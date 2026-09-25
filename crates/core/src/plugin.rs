@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{ClientRequest, ClientResponse, Fault, ProviderRequest};
+use crate::{ClientRequest, ClientResponse, Fault, Outcome, ProviderOutcome, ProviderRequest};
 
 /// What a plugin decides about a client request.
 #[derive(Debug)]
@@ -18,6 +18,12 @@ impl Flow {
 }
 
 /// The only extension point.
+///
+/// Each hook runs in chain order. A plugin gets a close hook only for the
+/// requests whose matching request hook it ran. When a client request ends,
+/// every ended provider request is closed first, in order, then the client
+/// request. Close hooks run once each, after the response is finished,
+/// refused, or abandoned by the client.
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
     /// Once per client request, in chain order. `Err` refuses the request;
@@ -32,4 +38,10 @@ pub trait Plugin: Send + Sync + 'static {
     async fn on_provider_request(&self, _req: &ProviderRequest<'_>) -> Result<(), Fault> {
         Ok(())
     }
+
+    /// A provider request ended: failed, unused, finished, or abandoned.
+    async fn on_provider_close(&self, _req: &ClientRequest, _outcome: &ProviderOutcome) {}
+
+    /// The client request ended, however it ended.
+    async fn on_client_close(&self, _req: &ClientRequest, _outcome: &Outcome) {}
 }

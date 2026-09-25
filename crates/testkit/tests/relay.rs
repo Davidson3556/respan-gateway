@@ -169,8 +169,11 @@ impl Harness {
         self.records.lock().map(|r| r.clone()).unwrap_or_default()
     }
 
+    /// Send, read the whole response, and wait for the close phase.
     async fn send(&self, inbound: Inbound) -> (u16, http::HeaderMap, bytes::Bytes) {
-        collect(self.gw.handle(inbound).await).await
+        let out = collect(self.gw.handle(inbound).await).await;
+        self.gw.idle().await;
+        out
     }
 }
 
@@ -401,6 +404,7 @@ async fn a_client_that_leaves_still_closes_everything_once() {
     let (_, mut body) = h.gw.handle(chat()).await.into_parts();
     let _first = body.next().await;
     drop(body);
+    h.gw.idle().await;
 
     let records = h.records();
     assert_eq!(records.len(), 1);

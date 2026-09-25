@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
@@ -7,10 +7,11 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, RETRY_AFTER, TRANSFER_ENCODING};
 use http::{Method, StatusCode};
+use tokio::sync::Notify;
 
 use crate::edits::{PartStream, TapFn, apply, apply_head, changes_body, lock, taps};
 use crate::providers::Reply;
-use crate::request::{ClientRequestInit, ProviderCloseFn};
+use crate::request::{ClientRequestInit, Closed};
 use crate::{
     Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, Flow, Format, Inbound,
     Outcome, Part, Plugin, ProviderEnd, ProviderOutcome, ResponseHead, Store, Target, Transport,
@@ -33,6 +34,31 @@ pub(crate) struct Inner {
     pub store: Arc<dyn Store>,
     pub transport: Arc<dyn Transport>,
     pub next_id: AtomicU64,
+    pub closing: Closing,
+}
+
+/// Close phases still running, so shutdown can wait for them.
+#[derive(Default)]
+pub(crate) struct Closing {
+    count: AtomicUsize,
+    idle: Notify,
+}
+
+struct ClosingGuard(Arc<Inner>);
+
+impl ClosingGuard {
+    fn new(inner: Arc<Inner>) -> Self {
+        inner.closing.count.fetch_add(1, Ordering::SeqCst);
+        Self(inner)
+    }
+}
+
+impl Drop for ClosingGuard {
+    fn drop(&mut self) {
+        if self.0.closing.count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.closing.idle.notify_waiters();
+        }
+    }
 }
 
 impl Inner {
@@ -61,6 +87,18 @@ impl std::fmt::Debug for Gateway {
 }
 
 impl Gateway {
+    /// Resolves once every close phase that has started has finished. Call it
+    /// on shutdown, after the server stops, so close hooks are not lost.
+    pub async fn idle(&self) {
+        loop {
+            let idle = self.inner.closing.idle.notified();
+            if self.inner.closing.count.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            idle.await;
+        }
+    }
+
     /// The route an HTTP adapter should use for `method` and `path`.
     pub fn http_route(&self, method: &Method, path: &str) -> Option<&str> {
         self.inner.routes.values().find_map(|r| match &r.http {
@@ -88,6 +126,8 @@ impl Gateway {
         }));
         let tap: Tap = Arc::default();
         let mut fin = Finalizer {
+            inner: self.inner.clone(),
+            chain: route.chain.clone(),
             client: client.clone(),
             tap: tap.clone(),
             committed: None,
@@ -106,12 +146,14 @@ impl Gateway {
 
 async fn run(route: &Route, client: &ClientRequest) -> Result<ClientResponse, Fault> {
     for (i, plugin) in route.chain.iter().enumerate() {
-        client.set_position(i);
+        client.enter(i);
         if let Flow::Respond(resp) = plugin.on_client_request(client).await? {
             return Ok(*resp);
         }
     }
-    client.set_position(route.chain.len().saturating_sub(1));
+    if let Some(last) = route.chain.len().checked_sub(1) {
+        client.enter(last);
+    }
     match &route.target {
         Some(target) => client.call(target).await.map(Into::into),
         None => Err(Fault::config(format!(
@@ -136,8 +178,9 @@ fn commit(
             let c = pr.commit();
             fin.committed = Some(CommittedProvider {
                 provider: c.provider,
+                index: c.index,
+                seen_by: c.seen_by,
                 status: c.head.status.as_u16(),
-                on_close: c.on_close,
             });
             let decoder = c.format.decoder(&c.head);
             (
@@ -383,14 +426,16 @@ fn encode(parts: PartStream, encoder: Box<dyn Encoder>, fin: Finalizer) -> Body 
 
 struct CommittedProvider {
     provider: String,
+    index: usize,
+    seen_by: usize,
     status: u16,
-    on_close: Vec<ProviderCloseFn>,
 }
 
-/// Runs the close hooks exactly once: when the response finishes, when the
-/// request is refused, or when the client goes away (drop). The committed
-/// provider request closes first, then the client request.
+/// Starts the close phase exactly once: when the response finishes, when the
+/// request is refused, or when the client goes away (drop).
 struct Finalizer {
+    inner: Arc<Inner>,
+    chain: Vec<Arc<dyn Plugin>>,
     client: Arc<ClientRequest>,
     tap: Tap,
     committed: Option<CommittedProvider>,
@@ -412,24 +457,45 @@ impl Finalizer {
             return;
         }
         self.closed = true;
+        let mut closed = self.client.take_closed();
         if let Some(c) = self.committed.take() {
             let end = match outcome {
                 Outcome::ClientGone => ProviderEnd::Abandoned,
                 Outcome::Done => ProviderEnd::Committed,
                 _ => ProviderEnd::Failed,
             };
-            let po = ProviderOutcome {
-                provider: c.provider,
-                status: Some(c.status),
-                end,
-                usage: std::mem::take(&mut lock(&self.tap).usage),
-            };
-            for f in c.on_close {
-                f(&po);
-            }
+            closed.push(Closed {
+                outcome: ProviderOutcome {
+                    provider: c.provider,
+                    index: c.index,
+                    status: Some(c.status),
+                    end,
+                    usage: std::mem::take(&mut lock(&self.tap).usage),
+                },
+                seen_by: c.seen_by,
+            });
         }
-        for f in self.client.take_close_fns() {
-            f(&self.client, &outcome);
+
+        let guard = ClosingGuard::new(self.inner.clone());
+        let chain = std::mem::take(&mut self.chain);
+        let client = self.client.clone();
+        let ran = client.ran();
+        let phase = async move {
+            for c in &closed {
+                for plugin in chain.iter().take(c.seen_by) {
+                    plugin.on_provider_close(&client, &c.outcome).await;
+                }
+            }
+            for plugin in chain.iter().take(ran) {
+                plugin.on_client_close(&client, &outcome).await;
+            }
+            drop(guard);
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(phase);
+            }
+            Err(_) => futures::executor::block_on(phase),
         }
     }
 }

@@ -5,8 +5,7 @@ use crate::edits::{apply_once, lock};
 use crate::gateway::Inner;
 use crate::store::{Class, Key, Scope};
 use crate::{
-    Doc, Edits, Envelope, Extensions, Fault, Outcome, Part, ProviderOutcome, ProviderResponse,
-    Store, Target,
+    Doc, Edits, Envelope, Extensions, Fault, Part, ProviderOutcome, ProviderResponse, Store, Target,
 };
 
 /// Who is calling. An auth plugin attaches it with
@@ -38,8 +37,15 @@ impl Session {
     }
 }
 
-pub(crate) type CloseFn = Box<dyn FnOnce(&ClientRequest, &Outcome) + Send>;
-pub(crate) type ProviderCloseFn = Box<dyn FnOnce(&ProviderOutcome) + Send>;
+/// A provider request that has ended, waiting for the close phase.
+#[derive(Debug)]
+pub(crate) struct Closed {
+    pub outcome: ProviderOutcome,
+    /// How many chain entries saw this provider request.
+    pub seen_by: usize,
+}
+
+pub(crate) type ClosedLog = Arc<Mutex<Vec<Closed>>>;
 
 /// One unit of work from a client. Not necessarily an HTTP request: it can
 /// come from an embedding program or be one turn of a socket. Transport
@@ -55,10 +61,12 @@ pub struct ClientRequest {
     store: Arc<dyn Store>,
     from_client: Edits,
     to_client: Edits,
-    on_close: Mutex<Vec<CloseFn>>,
+    closed: ClosedLog,
     gateway: Arc<Inner>,
     /// Index of the chain entry currently running.
     position: AtomicUsize,
+    /// How many chain entries have run `on_client_request`.
+    ran: AtomicUsize,
     next_index: AtomicUsize,
 }
 
@@ -99,9 +107,10 @@ impl ClientRequest {
             store: init.store,
             from_client: Edits::default(),
             to_client: Edits::default(),
-            on_close: Mutex::default(),
+            closed: ClosedLog::default(),
             gateway: init.gateway,
             position: AtomicUsize::new(0),
+            ran: AtomicUsize::new(0),
             next_index: AtomicUsize::new(0),
         }
     }
@@ -179,13 +188,6 @@ impl ClientRequest {
         &self.to_client
     }
 
-    /// Runs exactly once when the request ends, however it ends, after every
-    /// provider request's own close hooks. Receives the request in its final
-    /// state, so a hook registered early still sees what later plugins set.
-    pub fn on_close(&self, f: impl FnOnce(&ClientRequest, &Outcome) + Send + 'static) {
-        lock(&self.on_close).push(Box::new(f));
-    }
-
     /// Send this request to one provider. The `on_provider_request` hooks of
     /// the chain entries that have run so far see it first. A provider error
     /// status is an `Ok` response; check [`ProviderResponse::status`].
@@ -201,8 +203,18 @@ impl ClientRequest {
         crate::providers::call(&self.gateway, route, self, upto, index, provider).await
     }
 
-    pub(crate) fn set_position(&self, i: usize) {
+    /// Chain entry `i` is about to run `on_client_request`.
+    pub(crate) fn enter(&self, i: usize) {
         self.position.store(i, Ordering::Relaxed);
+        self.ran.store(i + 1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ran(&self) -> usize {
+        self.ran.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn closed_log(&self) -> ClosedLog {
+        self.closed.clone()
     }
 
     /// Apply pending `from_client` edits to the body, once.
@@ -220,8 +232,8 @@ impl ClientRequest {
         result
     }
 
-    pub(crate) fn take_close_fns(&self) -> Vec<CloseFn> {
-        std::mem::take(&mut *lock(&self.on_close))
+    pub(crate) fn take_closed(&self) -> Vec<Closed> {
+        std::mem::take(&mut *lock(&self.closed))
     }
 }
 
@@ -234,7 +246,6 @@ pub struct ProviderRequest<'a> {
     body: Mutex<Doc>,
     to_provider: Edits,
     from_provider: Edits,
-    on_close: Mutex<Vec<ProviderCloseFn>>,
 }
 
 impl std::fmt::Debug for ProviderRequest<'_> {
@@ -251,7 +262,6 @@ pub(crate) struct ProviderRequestParts {
     pub body: Doc,
     pub to_provider: Edits,
     pub from_provider: Edits,
-    pub on_close: Vec<ProviderCloseFn>,
 }
 
 impl<'a> ProviderRequest<'a> {
@@ -264,7 +274,6 @@ impl<'a> ProviderRequest<'a> {
             body: Mutex::new(body),
             to_provider: Edits::default(),
             from_provider: Edits::default(),
-            on_close: Mutex::default(),
         }
     }
 
@@ -296,12 +305,6 @@ impl<'a> ProviderRequest<'a> {
         &self.from_provider
     }
 
-    /// Runs exactly once when this provider request ends: failed, unused,
-    /// finished, or abandoned by the client.
-    pub fn on_close(&self, f: impl FnOnce(&ProviderOutcome) + Send + 'static) {
-        lock(&self.on_close).push(Box::new(f));
-    }
-
     pub(crate) fn into_parts(self) -> ProviderRequestParts {
         let into = |m: Mutex<Doc>| {
             m.into_inner()
@@ -311,10 +314,6 @@ impl<'a> ProviderRequest<'a> {
             body: into(self.body),
             to_provider: self.to_provider,
             from_provider: self.from_provider,
-            on_close: self
-                .on_close
-                .into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
         }
     }
 }

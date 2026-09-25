@@ -22,8 +22,8 @@ byte for byte.
 
 | Concept | What it is |
 |---|---|
-| **ClientRequest** | One unit of work from a client, created after the Format. Not necessarily HTTP. Holds only what every caller has: route, format, envelope (model, stream), body in the client's format, principal, session, store, `from_client()` / `to_client()` streams, `on_close`. Transport details are optional typed extensions (`ext::<HttpHead>()`, `ext::<Credential>()`). |
-| **ProviderRequest** | Gateway to one provider. A client request can make several (fallback, retry, hedging, split). Has its own copy of the body, `to_provider()` / `from_provider()` streams and its own `on_close`. |
+| **ClientRequest** | One unit of work from a client, created after the Format. Not necessarily HTTP. Holds only what every caller has: route, format, envelope (model, stream), body in the client's format, session, store, `from_client()` / `to_client()` streams. Transport details are optional typed extensions (`ext::<HttpHead>()`, `ext::<Credential>()`). |
+| **ProviderRequest** | Gateway to one provider. A client request can make several (fallback, retry, hedging, split). Has its own copy of the body and `to_provider()` / `from_provider()` streams. |
 | **ClientResponse** / **ProviderResponse** | What goes back to the client, and what a provider sent (`req.call(provider)`). Responding with a ProviderResponse commits it; dropping it cancels it. |
 | **Session** | A group of client requests that share state and a provider: a socket, a job, an MCP session. A plain HTTP request is a session of one. |
 | **Part** | What flows through a stream: Head, Doc (a whole message), Delta (Text, Args, Reasoning, Bytes), Frame, Usage, End. Edit with `head()`, `map()` and `filter()`; observe with `tap()`, which never forces a re-encode. |
@@ -43,8 +43,16 @@ pub enum Flow {
 pub trait Plugin: Send + Sync + 'static {
     async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> { Ok(Flow::Pass) }
     async fn on_provider_request(&self, req: &ProviderRequest<'_>) -> Result<(), Fault> { Ok(()) }
+    async fn on_provider_close(&self, req: &ClientRequest, outcome: &ProviderOutcome) {}
+    async fn on_client_close(&self, req: &ClientRequest, outcome: &Outcome) {}
 }
 ```
+
+- Close hooks run in one close phase when the request ends: every provider
+  request that ended, in order, then the client request. A plugin gets a
+  close hook only for requests whose matching request hook it ran.
+- The close phase is async and tracked; `Gateway::idle()` waits for it on
+  shutdown.
 
 - `Err` refuses the request, in the client's format.
 - A plugin that responds (router, fallback, cache) goes after the plugins that
@@ -64,7 +72,7 @@ client ◄──to_client()──── gateway ◄─from_provider()── prov
 
 - Close hooks run exactly once, including on disconnect: each provider
   request's first, then the client request's. There is no built-in Record;
-  the SDK `Recorder` assembles one from these hooks.
+  the SDK `Recorder` assembles one from the close hooks.
 - At most one committed response per client request. After commit no attempt can start, and
   later failures go out in the client's framing.
 - Each provider request gets its own copy of the body. Crossing Formats means the

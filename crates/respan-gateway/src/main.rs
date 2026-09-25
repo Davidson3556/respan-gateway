@@ -57,7 +57,9 @@ async fn main() -> ExitCode {
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
-    match respan_gateway_server::serve(gateway, listener, shutdown).await {
+    let served = respan_gateway_server::serve(gateway.clone(), listener, shutdown).await;
+    gateway.idle().await;
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&e.to_string()),
     }

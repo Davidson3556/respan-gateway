@@ -3,9 +3,10 @@ use std::sync::Arc;
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{Method, StatusCode};
 
+use crate::edits::lock;
 use crate::edits::{Edit, apply_once};
 use crate::gateway::{Inner, Route};
-use crate::request::{ProviderCloseFn, ProviderRequestParts};
+use crate::request::{Closed, ClosedLog, ProviderRequestParts};
 use crate::{
     Body, ClientRequest, Fault, Format, Part, ProviderEnd, ProviderOutcome, ProviderRequest,
     ResponseHead, Usage,
@@ -22,10 +23,8 @@ pub struct Target {
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
-fn close_all(fns: Vec<ProviderCloseFn>, outcome: &ProviderOutcome) {
-    for f in fns {
-        f(outcome);
-    }
+fn log_closed(log: &ClosedLog, seen_by: usize, outcome: ProviderOutcome) {
+    lock(log).push(Closed { outcome, seen_by });
 }
 
 /// One provider request for `client`, running the `on_provider_request` hooks
@@ -52,6 +51,8 @@ pub(crate) async fn call(
             )));
         }
 
+        let seen_by = (upto + 1).min(route.chain.len());
+        let log = client.closed_log();
         let pr = ProviderRequest::new(client, target, index);
         let mut hook_result = Ok(());
         for plugin in route.chain.iter().take(upto + 1) {
@@ -64,13 +65,14 @@ pub(crate) async fn call(
             body,
             to_provider,
             from_provider,
-            on_close,
         } = pr.into_parts();
-        let fail = |on_close: Vec<ProviderCloseFn>, f: Fault| {
-            close_all(
-                on_close,
-                &ProviderOutcome {
+        let fail = |f: Fault| {
+            log_closed(
+                &log,
+                seen_by,
+                ProviderOutcome {
                     provider: target.name.clone(),
+                    index,
                     status: None,
                     end: ProviderEnd::Failed,
                     usage: Usage::default(),
@@ -79,7 +81,7 @@ pub(crate) async fn call(
             f
         };
         if let Err(f) = hook_result {
-            return Err(fail(on_close, f));
+            return Err(fail(f));
         }
 
         let prepared = (|| {
@@ -110,12 +112,12 @@ pub(crate) async fn call(
         })();
         let req = match prepared {
             Ok(r) => r,
-            Err(f) => return Err(fail(on_close, f)),
+            Err(f) => return Err(fail(f)),
         };
 
         let resp = match inner.transport.send(req).await {
             Ok(r) => r,
-            Err(f) => return Err(fail(on_close, f)),
+            Err(f) => return Err(fail(f)),
         };
         let (parts, body) = resp.into_parts();
         Ok(ProviderResponse {
@@ -127,7 +129,9 @@ pub(crate) async fn call(
             },
             body: Some(body),
             from_provider: from_provider.take(),
-            on_close,
+            index,
+            seen_by,
+            log,
         })
     }
 }
@@ -140,7 +144,9 @@ pub struct ProviderResponse {
     head: ResponseHead,
     body: Option<Body>,
     from_provider: Vec<Edit>,
-    on_close: Vec<ProviderCloseFn>,
+    index: usize,
+    seen_by: usize,
+    log: ClosedLog,
 }
 
 impl std::fmt::Debug for ProviderResponse {
@@ -176,7 +182,8 @@ impl ProviderResponse {
             head: self.head.clone(),
             body,
             from_provider: std::mem::take(&mut self.from_provider),
-            on_close: std::mem::take(&mut self.on_close),
+            index: self.index,
+            seen_by: self.seen_by,
         }
     }
 }
@@ -191,10 +198,12 @@ impl Drop for ProviderResponse {
         } else {
             ProviderEnd::Failed
         };
-        close_all(
-            std::mem::take(&mut self.on_close),
-            &ProviderOutcome {
+        log_closed(
+            &self.log,
+            self.seen_by,
+            ProviderOutcome {
                 provider: self.provider.clone(),
+                index: self.index,
                 status: Some(self.head.status.as_u16()),
                 end,
                 usage: Usage::default(),
@@ -209,7 +218,8 @@ pub(crate) struct Committed {
     pub head: ResponseHead,
     pub body: Body,
     pub from_provider: Vec<Edit>,
-    pub on_close: Vec<ProviderCloseFn>,
+    pub index: usize,
+    pub seen_by: usize,
 }
 
 /// What the client gets back. Built from a [`ProviderResponse`] (which commits

@@ -224,6 +224,7 @@ impl Builder {
                 store: self.store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
                 transport,
                 next_id: AtomicU64::new(1),
+                closing: Default::default(),
             }),
         })
     }

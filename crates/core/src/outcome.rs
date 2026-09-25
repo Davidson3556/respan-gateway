@@ -1,6 +1,6 @@
 use crate::{Fault, Usage};
 
-/// How a client request ended. Passed to [`crate::ClientRequest::on_close`].
+/// How a client request ended. Passed to [`crate::Plugin::on_client_close`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Done,
@@ -12,10 +12,12 @@ pub enum Outcome {
 }
 
 /// How one provider request ended. Passed to
-/// [`crate::ProviderRequest::on_close`].
+/// [`crate::Plugin::on_provider_close`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderOutcome {
     pub provider: String,
+    /// Matches [`crate::ProviderRequest::index`].
+    pub index: usize,
     pub status: Option<u16>,
     pub end: ProviderEnd,
     /// Usage the provider reported. Empty unless the response was committed
