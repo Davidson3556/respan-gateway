@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{Method, StatusCode};
@@ -23,50 +22,39 @@ pub struct Target {
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
-/// The capability to make provider requests. Only a route's source gets it.
-pub struct Providers<'a> {
-    pub(crate) inner: &'a Inner,
-    pub(crate) route: &'a Route,
-    pub(crate) client: &'a ClientRequest,
-    pub(crate) next_index: AtomicUsize,
-}
-
-impl std::fmt::Debug for Providers<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Providers")
-            .field("route", &self.route.name)
-            .finish()
-    }
-}
-
 fn close_all(fns: Vec<ProviderCloseFn>, outcome: &ProviderOutcome) {
     for f in fns {
         f(outcome);
     }
 }
 
-impl Providers<'_> {
-    /// Send the client request to one provider. A provider error status is
-    /// an `Ok` response; check [`ProviderResponse::status`].
-    pub async fn call(&self, provider: &str) -> Result<ProviderResponse, Fault> {
-        let target = self
-            .inner
+/// One provider request for `client`, running the `on_provider_request` hooks
+/// of chain entries `0..=upto`.
+pub(crate) async fn call(
+    inner: &Inner,
+    route: &Route,
+    client: &ClientRequest,
+    upto: usize,
+    index: usize,
+    provider: &str,
+) -> Result<ProviderResponse, Fault> {
+    {
+        let target = inner
             .targets
             .get(provider)
             .ok_or_else(|| Fault::config(format!("unknown provider '{provider}'")))?;
-        let format = self.inner.format(&target.format)?;
-        if format.name() != self.route.format.name() {
+        let format = inner.format(&target.format)?;
+        if format.name() != route.format.name() {
             return Err(Fault::config(format!(
                 "provider '{provider}' speaks {}, route speaks {}: translation is not supported yet",
                 format.name(),
-                self.route.format.name()
+                route.format.name()
             )));
         }
 
-        let index = self.next_index.fetch_add(1, Ordering::Relaxed);
-        let pr = ProviderRequest::new(self.client, target, index);
+        let pr = ProviderRequest::new(client, target, index);
         let mut hook_result = Ok(());
-        for plugin in &self.route.chain {
+        for plugin in route.chain.iter().take(upto + 1) {
             hook_result = plugin.on_provider_request(&pr).await;
             if hook_result.is_err() {
                 break;
@@ -100,7 +88,7 @@ impl Providers<'_> {
             let Part::Doc(mut body) = part else {
                 return Err(Fault::internal("request edit replaced the body"));
             };
-            let mut envelope = self.client.envelope().clone();
+            let mut envelope = client.envelope().clone();
             if target.model.is_some() {
                 envelope.model = target.model.clone();
             }
@@ -125,7 +113,7 @@ impl Providers<'_> {
             Err(f) => return Err(fail(on_close, f)),
         };
 
-        let resp = match self.inner.transport.send(req).await {
+        let resp = match inner.transport.send(req).await {
             Ok(r) => r,
             Err(f) => return Err(fail(on_close, f)),
         };

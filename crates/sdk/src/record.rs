@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use respan_gateway_core::{
-    ClientRequest, Fault, Outcome, Plugin, ProviderEnd, ProviderOutcome, ProviderRequest, Usage,
+    ClientRequest, Fault, Flow, Outcome, Plugin, Principal, ProviderEnd, ProviderOutcome,
+    ProviderRequest, Usage,
 };
 
 #[derive(Debug, Clone)]
@@ -64,7 +65,7 @@ impl Recorder {
 
 #[async_trait]
 impl Plugin for Recorder {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> {
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
         let draft = Draft(Arc::default());
         req.insert_ext(draft.clone());
         let started = Instant::now();
@@ -75,7 +76,7 @@ impl Plugin for Recorder {
             req.model().map(str::to_owned),
         );
         req.on_close(move |req, outcome| {
-            let principal = req.principal();
+            let principal = req.ext::<Principal>();
             let attempts =
                 std::mem::take(&mut *draft.0.lock().unwrap_or_else(PoisonError::into_inner));
             sink(&Record {
@@ -89,7 +90,7 @@ impl Plugin for Recorder {
                 duration: started.elapsed(),
             });
         });
-        Ok(())
+        Ok(Flow::Pass)
     }
 
     async fn on_provider_request(&self, req: &ProviderRequest<'_>) -> Result<(), Fault> {

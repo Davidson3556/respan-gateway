@@ -13,10 +13,10 @@ remains is detail work, listed at the end.
 
 ## The idea
 
-A client request runs through a chain of plugins. The route's source decides
-which provider requests to make; the response it returns is committed to the
-client. Plugins are one trait whose methods say where they run. A response
-nobody edits is relayed byte for byte.
+A client request runs through a chain of plugins. Each one passes, refuses,
+or responds; any plugin can call providers to build its response. If every
+plugin passes, the route's target answers. A response nobody edits is relayed
+byte for byte.
 
 ## Concepts
 
@@ -24,8 +24,7 @@ nobody edits is relayed byte for byte.
 |---|---|
 | **ClientRequest** | One unit of work from a client, created after the Format. Not necessarily HTTP. Holds only what every caller has: route, format, envelope (model, stream), body in the client's format, principal, session, store, `from_client()` / `to_client()` streams, `on_close`. Transport details are optional typed extensions (`ext::<HttpHead>()`, `ext::<Credential>()`). |
 | **ProviderRequest** | Gateway to one provider. A client request can make several (fallback, retry, hedging, split). Has its own copy of the body, `to_provider()` / `from_provider()` streams and its own `on_close`. |
-| **ClientResponse** / **ProviderResponse** | What goes back to the client, and what a provider sent. Turning a ProviderResponse into a ClientResponse commits it. |
-| **Providers** | The capability to make provider requests. Only the route's source gets it. |
+| **ClientResponse** / **ProviderResponse** | What goes back to the client, and what a provider sent (`req.call(provider)`). Responding with a ProviderResponse commits it; dropping it cancels it. |
 | **Session** | A group of client requests that share state and a provider: a socket, a job, an MCP session. A plain HTTP request is a session of one. |
 | **Part** | What flows through a stream: Head, Doc (a whole message), Delta (Text, Args, Reasoning, Bytes), Frame, Usage, End. Edit with `head()`, `map()` and `filter()`; observe with `tap()`, which never forces a re-encode. |
 | **Store** | Shared key-value store with atomic batches. Keys are typed by a `Class`. |
@@ -35,14 +34,24 @@ nobody edits is relayed byte for byte.
 ## The plugin trait
 
 ```rust
+pub enum Flow {
+    Pass,                          // continue to the next plugin
+    Respond(Box<ClientResponse>),  // commit this response; the chain stops
+}
+
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> { Ok(()) }
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> { Ok(Flow::Pass) }
     async fn on_provider_request(&self, req: &ProviderRequest<'_>) -> Result<(), Fault> { Ok(()) }
-    async fn dispatch(&self, req: &ClientRequest, providers: &Providers<'_>)
-        -> Result<ClientResponse, Fault> { Err(Fault::config("not a source")) }
 }
 ```
+
+- `Err` refuses the request, in the client's format.
+- A plugin that responds (router, fallback, cache) goes after the plugins that
+  must see the request (auth, limits, PII).
+- Plugins share context through typed extensions: `req.insert_ext(value)` and
+  `req.ext::<T>()`. The kernel defines only the shared vocabulary:
+  `Principal`, `Credential`, `HttpHead`.
 
 Stream directions are named after who is on the other end:
 

@@ -7,7 +7,7 @@ use http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::gateway::{Inner, Route, Source};
+use crate::gateway::{Inner, Route};
 use crate::{Fault, Format, Gateway, MemoryStore, Plugin, Store, Target, Transport};
 
 /// The static configuration, usually loaded from YAML.
@@ -52,12 +52,9 @@ pub struct RouteConfig {
     pub http: Option<HttpRouteConfig>,
     #[serde(default)]
     pub chain: Vec<EntryConfig>,
-    /// A provider name. Exactly one of `target` and `source` is set.
+    /// The provider that answers when every plugin in the chain passes.
     #[serde(default)]
     pub target: Option<String>,
-    /// A source plugin that decides which providers to call.
-    #[serde(default)]
-    pub source: Option<EntryConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,28 +193,19 @@ impl Builder {
                 .iter()
                 .map(|e| self.instantiate(e))
                 .collect::<Result<Vec<_>, _>>()?;
-            let source = match (&r.target, &r.source) {
-                (Some(t), None) => {
-                    if !targets.contains_key(t) {
-                        return Err(Fault::config(format!(
-                            "route '{name}': unknown provider '{t}'"
-                        )));
-                    }
-                    Source::Provider(t.clone())
-                }
-                (None, Some(e)) => Source::Plugin(self.instantiate(e)?),
-                _ => {
-                    return Err(Fault::config(format!(
-                        "route '{name}': set exactly one of `target` and `source`"
-                    )));
-                }
-            };
+            if let Some(t) = &r.target
+                && !targets.contains_key(t)
+            {
+                return Err(Fault::config(format!(
+                    "route '{name}': unknown provider '{t}'"
+                )));
+            }
             let route = Route {
                 name: name.clone(),
                 http,
                 format,
                 chain,
-                source,
+                target: r.target.clone(),
             };
             if routes.insert(name.clone(), route).is_some() {
                 return Err(Fault::config(format!("route '{name}' is defined twice")));

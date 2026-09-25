@@ -1,10 +1,16 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::edits::lock;
+use crate::edits::{apply_once, lock};
+use crate::gateway::Inner;
 use crate::store::{Class, Key, Scope};
-use crate::{Doc, Edits, Envelope, Extensions, Outcome, ProviderOutcome, Store, Target};
+use crate::{
+    Doc, Edits, Envelope, Extensions, Fault, Outcome, Part, ProviderOutcome, ProviderResponse,
+    Store, Target,
+};
 
-/// Who is calling. Set by an auth plugin.
+/// Who is calling. An auth plugin attaches it with
+/// [`ClientRequest::insert_ext`]; tenant-scoped store keys read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
     pub id: String,
@@ -45,12 +51,15 @@ pub struct ClientRequest {
     envelope: Envelope,
     body: Mutex<Doc>,
     ext: Mutex<Extensions>,
-    principal: Mutex<Option<Principal>>,
     session: Session,
     store: Arc<dyn Store>,
     from_client: Edits,
     to_client: Edits,
     on_close: Mutex<Vec<CloseFn>>,
+    gateway: Arc<Inner>,
+    /// Index of the chain entry currently running.
+    position: AtomicUsize,
+    next_index: AtomicUsize,
 }
 
 impl std::fmt::Debug for ClientRequest {
@@ -72,6 +81,7 @@ pub(crate) struct ClientRequestInit {
     pub body: Doc,
     pub ext: Extensions,
     pub store: Arc<dyn Store>,
+    pub gateway: Arc<Inner>,
 }
 
 impl ClientRequest {
@@ -86,11 +96,13 @@ impl ClientRequest {
             envelope: init.envelope,
             body: Mutex::new(init.body),
             ext: Mutex::new(init.ext),
-            principal: Mutex::new(None),
             store: init.store,
             from_client: Edits::default(),
             to_client: Edits::default(),
             on_close: Mutex::default(),
+            gateway: init.gateway,
+            position: AtomicUsize::new(0),
+            next_index: AtomicUsize::new(0),
         }
     }
 
@@ -135,14 +147,6 @@ impl ClientRequest {
         lock(&self.ext).insert(value);
     }
 
-    pub fn principal(&self) -> Option<Principal> {
-        lock(&self.principal).clone()
-    }
-
-    pub fn set_principal(&self, p: Principal) {
-        *lock(&self.principal) = Some(p);
-    }
-
     pub fn session(&self) -> &Session {
         &self.session
     }
@@ -151,9 +155,10 @@ impl ClientRequest {
         self.store.as_ref()
     }
 
-    /// A key scoped to this request's tenant, or global if no principal is set.
+    /// A key scoped to this request's tenant, or global if no [`Principal`]
+    /// is attached.
     pub fn key(&self, class: Class, name: impl Into<String>) -> Key {
-        let scope = match self.principal() {
+        let scope = match self.ext::<Principal>() {
             Some(p) => Scope::Tenant(p.tenant),
             None => Scope::Global,
         };
@@ -179,6 +184,40 @@ impl ClientRequest {
     /// state, so a hook registered early still sees what later plugins set.
     pub fn on_close(&self, f: impl FnOnce(&ClientRequest, &Outcome) + Send + 'static) {
         lock(&self.on_close).push(Box::new(f));
+    }
+
+    /// Send this request to one provider. The `on_provider_request` hooks of
+    /// the chain entries that have run so far see it first. A provider error
+    /// status is an `Ok` response; check [`ProviderResponse::status`].
+    pub async fn call(&self, provider: &str) -> Result<ProviderResponse, Fault> {
+        self.apply_from_client()?;
+        let route = self
+            .gateway
+            .routes
+            .get(&self.route)
+            .ok_or_else(|| Fault::internal("route vanished"))?;
+        let upto = self.position.load(Ordering::Relaxed);
+        let index = self.next_index.fetch_add(1, Ordering::Relaxed);
+        crate::providers::call(&self.gateway, route, self, upto, index, provider).await
+    }
+
+    pub(crate) fn set_position(&self, i: usize) {
+        self.position.store(i, Ordering::Relaxed);
+    }
+
+    /// Apply pending `from_client` edits to the body, once.
+    pub(crate) fn apply_from_client(&self) -> Result<(), Fault> {
+        let edits = self.from_client.take();
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let mut body = self.body();
+        let mut part = Part::Doc(std::mem::replace(&mut *body, Doc::new(bytes::Bytes::new())));
+        let result = apply_once(&mut part, edits);
+        if let Part::Doc(d) = part {
+            *body = d;
+        }
+        result
     }
 
     pub(crate) fn take_close_fns(&self) -> Vec<CloseFn> {

@@ -4,8 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use respan_gateway_core::{
-    Builder, Class, ClientRequest, ClientResponse, Config, Credential, Fault, Gateway, Inbound, Op,
-    Outcome, Part, Plugin, Principal, ProviderEnd, Providers, units,
+    Builder, Class, ClientRequest, Config, Credential, Fault, Flow, Gateway, Inbound, Op, Outcome,
+    Part, Plugin, Principal, ProviderEnd, units,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_sdk::record::{Record, Recorder};
@@ -39,12 +39,12 @@ struct Stamp;
 
 #[async_trait]
 impl Plugin for Stamp {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> {
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
         req.to_client().head(|h| {
             h.headers
                 .insert("x-served-by", http::HeaderValue::from_static("respan"));
         });
-        Ok(())
+        Ok(Flow::Pass)
     }
 }
 
@@ -52,13 +52,13 @@ struct Shout;
 
 #[async_trait]
 impl Plugin for Shout {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> {
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
         req.to_client().map(|p| {
             if let Part::Delta(d) = p {
                 *d.text_mut() = d.text().to_uppercase();
             }
         });
-        Ok(())
+        Ok(Flow::Pass)
     }
 }
 
@@ -67,7 +67,7 @@ struct CountChars(Arc<Mutex<usize>>);
 
 #[async_trait]
 impl Plugin for CountChars {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> {
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
         let count = self.0.clone();
         req.to_client().tap(move |p| {
             if let Part::Delta(d) = p
@@ -76,7 +76,7 @@ impl Plugin for CountChars {
                 *n += d.text().len();
             }
         });
-        Ok(())
+        Ok(Flow::Pass)
     }
 }
 
@@ -85,15 +85,15 @@ struct KeyAuth;
 
 #[async_trait]
 impl Plugin for KeyAuth {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> {
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
         let key = req
             .ext::<Credential>()
             .ok_or_else(|| Fault::unauthorized("missing credential"))?;
-        req.set_principal(Principal {
+        req.insert_ext(Principal {
             id: key.expose().to_owned(),
             tenant: "acme".into(),
         });
-        Ok(())
+        Ok(Flow::Pass)
     }
 }
 
@@ -106,13 +106,13 @@ struct PerKeyRate(Rpm);
 
 #[async_trait]
 impl Plugin for PerKeyRate {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> {
-        let who = req.principal().map(|p| p.id).unwrap_or_default();
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
+        let who = req.ext::<Principal>().map(|p| p.id).unwrap_or_default();
         let op = Op::add(req.key(LIMIT, format!("rpm:{who}")), 1.0)
             .max(self.0.per_minute)
             .ttl(Duration::from_secs(60));
         if req.store().apply(vec![op]).await?.is_applied() {
-            Ok(())
+            Ok(Flow::Pass)
         } else {
             Err(Fault::too_many(Duration::from_secs(60)))
         }
@@ -126,18 +126,15 @@ struct FallbackConfig {
 
 struct Fallback(FallbackConfig);
 
+/// Answers from the first provider that succeeds.
 #[async_trait]
 impl Plugin for Fallback {
-    async fn dispatch(
-        &self,
-        _req: &ClientRequest,
-        providers: &Providers<'_>,
-    ) -> Result<ClientResponse, Fault> {
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
         let mut last = Err(Fault::upstream("no providers"));
         for name in &self.0.providers {
-            match providers.call(name).await {
-                Ok(r) if r.status().is_success() => return Ok(r.into()),
-                Ok(r) => last = Ok(r.into()),
+            match req.call(name).await {
+                Ok(r) if r.status().is_success() => return Ok(Flow::respond(r)),
+                Ok(r) => last = Ok(Flow::respond(r)),
                 Err(f) => last = Err(f),
             }
         }
@@ -353,10 +350,10 @@ async fn a_refusal_uses_the_client_format_and_retry_after() {
 }
 
 #[tokio::test]
-async fn a_source_plugin_falls_back_and_every_attempt_is_recorded() {
+async fn a_plugin_can_answer_by_calling_providers_itself() {
     let h = harness(
-        json!([]),
-        json!({ "source": { "use": "fallback", "with": { "providers": ["openai", "backup"] } } }),
+        json!([{ "use": "fallback", "with": { "providers": ["openai", "backup"] } }]),
+        json!({}),
     );
     h.mock.reply(
         OPENAI,

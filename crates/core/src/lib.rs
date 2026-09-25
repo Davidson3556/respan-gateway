@@ -1,8 +1,8 @@
 //! The respan-gateway kernel.
 //!
 //! A [`Gateway`] takes [`Inbound`] work, runs the route's [`Plugin`] chain on
-//! the resulting [`ClientRequest`], sends [`ProviderRequest`]s through the
-//! route's source, and streams the committed response back. A response
+//! the resulting [`ClientRequest`] until one responds (or the route's target
+//! does), and streams the committed response back. A response
 //! nobody edits is relayed byte for byte. Close hooks run exactly once. See
 //! `docs/ARCHITECTURE.md`.
 
@@ -30,8 +30,8 @@ pub use gateway::{Gateway, plain_error};
 pub use inbound::{Credential, Envelope, Extensions, HttpHead, Inbound};
 pub use outcome::{Outcome, ProviderEnd, ProviderOutcome};
 pub use part::{Delta, DeltaKind, Doc, End, Part, ResponseHead, Usage, units};
-pub use plugin::Plugin;
-pub use providers::{ClientResponse, ProviderResponse, Providers, Target};
+pub use plugin::{Flow, Plugin};
+pub use providers::{ClientResponse, ProviderResponse, Target};
 pub use request::{ClientRequest, Principal, ProviderRequest, Session};
 pub use store::{Applied, Class, Key, MemoryStore, Op, Scope, Store};
 #[cfg(feature = "reqwest")]

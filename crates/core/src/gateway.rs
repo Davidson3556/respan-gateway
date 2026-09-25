@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
@@ -8,12 +8,12 @@ use futures::stream::{self, BoxStream};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, RETRY_AFTER, TRANSFER_ENCODING};
 use http::{Method, StatusCode};
 
-use crate::edits::{PartStream, TapFn, apply, apply_head, apply_once, changes_body, lock, taps};
+use crate::edits::{PartStream, TapFn, apply, apply_head, changes_body, lock, taps};
 use crate::providers::Reply;
 use crate::request::{ClientRequestInit, ProviderCloseFn};
 use crate::{
-    Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, FaultKind, Format,
-    Inbound, Outcome, Part, Plugin, ProviderEnd, ProviderOutcome, Providers, ResponseHead, Store,
+    Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, FaultKind, Flow,
+    Format, Inbound, Outcome, Part, Plugin, ProviderEnd, ProviderOutcome, ResponseHead, Store,
     Target, Transport, Usage,
 };
 
@@ -22,12 +22,8 @@ pub(crate) struct Route {
     pub http: Option<(Method, String)>,
     pub format: Arc<dyn Format>,
     pub chain: Vec<Arc<dyn Plugin>>,
-    pub source: Source,
-}
-
-pub(crate) enum Source {
-    Provider(String),
-    Plugin(Arc<dyn Plugin>),
+    /// Answers when every plugin passes.
+    pub target: Option<String>,
 }
 
 pub(crate) struct Inner {
@@ -88,6 +84,7 @@ impl Gateway {
             body,
             ext: inbound.ext,
             store: inner.store.clone(),
+            gateway: self.inner.clone(),
         }));
         let tap: Tap = Arc::default();
         let mut fin = Finalizer {
@@ -97,7 +94,7 @@ impl Gateway {
             closed: false,
         };
 
-        match run(inner, route, &client).await {
+        match run(route, &client).await {
             Ok(resp) => commit(route, &client, resp, fin, tap),
             Err(f) => {
                 fin.close(Outcome::Refused(f.clone()));
@@ -107,32 +104,20 @@ impl Gateway {
     }
 }
 
-async fn run(
-    inner: &Inner,
-    route: &Route,
-    client: &ClientRequest,
-) -> Result<ClientResponse, Fault> {
-    for plugin in &route.chain {
-        plugin.on_client_request(client).await?;
-    }
-    let edits = client.from_client().take();
-    if !edits.is_empty() {
-        let mut body = client.body();
-        let mut part = Part::Doc(std::mem::replace(&mut *body, Doc::new(Bytes::new())));
-        apply_once(&mut part, edits)?;
-        if let Part::Doc(d) = part {
-            *body = d;
+async fn run(route: &Route, client: &ClientRequest) -> Result<ClientResponse, Fault> {
+    for (i, plugin) in route.chain.iter().enumerate() {
+        client.set_position(i);
+        if let Flow::Respond(resp) = plugin.on_client_request(client).await? {
+            return Ok(*resp);
         }
     }
-    let providers = Providers {
-        inner,
-        route,
-        client,
-        next_index: AtomicUsize::new(0),
-    };
-    match &route.source {
-        Source::Provider(name) => providers.call(name).await.map(Into::into),
-        Source::Plugin(p) => p.dispatch(client, &providers).await,
+    client.set_position(route.chain.len().saturating_sub(1));
+    match &route.target {
+        Some(target) => client.call(target).await.map(Into::into),
+        None => Err(Fault::config(format!(
+            "route '{}': no plugin responded and the route has no target",
+            route.name
+        ))),
     }
 }
 
