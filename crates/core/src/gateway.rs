@@ -12,9 +12,9 @@ use crate::edits::{PartStream, TapFn, apply, apply_head, changes_body, lock, tap
 use crate::providers::Reply;
 use crate::request::{ClientRequestInit, ProviderCloseFn};
 use crate::{
-    Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, FaultKind, Flow,
-    Format, Inbound, Outcome, Part, Plugin, ProviderEnd, ProviderOutcome, ResponseHead, Store,
-    Target, Transport, Usage,
+    Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, Flow, Format, Inbound,
+    Outcome, Part, Plugin, ProviderEnd, ProviderOutcome, ResponseHead, Store, Target, Transport,
+    Usage,
 };
 
 pub(crate) struct Route {
@@ -447,7 +447,7 @@ fn fault_response(format: &dyn Format, f: &Fault) -> http::Response<Body> {
         CONTENT_TYPE,
         HeaderValue::from_static(format.fault_content_type()),
     );
-    if let FaultKind::TooMany { retry_after } = &f.kind
+    if let Some(retry_after) = f.retry_after()
         && let Ok(v) = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string())
     {
         resp.headers_mut().insert(RETRY_AFTER, v);

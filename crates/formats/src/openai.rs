@@ -79,9 +79,14 @@ impl Format for OpenAiChat {
     }
 
     fn fault(&self, fault: &Fault, in_stream: bool) -> Bytes {
-        let body = json!({
-            "error": { "message": fault.message, "type": fault.code(), "code": fault.code() }
-        });
+        let mut error =
+            json!({ "message": fault.message(), "type": fault.code(), "code": fault.code() });
+        if let (Some(e), Some(Value::Object(extra))) = (error.as_object_mut(), fault.details()) {
+            for (k, v) in extra {
+                e.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        let body = json!({ "error": error });
         if in_stream {
             Bytes::from(format!("data: {body}\n\n"))
         } else {
@@ -345,7 +350,7 @@ mod tests {
             decode_all(&["data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"a\"}}]}\n\n"]);
         assert!(matches!(
             out.last(),
-            Some(Part::End(End::Failed(f))) if f.kind == respan_gateway_core::FaultKind::Truncated
+            Some(Part::End(End::Failed(f))) if f.is(respan_gateway_core::codes::TRUNCATED)
         ));
     }
 

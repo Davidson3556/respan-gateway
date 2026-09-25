@@ -38,7 +38,7 @@ async fn main() -> ExitCode {
     };
     let gateway = match builder().build(&config) {
         Ok(g) => g,
-        Err(e) => return fail(&format!("{config_path}: {}", e.message)),
+        Err(e) => return fail(&format!("{config_path}: {}", e.message())),
     };
     if check_only {
         println!("{config_path}: ok");

@@ -97,6 +97,21 @@ impl Plugin for KeyAuth {
     }
 }
 
+/// Refuses everyone with a custom error.
+struct Broke;
+
+#[async_trait]
+impl Plugin for Broke {
+    async fn on_client_request(&self, _req: &ClientRequest) -> Result<Flow, Fault> {
+        Err(Fault::new(
+            http::StatusCode::PAYMENT_REQUIRED,
+            "insufficient_credits",
+            "balance too low",
+        )
+        .with_details(json!({ "balance": 0.12 })))
+    }
+}
+
 #[derive(Deserialize)]
 struct Rpm {
     per_minute: f64,
@@ -211,6 +226,7 @@ fn builder() -> Builder {
         .plugin("stamp", |_: ()| Ok(Stamp))
         .plugin("shout", |_: ()| Ok(Shout))
         .plugin("auth", |_: ()| Ok(KeyAuth))
+        .plugin("broke", |_: ()| Ok(Broke))
         .plugin("rate", |c: Rpm| Ok(PerKeyRate(c)))
         .plugin("fallback", |c: FallbackConfig| Ok(Fallback(c)))
 }
@@ -419,10 +435,13 @@ async fn unknown_names_fail_at_build_time() {
         .transport(MockTransport::new())
         .build(&config)
         .err()
-        .map(|e| e.message)
+        .map(|e| e.message().to_owned())
         .unwrap_or_default();
     assert!(err.contains("unknown plugin 'nope'"), "{err}");
-    assert!(err.contains("auth, fallback, rate, shout, stamp"), "{err}");
+    assert!(
+        err.contains("auth, broke, fallback, rate, shout, stamp"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -431,4 +450,18 @@ async fn unknown_routes_are_404() {
     let (status, _, _) = h.send(Inbound::new("nope", "{}")).await;
     assert_eq!(status, 404);
     assert!(h.records().is_empty());
+}
+
+#[tokio::test]
+async fn a_custom_error_reaches_the_client_in_its_format() {
+    let h = harness(json!([{ "use": "broke" }]), to_openai());
+
+    let (status, _, body) = h.send(chat()).await;
+
+    assert_eq!(status, 402);
+    let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    assert_eq!(err["error"]["code"], "insufficient_credits");
+    assert_eq!(err["error"]["message"], "balance too low");
+    assert_eq!(err["error"]["balance"], 0.12);
+    assert!(h.mock.sent().is_empty());
 }

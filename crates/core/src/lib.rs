@@ -24,7 +24,7 @@ pub use config::{
     AuthConfig, Builder, Config, EntryConfig, HttpRouteConfig, ProviderConfig, RouteConfig,
 };
 pub use edits::{Edits, Filter, PartRx, PartTx};
-pub use fault::{Fault, FaultKind};
+pub use fault::{Fault, codes};
 pub use format::{Decoder, Encoder, Format};
 pub use gateway::{Gateway, plain_error};
 pub use inbound::{Credential, Envelope, Extensions, HttpHead, Inbound};
