@@ -1,0 +1,15 @@
+[package]
+name = "respan-gateway-testkit"
+description = "Mock providers and golden streams for plugin authors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-core.workspace = true
