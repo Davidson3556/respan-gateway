@@ -974,6 +974,7 @@ dependencies = [
 name = "respan-gateway-sdk"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "respan-gateway-core",
 ]
 
@@ -1009,6 +1010,7 @@ dependencies = [
  "http",
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-sdk",
  "serde",
  "serde_json",
  "tokio",

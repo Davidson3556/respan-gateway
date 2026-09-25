@@ -7,8 +7,8 @@ use http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::gateway::{Inner, Route, Sink, Source};
-use crate::{Fault, Format, Gateway, MemoryStore, Plugin, Record, Store, Target, Transport};
+use crate::gateway::{Inner, Route, Source};
+use crate::{Fault, Format, Gateway, MemoryStore, Plugin, Store, Target, Transport};
 
 /// The static configuration, usually loaded from YAML.
 #[derive(Debug, Clone, Deserialize)]
@@ -44,12 +44,12 @@ pub enum AuthConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteConfig {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default = "default_method")]
-    pub method: String,
-    pub path: String,
+    pub name: String,
     pub format: String,
+    /// How an HTTP adapter reaches this route. Routes without it are reachable
+    /// only by name, e.g. from an embedding program.
+    #[serde(default)]
+    pub http: Option<HttpRouteConfig>,
     #[serde(default)]
     pub chain: Vec<EntryConfig>,
     /// A provider name. Exactly one of `target` and `source` is set.
@@ -58,6 +58,14 @@ pub struct RouteConfig {
     /// A source plugin that decides which providers to call.
     #[serde(default)]
     pub source: Option<EntryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HttpRouteConfig {
+    #[serde(default = "default_method")]
+    pub method: String,
+    pub path: String,
 }
 
 fn default_method() -> String {
@@ -83,7 +91,6 @@ pub struct Builder {
     factories: BTreeMap<String, Factory>,
     store: Option<Arc<dyn Store>>,
     transport: Option<Arc<dyn Transport>>,
-    sinks: Vec<Sink>,
 }
 
 impl std::fmt::Debug for Builder {
@@ -108,7 +115,6 @@ impl Builder {
             factories: BTreeMap::new(),
             store: None,
             transport: None,
-            sinks: Vec::new(),
         }
     }
 
@@ -149,12 +155,6 @@ impl Builder {
         self
     }
 
-    /// Called with every Record, after the request's own `on_close` hooks.
-    pub fn on_record(mut self, f: impl Fn(&Record) + Send + Sync + 'static) -> Self {
-        self.sinks.push(Box::new(f));
-        self
-    }
-
     pub fn build(self, config: &Config) -> Result<Gateway, Fault> {
         let mut targets = HashMap::new();
         for (name, p) in &config.providers {
@@ -173,16 +173,24 @@ impl Builder {
             );
         }
 
-        let mut routes = Vec::new();
-        for (i, r) in config.routes.iter().enumerate() {
-            let name = r.name.clone().unwrap_or_else(|| r.path.clone());
+        let mut routes = HashMap::new();
+        for r in &config.routes {
+            let name = r.name.clone();
             let format = self
                 .formats
                 .get(&r.format)
                 .cloned()
                 .ok_or_else(|| self.unknown_format(&r.format, &format!("route '{name}'")))?;
-            let method = Method::from_bytes(r.method.to_uppercase().as_bytes())
-                .map_err(|_| Fault::config(format!("route '{name}': bad method '{}'", r.method)))?;
+            let http = match &r.http {
+                None => None,
+                Some(h) => {
+                    let method =
+                        Method::from_bytes(h.method.to_uppercase().as_bytes()).map_err(|_| {
+                            Fault::config(format!("route '{name}': bad method '{}'", h.method))
+                        })?;
+                    Some((method, h.path.clone()))
+                }
+            };
             let chain = r
                 .chain
                 .iter()
@@ -200,18 +208,20 @@ impl Builder {
                 (None, Some(e)) => Source::Plugin(self.instantiate(e)?),
                 _ => {
                     return Err(Fault::config(format!(
-                        "route {i} '{name}': set exactly one of `target` and `source`"
+                        "route '{name}': set exactly one of `target` and `source`"
                     )));
                 }
             };
-            routes.push(Route {
-                name,
-                method,
-                path: r.path.clone(),
+            let route = Route {
+                name: name.clone(),
+                http,
                 format,
                 chain,
                 source,
-            });
+            };
+            if routes.insert(name.clone(), route).is_some() {
+                return Err(Fault::config(format!("route '{name}' is defined twice")));
+            }
         }
 
         let transport = match self.transport {
@@ -225,7 +235,6 @@ impl Builder {
                 targets,
                 store: self.store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
                 transport,
-                sinks: self.sinks,
                 next_id: AtomicU64::new(1),
             }),
         })

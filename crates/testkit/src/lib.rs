@@ -130,15 +130,3 @@ pub async fn collect(resp: http::Response<Body>) -> (u16, http::HeaderMap, Bytes
     }
     (parts.status.as_u16(), parts.headers, Bytes::from(out))
 }
-
-/// A JSON POST, as a client would send it.
-pub fn post(path: &str, body: &str) -> http::Request<Bytes> {
-    let mut req = http::Request::new(Bytes::from(body.to_owned()));
-    *req.method_mut() = http::Method::POST;
-    *req.uri_mut() = path.parse().unwrap_or_default();
-    req.headers_mut().insert(
-        CONTENT_TYPE,
-        http::HeaderValue::from_static("application/json"),
-    );
-    req
-}

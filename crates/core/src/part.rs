@@ -2,17 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode, Uri};
+use http::{HeaderMap, StatusCode};
 use serde_json::Value;
 
 use crate::Fault;
-
-#[derive(Debug, Clone)]
-pub struct RequestHead {
-    pub method: Method,
-    pub uri: Uri,
-    pub headers: HeaderMap,
-}
 
 #[derive(Debug, Clone)]
 pub struct ResponseHead {

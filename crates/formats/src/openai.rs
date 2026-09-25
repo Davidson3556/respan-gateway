@@ -2,8 +2,8 @@
 
 use bytes::{Bytes, BytesMut};
 use respan_gateway_core::{
-    Decoder, Delta, DeltaKind, Doc, Encoder, End, Fault, Format, Part, RequestHead, ResponseHead,
-    Usage, units,
+    Decoder, Delta, DeltaKind, Doc, Encoder, End, Envelope, Extensions, Fault, Format, Part,
+    ResponseHead, Usage, units,
 };
 use serde_json::{Value, json};
 
@@ -15,21 +15,21 @@ impl Format for OpenAiChat {
         "openai-chat"
     }
 
-    fn is_stream(&self, _head: &RequestHead, body: &Doc) -> bool {
-        body.json()
-            .and_then(|v| v.get("stream"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    fn envelope(&self, body: &Doc, _ext: &Extensions) -> Envelope {
+        let v = body.json();
+        Envelope {
+            model: v
+                .and_then(|v| v.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            stream: v
+                .and_then(|v| v.get("stream"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }
     }
 
-    fn model(&self, _head: &RequestHead, body: &Doc) -> Option<String> {
-        body.json()
-            .and_then(|v| v.get("model"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    }
-
-    fn provider_path(&self, _head: &RequestHead, _model: Option<&str>, _stream: bool) -> String {
+    fn provider_path(&self, _envelope: &Envelope) -> String {
         "/v1/chat/completions".into()
     }
 

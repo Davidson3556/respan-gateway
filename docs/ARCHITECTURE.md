@@ -22,12 +22,12 @@ nobody edits is relayed byte for byte.
 
 | Concept | What it is |
 |---|---|
-| **ClientRequest** | Client to gateway. The plugin's main handle: head, body, principal, session, store, labels, `from_client()` and `to_client()` streams, `on_close`. Closes into exactly one Record. |
-| **ProviderRequest** | Gateway to one provider. A client request can make several (fallback, retry, hedging, split). Has its own copy of the body and `to_provider()` / `from_provider()` streams. |
+| **ClientRequest** | One unit of work from a client, created after the Format. Not necessarily HTTP. Holds only what every caller has: route, format, envelope (model, stream), body in the client's format, principal, session, store, `from_client()` / `to_client()` streams, `on_close`. Transport details are optional typed extensions (`ext::<HttpHead>()`, `ext::<Credential>()`). |
+| **ProviderRequest** | Gateway to one provider. A client request can make several (fallback, retry, hedging, split). Has its own copy of the body, `to_provider()` / `from_provider()` streams and its own `on_close`. |
 | **ClientResponse** / **ProviderResponse** | What goes back to the client, and what a provider sent. Turning a ProviderResponse into a ClientResponse commits it. |
 | **Providers** | The capability to make provider requests. Only the route's source gets it. |
 | **Session** | A group of client requests that share state and a provider: a socket, a job, an MCP session. A plain HTTP request is a session of one. |
-| **Part** | What flows through a stream: Head, Doc (a whole message), Delta (Text, Args, Reasoning, Bytes), Frame, Usage, End. Edit with `head()`, `map()` and `filter()`. |
+| **Part** | What flows through a stream: Head, Doc (a whole message), Delta (Text, Args, Reasoning, Bytes), Frame, Usage, End. Edit with `head()`, `map()` and `filter()`; observe with `tap()`, which never forces a re-encode. |
 | **Store** | Shared key-value store with atomic batches. Keys are typed by a `Class`. |
 | **Format** | A wire protocol. Stateless; hands out a decoder and encoder per stream. Compiled in, or declared in YAML. |
 | **Config** | Routes, chains, providers. Anything it names that the binary does not contain is a startup error. |
@@ -53,8 +53,9 @@ client ◄──to_client()──── gateway ◄─from_provider()── prov
 
 ## Invariants the kernel guarantees
 
-- Every client request closes into exactly one Record; `on_close` runs once,
-  including on disconnect.
+- Close hooks run exactly once, including on disconnect: each provider
+  request's first, then the client request's. There is no built-in Record;
+  the SDK `Recorder` assembles one from these hooks.
 - At most one committed response per client request. After commit no attempt can start, and
   later failures go out in the client's framing.
 - Each provider request gets its own copy of the body. Crossing Formats means the

@@ -30,7 +30,7 @@ async fn relays_a_stream_over_real_http() {
 
     let config: Config = serde_json::from_value(json!({
         "providers": { "local": { "format": "openai-chat", "base_url": provider } },
-        "routes": [{ "path": "/v1/chat/completions", "format": "openai-chat", "target": "local" }],
+        "routes": [{ "name": "chat", "format": "openai-chat", "http": { "path": "/v1/chat/completions" }, "target": "local" }],
     }))
     .unwrap_or_else(|e| panic!("config: {e}"));
     let gateway = Builder::new()

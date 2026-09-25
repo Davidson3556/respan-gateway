@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
@@ -8,21 +8,18 @@ use futures::stream::{self, BoxStream};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, RETRY_AFTER, TRANSFER_ENCODING};
 use http::{Method, StatusCode};
 
-use crate::edits::{PartStream, apply, apply_head, apply_once, is_body_edit, lock};
-use crate::providers::{Attempts, Reply};
-use crate::request::ClientRequestInit;
+use crate::edits::{PartStream, TapFn, apply, apply_head, apply_once, changes_body, lock, taps};
+use crate::providers::Reply;
+use crate::request::{ClientRequestInit, ProviderCloseFn};
 use crate::{
-    AttemptEnd, Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, FaultKind,
-    Format, Outcome, Part, Plugin, Providers, Record, RequestHead, ResponseHead, Store, Target,
-    Transport, Usage,
+    Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, FaultKind, Format,
+    Inbound, Outcome, Part, Plugin, ProviderEnd, ProviderOutcome, Providers, ResponseHead, Store,
+    Target, Transport, Usage,
 };
-
-pub(crate) type Sink = Box<dyn Fn(&Record) + Send + Sync>;
 
 pub(crate) struct Route {
     pub name: String,
-    pub method: Method,
-    pub path: String,
+    pub http: Option<(Method, String)>,
     pub format: Arc<dyn Format>,
     pub chain: Vec<Arc<dyn Plugin>>,
     pub source: Source,
@@ -34,12 +31,11 @@ pub(crate) enum Source {
 }
 
 pub(crate) struct Inner {
-    pub routes: Vec<Route>,
+    pub routes: HashMap<String, Route>,
     pub formats: HashMap<String, Arc<dyn Format>>,
     pub targets: HashMap<String, Target>,
     pub store: Arc<dyn Store>,
     pub transport: Arc<dyn Transport>,
-    pub sinks: Vec<Sink>,
     pub next_id: AtomicU64,
 }
 
@@ -52,8 +48,8 @@ impl Inner {
     }
 }
 
-/// The gateway. Has no server inside: feed it requests with
-/// [`Gateway::handle`], from an HTTP adapter or embedded in another program.
+/// The gateway. Has no server inside: hand it [`Inbound`] work from an HTTP
+/// adapter, an embedding program, or anything else.
 #[derive(Clone)]
 pub struct Gateway {
     pub(crate) inner: Arc<Inner>,
@@ -69,50 +65,41 @@ impl std::fmt::Debug for Gateway {
 }
 
 impl Gateway {
-    pub async fn handle(&self, req: http::Request<Bytes>) -> http::Response<Body> {
-        let (parts, bytes) = req.into_parts();
-        let inner = &self.inner;
-        let Some(route_index) = inner
-            .routes
-            .iter()
-            .position(|r| r.method == parts.method && r.path == parts.uri.path())
-        else {
-            return plain_error(StatusCode::NOT_FOUND, "no route");
-        };
-        let route = &inner.routes[route_index];
+    /// The route an HTTP adapter should use for `method` and `path`.
+    pub fn http_route(&self, method: &Method, path: &str) -> Option<&str> {
+        self.inner.routes.values().find_map(|r| match &r.http {
+            Some((m, p)) if m == method && p == path => Some(r.name.as_str()),
+            _ => None,
+        })
+    }
 
-        let head = RequestHead {
-            method: parts.method,
-            uri: parts.uri,
-            headers: parts.headers,
+    pub async fn handle(&self, inbound: Inbound) -> http::Response<Body> {
+        let inner = &self.inner;
+        let Some(route) = inner.routes.get(&inbound.route) else {
+            return plain_error(StatusCode::NOT_FOUND, "no such route");
         };
-        let body = Doc::new(bytes);
+        let body = Doc::new(inbound.body);
         let n = inner.next_id.fetch_add(1, Ordering::Relaxed);
         let client = Arc::new(ClientRequest::new(ClientRequestInit {
             id: format!("req_{n:016x}"),
             route: route.name.clone(),
-            stream: route.format.is_stream(&head, &body),
-            model: route.format.model(&head, &body),
-            head,
+            format: route.format.name(),
+            envelope: route.format.envelope(&body, &inbound.ext),
             body,
+            ext: inbound.ext,
             store: inner.store.clone(),
         }));
-        let attempts: Attempts = Arc::default();
         let tap: Tap = Arc::default();
         let mut fin = Finalizer {
-            inner: self.inner.clone(),
             client: client.clone(),
-            attempts: attempts.clone(),
             tap: tap.clone(),
             committed: None,
-            status: 0,
             closed: false,
         };
 
-        match run(inner, route, &client, attempts).await {
+        match run(inner, route, &client).await {
             Ok(resp) => commit(route, &client, resp, fin, tap),
             Err(f) => {
-                fin.status = f.status().as_u16();
                 fin.close(Outcome::Refused(f.clone()));
                 fault_response(route.format.as_ref(), &f)
             }
@@ -124,7 +111,6 @@ async fn run(
     inner: &Inner,
     route: &Route,
     client: &ClientRequest,
-    attempts: Attempts,
 ) -> Result<ClientResponse, Fault> {
     for plugin in &route.chain {
         plugin.on_client_request(client).await?;
@@ -142,7 +128,7 @@ async fn run(
         inner,
         route,
         client,
-        attempts,
+        next_index: AtomicUsize::new(0),
     };
     match &route.source {
         Source::Provider(name) => providers.call(name).await.map(Into::into),
@@ -157,13 +143,17 @@ fn commit(
     mut fin: Finalizer,
     tap: Tap,
 ) -> http::Response<Body> {
-    let mut to_client = client.to_client().take();
+    let to_client = client.to_client().take();
     let client_format = route.format.clone();
 
     let (mut head, source, provider_format, mut edits) = match resp.0 {
         Reply::Provider(pr) => {
             let c = pr.commit();
-            fin.committed = Some(c.index);
+            fin.committed = Some(CommittedProvider {
+                provider: c.provider,
+                status: c.head.status.as_u16(),
+                on_close: c.on_close,
+            });
             let decoder = c.format.decoder(&c.head);
             (
                 c.head,
@@ -174,20 +164,22 @@ fn commit(
         }
         Reply::Synthetic { head, parts } => (head, BodySource::Parts(parts), None, Vec::new()),
     };
-    apply_head(&mut edits, &mut head);
-    apply_head(&mut to_client, &mut head);
     edits.extend(to_client);
-    edits.retain(is_body_edit);
-    fin.status = head.status.as_u16();
+    apply_head(&mut edits, &mut head);
     let in_stream = is_event_stream(&head);
+    let relay = !edits.iter().any(changes_body)
+        && provider_format.is_some_and(|f| f.name() == client_format.name());
 
     let body = match source {
-        BodySource::Bytes(bytes, decoder)
-            if edits.is_empty()
-                && provider_format.is_some_and(|f| f.name() == client_format.name()) =>
-        {
-            splice(bytes, decoder, client_format, in_stream, fin, tap)
-        }
+        BodySource::Bytes(bytes, decoder) if relay => splice(
+            bytes,
+            decoder,
+            taps(edits),
+            client_format,
+            in_stream,
+            fin,
+            tap,
+        ),
         BodySource::Bytes(bytes, decoder) => {
             let parts = decode(bytes, decoder, tap);
             encode(apply(parts, edits), client_format.encoder(&head), fin)
@@ -218,6 +210,8 @@ fn is_event_stream(head: &ResponseHead) -> bool {
 
 type Tap = Arc<Mutex<TapState>>;
 
+/// What the kernel itself reads off the committed stream: the provider's
+/// usage and how the stream ended.
 #[derive(Default)]
 struct TapState {
     usage: Usage,
@@ -235,10 +229,11 @@ fn record_parts(tap: &Tap, parts: &[Part]) {
     }
 }
 
-/// Relay bytes untouched, decoding a copy only to read usage and the end.
+/// Relay bytes untouched, decoding a copy for the kernel and for taps.
 fn splice(
     bytes: Body,
     decoder: Box<dyn Decoder>,
+    taps: Vec<TapFn>,
     format: Arc<dyn Format>,
     in_stream: bool,
     fin: Finalizer,
@@ -247,15 +242,27 @@ fn splice(
     struct State {
         bytes: Body,
         decoder: Box<dyn Decoder>,
+        taps: Vec<TapFn>,
         format: Arc<dyn Format>,
         in_stream: bool,
         fin: Finalizer,
         tap: Tap,
         done: bool,
     }
+    impl State {
+        fn seen(&mut self, parts: &[Part]) {
+            record_parts(&self.tap, parts);
+            for f in &mut self.taps {
+                for p in parts {
+                    f(p);
+                }
+            }
+        }
+    }
     let state = State {
         bytes,
         decoder,
+        taps,
         format,
         in_stream,
         fin,
@@ -270,12 +277,12 @@ fn splice(
         match s.bytes.next().await {
             Some(Ok(chunk)) => {
                 s.decoder.decode(chunk.clone(), &mut seen);
-                record_parts(&s.tap, &seen);
+                s.seen(&seen);
                 Some((Ok(chunk), s))
             }
             Some(Err(f)) => {
                 s.done = true;
-                lock(&s.tap).end.get_or_insert(End::Failed(f.clone()));
+                s.seen(&[Part::End(End::Failed(f.clone()))]);
                 s.fin.close_from_tap();
                 let item = if s.in_stream {
                     Ok(s.format.fault(&f, true))
@@ -287,14 +294,14 @@ fn splice(
             None => {
                 s.done = true;
                 s.decoder.finish(&mut seen);
-                record_parts(&s.tap, &seen);
-                let end = lock(&s.tap)
-                    .end
-                    .get_or_insert(End::Failed(Fault::truncated()))
-                    .clone();
+                if !seen.iter().any(|p| matches!(p, Part::End(_))) && lock(&s.tap).end.is_none() {
+                    seen.push(Part::End(End::Failed(Fault::truncated())));
+                }
+                s.seen(&seen);
+                let end = lock(&s.tap).end.clone();
                 s.fin.close_from_tap();
                 match end {
-                    End::Failed(f) if s.in_stream => Some((Ok(s.format.fault(&f, true)), s)),
+                    Some(End::Failed(f)) if s.in_stream => Some((Ok(s.format.fault(&f, true)), s)),
                     _ => None,
                 }
             }
@@ -389,15 +396,19 @@ fn encode(parts: PartStream, encoder: Box<dyn Encoder>, fin: Finalizer) -> Body 
     .boxed()
 }
 
-/// Emits the request's Record exactly once: when its response finishes, when
-/// it is refused, or when the client goes away (drop).
-struct Finalizer {
-    inner: Arc<Inner>,
-    client: Arc<ClientRequest>,
-    attempts: Attempts,
-    tap: Tap,
-    committed: Option<usize>,
+struct CommittedProvider {
+    provider: String,
     status: u16,
+    on_close: Vec<ProviderCloseFn>,
+}
+
+/// Runs the close hooks exactly once: when the response finishes, when the
+/// request is refused, or when the client goes away (drop). The committed
+/// provider request closes first, then the client request.
+struct Finalizer {
+    client: Arc<ClientRequest>,
+    tap: Tap,
+    committed: Option<CommittedProvider>,
     closed: bool,
 }
 
@@ -416,33 +427,24 @@ impl Finalizer {
             return;
         }
         self.closed = true;
-        let usage = std::mem::take(&mut lock(&self.tap).usage);
-        let mut attempts = lock(&self.attempts).clone();
-        if let Some(i) = self.committed
-            && let Some(a) = attempts.get_mut(i)
-        {
-            a.end = AttemptEnd::Committed;
-            a.usage = usage.clone();
+        if let Some(c) = self.committed.take() {
+            let end = match outcome {
+                Outcome::ClientGone => ProviderEnd::Abandoned,
+                Outcome::Done => ProviderEnd::Committed,
+                _ => ProviderEnd::Failed,
+            };
+            let po = ProviderOutcome {
+                provider: c.provider,
+                status: Some(c.status),
+                end,
+                usage: std::mem::take(&mut lock(&self.tap).usage),
+            };
+            for f in c.on_close {
+                f(&po);
+            }
         }
-        let principal = self.client.principal();
-        let record = Record {
-            request_id: self.client.id.clone(),
-            route: self.client.route.clone(),
-            principal: principal.as_ref().map(|p| p.id.clone()),
-            tenant: principal.map(|p| p.tenant),
-            model: self.client.model().map(str::to_owned),
-            status: self.status,
-            outcome,
-            attempts,
-            usage,
-            labels: self.client.labels(),
-            duration: self.client.started.elapsed(),
-        };
         for f in self.client.take_close_fns() {
-            f(&record);
-        }
-        for sink in &self.inner.sinks {
-            sink(&record);
+            f(&self.client, &outcome);
         }
     }
 }
@@ -468,7 +470,8 @@ fn fault_response(format: &dyn Format, f: &Fault) -> http::Response<Body> {
     resp
 }
 
-fn plain_error(status: StatusCode, message: &str) -> http::Response<Body> {
+/// For errors outside any route, where no Format is known.
+pub fn plain_error(status: StatusCode, message: &str) -> http::Response<Body> {
     let body = serde_json::json!({ "error": { "message": message } }).to_string();
     let mut resp = http::Response::new(once(Bytes::from(body)));
     *resp.status_mut() = status;

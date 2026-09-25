@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+async-trait.workspace = true

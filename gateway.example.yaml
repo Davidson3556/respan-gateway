@@ -7,6 +7,7 @@ providers:
     auth: { type: bearer, key: env:OPENAI_API_KEY }
 
 routes:
-  - path: /v1/chat/completions
+  - name: chat
     format: openai-chat
+    http: { path: /v1/chat/completions }
     target: openai

@@ -1,6 +1,6 @@
 use bytes::{Bytes, BytesMut};
 
-use crate::{Doc, Fault, Part, RequestHead, ResponseHead};
+use crate::{Doc, Envelope, Extensions, Fault, Part, ResponseHead};
 
 /// A wire protocol. Stateless and shared; each stream gets its own
 /// [`Decoder`] and [`Encoder`].
@@ -8,14 +8,12 @@ pub trait Format: Send + Sync + 'static {
     /// Referenced by `format:` in config.
     fn name(&self) -> &'static str;
 
-    /// Whether the client asked for a streamed response.
-    fn is_stream(&self, head: &RequestHead, body: &Doc) -> bool;
-
-    /// The model the client asked for, if the protocol carries one.
-    fn model(&self, head: &RequestHead, body: &Doc) -> Option<String>;
+    /// The model and streaming flag, read from the body or, for protocols
+    /// that carry them elsewhere, from the caller's extensions.
+    fn envelope(&self, body: &Doc, ext: &Extensions) -> Envelope;
 
     /// The path to call on a provider speaking this format.
-    fn provider_path(&self, head: &RequestHead, model: Option<&str>, stream: bool) -> String;
+    fn provider_path(&self, envelope: &Envelope) -> String;
 
     /// Protocol-level changes to a request before it goes to a provider:
     /// the model override, asking for streamed usage, and so on.

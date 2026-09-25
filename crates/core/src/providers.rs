@@ -1,12 +1,14 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use http::{Method, StatusCode};
 
-use crate::edits::{Edit, apply_once, lock};
+use crate::edits::{Edit, apply_once};
 use crate::gateway::{Inner, Route};
+use crate::request::{ProviderCloseFn, ProviderRequestParts};
 use crate::{
-    AttemptEnd, AttemptRecord, Body, ClientRequest, Fault, Format, Part, ProviderRequest,
+    Body, ClientRequest, Fault, Format, Part, ProviderEnd, ProviderOutcome, ProviderRequest,
     ResponseHead, Usage,
 };
 
@@ -21,14 +23,12 @@ pub struct Target {
     pub headers: Vec<(HeaderName, HeaderValue)>,
 }
 
-pub(crate) type Attempts = Arc<Mutex<Vec<AttemptRecord>>>;
-
 /// The capability to make provider requests. Only a route's source gets it.
 pub struct Providers<'a> {
     pub(crate) inner: &'a Inner,
     pub(crate) route: &'a Route,
     pub(crate) client: &'a ClientRequest,
-    pub(crate) attempts: Attempts,
+    pub(crate) next_index: AtomicUsize,
 }
 
 impl std::fmt::Debug for Providers<'_> {
@@ -36,6 +36,12 @@ impl std::fmt::Debug for Providers<'_> {
         f.debug_struct("Providers")
             .field("route", &self.route.name)
             .finish()
+    }
+}
+
+fn close_all(fns: Vec<ProviderCloseFn>, outcome: &ProviderOutcome) {
+    for f in fns {
+        f(outcome);
     }
 }
 
@@ -57,56 +63,73 @@ impl Providers<'_> {
             )));
         }
 
-        let index = {
-            let mut a = lock(&self.attempts);
-            a.push(AttemptRecord {
-                provider: target.name.clone(),
-                status: None,
-                end: AttemptEnd::Pending,
-                usage: Usage::default(),
-            });
-            a.len() - 1
-        };
-        let fail = |f: Fault| {
-            lock(&self.attempts)[index].end = AttemptEnd::Failed;
+        let index = self.next_index.fetch_add(1, Ordering::Relaxed);
+        let pr = ProviderRequest::new(self.client, target, index);
+        let mut hook_result = Ok(());
+        for plugin in &self.route.chain {
+            hook_result = plugin.on_provider_request(&pr).await;
+            if hook_result.is_err() {
+                break;
+            }
+        }
+        let ProviderRequestParts {
+            body,
+            to_provider,
+            from_provider,
+            on_close,
+        } = pr.into_parts();
+        let fail = |on_close: Vec<ProviderCloseFn>, f: Fault| {
+            close_all(
+                on_close,
+                &ProviderOutcome {
+                    provider: target.name.clone(),
+                    status: None,
+                    end: ProviderEnd::Failed,
+                    usage: Usage::default(),
+                },
+            );
             f
         };
-
-        let pr = ProviderRequest::new(self.client, target, index);
-        for plugin in &self.route.chain {
-            plugin.on_provider_request(&pr).await.map_err(fail)?;
+        if let Err(f) = hook_result {
+            return Err(fail(on_close, f));
         }
-        let (body, to_provider, from_provider) = pr.into_parts();
-        let mut part = Part::Doc(body);
-        apply_once(&mut part, to_provider.take()).map_err(fail)?;
-        let Part::Doc(mut body) = part else {
-            return Err(fail(Fault::internal("request edit replaced the body")));
+
+        let prepared = (|| {
+            let mut part = Part::Doc(body);
+            apply_once(&mut part, to_provider.take())?;
+            let Part::Doc(mut body) = part else {
+                return Err(Fault::internal("request edit replaced the body"));
+            };
+            let mut envelope = self.client.envelope().clone();
+            if target.model.is_some() {
+                envelope.model = target.model.clone();
+            }
+            format.prepare_request(&mut body, target.model.as_deref(), envelope.stream)?;
+            let url = format!(
+                "{}{}",
+                target.base_url.trim_end_matches('/'),
+                format.provider_path(&envelope)
+            );
+            let mut req = http::Request::builder()
+                .method(Method::POST)
+                .uri(url)
+                .header(CONTENT_TYPE, "application/json");
+            for (k, v) in &target.headers {
+                req = req.header(k, v);
+            }
+            req.body(body.to_bytes())
+                .map_err(|e| Fault::config(e.to_string()))
+        })();
+        let req = match prepared {
+            Ok(r) => r,
+            Err(f) => return Err(fail(on_close, f)),
         };
 
-        let stream = self.client.is_stream();
-        format
-            .prepare_request(&mut body, target.model.as_deref(), stream)
-            .map_err(fail)?;
-        let model = target.model.as_deref().or(self.client.model());
-        let url = format!(
-            "{}{}",
-            target.base_url.trim_end_matches('/'),
-            format.provider_path(self.client.head(), model, stream)
-        );
-        let mut req = http::Request::builder()
-            .method(Method::POST)
-            .uri(url)
-            .header(CONTENT_TYPE, "application/json");
-        for (k, v) in &target.headers {
-            req = req.header(k, v);
-        }
-        let req = req
-            .body(body.to_bytes())
-            .map_err(|e| fail(Fault::config(e.to_string())))?;
-
-        let resp = self.inner.transport.send(req).await.map_err(fail)?;
+        let resp = match self.inner.transport.send(req).await {
+            Ok(r) => r,
+            Err(f) => return Err(fail(on_close, f)),
+        };
         let (parts, body) = resp.into_parts();
-        lock(&self.attempts)[index].status = Some(parts.status.as_u16());
         Ok(ProviderResponse {
             provider: target.name.clone(),
             format,
@@ -116,8 +139,7 @@ impl Providers<'_> {
             },
             body: Some(body),
             from_provider: from_provider.take(),
-            index,
-            attempts: self.attempts.clone(),
+            on_close,
         })
     }
 }
@@ -130,8 +152,7 @@ pub struct ProviderResponse {
     head: ResponseHead,
     body: Option<Body>,
     from_provider: Vec<Edit>,
-    index: usize,
-    attempts: Attempts,
+    on_close: Vec<ProviderCloseFn>,
 }
 
 impl std::fmt::Debug for ProviderResponse {
@@ -155,27 +176,52 @@ impl ProviderResponse {
     pub fn head(&self) -> &ResponseHead {
         &self.head
     }
-}
 
-impl Drop for ProviderResponse {
-    fn drop(&mut self) {
-        if self.body.is_some() {
-            let failed = !self.head.status.is_success();
-            lock(&self.attempts)[self.index].end = if failed {
-                AttemptEnd::Failed
-            } else {
-                AttemptEnd::Cancelled
-            };
+    pub(crate) fn commit(mut self) -> Committed {
+        let body = self
+            .body
+            .take()
+            .unwrap_or_else(|| Box::pin(futures::stream::empty()));
+        Committed {
+            provider: std::mem::take(&mut self.provider),
+            format: self.format.clone(),
+            head: self.head.clone(),
+            body,
+            from_provider: std::mem::take(&mut self.from_provider),
+            on_close: std::mem::take(&mut self.on_close),
         }
     }
 }
 
+impl Drop for ProviderResponse {
+    fn drop(&mut self) {
+        if self.body.is_none() {
+            return;
+        }
+        let end = if self.head.status.is_success() {
+            ProviderEnd::Cancelled
+        } else {
+            ProviderEnd::Failed
+        };
+        close_all(
+            std::mem::take(&mut self.on_close),
+            &ProviderOutcome {
+                provider: self.provider.clone(),
+                status: Some(self.head.status.as_u16()),
+                end,
+                usage: Usage::default(),
+            },
+        );
+    }
+}
+
 pub(crate) struct Committed {
+    pub provider: String,
     pub format: Arc<dyn Format>,
     pub head: ResponseHead,
     pub body: Body,
     pub from_provider: Vec<Edit>,
-    pub index: usize,
+    pub on_close: Vec<ProviderCloseFn>,
 }
 
 /// What the client gets back. Built from a [`ProviderResponse`] (which commits
@@ -202,21 +248,5 @@ impl ClientResponse {
 impl From<ProviderResponse> for ClientResponse {
     fn from(r: ProviderResponse) -> Self {
         Self(Reply::Provider(r))
-    }
-}
-
-impl ProviderResponse {
-    pub(crate) fn commit(mut self) -> Committed {
-        let body = self
-            .body
-            .take()
-            .unwrap_or_else(|| Box::pin(futures::stream::empty()));
-        Committed {
-            format: self.format.clone(),
-            head: self.head.clone(),
-            body,
-            from_provider: std::mem::take(&mut self.from_provider),
-            index: self.index,
-        }
     }
 }

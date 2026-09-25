@@ -1,10 +1,8 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
 use crate::edits::lock;
 use crate::store::{Class, Key, Scope};
-use crate::{Doc, Edits, Record, RequestHead, Store, Target};
+use crate::{Doc, Edits, Envelope, Extensions, Outcome, ProviderOutcome, Store, Target};
 
 /// Who is calling. Set by an auth plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,24 +32,25 @@ impl Session {
     }
 }
 
-type CloseFn = Box<dyn FnOnce(&Record) + Send>;
+pub(crate) type CloseFn = Box<dyn FnOnce(&ClientRequest, &Outcome) + Send>;
+pub(crate) type ProviderCloseFn = Box<dyn FnOnce(&ProviderOutcome) + Send>;
 
-/// A request from the client to the gateway. Plugins see it once per request.
+/// One unit of work from a client. Not necessarily an HTTP request: it can
+/// come from an embedding program or be one turn of a socket. Transport
+/// details, when there are any, are in [`ClientRequest::ext`].
 pub struct ClientRequest {
-    pub(crate) id: String,
-    pub(crate) route: String,
-    head: RequestHead,
+    id: String,
+    route: String,
+    format: &'static str,
+    envelope: Envelope,
     body: Mutex<Doc>,
-    stream: bool,
-    model: Option<String>,
+    ext: Mutex<Extensions>,
     principal: Mutex<Option<Principal>>,
     session: Session,
     store: Arc<dyn Store>,
-    labels: Mutex<BTreeMap<String, String>>,
     from_client: Edits,
     to_client: Edits,
     on_close: Mutex<Vec<CloseFn>>,
-    pub(crate) started: Instant,
 }
 
 impl std::fmt::Debug for ClientRequest {
@@ -59,8 +58,8 @@ impl std::fmt::Debug for ClientRequest {
         f.debug_struct("ClientRequest")
             .field("id", &self.id)
             .field("route", &self.route)
-            .field("model", &self.model)
-            .field("stream", &self.stream)
+            .field("format", &self.format)
+            .field("envelope", &self.envelope)
             .finish()
     }
 }
@@ -68,10 +67,10 @@ impl std::fmt::Debug for ClientRequest {
 pub(crate) struct ClientRequestInit {
     pub id: String,
     pub route: String,
-    pub head: RequestHead,
+    pub format: &'static str,
+    pub envelope: Envelope,
     pub body: Doc,
-    pub stream: bool,
-    pub model: Option<String>,
+    pub ext: Extensions,
     pub store: Arc<dyn Store>,
 }
 
@@ -83,17 +82,15 @@ impl ClientRequest {
             },
             id: init.id,
             route: init.route,
-            head: init.head,
+            format: init.format,
+            envelope: init.envelope,
             body: Mutex::new(init.body),
-            stream: init.stream,
-            model: init.model,
+            ext: Mutex::new(init.ext),
             principal: Mutex::new(None),
             store: init.store,
-            labels: Mutex::default(),
             from_client: Edits::default(),
             to_client: Edits::default(),
             on_close: Mutex::default(),
-            started: Instant::now(),
         }
     }
 
@@ -105,21 +102,37 @@ impl ClientRequest {
         &self.route
     }
 
-    pub fn head(&self) -> &RequestHead {
-        &self.head
+    /// The name of the Format the client spoke.
+    pub fn format(&self) -> &str {
+        self.format
     }
 
-    /// The request body. Do not hold the guard across an `.await`.
+    pub fn model(&self) -> Option<&str> {
+        self.envelope.model.as_deref()
+    }
+
+    pub fn is_stream(&self) -> bool {
+        self.envelope.stream
+    }
+
+    pub fn envelope(&self) -> &Envelope {
+        &self.envelope
+    }
+
+    /// The message, in the client's format. Do not hold the guard across an
+    /// `.await`.
     pub fn body(&self) -> MutexGuard<'_, Doc> {
         lock(&self.body)
     }
 
-    pub fn is_stream(&self) -> bool {
-        self.stream
+    /// A value the caller or an earlier plugin attached, by type.
+    pub fn ext<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
+        lock(&self.ext).get::<T>().cloned()
     }
 
-    pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
+    /// Attach a value for later plugins, replacing any of the same type.
+    pub fn insert_ext<T: Clone + Send + Sync + 'static>(&self, value: T) {
+        lock(&self.ext).insert(value);
     }
 
     pub fn principal(&self) -> Option<Principal> {
@@ -151,10 +164,6 @@ impl ClientRequest {
         }
     }
 
-    pub fn label(&self, key: impl Into<String>, value: impl Into<String>) {
-        lock(&self.labels).insert(key.into(), value.into());
-    }
-
     /// The request body on its way in from the client.
     pub fn from_client(&self) -> &Edits {
         &self.from_client
@@ -165,13 +174,11 @@ impl ClientRequest {
         &self.to_client
     }
 
-    /// Runs exactly once when the request closes, however it ends.
-    pub fn on_close(&self, f: impl FnOnce(&Record) + Send + 'static) {
+    /// Runs exactly once when the request ends, however it ends, after every
+    /// provider request's own close hooks. Receives the request in its final
+    /// state, so a hook registered early still sees what later plugins set.
+    pub fn on_close(&self, f: impl FnOnce(&ClientRequest, &Outcome) + Send + 'static) {
         lock(&self.on_close).push(Box::new(f));
-    }
-
-    pub(crate) fn labels(&self) -> BTreeMap<String, String> {
-        lock(&self.labels).clone()
     }
 
     pub(crate) fn take_close_fns(&self) -> Vec<CloseFn> {
@@ -188,6 +195,7 @@ pub struct ProviderRequest<'a> {
     body: Mutex<Doc>,
     to_provider: Edits,
     from_provider: Edits,
+    on_close: Mutex<Vec<ProviderCloseFn>>,
 }
 
 impl std::fmt::Debug for ProviderRequest<'_> {
@@ -200,6 +208,13 @@ impl std::fmt::Debug for ProviderRequest<'_> {
     }
 }
 
+pub(crate) struct ProviderRequestParts {
+    pub body: Doc,
+    pub to_provider: Edits,
+    pub from_provider: Edits,
+    pub on_close: Vec<ProviderCloseFn>,
+}
+
 impl<'a> ProviderRequest<'a> {
     pub(crate) fn new(client: &'a ClientRequest, target: &'a Target, index: usize) -> Self {
         let body = client.body().clone();
@@ -210,6 +225,7 @@ impl<'a> ProviderRequest<'a> {
             body: Mutex::new(body),
             to_provider: Edits::default(),
             from_provider: Edits::default(),
+            on_close: Mutex::default(),
         }
     }
 
@@ -241,11 +257,25 @@ impl<'a> ProviderRequest<'a> {
         &self.from_provider
     }
 
-    pub(crate) fn into_parts(self) -> (Doc, Edits, Edits) {
-        let body = self
-            .body
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (body, self.to_provider, self.from_provider)
+    /// Runs exactly once when this provider request ends: failed, unused,
+    /// finished, or abandoned by the client.
+    pub fn on_close(&self, f: impl FnOnce(&ProviderOutcome) + Send + 'static) {
+        lock(&self.on_close).push(Box::new(f));
+    }
+
+    pub(crate) fn into_parts(self) -> ProviderRequestParts {
+        let into = |m: Mutex<Doc>| {
+            m.into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        ProviderRequestParts {
+            body: into(self.body),
+            to_provider: self.to_provider,
+            from_provider: self.from_provider,
+            on_close: self
+                .on_close
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
     }
 }

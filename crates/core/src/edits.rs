@@ -11,6 +11,7 @@ pub(crate) type PartStream = BoxStream<'static, Part>;
 
 type MapFn = Box<dyn FnMut(&mut Part) + Send>;
 type HeadFn = Box<dyn FnMut(&mut ResponseHead) + Send>;
+pub(crate) type TapFn = Box<dyn FnMut(&Part) + Send>;
 
 /// A stateful stream edit: read Parts from `input`, write Parts to `output`.
 ///
@@ -49,6 +50,7 @@ impl PartTx {
 pub(crate) enum Edit {
     Head(HeadFn),
     Map(MapFn),
+    Tap(TapFn),
     Filter(Box<dyn Filter>),
 }
 
@@ -70,6 +72,12 @@ impl Edits {
         lock(&self.0).push(Edit::Head(Box::new(f)));
     }
 
+    /// Read every Part without changing anything. Unlike `map`, a tap never
+    /// forces a relayed response to be re-encoded.
+    pub fn tap(&self, f: impl FnMut(&Part) + Send + 'static) {
+        lock(&self.0).push(Edit::Tap(Box::new(f)));
+    }
+
     /// Stateless edit of every Part, in order.
     pub fn map(&self, f: impl FnMut(&mut Part) + Send + 'static) {
         lock(&self.0).push(Edit::Map(Box::new(f)));
@@ -89,8 +97,19 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub(crate) fn is_body_edit(e: &Edit) -> bool {
-    !matches!(e, Edit::Head(_))
+/// Edits that change the body, so the response must be decoded and re-encoded.
+pub(crate) fn changes_body(e: &Edit) -> bool {
+    matches!(e, Edit::Map(_) | Edit::Filter(_))
+}
+
+pub(crate) fn taps(edits: Vec<Edit>) -> Vec<TapFn> {
+    edits
+        .into_iter()
+        .filter_map(|e| match e {
+            Edit::Tap(f) => Some(f),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn apply_head(edits: &mut [Edit], head: &mut ResponseHead) {
@@ -112,6 +131,12 @@ pub(crate) fn apply(mut parts: PartStream, edits: Vec<Edit>) -> PartStream {
                     p
                 })
                 .boxed(),
+            Edit::Tap(mut f) => parts
+                .map(move |p| {
+                    f(&p);
+                    p
+                })
+                .boxed(),
             Edit::Filter(filter) => run_filter(parts, filter),
         };
     }
@@ -124,6 +149,7 @@ pub(crate) fn apply_once(part: &mut Part, edits: Vec<Edit>) -> Result<(), Fault>
     for edit in edits {
         match edit {
             Edit::Map(mut f) => f(part),
+            Edit::Tap(mut f) => f(part),
             Edit::Head(_) => {}
             Edit::Filter(_) => {
                 return Err(Fault::config(
