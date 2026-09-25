@@ -22,10 +22,10 @@ Details and reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 
 | Crate | What it is |
 |---|---|
-| `crates/core` | The kernel: Turn, Part, Plugin, Store, Format, Policy |
+| `crates/core` | The kernel, with the in-memory store and the reqwest transport |
 | `crates/sdk` | Optional helpers, built only on the public kernel API |
 | `crates/formats` | Wire formats: OpenAI, Anthropic, Gemini, YAML generic |
-| `crates/store` | Store backends: memory, Redis |
+| `crates/store` | External store backends (Redis) |
 | `crates/server` | HTTP adapter; the kernel itself has no server |
 | `crates/testkit` | Mock providers and golden streams for plugin authors |
 | `crates/respan-gateway` | The binary: registers compiled-in plugins and formats |

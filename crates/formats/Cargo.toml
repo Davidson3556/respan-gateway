@@ -13,3 +13,5 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+bytes.workspace = true
+serde_json.workspace = true

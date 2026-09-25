@@ -13,58 +13,53 @@ remains is detail work, listed at the end.
 
 ## The idea
 
-Every shape (unary, stream, job, session) is a sequence of **Turns** grouped
-into an **Exchange**. A plugin is one trait whose method signatures say where
-it runs: once per request, once per attempt, or as the route's source. Only the
-source can reach a provider, and the Call it returns is the commit.
+A client request runs through a chain of plugins. The route's source decides
+which provider requests to make; the response it returns is committed to the
+client. Plugins are one trait whose methods say where they run. A response
+nobody edits is relayed byte for byte.
 
-## Six concepts
+## Concepts
 
 | Concept | What it is |
 |---|---|
-| **Turn** | One request/response unit and the plugin's only handle. `Turn<Req>` for the request, `Turn<Attempt>` for one provider call. Carries the up/down streams, identity, labels, store access, subrequests, offload and `on_close`. Closes into exactly one Record (a tree of attempts and subrequests). The Format decides its Exchange: itself for HTTP, the socket for Realtime, a sealed id for jobs, files and MCP. |
-| **Part** | What flows each way: Head, Doc (whole message, lazily parsed, lossless), Delta (Text, Args, Reasoning, Bytes), Usage, End. Streams offer `head()`, stateless `map()` and stateful `filter()` with holds. A direction with no map or filter is spliced untouched. |
-| **Plugin** | One trait, four optional methods: `covers`, `request`, `attempt`, `serve`. Configured instance per chain entry and tenant version. |
-| **Store** | Shared key-value store with atomic batches (Get, Put, Add with bounds/TTL/lease, Settle, Once, Del), change waits and purge by tenant and class. Keys are tenant, exchange or global scoped. No billing or queue types. |
-| **Format** | Codec between wire frames and Parts: decode, encode, faults in the client's framing, turn boundaries, usage normalization, a content map for every string leaf, and id fields the kernel seals. Compiled in, or declared in YAML (`GenericJson`, JSON pointers only). |
-| **Policy** | Read-only versioned config: static snapshot plus per-tenant overlays (entry config, BYOK targets, routes). |
+| **ClientRequest** | Client to gateway. The plugin's main handle: head, body, principal, session, store, labels, `from_client()` and `to_client()` streams, `on_close`. Closes into exactly one Record. |
+| **ProviderRequest** | Gateway to one provider. A client request can make several (fallback, retry, hedging, split). Has its own copy of the body and `to_provider()` / `from_provider()` streams. |
+| **ClientResponse** / **ProviderResponse** | What goes back to the client, and what a provider sent. Turning a ProviderResponse into a ClientResponse commits it. |
+| **Providers** | The capability to make provider requests. Only the route's source gets it. |
+| **Session** | A group of client requests that share state and a provider: a socket, a job, an MCP session. A plain HTTP request is a session of one. |
+| **Part** | What flows through a stream: Head, Doc (a whole message), Delta (Text, Args, Reasoning, Bytes), Frame, Usage, End. Edit with `head()`, `map()` and `filter()`. |
+| **Store** | Shared key-value store with atomic batches. Keys are typed by a `Class`. |
+| **Format** | A wire protocol. Stateless; hands out a decoder and encoder per stream. Compiled in, or declared in YAML. |
+| **Config** | Routes, chains, providers. Anything it names that the binary does not contain is a startup error. |
 
 ## The plugin trait
 
 ```rust
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
-    fn covers(&self) -> Covers { Covers::NONE }
-    async fn request(&self, t: &Turn<Req>) -> Result<(), Fault> { Ok(()) }        // once per Turn
-    async fn attempt(&self, a: &Turn<Attempt>) -> Result<(), Fault> { Ok(()) }    // once per provider call
-    async fn serve(&self, t: &Turn<Req>, up: &Upstream) -> Result<Call, Fault> { // route source; returned Call = commit
-        Err(Fault::config("not a source"))
-    }
+    async fn on_client_request(&self, req: &ClientRequest) -> Result<(), Fault> { Ok(()) }
+    async fn on_provider_request(&self, req: &ProviderRequest<'_>) -> Result<(), Fault> { Ok(()) }
+    async fn dispatch(&self, req: &ClientRequest, providers: &Providers<'_>)
+        -> Result<ClientResponse, Fault> { Err(Fault::config("not a source")) }
 }
 ```
 
-A per-key rate limit, for scale:
+Stream directions are named after who is on the other end:
 
-```rust
-impl Plugin for PerKeyRate {
-    async fn request(&self, t: &Turn<Req>) -> Result<(), Fault> {
-        let minute = now_secs() / 60;
-        let key = t.key("limit", &format!("rpm:{}:{minute}", t.principal()?.id()));
-        let op = Op::add(key, 1.0).max(self.per_minute).ttl(Duration::from_secs(120));
-        if t.store().apply([op]).await?.is_applied() { Ok(()) } else { Err(Fault::too_many(60)) }
-    }
-}
+```
+client ──from_client()──► gateway ──to_provider()──► provider
+client ◄──to_client()──── gateway ◄─from_provider()── provider
 ```
 
 ## Invariants the kernel guarantees
 
-- Every Turn closes into exactly one Record; `on_close` runs once, including
-  on disconnect, cancel or panic.
-- At most one committed Call per Turn. After commit no attempt can start, and
+- Every client request closes into exactly one Record; `on_close` runs once,
+  including on disconnect.
+- At most one committed response per client request. After commit no attempt can start, and
   later failures go out in the client's framing.
-- Each attempt gets its own copy-on-write request. Crossing Formats means the
+- Each provider request gets its own copy of the body. Crossing Formats means the
   target Format decodes and the client Format encodes.
-- Subrequests are full Turns on another route, depth-limited, inheriting
+- Subrequests are full client requests on another route, depth-limited, inheriting
   identity, forbids, trace and deadline.
 - Required chain entries run first and their filters sit at the edge, so no
   other plugin's output bypasses them. A required entry that cannot cover a
@@ -107,7 +102,7 @@ adding concepts:
   request stage wrapping the attempt stage is visible in the code.
 - Add a read-only `tap` verb next to `map` and `filter`, so observers never
   force a re-encode.
-- Let subrequests and timer Turns inherit their root Turn's admission, so a
+- Let subrequests and timer requests inherit their root request's admission, so a
   naive rate limiter is correct without knowing about `origin`.
 - Replace the ZDR exemptions with one ordinary scope value (`Durable` vs
   `Process`).
@@ -121,7 +116,7 @@ A focused round cut the design to five concepts. Simplicity stayed at 7,
 elegance fell to 6, and it caused 10-14 regressions. Do not repeat these:
 
 - Dropping the `origins` default: rate limiters, admission and auth start
-  running on subrequests, polls and timer Turns.
+  running on subrequests, polls and timer requests.
 - Forcing required entries to the end of the chain: auth can no longer be
   required, and hooks run before zero-retention forbids exist.
 - Removing the kernel flush guarantee: a filter that returns early truncates
@@ -133,11 +128,11 @@ elegance fell to 6, and it caused 10-14 regressions. Do not repeat these:
 - Per-attempt body edits for split sources.
 - PII mappings must also be registered on cache hits.
 - `forbid` should take a scope, so ZDR can allow in-process keys.
-- Default `origins` skips webhook and timer Turns, so jobs settled that way
+- Default `origins` skips webhook and timer requests, so jobs settled that way
   are not billed.
 - Durable file ids need non-expiring spill handles.
 - Admission waits need an exemption from per-entry time budgets.
-- Session rules for binding response ids to concurrent open Turns.
+- Session rules for binding response ids to concurrent open requests.
 - Spliced passthrough still needs a cheap scan for usage and the terminal
   marker.
 - Fault text must pass through required down filters.

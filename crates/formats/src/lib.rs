@@ -1,2 +1,6 @@
-//! Wire formats. Planned: `openai` (chat, responses, embeddings), `anthropic`,
-//! `gemini`, and `generic` (declared in YAML with JSON pointers).
+//! Wire formats. Anthropic, Gemini, Responses and the YAML generic format come
+//! next.
+
+pub mod openai;
+
+pub use openai::OpenAiChat;

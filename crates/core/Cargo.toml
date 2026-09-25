@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-core"
-description = "The respan-gateway kernel: Turn, Part, Plugin, Store, Format, Policy."
+description = "The respan-gateway kernel."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,5 +11,17 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["reqwest"]
+reqwest = ["dep:reqwest"]
+
 [dependencies]
 async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+reqwest = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

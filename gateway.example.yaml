@@ -1,0 +1,12 @@
+listen: 0.0.0.0:8080
+
+providers:
+  openai:
+    format: openai-chat
+    base_url: https://api.openai.com
+    auth: { type: bearer, key: env:OPENAI_API_KEY }
+
+routes:
+  - path: /v1/chat/completions
+    format: openai-chat
+    target: openai

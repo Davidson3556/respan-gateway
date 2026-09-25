@@ -13,3 +13,13 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+
+[dev-dependencies]
+respan-gateway-formats.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
