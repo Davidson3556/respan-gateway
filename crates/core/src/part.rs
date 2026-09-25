@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::Fault;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResponseHead {
     pub status: StatusCode,
     pub headers: HeaderMap,

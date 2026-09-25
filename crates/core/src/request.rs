@@ -1,15 +1,11 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 
-use crate::edits::{apply_once, lock};
-use crate::gateway::Inner;
+use crate::edits::{Edit, apply_once, lock};
 use crate::store::{Class, Key, Scope};
-use crate::{
-    Doc, Edits, Envelope, Extensions, Fault, Part, ProviderOutcome, ProviderResponse, Store, Target,
-};
+use crate::{Doc, Edits, Envelope, Fault, Part, Target};
 
 /// Who is calling. An auth plugin attaches it with
-/// [`ClientRequest::insert_ext`]; tenant-scoped store keys read it.
+/// [`crate::Context::insert_ext`]; tenant-scoped store keys read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
     pub id: String,
@@ -20,7 +16,7 @@ pub struct Principal {
 /// session of one; sockets, jobs and sealed ids come later.
 #[derive(Debug, Clone)]
 pub struct Session {
-    id: String,
+    pub(crate) id: String,
 }
 
 impl Session {
@@ -37,95 +33,82 @@ impl Session {
     }
 }
 
-/// A provider request that has ended, waiting for the close phase.
-#[derive(Debug)]
-pub(crate) struct Closed {
-    pub outcome: ProviderOutcome,
-    /// How many chain entries saw this provider request.
-    pub seen_by: usize,
+/// Who a request is exchanged with.
+#[derive(Debug, Clone)]
+pub enum Peer {
+    /// The request came from a client.
+    Client,
+    /// The request goes to this provider.
+    Provider(Target),
 }
 
-pub(crate) type ClosedLog = Arc<Mutex<Vec<Closed>>>;
-
-/// One unit of work from a client. Not necessarily an HTTP request: it can
-/// come from an embedding program or be one turn of a socket. Transport
-/// details, when there are any, are in [`ClientRequest::ext`].
-pub struct ClientRequest {
-    id: String,
-    route: String,
+/// A message exchanged with a peer: the client's request to the gateway, or
+/// one of the gateway's requests to a provider. Both have a format, a body,
+/// and two streams to edit: the request on its way to whoever answers it, and
+/// the response on its way back.
+pub struct Request {
+    peer: Peer,
     format: &'static str,
     envelope: Envelope,
+    index: usize,
     body: Mutex<Doc>,
-    ext: Mutex<Extensions>,
-    session: Session,
-    store: Arc<dyn Store>,
-    from_client: Edits,
-    to_client: Edits,
-    closed: ClosedLog,
-    gateway: Arc<Inner>,
-    /// Index of the chain entry currently running.
-    position: AtomicUsize,
-    /// How many chain entries have run `on_client_request`.
-    ran: AtomicUsize,
-    next_index: AtomicUsize,
+    request: Edits,
+    response: Edits,
 }
 
-impl std::fmt::Debug for ClientRequest {
+impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientRequest")
-            .field("id", &self.id)
-            .field("route", &self.route)
+        f.debug_struct("Request")
+            .field("peer", &self.peer)
             .field("format", &self.format)
             .field("envelope", &self.envelope)
+            .field("index", &self.index)
             .finish()
     }
 }
 
-pub(crate) struct ClientRequestInit {
-    pub id: String,
-    pub route: String,
-    pub format: &'static str,
-    pub envelope: Envelope,
-    pub body: Doc,
-    pub ext: Extensions,
-    pub store: Arc<dyn Store>,
-    pub gateway: Arc<Inner>,
-}
-
-impl ClientRequest {
-    pub(crate) fn new(init: ClientRequestInit) -> Self {
+impl Request {
+    pub(crate) fn new(
+        peer: Peer,
+        format: &'static str,
+        envelope: Envelope,
+        body: Doc,
+        index: usize,
+    ) -> Self {
         Self {
-            session: Session {
-                id: init.id.clone(),
-            },
-            id: init.id,
-            route: init.route,
-            format: init.format,
-            envelope: init.envelope,
-            body: Mutex::new(init.body),
-            ext: Mutex::new(init.ext),
-            store: init.store,
-            from_client: Edits::default(),
-            to_client: Edits::default(),
-            closed: ClosedLog::default(),
-            gateway: init.gateway,
-            position: AtomicUsize::new(0),
-            ran: AtomicUsize::new(0),
-            next_index: AtomicUsize::new(0),
+            peer,
+            format,
+            envelope,
+            index,
+            body: Mutex::new(body),
+            request: Edits::default(),
+            response: Edits::default(),
         }
     }
 
-    pub fn id(&self) -> &str {
-        &self.id
+    pub fn peer(&self) -> &Peer {
+        &self.peer
     }
 
-    pub fn route(&self) -> &str {
-        &self.route
+    pub fn is_client(&self) -> bool {
+        matches!(self.peer, Peer::Client)
     }
 
-    /// The name of the Format the client spoke.
+    /// The provider this request goes to, if it is a provider request.
+    pub fn provider(&self) -> Option<&Target> {
+        match &self.peer {
+            Peer::Provider(t) => Some(t),
+            Peer::Client => None,
+        }
+    }
+
+    /// The name of the Format this request is in.
     pub fn format(&self) -> &str {
         self.format
+    }
+
+    pub fn envelope(&self) -> &Envelope {
+        &self.envelope
     }
 
     pub fn model(&self) -> Option<&str> {
@@ -136,90 +119,31 @@ impl ClientRequest {
         self.envelope.stream
     }
 
-    pub fn envelope(&self) -> &Envelope {
-        &self.envelope
+    /// For provider requests: 0 for the first one of this client request,
+    /// then 1, 2... Always 0 for the client request.
+    pub fn index(&self) -> usize {
+        self.index
     }
 
-    /// The message, in the client's format. Do not hold the guard across an
-    /// `.await`.
+    /// The message, in this request's format. Do not hold the guard across
+    /// an `.await`.
     pub fn body(&self) -> MutexGuard<'_, Doc> {
         lock(&self.body)
     }
 
-    /// A value the caller or an earlier plugin attached, by type.
-    pub fn ext<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
-        lock(&self.ext).get::<T>().cloned()
+    /// Edits to the request on its way to whoever answers it.
+    pub fn request(&self) -> &Edits {
+        &self.request
     }
 
-    /// Attach a value for later plugins, replacing any of the same type.
-    pub fn insert_ext<T: Clone + Send + Sync + 'static>(&self, value: T) {
-        lock(&self.ext).insert(value);
+    /// Edits to the response on its way back.
+    pub fn response(&self) -> &Edits {
+        &self.response
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
-    }
-
-    pub fn store(&self) -> &dyn Store {
-        self.store.as_ref()
-    }
-
-    /// A key scoped to this request's tenant, or global if no [`Principal`]
-    /// is attached.
-    pub fn key(&self, class: Class, name: impl Into<String>) -> Key {
-        let scope = match self.ext::<Principal>() {
-            Some(p) => Scope::Tenant(p.tenant),
-            None => Scope::Global,
-        };
-        Key {
-            scope,
-            class,
-            name: name.into(),
-        }
-    }
-
-    /// The request body on its way in from the client.
-    pub fn from_client(&self) -> &Edits {
-        &self.from_client
-    }
-
-    /// The response on its way out to the client.
-    pub fn to_client(&self) -> &Edits {
-        &self.to_client
-    }
-
-    /// Send this request to one provider. The `on_provider_request` hooks of
-    /// the chain entries that have run so far see it first. A provider error
-    /// status is an `Ok` response; check [`ProviderResponse::status`].
-    pub async fn call(&self, provider: &str) -> Result<ProviderResponse, Fault> {
-        self.apply_from_client()?;
-        let route = self
-            .gateway
-            .routes
-            .get(&self.route)
-            .ok_or_else(|| Fault::internal("route vanished"))?;
-        let upto = self.position.load(Ordering::Relaxed);
-        let index = self.next_index.fetch_add(1, Ordering::Relaxed);
-        crate::providers::call(&self.gateway, route, self, upto, index, provider).await
-    }
-
-    /// Chain entry `i` is about to run `on_client_request`.
-    pub(crate) fn enter(&self, i: usize) {
-        self.position.store(i, Ordering::Relaxed);
-        self.ran.store(i + 1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn ran(&self) -> usize {
-        self.ran.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn closed_log(&self) -> ClosedLog {
-        self.closed.clone()
-    }
-
-    /// Apply pending `from_client` edits to the body, once.
-    pub(crate) fn apply_from_client(&self) -> Result<(), Fault> {
-        let edits = self.from_client.take();
+    /// Apply pending request edits to the body, once.
+    pub(crate) fn apply_request_edits(&self) -> Result<(), Fault> {
+        let edits = self.request.take();
         if edits.is_empty() {
             return Ok(());
         }
@@ -232,88 +156,7 @@ impl ClientRequest {
         result
     }
 
-    pub(crate) fn take_closed(&self) -> Vec<Closed> {
-        std::mem::take(&mut *lock(&self.closed))
-    }
-}
-
-/// A request from the gateway to one provider. A client request can make
-/// several: fallback, retries, hedging, splitting.
-pub struct ProviderRequest<'a> {
-    client: &'a ClientRequest,
-    target: &'a Target,
-    index: usize,
-    body: Mutex<Doc>,
-    to_provider: Edits,
-    from_provider: Edits,
-}
-
-impl std::fmt::Debug for ProviderRequest<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderRequest")
-            .field("client", &self.client.id)
-            .field("provider", &self.target.name)
-            .field("index", &self.index)
-            .finish()
-    }
-}
-
-pub(crate) struct ProviderRequestParts {
-    pub body: Doc,
-    pub to_provider: Edits,
-    pub from_provider: Edits,
-}
-
-impl<'a> ProviderRequest<'a> {
-    pub(crate) fn new(client: &'a ClientRequest, target: &'a Target, index: usize) -> Self {
-        let body = client.body().clone();
-        Self {
-            client,
-            target,
-            index,
-            body: Mutex::new(body),
-            to_provider: Edits::default(),
-            from_provider: Edits::default(),
-        }
-    }
-
-    pub fn client(&self) -> &ClientRequest {
-        self.client
-    }
-
-    pub fn provider(&self) -> &Target {
-        self.target
-    }
-
-    /// 0 for the first provider request of this client request, then 1, 2...
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    /// This provider request's own copy of the body.
-    pub fn body(&self) -> MutexGuard<'_, Doc> {
-        lock(&self.body)
-    }
-
-    /// The request body on its way to the provider.
-    pub fn to_provider(&self) -> &Edits {
-        &self.to_provider
-    }
-
-    /// The response on its way back from the provider.
-    pub fn from_provider(&self) -> &Edits {
-        &self.from_provider
-    }
-
-    pub(crate) fn into_parts(self) -> ProviderRequestParts {
-        let into = |m: Mutex<Doc>| {
-            m.into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        };
-        ProviderRequestParts {
-            body: into(self.body),
-            to_provider: self.to_provider,
-            from_provider: self.from_provider,
-        }
+    pub(crate) fn take_response_edits(&self) -> Vec<Edit> {
+        self.response.take()
     }
 }

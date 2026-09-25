@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{ClientRequest, ClientResponse, Fault, Outcome, ProviderOutcome, ProviderRequest};
+use crate::{Context, Fault, Request, Response};
 
 /// What a plugin decides about a client request.
 #[derive(Debug)]
@@ -8,40 +8,50 @@ pub enum Flow {
     /// Continue to the next plugin in the chain.
     Pass,
     /// Commit this response to the client. The rest of the chain does not run.
-    Respond(Box<ClientResponse>),
+    Respond(Box<Response>),
 }
 
 impl Flow {
-    pub fn respond(resp: impl Into<ClientResponse>) -> Self {
-        Flow::Respond(Box::new(resp.into()))
+    pub fn respond(resp: Response) -> Self {
+        Flow::Respond(Box::new(resp))
     }
 }
 
 /// The only extension point.
 ///
-/// Each hook runs in chain order. A plugin gets a close hook only for the
-/// requests whose matching request hook it ran. When a client request ends,
-/// every ended provider request is closed first, in order, then the client
-/// request. Close hooks run once each, after the response is finished,
-/// refused, or abandoned by the client.
+/// Hooks run in chain order. A plugin gets a close hook only for the requests
+/// whose matching request hook it ran. When a client request ends, every
+/// provider request that ended is closed first, in order, then the client
+/// request. A close hook gets `Ok` with the finished response, or `Err` if
+/// there never was one (transport error, refusal).
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
-    /// Once per client request, in chain order. `Err` refuses the request;
-    /// `Flow::Respond` answers it and ends the chain. If every plugin passes,
-    /// the route's `target` answers.
-    async fn on_client_request(&self, _req: &ClientRequest) -> Result<Flow, Fault> {
+    /// Once per client request. `Err` refuses it; `Flow::Respond` answers it
+    /// and ends the chain. If every plugin passes, the route's `target`
+    /// answers.
+    async fn on_client_request(&self, _cx: &Context, _req: &Request) -> Result<Flow, Fault> {
         Ok(Flow::Pass)
     }
 
     /// Once per provider request, before it is sent, for every chain entry
     /// that has run so far.
-    async fn on_provider_request(&self, _req: &ProviderRequest<'_>) -> Result<(), Fault> {
+    async fn on_provider_request(&self, _cx: &Context, _req: &Request) -> Result<(), Fault> {
         Ok(())
     }
 
-    /// A provider request ended: failed, unused, finished, or abandoned.
-    async fn on_provider_close(&self, _req: &ClientRequest, _outcome: &ProviderOutcome) {}
+    async fn on_provider_close(
+        &self,
+        _cx: &Context,
+        _req: &Request,
+        _resp: Result<&Response, &Fault>,
+    ) {
+    }
 
-    /// The client request ended, however it ended.
-    async fn on_client_close(&self, _req: &ClientRequest, _outcome: &Outcome) {}
+    async fn on_client_close(
+        &self,
+        _cx: &Context,
+        _req: &Request,
+        _resp: Result<&Response, &Fault>,
+    ) {
+    }
 }

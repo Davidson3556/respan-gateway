@@ -6,8 +6,20 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use respan_gateway_core::{
-    ClientRequest, Fault, Flow, Outcome, Plugin, Principal, ProviderEnd, ProviderOutcome, Usage,
+    Context, Fault, Flow, Plugin, Principal, Request, Response, ResponseEnd, Usage,
 };
+
+/// One provider request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attempt {
+    pub provider: String,
+    pub index: usize,
+    /// `None` if no response came back.
+    pub status: Option<u16>,
+    /// `Failed` with the fault if no response came back.
+    pub end: ResponseEnd,
+    pub usage: Usage,
+}
 
 #[derive(Debug, Clone)]
 pub struct Record {
@@ -17,22 +29,34 @@ pub struct Record {
     /// Who was calling, if an auth plugin said so.
     pub principal: Option<String>,
     pub tenant: Option<String>,
-    pub outcome: Outcome,
+    /// Status sent to the client, if a response was sent.
+    pub status: Option<u16>,
+    /// How the client's response ended, or why there was none.
+    pub result: Result<ResponseEnd, Fault>,
     /// Every provider request, in the order they ended.
-    pub attempts: Vec<ProviderOutcome>,
+    pub attempts: Vec<Attempt>,
     pub duration: Duration,
 }
 
 impl Record {
-    /// Usage of the provider request whose response went to the client.
+    /// Usage across every provider request. Unused ones report none.
     pub fn usage(&self) -> Usage {
         let mut total = Usage::default();
         for a in &self.attempts {
-            if matches!(a.end, ProviderEnd::Committed | ProviderEnd::Abandoned) {
-                total.merge(&a.usage);
-            }
+            total.merge(&a.usage);
         }
         total
+    }
+}
+
+fn outcome(resp: Result<&Response, &Fault>) -> (Option<u16>, Result<ResponseEnd, Fault>, Usage) {
+    match resp {
+        Ok(r) => (
+            Some(r.status().as_u16()),
+            Ok(r.end().cloned().unwrap_or(ResponseEnd::Done)),
+            r.usage().clone(),
+        ),
+        Err(f) => (None, Err(f.clone()), Usage::default()),
     }
 }
 
@@ -41,7 +65,7 @@ type Sink = Arc<dyn Fn(&Record) + Send + Sync>;
 #[derive(Clone)]
 struct Draft {
     started: Instant,
-    attempts: Arc<Mutex<Vec<ProviderOutcome>>>,
+    attempts: Arc<Mutex<Vec<Attempt>>>,
 }
 
 /// Calls `sink` with a [`Record`] when each request ends. Place it first in
@@ -67,37 +91,52 @@ impl Recorder {
 
 #[async_trait]
 impl Plugin for Recorder {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
-        req.insert_ext(Draft {
+    async fn on_client_request(&self, cx: &Context, _req: &Request) -> Result<Flow, Fault> {
+        cx.insert_ext(Draft {
             started: Instant::now(),
             attempts: Arc::default(),
         });
         Ok(Flow::Pass)
     }
 
-    async fn on_provider_close(&self, req: &ClientRequest, outcome: &ProviderOutcome) {
-        if let Some(d) = req.ext::<Draft>() {
-            d.attempts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(outcome.clone());
-        }
-    }
-
-    async fn on_client_close(&self, req: &ClientRequest, outcome: &Outcome) {
-        let Some(d) = req.ext::<Draft>() else {
+    async fn on_provider_close(
+        &self,
+        cx: &Context,
+        req: &Request,
+        resp: Result<&Response, &Fault>,
+    ) {
+        let Some(d) = cx.ext::<Draft>() else {
             return;
         };
-        let principal = req.ext::<Principal>();
+        let (status, result, usage) = outcome(resp);
+        d.attempts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Attempt {
+                provider: req.provider().map(|t| t.name.clone()).unwrap_or_default(),
+                index: req.index(),
+                status,
+                end: result.unwrap_or_else(ResponseEnd::Failed),
+                usage,
+            });
+    }
+
+    async fn on_client_close(&self, cx: &Context, req: &Request, resp: Result<&Response, &Fault>) {
+        let Some(d) = cx.ext::<Draft>() else {
+            return;
+        };
+        let principal = cx.ext::<Principal>();
+        let (status, result, _) = outcome(resp);
         let attempts =
             std::mem::take(&mut *d.attempts.lock().unwrap_or_else(PoisonError::into_inner));
         (self.sink)(&Record {
-            request_id: req.id().to_owned(),
-            route: req.route().to_owned(),
+            request_id: cx.id().to_owned(),
+            route: cx.route().to_owned(),
             model: req.model().map(str::to_owned),
             principal: principal.as_ref().map(|p| p.id.clone()),
             tenant: principal.map(|p| p.tenant),
-            outcome: outcome.clone(),
+            status,
+            result,
             attempts,
             duration: d.started.elapsed(),
         });

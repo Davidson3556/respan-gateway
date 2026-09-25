@@ -4,8 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use respan_gateway_core::{
-    Builder, Class, ClientRequest, Config, Credential, Fault, Flow, Gateway, Inbound, Op, Outcome,
-    Part, Plugin, Principal, ProviderEnd, units,
+    Builder, Class, Config, Context, Credential, Fault, Flow, Gateway, Inbound, Op, Part, Plugin,
+    Principal, Request, ResponseEnd, units,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_sdk::record::{Record, Recorder};
@@ -39,8 +39,8 @@ struct Stamp;
 
 #[async_trait]
 impl Plugin for Stamp {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
-        req.to_client().head(|h| {
+    async fn on_client_request(&self, _cx: &Context, req: &Request) -> Result<Flow, Fault> {
+        req.response().head(|h| {
             h.headers
                 .insert("x-served-by", http::HeaderValue::from_static("respan"));
         });
@@ -52,8 +52,8 @@ struct Shout;
 
 #[async_trait]
 impl Plugin for Shout {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
-        req.to_client().map(|p| {
+    async fn on_client_request(&self, _cx: &Context, req: &Request) -> Result<Flow, Fault> {
+        req.response().map(|p| {
             if let Part::Delta(d) = p {
                 *d.text_mut() = d.text().to_uppercase();
             }
@@ -67,9 +67,9 @@ struct CountChars(Arc<Mutex<usize>>);
 
 #[async_trait]
 impl Plugin for CountChars {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
+    async fn on_client_request(&self, _cx: &Context, req: &Request) -> Result<Flow, Fault> {
         let count = self.0.clone();
-        req.to_client().tap(move |p| {
+        req.response().tap(move |p| {
             if let Part::Delta(d) = p
                 && let Ok(mut n) = count.lock()
             {
@@ -85,11 +85,11 @@ struct KeyAuth;
 
 #[async_trait]
 impl Plugin for KeyAuth {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
-        let key = req
+    async fn on_client_request(&self, cx: &Context, _req: &Request) -> Result<Flow, Fault> {
+        let key = cx
             .ext::<Credential>()
             .ok_or_else(|| Fault::unauthorized("missing credential"))?;
-        req.insert_ext(Principal {
+        cx.insert_ext(Principal {
             id: key.expose().to_owned(),
             tenant: "acme".into(),
         });
@@ -102,7 +102,7 @@ struct Broke;
 
 #[async_trait]
 impl Plugin for Broke {
-    async fn on_client_request(&self, _req: &ClientRequest) -> Result<Flow, Fault> {
+    async fn on_client_request(&self, _cx: &Context, _req: &Request) -> Result<Flow, Fault> {
         Err(Fault::new(
             http::StatusCode::PAYMENT_REQUIRED,
             "insufficient_credits",
@@ -121,12 +121,12 @@ struct PerKeyRate(Rpm);
 
 #[async_trait]
 impl Plugin for PerKeyRate {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
-        let who = req.ext::<Principal>().map(|p| p.id).unwrap_or_default();
-        let op = Op::add(req.key(LIMIT, format!("rpm:{who}")), 1.0)
+    async fn on_client_request(&self, cx: &Context, _req: &Request) -> Result<Flow, Fault> {
+        let who = cx.ext::<Principal>().map(|p| p.id).unwrap_or_default();
+        let op = Op::add(cx.key(LIMIT, format!("rpm:{who}")), 1.0)
             .max(self.0.per_minute)
             .ttl(Duration::from_secs(60));
-        if req.store().apply(vec![op]).await?.is_applied() {
+        if cx.store().apply(vec![op]).await?.is_applied() {
             Ok(Flow::Pass)
         } else {
             Err(Fault::too_many(Duration::from_secs(60)))
@@ -144,10 +144,10 @@ struct Fallback(FallbackConfig);
 /// Answers from the first provider that succeeds.
 #[async_trait]
 impl Plugin for Fallback {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> {
+    async fn on_client_request(&self, cx: &Context, _req: &Request) -> Result<Flow, Fault> {
         let mut last = Err(Fault::upstream("no providers"));
         for name in &self.0.providers {
-            match req.call(name).await {
+            match cx.call(name).await {
                 Ok(r) if r.status().is_success() => return Ok(Flow::respond(r)),
                 Ok(r) => last = Ok(Flow::respond(r)),
                 Err(f) => last = Err(f),
@@ -244,11 +244,12 @@ async fn relays_a_stream_byte_for_byte_and_records_usage() {
     assert_eq!(status, 200);
     assert_eq!(body.to_vec(), stream_bytes());
     let r = &h.records()[0];
-    assert_eq!(r.outcome, Outcome::Done);
+    assert_eq!(r.result, Ok(ResponseEnd::Done));
+    assert_eq!(r.status, Some(200));
     assert_eq!(r.usage().get(units::INPUT_TOKENS), 5.0);
     assert_eq!(r.usage().get(units::OUTPUT_TOKENS), 2.0);
     assert_eq!(r.attempts.len(), 1);
-    assert_eq!(r.attempts[0].end, ProviderEnd::Committed);
+    assert_eq!(r.attempts[0].end, ResponseEnd::Done);
     assert_eq!(r.model.as_deref(), Some("gpt-x"));
 }
 
@@ -324,8 +325,8 @@ async fn a_cut_stream_ends_with_an_error_frame_not_a_clean_stop() {
     assert!(text.contains("\"type\":\"truncated\""), "{text}");
     assert!(!text.contains("[DONE]"));
     let r = &h.records()[0];
-    assert!(matches!(r.outcome, Outcome::Failed(_)));
-    assert_eq!(r.attempts[0].end, ProviderEnd::Failed);
+    assert!(matches!(r.result, Ok(ResponseEnd::Failed(_))));
+    assert!(matches!(r.attempts[0].end, ResponseEnd::Failed(_)));
 }
 
 #[tokio::test]
@@ -335,7 +336,7 @@ async fn auth_works_from_any_transport_through_a_credential() {
 
     let (status, _, _) = h.send(chat()).await;
     assert_eq!(status, 401);
-    assert!(matches!(h.records()[0].outcome, Outcome::Refused(_)));
+    assert!(h.records()[0].result.is_err());
 
     let (status, _, _) = h.send(chat().with(Credential::new("key-1"))).await;
     assert_eq!(status, 200);
@@ -387,12 +388,12 @@ async fn a_plugin_can_answer_by_calling_providers_itself() {
     let a = &h.records()[0].attempts;
     assert_eq!(a.len(), 2);
     assert_eq!(
-        (a[0].provider.as_str(), a[0].end, a[0].status),
-        ("openai", ProviderEnd::Failed, Some(503))
+        (a[0].provider.as_str(), &a[0].end, a[0].status),
+        ("openai", &ResponseEnd::Cancelled, Some(503))
     );
     assert_eq!(
-        (a[1].provider.as_str(), a[1].end),
-        ("backup", ProviderEnd::Committed)
+        (a[1].provider.as_str(), &a[1].end, a[1].index),
+        ("backup", &ResponseEnd::Done, 1)
     );
 }
 
@@ -408,8 +409,8 @@ async fn a_client_that_leaves_still_closes_everything_once() {
 
     let records = h.records();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].outcome, Outcome::ClientGone);
-    assert_eq!(records[0].attempts[0].end, ProviderEnd::Abandoned);
+    assert_eq!(records[0].result, Ok(ResponseEnd::Abandoned));
+    assert_eq!(records[0].attempts[0].end, ResponseEnd::Abandoned);
 }
 
 #[tokio::test]
@@ -425,7 +426,7 @@ async fn a_unary_response_is_relayed_with_usage() {
     assert_eq!(status, 200);
     assert_eq!(&body[..], reply.as_bytes());
     let r = &h.records()[0];
-    assert_eq!(r.outcome, Outcome::Done);
+    assert_eq!(r.result, Ok(ResponseEnd::Done));
     assert_eq!(r.usage().get(units::INPUT_TOKENS), 4.0);
 }
 

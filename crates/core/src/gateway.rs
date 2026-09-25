@@ -9,13 +9,12 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, RETRY_AFTER, TRANS
 use http::{Method, StatusCode};
 use tokio::sync::Notify;
 
+use crate::context::ContextInit;
 use crate::edits::{PartStream, TapFn, apply, apply_head, changes_body, lock, taps};
-use crate::providers::Reply;
-use crate::request::{ClientRequestInit, Closed};
+use crate::response::{Closer, Live};
 use crate::{
-    Body, ClientRequest, ClientResponse, Decoder, Doc, Encoder, End, Fault, Flow, Format, Inbound,
-    Outcome, Part, Plugin, ProviderEnd, ProviderOutcome, ResponseHead, Store, Target, Transport,
-    Usage,
+    Body, Context, Decoder, Doc, Encoder, End, Fault, Flow, Format, Inbound, Part, Peer, Plugin,
+    Request, Response, ResponseEnd, ResponseHead, Store, Target, Transport, Usage,
 };
 
 pub(crate) struct Route {
@@ -35,6 +34,15 @@ pub(crate) struct Inner {
     pub transport: Arc<dyn Transport>,
     pub next_id: AtomicU64,
     pub closing: Closing,
+}
+
+impl Inner {
+    pub fn format(&self, name: &str) -> Result<Arc<dyn Format>, Fault> {
+        self.formats
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Fault::config(format!("unknown format '{name}'")))
+    }
 }
 
 /// Close phases still running, so shutdown can wait for them.
@@ -58,15 +66,6 @@ impl Drop for ClosingGuard {
         if self.0.closing.count.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.0.closing.idle.notify_waiters();
         }
-    }
-}
-
-impl Inner {
-    pub fn format(&self, name: &str) -> Result<Arc<dyn Format>, Fault> {
-        self.formats
-            .get(name)
-            .cloned()
-            .ok_or_else(|| Fault::config(format!("unknown format '{name}'")))
     }
 }
 
@@ -113,13 +112,12 @@ impl Gateway {
             return plain_error(StatusCode::NOT_FOUND, "no such route");
         };
         let body = Doc::new(inbound.body);
+        let envelope = route.format.envelope(&body, &inbound.ext);
         let n = inner.next_id.fetch_add(1, Ordering::Relaxed);
-        let client = Arc::new(ClientRequest::new(ClientRequestInit {
+        let cx = Arc::new(Context::new(ContextInit {
             id: format!("req_{n:016x}"),
             route: route.name.clone(),
-            format: route.format.name(),
-            envelope: route.format.envelope(&body, &inbound.ext),
-            body,
+            client: Request::new(Peer::Client, route.format.name(), envelope, body, 0),
             ext: inbound.ext,
             store: inner.store.clone(),
             gateway: self.inner.clone(),
@@ -128,34 +126,35 @@ impl Gateway {
         let mut fin = Finalizer {
             inner: self.inner.clone(),
             chain: route.chain.clone(),
-            client: client.clone(),
+            cx: cx.clone(),
             tap: tap.clone(),
             committed: None,
+            client_head: None,
             closed: false,
         };
 
-        match run(route, &client).await {
-            Ok(resp) => commit(route, &client, resp, fin, tap),
+        match run(route, &cx).await {
+            Ok(resp) => commit(route, &cx, resp, fin, tap),
             Err(f) => {
-                fin.close(Outcome::Refused(f.clone()));
+                fin.close(ClientEnd::Refused(f.clone()));
                 fault_response(route.format.as_ref(), &f)
             }
         }
     }
 }
 
-async fn run(route: &Route, client: &ClientRequest) -> Result<ClientResponse, Fault> {
+async fn run(route: &Route, cx: &Context) -> Result<Response, Fault> {
     for (i, plugin) in route.chain.iter().enumerate() {
-        client.enter(i);
-        if let Flow::Respond(resp) = plugin.on_client_request(client).await? {
+        cx.enter(i);
+        if let Flow::Respond(resp) = plugin.on_client_request(cx, cx.client()).await? {
             return Ok(*resp);
         }
     }
     if let Some(last) = route.chain.len().checked_sub(1) {
-        client.enter(last);
+        cx.enter(last);
     }
     match &route.target {
-        Some(target) => client.call(target).await.map(Into::into),
+        Some(target) => cx.call(target).await,
         None => Err(Fault::config(format!(
             "route '{}': no plugin responded and the route has no target",
             route.name
@@ -165,35 +164,33 @@ async fn run(route: &Route, client: &ClientRequest) -> Result<ClientResponse, Fa
 
 fn commit(
     route: &Route,
-    client: &ClientRequest,
-    resp: ClientResponse,
+    cx: &Context,
+    mut resp: Response,
     mut fin: Finalizer,
     tap: Tap,
 ) -> http::Response<Body> {
-    let to_client = client.to_client().take();
+    let client_edits = cx.client().take_response_edits();
     let client_format = route.format.clone();
+    let mut head = resp.head().clone();
 
-    let (mut head, source, provider_format, mut edits) = match resp.0 {
-        Reply::Provider(pr) => {
-            let c = pr.commit();
-            fin.committed = Some(CommittedProvider {
-                provider: c.provider,
-                index: c.index,
-                seen_by: c.seen_by,
-                status: c.head.status.as_u16(),
-            });
-            let decoder = c.format.decoder(&c.head);
-            (
-                c.head,
-                BodySource::Bytes(c.body, decoder),
-                Some(c.format),
-                c.from_provider,
-            )
+    let (source, provider_format, mut edits) = match resp.take_live() {
+        Some(Live::Provider {
+            format,
+            body,
+            edits,
+            closer,
+        }) => {
+            fin.committed = Some((*closer, head.clone()));
+            let decoder = format.decoder(&head);
+            (BodySource::Bytes(body, decoder), Some(format), edits)
         }
-        Reply::Synthetic { head, parts } => (head, BodySource::Parts(parts), None, Vec::new()),
+        Some(Live::Synthetic { parts }) => (BodySource::Parts(parts), None, Vec::new()),
+        None => (BodySource::Parts(Vec::new()), None, Vec::new()),
     };
-    edits.extend(to_client);
+    drop(resp);
+    edits.extend(client_edits);
     apply_head(&mut edits, &mut head);
+    fin.client_head = Some(head.clone());
     let in_stream = is_event_stream(&head);
     let relay = !edits.iter().any(changes_body)
         && provider_format.is_some_and(|f| f.name() == client_format.name());
@@ -424,11 +421,10 @@ fn encode(parts: PartStream, encoder: Box<dyn Encoder>, fin: Finalizer) -> Body 
     .boxed()
 }
 
-struct CommittedProvider {
-    provider: String,
-    index: usize,
-    seen_by: usize,
-    status: u16,
+enum ClientEnd {
+    /// No response was sent: a plugin refused, or no provider answered.
+    Refused(Fault),
+    Ended(ResponseEnd),
 }
 
 /// Starts the close phase exactly once: when the response finishes, when the
@@ -436,58 +432,60 @@ struct CommittedProvider {
 struct Finalizer {
     inner: Arc<Inner>,
     chain: Vec<Arc<dyn Plugin>>,
-    client: Arc<ClientRequest>,
+    cx: Arc<Context>,
     tap: Tap,
-    committed: Option<CommittedProvider>,
+    /// The committed provider request and the head it answered with.
+    committed: Option<(Closer, ResponseHead)>,
+    /// The head sent to the client, after edits.
+    client_head: Option<ResponseHead>,
     closed: bool,
 }
 
 impl Finalizer {
     fn close_from_tap(&mut self) {
-        let outcome = match lock(&self.tap).end.clone() {
-            Some(End::Done) => Outcome::Done,
-            Some(End::Failed(f)) => Outcome::Failed(f),
-            None => Outcome::Failed(Fault::truncated()),
+        let end = match lock(&self.tap).end.clone() {
+            Some(End::Done) => ResponseEnd::Done,
+            Some(End::Failed(f)) => ResponseEnd::Failed(f),
+            None => ResponseEnd::Failed(Fault::truncated()),
         };
-        self.close(outcome);
+        self.close(ClientEnd::Ended(end));
     }
 
-    fn close(&mut self, outcome: Outcome) {
+    fn close(&mut self, end: ClientEnd) {
         if self.closed {
             return;
         }
         self.closed = true;
-        let mut closed = self.client.take_closed();
-        if let Some(c) = self.committed.take() {
-            let end = match outcome {
-                Outcome::ClientGone => ProviderEnd::Abandoned,
-                Outcome::Done => ProviderEnd::Committed,
-                _ => ProviderEnd::Failed,
-            };
-            closed.push(Closed {
-                outcome: ProviderOutcome {
-                    provider: c.provider,
-                    index: c.index,
-                    status: Some(c.status),
-                    end,
-                    usage: std::mem::take(&mut lock(&self.tap).usage),
-                },
-                seen_by: c.seen_by,
-            });
+        let usage = std::mem::take(&mut lock(&self.tap).usage);
+        if let (Some((closer, head)), ClientEnd::Ended(e)) = (self.committed.take(), &end) {
+            closer.close(Ok(Response::finished(head, e.clone(), usage.clone())));
         }
+        let client = match end {
+            ClientEnd::Refused(f) => Err(f),
+            ClientEnd::Ended(e) => Ok(Response::finished(
+                self.client_head.take().unwrap_or_default(),
+                e,
+                usage,
+            )),
+        };
 
         let guard = ClosingGuard::new(self.inner.clone());
         let chain = std::mem::take(&mut self.chain);
-        let client = self.client.clone();
-        let ran = client.ran();
+        let cx = self.cx.clone();
+        let closed = cx.take_closed();
+        let ran = cx.ran();
         let phase = async move {
             for c in &closed {
                 for plugin in chain.iter().take(c.seen_by) {
-                    plugin.on_provider_close(&client, &c.outcome).await;
+                    plugin
+                        .on_provider_close(&cx, &c.request, c.response.as_ref())
+                        .await;
                 }
             }
             for plugin in chain.iter().take(ran) {
-                plugin.on_client_close(&client, &outcome).await;
+                plugin
+                    .on_client_close(&cx, cx.client(), client.as_ref())
+                    .await;
             }
             drop(guard);
         };
@@ -502,7 +500,7 @@ impl Finalizer {
 
 impl Drop for Finalizer {
     fn drop(&mut self) {
-        self.close(Outcome::ClientGone);
+        self.close(ClientEnd::Ended(ResponseEnd::Abandoned));
     }
 }
 

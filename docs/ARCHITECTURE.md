@@ -22,51 +22,42 @@ byte for byte.
 
 | Concept | What it is |
 |---|---|
-| **ClientRequest** | One unit of work from a client, created after the Format. Not necessarily HTTP. Holds only what every caller has: route, format, envelope (model, stream), body in the client's format, session, store, `from_client()` / `to_client()` streams. Transport details are optional typed extensions (`ext::<HttpHead>()`, `ext::<Credential>()`). |
-| **ProviderRequest** | Gateway to one provider. A client request can make several (fallback, retry, hedging, split). Has its own copy of the body and `to_provider()` / `from_provider()` streams. |
-| **ClientResponse** / **ProviderResponse** | What goes back to the client, and what a provider sent (`req.call(provider)`). Responding with a ProviderResponse commits it; dropping it cancels it. |
-| **Session** | A group of client requests that share state and a provider: a socket, a job, an MCP session. A plain HTTP request is a session of one. |
-| **Part** | What flows through a stream: Head, Doc (a whole message), Delta (Text, Args, Reasoning, Bytes), Frame, Usage, End. Edit with `head()`, `map()` and `filter()`; observe with `tap()`, which never forces a re-encode. |
+| **Context** | Everything about one client request that is not the message: id, route, session, store, typed extensions (`ext::<T>()`, `insert_ext`), and `call(provider)`. Shared by every hook, client side and provider side. |
+| **Request** | A message exchanged with a peer: the client's request, or one of the gateway's requests to a provider. Same shape on both sides: peer, format, envelope (model, stream), body, and two streams to edit, `request()` on its way to whoever answers and `response()` on its way back. |
+| **Response** | What came back: a provider's response (`cx.call`) or a synthetic one. Live while it streams; responding with it commits it, dropping it cancels it. Close hooks see it finished: status, head, `end()`, `usage()`. |
+| **Flow** | What a client-request hook decides: `Pass` or `Respond(Response)`. |
+| **Part** | What flows through a stream: Head, Doc, Delta (Text, Args, Reasoning, Bytes), Frame, Usage, End. Edit with `head()`, `map()`, `filter()`; observe with `tap()`, which never forces a re-encode. |
 | **Store** | Shared key-value store with atomic batches. Keys are typed by a `Class`. |
-| **Format** | A wire protocol. Stateless; hands out a decoder and encoder per stream. Compiled in, or declared in YAML. |
-| **Config** | Routes, chains, providers. Anything it names that the binary does not contain is a startup error. |
+| **Format** | A wire protocol, used on both sides: it parses and renders client traffic, and forges and parses provider traffic. Stateless; a decoder and encoder per stream. |
+| **Target** | A configured provider: the Format it speaks, base URL, auth, model override. Config, not code. |
 
 ## The plugin trait
 
 ```rust
-pub enum Flow {
-    Pass,                          // continue to the next plugin
-    Respond(Box<ClientResponse>),  // commit this response; the chain stops
-}
+pub enum Flow { Pass, Respond(Box<Response>) }
 
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
-    async fn on_client_request(&self, req: &ClientRequest) -> Result<Flow, Fault> { Ok(Flow::Pass) }
-    async fn on_provider_request(&self, req: &ProviderRequest<'_>) -> Result<(), Fault> { Ok(()) }
-    async fn on_provider_close(&self, req: &ClientRequest, outcome: &ProviderOutcome) {}
-    async fn on_client_close(&self, req: &ClientRequest, outcome: &Outcome) {}
+    async fn on_client_request(&self, cx: &Context, req: &Request) -> Result<Flow, Fault> { Ok(Flow::Pass) }
+    async fn on_provider_request(&self, cx: &Context, req: &Request) -> Result<(), Fault> { Ok(()) }
+    async fn on_provider_close(&self, cx: &Context, req: &Request, resp: Result<&Response, &Fault>) {}
+    async fn on_client_close(&self, cx: &Context, req: &Request, resp: Result<&Response, &Fault>) {}
 }
 ```
 
-- Close hooks run in one close phase when the request ends: every provider
-  request that ended, in order, then the client request. A plugin gets a
-  close hook only for requests whose matching request hook it ran.
-- The close phase is async and tracked; `Gateway::idle()` waits for it on
-  shutdown.
-
-- `Err` refuses the request, in the client's format.
-- A plugin that responds (router, fallback, cache) goes after the plugins that
-  must see the request (auth, limits, PII).
-- Plugins share context through typed extensions: `req.insert_ext(value)` and
-  `req.ext::<T>()`. The kernel defines only the shared vocabulary:
-  `Principal`, `Credential`, `HttpHead`.
-
-Stream directions are named after who is on the other end:
-
-```
-client ──from_client()──► gateway ──to_provider()──► provider
-client ◄──to_client()──── gateway ◄─from_provider()── provider
-```
+- `Err` from `on_client_request` refuses the request, in the client's format.
+  A plugin that responds (router, fallback, cache) goes after the plugins
+  that must see the request (auth, limits, PII). If every plugin passes, the
+  route's target answers.
+- Provider requests run `on_provider_request` for the chain entries that
+  have run so far.
+- Close hooks run in one async, tracked close phase when the request ends:
+  every provider request that ended, in order, then the client request. A
+  plugin is closed only for requests its request hook saw. `Ok(resp)` means a
+  response existed (`resp.end()` says how it ended: Done, Failed, Cancelled,
+  Abandoned); `Err(fault)` means there never was one.
+- Plugins share context through typed extensions on the Context. The kernel
+  defines only the shared vocabulary: `Principal`, `Credential`, `HttpHead`.
 
 ## Invariants the kernel guarantees
 
@@ -116,8 +107,8 @@ watchdog; file inlining.
 Reviewers agree on what keeps simplicity at 7, and what would lift it without
 adding concepts:
 
-- Name stream directions absolutely (`to_client`, `from_provider`) so the
-  request stage wrapping the attempt stage is visible in the code.
+- Done: stream directions are `request()` and `response()` on both the
+  client and provider Request, so the nesting reads the same on both sides.
 - Add a read-only `tap` verb next to `map` and `filter`, so observers never
   force a re-encode.
 - Let subrequests and timer requests inherit their root request's admission, so a
