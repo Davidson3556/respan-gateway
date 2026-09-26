@@ -1,84 +1,105 @@
-//! HTTP adapter for the kernel. The kernel has no server inside it; this crate
-//! is one way to put it on the network. It maps method and path to a route,
-//! and attaches [`HttpHead`] and [`Credential`] to the request.
+#![warn(missing_docs)]
+//! HTTP for the kernel: an axum router that hands requests to a [`Gateway`],
+//! and a [`Transport`] that reaches providers over HTTP.
 
-use std::future::Future;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
-use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
-use http::header::AUTHORIZATION;
-use http::{HeaderMap, StatusCode};
-use respan_gateway_core::{Credential, Gateway, HttpHead, Inbound, plain_error};
-use tokio::net::TcpListener;
+use http::StatusCode;
+use http_body_util::{BodyExt, Limited};
+use respan_gateway_core::{Body, Fault, Gateway, Transport};
+use respan_gateway_core::{async_trait, http, http_body_util};
 
-/// Default cap on a buffered request body.
-pub const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-#[derive(Clone)]
-struct AppState {
-    gateway: Gateway,
-    max_body: usize,
-}
-
-/// Every request goes to the gateway's HTTP routes.
-pub fn router(gateway: Gateway, max_body: usize) -> Router {
-    Router::new()
-        .fallback(handle)
-        .with_state(AppState { gateway, max_body })
-}
-
-/// Serve until `shutdown` resolves, then stop accepting and let open responses
-/// finish.
-pub async fn serve(
-    gateway: Gateway,
-    listener: TcpListener,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-) -> std::io::Result<()> {
-    axum::serve(listener, router(gateway, MAX_BODY_BYTES))
-        .with_graceful_shutdown(shutdown)
-        .await
-}
-
-async fn handle(State(state): State<AppState>, req: Request) -> Response {
-    let (parts, body) = req.into_parts();
-    let Some(route) = state
-        .gateway
-        .http_route(&parts.method, parts.uri.path())
-        .map(str::to_owned)
-    else {
-        return into_axum(plain_error(StatusCode::NOT_FOUND, "no route"));
-    };
-    let bytes = match axum::body::to_bytes(body, state.max_body).await {
-        Ok(b) => b,
-        Err(_) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+/// Serves each `(path, route)`: a request of any method to exactly `path`,
+/// whatever its query, runs `route`. Any other path is a plain-text 404. A
+/// body over 32 MiB is refused 413 `too_large`, and one that breaks off 400
+/// `bad_request`, both in the route's format.
+pub fn router<P, R>(gateway: Gateway, routes: impl IntoIterator<Item = (P, R)>) -> Router
+where
+    P: Into<String>,
+    R: Into<String>,
+{
+    let routes = routes.into_iter().map(|(p, r)| (p.into(), r.into()));
+    let routes: Arc<HashMap<String, String>> = Arc::new(routes.collect());
+    let handler = move |State(gateway): State<Gateway>, req: Request| {
+        let path = req.uri().path().to_owned();
+        let route = routes.get(&path).cloned();
+        async move {
+            match route {
+                Some(route) => handle(gateway, route, req).await,
+                None => (StatusCode::NOT_FOUND, format!("no route at '{path}'")).into_response(),
+            }
         }
     };
-    let mut inbound = Inbound::new(route, bytes);
-    if let Some(c) = credential(&parts.headers) {
-        inbound.ext.insert(c);
+    Router::new().fallback(handler).with_state(gateway)
+}
+
+async fn handle(gateway: Gateway, route: String, req: Request) -> Response {
+    let req = req.map(|body| Limited::new(body, MAX_BODY_BYTES).map_err(body_fault));
+    let (parts, body) = gateway.handle(&route, req).await.into_parts();
+    Response::from_parts(parts, axum::body::Body::new(body))
+}
+
+/// Why a client's body did not arrive whole.
+fn body_fault(e: axum::BoxError) -> Fault {
+    if e.is::<http_body_util::LengthLimitError>() {
+        let status = StatusCode::PAYLOAD_TOO_LARGE;
+        return Fault::new(status, "too_large", "request body too large");
     }
-    inbound.ext.insert(HttpHead {
-        method: parts.method,
-        uri: parts.uri,
-        headers: parts.headers,
-    });
-    into_axum(state.gateway.handle(inbound).await)
+    Fault::bad_request("the request body broke off")
 }
 
-/// `Authorization: Bearer <key>`, or `x-api-key: <key>`.
-fn credential(headers: &HeaderMap) -> Option<Credential> {
-    let bearer = headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let api_key = headers.get("x-api-key").and_then(|v| v.to_str().ok());
-    bearer.or(api_key).map(|k| Credential::new(k.trim()))
+/// Reaches providers over HTTPS or HTTP.
+#[derive(Debug, Clone)]
+pub struct HttpTransport {
+    client: reqwest::Client,
 }
 
-fn into_axum(resp: http::Response<respan_gateway_core::Body>) -> Response {
-    let (parts, body) = resp.into_parts();
-    Response::from_parts(parts, Body::from_stream(body))
+impl HttpTransport {
+    /// A transport that passes redirects on rather than following them, and
+    /// gives up after 10 s connecting or 300 s of silence. `Err` with
+    /// `internal_error` if the HTTP client cannot be built.
+    pub fn new() -> Result<Self, Fault> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| Fault::internal("the HTTP client could not be built").with_source(e))?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait]
+impl Transport for HttpTransport {
+    async fn send(&self, req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        let (parts, body) = req.into_parts();
+        let body = body.collect().await?.to_bytes();
+        let req = reqwest::Request::try_from(http::Request::from_parts(parts, body))
+            .map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
+        let resp = self
+            .client
+            .execute(req)
+            .await
+            // Its message names the provider's URL, which is for logs only.
+            .map_err(|e| match e.is_builder() {
+                true => Fault::config("the provider request is not valid").with_source(e),
+                false => Fault::upstream("the provider could not be reached").with_source(e),
+            })?;
+        let broke = |e| Fault::upstream("the provider's body broke off").with_source(e);
+        Ok(http::Response::from(resp).map(|body| body.map_err(broke).boxed_unsync()))
+    }
+
+    /// An `http` or `https` URL with a host and a nonzero port.
+    fn reaches(&self, base_url: &str) -> bool {
+        reqwest::Url::parse(base_url).is_ok_and(|u| {
+            matches!(u.scheme(), "http" | "https") && u.has_host() && u.port() != Some(0)
+        })
+    }
 }

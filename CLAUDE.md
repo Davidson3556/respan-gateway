@@ -14,9 +14,10 @@ is being designed.
 ## Layout
 
 - `crates/core` is the kernel. Nothing feature-specific goes here.
-- `crates/sdk` may use only the public API of `core`. If a helper needs
+- Every other crate may use only the public API of `core`. If a helper needs
   private access, the kernel API is missing something; fix that instead.
-- Formats, stores, the server adapter and the binary are separate crates.
+- Formats, first-party plugins, the server adapter, the testkit and the binary
+  are separate crates.
 
 ## Commands
 

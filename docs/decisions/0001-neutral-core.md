@@ -5,11 +5,9 @@
 
 ## Context
 
-The gateway this replaces grew one special case per feature. Billing, prompt
-handling and logging are woven through every request path, so a change to one
-touches all of them. An earlier draft of this design repeated the mistake at
-the trait level, with a separate trait for guards, routers, price books,
-limiters and sinks.
+A gateway with a special case, or a trait, per feature (guards, routers,
+price books, limiters, sinks) ties every feature to its core: a change to
+one touches all of them.
 
 Users will want things nobody has planned for: translating every prompt into
 Chinese, routing by prompt length, billing by request bytes.

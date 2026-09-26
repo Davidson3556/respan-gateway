@@ -26,6 +26,6 @@ Dynamic dispatch over a fixed registry is not dynamic loading.
 
 - A custom gateway is a small `main.rs` that depends on these crates and
   registers its plugins explicitly.
-- A config that names a plugin the binary does not contain fails at startup.
+- A config that names a format the binary does not contain fails at startup.
 - A config can be validated offline against the exact binary that will run it.
 - The plugin API is a Rust API with semver, not an ABI.

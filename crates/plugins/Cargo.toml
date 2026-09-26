@@ -1,6 +1,6 @@
 [package]
-name = "respan-gateway-sdk"
-description = "Optional helpers built only on the public kernel API."
+name = "respan-gateway-plugins"
+description = "First-party plugins, built only on the public kernel API."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,4 +13,3 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
-async-trait.workspace = true

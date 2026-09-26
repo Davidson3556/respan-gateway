@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-testkit"
-description = "Mock providers and golden streams for plugin authors."
+description = "A mock provider transport, and the kernel's checkpoint tests."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,14 +13,8 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
-async-trait.workspace = true
-bytes.workspace = true
-futures.workspace = true
-http.workspace = true
 
 [dev-dependencies]
 respan-gateway-formats.workspace = true
-respan-gateway-sdk.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
+respan-gateway-plugins.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

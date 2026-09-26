@@ -939,9 +939,13 @@ dependencies = [
 name = "respan-gateway"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-plugins",
  "respan-gateway-server",
+ "respan-gateway-testkit",
+ "serde",
  "serde_norway",
  "tokio",
 ]
@@ -954,10 +958,9 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "reqwest",
- "serde",
+ "http-body",
+ "http-body-util",
  "serde_json",
- "thiserror",
  "tokio",
 ]
 
@@ -965,16 +968,13 @@ dependencies = [
 name = "respan-gateway-formats"
 version = "0.0.0"
 dependencies = [
- "bytes",
  "respan-gateway-core",
- "serde_json",
 ]
 
 [[package]]
-name = "respan-gateway-sdk"
+name = "respan-gateway-plugins"
 version = "0.0.0"
 dependencies = [
- "async-trait",
  "respan-gateway-core",
 ]
 
@@ -985,34 +985,20 @@ dependencies = [
  "axum",
  "bytes",
  "futures",
- "http",
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-formats",
- "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "respan-gateway-store"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
+ "tower",
 ]
 
 [[package]]
 name = "respan-gateway-testkit"
 version = "0.0.0"
 dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "http",
  "respan-gateway-core",
  "respan-gateway-formats",
- "respan-gateway-sdk",
- "serde",
- "serde_json",
+ "respan-gateway-plugins",
  "tokio",
 ]
 

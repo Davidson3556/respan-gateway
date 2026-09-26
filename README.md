@@ -4,8 +4,8 @@ An LLM gateway with a neutral core and compiled-in plugins. The goal is to be
 for LLM traffic what Nginx is for HTTP: a small, fast, predictable core, with
 everything else built as modules on one public API.
 
-> **Status: pre-alpha.** The architecture is still being designed. Nothing
-> here is usable yet.
+> **Status: pre-alpha.** Relays OpenAI and Anthropic chat traffic and
+> translates text between them (no tools or images yet). APIs will change.
 
 ## Ground rules
 
@@ -18,25 +18,43 @@ everything else built as modules on one public API.
 Details and reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 [`docs/decisions/`](docs/decisions/).
 
-## Layout
+## Try it
 
-| Crate | What it is |
+```bash
+cp gateway.example.yaml gateway.yaml
+export OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-...
+cargo run -p respan-gateway -- check
+cargo run -p respan-gateway
+
+# An OpenAI client asking for a Claude model is translated to Anthropic,
+curl localhost:8080/v1/chat/completions \
+  -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}'
+# and an Anthropic client asking for a GPT model is translated to OpenAI.
+curl localhost:8080/v1/messages \
+  -d '{"model":"gpt-4o-mini","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+## Roadmap
+
+Goal for 0.1: all 14 [use cases](docs/use-cases.md) pass as integration
+tests, and a 10-minute plugin really takes 10 minutes. Each use case becomes a
+test when its milestone lands. The kernel API is frozen after M2.
+
+| Milestone | Delivers |
 |---|---|
-| `crates/core` | The kernel, with the in-memory store and the reqwest transport |
-| `crates/sdk` | Optional helpers, built only on the public kernel API |
-| `crates/formats` | Wire formats: OpenAI, Anthropic, Gemini, YAML generic |
-| `crates/store` | External store backends (Redis) |
-| `crates/server` | HTTP adapter; the kernel itself has no server |
-| `crates/testkit` | Mock providers and golden streams for plugin authors |
-| `crates/respan-gateway` | The binary: registers compiled-in plugins and formats |
+| M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic with correct usage, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
+| M2 Plugin API | Per-call hooks, async stream filters, reading provider responses, the shared store; API fixes before the freeze |
+| M3 Formats | Gemini, Responses, embeddings |
+| M4 Plugins | Fallback, hedge, limits, memo, ledger |
+| M5 Translation | Tool calls, images and reasoning across formats |
+| M6 Hard cases | Sessions and Realtime, jobs, required coverage, PII rewriting, admission |
+| M7 0.1 release | Docs, examples, benchmarks, Redis store |
+| M8 MCP gateway | `mcp` kind, relay, aggregation, per-key access |
+| M9 Agent loop | Gateway-run MCP tools inside chat and Responses requests |
 
 ## Development
 
-```bash
-cargo fmt --all
-cargo clippy --workspace --all-targets
-cargo test --workspace
-```
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 

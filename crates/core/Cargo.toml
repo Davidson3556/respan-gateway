@@ -11,19 +11,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = ["reqwest"]
-reqwest = ["dep:reqwest"]
-
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 http.workspace = true
-reqwest = { workspace = true, optional = true }
-serde.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
 
-[dev-dependencies]
-thiserror.workspace = true

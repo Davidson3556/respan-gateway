@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-server"
-description = "HTTP adapter that serves the kernel."
+description = "HTTP for the kernel: a server router and a provider transport."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,12 +14,11 @@ workspace = true
 [dependencies]
 respan-gateway-core.workspace = true
 axum.workspace = true
-bytes.workspace = true
-http.workspace = true
-tokio.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
-futures.workspace = true
-reqwest.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 respan-gateway-formats.workspace = true
-serde_json.workspace = true
+tower = { version = "0.5", features = ["util"] }
+bytes.workspace = true
+futures.workspace = true

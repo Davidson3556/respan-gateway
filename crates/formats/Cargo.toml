@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-formats"
-description = "Wire formats: OpenAI, Anthropic, Gemini and the YAML generic format."
+description = "Wire formats for respan-gateway: the conversation kind, OpenAI Chat Completions and Anthropic Messages."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,5 +13,3 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
-bytes.workspace = true
-serde_json.workspace = true

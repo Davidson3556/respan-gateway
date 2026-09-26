@@ -1,15 +1,25 @@
+use std::future::IntoFuture;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
-use respan_gateway_core::{Builder, Config, Fault};
-use respan_gateway_formats::OpenAiChat;
+use respan_gateway_core::Format;
+use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_server::{HttpTransport, router};
 
-const USAGE: &str = "usage: respan-gateway [--config <path>] [check]";
-const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
+mod config;
 
-/// Every format and plugin this binary can use. A custom gateway is a copy of
-/// this function with more registrations.
-fn builder() -> Builder {
-    Builder::new().format(OpenAiChat)
+const USAGE: &str = "usage: respan-gateway [-c|--config <path>] [check] [-V|--version]";
+const DEFAULT_LISTEN: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// How long open responses and close hooks get, together, after a signal.
+const SHUTDOWN: Duration = Duration::from_secs(30);
+
+/// Every format this binary speaks. A custom gateway builds its own
+/// `Gateway` in its own `main.rs`.
+fn formats() -> Vec<Arc<dyn Format>> {
+    vec![Arc::new(OpenAiChat), Arc::new(AnthropicMessages)]
 }
 
 #[tokio::main]
@@ -25,19 +35,23 @@ async fn main() -> ExitCode {
             },
             "check" => check_only = true,
             "--version" | "-V" => {
-                println!("respan-gateway {}", respan_gateway::VERSION);
+                println!("respan-gateway {VERSION}");
                 return ExitCode::SUCCESS;
             }
             _ => return fail(USAGE),
         }
     }
 
-    let config = match load(&config_path) {
+    let loaded = std::fs::read_to_string(&config_path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| config::Config::parse(&text).map_err(|e| e.message().to_owned()));
+    let config = match loaded {
         Ok(c) => c,
         Err(e) => return fail(&format!("{config_path}: {e}")),
     };
-    let gateway = match builder().build(&config) {
-        Ok(g) => g,
+    let built = HttpTransport::new().and_then(|t| config.build(t, &formats()));
+    let gateway = match built {
+        Ok(built) => built,
         Err(e) => return fail(&format!("{config_path}: {}", e.message())),
     };
     if check_only {
@@ -45,29 +59,73 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let addr = config.listen.as_deref().unwrap_or(DEFAULT_LISTEN);
+    let addr = config.listen.unwrap_or(DEFAULT_LISTEN);
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => return fail(&format!("listen on {addr}: {e}")),
     };
-    println!(
-        "respan-gateway {} listening on {addr}",
-        respan_gateway::VERSION
-    );
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
+    let bound = listener.local_addr().unwrap_or(addr);
+    println!("respan-gateway {VERSION} listening on {bound}");
+    // On a signal, open responses and then close hooks share one deadline.
+    // Responses open at it are cut and lose their close hooks.
+    let (stopping, mut stopped) = tokio::sync::oneshot::channel();
+    let serve = axum::serve(
+        listener,
+        router(gateway.clone(), config.routes.keys().map(|p| (p, p))),
+    )
+    .with_graceful_shutdown(async {
+        shutdown().await;
+        let _ = stopping.send(tokio::time::Instant::now() + SHUTDOWN);
+    })
+    .into_future();
+    let mut serve = std::pin::pin!(serve);
+    let mut deadline = None;
+    let served = tokio::select! {
+        served = &mut serve => served,
+        Ok(at) = &mut stopped => {
+            deadline = Some(at);
+            match tokio::time::timeout_at(at, &mut serve).await {
+                Ok(served) => served,
+                Err(_) => {
+                    eprintln!("shutdown: responses still open at the deadline are cut");
+                    Ok(())
+                }
+            }
+        }
     };
-    let served = respan_gateway_server::serve(gateway.clone(), listener, shutdown).await;
-    gateway.idle().await;
+    let deadline = deadline
+        .or_else(|| stopped.try_recv().ok())
+        .unwrap_or_else(|| tokio::time::Instant::now() + SHUTDOWN);
+    if tokio::time::timeout_at(deadline, gateway.idle())
+        .await
+        .is_err()
+    {
+        eprintln!("shutdown: close hooks still running at the deadline were dropped");
+    }
     match served {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&e.to_string()),
     }
 }
 
-fn load(path: &str) -> Result<Config, Fault> {
-    let text = std::fs::read_to_string(path).map_err(|e| Fault::config(e.to_string()))?;
-    serde_norway::from_str(&text).map_err(|e| Fault::config(e.to_string()))
+/// Resolves on Ctrl-C, or on SIGTERM where there is one.
+async fn shutdown() {
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        () = terminate => {}
+    }
 }
 
 fn fail(message: &str) -> ExitCode {

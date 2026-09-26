@@ -1,13 +1,30 @@
-listen: 0.0.0.0:8080
+# There is no client auth: anyone who can reach this address spends your
+# keys. Keep it local.
+listen: 127.0.0.1:8080
 
 providers:
   openai:
     format: openai-chat
     base_url: https://api.openai.com
     auth: { type: bearer, key: env:OPENAI_API_KEY }
+  anthropic:
+    format: anthropic-messages
+    base_url: https://api.anthropic.com
+    auth: { type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }
 
+# Keyed by the path each is served at. Translation is text only: a request
+# with tools is refused unless it goes to a provider of its own format.
 routes:
-  - name: chat
+  # Claude models go to Anthropic, translated.
+  /v1/chat/completions:
     format: openai-chat
-    http: { path: /v1/chat/completions }
+    models:
+      - { prefix: claude, provider: anthropic }
+    target: openai
+  # Claude models are relayed, anthropic-beta header included; others go to
+  # OpenAI, translated.
+  /v1/messages:
+    format: anthropic-messages
+    models:
+      - { prefix: claude, provider: anthropic }
     target: openai

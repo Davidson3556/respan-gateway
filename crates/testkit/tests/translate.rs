@@ -1,0 +1,1858 @@
+//! A client in one format reaching a provider in another.
+
+use respan_gateway_core::{bytes, futures, http, serde_json};
+use std::sync::Arc;
+
+use http::{HeaderValue, StatusCode};
+use respan_gateway_core::async_trait;
+use respan_gateway_core::{
+    Context, Fault, Format, Gateway, Plugin, Provider, Response, Route, codes,
+};
+use respan_gateway_formats::conversation::{Event, Finish, units};
+use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_plugins::ModelRouter;
+use respan_gateway_testkit::{MockTransport, Outcomes, collect, mock, post};
+
+mod common;
+use common::{
+    Call, Disclaimer, Flip, Footer, Harness, HoldAll, Nameless, OPENAI, Shout, Silence, Unmask,
+    call,
+};
+use respan_gateway_core::{Filter, Outcome};
+use serde_json::{Value, json};
+
+const ANTHROPIC: &str = "http://anthropic.test";
+
+const ANTHROPIC_STREAM: &[&str] = &[
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: ping\ndata: {\"type\": \"ping\"}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n\n",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+];
+
+const OPENAI_STREAM: &[&str] = &[
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n",
+    "data: [DONE]\n\n",
+];
+
+fn openai_request(model: &str, stream: bool) -> Call {
+    call("openai", openai_body(model, stream))
+}
+
+fn openai_body(model: &str, stream: bool) -> String {
+    json!({
+        "model": model,
+        "stream": stream,
+        "stream_options": { "include_usage": stream },
+        "messages": [
+            { "role": "system", "content": "be brief" },
+            { "role": "user", "content": "hi" },
+        ],
+    })
+    .to_string()
+}
+
+fn anthropic_request(stream: bool) -> Call {
+    let body = json!({
+        "model": "gpt-x",
+        "max_tokens": 100,
+        "stream": stream,
+        "system": "be brief",
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    call("anthropic", body.to_string())
+}
+
+impl Harness {
+    /// Routes `openai` (OpenAI to Anthropic), `anthropic` (Anthropic to
+    /// OpenAI), `messages` (as in gateway.example.yaml) and `strict` (Claude
+    /// models only, no target).
+    fn new(extra: Vec<Arc<dyn Plugin>>) -> Self {
+        let log = Outcomes::default();
+        let mock = MockTransport::new();
+        let mut chain: Vec<Arc<dyn Plugin>> = vec![Arc::new(log.clone())];
+        chain.extend(extra);
+        let route = |name: &str, format: Arc<dyn Format>, chain, target: &str| {
+            let route: Route =
+                Vec::into_iter(chain).fold(Route::new(name, format), Route::with_plugin);
+            route.with_target(target)
+        };
+        let router = ModelRouter::new().route("claude", "anthropic");
+        let mut routed = chain.clone();
+        routed.push(Arc::new(router));
+        let gw = Gateway::new(
+            mock.clone(),
+            [
+                Provider::new("openai", OpenAiChat, OPENAI),
+                Provider::new("anthropic", AnthropicMessages, ANTHROPIC),
+            ],
+            [
+                route("openai", Arc::new(OpenAiChat), chain.clone(), "anthropic"),
+                route("anthropic", Arc::new(AnthropicMessages), chain, "openai"),
+                route(
+                    "messages",
+                    Arc::new(AnthropicMessages),
+                    routed.clone(),
+                    "openai",
+                ),
+                routed
+                    .into_iter()
+                    .fold(Route::new("strict", OpenAiChat), Route::with_plugin),
+            ],
+        )
+        .unwrap_or_else(|e| panic!("gateway: {e}"));
+        Self { gw, mock, log }
+    }
+
+    fn sent_json(&self, i: usize) -> Value {
+        serde_json::from_slice(self.mock.sent()[i].body()).unwrap_or_default()
+    }
+}
+
+/// Each SSE event as `(event name, data)`.
+fn events(body: &str) -> Vec<(Option<String>, Value)> {
+    body.split("\n\n")
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| {
+            let field = |name: &str| {
+                e.lines()
+                    .find_map(|l| l.strip_prefix(name))
+                    .map(|v| v.trim().to_owned())
+            };
+            let data = field("data:").unwrap_or_default();
+            let data = serde_json::from_str(&data).unwrap_or(Value::String(data));
+            (field("event:"), data)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_openai_client_streams_from_anthropic() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+
+    let (status, body) = h.text(openai_request("claude-x", true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sent = &h.mock.sent()[0];
+    assert_eq!(sent.uri(), "http://anthropic.test/v1/messages");
+    assert_eq!(
+        sent.headers().get("anthropic-version"),
+        Some(&HeaderValue::from_static("2023-06-01"))
+    );
+    assert_eq!(
+        h.sent_json(0),
+        json!({
+            "model": "claude-x",
+            "max_tokens": 4096,
+            "system": "be brief",
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true,
+        })
+    );
+
+    let chunks: Vec<Value> = events(&body).into_iter().map(|(_, d)| d).collect();
+    assert_eq!(chunks[0]["id"], "msg_1");
+    assert_eq!(chunks[0]["model"], "claude-x");
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| {
+            c.pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+        })
+        .collect();
+    assert_eq!(text, "Hello world");
+    let n = chunks.len();
+    assert_eq!(chunks[n - 3]["choices"][0]["finish_reason"], "stop");
+    assert_eq!(
+        chunks[n - 2]["usage"],
+        json!({ "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7 })
+    );
+    assert_eq!(chunks[n - 1], Value::String("[DONE]".into()));
+
+    let o = h.log.only();
+    assert_eq!(o.end, Ok(()));
+    assert_eq!(o.usage.get(units::INPUT_TOKENS), 5.0);
+    assert_eq!(o.usage.get(units::OUTPUT_TOKENS), 2.0);
+}
+
+#[tokio::test]
+async fn an_anthropic_client_streams_from_openai() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(OPENAI_STREAM));
+
+    let (status, body) = h.text(anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        h.mock.sent()[0].uri(),
+        "http://openai.test/v1/chat/completions"
+    );
+    assert_eq!(
+        h.sent_json(0),
+        json!({
+            "model": "gpt-x",
+            "messages": [
+                { "role": "system", "content": "be brief" },
+                { "role": "user", "content": "hi" },
+            ],
+            "max_completion_tokens": 100,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        })
+    );
+
+    let events = events(&body);
+    let names: Vec<&str> = events.iter().filter_map(|(e, _)| e.as_deref()).collect();
+    assert_eq!(
+        names,
+        [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+    );
+    assert_eq!(events[0].1["message"]["id"], "c1");
+    assert_eq!(
+        events[2].1["delta"],
+        json!({ "type": "text_delta", "text": "Hello" })
+    );
+    assert_eq!(
+        events[5].1,
+        json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "input_tokens": 5, "output_tokens": 2 },
+        })
+    );
+    assert_eq!(h.log.only().end, Ok(()));
+}
+
+#[tokio::test]
+async fn the_client_gets_the_streaming_it_asked_for_whatever_a_plugin_asks_of_the_provider() {
+    struct Whole;
+
+    #[async_trait]
+    impl Plugin for Whole {
+        async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+            use respan_gateway_formats::conversation::Conversation;
+            cx.request_mut::<Conversation>()?.stream = false;
+            Ok(None)
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Whole)]);
+    let reply = json!({
+        "id": "msg_2", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "hi" }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+
+    let (_, body) = h.text(openai_request("claude-x", true)).await;
+
+    let sent: Value = serde_json::from_slice(h.mock.sent()[0].body()).unwrap_or_default();
+    assert_eq!(
+        sent["stream"],
+        Value::Null,
+        "the provider was asked for a whole answer"
+    );
+    assert!(body.starts_with("data: "), "{body}");
+    assert!(body.contains("\"content\":\"hi\""), "{body}");
+}
+
+#[tokio::test]
+async fn unary_responses_translate_both_ways() {
+    let h = Harness::new(Vec::new());
+    let reply = json!({
+        "id": "msg_2", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "hi there" }],
+        "stop_reason": "max_tokens", "stop_sequence": null,
+        "usage": { "input_tokens": 4, "output_tokens": 2 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+
+    let (_, body) = h.text(openai_request("claude-x", false)).await;
+
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(v["id"], "msg_2");
+    assert_eq!(v["object"], "chat.completion");
+    assert_eq!(
+        v["choices"][0],
+        json!({
+            "index": 0,
+            "message": { "role": "assistant", "content": "hi there" },
+            "finish_reason": "length",
+        })
+    );
+    assert_eq!(
+        v["usage"],
+        json!({ "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6 })
+    );
+
+    let h = Harness::new(Vec::new());
+    let reply = json!({
+        "id": "c2", "object": "chat.completion", "model": "gpt-x",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "hi there" }, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 4, "completion_tokens": 2 },
+    });
+    h.mock
+        .reply(OPENAI, mock::json(StatusCode::OK, &reply.to_string()));
+
+    let (_, body) = h.text(anthropic_request(false)).await;
+
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(
+        v,
+        json!({
+            "id": "c2", "type": "message", "role": "assistant", "model": "gpt-x",
+            "content": [{ "type": "text", "text": "hi there" }],
+            "stop_reason": "end_turn", "stop_sequence": null,
+            "usage": { "input_tokens": 4, "output_tokens": 2 },
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_provider_error_reaches_the_client_in_its_format() {
+    let h = Harness::new(Vec::new());
+    let error = r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::TOO_MANY_REQUESTS, error));
+
+    let (status, body) = h.text(openai_request("claude-x", true)).await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(
+        v,
+        json!({ "error": { "message": "slow down", "type": "rate_limit_error", "param": null, "code": "rate_limit_error" } })
+    );
+    assert!(matches!(h.log.only().end, Err(f) if f.code() == "rate_limit_error"));
+}
+
+#[tokio::test]
+async fn a_request_that_cannot_be_translated_is_refused() {
+    let h = Harness::new(Vec::new());
+    let tools = json!([{ "type": "function", "function": { "name": "f" } }]);
+    let body = json!({ "model": "claude-x", "messages": [], "tools": tools });
+
+    let (status, body) = h.text(call("openai", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.contains("'tools' in the request cannot be translated"),
+        "{body}"
+    );
+    assert!(h.mock.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_cut_translated_stream_ends_with_an_error_in_the_client_format() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(&ANTHROPIC_STREAM[..3]));
+
+    let (_, body) = h.text(openai_request("claude-x", true)).await;
+
+    let last = events(&body).pop().map(|(_, d)| d).unwrap_or_default();
+    assert_eq!(last["error"]["type"], "truncated");
+    assert!(!body.contains("[DONE]"));
+    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::TRUNCATED));
+}
+
+#[tokio::test]
+async fn a_filter_can_turn_content_of_another_format_into_text() {
+    /// Reports that the model thought, from Anthropic's thinking block.
+    struct Thought;
+
+    #[async_trait]
+    impl Plugin for Thought {
+        async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+            cx.filter(|e: &mut Event| {
+                if let Event::Other { format, raw, .. } = e
+                    && &**format == "anthropic-messages"
+                    && raw["type"] == "thinking"
+                {
+                    *e = Event::text(0, "[thought] ");
+                }
+                Ok(())
+            })?;
+            Ok(None)
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Thought)]);
+    let thinking = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n";
+    let mut stream = ANTHROPIC_STREAM.to_vec();
+    stream.insert(1, thinking);
+    h.mock.reply(ANTHROPIC, mock::sse(&stream));
+
+    let (status, body) = h.text(openai_request("claude-x", true)).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("[thought] "), "{body}");
+}
+
+#[tokio::test]
+async fn a_translated_stream_that_starts_with_what_cannot_be_translated_is_refused() {
+    let h = Harness::new(Vec::new());
+    let thinking = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n";
+    h.mock
+        .reply(ANTHROPIC, mock::sse(&[ANTHROPIC_STREAM[0], thinking]));
+
+    let (status, body) = h.text(openai_request("claude-x", true)).await;
+
+    // Nothing was sent before the failure, so it is a refusal.
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(!body.contains("\"role\":\"assistant\""), "{body}");
+}
+
+#[tokio::test]
+async fn a_translated_chunk_that_fails_partway_is_refused_whole() {
+    let h = Harness::new(Vec::new());
+    let chunk = r#"data: {"id":"c","model":"gpt-x","choices":[{"index":0,"delta":{"content":"hi","tool_calls":[{"index":0,"id":"t","function":{"name":"f","arguments":"{}"}}]}}]}
+
+"#;
+    h.mock.reply(OPENAI, mock::sse(&[chunk]));
+
+    let (status, body) = h.text(anthropic_request(true)).await;
+
+    // Its text was not sent before its tool call failed.
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(!body.contains("message_start"), "{body}");
+}
+
+#[tokio::test]
+async fn an_error_in_a_success_is_a_failure_not_an_empty_answer() {
+    let h = Harness::new(Vec::new());
+    let error = r#"{"error":{"message":"boom","type":"server_error"}}"#;
+    h.mock.reply(OPENAI, mock::json(StatusCode::OK, error));
+
+    let (status, body) = h.text(anthropic_request(false)).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("\"type\":\"server_error\""), "{body}");
+    assert!(h.log.only().end.is_err());
+}
+
+#[tokio::test]
+async fn a_success_that_is_not_a_response_is_a_failure_not_an_empty_answer() {
+    let h = Harness::new(Vec::new());
+    h.mock
+        .reply(OPENAI, mock::json(StatusCode::OK, r#"{"status":"queued"}"#));
+
+    let (status, body) = h.text(anthropic_request(false)).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(h.log.only().end.is_err());
+}
+
+#[tokio::test]
+async fn a_filter_edits_translated_text() {
+    let h = Harness::new(vec![Arc::new(Shout)]);
+    h.mock.reply(OPENAI, mock::sse(OPENAI_STREAM));
+
+    let (_, body) = h.text(anthropic_request(true)).await;
+
+    let text: String = events(&body)
+        .iter()
+        .filter_map(|(_, d)| {
+            d.pointer("/delta/text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(text, "HELLO WORLD");
+}
+
+/// Answers with a stream it makes from facts, like a semantic cache.
+struct Canned;
+
+#[async_trait]
+impl Plugin for Canned {
+    async fn on_request(&self, _cx: &mut Context) -> Result<Option<Response>, Fault> {
+        let events = [
+            Event::start("cached_1", "claude-x"),
+            Event::text(0, "Hi"),
+            Event::Finish(Finish::Stop),
+        ];
+        let events = futures::stream::iter(events.map(Ok));
+        Ok(Some(Response::stream(http::Response::new(events))))
+    }
+}
+
+#[tokio::test]
+async fn a_plugin_can_stream_from_facts_in_the_client_format() {
+    let h = Harness::new(vec![Arc::new(Canned)]);
+
+    let (_, body) = h.text(anthropic_request(true)).await;
+
+    let names: Vec<Option<String>> = events(&body).into_iter().map(|(e, _)| e).collect();
+    let names: Vec<&str> = names.iter().flatten().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+    );
+    assert!(body.contains("\"id\":\"cached_1\""), "{body}");
+    assert!(h.mock.sent().is_empty());
+}
+
+#[tokio::test]
+async fn an_anthropic_stream_is_relayed_byte_for_byte() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    // Same format end to end: nothing is translated, so tools are fine.
+    let body = json!({
+        "model": "claude-x",
+        "max_tokens": 10,
+        "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+        "tools": [{ "name": "f", "input_schema": { "type": "object" } }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(out, ANTHROPIC_STREAM.concat());
+}
+
+#[tokio::test]
+async fn a_model_nothing_answers_is_a_404_in_the_client_format() {
+    let h = Harness::new(Vec::new());
+
+    let (status, body) = h.text(call("strict", openai_body("llama-3", false))).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(v["error"]["message"], "nothing answers model 'llama-3'");
+    assert!(h.mock.sent().is_empty());
+}
+
+#[tokio::test]
+async fn an_openai_error_reaches_an_anthropic_client_in_its_format() {
+    let h = Harness::new(Vec::new());
+    let error = r#"{"error":{"message":"bad key","type":"invalid_request_error"}}"#;
+    h.mock
+        .reply(OPENAI, mock::json(StatusCode::UNAUTHORIZED, error));
+
+    let (status, body) = h.text(anthropic_request(false)).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(
+        v,
+        json!({ "type": "error", "error": { "type": "invalid_request_error", "message": "bad key" } })
+    );
+}
+
+#[tokio::test]
+async fn provider_stream_quirks_translate_cleanly() {
+    // An Azure-style opening chunk with no id, then finish and usage in one
+    // chunk.
+    let quirky = [
+        "data: {\"id\":\"\",\"choices\":[],\"prompt_filter_results\":[]}\n\n",
+        "data: {\"id\":\"c9\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+        "data: {\"id\":\"c9\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(&quirky));
+
+    let (_, body) = h.text(anthropic_request(true)).await;
+
+    let events = events(&body);
+    assert_eq!(events[0].1["message"]["id"], "c9");
+    let delta = events
+        .iter()
+        .find(|(e, _)| e.as_deref() == Some("message_delta"));
+    assert_eq!(
+        delta.map(|(_, d)| d.clone()),
+        Some(json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "max_tokens", "stop_sequence": null },
+            "usage": { "input_tokens": 3, "output_tokens": 1 },
+        }))
+    );
+}
+
+#[tokio::test]
+async fn an_anthropic_error_event_reaches_an_openai_client_with_its_code() {
+    let mut stream = ANTHROPIC_STREAM[..3].to_vec();
+    stream.push("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n");
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(&stream));
+
+    let (_, body) = h.text(openai_request("claude-x", true)).await;
+
+    let last = events(&body).pop().map(|(_, d)| d).unwrap_or_default();
+    assert_eq!(last["error"]["type"], "overloaded_error");
+    assert!(matches!(h.log.only().end, Err(f) if f.code() == "overloaded_error"));
+}
+
+#[tokio::test]
+async fn several_anthropic_text_blocks_reach_an_openai_client_in_order() {
+    let reply = json!({
+        "id": "msg_3", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "one " }, { "type": "text", "text": "two" }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 1, "output_tokens": 2 },
+    });
+    let h = Harness::new(Vec::new());
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+
+    let (_, body) = h.text(openai_request("claude-x", false)).await;
+
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(v["choices"][0]["message"]["content"], "one two");
+}
+
+#[tokio::test]
+async fn a_filter_edits_an_anthropic_stream_in_its_own_shape() {
+    let h = Harness::new(vec![Arc::new(Shout)]);
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let body = json!({
+        "model": "claude-x",
+        "max_tokens": 10,
+        "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (_, out) = h.text(call("messages", body.to_string())).await;
+
+    let expected = ANTHROPIC_STREAM
+        .concat()
+        .replace("\"text\":\"Hello\"", "\"text\":\"HELLO\"")
+        .replace("\"text\":\" world\"", "\"text\":\" WORLD\"");
+    assert_eq!(out, expected);
+}
+
+#[tokio::test]
+async fn a_translated_stream_split_mid_event_decodes_once() {
+    let whole = ANTHROPIC_STREAM.concat();
+    let (a, b) = whole.split_at(whole.len() / 2);
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(&[a, b]));
+
+    let (_, body) = h.text(openai_request("claude-x", true)).await;
+
+    let text: String = events(&body)
+        .iter()
+        .filter_map(|(_, c)| {
+            c.pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(text, "Hello world");
+    assert_eq!(h.log.only().end, Ok(()));
+}
+
+#[tokio::test]
+async fn a_filtered_stream_that_ends_in_a_provider_error_ends_with_that_error() {
+    let mut stream = ANTHROPIC_STREAM[..3].to_vec();
+    stream.push("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n");
+    let h = Harness::new(vec![Arc::new(Shout)]);
+    h.mock.reply(ANTHROPIC, mock::sse(&stream));
+    let body = json!({
+        "model": "claude-x",
+        "max_tokens": 10,
+        "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (_, out) = h.text(call("messages", body.to_string())).await;
+
+    let (name, data) = events(&out).pop().unwrap_or_default();
+    assert_eq!(name.as_deref(), Some("error"));
+    assert_eq!(data["error"]["type"], "overloaded_error");
+    assert!(matches!(h.log.only().end, Err(f) if f.code() == "overloaded_error"));
+}
+
+#[tokio::test]
+async fn anthropic_beta_features_reach_anthropic() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let body = json!({
+        "model": "claude-x",
+        "max_tokens": 10,
+        "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    let request = http::Request::post("/v1/messages")
+        .header("anthropic-beta", "context-1m-2025-08-07")
+        .header("anthropic-beta", "files-api-2025-04-14")
+        .body(())
+        .unwrap_or_default()
+        .map(|()| post(body.to_string()).into_body());
+
+    h.text(("messages", request)).await;
+
+    let sent = h.mock.sent();
+    let beta: Vec<_> = sent[0].headers().get_all("anthropic-beta").iter().collect();
+    assert_eq!(beta, ["context-1m-2025-08-07", "files-api-2025-04-14"]);
+}
+
+#[tokio::test]
+async fn a_system_message_mid_conversation_is_refused_not_moved() {
+    let h = Harness::new(Vec::new());
+    let body = json!({
+        "model": "claude-x",
+        "messages": [
+            { "role": "user", "content": "hi" },
+            { "role": "system", "content": "be brief" },
+        ],
+    });
+
+    let (status, _) = h.text(call("openai", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(h.mock.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_filter_edits_events_that_share_a_chunk_while_translating() {
+    struct Truncated;
+
+    #[async_trait]
+    impl Plugin for Truncated {
+        async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+            cx.filter(|e: &mut Event| {
+                match e {
+                    Event::Start { model, .. } => *model = "alias".into(),
+                    Event::Finish(f) => *f = Finish::Length,
+                    _ => {}
+                }
+                Ok(())
+            })?;
+            Ok(None)
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Truncated)]);
+    let chunk = "data: {\"id\":\"c1\",\"model\":\"gpt-real\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
+    h.mock
+        .reply(OPENAI, mock::sse(&[chunk, "data: [DONE]\n\n"]));
+
+    let (_, body) = h.text(anthropic_request(true)).await;
+
+    let events = events(&body);
+    assert_eq!(events[0].1["message"]["model"], "alias");
+    let stop = events
+        .iter()
+        .find_map(|(_, d)| d.pointer("/delta/stop_reason"));
+    assert_eq!(stop, Some(&json!("max_tokens")));
+}
+
+#[tokio::test]
+async fn usage_counts_even_when_its_chunk_cannot_be_translated() {
+    let h = Harness::new(Vec::new());
+    // A provider that reports usage on a tool call chunk.
+    let chunk = "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1}}\n\n";
+    h.mock.reply(OPENAI, mock::sse(&[chunk]));
+
+    let _ = h.text(anthropic_request(true)).await;
+
+    let o = h.log.only();
+    assert_eq!(o.usage.get(units::INPUT_TOKENS), 9.0);
+    assert!(o.end.is_err());
+}
+
+#[tokio::test]
+async fn a_translated_response_keeps_the_providers_retry_after() {
+    let h = Harness::new(Vec::new());
+    let mut limited = mock::json(
+        StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#,
+    );
+    limited
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from_static("7"));
+    h.mock.reply(OPENAI, limited);
+
+    let (status, headers, _) = collect(
+        {
+            let (route, req) = anthropic_request(false);
+            h.gw.handle(route, req)
+        }
+        .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        headers.get("retry-after"),
+        Some(&HeaderValue::from_static("7"))
+    );
+}
+
+#[tokio::test]
+async fn an_empty_plugin_made_stream_is_a_whole_anthropic_stream() {
+    struct Silent;
+
+    #[async_trait]
+    impl Plugin for Silent {
+        async fn on_request(&self, _cx: &mut Context) -> Result<Option<Response>, Fault> {
+            let none = futures::stream::empty::<Result<Event, Fault>>();
+            Ok(Some(Response::stream(http::Response::new(none))))
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Silent)]);
+
+    let (_, body) = h.text(anthropic_request(true)).await;
+
+    let names: Vec<String> = events(&body).into_iter().filter_map(|(e, _)| e).collect();
+    assert_eq!(names, ["message_start", "message_delta", "message_stop"]);
+}
+
+#[tokio::test]
+async fn a_real_openai_reply_reaches_an_anthropic_client() {
+    let h = Harness::new(Vec::new());
+    // OpenAI's real shape, with null and empty fields.
+    let reply = r#"{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"gpt-x","choices":[{"index":0,"message":{"role":"assistant","content":"hi","refusal":null,"annotations":[]},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}},"service_tier":"default","system_fingerprint":"fp"}"#;
+    h.mock.reply(OPENAI, mock::json(StatusCode::OK, reply));
+
+    let (status, body) = h.text(anthropic_request(false)).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(v["content"], json!([{ "type": "text", "text": "hi" }]));
+}
+
+/// Anthropic's stream with a placeholder split across its deltas and a `<`
+/// left open at the end.
+fn masked_anthropic_stream() -> Vec<String> {
+    let delta = |text: &str| {
+        let data = json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": text}});
+        format!("event: content_block_delta\ndata: {data}\n\n")
+    };
+    let mut stream: Vec<String> = ANTHROPIC_STREAM.iter().map(|s| s.to_string()).collect();
+    stream.splice(2..4, [delta("Hi <P"), delta("1>, bye <")]);
+    stream
+}
+
+fn anthropic_texts(body: &str) -> String {
+    events(body)
+        .iter()
+        .filter_map(|(_, v)| v.pointer("/delta/text").and_then(Value::as_str))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_filter_restores_text_across_an_anthropic_stream_and_releases_the_rest() {
+    let h = Harness::new(vec![Arc::new(Unmask)]);
+    let stream = masked_anthropic_stream();
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(anthropic_texts(&out), "Hi Alice, bye <");
+    // What was held goes into Anthropic's own block, before it closes.
+    let names: Vec<String> = events(&out)
+        .into_iter()
+        .filter_map(|(name, _)| name)
+        .collect();
+    let tail = &names[names.len() - 4..];
+    assert_eq!(
+        tail,
+        [
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop"
+        ]
+    );
+    assert!(!out.contains("\"index\":1"), "{out}");
+    assert_eq!(h.log.only().end, Ok(()));
+}
+
+#[tokio::test]
+async fn a_filter_restores_text_across_a_translated_stream() {
+    let h = Harness::new(vec![Arc::new(Unmask)]);
+    let stream = masked_anthropic_stream();
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+
+    let (_, body) = h.text(openai_request("claude-x", true)).await;
+
+    let text: String = events(&body)
+        .iter()
+        .filter_map(|(_, c)| {
+            c.pointer("/choices/0/delta/content")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(text, "Hi Alice, bye <");
+    assert!(body.ends_with("data: [DONE]\n\n"));
+}
+
+#[tokio::test]
+async fn a_filter_releases_what_it_held_into_a_whole_message() {
+    let h = Harness::new(vec![Arc::new(Unmask)]);
+    let reply = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "Hi <P1>, bye <", "citations": null }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 5, "output_tokens": 2 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let out: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(out["content"][0]["text"], "Hi Alice, bye <");
+    assert_eq!(out["content"][0]["citations"], Value::Null);
+    assert_eq!(out["id"], "msg_1");
+}
+
+#[tokio::test]
+async fn anthropics_own_end_is_kept_when_it_breaks_off_after_it() {
+    let h = Harness::new(vec![Arc::new(Unmask)]);
+    let cut = &ANTHROPIC_STREAM[..ANTHROPIC_STREAM.len() - 1];
+    h.mock.reply(ANTHROPIC, mock::sse(cut));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (_, out) = h.text(call("messages", body.to_string())).await;
+
+    let names: Vec<String> = events(&out).into_iter().filter_map(|(n, _)| n).collect();
+    assert_eq!(names[names.len() - 2..], ["message_delta", "error"]);
+}
+
+#[tokio::test]
+async fn a_relayed_stream_cut_after_its_last_block_keeps_every_byte() {
+    let h = Harness::new(Vec::new());
+    let cut = &ANTHROPIC_STREAM[..ANTHROPIC_STREAM.len() - 1];
+    h.mock.reply(ANTHROPIC, mock::sse(cut));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (_, out) = h.text(call("messages", body.to_string())).await;
+
+    assert!(out.starts_with(&cut.concat()), "{out}");
+    assert!(
+        out[cut.concat().len()..].starts_with("event: error"),
+        "{out}"
+    );
+}
+
+/// Fails the end of a response that failed, as an audit might.
+struct Audit;
+
+impl Filter<Event> for Audit {
+    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
+        out.push(event);
+        Ok(())
+    }
+
+    fn end(&mut self, outcome: &Outcome, _out: &mut Vec<Event>) -> Result<(), Fault> {
+        match outcome.end {
+            Ok(()) => Ok(()),
+            _ => Err(Fault::upstream("audit: failed response")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_providers_error_body_is_the_whole_body_whatever_a_filter_says() {
+    struct Audited;
+
+    #[async_trait]
+    impl Plugin for Audited {
+        async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+            cx.filter(Audit)?;
+            Ok(None)
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Audited)]);
+    let limited = r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#;
+    h.mock.reply(
+        ANTHROPIC,
+        mock::json(StatusCode::TOO_MANY_REQUESTS, limited),
+    );
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(
+        (status, out.as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, limited)
+    );
+}
+
+/// Adds a footer in a block of its own.
+struct NewBlock;
+
+#[async_trait]
+impl Plugin for NewBlock {
+    async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+        cx.filter(Footer(1, None))?;
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn a_block_a_filter_adds_at_the_end_opens_after_anthropics_own() {
+    let h = Harness::new(vec![Arc::new(NewBlock)]);
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let starts: Vec<Value> = events(&out)
+        .into_iter()
+        .filter(|(n, _)| n.as_deref() == Some("content_block_start"))
+        .map(|(_, v)| v["index"].clone())
+        .collect();
+    assert_eq!(starts, [json!(0), json!(1)]);
+    assert_eq!(anthropic_texts(&out), "Hello world [footer]");
+    let delta = events(&out)
+        .into_iter()
+        .find(|(n, _)| n.as_deref() == Some("message_delta"));
+    let delta = delta.map(|(_, v)| v).unwrap_or_default();
+    assert_eq!(
+        delta.pointer("/delta/stop_reason"),
+        Some(&json!("end_turn"))
+    );
+}
+
+#[tokio::test]
+async fn a_block_a_filter_adds_to_a_whole_message_is_appended() {
+    let h = Harness::new(vec![Arc::new(NewBlock)]);
+    let reply = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "Hello" }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 5, "output_tokens": 2 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let out: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(out["content"][1]["text"], " [footer]");
+    assert_eq!(out["stop_reason"], "end_turn");
+}
+
+fn anthropic_messages(stream: &[String]) -> (Harness, String) {
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    let h = Harness::new(vec![Arc::new(Unmask)]);
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    (h, body.to_string())
+}
+
+#[tokio::test]
+async fn text_released_before_a_tool_call_stays_in_its_own_block() {
+    let tool = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let mut stream = masked_anthropic_stream();
+    stream.splice(
+        5..5,
+        [
+            tool(
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 1,
+                "content_block": {"type": "tool_use", "id": "t", "name": "f", "input": {}}}),
+            ),
+            tool(
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 1}),
+            ),
+        ],
+    );
+    let (h, body) = anthropic_messages(&stream);
+
+    let (status, out) = h.text(call("messages", body)).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let seen: Vec<(String, Value)> = events(&out)
+        .into_iter()
+        .filter_map(|(n, v)| Some((n?, v["index"].clone())))
+        .filter(|(n, _)| n.starts_with("content_block"))
+        .collect();
+    let at = |name: &str, index: i64| (name.to_owned(), json!(index));
+    assert_eq!(
+        seen,
+        [
+            at("content_block_start", 0),
+            at("content_block_delta", 0),
+            at("content_block_delta", 0),
+            at("content_block_delta", 0),
+            at("content_block_stop", 0),
+            at("content_block_start", 1),
+            at("content_block_stop", 1),
+        ]
+    );
+    assert_eq!(anthropic_texts(&out), "Hi Alice, bye <");
+}
+
+#[test]
+fn a_filter_is_tested_on_its_own() {
+    let mut footer = Footer(0, None);
+    let mut out = Vec::new();
+    let finish = Event::Finish(Finish::Stop);
+    let _ = footer.event(finish.clone(), &mut out);
+    assert!(out.is_empty());
+    let _ = footer.end(&Outcome::default(), &mut out);
+    assert_eq!(out, [Event::text(0, " [footer]"), finish]);
+}
+
+#[tokio::test]
+async fn a_finish_held_to_the_end_still_ends_anthropics_stream() {
+    struct Foot;
+
+    #[async_trait]
+    impl Plugin for Foot {
+        async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+            cx.filter(Footer(0, None))?;
+            Ok(None)
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Foot)]);
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(anthropic_texts(&out), "Hello world [footer]");
+    let delta = events(&out)
+        .into_iter()
+        .find(|(n, _)| n.as_deref() == Some("message_delta"));
+    let delta = delta.map(|(_, v)| v).unwrap_or_default();
+    assert_eq!(
+        delta.pointer("/delta/stop_reason"),
+        Some(&json!("end_turn"))
+    );
+    assert_eq!(delta.pointer("/usage/output_tokens"), Some(&json!(2)));
+    assert!(out.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+}
+
+/// Puts a note before the answer, as soon as the response starts.
+struct Note(bool);
+
+impl Filter<Event> for Note {
+    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
+        let first = matches!(event, Event::Start { .. }) && !std::mem::replace(&mut self.0, true);
+        out.push(event);
+        if first {
+            out.push(Event::text(0, "Note: "));
+        }
+        Ok(())
+    }
+}
+
+fn filtered<F: Filter<Event> + Clone + Sync>(filter: F) -> Harness {
+    struct Adds<F>(F);
+
+    #[async_trait]
+    impl<F: Filter<Event> + Clone + Sync> Plugin for Adds<F> {
+        async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+            cx.filter(self.0.clone())?;
+            Ok(None)
+        }
+    }
+
+    Harness::new(vec![Arc::new(Adds(filter))])
+}
+
+impl Clone for Note {
+    fn clone(&self) -> Self {
+        Note(self.0)
+    }
+}
+
+#[tokio::test]
+async fn text_put_before_anthropics_first_block_goes_into_it() {
+    let h = filtered(Note(false));
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let names: Vec<String> = events(&out).into_iter().filter_map(|(n, _)| n).collect();
+    let count = |name: &str| names.iter().filter(|n| *n == name).count();
+    assert_eq!(
+        (count("message_start"), count("content_block_start")),
+        (1, 1),
+        "{out}"
+    );
+    assert_eq!(anthropic_texts(&out), "Note: Hello world");
+}
+
+#[tokio::test]
+async fn a_whole_message_a_filter_took_all_text_of_is_still_sent() {
+    let h = filtered(Silence);
+    let reply = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "secret" }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 5, "output_tokens": 2 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let out: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(out["content"], json!([]));
+    assert_eq!(out["stop_reason"], "end_turn");
+}
+
+#[tokio::test]
+async fn made_text_stays_out_of_a_thinking_block() {
+    let h = filtered(Note(false));
+    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let stream = [
+        ANTHROPIC_STREAM[0].to_owned(),
+        event(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""}}),
+        ),
+        event(
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "hmm"}}),
+        ),
+        event(
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        event(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 1,
+            "content_block": {"type": "text", "text": ""}}),
+        ),
+        event(
+            "content_block_delta",
+            json!({"type": "content_block_delta", "index": 1,
+            "delta": {"type": "text_delta", "text": "Hello"}}),
+        ),
+        event(
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 1}),
+        ),
+        ANTHROPIC_STREAM[5].to_owned(),
+        ANTHROPIC_STREAM[6].to_owned(),
+    ];
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let in_thinking = events(&out)
+        .into_iter()
+        .any(|(_, v)| v["index"] == 0 && v.pointer("/delta/type") == Some(&json!("text_delta")));
+    assert!(!in_thinking, "{out}");
+    assert!(anthropic_texts(&out).contains("Note: "), "{out}");
+}
+
+#[tokio::test]
+async fn a_filter_holding_everything_of_anthropics_stream_releases_it_whole() {
+    let h = filtered(HoldAll(Vec::new()));
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(anthropic_texts(&out), "Hello world");
+    let names: Vec<String> = events(&out).into_iter().filter_map(|(n, _)| n).collect();
+    assert_eq!(
+        names.iter().filter(|n| *n == "message_start").count(),
+        1,
+        "{out}"
+    );
+    assert_eq!(names.last().map(String::as_str), Some("message_stop"));
+}
+
+#[tokio::test]
+async fn text_before_the_start_of_an_anthropic_message_is_written() {
+    let h = filtered(Disclaimer);
+    let reply = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "Hello" }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 5, "output_tokens": 2 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let out: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(out["content"][0]["text"], "NOTE: Hello");
+}
+
+#[tokio::test]
+async fn a_block_that_opens_with_text_a_filter_holds_opens_once() {
+    let h = filtered(HoldAll(Vec::new()));
+    let mut stream: Vec<String> = ANTHROPIC_STREAM.iter().map(|s| s.to_string()).collect();
+    stream[1] = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Well, \"}}\n\n".to_owned();
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let names: Vec<String> = events(&out).into_iter().filter_map(|(n, _)| n).collect();
+    let count = |name: &str| names.iter().filter(|n| *n == name).count();
+    assert_eq!(
+        (count("content_block_start"), count("content_block_stop")),
+        (1, 1),
+        "{out}"
+    );
+    assert_eq!(anthropic_texts(&out), "Well, Hello world");
+    let start = events(&out)
+        .into_iter()
+        .find(|(n, _)| n.as_deref() == Some("message_start"));
+    assert_eq!(
+        start.map(|(_, v)| v["message"]["id"].clone()),
+        Some(json!("msg_1"))
+    );
+}
+
+#[tokio::test]
+async fn an_anthropic_stream_of_data_lines_only_is_written_once() {
+    let h = Harness::new(vec![Arc::new(Unmask)]);
+    let stream: Vec<String> = ANTHROPIC_STREAM
+        .iter()
+        .map(|e| {
+            e.lines()
+                .filter(|l| !l.starts_with("event:"))
+                .map(|l| format!("{l}\n"))
+                .collect()
+        })
+        .collect();
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let types: Vec<String> = events(&out)
+        .into_iter()
+        .filter_map(|(_, v)| v["type"].as_str().map(str::to_owned))
+        .collect();
+    let count = |t: &str| types.iter().filter(|n| *n == t).count();
+    assert_eq!(
+        (
+            count("message_start"),
+            count("message_delta"),
+            count("message_stop")
+        ),
+        (1, 1, 1),
+        "{out}"
+    );
+}
+
+/// Holds text to the end, letting everything else through.
+#[derive(Clone)]
+struct HoldText(Vec<Event>);
+
+impl Filter<Event> for HoldText {
+    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
+        match event {
+            Event::Text { .. } => self.0.push(event),
+            event => out.push(event),
+        }
+        Ok(())
+    }
+
+    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Event>) -> Result<(), Fault> {
+        out.append(&mut self.0);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn text_released_at_the_end_of_a_translated_stream_goes_before_its_finish() {
+    let h = filtered(HoldText(Vec::new()));
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+
+    let (status, body) = h.text(openai_request("claude-x", true)).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let chunks: Vec<Value> = events(&body).into_iter().map(|(_, v)| v).collect();
+    let text_at = chunks.iter().rposition(|c| {
+        c.pointer("/choices/0/delta/content")
+            .is_some_and(|t| t != "")
+    });
+    let finish_at = chunks.iter().position(|c| {
+        !c.pointer("/choices/0/finish_reason")
+            .is_none_or(Value::is_null)
+    });
+    assert!(text_at < finish_at, "{body}");
+    assert!(body.ends_with("data: [DONE]\n\n"));
+}
+
+#[tokio::test]
+async fn a_whole_anthropic_message_a_filter_took_the_start_of_is_sent() {
+    let h = filtered(Nameless);
+    let reply = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "Hello" }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 5, "output_tokens": 2 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &reply.to_string()));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let out: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(out["id"], "msg_1");
+}
+
+#[tokio::test]
+async fn a_tool_block_held_in_anthropics_stream_is_the_plugins_fault() {
+    let h = filtered(HoldAll(Vec::new()));
+    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let stream = [
+        ANTHROPIC_STREAM[0].to_owned(),
+        event(
+            "content_block_start",
+            json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "tool_use", "id": "t", "name": "f", "input": {}}}),
+        ),
+        event(
+            "content_block_stop",
+            json!({"type": "content_block_stop", "index": 0}),
+        ),
+        ANTHROPIC_STREAM[5].to_owned(),
+        ANTHROPIC_STREAM[6].to_owned(),
+    ];
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (_, out) = h.text(call("messages", body.to_string())).await;
+
+    assert!(out.contains("config_error"), "{out}");
+    assert!(!out.contains("untranslatable"), "{out}");
+}
+
+#[tokio::test]
+async fn azures_filter_annotation_after_the_finish_ends_a_translated_stream_cleanly() {
+    let h = Harness::new(Vec::new());
+    let mut stream: Vec<String> = OPENAI_STREAM.iter().map(|s| s.to_string()).collect();
+    let annotation = json!({"id": "", "choices": [{"index": 0, "delta": {},
+        "content_filter_offsets": {"check_offset": 0, "start_offset": 0, "end_offset": 11},
+        "content_filter_results": {"hate": {"filtered": false, "severity": "safe"}}}]});
+    stream.insert(4, format!("data: {annotation}\n\n"));
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(OPENAI, mock::sse(&chunks));
+
+    let (status, out) = h.text(anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert!(!out.contains("event: error"), "{out}");
+    assert!(
+        out.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+        "{out}"
+    );
+}
+
+/// Holds each text until the next one comes, releasing the last at the end.
+#[derive(Clone)]
+struct LagByOne(Option<Event>);
+
+impl Filter<Event> for LagByOne {
+    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
+        match event {
+            Event::Text { .. } => out.extend(self.0.replace(event)),
+            event => out.push(event),
+        }
+        Ok(())
+    }
+
+    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Event>) -> Result<(), Fault> {
+        out.extend(self.0.take());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn text_held_across_two_anthropic_blocks_stays_in_its_block() {
+    let h = filtered(LagByOne(None));
+    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let block = |i: u32, text: &str| {
+        [
+            event(
+                "content_block_start",
+                json!({"type": "content_block_start", "index": i,
+                "content_block": {"type": "text", "text": ""}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": i,
+                "delta": {"type": "text_delta", "text": text}}),
+            ),
+            event(
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": i}),
+            ),
+        ]
+    };
+    let mut stream = vec![ANTHROPIC_STREAM[0].to_owned()];
+    stream.extend(block(0, "a"));
+    stream.extend(block(1, "b"));
+    stream.extend([
+        ANTHROPIC_STREAM[5].to_owned(),
+        ANTHROPIC_STREAM[6].to_owned(),
+    ]);
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert!(!out.contains("event: error"), "{out}");
+    let deltas: Vec<(Value, Value)> = events(&out)
+        .into_iter()
+        .filter(|(n, _)| n.as_deref() == Some("content_block_delta"))
+        .map(|(_, v)| (v["index"].clone(), v["delta"]["text"].clone()))
+        .collect();
+    assert_eq!(deltas, [(json!(0), json!("a")), (json!(1), json!("b"))]);
+}
+
+fn two_text_blocks(a: &str, b: &str) -> Vec<String> {
+    let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let block = |i: u32, text: &str| {
+        [
+            event(
+                "content_block_start",
+                json!({"type": "content_block_start", "index": i,
+                "content_block": {"type": "text", "text": ""}}),
+            ),
+            event(
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": i,
+                "delta": {"type": "text_delta", "text": text}}),
+            ),
+            event(
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": i}),
+            ),
+        ]
+    };
+    let mut stream = vec![ANTHROPIC_STREAM[0].to_owned()];
+    stream.extend(block(0, a));
+    stream.extend(block(1, b));
+    stream.extend([
+        ANTHROPIC_STREAM[5].to_owned(),
+        ANTHROPIC_STREAM[6].to_owned(),
+    ]);
+    stream
+}
+
+async fn anthropic_through<F: Filter<Event> + Clone + Sync>(
+    filter: F,
+    stream: &[String],
+) -> String {
+    let h = filtered(filter);
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.mock.reply(ANTHROPIC, mock::sse(&chunks));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    let (status, out) = h.text(call("messages", body.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    out
+}
+
+#[tokio::test]
+async fn text_held_from_two_anthropic_blocks_keeps_its_order() {
+    let out = anthropic_through(HoldAll(Vec::new()), &two_text_blocks("first ", "second")).await;
+
+    assert_eq!(anthropic_texts(&out), "first second", "{out}");
+}
+
+#[tokio::test]
+async fn a_guardrail_ending_an_anthropic_stream_early_ends_it() {
+    /// Cuts the answer at " world", ending it as filtered.
+    #[derive(Clone)]
+    struct Cut;
+
+    impl Filter<Event> for Cut {
+        fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
+            match event {
+                Event::Text { block, text, .. } if text == " world" => {
+                    out.extend([
+                        Event::text(block, " [cut]"),
+                        Event::Finish(Finish::Filtered),
+                    ]);
+                }
+                event => out.push(event),
+            }
+            Ok(())
+        }
+    }
+
+    let stream: Vec<String> = ANTHROPIC_STREAM.iter().map(|s| s.to_string()).collect();
+    let out = anthropic_through(Cut, &stream).await;
+
+    assert!(!out.contains("event: error"), "{out}");
+    assert_eq!(anthropic_texts(&out), "Hello [cut]");
+}
+
+#[tokio::test]
+async fn an_anthropic_response_is_reframed_as_its_client_asked() {
+    let h = Harness::new(vec![Arc::new(Flip)]);
+    let whole = json!({
+        "id": "msg_2", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "hi" }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 },
+    });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &whole.to_string()))
+        .reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let ask = |stream: bool| {
+        let body = json!({
+            "model": "claude-x", "max_tokens": 10, "stream": stream,
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        call("messages", body.to_string())
+    };
+
+    let (_, streamed) = h.text(ask(true)).await;
+    let (_, whole) = h.text(ask(false)).await;
+
+    let names: Vec<_> = events(&streamed)
+        .into_iter()
+        .filter_map(|(n, _)| n)
+        .collect();
+    assert_eq!(names.first().map(String::as_str), Some("message_start"));
+    assert_eq!(names.last().map(String::as_str), Some("message_stop"));
+    assert!(streamed.contains("\"text\":\"hi\""), "{streamed}");
+    let whole: Value = serde_json::from_str(&whole).unwrap_or_default();
+    assert_eq!(whole["content"][0]["text"], "Hello world", "{whole}");
+    assert_eq!(whole["usage"]["output_tokens"], 2, "{whole}");
+}
+
+#[tokio::test]
+async fn a_translated_redirect_is_a_bad_gateway() {
+    let h = Harness::new(Vec::new());
+    let moved = http::Response::builder()
+        .status(StatusCode::FOUND)
+        .header("location", "http://elsewhere/")
+        .body(Vec::new())
+        .unwrap_or_default();
+    h.mock.reply(ANTHROPIC, moved);
+
+    let (status, headers, body) = h.send(openai_request("claude-x", false)).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(headers.get("location").is_none());
+    let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
+    assert_eq!(body["error"]["code"], "upstream_error", "{body}");
+}
+
+#[tokio::test]
+async fn a_translated_failure_labelled_as_a_stream_is_still_a_failure() {
+    let h = Harness::new(Vec::new());
+    let failed = http::Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("content-type", "text/event-stream")
+        .body(
+            OPENAI_STREAM
+                .iter()
+                .map(|c| Ok(bytes::Bytes::from(*c)))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+    h.mock.reply(OPENAI, failed);
+
+    let (status, _, body) = h.send(anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
+    assert_eq!(body["type"], "error", "{body}");
+    let end = h.log.only().end.map_err(|f| f.status());
+    assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE));
+}
+
+#[tokio::test]
+async fn a_provider_error_framed_as_an_event_keeps_its_words() {
+    let h = Harness::new(Vec::new());
+    let error =
+        "data: {\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"slow down\"}}\n\n";
+    let failed = http::Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("content-type", "text/event-stream")
+        .body(vec![Ok(bytes::Bytes::from(error))])
+        .unwrap_or_default();
+    h.mock.reply(OPENAI, failed);
+
+    let (status, _, body) = h.send(anthropic_request(true)).await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
+    assert!(body.contains("slow down"), "{body}");
+    let end = h.log.only().end.err().map(|f| f.message().to_owned());
+    assert_eq!(end.as_deref(), Some("slow down"));
+}
+
+#[tokio::test]
+async fn an_anthropic_stream_error_with_no_type_keeps_its_words() {
+    let h = Harness::new(Vec::new());
+    let stream = [
+        ANTHROPIC_STREAM[0],
+        "data: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n",
+    ];
+    h.mock.reply(ANTHROPIC, mock::sse(&stream));
+
+    let (_, _, body) = h.send(openai_request("claude-x", true)).await;
+
+    let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
+    assert!(
+        body.contains("busy") && body.contains("overloaded_error"),
+        "{body}"
+    );
+    let end = h
+        .log
+        .only()
+        .end
+        .map_err(|f| (f.code().to_owned(), f.message().to_owned()));
+    assert_eq!(end, Err(("overloaded_error".to_owned(), "busy".to_owned())));
+}
+
+#[tokio::test]
+async fn a_providers_error_event_mid_stream_is_written_anew_when_translated() {
+    let h = Harness::new(Vec::new());
+    let error = "data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n";
+    h.mock.reply(
+        OPENAI,
+        mock::sse(&[OPENAI_STREAM[0], OPENAI_STREAM[1], error]),
+    );
+
+    let (_, _, body) = h.send(anthropic_request(true)).await;
+
+    let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
+    let (name, data) = events(&body).pop().unwrap_or_default();
+    assert_eq!(name.as_deref(), Some("error"));
+    assert_eq!(data["type"], "error");
+    assert_eq!(
+        (&data["error"]["type"], &data["error"]["message"]),
+        (&json!("server_error"), &json!("boom"))
+    );
+}
+
+#[tokio::test]
+async fn an_anthropic_error_after_its_message_delta_keeps_both_and_ends_last() {
+    let h = Harness::new(Vec::new());
+    let error = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n";
+    let stream = [ANTHROPIC_STREAM[0], ANTHROPIC_STREAM[5], error];
+    h.mock.reply(ANTHROPIC, mock::sse(&stream));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    let (_, out) = h.text(call("messages", body.to_string())).await;
+
+    assert!(out.contains("message_delta"), "{out}");
+    assert!(out.ends_with(error), "{out}");
+    let end = h.log.only().end.map_err(|f| f.code().to_owned());
+    assert_eq!(end, Err("overloaded_error".to_owned()));
+}
