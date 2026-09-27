@@ -56,10 +56,9 @@ the square of the formats and give plugins no typed view.
 - New behaviour comes as trait methods with defaults, `Context` methods, or
   entry points beside `Gateway::handle`. The `Arc` impls of `Format`,
   `Plugin` and `Transport` forward every method, as any wrapper must.
-- A plugin without a hook added later covers nothing that hook sees; the
-  kernel refuses what a required plugin's missing hook would miss. With the
-  first such hook comes a method, taking `self: Arc<Self>`, that lists a
-  plugin's hooks as objects; its default gives today's two.
+- A plugin without a hook added later covers nothing that hook sees. A
+  required plugin declares the hooks it covers, and the kernel refuses what
+  it would miss.
 - `Kind::new` and `Gateway::new` keep their signatures. More kind types
   come as methods beside `Kind::new`; gateway-wide settings (required
   plugins, the drain, the store) as by-value methods beside `Gateway::new`,
@@ -85,7 +84,7 @@ Each lands additively; names are chosen when it comes.
 **Calls**
 
 - A call with its own `http::Request`, of any kind, format and provider.
-- A per-call hook, known when the route is built. It runs for every call
+- A per-call hook, a trait method with a default. It runs for every call
   the request makes, whoever makes it, even before `on_request`, and can:
   - wait, such as for capacity, refuse before anything is sent, and add to
     the call's facts;
@@ -286,11 +285,11 @@ Each lands additively; names are chosen when it comes.
 
 **Other**
 
-- Plugins required on the gateway, declaring the kinds or formats they
-  cover, for every request or per scope; the kernel refuses any request or
-  call they cannot cover. One checks each call in the per-call hook after
-  the route's plugins, and a plugin's answer before it is committed; its
-  filter is added first, so it sees what the client gets.
+- Plugins required on the gateway, declaring the kinds or formats and the
+  hooks they cover, for every request or per scope; the kernel refuses any
+  request or call they cannot cover. One checks each call in the per-call
+  hook after the route's plugins, and a plugin's answer before it is
+  committed; its filter is added first, so it sees what the client gets.
 - Formats writing path or header fields from the typed request.
 - Translation between kinds, under a decision of its own.
 - A keyed provider's error text, which may name the operator's account,
