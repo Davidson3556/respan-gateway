@@ -85,9 +85,8 @@ impl Config {
         serde_norway::from_str(yaml).map_err(|e| Fault::config(e.to_string()))
     }
 
-    /// A gateway from this config, reaching each provider through the
-    /// transport `transport` builds from its base URL and auth headers,
-    /// with formats looked up in `formats`.
+    /// Builds the gateway: each provider's transport comes from `transport`,
+    /// given its base URL and auth headers; formats are found in `formats`.
     pub fn build<T: Transport>(
         &self,
         transport: impl Fn(&str, HeaderMap) -> Result<T, Fault>,

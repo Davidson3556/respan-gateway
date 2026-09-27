@@ -5,7 +5,8 @@ for LLM traffic what Nginx is for HTTP: a small, fast, predictable core, with
 everything else built as modules on one public API.
 
 > **Status: pre-alpha.** Relays OpenAI and Anthropic chat traffic and
-> translates text between them (no tools or images yet). APIs will change.
+> translates text between them; tools and images come in M5. APIs will
+> change.
 
 ## Ground rules
 
@@ -39,7 +40,7 @@ Each format served recognises its own requests (OpenAI Chat a `POST` to
 else is a 404.
 
 A provider's `base_url` is the one its own SDK takes. OpenAI-compatible
-ones hold the version, such as `https://api.openai.com/v1`,
+ones include the version, such as `https://api.openai.com/v1`,
 `https://api.groq.com/openai/v1` or
 `https://generativelanguage.googleapis.com/v1beta/openai`; Anthropic's does
 not: `https://api.anthropic.com`.

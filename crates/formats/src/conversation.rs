@@ -1,15 +1,15 @@
 //! The conversation kind: chats with a language model. OpenAI Chat
 //! Completions and Anthropic Messages translate to each other through these
-//! types. Plugins that work on any conversation, such as PII redaction, use
-//! them too: `cx.input_mut::<Conversation>()` for the request and
-//! `cx.filter(|r: &mut Reply| ..)` for the response, streamed or not.
+//! types, and so do plugins for any conversation, such as PII redaction:
+//! `cx.input_mut::<Conversation>()` for the input and
+//! `cx.filter(|r: &mut Reply| ..)` for the output, streamed or not.
 //!
 //! What the kind has no form for stays as the client's format has it: a
 //! request's fields in [`Conversation::unsupported`], a message's in
-//! [`Message::unsupported`], a content part as [`Content::Other`]. It is
-//! sent as it is to a provider of the client's format. For another format
-//! the request is refused rather than sent without it, unless it cannot
-//! change the answer: a cache hint, a user id, a field at its default.
+//! [`Message::unsupported`], a content part as [`Content::Other`]. A
+//! provider of the client's format gets it as it is. For another format the
+//! request is refused, unless the field cannot change the answer: a cache
+//! hint, a user id, a field at its default.
 
 use respan_gateway_core::serde_json;
 use std::sync::Arc;
@@ -32,18 +32,16 @@ pub mod units {
     pub const REASONING_TOKENS: &str = "reasoning_tokens";
 }
 
-/// A conversation request: the kind's input type. The model is held by
-/// the kernel, as [`Context::model`](respan_gateway_core::Context::model).
+/// The kind's input: a conversation request. The kernel holds its model,
+/// as [`Context::model`](respan_gateway_core::Context::model).
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Conversation {
     /// The messages, in order.
     pub messages: Vec<Message>,
-    /// Whether the client asked for a streamed response. A provider of
-    /// another format may answer either way; its response is written anew
-    /// as asked. A provider of the client's format frames its response as
-    /// this says and is relayed as it comes, so a plugin that changes this
-    /// gets that framing.
+    /// Whether the request asks for a stream. The client always gets the
+    /// framing its own request asked for; a response framed otherwise, such
+    /// as after a plugin changed this, is written anew from its events.
     pub stream: bool,
     /// The most tokens the answer may have.
     pub max_tokens: Option<u64>,
@@ -54,7 +52,7 @@ pub struct Conversation {
     /// Sequences that stop the answer.
     pub stop: Vec<String>,
     /// The request's fields the kind has no place for, such as its tools.
-    /// A plugin that removes one sends the request without it.
+    /// A field a plugin removes is not sent.
     pub unsupported: Map<String, Value>,
 }
 
@@ -101,25 +99,24 @@ impl Message {
         }
     }
 
-    /// This message, decoded from `source`, the client's message in its
-    /// format; for formats, not plugins. An unchanged message is sent as
-    /// `source`; a changed one is written in its form. A message counts as
-    /// the client's by sharing its source ([`Message::same_source`]), not by
-    /// equal content, so one given a new source is written anew.
+    /// Records `source`, the client's message this was decoded from; for
+    /// formats, not plugins. An unchanged message is sent as `source`, a
+    /// changed one written in its shape. A message is the client's if it
+    /// shares the source ([`Message::same_source`]), not if its content is
+    /// equal, so one given a new source is written anew.
     pub fn with_source(mut self, source: Value) -> Self {
         self.source = Some(Arc::new(source));
         self
     }
 
-    /// The client's message this was decoded from, if any, for formats to
-    /// write a message in its form.
+    /// The client's message this was decoded from, if any.
     pub fn source(&self) -> Option<&Value> {
         self.source.as_deref()
     }
 
-    /// Whether `self` and `other` were decoded from the same client message,
-    /// wherever plugins moved them. A format uses it to tell a client
-    /// message, edited or not, from a new one.
+    /// Whether `self` and `other` were decoded from the same client
+    /// message, wherever plugins moved them: a client message, edited or
+    /// not, rather than a new one.
     pub fn same_source(&self, other: &Message) -> bool {
         matches!((&self.source, &other.source), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
     }
@@ -137,8 +134,7 @@ impl Message {
     }
 
     /// Whether the kind holds all of the message: a known role, text parts
-    /// and nothing else. A guard refuses a message that is not, as content
-    /// it cannot read.
+    /// and nothing else. A guard refuses any other message as unreadable.
     pub fn is_plain(&self) -> bool {
         let text = |c: &Content| matches!(c, Content::Text { .. });
         !matches!(self.role, Role::Other(_))
@@ -205,15 +201,13 @@ impl From<String> for Content {
     }
 }
 
-/// A reply: an event of a response, streamed or whole, the kind's output
-/// type.
+/// The kind's output: one event of a response, streamed or whole.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Reply {
-    /// Which response this is: the provider's id and model as it gave
-    /// them, even after translation, or a plugin's own. A stream may repeat
-    /// it, as OpenAI's chunks do, so it says nothing about the content
-    /// around it.
+    /// Which response this is: the provider's id and model, even after
+    /// translation, or a plugin's own. A stream may repeat it, as OpenAI's
+    /// chunks do, so it marks no boundary in the content.
     #[non_exhaustive]
     Start {
         /// The response's id.
@@ -231,9 +225,9 @@ pub enum Reply {
     },
     /// Content the kind has no form for, such as a tool call or reasoning,
     /// as the provider's `format` has it. It reaches clients of that format;
-    /// translating it is refused. New forms become new variants, so a
-    /// plugin that must see all content handles the variants it knows and
-    /// refuses the rest. Shared, as it may be large.
+    /// translating it is refused. A plugin that must see all content
+    /// handles the variants it knows and refuses the rest. Shared, as it may
+    /// be large.
     #[non_exhaustive]
     Other {
         /// The name of the format `raw` is in.

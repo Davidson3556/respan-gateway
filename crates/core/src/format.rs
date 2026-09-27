@@ -5,11 +5,9 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{Doc, Fault, Part};
 
-/// The client's request as formats see it, in the client's format (which
-/// may not be the viewing format), with the model to send. Its head is the
-/// head as plugins left it ([`Context::head_mut`](crate::Context::head_mut)),
-/// on a call with that call's extensions; only its body is as it arrived.
-/// On a call, the model is that call's.
+/// The client's request as a format sees it, which may be in another
+/// format: the head as plugins left it, the body as it arrived, and the
+/// model to send. On a call, the extensions and model are the call's.
 #[derive(Debug, Clone, Copy)]
 pub struct ClientView<'a> {
     own: bool,
@@ -33,31 +31,29 @@ impl<'a> ClientView<'a> {
         }
     }
 
-    /// The client's request line and headers as plugins left them, in its
-    /// format, even for a call with an input of its own. Values attached by
-    /// type are in its `extensions`, as the call's hooks left them, which
-    /// any format may read.
+    /// The client's request line and headers as plugins left them
+    /// ([`Context::head_mut`](crate::Context::head_mut)). Any format may
+    /// read its `extensions`.
     pub fn head(&self) -> &'a http::request::Parts {
         self.head
     }
 
-    /// Whether the viewing format is the client's, whose headers are then
-    /// its own.
+    /// Whether the viewing format is the client's.
     pub fn is_own(&self) -> bool {
         self.own
     }
 
     /// The client's body, if the viewing format is the client's
-    /// ([`is_own`](Self::is_own)), even for a call with an input of its own,
-    /// whose body `prepare` is given instead.
+    /// ([`is_own`](Self::is_own)). A call with its own input still sees the
+    /// client's here; `prepare` gets the call's.
     pub fn body(&self) -> Option<&'a Doc> {
         self.own.then_some(self.body)
     }
 
     /// The model to send: the call's ([`Call::model`](crate::Call::model)
     /// or [`ProviderContext::set_model`](crate::ProviderContext::set_model)),
-    /// else [`Context::model`](crate::Context::model), the one a plugin set
-    /// or the client's; `None`, and none written, if none names one.
+    /// else [`Context::model`](crate::Context::model); `None` if none is
+    /// named, and then none is written.
     pub fn model(&self) -> Option<&'a str> {
         self.model
     }
@@ -66,129 +62,100 @@ impl<'a> ClientView<'a> {
 /// A wire protocol. Stateless and shared; each response gets its own
 /// [`Decoder`] and [`Encoder`].
 ///
-/// Its kind is its pair of types: `Input`, what the protocol's caller
-/// sends, and `Output`, what it gets back. Both are named from the
-/// protocol's view, so they hold on both edges. A plain HTTP request is
-/// one input, its whole body; a stream's response is many outputs. Formats
-/// with the same pair are of one kind: a client in one reaches a provider
-/// in another through `decode` and `encode`. Anyone may define a kind
-/// outside the kernel.
+/// Its kind is its pair of types: `Input`, what a caller of the protocol
+/// sends, and `Output`, what it gets back, on both edges. A request is one
+/// input; a streamed response is many outputs. Formats of one kind
+/// translate through `decode` and `encode`. Kinds live outside the kernel.
 ///
-/// The two types must differ, as the type names the direction: a format
-/// with one type for both fails the build ([`Gateway::new`](crate::Gateway::new),
-/// [`Gateway::serve`](crate::Gateway::serve)).
-/// Both should be the kind's own: a type shared with another kind, such as
-/// `serde_json::Value`, lets a plugin for one read the other's traffic. A
-/// format of no kind, which only relays its own traffic and whose requests
-/// plugins cannot read, declares `()` for both; the kernel never calls its
-/// `decode` or `encode`.
+/// The two types must differ, since the type names the direction;
+/// otherwise [`Gateway::new`](crate::Gateway::new) and
+/// [`Gateway::serve`](crate::Gateway::serve) fail. Both should belong to
+/// the kind alone: a shared type such as `serde_json::Value` lets a plugin
+/// for one kind read another's traffic. A format of no kind declares `()`
+/// for both: it only relays, plugins cannot read it, and its `decode` and
+/// `encode` are never called.
 pub trait Format: Send + Sync + 'static {
-    /// What the protocol's caller sends, which the kernel copies and
-    /// compares to tell what a plugin changed. It does not hold the model:
-    /// the kernel does ([`Context::model`](crate::Context::model)), and
-    /// [`Format::prepare`] writes it.
+    /// What a caller sends, compared to tell what a plugin changed. It
+    /// leaves out the model, which the kernel holds
+    /// ([`Context::model`](crate::Context::model)) and
+    /// [`Format::prepare`] writes.
     type Input: Event;
 
-    /// What the protocol's caller gets back: the events responses decode
-    /// into, which filters compare.
+    /// What a caller gets back: the events responses decode into.
     type Output: Event;
 
-    /// The protocol's identity. Variants of one protocol, such as a
-    /// provider's own endpoint for it, share the name, so their traffic is
-    /// relayed, not translated. Formats of one name must share a kind, or
-    /// the gateway does not build.
+    /// The protocol's identity. Formats of one name relay to each other
+    /// rather than translate, and must share a kind.
     fn name(&self) -> &str;
 
-    /// Whether a client request with `head` is of this format, told from
-    /// the head alone, such as its method and path: the gateway serves a
-    /// request in the first format given to
-    /// [`Gateway::serve`](crate::Gateway::serve) that accepts it. The body
-    /// is never read here. A format given only to providers is never asked,
-    /// and may answer `false`.
+    /// Whether a client request with `head` is of this format, from the
+    /// head alone. A request goes to the first format given to
+    /// [`Gateway::serve`](crate::Gateway::serve) that accepts it. Formats
+    /// used only by providers are never asked.
     fn accepts(&self, head: &http::request::Parts) -> bool;
 
-    /// The model a client request asks for, wherever this format keeps it:
-    /// in the body, the path, or a header. `None` if it names none. `head`
-    /// is the head as it arrived, before any plugin's edit.
+    /// The model a client request names, wherever this format keeps it;
+    /// `None` if none. `head` is as it arrived.
     fn model(&self, _head: &http::request::Parts, _body: &Doc) -> Option<String> {
         None
     }
 
-    /// A client request of this format as its input. It refuses, with
-    /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST), only a body that
-    /// is not this format; what `Input` has no place for is noted in it,
-    /// not refused, as the request may go to a provider of this format.
-    /// `head` is the head as it arrived, so reading the input never changes
-    /// what is sent; a plugin's edit to the head reaches calls only through
-    /// [`Format::prepare`].
+    /// A client request of this format as its input. `Err` with
+    /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) only for a body
+    /// not of this format; note in the input what it cannot hold rather
+    /// than refuse it, as a provider of this format may take it. `head` is
+    /// as it arrived, so reading the input never changes what is sent.
     fn decode(&self, head: &http::request::Parts, body: &Doc) -> Result<Self::Input, Fault>;
 
-    /// An input as a body of this format. When the client's body is in this
-    /// format too, `original` is that body and the input decoded from it,
-    /// and the body is patched with what changed, keeping what `Input`
-    /// cannot hold. Otherwise it refuses, rather than drops, what this
-    /// format cannot say. It runs only for an input a plugin changed or
-    /// brought, or one going to another format; an unchanged one goes as
-    /// it came. `Err` with [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST)
-    /// for what the client sent that this format cannot say, and with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) for a plugin's change it
-    /// cannot make.
+    /// An input as a body of this format. If the client's body is of this
+    /// format, `original` is that body and its decoded input: patch the
+    /// body with what changed, keeping what `Input` cannot hold. Called
+    /// only for a changed or brought input, or across formats. Never drop
+    /// what this format cannot say: `Err` with
+    /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) if the client sent
+    /// it, [`codes::CONFIG`](crate::codes::CONFIG) if a plugin did.
     fn encode(
         &self,
         input: &Self::Input,
         original: Option<(&Doc, &Self::Input)>,
     ) -> Result<Doc, Fault>;
 
-    /// The call's HTTP request for `body` in this format: method, path and
-    /// query (relative to the provider's transport), content type, the
-    /// client's headers it passes on, and `client.model()`. `client` may be
-    /// in another format. Within one format ([`ClientView::is_own`]) the
-    /// client's end-to-end headers pass on, credentials included: the
-    /// transport knows whose keys go to the provider; across formats, being
-    /// another protocol's, none.
+    /// The call's HTTP request for `body`: method, path and query (relative
+    /// to the transport), content type, passed-on client headers, and
+    /// `client.model()`. Within one format ([`ClientView::is_own`]) pass on
+    /// the client's headers, credentials included, since the transport
+    /// decides whose keys reach the provider; across formats, pass none.
     ///
-    /// The kernel then drops `Content-Encoding` if the prepared body's bytes
-    /// are not the client's as they arrived, such as when patched, encoded
-    /// anew or given the model, and removes hop-by-hop headers
-    /// (`Proxy-Authorization`, `Content-Length` and `TE` among them,
-    /// keeping `te: trailers`), `Host` and `Expect`; the transport adds its
-    /// own. Headers the client's `Connection` names are not in `client`.
-    /// `Err` with [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) for a
-    /// body it cannot write the model into.
+    /// The kernel then drops `Content-Encoding` if the body's bytes differ
+    /// from the client's, and removes hop-by-hop headers (keeping
+    /// `te: trailers`), `Host` and `Expect`. `client` already lacks the
+    /// headers the client's `Connection` names. `Err` with
+    /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) for a body it
+    /// cannot write the model into.
     fn prepare(&self, body: Doc, client: ClientView<'_>) -> Result<http::Request<Doc>, Fault>;
 
-    /// Bytes to Parts, for a response with `head` to `client`'s request,
-    /// which may be in another format. The decoder reads what the response
-    /// is from `head`; `client` only says what the client sees, such as
-    /// whether it asked for something this format adds.
+    /// Bytes to Parts, for a response with `head` to `client`'s request.
+    /// The response is read from `head`; `client` only says what the client
+    /// asked for.
     fn decoder(&self, head: &http::response::Parts, client: ClientView<'_>) -> Box<dyn Decoder>;
 
-    /// Parts to bytes, for the response to `client`: bytes already in this
-    /// format (`relayed`) or Parts made anew. `client` is the client's own
-    /// request, so its [`is_own`](ClientView::is_own) is `true`, and its
-    /// [`model`](ClientView::model) is the request's, not that of the call
-    /// that answered.
+    /// Parts to bytes, for the response to `client`, the client's own
+    /// request ([`is_own`](ClientView::is_own) is `true`, and the model is
+    /// the request's). `relayed` if the Parts came in this format.
     ///
-    /// Relayed: `head` is the response's. Items are written as their bytes,
-    /// or rebuilt from them once edited; Frames as they are. Events a filter
-    /// adds come as items without bytes.
+    /// Relayed: `head` is the response's. Write an item as its bytes, or
+    /// rebuild it from them once edited, and Frames as they are. Events a
+    /// filter adds come as items without bytes.
     ///
-    /// Made anew: `head` is a plugin's, or the status and `Retry-After` of a
-    /// provider's response that was translated or answered a call's own
-    /// input. A provider's is never a redirect (301, 302, 303, 307 or 308
-    /// with a `Location`): the kernel refuses that as a 502, as its
-    /// `Location` would not reach the client. Any other status passes, a
-    /// 304 or 300 too, written as a failure if its format read one. The
-    /// encoder
-    /// sets the content type if there is none, as the client's request
-    /// asks. A format whose requests cannot ask to stream writes a
-    /// translated response whole. Items are written from their events; one
-    /// this format cannot write is an `Err`, so nothing is dropped.
+    /// Otherwise: `head` is a plugin's, or a provider's status and
+    /// `Retry-After`; never a redirect, which the kernel refuses as a 502.
+    /// Set the content type if there is none. Write items from their
+    /// events, whole if the client could not ask to stream; one this format
+    /// cannot write is an `Err`, so nothing is dropped.
     ///
-    /// `Usage` always comes; relayed, its bytes already say it. A failure is
-    /// written in this format's framing. The end always comes, except,
-    /// relayed, a [`Fault::said`] one: its Frame already said it, so the
-    /// encoder is not handed it.
+    /// `Usage` always comes; relayed, its bytes already carry it. Write a
+    /// failure in this format's framing. The end always comes, except a
+    /// relayed [`Fault::said`] one, which its Frame already wrote.
     fn encoder(
         &self,
         head: &mut http::response::Parts,
@@ -268,7 +235,7 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
         client: ClientView<'_>,
         relayed: bool,
     ) -> Box<dyn Encoder>;
-    /// Its kind: its input and output types; `None` for `()`, no kind.
+    /// Its input and output types; `None` for no kind.
     fn kind(&self) -> Option<(TypeId, TypeId)>;
     fn decode(&self, head: &http::request::Parts, body: &Doc) -> Result<AnyInput, Fault>;
     fn encode(&self, input: &AnyInput, original: Option<(&Doc, &AnyInput)>) -> Result<Doc, Fault>;
@@ -332,34 +299,31 @@ impl<F: Format> AnyFormat for F {
     }
 }
 
-/// An input as its format's type, which the kernel checked when it took it.
+/// An input as its format's type, checked when the kernel took it.
 fn typed<T: Any>(input: &AnyInput) -> &T {
     input
         .downcast_ref()
         .expect("inputs are checked to be of their format's kind")
 }
 
-/// Bytes to Parts, for one response. Every byte belongs to a Part, an
-/// item's bytes or a Frame, except what the format leaves out on purpose.
-/// A failed response, by error status or by an error the format reads as
-/// failing a success, ends `Err`; a success that is not a response of its
-/// format ends `Err` with [`codes::UPSTREAM`](crate::codes::UPSTREAM).
-/// Parts after the first `Part::End` are ignored; with none, the response
-/// ends truncated. Trailers are not delivered.
+/// Bytes to Parts, for one response. Every byte belongs to an item or a
+/// Frame, except what the format drops on purpose. A failed response ends
+/// `Err`; a success that is not of this format ends `Err` with
+/// [`codes::UPSTREAM`](crate::codes::UPSTREAM). Parts after the first
+/// `Part::End` are ignored; with none, the response ends truncated.
+/// Trailers are not delivered.
 pub trait Decoder: Send + 'static {
     /// Decode what is whole; hold back an incomplete message for later.
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<Part>);
 
-    /// The body ended. Bytes of an incomplete message are not content:
-    /// without a `Part::End` the response ends truncated.
+    /// The body ended. Without a `Part::End` the response ends truncated.
     fn finish(&mut self, _out: &mut Vec<Part>) {}
 }
 
 /// Parts to bytes, for one response.
 pub trait Encoder: Send + 'static {
-    /// Write `part` to `out`. `Err` if it cannot be written: what it wrote
-    /// of it is dropped, and the response fails with that fault, handed
-    /// back as a failed `Part::End`. If that cannot be written either, such
-    /// as once a successful unary body began, the body is aborted.
+    /// Write `part` to `out`. On `Err` its partial output is dropped and
+    /// the fault comes back as a failed `Part::End`; if that fails too, the
+    /// body is aborted.
     fn encode(&mut self, part: &Part, out: &mut BytesMut) -> Result<(), Fault>;
 }

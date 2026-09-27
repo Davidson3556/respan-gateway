@@ -51,8 +51,7 @@ impl From<String> for Target {
     }
 }
 
-/// A provider the gateway can call: a name, the format it speaks, and the
-/// transport that reaches it.
+/// A provider the gateway can call: a name, a format and a transport.
 #[derive(Clone)]
 pub struct Provider {
     pub(crate) name: String,
@@ -70,8 +69,7 @@ impl std::fmt::Debug for Provider {
 }
 
 impl Provider {
-    /// A provider named `name`, speaking `format`, reached through
-    /// `transport`, which its calls share.
+    /// A provider named `name`, speaking `format` over `transport`.
     pub fn new(name: impl Into<String>, format: impl Format, transport: impl Transport) -> Self {
         Self {
             name: name.into(),
@@ -81,8 +79,7 @@ impl Provider {
     }
 }
 
-/// A plugin as registered: its name, and the plugins it runs after, by
-/// registration index.
+/// A registered plugin and the plugins it runs after, by index.
 #[derive(Clone)]
 struct Registered {
     name: String,
@@ -105,13 +102,13 @@ pub(crate) struct Inner {
     pub(crate) in_flight: Arc<InFlight>,
 }
 
-/// The gateway. It has no server inside: hand it requests from an HTTP
-/// adapter, an embedding program, or anything else.
+/// The gateway. It has no server: an HTTP adapter or an embedding program
+/// hands it requests.
 ///
 /// Built by value, each setting checked as it is given:
 /// `Gateway::new(providers)?.serve(format)?.plugin(name, plugin)?`, then
-/// [`after`](Gateway::after) and [`target`](Gateway::target). Settings are
-/// given before the gateway is cloned or used.
+/// [`after`](Gateway::after) and [`target`](Gateway::target), all before
+/// it is cloned or used.
 #[derive(Clone)]
 pub struct Gateway {
     inner: Arc<Inner>,
@@ -130,10 +127,9 @@ impl std::fmt::Debug for Gateway {
 }
 
 impl Gateway {
-    /// A gateway with `providers`, serving no format yet, with no plugins
-    /// and no target. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if
-    /// two providers share a name, or their formats break a rule of
-    /// [`Gateway::serve`].
+    /// A gateway with `providers` and nothing else. `Err` with
+    /// [`codes::CONFIG`](crate::codes::CONFIG) if two providers share a
+    /// name, or a format breaks a rule of [`Gateway::serve`].
     pub fn new(providers: impl IntoIterator<Item = Provider>) -> Result<Gateway, Fault> {
         let mut gateway = Gateway {
             inner: Arc::new(Inner {
@@ -170,9 +166,8 @@ impl Gateway {
     }
 
     /// Register `plugin` as `name`. Its hooks run on every request and
-    /// every call, in the gateway's order ([`after`](Gateway::after)).
-    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the name is
-    /// taken.
+    /// call, in the gateway's order ([`after`](Gateway::after)). `Err` with
+    /// [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
     pub fn plugin(
         mut self,
         name: impl Into<String>,
@@ -195,13 +190,11 @@ impl Gateway {
         Ok(self)
     }
 
-    /// Run plugin `name` after each of `before`, on both edges. The order
-    /// is built one plugin at a time: next comes the earliest registered
-    /// of those whose `after` plugins have all run. Registered `a`, `b`,
-    /// `c` with `a` after `c`, they run `b`, `c`, `a`. A plugin's filters
-    /// wrap those of the plugins after it. `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) for a name not registered,
-    /// or a cycle: a plugin that would run after itself.
+    /// Run plugin `name` after each of `before`, on both edges. Next in
+    /// order is always the earliest registered plugin whose `after` plugins
+    /// have all run: registered `a`, `b`, `c` with `a` after `c` run `b`,
+    /// `c`, `a`. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) for an
+    /// unregistered name or a cycle.
     pub fn after<S: AsRef<str>>(
         mut self,
         name: &str,
@@ -228,11 +221,10 @@ impl Gateway {
         Ok(self)
     }
 
-    /// The provider that answers a request if every plugin passes and none
-    /// set a target ([`Context::set_target`]). `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) if the gateway has no such
-    /// provider. A request whose format shares neither format nor kind with
-    /// it is refused like any target it cannot use ([`Context::call`]).
+    /// The provider that answers if every plugin passes and none set a
+    /// target ([`Context::set_target`]). `Err` with
+    /// [`codes::CONFIG`](crate::codes::CONFIG) for an unknown provider. A
+    /// request that cannot use it is refused as [`Context::call`] says.
     pub fn target(mut self, provider: impl Into<Target>) -> Result<Gateway, Fault> {
         let target = provider.into();
         self.check_target(target.name())?;
@@ -240,11 +232,9 @@ impl Gateway {
         Ok(self)
     }
 
-    /// `Ok` if the gateway has `provider`, as a target a plugin sets must;
-    /// else `Err` with [`codes::CONFIG`](crate::codes::CONFIG). Not whether
-    /// it serves any model, nor whether a given request's format can use
-    /// it, which is known per request. A config uses this for targets its
-    /// routers may set.
+    /// `Ok` if the gateway has `provider`, else `Err` with
+    /// [`codes::CONFIG`](crate::codes::CONFIG), such as to check targets a
+    /// router may set. Whether a request can use it is known per request.
     pub fn check_target(&self, provider: impl Into<Target>) -> Result<(), Fault> {
         let name = provider.into();
         match self.inner.providers.contains_key(name.name()) {
@@ -253,33 +243,29 @@ impl Gateway {
         }
     }
 
-    /// Resolves once every request this gateway was handed has ended,
-    /// its response included, and every end hook, `on_client_end` and
-    /// `on_provider_end`, has finished. Call it on shutdown or after a
-    /// config swap so no end hook is lost; it waits as long as responses
-    /// stream and hooks run, so bound it with a deadline of your own. A
-    /// gateway given a setting after being cloned is a new one, which waits
-    /// only for its own requests.
+    /// Resolves once every request handed to this gateway has ended, its
+    /// response included, and every end hook has finished. Await it on
+    /// shutdown or after a config swap so no end hook is lost, under a
+    /// deadline of your own. A gateway changed after being cloned is a new
+    /// one and waits only for its own requests.
     pub async fn idle(&self) {
         self.inner.in_flight.idle().await;
     }
 
     /// Run `req` in the first format served that accepts it
-    /// ([`Format::accepts`]). Its head, extensions included, reaches
-    /// plugins as [`Context::head`]. The gateway's own credentials, such as
-    /// its auth header, must be removed by the caller first, or by a plugin
-    /// ([`Context::head_mut`]), as formats may pass the client's headers on.
-    /// A request no format accepts gets a plain-text 404, and a format that
-    /// panics before it can write a plain-text 500; the rest is in the
-    /// client's format. The request body is read whole, so the caller
-    /// bounds it; a body that fails while read is refused with its error's
-    /// fault, in the client's format, before any plugin runs or its format
-    /// reads it; so is one whose model the format would read from JSON
-    /// nested too deeply ([`Doc::json`]), with
+    /// ([`Format::accepts`]); plugins see its head as [`Context::head`].
+    /// Remove the gateway's own credentials first, here or in a plugin
+    /// ([`Context::head_mut`]), as formats may pass client headers on.
+    ///
+    /// A request no format accepts gets a plain-text 404, and a format
+    /// panic before it can write gets a plain-text 500; everything else is
+    /// in the client's format. The body is read whole, so the caller bounds
+    /// it. Before any plugin runs, a body that fails while read is refused
+    /// with its fault, and one whose model is read from JSON nested too
+    /// deeply ([`Doc::json`]) with
     /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST). A 204, a 304 or
-    /// an answer to `HEAD` is read to its end before its head goes out, and
-    /// sent with no body. The response body is `Send`, not `Sync`; a host
-    /// that needs `Sync` wraps it.
+    /// an answer to `HEAD` is sent with no body. The response body is
+    /// `Send`, not `Sync`.
     pub async fn handle<B>(&self, req: http::Request<B>) -> http::Response<Body>
     where
         B: http_body::Body<Data = Bytes> + Send + 'static,
@@ -288,7 +274,7 @@ impl Gateway {
         // In flight until its end hooks finish, for `idle`.
         let _live = InFlight::enter(self.inner.in_flight.clone());
         let (head, body) = req.into_parts();
-        // A format that panics telling its requests is refused plainly.
+        // A format that panics in `accepts` gets a plain refusal.
         let formats = &self.inner.formats;
         let accepts = || formats.iter().find(|f| f.accepts(&head)).cloned();
         let format = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
@@ -307,9 +293,8 @@ impl Gateway {
             Ok(collected) => (Doc::from(collected.to_bytes()), None),
             Err(fault) => (Doc::default(), Some(fault)),
         };
-        // A body that broke off is refused with its fault: no format reads
-        // it. A format that panics reading the model has no response of its
-        // own.
+        // No format reads a body that broke off. A format that panics
+        // reading the model gets a plain refusal.
         let model = || {
             broken
                 .is_none()
@@ -331,11 +316,10 @@ impl Gateway {
         let resp = match broken.or(deep) {
             Some(fault) => refuse(format, fault, lifecycle).await,
             None => {
-                // A plugin that panics is refused like one that fails, in
-                // the client's format.
+                // A plugin panic is refused like a failure.
                 let ran = AssertUnwindSafe(run(&self.inner, &mut lifecycle)).catch_unwind();
                 let ran = ran.await;
-                // Its calls' responses are no longer its plugins' to read.
+                // Its plugins may not read its calls' responses from here.
                 lifecycle.cx().open.answered();
                 match ran {
                     Ok(Ok(resp)) => commit(format, resp, lifecycle).await,
@@ -347,8 +331,8 @@ impl Gateway {
         closed(resp, Some(ended))
     }
 
-    /// The gateway's settings, for a by-value method to change. A gateway
-    /// changed after being cloned is a new one, with its own requests.
+    /// The settings, for a by-value method to change. A gateway changed
+    /// after being cloned is a new one, with its own requests.
     fn inner_mut(&mut self) -> &mut Inner {
         if Arc::strong_count(&self.inner) > 1 {
             let mut inner = (*self.inner).clone();
@@ -367,8 +351,8 @@ impl Gateway {
             .ok_or_else(|| Fault::config(format!("unknown plugin '{name}'")))
     }
 
-    /// `Ok` if `format` may join the gateway: its kind's two types differ,
-    /// and formats of its name are of its kind.
+    /// `Ok` if `format`'s two types differ and formats of its name share
+    /// its kind.
     fn check_format(&self, format: &dyn AnyFormat) -> Result<(), Fault> {
         let kind = format.kind();
         let name = format.name();
@@ -390,9 +374,8 @@ impl Gateway {
 }
 
 impl Inner {
-    /// Derive the chain from the registry: at each step, the earliest
-    /// registered plugin whose `after` plugins are all placed. The registry
-    /// has no cycle.
+    /// Derive the chain: at each step, the earliest registered plugin whose
+    /// `after` plugins are placed. The registry has no cycle.
     fn order(&mut self) {
         let plugins = &self.plugins;
         let mut placed = vec![false; plugins.len()];
@@ -423,10 +406,10 @@ fn runs_after(plugins: &[Registered], later: usize, first: usize) -> bool {
     false
 }
 
-/// How a request handed to [`Gateway::handle`] ended: a future of its
-/// [`Outcome`], in every response's extensions, ready once the response
-/// ends, such as for billing. `None` if no format served accepted the
-/// request, or its format panicked telling or reading it.
+/// A future of how a request handed to [`Gateway::handle`] ended, in its
+/// response's extensions. Resolves to the [`Outcome`] once the response
+/// ends, or `None` if no format accepted the request or its format
+/// panicked before a response.
 #[derive(Clone)]
 pub struct Closed(Shared<oneshot::Receiver<Outcome>>);
 
@@ -437,10 +420,9 @@ impl std::fmt::Debug for Closed {
 }
 
 impl Closed {
-    /// The `Closed` of a response [`Gateway::handle`] returned, which every
-    /// such response has; for another, one that resolves to `None`. Await
-    /// it after reading the body: it resolves as the response ends, before
-    /// end hooks finish ([`Gateway::idle`] waits for those).
+    /// The `Closed` of a response from [`Gateway::handle`]; for any other,
+    /// one that resolves to `None`. Await it after reading the body. It
+    /// resolves before end hooks finish ([`Gateway::idle`] waits for them).
     pub fn of<B>(response: &http::Response<B>) -> Closed {
         let none = || Closed(oneshot::channel().1.shared());
         response
@@ -459,8 +441,7 @@ impl Future for Closed {
     }
 }
 
-/// `resp` with its [`Closed`], from `ended` or, with none, resolving to
-/// `None`.
+/// `resp` with its [`Closed`]; without `ended`, it resolves to `None`.
 fn closed(
     mut resp: http::Response<Body>,
     ended: Option<oneshot::Receiver<Outcome>>,
@@ -498,8 +479,7 @@ async fn run(gateway: &Inner, lifecycle: &mut EndHooks<Context>) -> Result<Respo
     }
 }
 
-/// A refusal is a response that fails at once, written in the client's
-/// format like any other.
+/// A refusal: a response that fails at once, in the client's format.
 async fn refuse(
     format: &dyn AnyFormat,
     fault: Fault,
@@ -518,10 +498,9 @@ fn is_error(status: StatusCode) -> bool {
     status.is_client_error() || status.is_server_error()
 }
 
-/// Send `resp`. Its head waits for the first bytes: a success that fails
-/// before any, such as a unary one a guardrail stops, is sent as a refusal
-/// with the fault's status. Head edits apply to the head that goes out,
-/// whose status the `Outcome` gets.
+/// Send `resp`. The head waits for the first bytes, so a success that fails
+/// before any is sent as a refusal with the fault's status. Head edits
+/// apply to the outgoing head, whose status the `Outcome` gets.
 async fn commit(
     format: &dyn AnyFormat,
     resp: Response,
@@ -529,8 +508,8 @@ async fn commit(
 ) -> http::Response<Body> {
     let cx = lifecycle.cx();
     if let Source::Bytes { call: Some(c), .. } = &resp.body {
-        // A call's response goes only to its own request: another's format
-        // and end hooks are not this one's.
+        // A call's response goes only to its own request, whose format and
+        // end hooks it belongs to.
         if !cx.open.holds(c) {
             drop(resp);
             let fault = Fault::internal("a response to another request was sent");
@@ -540,7 +519,7 @@ async fn commit(
         cx.committed = Some(c.clone());
     }
     let output = format.kind().map(|(_, output)| output);
-    // Events of another kind fail it, even if there are none.
+    // A response of another kind fails, even with no events.
     if resp.event.is_some() && resp.event != output {
         drop(resp);
         let fault = Fault::another_kind("a response of another kind was sent".into());
@@ -551,8 +530,7 @@ async fn commit(
     let refusal = matches!(resp.body, Source::Parts(_)) && resp.event.is_none();
     let (mut head, body, usage) = (resp.head, resp.body, resp.usage);
     let translated = matches!(body, Source::Bytes { relayed: false, .. });
-    // A translated redirect would lose its `Location`, so it is refused; a
-    // relayed one passes, and so does any other 3xx.
+    // A translated redirect would lose its `Location`, so it is refused.
     let redirect = matches!(head.status.as_u16(), 301 | 302 | 303 | 307 | 308)
         && head.headers.contains_key(LOCATION);
     if translated && redirect {
@@ -577,23 +555,20 @@ async fn commit(
             source => source,
         };
         if translated {
-            // A translated response keeps only the provider's status and
-            // `Retry-After`; the client's format sets the rest.
+            // Translated, only the status and `Retry-After` are kept.
             let retry = head.headers.remove(RETRY_AFTER);
             head.headers.clear();
             head.headers.extend(retry.map(|v| (RETRY_AFTER, v)));
         }
-        // Judged before the encoder touches the head: only a success is
-        // refused for failing before any bytes, so a refusal never is.
+        // Judged before the encoder touches the head: only a success that
+        // fails before any bytes becomes a refusal.
         let refusable = head.status.is_success();
-        // The encoder follows the head the Parts are for, the provider's as
-        // it came, not the client edge's edits: they change what the client
-        // is told, not how the Parts are written.
+        // The encoder follows the head the Parts are for, before the client
+        // edge's edits, which change what the client is told, not the Parts.
         let encoder = format.encoder(&mut head, client, source.relayed());
         (source, encoder, refusable)
     };
-    // A format that panics building its decoder or encoder cannot write
-    // even a refusal.
+    // A format that panics building its codecs cannot write a refusal.
     let Ok((source, encoder, refusable)) = std::panic::catch_unwind(AssertUnwindSafe(build)) else {
         let status = StatusCode::INTERNAL_SERVER_ERROR;
         lifecycle.status = Some(status);
@@ -618,9 +593,9 @@ async fn commit(
         Err(fault) => return Box::pin(refuse(format, fault, pipe.lifecycle)).await,
     };
     let before = head.clone();
-    // Each edit changes a copy, so one that panics changes nothing. It is
-    // refused like a plugin that panics, the other edits applying to the
-    // refusal; the head has not gone out.
+    // Each edit changes a copy, so a panicking one changes nothing. The
+    // head has not gone out, so the request is refused with the other
+    // edits replayed onto the refusal.
     let mut panicked = false;
     for edit in pipe.lifecycle.cx().take_head_edits().into_iter().rev() {
         let mut edited = head.clone();
@@ -642,12 +617,11 @@ async fn commit(
     let head_only = pipe.lifecycle.cx().head().method == http::Method::HEAD;
     match first {
         Some(first) => pipe.held = Some(first),
-        // With no bytes to write, it ended as its head goes out.
+        // With no bytes, it ends as its head goes out.
         None => pipe.tell_end(),
     }
-    // A 204, a 304 or an answer to `HEAD` has no body, which a host never
-    // polls: it is read to its end before its head goes out, and nothing
-    // is sent.
+    // A host never polls a bodiless response, so it is read to its end
+    // here, which runs its end hooks.
     if head_only || matches!(head.status.as_u16(), 204 | 304) {
         while pipe.next().await.is_some() {}
         return into_http(head, crate::body(Bytes::new()));
@@ -659,8 +633,8 @@ async fn commit(
     )
 }
 
-/// An edit that makes on another head what edits made of `before`:
-/// `after`'s status, if it changed, and headers that changed.
+/// An edit that applies to another head what turned `before` into
+/// `after`: the status and headers that changed.
 fn replay(before: &http::response::Parts, after: http::response::Parts) -> HeadFn {
     let status = (after.status != before.status).then_some(after.status);
     let changed = |name: &HeaderName| {
@@ -687,8 +661,8 @@ fn replay(before: &http::response::Parts, after: http::response::Parts) -> HeadF
 }
 
 /// Turns the committed response into the client's body. Filters see every
-/// item. The encoder sees the client format's own Parts or, for a response
-/// made anew, items without the provider's bytes, plus the usage.
+/// item; the encoder sees the client format's own Parts, or items without
+/// provider bytes, plus the usage.
 struct Pipe {
     source: Source,
     /// Usage the response was given, reported first.
@@ -703,23 +677,21 @@ struct Pipe {
     /// The first bytes, written before the head went out.
     held: Option<Bytes>,
     /// Set once the end is written; told as its last bytes are handed out,
-    /// so a client that leaves before reading them is abandoned.
+    /// so a client that leaves first ends abandoned.
     ended: Option<Result<(), Fault>>,
     /// A failure that could not be written, to abort the body with.
     abort: Option<Fault>,
 }
 
 impl Pipe {
-    /// The body's first bytes, if any, which the head waits for. `Err` if
-    /// it failed before any and `refusable`, or panicked: it is refused
-    /// instead, whatever its status.
+    /// The body's first bytes, if any, which the head waits for. `Err`, to
+    /// refuse it, if it failed before any and is `refusable`, or panicked.
     async fn first(&mut self, refusable: bool) -> Result<Option<Bytes>, Fault> {
         loop {
             let Ok((out, bytes_before_end)) = self.step().await else {
                 return Err(Fault::internal(PANICKED));
             };
-            // A failure before any bytes, its own or one writing its end,
-            // is refused.
+            // A failure before any bytes is refused.
             if refusable
                 && !bytes_before_end
                 && let Some(Err(f)) = &self.ended
@@ -756,11 +728,10 @@ impl Pipe {
         }
     }
 
-    /// The next batch written, and whether any bytes came before the end,
-    /// if it reached one. `Err` with the bytes written before a decoder, a
-    /// filter or an encoder panicked, which ends the response as an
-    /// internal fault: refused if nothing was sent, and aborted after
-    /// those bytes if it was.
+    /// The next batch written, and whether any bytes came before an end.
+    /// `Err` with the bytes written before a decoder, filter or encoder
+    /// panicked; the response then ends internal: refused if nothing was
+    /// sent, else aborted after those bytes.
     async fn step(&mut self) -> Result<(BytesMut, bool), BytesMut> {
         let mut out = BytesMut::new();
         match AssertUnwindSafe(self.write(&mut out)).catch_unwind().await {
@@ -774,11 +745,11 @@ impl Pipe {
         }
     }
 
-    /// Write the next Parts to `out`, and at the end what the filters held
-    /// and the end: whether any bytes came before that end.
+    /// Write the next Parts to `out`, and at the end what filters held and
+    /// the end. Returns whether bytes came before the end.
     async fn write(&mut self, out: &mut BytesMut) -> bool {
         let end = self.batch(out).await;
-        // What filters release at a failure does not stop its refusal.
+        // What filters release at a failure does not prevent its refusal.
         let bytes_before_end = !out.is_empty();
         if let Some(end) = end {
             // Filters see every end, a Part's failure too.
@@ -788,8 +759,8 @@ impl Pipe {
         bytes_before_end
     }
 
-    /// Write the next Parts to `out`: the `Part::End` they reached, not yet
-    /// flushed or written, the response's own or a failure of a Part.
+    /// Write the next Parts to `out`, returning the end reached, if any,
+    /// unwritten: the response's own or a Part's failure.
     async fn batch(&mut self, out: &mut BytesMut) -> Option<Result<(), Fault>> {
         let mut parts: Vec<Part> = self.usage.take().map(Part::Usage).into_iter().collect();
         self.source.next(&mut parts).await;
@@ -823,8 +794,8 @@ impl Pipe {
         }
     }
 
-    /// Write what the filters held back, before the response's `end`: the
-    /// end, failed if that fails.
+    /// Write what the filters held back before `end`; returns the end,
+    /// failed if that fails.
     fn flush(&mut self, end: Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         let (tail, end) = self
             .filters
@@ -835,9 +806,8 @@ impl Pipe {
         }
     }
 
-    /// The response ends with `end`, written by the encoder: if it cannot
-    /// write it, the response fails with that fault instead, and if it
-    /// cannot write that either, the body is aborted.
+    /// Write `end`. If the encoder cannot, the response fails with its
+    /// fault; if it cannot write that either, the body is aborted.
     fn end(&mut self, mut end: Result<(), Fault>, out: &mut BytesMut) {
         let said = matches!(&end, Err(f) if f.is_said());
         if said && self.source.relayed() {
@@ -870,15 +840,13 @@ impl Pipe {
         }
     }
 
-    /// Whether the encoder is handed `part`: Frames only in the client's own
-    /// format, so never a plugin's.
+    /// Whether the encoder gets `part`: Frames only when relayed.
     fn for_encoder(&self, part: &Part) -> bool {
         !matches!(part, Part::Frame(_)) || self.source.relayed()
     }
 }
 
-/// Write `part` with `encoder` to `out`, or nothing if it fails or panics
-/// partway.
+/// Write `part` to `out`, or nothing if the encoder fails or panics.
 fn encode(encoder: &mut dyn Encoder, part: &Part, out: &mut BytesMut) -> Result<(), Fault> {
     let mut one = BytesMut::new();
     encoder.encode(part, &mut one)?;
@@ -895,19 +863,17 @@ pub(crate) trait Edge: Send + Sync + 'static {
     /// `plugin`'s end hook on this edge.
     fn end<'a>(&'a self, plugin: &'a dyn Plugin, outcome: &'a Outcome) -> BoxFuture<'a, ()>;
 
-    /// The end hooks start, for an edge ending `end`: the client edge ends
-    /// its calls, and a call cuts off its response's body.
+    /// The end hooks start, for an edge ending `end`.
     fn close(&mut self, _end: &Result<(), Fault>) {}
 
-    /// End hooks that must finish before this edge's start: for the client
-    /// edge, its calls'.
+    /// End hooks that must finish before this edge's start.
     fn after(&self) -> Option<&InFlight> {
         None
     }
 }
 
 /// Runs one edge's end hooks exactly once, for every plugin whose opening
-/// hook started: when told how it ended, or, abandoned, when dropped first.
+/// hook started: when told how it ended, or as abandoned if dropped first.
 pub(crate) struct EndHooks<E: Edge> {
     /// Held until its end hooks finish, for [`Gateway::idle`].
     live: Option<InFlightGuard>,
@@ -917,7 +883,7 @@ pub(crate) struct EndHooks<E: Edge> {
     cx: Option<E>,
     pub(crate) status: Option<StatusCode>,
     pub(crate) usage: Usage,
-    /// Where the `Outcome` goes too, for whoever handed the request over.
+    /// Also receives the `Outcome`, for [`Closed`].
     report: Option<oneshot::Sender<Outcome>>,
 }
 
@@ -947,8 +913,8 @@ impl<E: Edge> EndHooks<E> {
         self.cx.is_none()
     }
 
-    /// Count the usage in `parts` up to their end, even after a Part that
-    /// fails the response.
+    /// Count the usage in `parts` up to their end, including after a failed
+    /// Part.
     pub(crate) fn count(&mut self, parts: &[Part]) {
         for part in parts {
             match part {
@@ -991,26 +957,22 @@ impl<E: Edge> EndHooks<E> {
     }
 }
 
-/// Dropped unfinished, it was given up: abandoned, even while a panic
-/// elsewhere unwinds it; its own panic is caught where it happens.
+/// Dropped unfinished, it ends abandoned, even during a panic's unwinding.
 impl<E: Edge> Drop for EndHooks<E> {
     fn drop(&mut self) {
         self.finish(Err(Fault::abandoned()));
     }
 }
 
-/// Run end hooks detached from the response: on the current tokio runtime
-/// if there is one, else on a thread.
+/// Run end hooks detached: on the current tokio runtime, else a thread.
 fn detach(hooks: impl Future<Output = ()> + Send + 'static) {
     match tokio::runtime::Handle::try_current() {
         Ok(rt) => drop(rt.spawn(hooks)),
-        // Embedded without tokio: the hooks still run, on a thread.
         Err(_) => drop(std::thread::spawn(|| futures::executor::block_on(hooks))),
     }
 }
 
-/// Work still running, such as requests and their end hooks, so shutdown,
-/// or a request's own end hooks, can wait for it.
+/// A count of running work, such as requests and end hooks, to wait on.
 #[derive(Default)]
 pub(crate) struct InFlight {
     count: AtomicUsize,
@@ -1046,8 +1008,8 @@ impl Drop for InFlightGuard {
     }
 }
 
-/// The provider `name`, if a client of `format` can be sent to it:
-/// defined, and speaking that format or another of its kind.
+/// The provider `name`, if it exists and speaks `format` or another format
+/// of its kind.
 pub(crate) fn provider_for<'a>(
     format: &dyn AnyFormat,
     providers: &'a HashMap<String, Provider>,
@@ -1081,12 +1043,11 @@ const HOP_BY_HOP: [HeaderName; 10] = [
     UPGRADE,
 ];
 
-/// Headers of the provider's origin, such as cookies, which a relayed head
-/// does not pass to clients.
+/// The provider origin's headers, which never reach clients.
 const ORIGIN: [&str; 3] = ["set-cookie", "alt-svc", "strict-transport-security"];
 
-/// Remove the headers a hop's `Connection` names, which are that hop's,
-/// save `TE`, which [`HOP_BY_HOP`] covers.
+/// Remove the headers `Connection` names, except `TE`, which
+/// [`HOP_BY_HOP`] covers.
 pub(crate) fn strip_named(headers: &mut http::HeaderMap) {
     let named: Vec<HeaderName> = headers
         .get_all(CONNECTION)
@@ -1116,7 +1077,7 @@ fn into_http(mut head: http::response::Parts, body: Body) -> http::Response<Body
     http::Response::from_parts(head, body)
 }
 
-/// Servers spawn `handle`, so it must stay `Send`.
+/// Servers spawn `handle`, so it must be `Send`.
 #[cfg(test)]
 fn _handle_is_send(g: &Gateway, req: http::Request<Body>) {
     fn send<T: Send>(_: T) {}

@@ -10,22 +10,22 @@ use crate::part::head;
 use crate::provider::{CallEdge, SharedCall, lock};
 use crate::{Body, Decoder, Event, Fault, Item, Part, Usage};
 
-/// A response to send to the client: one a provider is streaming, or one a
-/// plugin made. Dropping it unsent cancels it.
+/// A response for the client, streaming from a provider or made by a
+/// plugin. Dropping it unsent cancels it.
 #[must_use = "a response does nothing unless sent or collected"]
 pub struct Response {
     pub(crate) head: http::response::Parts,
     pub(crate) body: Source,
     /// Usage a plugin added, reported before the body's own.
     pub(crate) usage: Usage,
-    /// The output type its items are, if known.
+    /// Its items' output type, if known.
     pub(crate) event: Option<TypeId>,
 }
 
-/// Bytes a plugin has in the client's format, such as a cached response with
-/// content its kind's events cannot hold, and the head to read them by. The
-/// client's format decodes it like a provider's; it is sent as is unless an
-/// edit changes it. It can be sent, not read with [`Response::collect`].
+/// A plugin's response in the client's format, such as a cached one with
+/// content its kind cannot hold. The client's format decodes it like a
+/// provider's and sends it as is unless edited. It cannot be read with
+/// [`Response::collect`].
 impl<B> From<http::Response<B>> for Response
 where
     B: http_body::Body<Data = bytes::Bytes> + Send + 'static,
@@ -51,13 +51,11 @@ impl std::fmt::Debug for Response {
 }
 
 impl Response {
-    /// A response made from events of the client's kind, such as a cached
-    /// answer: an `http::Response` whose body streams them
-    /// (`stream::iter(events.map(Ok))` for a whole one), ending `Ok` or
-    /// failed by the first `Err`. The head is the plugin's; the client's
-    /// format sets the content type if it has none. Events of another type
-    /// than the client format's output type fail the response with
-    /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) when it is sent.
+    /// A response made of events of the client's kind, streamed by the
+    /// body of `response` (`stream::iter(events.map(Ok))` for a whole one);
+    /// the first `Err` fails it. The client's format sets the content type
+    /// if the head has none. Events of another type fail it with
+    /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) when sent.
     pub fn stream<T, S>(response: http::Response<S>) -> Self
     where
         T: Event,
@@ -77,25 +75,22 @@ impl Response {
         }
     }
 
-    /// With `usage` added, reported to the client's format and the `Outcome`
-    /// before any the body reports. Only for usage no call produced, such
-    /// as a cached answer's. Such a response is sent, not read:
-    /// [`Response::collect`] refuses it, so the usage is never lost.
+    /// Add `usage` no call produced, such as a cached answer's, reported
+    /// before the body's. [`Response::collect`] refuses such a response, so
+    /// the usage is never lost.
     pub fn with_usage(mut self, usage: Usage) -> Self {
         self.usage += &usage;
         self
     }
 
-    /// Read it whole instead of sending it, such as a judge's verdict: its
-    /// events of `T`, the kind's output type. `Err` with its fault if
-    /// it ends `Err`, with [`codes::WRONG_KIND`](crate::codes::WRONG_KIND)
-    /// if it is of another kind, with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) if it is a plugin's own
-    /// bytes or was given usage ([`Response::with_usage`]), and with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if it answers a call of
-    /// a request whose plugins have answered, such as when read by another
-    /// request. Its usage is the provider edge's, not the client edge's
-    /// `Outcome.usage`; its call ends as it does.
+    /// Read it whole rather than send it, such as a judge's verdict: its
+    /// events of `T`, the kind's output type. `Err` with its own fault if
+    /// it fails, with [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) for
+    /// another kind, with [`codes::CONFIG`](crate::codes::CONFIG) for a
+    /// plugin's bytes or a response given usage, and with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) once its request's
+    /// plugins have answered. Its call ends as it does; its usage counts on
+    /// the provider edge only.
     pub async fn collect<T: Event>(mut self) -> Result<Vec<T>, Fault> {
         if matches!(self.body, Source::Raw(_)) {
             return Err(plugin_bytes());
@@ -105,7 +100,7 @@ impl Response {
                 "a response given usage can be sent, not read",
             ));
         }
-        // Of another kind, or none, it holds no `T`s, even with no items.
+        // Of another kind, or none, it holds no `T`s even with no items.
         if self.event != Some(TypeId::of::<T>()) {
             return Err(Fault::wrong_kind::<T>());
         }
@@ -120,7 +115,7 @@ impl Response {
         read
     }
 
-    /// Its events of `T`, to its end.
+    /// Its events of `T`, to the end.
     async fn read<T: Event>(&mut self) -> Result<Vec<T>, Fault> {
         let (mut events, mut parts) = (Vec::new(), Vec::new());
         loop {
@@ -136,7 +131,7 @@ impl Response {
         }
     }
 
-    /// A refusal: the kernel's own response, from Parts.
+    /// A kernel-made response from Parts, such as a refusal.
     pub(crate) fn made(
         status: StatusCode,
         parts: impl Stream<Item = Part> + Send + 'static,
@@ -149,8 +144,8 @@ impl Response {
         }
     }
 
-    /// A provider's response to a call, `relayed` if in the client's format
-    /// rather than translated, with the call's provider edge if it has one.
+    /// A provider's response to a call, `relayed` if in the client's
+    /// format, with the call's provider edge if it has one.
     pub(crate) fn provider(
         (head, body, decoder): Sent,
         relayed: bool,
@@ -158,7 +153,7 @@ impl Response {
         call: Option<CallEdge>,
     ) -> Self {
         // A call's body is cut off at its end, such as when its request
-        // closes, so a reader still waiting wakes to read it abandoned.
+        // closes, so a waiting reader wakes and reads it abandoned.
         let (body, call) = match call {
             Some(call) => {
                 let (abort, cut) = AbortHandle::new_pair();
@@ -191,10 +186,8 @@ impl Response {
 
 pub(crate) type PartStream = BoxStream<'static, Part>;
 
-/// A response's body: a plugin's bytes, decoded only by the client's format
-/// when sent; bytes and their decoder, `relayed` (in the client's format)
-/// or translated, and the provider edge of the call they answer; or Parts a
-/// plugin made.
+/// A response's body: a plugin's raw bytes, decoded only when sent; a
+/// provider's bytes with their decoder and call; or Parts.
 pub(crate) enum Source {
     Raw(Body),
     Bytes {
@@ -207,15 +200,14 @@ pub(crate) enum Source {
 }
 
 impl Source {
-    /// Whether its Parts are the client format's own bytes: items that
-    /// carry them and Frames, rather than items made anew.
-    /// Asked once a plugin's bytes have their decoder, as relayed ones.
+    /// Whether its Parts carry the client format's own bytes. Asked once a
+    /// plugin's raw bytes have their decoder, as relayed ones.
     pub(crate) fn relayed(&self) -> bool {
         matches!(self, Source::Bytes { relayed: true, .. })
     }
 
-    /// Push the next Parts to `parts`. Eventually pushes a `Part::End`; the
-    /// caller must not read past it.
+    /// Push the next Parts to `parts`, eventually a `Part::End`; the caller
+    /// must not read past it.
     pub(crate) async fn next(&mut self, parts: &mut Vec<Part>) {
         let (body, decoder, call) = match self {
             Source::Bytes {
@@ -224,17 +216,17 @@ impl Source {
                 call,
                 ..
             } => (body, decoder, call),
-            // Never read: the client's format decodes them, and `collect` refuses them.
+            // Unreachable: `commit` gives them a decoder, `collect` refuses.
             Source::Raw(_) => return parts.push(Part::End(Err(plugin_bytes()))),
             Source::Parts(made) => {
                 let truncated = || Part::End(Err(Fault::truncated()));
                 return parts.push(made.next().await.unwrap_or_else(truncated));
             }
         };
-        // Decoded apart, so the call sees only its own Parts.
+        // Decoded apart, so the call sees only these Parts.
         let mut decoded = Vec::new();
         match body.frame().await {
-            // Trailers carry nothing a format decodes yet.
+            // Trailers are not decoded.
             Some(Ok(frame)) => {
                 if let Ok(bytes) = frame.into_data() {
                     decoder.decode(bytes, &mut decoded);
@@ -244,7 +236,7 @@ impl Source {
             Some(Err(f)) => decoded.push(Part::End(Err(f.unsaid()))),
             None => {
                 decoder.finish(&mut decoded);
-                // Never read after the decoder's own `Part::End`.
+                // Ignored after the decoder's own `Part::End`.
                 decoded.push(Part::End(Err(Fault::truncated())));
             }
         }
@@ -254,8 +246,7 @@ impl Source {
         parts.append(&mut decoded);
     }
 
-    /// Its reader is done with it, ending `end`: the call it answers ends
-    /// so.
+    /// Its reader is done, ending `end`; the call it answers ends so.
     pub(crate) fn end(&mut self, end: Result<(), Fault>) {
         if let Source::Bytes { call: Some(c), .. } = self {
             lock(c).finish(end);
@@ -268,7 +259,7 @@ impl Source {
     }
 }
 
-/// A plugin's own bytes, which the client's format decodes only when they are sent.
+/// The fault for reading a plugin's raw bytes.
 fn plugin_bytes() -> Fault {
     Fault::config("a plugin's own bytes can be sent, not read")
 }

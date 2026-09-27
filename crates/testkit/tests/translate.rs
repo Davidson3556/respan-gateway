@@ -86,17 +86,16 @@ impl Plugin for Cross {
 }
 
 impl Harness {
-    /// OpenAI clients go to Anthropic and Anthropic clients to OpenAI
-    /// ([`Cross`]), Claude models to Anthropic (a router, as in
-    /// gateway.example.yaml): the log, `Cross`, `extra`, then the router.
+    /// Plugins, in order: the log, [`Cross`], `extra`, and a router sending
+    /// Claude models to Anthropic, as gateway.example.yaml does.
     fn new(extra: Vec<Arc<dyn Plugin>>) -> Self {
         let mut chain: Vec<Arc<dyn Plugin>> = vec![Arc::new(Cross)];
         chain.extend(extra);
         Self::with(chain)
     }
 
-    /// Serving both formats with no target: the log, `chain`, then a
-    /// router sending Claude models to Anthropic.
+    /// Serves both formats with no target. Plugins, in order: the log,
+    /// `chain`, and a router sending Claude models to Anthropic.
     fn with(chain: Vec<Arc<dyn Plugin>>) -> Self {
         let log = Outcomes::default();
         let mock = MockTransport::new();
@@ -592,8 +591,8 @@ async fn an_openai_error_reaches_an_anthropic_client_in_its_format() {
 
 #[tokio::test]
 async fn provider_stream_quirks_translate_cleanly() {
-    // An Azure-style opening chunk with no id, then finish and usage in one
-    // chunk.
+    // Azure's shape: an opening chunk with no id, then finish and usage in
+    // one chunk.
     let quirky = [
         "data: {\"id\":\"\",\"choices\":[],\"prompt_filter_results\":[]}\n\n",
         "data: {\"id\":\"c9\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
@@ -1775,8 +1774,7 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     assert!(headers.get("location").is_none());
     let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["error"]["code"], "upstream_error", "{body}");
-    // The call ends with the refusal, not as abandoned, with the
-    // provider's status.
+    // The call ends with the refusal and the provider's status.
     let ends = ends.0.lock().map(|all| all.clone()).unwrap_or_default();
     assert!(matches!(&ends[..], [o] if o.end.as_ref().is_err_and(|f| f.code() == codes::UPSTREAM)));
     assert_eq!(ends[0].status, Some(StatusCode::FOUND));

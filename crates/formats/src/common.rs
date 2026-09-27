@@ -92,16 +92,16 @@ pub(crate) fn encode_request<W: Wire>(
     Ok(Doc::from(v))
 }
 
-/// Pass on the client's end-to-end headers, such as `user-agent`, an
-/// app's own, beta features it opted into or its credentials, when the
-/// client speaks this format ([`ClientView::is_own`]); across formats they
-/// are another protocol's, so none pass. Whose keys reach the provider is
-/// the transport's to decide. For any format's
-/// [`Format::prepare`](respan_gateway_core::Format::prepare), whose header
-/// rules apply after it; a header the format already set is kept.
+/// Pass on the client's end-to-end headers, such as `user-agent`, an app's
+/// own, opted-in beta features or credentials, when the client speaks this
+/// format ([`ClientView::is_own`]); across formats none pass. A header the
+/// request already has is kept; the transport decides whose keys reach the
+/// provider. For any format's
+/// [`Format::prepare`](respan_gateway_core::Format::prepare); the kernel's
+/// header rules apply after it.
 ///
-/// Never passes what would change how the provider reads the request or
-/// who sent it: `cookie`, `accept-encoding` (the gateway reads what it
+/// Never passes what changes how the provider reads the request or who
+/// sent it: `cookie`, `accept-encoding` (the gateway reads what it
 /// relays), `forwarded`, `via`, `x-real-ip`, `x-forwarded-*`, method
 /// overrides, `if-*` and `range`.
 pub fn pass_headers(req: &mut http::Request<Doc>, client: ClientView<'_>) {
@@ -179,10 +179,10 @@ pub(crate) fn made_head(
     relayed && !reframe
 }
 
-/// Whether a success in the client's format is not framed as the client
-/// asked, as when a plugin changed `stream`. Its bytes cannot be relayed,
-/// so it is written from its events. Decoder and encoder both ask it of the
-/// provider's head, so they agree.
+/// Whether a success in the client's format is framed otherwise than the
+/// client asked, as when a plugin changed `stream`; it is then written from
+/// its events. Decoder and encoder both ask it of the provider's head, so
+/// they agree.
 fn reframed(head: &http::response::Parts, client: ClientView<'_>) -> bool {
     let streamed = crate::sse::is_stream(head);
     client.is_own() && head.status.is_success() && streamed != client.body().is_some_and(streams)
@@ -382,7 +382,7 @@ fn by_position(events: &[Reply]) -> Vec<Reply> {
 
 /// Checks that a message rebuilt with edited events reads back as them. An
 /// edit the message has no place for, such as a tool call turned into text,
-/// fails the response rather than go out unwritten.
+/// fails the response.
 pub(crate) fn reads_back(events: &[Reply], again: &[Reply]) -> Result<(), Fault> {
     if events == again {
         return Ok(());
@@ -729,7 +729,7 @@ fn part_update(value: &Value, was: &Content, now: &Content) -> Value {
     }
 }
 
-/// Turns providers' running usage totals into the increments the kernel
+/// Turns a provider's running usage totals into the increments the kernel
 /// adds.
 #[derive(Debug, Default)]
 pub(crate) struct Totals(Usage);
@@ -763,9 +763,8 @@ pub(crate) fn streams(body: &Doc) -> bool {
 
 /// Set a JSON body's `model`, or remove it for `None`, for any JSON
 /// format's `prepare`. A body whose `model` is already that keeps its
-/// bytes.
-/// `Err` with `bad_request` if the body must change and is not a JSON
-/// object.
+/// bytes. `Err` with `bad_request` if the body must change and is not a
+/// JSON object.
 pub fn write_model(body: &mut Doc, model: Option<&str>) -> Result<(), Fault> {
     if body.json().and_then(|v| v["model"].as_str()) != model {
         edit(body, |v| set(v, "model", model.map(Into::into)))?;
@@ -941,7 +940,7 @@ pub(crate) fn unpatchable(what: &str) -> Fault {
     Fault::config(format!("a plugin's change cannot be made: {what}"))
 }
 
-/// A request that holds what another format cannot be sent.
+/// A request holding what cannot be sent in another format.
 pub(crate) fn untranslatable(what: &str) -> Fault {
     Fault::bad_request(format!("{what} cannot be translated to another format yet"))
 }
@@ -1013,8 +1012,7 @@ pub(crate) fn replace(v: &mut Value, pointer: &str, value: impl Into<Value>) {
 }
 
 /// Write the sampling fields `after` changed from `before`. Both formats
-/// spell them alike except the stop sequences, whose key is `stop`, the
-/// argument.
+/// spell them alike except the stop sequences, whose key is `stop`.
 pub(crate) fn patch_sampling(
     v: &mut Map<String, Value>,
     before: &Conversation,

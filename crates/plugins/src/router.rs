@@ -2,9 +2,9 @@ use respan_gateway_core::async_trait;
 use respan_gateway_core::{Context, Fault, Plugin, Response, Target};
 
 /// Targets each request at the provider of the first prefix its model
-/// matches, over the gateway's default target. Later plugins still run. An
-/// unmatched request keeps its target. A provider the request cannot use
-/// fails the call with `config_error`; check each with
+/// matches; an unmatched request keeps its target. Later plugins still run.
+/// A provider the request cannot use fails the call with `config_error`;
+/// check each with
 /// [`Gateway::check_target`](respan_gateway_core::Gateway::check_target).
 #[derive(Debug, Clone, Default)]
 pub struct ModelRouter {

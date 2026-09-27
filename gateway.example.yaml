@@ -4,8 +4,8 @@ listen: 127.0.0.1:8080
 
 # A base URL is what the provider's own SDK takes: OpenAI's holds the
 # version (https://api.groq.com/openai/v1 for Groq), Anthropic's does not.
-# A provider with `auth` (any header) sends only its own credentials:
-# clients' are removed. Without it, clients' pass through.
+# A provider with `auth` (any header) sends only its own credentials;
+# without it, clients' pass through.
 providers:
   openai:
     format: openai-chat
@@ -21,11 +21,11 @@ providers:
 # POST to .../v1/messages. Anything else is a 404.
 serve: [openai-chat, anthropic-messages]
 
-# Compiled-in plugins, run on every request in the order listed, unless an
-# entry's `after` names plugins that must run before it.
+# Compiled-in plugins, run on every request in the order listed, except
+# that an entry runs after the plugins its `after` names.
 plugins:
-  # Claude models go to Anthropic: relayed for Anthropic clients,
-  # anthropic-beta header included, translated for OpenAI ones.
+  # Claude models go to Anthropic: relayed for Anthropic clients (with
+  # anthropic-beta), translated for OpenAI ones.
   - name: models
     models:
       - { prefix: claude, provider: anthropic }

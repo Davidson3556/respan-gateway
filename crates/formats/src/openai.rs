@@ -19,11 +19,10 @@ use crate::sse::{SseDecoder, event, event_as, event_data, event_json, is_stream}
 
 const OPENAI: &str = "openai-chat";
 
-/// OpenAI Chat Completions, `POST /chat/completions`, named
-/// `openai-chat`. It accepts a client's `POST` to any path ending in
-/// `/chat/completions`. As with OpenAI's SDKs, the provider's base URL holds the
-/// version, such as `https://api.openai.com/v1` or
-/// `https://api.groq.com/openai/v1`.
+/// OpenAI Chat Completions, named `openai-chat`. It accepts a `POST` to
+/// any path ending in `/chat/completions`. As in OpenAI's SDKs, the
+/// provider's base URL holds the version: `https://api.openai.com/v1`, or
+/// `https://api.groq.com/openai/v1` for Groq.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenAiChat;
 
@@ -103,7 +102,7 @@ impl Format for OpenAiChat {
     }
 }
 
-/// Ask a streaming request for usage, which OpenAI sends only if asked.
+/// Asks a streaming request for usage, which OpenAI sends only if asked.
 /// The decoder hides it from a client that did not ask.
 fn add_usage(body: &mut Doc) -> Result<(), Fault> {
     if !streams(body) || body.json().is_some_and(asks_for_usage) {
@@ -134,7 +133,7 @@ const KNOWN: &[&str] = &[
 ];
 
 /// Keys that change nothing at these values. Common SDKs send them by
-/// default, so they must not block translation.
+/// default, so they do not block translation.
 const INERT: &[(&str, f64)] = &[
     ("n", 1.0),
     ("presence_penalty", 0.0),
@@ -198,8 +197,8 @@ impl Wire for OpenAiChat {
         after: &Conversation,
     ) -> Result<(), Fault> {
         if before.max_tokens != after.max_tokens {
-            // Under every spelling the client used, or the current one, so
-            // no stale limit is left.
+            // Set under every spelling the client used, or the current
+            // one, so no stale limit is left.
             let limit = after.max_tokens.map(Value::from);
             let used = |key: &str| v.get(key).is_some_and(says);
             let (old, new) = (used("max_tokens"), used("max_completion_tokens"));
@@ -334,9 +333,8 @@ fn put_choice(v: &mut Value, events: &[Reply], key: &str) {
             }
         }
     }
-    // Rebuild the choices as `content` reads them: the other content as it
-    // came or, if a filter took it, the first choice bare, or none; then
-    // its text and finish.
+    // The choices are the other content as it came or, if a filter took
+    // it, the first choice bare. Its text and finish follow.
     let rest = rest_of(v, key);
     let old_finish = v.pointer("/choices/0/finish_reason").cloned();
     let other = events.iter().find_map(|e| match e {
@@ -391,15 +389,15 @@ fn put_choice(v: &mut Value, events: &[Reply], key: &str) {
     if let Some(choice) = v.pointer_mut("/choices/0").and_then(Value::as_object_mut) {
         let body = choice.entry(key).or_insert_with(|| json!({}));
         if let Some(body) = body.as_object_mut() {
-            // A whole message's content is required, if null.
+            // A whole message needs `content`, even if null.
             match (text, key) {
                 (Some(text), _) => _ = body.insert("content".into(), text.into()),
                 (None, "message") => _ = body.insert("content".into(), Value::Null),
                 (None, _) => _ = body.shift_remove("content"),
             }
         }
-        // The provider's spelling unless a filter changed the finish; null
-        // if a filter took it.
+        // The provider's spelling unless a filter changed the finish;
+        // null if a filter took it.
         let finish = events.iter().find_map(|e| match e {
             Reply::Finish(f) => Some(f),
             _ => None,
@@ -422,7 +420,7 @@ fn rest_of(v: &Value, key: &str) -> Value {
         && let Some(choice) = rest.get_mut(0).and_then(Value::as_object_mut)
     {
         choice.shift_remove("finish_reason");
-        // Text, or none; content in parts is other content.
+        // Content in parts stays: it is other content.
         if let Some(body) = choice.get_mut(key).and_then(Value::as_object_mut)
             && body
                 .get("content")
@@ -469,7 +467,7 @@ fn usage_body(u: &Usage) -> Value {
 #[derive(Debug, Default)]
 struct StreamState {
     totals: Totals,
-    /// Whether the usage chunk is the gateway's, not asked for by the client.
+    /// Whether the usage chunk is the gateway's, not the client's.
     hide_usage: bool,
 }
 
@@ -493,9 +491,9 @@ impl StreamState {
             .filter(|_| self.hide_usage)
             .and_then(|o| o.shift_remove("usage"));
         if let Some(field) = usage_field {
-            // The gateway asked for usage, not the client: the field (null
-            // on all but the last chunk) counts but is not sent, and the
-            // usage chunk, with no choices, is dropped.
+            // The gateway asked for usage: the field (null on all but the
+            // last chunk) counts but is not sent, and the usage chunk,
+            // which has no choices, is dropped.
             if field.is_object() && v["choices"].as_array().is_none_or(Vec::is_empty) {
                 if !usage.is_empty() {
                     out.push(usage.into());
@@ -505,12 +503,12 @@ impl StreamState {
             raw = event_as(Some(&raw), None, &v).into();
         }
         if !v["choices"].is_array() && v["usage"].is_null() {
-            // Not a chunk: filters see it rather than it passing unseen.
+            // Not a chunk: an unreadable event, so filters see it.
             return out.push(unreadable_event(OPENAI, raw));
         }
         let events = chunk_replies(&v);
-        // A chunk with no events, such as an id-less one of filter
-        // results, is a Frame.
+        // A chunk with no events, such as Azure's id-less filter results,
+        // is a Frame.
         if events.is_empty() {
             out.push(Part::Frame(raw));
         } else {
@@ -523,8 +521,8 @@ impl StreamState {
 }
 
 /// The events of a chunk: a start, its content and a finish. Every chunk
-/// names its response, so an edit to the start reaches each; an id-less
-/// one of filter results, which some servers open with, has no start.
+/// names its response, so an edit to the start reaches each. An id-less
+/// chunk, such as the filter results Azure opens with, has no start.
 fn chunk_replies(v: &Value) -> Vec<Reply> {
     let id = v["id"].as_str().filter(|id| !id.is_empty());
     let start = id.map(|id| Reply::start(id, v["model"].as_str().unwrap_or_default()));
@@ -731,7 +729,8 @@ impl StreamWriter for Chunks {
         self.begin(so_far, out);
         out.extend_from_slice(&self.finish.take().unwrap_or_default());
         out.extend_from_slice(&self.held.take().unwrap_or_default());
-        // Written only for chunks made from events; relayed ones carry it.
+        // The usage chunk, for chunks made from events; relayed ones carry
+        // their own.
         if !so_far.relayed && self.show_usage && !so_far.usage.is_empty() {
             self.chunk(so_far, out, json!([]), Some(usage_body(&so_far.usage)));
         }
@@ -745,7 +744,7 @@ mod tests {
 
     use super::*;
 
-    /// The rebuilt event, or none.
+    /// The rebuilt event, or empty bytes.
     fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Bytes, Fault> {
         Chunks::rebuild(raw, events).map(Option::unwrap_or_default)
     }
@@ -763,7 +762,6 @@ mod tests {
         out
     }
 
-    /// The events of the items in `out`, in order.
     fn replies(out: &[Part]) -> Vec<&Reply> {
         out.iter()
             .filter_map(|p| match p {
@@ -927,7 +925,7 @@ mod tests {
 
     #[test]
     fn the_terminator_ends_the_response() {
-        // What comes after it the kernel never reads.
+        // The kernel never reads what follows it.
         let out = decode_all(&["data: [DONE]\n\ndata: {\"choices\":[]}\n\n"]);
         assert!(matches!(out.first(), Some(Part::End(Ok(())))));
     }
@@ -1086,7 +1084,7 @@ mod tests {
         let mut patched = v.clone();
         OpenAiChat::put(&mut patched, &[Reply::text(0, "OK")]);
         assert_eq!(patched["choices"][0]["message"]["content"], "OK");
-        // An edit that points nowhere changes nothing, rather than panicking.
+        // An edit that points nowhere changes nothing.
         let mut empty = json!({});
         OpenAiChat::put(&mut empty, &[Reply::text(3, "x")]);
         assert_eq!(empty, json!({}));
@@ -1102,8 +1100,8 @@ mod tests {
         let chunk = |s: &'static str| Bytes::from_static(s.as_bytes());
         let first = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3}}\n\n";
         state.event(chunk(first), &mut out);
-        // The same totals again, in the chunk the client did not ask for.
-        // OpenAI's own fields on it, such as `obfuscation`, do not keep it.
+        // OpenAI repeats the totals in a usage chunk the client did not ask
+        // for; its own fields, such as `obfuscation`, do not keep it.
         let again =
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3},\"obfuscation\":\"xyz\"}\n\n";
         state.event(chunk(again), &mut out);
@@ -1208,8 +1206,8 @@ mod tests {
         let err = encode_request::<OpenAiChat>(&chat, None).err();
         assert_eq!(err.map(|e| e.status()), Some(http::StatusCode::BAD_REQUEST));
         assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body));
-        // A plugin that clears what is unsupported, and keeps only plain
-        // messages, sends the rest.
+        // With the unsupported cleared and only plain messages, it is
+        // sent.
         let mut chat = chat;
         chat.unsupported.clear();
         chat.messages = vec![Message::new(Role::User, "hi")];
@@ -1334,8 +1332,7 @@ mod tests {
             chat.messages[1].unsupported.get("tool_call_id"),
             Some(&json!("t"))
         );
-        // The text is edited in its part, beside the image and the tool
-        // result.
+        // The text is edited in its part, beside the image and tool result.
         let edited = patched(body, |c| {
             c.messages[0].content[0] = "WHAT IS THIS?".into();
         });

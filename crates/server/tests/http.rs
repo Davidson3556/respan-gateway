@@ -15,7 +15,6 @@ use tokio::net::TcpListener;
 const SSE: &str =
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
 
-/// A transport to `base`.
 fn http(base: impl Into<String>) -> HttpTransport {
     HttpTransport::new(base).unwrap_or_else(|e| panic!("{e}"))
 }
@@ -269,7 +268,7 @@ fn a_base_url_needs_http_or_https_and_a_host() {
     ] {
         assert!(HttpTransport::new(url).is_ok(), "{url}");
     }
-    // A base URL may hold a key, so it is not said back.
+    // A base URL may hold a key, so the error does not echo it.
     let expected = "bad base URL: an http or https one with a host, and no query, fragment or credentials (those go in its headers)";
     for url in [
         "api.openai.com",
@@ -377,7 +376,7 @@ fn headers_of_its_own_take_the_clients_credentials_off() {
 
 #[test]
 fn a_calls_own_headers_are_the_transports_for_that_call() {
-    // On a transport with a key, the call's replaces it.
+    // With transport headers, the call's replace those of the same name.
     let mut head = call_head("/v1/chat?key=a", &CLIENT);
     let call = headers(&[("authorization", "Bearer tenant"), ("host", "evil")]);
     head.extensions.insert(CallHeaders(call));
@@ -398,7 +397,8 @@ fn a_calls_own_headers_are_the_transports_for_that_call() {
     assert!(all("x-api-key").is_empty());
     assert_eq!(head.uri, "/v1/chat");
 
-    // On a transport without one, the call's still take the client's off.
+    // Without transport headers, the call's still remove the client's
+    // credentials.
     let mut head = call_head("/v1/chat", &CLIENT);
     let call = headers(&[("x-api-key", "tenant")]);
     head.extensions.insert(CallHeaders(call));

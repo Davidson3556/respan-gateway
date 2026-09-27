@@ -6,36 +6,34 @@ use std::sync::Arc;
 use http::StatusCode;
 use serde_json::Value;
 
-/// Codes the kernel and its shorthand constructors use. Plugins define their
-/// own freely; a code is any short machine-readable string.
+/// The codes the kernel uses. A code is any short machine-readable string;
+/// plugins may define their own.
 pub mod codes {
     /// The client's request is not one the format or kind can take.
     pub const BAD_REQUEST: &str = "bad_request";
     /// Nothing answers the request.
     pub const NOT_FOUND: &str = "not_found";
-    /// A provider failed: it could not be reached, broke off, sent what is
-    /// not a response or a redirect that cannot be translated, or failed
-    /// with no code of its own.
+    /// A provider failed: unreachable, broken off, not a response of its
+    /// format, an untranslatable redirect, or an error with no code of its
+    /// own.
     pub const UPSTREAM: &str = "upstream_error";
     /// A provider's stream stopped before its end.
     pub const TRUNCATED: &str = "truncated";
-    /// A response was given up before its end: the client left, or a
-    /// call's response was dropped, or still open as its request closed.
+    /// A response was given up before its end: the client left, or a call's
+    /// response was dropped or still open when its request closed.
     pub const ABANDONED: &str = "abandoned";
     /// The gateway is set up in a way that cannot work.
     pub const CONFIG: &str = "config_error";
-    /// A plugin or format asked for, or made, a type of another kind than
-    /// the client's format's.
+    /// A plugin or format used a type of another kind than the client's.
     pub const WRONG_KIND: &str = "wrong_kind";
     /// A bug, such as a plugin or format that panicked.
     pub const INTERNAL: &str = "internal_error";
 }
 
-/// The one error type at the plugin boundary. Open: any status, any code,
-/// optional details for the client and an optional source for logs.
+/// The one error type at the plugin boundary: a status, a code, a message
+/// and optional details for the client, and an optional source for logs.
 ///
-/// Plugins keep their own error types (e.g. with `thiserror`) and implement
-/// `From<TheirError> for Fault`, so `?` works in hooks.
+/// Plugins implement `From<TheirError> for Fault` so `?` works in hooks.
 #[derive(Clone)]
 pub struct Fault(Box<Inner>);
 
@@ -50,8 +48,8 @@ struct Inner {
 }
 
 impl Fault {
-    /// A fault with this status, code and message for the client. A refusal
-    /// with a status that is not 4xx or 5xx is sent as a 500.
+    /// A fault with this status, code and message. A refusal whose status
+    /// is not 4xx or 5xx is sent as a 500.
     pub fn new(
         status: StatusCode,
         code: impl Into<Cow<'static, str>>,
@@ -68,23 +66,20 @@ impl Fault {
     }
 
     /// Extra fields for the client's error body, as a JSON object; formats
-    /// ignore any other value. The format writes the fields that state the
-    /// fault, such as its message, and chooses which extra ones it keeps.
+    /// ignore any other value and choose which fields they keep.
     pub fn with_details(mut self, details: Value) -> Self {
         self.0.details = Some(details);
         self
     }
 
-    /// The underlying cause, for logs, never sent to the client: any error,
-    /// a boxed one, or a message.
+    /// The underlying cause, for logs only: an error or a message.
     pub fn with_source(mut self, source: impl Into<Box<dyn Error + Send + Sync>>) -> Self {
         self.0.source = Some(Arc::from(source.into()));
         self
     }
 
-    /// Marks the fault as already said: its decoder passed the error body on
-    /// as a Frame, so an encoder writing the provider's bytes is not handed
-    /// the `Part::End` carrying it.
+    /// Mark the fault as already said: the decoder passed its error body on
+    /// as a Frame, so a relaying encoder is not handed its `Part::End`.
     pub fn said(mut self) -> Self {
         self.0.said = true;
         self
@@ -94,15 +89,13 @@ impl Fault {
         self.0.said
     }
 
-    /// Not said after all: for a decoder that drops the Frame the fault was
-    /// said with.
+    /// Undo [`Fault::said`], for a decoder that drops the Frame.
     pub fn unsaid(mut self) -> Self {
         self.0.said = false;
         self
     }
 
-    /// The status it was made with; see [`Fault::new`] for how a refusal
-    /// sends it.
+    /// The status it was made with ([`Fault::new`]).
     pub fn status(&self) -> StatusCode {
         self.0.status
     }
@@ -146,7 +139,7 @@ impl Fault {
     }
 
     pub(crate) fn abandoned() -> Self {
-        // 499 is the de facto status for a request given up before its end.
+        // 499 is the de facto status for a request given up.
         let status = StatusCode::from_u16(499).expect("499 is a status code");
         Self::new(status, codes::ABANDONED, "abandoned")
     }
@@ -161,13 +154,13 @@ impl Fault {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, codes::INTERNAL, message)
     }
 
-    /// Something asked for `T`, which is not the client's kind.
+    /// Something asked for `T`, not of the client's kind.
     pub(crate) fn wrong_kind<T>() -> Self {
         Self::another_kind(format!("asked for {}", std::any::type_name::<T>()))
     }
 
-    /// A type of another kind than the client's was asked for or made: a
-    /// misconfiguration, or traffic a plugin should skip. `what` goes to logs only.
+    /// A type of another kind than the client's was used: a misconfiguration
+    /// or traffic a plugin should skip. `what` goes to logs only.
     pub(crate) fn another_kind(what: String) -> Self {
         let message = "a type of another kind than this request's was asked for or made";
         Self::new(
@@ -205,8 +198,7 @@ impl From<std::convert::Infallible> for Fault {
     }
 }
 
-/// A request or response a plugin or format built wrong, such as with a
-/// bad header: a bug, a 500.
+/// A message a plugin or format built wrong: a bug, a 500.
 impl From<http::Error> for Fault {
     fn from(e: http::Error) -> Self {
         Fault::internal("an HTTP message was built wrong").with_source(e)
@@ -222,8 +214,8 @@ impl Error for Fault {
     }
 }
 
-/// Faults are equal when the client would read them alike: the source and
-/// whether it was said are not compared.
+/// Faults are equal when the client would read them alike: source and
+/// `said` are ignored.
 impl PartialEq for Fault {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);

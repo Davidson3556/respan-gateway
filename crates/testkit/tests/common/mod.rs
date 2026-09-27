@@ -1,6 +1,6 @@
 //! Helpers the integration tests share.
 
-// Each test file uses some of it.
+// Each test file uses only some helpers.
 #![allow(dead_code)]
 
 use respan_gateway_core::bytes::Bytes;
@@ -22,7 +22,6 @@ pub const MESSAGES: &str = "/v1/messages";
 /// A client's request.
 pub type Call = http::Request<Body>;
 
-/// `body` posted to `path`.
 pub fn call(path: &str, body: impl Into<Bytes>) -> Call {
     post(path, body)
 }
@@ -77,7 +76,7 @@ impl Plugin for Flip {
 }
 
 /// Upper-cases a conversation response's text, streamed or whole, in any
-/// format, as a redaction plugin would.
+/// format.
 pub struct Shout;
 
 #[async_trait]
@@ -179,7 +178,7 @@ impl Filter<Reply> for Disclaimer {
     }
 }
 
-/// Takes every start.
+/// Drops every start.
 #[derive(Clone)]
 pub struct Nameless;
 
@@ -192,7 +191,7 @@ impl Filter<Reply> for Nameless {
     }
 }
 
-/// Takes every text.
+/// Drops every text.
 #[derive(Clone)]
 pub struct Silence;
 

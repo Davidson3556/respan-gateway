@@ -6,13 +6,13 @@ use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::http::{self, StatusCode};
 use respan_gateway_core::{Decoder, Encoder, Event, Fault, Part};
 
-/// A decoder for a body read whole. For a success, `on_body` gets all the
-/// bytes when the body ends; the response ends `Ok` unless `on_body` pushed
-/// an end or returned `Err`. A failure status yields the body as a Frame,
-/// then an `Err` end with a relayed fault of that status, the provider's
-/// code and message (else `upstream_error` and "the provider answered N"),
-/// and its error fields as details. An error inside a success is for
-/// `on_body` to judge.
+/// A decoder for a body read whole. On success, `on_body` gets all the
+/// bytes at the end; the response ends `Ok` unless `on_body` pushed an end
+/// or returned `Err`. On a failure status the body passes as a Frame, then
+/// the response ends `Err` with a relayed fault of that status: the
+/// provider's code and message (else `upstream_error` and "the provider
+/// answered N"), and its error fields as details. `on_body` judges an error
+/// inside a success.
 pub fn decoder<F>(head: &http::response::Parts, mut on_body: F) -> Box<dyn Decoder>
 where
     F: FnMut(Bytes, &mut Vec<Part>) -> Result<(), Fault> + Send + 'static,
@@ -21,7 +21,7 @@ where
     Box::new(Whole::new(move |raw, out: &mut Vec<Part>| {
         match status.is_success() {
             false => {
-                // The provider's words, if its body says an error as JSON.
+                // The provider's message, if its body has a JSON error.
                 let v = crate::sse::failure_json(&raw).unwrap_or_default();
                 let fault = crate::common::provider_error(status, &v);
                 out.push(Part::Frame(raw));
@@ -85,13 +85,13 @@ pub(crate) fn answered(status: StatusCode) -> String {
 /// Encodes a response of events of `T`.
 ///
 /// Unedited items and Frames are written as the provider's bytes. Made or
-/// edited items go through `write`, which also gets the bytes an edited
-/// item came from, so it can keep their shape; it returns `Err` for what it
-/// cannot write. A failure goes through `fail`. A stream is written item by
-/// item. A whole body is written once, at its end, as one document of all
-/// its events; Frames after its first item follow that document. A failed
-/// whole body writes its Frames and the failure, not its items.
-/// `Part::Usage` is not written.
+/// edited items go through `write`, which also gets an edited item's
+/// original bytes to keep their shape, and returns `Err` for what it cannot
+/// write. A failure goes through `fail`. A stream is written item by item.
+/// A whole body is written once, at its end, as one document of all its
+/// events, followed by any Frames after its first item. A failed whole body
+/// writes its Frames and the failure, not its items. `Part::Usage` is not
+/// written.
 pub struct Relay<T, W, F, B> {
     write: W,
     fail: F,
@@ -166,8 +166,7 @@ where
                 (None, []) => {}
                 (None, events) => out.extend_from_slice((self.write)(events, item.raw())?.as_ref()),
             },
-            // A body with no item, such as one passed on as Frames, has
-            // nothing to write.
+            // A body of Frames alone has nothing more to write.
             (Part::End(Ok(())), Some(held)) if held.seen => {
                 match (&held.raw, held.as_raw) {
                     (Some(raw), true) => out.extend_from_slice(raw),

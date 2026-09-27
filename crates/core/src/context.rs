@@ -30,8 +30,8 @@ trait ItemFilter: Send {
     /// Filter the item's events.
     fn item(&mut self, item: &mut Item) -> Result<(), Fault>;
 
-    /// The response ends as `outcome` says: `tail`, what filters run before
-    /// this one still held, goes through it, then what it holds joins it.
+    /// The response ends as `outcome` says: `tail`, held by earlier
+    /// filters, goes through this one, then this one's held events join it.
     fn end(&mut self, outcome: &Outcome, tail: &mut Option<Item>) -> Result<(), Fault>;
 }
 
@@ -80,8 +80,8 @@ impl Filters {
         self.0.iter_mut().rev().try_for_each(|f| f.item(item))
     }
 
-    /// The response ends with `end`: what the filters held back, and the
-    /// end once their own ends ran, failed if one failed.
+    /// Run the filters' ends: what they held back, and the end, failed if
+    /// one failed.
     pub(crate) fn end(
         &mut self,
         status: Option<http::StatusCode>,
@@ -105,8 +105,8 @@ impl Filters {
     }
 }
 
-/// The end once `fault` failed a response ending `end`: said already if
-/// `end` is an error the client already has.
+/// The end after `fault` fails a response ending `end`, marked said if the
+/// client already has `end`'s error.
 pub(crate) fn failed(fault: Fault, end: &Result<(), Fault>) -> Result<(), Fault> {
     match end {
         Err(said) if said.is_said() => Err(fault.said()),
@@ -114,9 +114,8 @@ pub(crate) fn failed(fault: Fault, end: &Result<(), Fault>) -> Result<(), Fault>
     }
 }
 
-/// The client edge's response edits. Kept in a `Mutex` reached only
-/// through `&mut`, so the lock is never taken; it makes its holder `Sync`
-/// for end hooks although edits are not.
+/// The client edge's response edits. The `Mutex` is reached only through
+/// `&mut`, so it never locks; it makes the holder `Sync` for end hooks.
 #[derive(Default)]
 struct Edits {
     head: Vec<HeadFn>,
@@ -127,26 +126,24 @@ pub(crate) fn unlocked<T>(edits: &mut Mutex<T>) -> &mut T {
     edits.get_mut().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// One client request, handed to the client edge's hooks: its head, body,
-/// model, input, response edits, values attached by type, and provider
-/// calls.
+/// One client request, as the client edge's hooks see it: head, body,
+/// input, model, target, response edits and provider calls.
 pub struct Context {
     /// The client's format: the first served that accepted the request.
     pub(crate) format: Arc<dyn AnyFormat>,
     head: Arc<http::request::Parts>,
-    /// The head as it arrived, which the input and model are read from.
+    /// The head as it arrived; the input and model are read from it.
     pub(crate) arrived: Arc<http::request::Parts>,
     pub(crate) body: Doc,
     model: Option<String>,
     /// The provider that answers if every plugin passes.
     pub(crate) target: Option<Target>,
     input: Input,
-    /// Set when the end hooks start, and in a call's copy: providers cannot
-    /// be called.
+    /// Set once end hooks start, and in a call's copy: no calls allowed.
     closed: bool,
-    /// The end hooks of its calls still to run, which its own wait for.
+    /// Its calls' end hooks still to run; its own wait for them.
     calls: Arc<InFlight>,
-    /// Its calls whose response is still open, ended when it closes.
+    /// Its calls with an open response, ended when it closes.
     pub(crate) open: Arc<OpenCalls>,
     /// The call whose response is sent, which ends as it does.
     pub(crate) committed: Option<SharedCall>,
@@ -171,9 +168,9 @@ impl Edge for Context {
         plugin.on_client_end(self, outcome)
     }
 
-    /// The committed call ends as the response did, before the other calls
-    /// still open are abandoned: its filters' `end` ran at its end, or not
-    /// at all if the client edge stopped reading it first.
+    /// The committed call ends as the response did, then the other open
+    /// calls are abandoned. The committed call's filters already ran their
+    /// `end`, or never will if the client edge stopped reading.
     fn close(&mut self, end: &Result<(), Fault>) {
         self.closed = true;
         if let Some(call) = self.committed.take() {
@@ -214,83 +211,73 @@ impl Context {
         }
     }
 
-    /// The name of the client's format, the first served that accepted the
-    /// request, such as for logs or a cache key.
+    /// The name of the client's format: the first served that accepted the
+    /// request.
     pub fn format(&self) -> &str {
         self.format.name()
     }
 
-    /// The client's request line and headers, and values attached by type
-    /// in its `extensions`, such as by an earlier plugin or the adapter.
+    /// The client's request line and headers. Its `extensions` hold values
+    /// set by the adapter or earlier plugins.
     pub fn head(&self) -> &http::request::Parts {
         &self.head
     }
 
-    /// Like [`Context::head`], for changing it: attaching values for later
-    /// plugins and calls, or removing a header, such as the gateway's own
-    /// credential, before formats pass the client's headers on. Edits reach
-    /// calls made afterwards through their format's
-    /// [`prepare`](crate::Format::prepare); within the client's format its
-    /// headers and query pass on, across formats only what that format
-    /// reads. [`model`](crate::Format::model) and
-    /// [`decode`](crate::Format::decode) read the head as it arrived. The
-    /// response is not affected. [`ProviderContext::client`] shows the head
-    /// as of its call. The model is set through [`Context::set_model`].
+    /// Like [`Context::head`], for changing it, such as to attach values or
+    /// to remove the gateway's own credential before formats pass headers
+    /// on. Later calls see the edits through their format's
+    /// [`prepare`](crate::Format::prepare). [`model`](crate::Format::model)
+    /// and [`decode`](crate::Format::decode) read the head as it arrived.
+    /// Set the model with [`Context::set_model`].
     pub fn head_mut(&mut self) -> &mut http::request::Parts {
         Arc::make_mut(&mut self.head)
     }
 
-    /// The client's body as it arrived, in its format; the input as plugins
-    /// changed it is [`Context::input`]. `Err` for content the plugin may
-    /// not see; always `Ok` today.
+    /// The client's body as it arrived, in its format. `Err` is reserved for
+    /// content a plugin may not see.
     pub fn body(&self) -> Result<&Doc, Fault> {
         Ok(&self.body)
     }
 
-    /// The client's input as plugins have left it, as `T`, the client's
-    /// format's [`Input`](crate::Format::Input) type. `Err` with
-    /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) if `T` is not that
-    /// type; the `Err` of its [`decode`](crate::Format::decode) if the body
-    /// is not a request of its format, the same each time it is read. Reading
-    /// changes nothing: an unchanged input reaches a provider of the
-    /// client's format as the client's body.
+    /// The client's input as plugins left it, as `T`, the client's format's
+    /// [`Input`](crate::Format::Input) type. `Err` with
+    /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) for another type, or
+    /// [`decode`](crate::Format::decode)'s `Err` for a bad body, the same on
+    /// every read. Reading changes nothing.
     pub fn input<T: Event>(&self) -> Result<&T, Fault> {
         self.input.get(&*self.format, &self.arrived, &self.body)
     }
 
-    /// Like [`Context::input`], for changing it. Calls made afterwards get
-    /// the changed input, encoded in their provider's format. If it did not
-    /// actually change, a provider of the client's format gets the client's
-    /// body.
+    /// Like [`Context::input`], for changing it. Later calls get the change,
+    /// encoded in their provider's format. An unchanged input reaches a
+    /// provider of the client's format as the client's body.
     pub fn input_mut<T: Event>(&mut self) -> Result<&mut T, Fault> {
         self.input.get_mut(&*self.format, &self.arrived, &self.body)
     }
 
-    /// The model providers are sent: the client's, unless a plugin set one.
-    /// Change it here, not in the input.
+    /// The model sent to providers: the client's, unless a plugin set one.
     pub fn model(&self) -> Option<&str> {
         self.model.as_deref()
     }
 
-    /// Send providers `model`, whatever the request said. A model can be
-    /// changed, not removed.
+    /// Send providers `model`. A model can be changed, not removed.
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = Some(model.into());
     }
 
-    /// The provider that answers if every plugin passes; initially the
-    /// gateway's ([`Gateway::target`](crate::Gateway::target)).
+    /// The provider that answers if every plugin passes; initially
+    /// [`Gateway::target`](crate::Gateway::target).
     pub fn target(&self) -> Option<&Target> {
         self.target.as_ref()
     }
 
-    /// Have `provider` answer if every plugin passes. A router sets the
-    /// target rather than calling it, so later plugins still run.
+    /// Have `provider` answer if every plugin passes. Routers set the target
+    /// so later plugins still run.
     pub fn set_target(&mut self, provider: impl Into<Target>) {
         self.target = Some(provider.into());
     }
 
-    /// The request as it is now, for a call to keep: it cannot call.
+    /// A snapshot for a call to keep; it cannot call.
     fn at_call(&self) -> Self {
         Self {
             format: self.format.clone(),
@@ -314,30 +301,26 @@ impl Context {
         ClientView::new(true, &self.head, &self.body, self.model())
     }
 
-    /// The filters plugins added, taken by the response that is sent.
+    /// The filters plugins added, taken by the committed response.
     pub(crate) fn take_filters(&mut self) -> Filters {
         std::mem::take(&mut unlocked(&mut self.edits).filters)
     }
 
-    /// The head edits, taken by the head that goes out, even a refusal's.
+    /// The head edits, taken by the outgoing head, a refusal's included.
     pub(crate) fn take_head_edits(&mut self) -> Vec<HeadFn> {
         std::mem::take(&mut unlocked(&mut self.edits).head)
     }
 
-    /// Add a head edit.
     pub(crate) fn edit_head(&mut self, edit: HeadFn) {
         unlocked(&mut self.edits).head.push(edit);
     }
 
-    /// Change the status or headers of the response sent to the client,
-    /// whoever answers, refusals included. Edits apply the last added first,
-    /// unwinding in reverse plugin order. A refusal keeps its status unless
-    /// an edit makes it another error. An edit that panics changes nothing,
-    /// and the
-    /// request is refused with the other edits applied. Connection headers,
-    /// such as `Connection` and `Content-Length`, are removed after the
-    /// edits. `Err` is reserved for edits once the head is sent, as in a
-    /// session; `Ok` in `on_client`.
+    /// Edit the status or headers sent to the client, whoever answers,
+    /// refusals included. Edits apply the last added first. A refusal keeps
+    /// its status unless an edit makes it another error. An edit that panics
+    /// changes nothing and the request is refused, the other edits applied.
+    /// Connection headers are removed afterwards. `Err` is reserved for
+    /// edits after the head is sent; always `Ok` in `on_client`.
     pub fn map_head(
         &mut self,
         f: impl FnOnce(&mut http::response::Parts) + Send + 'static,
@@ -347,32 +330,26 @@ impl Context {
     }
 
     /// Run the response's events through `filter`, whoever answers: a
-    /// closure that changes each in place (`|r: &mut Reply| ..`), or a
-    /// [`Filter`] that also holds, drops and inserts them. `Err` with
+    /// closure editing each in place, or a [`Filter`]. Filters run after the
+    /// provider edge's, the last added first. `Err` with
     /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) unless `T` is the
-    /// client's format's [`Output`](crate::Format::Output) type. Filters
-    /// apply the last added first, each to what the next-added one passed
-    /// on, after the provider edge's.
+    /// client's format's [`Output`](crate::Format::Output) type.
     pub fn filter<T: Event>(&mut self, filter: impl Filter<T>) -> Result<(), Fault> {
         unlocked(&mut self.edits).filters.add(&*self.format, filter)
     }
 
-    /// A call to `provider`, sent when awaited: the input as plugins left
-    /// it, translated if the provider speaks another format of the kind.
-    /// Every plugin runs [`on_provider`](crate::Plugin::on_provider)
-    /// first. An error status
-    /// is still `Ok`; check the response's head. The only way to reach a
-    /// provider.
+    /// A call to `provider`, sent when awaited, the only way to reach one.
+    /// It carries the input as plugins left it, translated if the provider
+    /// speaks another format of the kind. Every plugin's
+    /// [`on_provider`](crate::Plugin::on_provider) runs first. An error
+    /// status is still `Ok`; check the response's head.
     ///
-    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if this request
-    /// cannot use `provider` (unknown, or sharing neither the client's
-    /// format nor its kind), with
+    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if `provider` is
+    /// unknown or shares neither format nor kind with the client, with
     /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) for a [`Call::input`]
     /// of another type, and with [`codes::INTERNAL`](crate::codes::INTERNAL)
-    /// outside `on_client`: from end hooks and from
-    /// [`ProviderContext::client`]. Otherwise the `Err` of an
-    /// `on_provider`, of the formats' decode or encode, of the provider
-    /// format's `prepare`, or of the transport.
+    /// outside `on_client`. Otherwise the `Err` of an `on_provider`, of
+    /// decode, encode or `prepare`, or of the transport.
     pub fn call(&self, provider: impl Into<Target>) -> Call<'_> {
         Call {
             cx: self,
@@ -424,8 +401,8 @@ impl Context {
             edge.status = Some(sent.0.status);
             Ok::<_, Fault>(sent)
         };
-        // A panic here, such as a hook's, ends this call as internal before
-        // it unwinds, so a call dropped by the unwinding is abandoned.
+        // A panic ends this call as internal before unwinding, so the drop
+        // during unwinding does not end it abandoned.
         match AssertUnwindSafe(sent).catch_unwind().await {
             Ok(Ok(sent)) => Ok(respond(sent, Some(edge))),
             Ok(Err(fault)) => {
@@ -439,9 +416,8 @@ impl Context {
         }
     }
 
-    /// Send `input` to `p`, asking for `model`, with `head`, the client's
-    /// as the call's hooks left it: the response's head and body, and its
-    /// decoder.
+    /// Send `input` to `p` for `model`, with `head` as the call's hooks left
+    /// it; returns the response and its decoder.
     async fn exchange(
         &self,
         p: &Provider,
@@ -464,9 +440,8 @@ impl Context {
         if bytes != self.body.to_bytes() {
             sent.headers.remove(CONTENT_ENCODING);
         }
-        // Strip connection headers, keeping `te: trailers`, which a request
-        // such as gRPC's needs, and `Host` and `Expect`, as the body is sent
-        // whole.
+        // Strip connection headers, `Host` and `Expect` (the body is sent
+        // whole), keeping `te: trailers`, which gRPC needs.
         let trailers = sent.headers.get_all(TE).iter().any(|v| {
             let v = v.to_str().unwrap_or_default();
             v.split(',')
@@ -481,15 +456,14 @@ impl Context {
         }
         let bytes = http::Request::from_parts(sent, crate::body(bytes));
         let (head, body) = p.transport.send(bytes).await?.into_parts();
-        // The decoder reads the bytes the provider sent, so it follows the
-        // provider's head as it came, before any edit.
+        // The decoder follows the provider's head as it came, before edits.
         let decoder = p.format.decoder(&head, view);
         Ok((head, body, decoder))
     }
 }
 
-/// `head` without the headers its `Connection` names, which are the
-/// client's hop's, so they never strip what a format or the kernel sets.
+/// `head` without the headers its `Connection` names. Stripped here, from
+/// the client's hop, so they never strip what a format sets.
 fn end_to_end(head: &http::request::Parts) -> Cow<'_, http::request::Parts> {
     if !head.headers.contains_key(CONNECTION) {
         return Cow::Borrowed(head);
@@ -499,8 +473,8 @@ fn end_to_end(head: &http::request::Parts) -> Cow<'_, http::request::Parts> {
     Cow::Owned(head)
 }
 
-/// A call to a provider from [`Context::call`], sent when awaited. Its
-/// settings are its own: the input plugins left is unchanged.
+/// A call from [`Context::call`], sent when awaited. Its settings apply to
+/// it alone.
 #[must_use = "a call is sent only when awaited"]
 pub struct Call<'a> {
     cx: &'a Context,
@@ -519,21 +493,18 @@ impl std::fmt::Debug for Call<'_> {
 }
 
 impl Call<'_> {
-    /// Ask for `model` in this call, such as the next one a fallback tries.
+    /// Ask for `model` in this call only.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
     }
 
-    /// Send `input`, of the client's format's input type, instead of the
-    /// client's, such as a judge's prompt; another type is an `Err` when
-    /// sent with [`codes::WRONG_KIND`](crate::codes::WRONG_KIND). The model
-    /// is [`Call::model`] or else [`Context::model`]. For a provider of the
-    /// client's format it patches the client's body, so a copy of the
-    /// client's input carries what the kind cannot hold, unless that body
-    /// is not of the format: then it is encoded anew. A judge builds its
-    /// own. Its response, if sent on, is written from its events, like a
-    /// translated one.
+    /// Send `input` in place of the client's, such as a judge's prompt. It
+    /// must be the client's format's input type; another fails the call with
+    /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND). To a provider of the
+    /// client's format it is a patch of the client's body, keeping what the
+    /// kind cannot hold. A response to it, if sent on, is written from its
+    /// events.
     pub fn input<T: Event>(mut self, input: T) -> Self {
         let kind = self.cx.format.kind();
         self.input = Some(
@@ -555,13 +526,12 @@ impl<'a> IntoFuture for Call<'a> {
     }
 }
 
-/// An input, as a context or a call holds it. Like a [`Doc`]: the client's,
-/// decoded once per request when first asked for and shared by every
-/// context and call, and a changed copy of its holder's own.
+/// An input as a context or call holds it: the client's, decoded lazily
+/// once per request and shared, plus the holder's changed copy.
 #[derive(Clone, Default)]
 pub(crate) struct Input {
     base: Arc<OnceLock<Result<AnyInput, Fault>>>,
-    /// Set once a plugin asks to change it, or a call brings its own.
+    /// Set once a plugin changes it or a call brings its own.
     changed: Option<AnyInput>,
 }
 
@@ -577,8 +547,7 @@ impl Input {
         base.as_ref().map_err(Clone::clone)
     }
 
-    /// The input as `T`, decoded only if `T` is the client's input type:
-    /// another type is refused whatever the body holds.
+    /// The input as `T`; another type is refused without decoding.
     pub(crate) fn get<T: Any>(
         &self,
         format: &dyn AnyFormat,
@@ -595,7 +564,7 @@ impl Input {
         input.downcast_ref().ok_or_else(Fault::wrong_kind::<T>)
     }
 
-    /// Like [`Input::get`], for changing it: its own copy, made first.
+    /// Like [`Input::get`], for changing it; copies first if shared.
     pub(crate) fn get_mut<T: Any>(
         &mut self,
         format: &dyn AnyFormat,
@@ -616,9 +585,8 @@ impl Input {
             .ok_or_else(Fault::wrong_kind::<T>)
     }
 
-    /// The body for `p`, which speaks the client's format if `same`: the
-    /// client's as it came, unless the input changed; then the client's
-    /// patched, or, in another format, the input encoded anew.
+    /// The body for `p` (of the client's format if `same`): the client's if
+    /// the input is unchanged, else patched, or encoded anew across formats.
     fn body(
         &self,
         format: &dyn AnyFormat,

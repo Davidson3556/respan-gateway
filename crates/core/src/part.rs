@@ -20,34 +20,30 @@ pub(crate) fn head(status: StatusCode) -> http::response::Parts {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Part {
-    /// One message of the response: its output events, and the bytes they
-    /// came from, if any.
+    /// One message: its output events and the bytes they came from.
     Item(Item),
-    /// Bytes that hold no content: framing, a keep-alive, bookkeeping, or a
-    /// failed response's error body, which an `Err` end follows. Content
-    /// goes in items, even a message the format cannot read, so filters see
-    /// all of it. Only a format of no kind has no items: every byte is a
-    /// Frame. Written only in the format it came from.
+    /// Bytes with no content: framing, a keep-alive, or a failed response's
+    /// error body, which an `Err` end follows. Content goes in items, even
+    /// a message the format cannot read, so filters see it all; only a
+    /// format of no kind makes every byte a Frame. Written only in the
+    /// format it came from.
     Frame(Bytes),
-    /// Usage reported by the provider or given with
-    /// [`Response::with_usage`](crate::Response::with_usage), as an
-    /// increment, whatever the kind.
+    /// An increment of usage, from the provider or
+    /// [`Response::with_usage`](crate::Response::with_usage).
     Usage(Usage),
     /// The last Part of every response.
     End(Result<(), Fault>),
 }
 
-/// One message of a response: one or more events of its kind, such as an
-/// OpenAI chunk's start and text or all events of a whole response, and the
-/// bytes it was decoded from, if any. Read with `item.events::<T>()`.
+/// One message of a response: its events, such as an OpenAI chunk's start
+/// and text, and the bytes it was decoded from, if any.
 ///
-/// From the client's own format it is written as its bytes until edited,
-/// then rebuilt from them; translated or made by a plugin, it is written
-/// from its events.
+/// Relayed, it is written as its bytes until edited, then rebuilt from
+/// them; otherwise it is written from its events.
 pub struct Item {
-    /// A `Vec<T>` of the kind's output type `T`.
+    /// A `Vec<T>` of the kind's output type.
     events: Box<dyn Any + Send + Sync>,
-    /// `T`.
+    /// The `TypeId` of `T`.
     event_type: TypeId,
     raw: Option<Bytes>,
     edited: bool,
@@ -88,7 +84,7 @@ impl Item {
         events.map(Vec::as_slice).ok_or_else(Fault::wrong_kind::<T>)
     }
 
-    /// Run each event through `f` if they are `T`s, keeping what `f` passes
+    /// Run each event through `f` if they are `T`s, keeping what it passes
     /// on; marked edited if that differs.
     pub(crate) fn filter<T: Any + Clone + PartialEq>(
         &mut self,
@@ -113,13 +109,12 @@ impl Item {
     }
 
     /// The bytes it was decoded from, kept after an edit so the format can
-    /// write the edited events in the same shape.
+    /// write the edited events in their shape.
     pub fn raw(&self) -> Option<&Bytes> {
         self.raw.as_ref()
     }
 
-    /// The bytes it was decoded from if no edit changed it, to write as
-    /// they are.
+    /// The bytes it was decoded from, if no edit changed it.
     pub fn unedited(&self) -> Option<&Bytes> {
         self.raw.as_ref().filter(|_| !self.edited)
     }
@@ -129,7 +124,7 @@ impl Item {
         self.event_type
     }
 
-    /// Drop the provider's bytes, before another format writes the item.
+    /// Drop the provider's bytes, before another format writes it.
     pub(crate) fn forget_raw(&mut self) {
         self.raw = None;
     }
@@ -147,15 +142,14 @@ impl From<Usage> for Part {
     }
 }
 
-/// A whole message, JSON or not ([`Doc::json`] is `None` if not). One that
-/// arrived is parsed on first read and keeps its bytes until changed
-/// through [`Doc::json_mut`]; then it is written from its value. Copies
-/// share the value; a change copies it only if shared.
+/// A whole message body, JSON or not. It is parsed on first read and keeps
+/// its bytes until changed through [`Doc::json_mut`], then is written from
+/// its value. Copies share the value until one changes.
 #[derive(Debug, Clone)]
 pub struct Doc {
     raw: Bytes,
     parsed: Arc<OnceLock<Result<Value, Invalid>>>,
-    /// The value it is written from, once changed or made from one.
+    /// The value it is written from, once changed or built from one.
     changed: Option<Arc<Value>>,
 }
 
@@ -197,10 +191,9 @@ enum Invalid {
 }
 
 impl Doc {
-    /// The message as JSON; `None` if it is not JSON, or nests 128 levels
-    /// deep or more. A client's request that deep is refused once its
-    /// format reads the model from it
-    /// ([`Gateway::handle`](crate::Gateway::handle)).
+    /// The message as JSON; `None` if it is not JSON or nests 128 levels
+    /// deep or more. [`Gateway::handle`](crate::Gateway::handle) refuses a
+    /// request whose model is read from one that deep.
     pub fn json(&self) -> Option<&Value> {
         match &self.changed {
             Some(value) => Some(value),
@@ -209,7 +202,6 @@ impl Doc {
     }
 
     /// The message as JSON, to change in place; `None` if it is not JSON.
-    /// Once changed, it is written from its value.
     pub fn json_mut(&mut self) -> Option<&mut Value> {
         if self.changed.is_none() {
             self.changed = Some(Arc::new(self.parsed().as_ref().ok()?.clone()));
@@ -242,9 +234,8 @@ impl Doc {
     }
 }
 
-/// An open map of usage units. Always additive: `+=` another usage adds its
-/// amounts. Amounts are `f64`, exact for counts such as tokens; billing in
-/// money converts to a decimal type of its own.
+/// An open map of usage units to additive amounts. `f64` is exact for
+/// counts such as tokens; money belongs in a decimal type.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage(BTreeMap<Cow<'static, str>, f64>);
 
@@ -264,8 +255,7 @@ impl Usage {
         self.0.is_empty()
     }
 
-    /// Every unit and its amount. A unit named by a `&'static str` copies
-    /// without allocating.
+    /// Every unit and its amount.
     pub fn iter(&self) -> impl Iterator<Item = (Cow<'static, str>, f64)> + '_ {
         self.0.iter().map(|(k, v)| (k.clone(), *v))
     }

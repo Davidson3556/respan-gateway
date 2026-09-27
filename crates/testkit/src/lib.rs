@@ -14,8 +14,8 @@ use http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{Body, Context, Fault, Outcome, Plugin, Transport};
 use respan_gateway_core::{async_trait, bytes, futures, http, http_body, http_body_util};
 
-/// Scripted provider responses: an `http::Response` whose body is its
-/// chunks as they arrive, an `Err` chunk breaking it off.
+/// Scripted provider responses: the body arrives chunk by chunk, and an
+/// `Err` chunk breaks it off.
 pub mod mock {
     use super::*;
 
@@ -57,11 +57,10 @@ pub mod mock {
 /// Responses queued for one base URL.
 type Script = (String, VecDeque<mock::Reply>);
 
-/// Scripted providers: [`at`](Self::at) hands out a [`Transport`] for one
-/// provider, tagged with a base URL, and every request any of them sends is
-/// recorded here with its full URL. Each reply answers one request to its
-/// base URL; a request with none queued gets an `Err` with
-/// `upstream_error` (502).
+/// Scripted providers, one [`Transport`] per base URL from [`at`](Self::at).
+/// Each queued reply answers one request to its base URL; a request with
+/// none queued gets an `upstream_error` (502). Every request is recorded
+/// with its full URL.
 #[derive(Debug, Clone, Default)]
 pub struct MockTransport {
     scripts: Arc<Mutex<Vec<Script>>>,
@@ -74,8 +73,7 @@ impl MockTransport {
         Self::default()
     }
 
-    /// The transport of a provider at `base_url`, answered from the replies
-    /// queued for it.
+    /// The transport of the provider at `base_url`.
     pub fn at(&self, base_url: &str) -> MockAt {
         MockAt {
             mock: self.clone(),
@@ -106,10 +104,10 @@ impl MockTransport {
     }
 }
 
-/// One provider's transport, from [`MockTransport::at`]: it joins its base
-/// URL with each request's path and adds its own headers and the call's
-/// [`CallHeaders`](respan_gateway_server::CallHeaders), as
-/// `HttpTransport` does
+/// One provider's transport, from [`MockTransport::at`]. Like
+/// `HttpTransport`, it joins its base URL with the request's path and adds
+/// its own headers and the call's
+/// [`CallHeaders`](respan_gateway_server::CallHeaders)
 /// ([`add_own_headers`](respan_gateway_server::add_own_headers)).
 #[derive(Debug, Clone)]
 pub struct MockAt {
@@ -119,8 +117,8 @@ pub struct MockAt {
 }
 
 impl MockAt {
-    /// Send `headers` with every request, replacing same-named ones; a name
-    /// given several values sends them all. With any, clients' credentials
+    /// Sends `headers` with every request, replacing same-named ones, all
+    /// values of a repeated name included. With any, clients' credentials
     /// are not passed on.
     pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
         self.headers = headers;
@@ -131,8 +129,7 @@ impl MockAt {
 #[async_trait]
 impl Transport for MockAt {
     async fn send(&self, req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        // Joins the URL and adds headers as `HttpTransport::send` does, in
-        // the server crate; keep the two alike.
+        // Keep alike with `HttpTransport::send` in the server crate.
         let (mut head, body) = req.into_parts();
         respan_gateway_server::add_own_headers(&mut head, &self.headers)?;
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
@@ -165,7 +162,7 @@ impl Transport for MockAt {
     }
 }
 
-/// A request of just `body`, as a `POST` to `path`, for
+/// A `POST` of `body` to `path`, for
 /// [`Gateway::handle`](respan_gateway_core::Gateway::handle).
 pub fn post(path: &str, body: impl Into<Bytes>) -> http::Request<Body> {
     let mut req = http::Request::new(respan_gateway_core::body(body));
@@ -184,9 +181,9 @@ pub async fn collect(
     (parts.status, parts.headers, body)
 }
 
-/// A plugin that records the outcome of each request it sees. Register it
-/// first to see every request whose plugins ran; a body refused before
-/// them, such as one that broke off, runs no hooks.
+/// A plugin that records each request's client-edge outcome. Register it
+/// first to see every request whose plugins ran; a request refused before
+/// them, such as one whose body broke off, runs no hooks.
 #[derive(Debug, Clone, Default)]
 pub struct Outcomes(Arc<Mutex<Vec<Outcome>>>);
 

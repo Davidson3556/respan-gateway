@@ -4,9 +4,8 @@ use http_body_util::{BodyExt, Full};
 
 use crate::Fault;
 
-/// A message body: a boxed [`http_body::Body`] of bytes whose error is the
-/// [`Fault`] that broke it. Make one of bytes with [`body`], or pass any
-/// body whose error converts into a `Fault`.
+/// A message body: a boxed [`http_body::Body`] of bytes whose error is a
+/// [`Fault`]. Make one with [`body`].
 pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, Fault>;
 
 /// A whole [`Body`] of `bytes`.
@@ -14,34 +13,27 @@ pub fn body(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(Fault::from).boxed_unsync()
 }
 
-/// How the kernel reaches one provider, and where: a URL and credentials,
-/// a process, a socket, or code in the same process. Each [`Provider`]
-/// has its own; it may hold state its calls share, such as a connection
-/// pool.
+/// How the kernel reaches one [`Provider`]: a URL and credentials, a
+/// process, a socket, or in-process code. It may hold state its calls
+/// share, such as a connection pool.
 ///
 /// [`Provider`]: crate::Provider
 #[async_trait]
 pub trait Transport: Send + Sync + 'static {
     /// Send `req` and return the provider's response, whatever its status.
-    /// `req` is as the provider's format prepared it
-    /// ([`Format::prepare`](crate::Format::prepare)): its URI is the path
-    /// and query, relative to this transport, and the kernel has removed
-    /// hop-by-hop headers, those the client's `Connection` names, `Host`
-    /// and `Expect`. It may carry the client's
-    /// credentials, as a format passes the client's headers on within its
-    /// protocol: whose keys reach the provider is the transport's to
-    /// decide. Its extensions are the call's, as its `on_provider` hooks
-    /// left them
+    /// `req` is as [`Format::prepare`](crate::Format::prepare) made it, its
+    /// URI the path and query relative to this transport, without
+    /// connection headers, `Host` or `Expect`. It may carry the client's
+    /// credentials: the transport decides whose keys reach the provider.
+    /// Its extensions are the call's
     /// ([`ProviderContext::extensions`](crate::ProviderContext::extensions)),
-    /// under any `prepare` set, so it can read a per-call value such as a
-    /// tenant's key. It may return once the response head arrives, with both
-    /// bodies still streaming. Redirects are returned, not followed: a
-    /// relayed one reaches the client.
+    /// overlaid by any `prepare` set. It may return once the head arrives,
+    /// both bodies still streaming. Return redirects rather than follow
+    /// them.
     ///
     /// `Err` only if the request could not be sent: [`Fault::upstream`] if
-    /// the provider could not be reached, [`Fault::config`] if this
-    /// transport cannot express the request. The call returns it, and the
-    /// target's call refuses the request with it in the client's format.
+    /// the provider is unreachable, [`Fault::config`] if this transport
+    /// cannot express the request.
     async fn send(&self, req: http::Request<Body>) -> Result<http::Response<Body>, Fault>;
 }
 

@@ -5,39 +5,29 @@ use http::StatusCode;
 
 use crate::{Context, Fault, ProviderContext, Response, Usage};
 
-/// How a request, or one call it made, ended. On the client edge
-/// ([`Plugin::on_client_end`]): what the client was sent, and the usage of
-/// the response committed to it. On the provider edge
-/// ([`Plugin::on_provider_end`]): what the call got, and its usage.
+/// How a request ([`Plugin::on_client_end`]) or one of its calls
+/// ([`Plugin::on_provider_end`]) ended.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Outcome {
-    /// On the client edge, the status sent, after head edits; a
-    /// [`Filter::end`] there sees it before them. On the provider edge, the
-    /// provider's, as its filters and the client edge's see it. `None` if
-    /// no response started: the client left first, or the call was refused
-    /// or failed before its head came.
+    /// The status sent to the client, after head edits; on the provider
+    /// edge, the provider's. A [`Filter::end`] sees it before head edits.
+    /// `None` if no response started.
     pub status: Option<StatusCode>,
-    /// `Ok` if the response was delivered to its end as it said: its
-    /// status tells whether it was a success, so a plugin's own 429 made of
-    /// events ends `Ok`. `Err` if it failed: with the error its format read
-    /// in it, such as a provider's error status or error event, the fault
-    /// that broke the body or refused the request or call, an internal
-    /// fault if a plugin or format panicked, or an
-    /// [`codes::ABANDONED`](crate::codes::ABANDONED) fault if the client
-    /// left or the call's response was dropped before its end. A call whose
-    /// response is sent ends as the client's response does.
+    /// `Ok` if the response was delivered to its end; the status says
+    /// whether it was a success, so a plugin's own 429 ends `Ok`. `Err` if
+    /// it failed: a provider error its format read, the fault that broke
+    /// the body or refused the request or call, an internal fault for a
+    /// panic, or [`codes::ABANDONED`](crate::codes::ABANDONED) if it was
+    /// given up. A call whose response is sent ends as the client's does.
     pub end: Result<(), Fault>,
-    /// On the provider edge, the call's usage. On the client edge, the
-    /// usage reported for the committed response, including any not passed
-    /// to the client: the committed call's, which that call's
-    /// `on_provider_end` also gets, plus any [`Response::with_usage`].
-    /// Other calls' usage is on their own provider edge. Do not add the two
-    /// edges' usage for billing.
+    /// The call's usage; on the client edge, the committed response's,
+    /// including any [`Response::with_usage`]. The committed call reports
+    /// its usage on both edges, so bill from one edge only.
     pub usage: Usage,
 }
 
-/// Done, with no status or usage, such as to test a filter's `end`.
+/// Ended `Ok`, with no status or usage, such as to test a filter.
 impl Default for Outcome {
     fn default() -> Self {
         Self {
@@ -48,19 +38,15 @@ impl Default for Outcome {
     }
 }
 
-/// The only per-request extension point for features, on two edges: the
-/// client edge, once per request, and the provider edge, once per call the
-/// request makes, whoever makes it. A plugin implements the edge it
-/// belongs to, and works on a kind through its types
-/// ([`Context::input_mut`], [`Context::filter`]), whatever format the
-/// request comes in.
+/// The per-request extension point, on two edges: the client edge, once per
+/// request, and the provider edge, once per call the request makes. A
+/// plugin works on a kind through its types ([`Context::input_mut`],
+/// [`Context::filter`]), whatever the request's format.
 ///
-/// Plugins are registered on the gateway
-/// ([`Gateway::plugin`](crate::Gateway::plugin)) and see all its traffic,
-/// in one order on both edges. For traffic of another kind the typed
-/// accessors are an `Err` with
-/// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND), which `?` turns into a
-/// refusal; a plugin for one kind that lets other traffic pass says so:
+/// Plugins registered with [`Gateway::plugin`](crate::Gateway::plugin) see
+/// all traffic, in one order on both edges. On traffic of another kind the
+/// typed accessors fail with [`codes::WRONG_KIND`](crate::codes::WRONG_KIND),
+/// which `?` turns into a refusal; to let such traffic pass:
 ///
 /// ```ignore
 /// let chat = match cx.input_mut::<Conversation>() {
@@ -70,52 +56,40 @@ impl Default for Outcome {
 /// ```
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
-    /// The client edge: runs once per request, in the gateway's order.
-    /// `Ok(None)` passes to the next plugin; `Ok(Some(response))` answers
-    /// and skips the plugins after it; `Err` refuses the request. If every plugin
-    /// passes, the target answers ([`Context::set_target`]); with none set,
-    /// the request is refused 404 with
+    /// The client edge, once per request. `Ok(None)` passes to the next
+    /// plugin; `Ok(Some(response))` answers, skipping the rest; `Err`
+    /// refuses. If all pass, the target answers ([`Context::set_target`]);
+    /// with none, the request is refused 404
     /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
     async fn on_client(&self, _cx: &mut Context) -> Result<Option<Response>, Fault> {
         Ok(None)
     }
 
-    /// Runs once per request after the response ended, for every plugin
-    /// whose `on_client` started, once every call the request made has
-    /// ended and run its `on_provider_end` hooks: a call whose response is
-    /// still open, such as one a plugin kept, ends as the request closes,
-    /// [`codes::ABANDONED`](crate::codes::ABANDONED). The hooks run one
-    /// after another in the gateway's order, detached from the response:
-    /// on the current tokio runtime if there is one, else on a thread of
-    /// their own. A hook that panics does not stop the others;
-    /// [`Gateway::idle`](crate::Gateway::idle) waits for them all. `call`
-    /// is an `Err` here. `cx.target()` is the last target set, not proof
-    /// that it answered.
+    /// Once per request, after the response ended, for every plugin whose
+    /// `on_client` started. It runs after every call's `on_provider_end`;
+    /// calls still open end [`codes::ABANDONED`](crate::codes::ABANDONED)
+    /// when the request closes. Hooks run in order, detached: on the current
+    /// tokio runtime, else a thread. A panic does not stop the others;
+    /// [`Gateway::idle`](crate::Gateway::idle) waits for all. `call` fails
+    /// here, and `cx.target()` is the last target set, not proof it
+    /// answered.
     async fn on_client_end(&self, _cx: &Context, _outcome: &Outcome) {}
 
-    /// The provider edge: runs before every call the request makes, the
-    /// target's once every plugin passes, a plugin's [`Context::call`], each
-    /// of a fallback's, for each plugin in the gateway's order until one
-    /// refuses, whether or not its `on_client` ran; the request is
-    /// [`ProviderContext::client`]. `Err` refuses the call before anything
-    /// is sent: the call returns it, and for the target's call the request
-    /// is refused with it in the client's format.
+    /// The provider edge, before every call the request makes, the target's
+    /// included, for each plugin in order until one refuses, whether or not
+    /// its `on_client` ran. `Err` refuses the call before anything is sent:
+    /// [`Context::call`] returns it, and a refused target call refuses the
+    /// request.
     async fn on_provider(&self, _px: &mut ProviderContext) -> Result<(), Fault> {
         Ok(())
     }
 
-    /// Runs once per call whose `on_provider` started for this plugin: when
-    /// the call fails before a response, such as refused on this edge or
-    /// by the transport, or once its response ended, whoever read it:
-    /// sent, collected, read to its end, or dropped first or still open
-    /// when the request closes, which ends it
-    /// [`codes::ABANDONED`](crate::codes::ABANDONED). `outcome` is the
-    /// call's own, its usage included; a response sent ends as the
-    /// client's does, a failure on the client edge included, and one
-    /// collected as `collect` returns. Runs like `on_client_end`: detached,
-    /// in the gateway's order, panics caught, awaited by
-    /// [`Gateway::idle`](crate::Gateway::idle), and always before the
-    /// request's `on_client_end`.
+    /// Once per call whose `on_provider` started for this plugin: when the
+    /// call fails before a response, or its response ends. A sent response
+    /// ends as the client's does, a collected one as `collect` returns, and
+    /// one dropped or still open when the request closes ends
+    /// [`codes::ABANDONED`](crate::codes::ABANDONED). Runs like
+    /// `on_client_end`, and before it.
     async fn on_provider_end(&self, _px: &ProviderContext, _outcome: &Outcome) {}
 }
 
@@ -140,26 +114,21 @@ impl<P: Plugin + ?Sized> Plugin for Arc<P> {
 }
 
 /// Edits a response's events of `T`, its format's output type, as they
-/// stream ([`Context::filter`], [`ProviderContext::filter`]): it may
-/// change, drop, hold back and insert them. When relaying, the client's
-/// format rebuilds an item whose events changed and leaves out a streamed
-/// one with every event taken. Content the client's format cannot write
-/// out of place, such as another format's, fails the response.
+/// stream ([`Context::filter`], [`ProviderContext::filter`]): change, drop,
+/// hold back or insert them. Relayed, an item whose events changed is
+/// rebuilt, and a streamed one left empty is left out. An event the
+/// client's format cannot write fails the response.
 pub trait Filter<T>: Send + 'static {
-    /// Take `event` and push to `out` what replaces it: it, others, or
-    /// nothing yet.
+    /// Take `event` and push to `out` what replaces it, if anything.
     fn event(&mut self, event: T, out: &mut Vec<T>) -> Result<(), Fault>;
 
-    /// The response ends as `outcome` says, as known before the end is
-    /// written: its end, all its usage, and its status before head edits.
-    /// Runs once at every end, a failure or truncation too, or a call's
-    /// response still open as its request closes, but not if its reader
-    /// stops first (the response is dropped, or, for a call's filter, fails
-    /// on the client edge), or a decoder, filter, encoder or head edit
-    /// panics. Push to `out` what is held back; it is written
-    /// before the end. `Err` fails the response; at a relayed provider
-    /// error, whose body already told the client, that fault reaches the
-    /// `Outcome`, not the client.
+    /// The response ends as `outcome` says, before the end is written: its
+    /// end, usage, and status before head edits. Runs once at every end,
+    /// failures included, and for a call still open when its request
+    /// closes; not if the reader stops first or something panics. Push held
+    /// events to `out`, written before the end. `Err` fails the response;
+    /// after a relayed provider error the client already has, it reaches
+    /// only the `Outcome`.
     fn end(&mut self, _outcome: &Outcome, _out: &mut Vec<T>) -> Result<(), Fault> {
         Ok(())
     }

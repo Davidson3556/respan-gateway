@@ -18,11 +18,9 @@ pub use reqwest;
 
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-/// Sends every request, whatever its method and path, to
-/// [`Gateway::handle`], which serves it in the first format that accepts
-/// it or answers a plain-text 404. A body over 32 MiB is refused 413
-/// `too_large`, and one that breaks off 400 `bad_request`, both in the
-/// client's format.
+/// A router sending every request to [`Gateway::handle`]. A body over
+/// 32 MiB is refused 413 `too_large`, and one that breaks off 400
+/// `bad_request`, both in the client's format.
 pub fn router(gateway: Gateway) -> Router {
     Router::new().fallback(handle).with_state(gateway)
 }
@@ -42,9 +40,9 @@ fn body_fault(e: axum::BoxError) -> Fault {
     Fault::bad_request("the request body broke off")
 }
 
-/// Reaches one provider over HTTPS or HTTP, at a base URL to which each
-/// request's path is appended, with headers of its own. Every instance
-/// shares one connection pool unless given its own client.
+/// Reaches one provider over HTTP(S) at a base URL, which each request's
+/// path extends, with headers of its own. Instances share one connection
+/// pool unless given their own client.
 #[derive(Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
@@ -63,9 +61,8 @@ impl std::fmt::Debug for HttpTransport {
     }
 }
 
-/// The process's client, whose pool every transport shares: it passes
-/// redirects on rather than following them, and gives up after 10 s
-/// connecting or 300 s of silence.
+/// The client every transport shares: it returns redirects unfollowed and
+/// gives up after 10 s connecting or 300 s of silence.
 fn shared_client() -> Result<reqwest::Client, Fault> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     let built = CLIENT.get_or_init(|| {
@@ -82,12 +79,10 @@ fn shared_client() -> Result<reqwest::Client, Fault> {
 }
 
 impl HttpTransport {
-    /// A transport to `base_url`: `http` or `https`, with a host and a
-    /// valid port, and no query, fragment or credentials (those go in
-    /// [`with_headers`](Self::with_headers)). It may hold a path prefix,
-    /// such as `/v1`, which the format's path follows. With no headers
-    /// ([`with_headers`](Self::with_headers)) clients' credentials pass
-    /// through to it, as to a local proxy. `Err` with
+    /// A transport to `base_url`: `http` or `https`, with a host, a valid
+    /// port, an optional path prefix such as `/v1`, and no query, fragment
+    /// or credentials. With no [`with_headers`](Self::with_headers),
+    /// clients' credentials pass through, as to a local proxy. `Err` with
     /// `config_error` for any other URL, or `internal_error` if the HTTP
     /// client cannot be built.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Fault> {
@@ -114,12 +109,10 @@ impl HttpTransport {
         })
     }
 
-    /// Send `headers` with every call, such as the API key, replacing any
-    /// set before; a name given several values sends them all. They are
-    /// its own ([`add_own_headers`]): with any, a key or not, clients'
-    /// credentials are not passed on. `Err` with `config_error` for a
-    /// connection header (`Host`, `Content-Length`, a hop-by-hop one,
-    /// `Expect` or `Proxy-Authorization`).
+    /// Send `headers`, such as the API key, with every call, replacing any
+    /// set before. With any at all, clients' credentials are removed
+    /// ([`add_own_headers`]). `Err` with `config_error` for a connection
+    /// header, such as `Host` or `Content-Length`.
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
         if let Some(name) = headers.keys().find(|k| CONNECTION_HEADERS.contains(k)) {
             let name = name.as_str();
@@ -131,17 +124,15 @@ impl HttpTransport {
         Ok(self)
     }
 
-    /// Use `client`, and its own pool, rather than the shared one. It
-    /// should not follow redirects, as they are for the client to follow.
+    /// Use `client` and its pool instead of the shared one. It should not
+    /// follow redirects: they are the client's to follow.
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
         self
     }
 }
 
-/// Headers the connection sets, or that edits and reframing change: the
-/// hop-by-hop ones the kernel strips from every call
-/// ([`Transport::send`]), plus `Host` and `Expect`.
+/// Headers the kernel strips from every call ([`Transport::send`]).
 const CONNECTION_HEADERS: [HeaderName; 12] = [
     header::CONNECTION,
     header::CONTENT_LENGTH,
@@ -174,7 +165,7 @@ impl Transport for HttpTransport {
             .client
             .execute(req)
             .await
-            // Its message names the provider's URL, which is for logs only.
+            // The error names the provider's URL, which is for logs only.
             .map_err(|e| match e.is_builder() {
                 true => Fault::config("the provider request is not valid").with_source(e),
                 false => Fault::upstream("the provider could not be reached").with_source(e),
@@ -184,10 +175,9 @@ impl Transport for HttpTransport {
     }
 }
 
-/// Headers of one call that a transport of this crate sends as its own,
-/// like those given to [`HttpTransport::with_headers`], replacing any of
-/// the same name: a plugin puts them in the call's extensions, such as a
-/// tenant's key in `on_provider`
+/// Headers for one call, sent as the transport's own and replacing those
+/// of the same name from [`HttpTransport::with_headers`], such as a
+/// tenant's key set in `on_provider`
 /// (`px.extensions_mut().insert(CallHeaders(headers))`).
 #[derive(Clone, Default)]
 pub struct CallHeaders(pub HeaderMap);
@@ -200,17 +190,16 @@ impl std::fmt::Debug for CallHeaders {
     }
 }
 
-/// Write a transport's own `headers`, then the call's [`CallHeaders`], onto
-/// a call's request `head`, each replacing any of the same name; connection
-/// headers among the call's are not sent. With any, the provider's
-/// credentials are the transport's: the client's credential headers and
-/// query parameters are removed first. Without any, the client's pass
-/// through. A name is a credential when its last segment, split on `-` and
-/// `_`, is `authorization`, `auth`, `key`, `token`, `secret`, `password`,
-/// `credential` or `credentials`, as in `x-api-key` or `access_token`;
-/// `idempotency-key` and `x-idempotency-key` are the client's own.
+/// Write a transport's own `headers`, then the call's [`CallHeaders`]
+/// (minus connection headers), onto a call's `head`, each replacing any of
+/// the same name. If there are any, the client's credential headers and
+/// query parameters are removed first; otherwise the client's pass
+/// through. A credential is a name whose last `-` or `_` segment is
+/// `authorization`, `auth`, `key`, `token`, `secret`, `password`,
+/// `credential` or `credentials`, except `idempotency-key` and
+/// `x-idempotency-key`.
 ///
-/// For any transport keeping this crate's rule, such as a mock. `Err` with
+/// For any transport keeping this rule, such as a mock. `Err` with
 /// `config_error` if the query cannot be rewritten.
 pub fn add_own_headers(head: &mut http::request::Parts, headers: &HeaderMap) -> Result<(), Fault> {
     let mut own = headers.clone();

@@ -287,9 +287,9 @@ async fn the_provider_gets_its_auth_and_the_usage_option() {
 
 #[tokio::test]
 async fn the_clients_credentials_reach_only_a_provider_with_none_configured() {
-    // The transport owns credentials: one with headers of its own drops the
-    // client's, whatever their names; other headers always go. One with
-    // none gets the client's, as a local subscription proxy needs.
+    // A transport with headers of its own drops the client's key; one with
+    // none passes it on, as a local subscription proxy needs. Other client
+    // headers reach both.
     for (target, base, auth) in [
         ("openai", OPENAI, Some("Bearer sk-test")),
         ("backup", BACKUP, Some("Bearer client-key")),
@@ -4309,7 +4309,6 @@ async fn a_plugin_removes_the_gateways_own_credential() {
 
 // How a response begins and ends, whatever goes wrong around it.
 
-/// The end's code, or `ok`.
 fn code(end: &Result<(), Fault>) -> &str {
     end.as_ref().err().map_or("ok", |f| f.code())
 }
@@ -4332,7 +4331,6 @@ async fn frames(resp: http::Response<Body>) -> (String, Option<Fault>) {
 const HI: &str =
     "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";
 
-/// A chunk of text `text`.
 fn text_chunk(text: &str) -> String {
     chunk(json!({"id": "c1", "choices": [{"index": 0, "delta": {"content": text}}]}))
 }
@@ -4432,7 +4430,7 @@ async fn a_clients_connection_header_names_only_its_own_headers() {
 
     assert_eq!(h.text(req).await.0, StatusCode::OK);
 
-    // The format's content type stays; the client's hop's header goes.
+    // The format's content type stays; a header `Connection` names goes.
     let sent = h.mock.sent();
     assert_eq!(sent[0].headers()["content-type"], "application/json");
     assert!(sent[0].headers().get("x-hop").is_none());
@@ -4849,7 +4847,6 @@ async fn a_providers_te_header_does_not_reach_the_client() {
 
 #[tokio::test]
 async fn a_panicking_call_leaves_its_sibling_abandoned() {
-    /// Never answers.
     struct Never;
 
     #[async_trait]

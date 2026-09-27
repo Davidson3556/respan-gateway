@@ -1,9 +1,10 @@
 #![warn(missing_docs)]
-//! Wire formats. Each relays the provider's bytes as they came, except the
-//! terminator and stream errors, which it rewrites, and what it asked for
-//! itself, such as a usage chunk the client did not ask for, which it drops.
-//! OpenAI Chat Completions and Anthropic Messages are formats of the
-//! [`conversation`] kind and translate to each other through its types.
+//! Wire formats, and helpers for writing one. A format relays the
+//! provider's bytes as they came, except that it rewrites the terminator and
+//! stream errors and drops what it asked for itself, such as a usage chunk
+//! the client did not request. OpenAI Chat Completions and Anthropic
+//! Messages are formats of the [`conversation`] kind and translate to each
+//! other through its types.
 
 mod common;
 pub mod sse;
@@ -23,6 +24,7 @@ use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_core::{Decoder, Encoder, Fault, Part};
 
 /// A provider's message as JSON: a whole body, or an event's `data:`.
+/// `None` if neither parses.
 pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
     let raw = raw.as_ref();
     serde_json::from_slice(raw)
@@ -31,9 +33,8 @@ pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
 }
 
 /// Whether a client request is a `POST` to a path ending in `suffix`, such
-/// as `/chat/completions`, whatever its query: the usual
-/// [`Format::accepts`](respan_gateway_core::Format::accepts), for a format of
-/// a kind or of none.
+/// as `/chat/completions`, whatever its query. The usual
+/// [`Format::accepts`](respan_gateway_core::Format::accepts).
 pub fn posts_to(head: &http::request::Parts, suffix: &str) -> bool {
     head.method == http::Method::POST && head.uri.path().ends_with(suffix)
 }
@@ -44,11 +45,9 @@ pub fn default_content_type(head: &mut http::response::Parts, value: &'static st
     head.headers.entry(CONTENT_TYPE).or_insert(value);
 }
 
-/// The decoder of a format of no kind, which the gateway only passes on.
-/// Such a format tells its requests itself, as any does, such as with
-/// [`posts_to`] or a path prefix.
-/// A success becomes Frames as its bytes come. A failure is read whole, as
-/// [`whole::decoder`] reads one, keeping the provider's words.
+/// The decoder of a format of no kind. A success becomes Frames as its
+/// bytes come; a failure is read whole by [`whole::decoder`], keeping the
+/// provider's message.
 pub fn frames_decoder(head: &http::response::Parts) -> Box<dyn Decoder> {
     match head.status.is_success() {
         false => whole::decoder(head, |_, _| Ok(())),
@@ -68,10 +67,10 @@ impl Decoder for FramesDecoder {
     }
 }
 
-/// The encoder of a format of no kind. Frames are written as they came and
-/// a relayed head is left as it is. A failure is written as its message in
-/// plain text; under a relayed head it returns `Err`, so the kernel aborts
-/// the body.
+/// The encoder of a format of no kind. Frames are written as they came.
+/// Unless `relayed`, the head defaults to plain text and a failure is
+/// written as its message; under a relayed head a failure returns `Err`, so
+/// the kernel aborts the body.
 pub fn frames_encoder(head: &mut http::response::Parts, relayed: bool) -> Box<dyn Encoder> {
     if !relayed {
         default_content_type(head, "text/plain; charset=utf-8");
@@ -80,8 +79,7 @@ pub fn frames_encoder(head: &mut http::response::Parts, relayed: bool) -> Box<dy
 }
 
 struct FramesEncoder {
-    /// Whether the head is the provider's, under which plain text cannot
-    /// tell a failure.
+    /// Whether the head is the provider's, so a failure cannot be text.
     relayed: bool,
 }
 

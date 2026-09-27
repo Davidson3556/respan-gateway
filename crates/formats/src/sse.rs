@@ -19,8 +19,8 @@ pub fn is_stream(head: &http::response::Parts) -> bool {
 }
 
 /// Splits a body into events for `on_event`. At the end of the body, a last
-/// event of whole lines is kept even without its blank line; one cut short
-/// is dropped, as SSE clients drop it.
+/// event of whole lines is kept without its blank line; one cut mid-line is
+/// dropped, as SSE clients drop it.
 pub(crate) struct SseDecoder<F> {
     buf: BytesMut,
     /// Where to resume searching `buf` for the end of an event.
@@ -109,12 +109,12 @@ where
 ///
 /// In a stream, `on_message` gets each event that carries data; one without,
 /// such as a keep-alive comment, passes on as a Frame. `on_message` pushes
-/// `Part::End` at the event that ends the exchange (or wrap the decoder in
-/// [`at_eof`]); later events are dropped. A whole body goes to
-/// [`whole::decoder`](crate::whole::decoder) as it is. An `Err` from
+/// `Part::End` at the event that ends the exchange, or the decoder is
+/// wrapped in [`at_eof`]; later events are dropped. An `Err` from
 /// `on_message` ends the response with that fault. `on_message` decides
 /// whether an error inside a success is a failure, as for a chat format, or
-/// content, as a JSON-RPC error reply is.
+/// content, as a JSON-RPC error reply is. A whole body goes to
+/// [`whole::decoder`](crate::whole::decoder).
 pub fn or_whole<F>(head: &http::response::Parts, mut on_message: F) -> Box<dyn Decoder>
 where
     F: FnMut(Bytes, &mut Vec<Part>) -> Result<(), Fault> + Send + 'static,
@@ -174,10 +174,9 @@ pub fn event(name: Option<&str>, data: impl std::fmt::Display) -> String {
     out
 }
 
-/// `data` as an event in the shape of `like`, an event the provider sent,
-/// for formats that rewrite events. The fields of `like` other than
-/// `data`, such as `event` and `id`, are kept. Without `like`, an event
-/// named `name`.
+/// `data` as an event in the shape of `like`, an event the provider sent:
+/// its fields other than `data`, such as `event` and `id`, are kept.
+/// Without `like`, an event named `name`.
 pub fn event_as(like: Option<&Bytes>, name: Option<&str>, data: impl std::fmt::Display) -> String {
     let Some(like) = like else {
         return event(name, data);
@@ -235,7 +234,6 @@ mod tests {
 
     type Events = SseDecoder<fn(Bytes, &mut Vec<Part>)>;
 
-    /// A decoder that makes each event a Frame.
     fn frames() -> Events {
         SseDecoder::new(|raw, out| out.push(Part::Frame(raw)))
     }

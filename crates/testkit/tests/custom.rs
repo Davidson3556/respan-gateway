@@ -16,8 +16,7 @@ use respan_gateway_testkit::{MockTransport, Outcomes, collect, mock, post};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// `body` posted where clients of the format named `format` send: `/` and
-/// its name.
+/// A `POST` of `body` to `/{format}`, where that format's clients send.
 fn to(format: &str, body: impl Into<Bytes>) -> http::Request<respan_gateway_core::Body> {
     post(&format!("/{format}"), body)
 }
@@ -298,7 +297,7 @@ async fn a_target_a_plugin_may_set_is_checked_on_asking() {
     );
     let v2 = Provider::new("v2", V2, mock.at("http://v2.test"));
     let gw = serving(V1, [openai, v2], vec![Arc::new(Polite)], None).expect("builds");
-    // Whether a request's format can use it is known per request.
+    // Only existence is checked: a format's fit is known per request.
     assert!(gw.check_target("v2").is_ok());
     assert!(gw.check_target("openai").is_ok());
     let err = gw.check_target("nope").err();
@@ -470,7 +469,7 @@ async fn a_plugin_asking_for_another_kind_is_told_so_before_decoding() {
     impl Plugin for Chatty {
         async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
             let asked = cx.input::<respan_gateway_formats::conversation::Conversation>();
-            // Its code sets it apart from an undecodable body.
+            // `WRONG_KIND` sets it apart from an undecodable body.
             let code = asked.as_ref().err().map(|f| f.code().to_owned());
             assert_eq!(
                 code.as_deref(),

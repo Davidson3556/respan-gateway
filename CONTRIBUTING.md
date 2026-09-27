@@ -1,11 +1,11 @@
 # Contributing
 
-The project is pre-alpha and the architecture is still being designed.
+The project is pre-alpha; the architecture is being designed.
 
 Before proposing a change to the core, read
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the
 [decision records](docs/decisions/). A change that contradicts an
-accepted decision needs a new decision record that supersedes it.
+accepted decision needs a new decision record.
 
 Every change must pass:
 

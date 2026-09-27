@@ -18,12 +18,12 @@ use crate::common::{
 use crate::conversation::{Content, Conversation, Finish, Message, Reply, Role, units};
 use crate::sse::{SseDecoder, event, event_json, is_stream};
 
-/// The API version sent when the client names none. Headers a provider's
-/// transport adds override it.
+/// The API version sent when the client names none. A provider's
+/// transport headers override it.
 const VERSION: &str = "2023-06-01";
 const VERSION_HEADER: &str = "anthropic-version";
 
-/// The `max_tokens` of a translated request without one, as Anthropic
+/// The `max_tokens` of a translated request without one; Anthropic
 /// requires it.
 const DEFAULT_MAX_TOKENS: u64 = 4096;
 
@@ -37,11 +37,10 @@ const FINISH: Names<Finish> = Names(&[
 
 const ANTHROPIC: &str = "anthropic-messages";
 
-/// Anthropic Messages, `POST /v1/messages`, named `anthropic-messages`.
-/// It accepts a client's `POST` to any path ending in `/v1/messages`.
-/// As with Anthropic's SDKs, the provider's base URL leaves out the
-/// version, such as `https://api.anthropic.com`. It sends
-/// `anthropic-version: 2023-06-01` if none is set.
+/// Anthropic Messages, named `anthropic-messages`. It accepts a `POST` to
+/// any path ending in `/v1/messages`. As in Anthropic's SDKs, the
+/// provider's base URL leaves out the version: `https://api.anthropic.com`.
+/// It sends `anthropic-version: 2023-06-01` if none is set.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnthropicMessages;
 
@@ -126,8 +125,8 @@ const KNOWN: &[&str] = &[
 /// Roles a message can have; system prompts have their own field.
 const ROLES: Names<Role> = Names(&[("user", Role::User), ("assistant", Role::Assistant)]);
 
-/// The system prompt, as the parts of the leading system messages, and the
-/// rest. Anthropic has no place for a later system message.
+/// The parts of the leading system messages, as the system prompt, and
+/// the rest. Anthropic has no place for a later system message.
 fn split_system(chat: &Conversation) -> Result<(Vec<Content>, &[Message]), Fault> {
     let lead = chat
         .messages
@@ -149,9 +148,9 @@ fn split_system(chat: &Conversation) -> Result<(Vec<Content>, &[Message]), Fault
     Ok((parts.collect(), rest))
 }
 
-/// The system prompt of `after`'s leading system messages. The client's,
-/// decoded from `system`, is patched in its form so its cache markers stay;
-/// others, such as one a plugin added, become new parts beside it.
+/// The system prompt of `after`'s leading system messages. The client's
+/// is patched in its own form, so its cache markers stay; others, such as
+/// one a plugin added, become new parts beside it.
 fn patch_system(
     system: Option<&Value>,
     before: &Conversation,
@@ -306,7 +305,7 @@ impl Wire for AnthropicMessages {
         })
     }
 
-    /// Rebuild the content from the events, one block each, in order: the
+    /// Rebuilds the content from the events, one block each, in order: the
     /// provider's text block of that number with the text put in, new text
     /// as a new block, and other content as it came.
     fn put(v: &mut Value, events: &[Reply]) {
@@ -340,7 +339,7 @@ impl Wire for AnthropicMessages {
     }
 }
 
-/// Put edited events back into a stream event.
+/// Puts edited events back into a stream event.
 fn put_event(v: &mut Value, events: &[Reply]) {
     // A block that opened with text a filter took opens empty.
     if v["type"] == "content_block_start" && !events.iter().any(|e| matches!(e, Reply::Text { .. }))
@@ -446,8 +445,8 @@ fn reply_of(v: &Value) -> Option<Reply> {
         "content_block_start" => {
             let content = &v["content_block"];
             match (content["type"].as_str(), content["text"].as_str()) {
-                // A text block opens empty and its text comes in deltas, but
-                // one that opens with text holds that text.
+                // A text block usually opens empty, its text coming in
+                // deltas; one that opens with text holds it.
                 (Some("text"), None | Some("")) => None,
                 (Some("text"), Some(text)) => Some(Reply::text(block, text)),
                 _ => Some(Reply::other(ANTHROPIC, content.clone())),
@@ -485,10 +484,9 @@ struct EventStream {
     /// The provider's open text block and its stop, held until the next
     /// event so text a filter releases can still go in.
     provider_open: Option<(u32, Option<Bytes>)>,
-    /// Written text for a block not open among the provider's events. It
-    /// goes into that block when the provider opens it, or a new block at
-    /// the end: a block cannot open among the provider's, which Anthropic
-    /// numbers by position.
+    /// Written text for a block the provider has not opened. It goes into
+    /// that block when the provider opens it, or else a new block at the
+    /// end, since Anthropic numbers blocks by position.
     waiting: Vec<(u32, String)>,
     /// The provider's events from `message_delta` on.
     held: Option<BytesMut>,
@@ -505,7 +503,7 @@ impl EventStream {
         }
     }
 
-    /// Write `message_start`, unless it is written.
+    /// Writes `message_start` once.
     fn open(&mut self, so_far: &SoFar, out: &mut BytesMut) {
         if std::mem::replace(&mut self.started, true) {
             return;
@@ -526,7 +524,7 @@ impl EventStream {
         out.extend_from_slice(event(Some("message_start"), &start).as_bytes());
     }
 
-    /// Close the provider's block, if its stop was held.
+    /// Closes the provider's block, if its stop was held.
     fn close_provider_block(&mut self, out: &mut BytesMut) {
         if let Some((_, Some(stop))) = self.provider_open.take_if(|(_, stop)| stop.is_some()) {
             out.extend_from_slice(&stop);
@@ -603,8 +601,7 @@ impl StreamWriter for EventStream {
         if let Some(held) = &mut self.held {
             return held.extend_from_slice(raw);
         }
-        // An event of no type, such as a comment, a ping or an empty text
-        // block's start, says nothing.
+        // A comment, a ping or an empty text block's start says nothing.
         let says_nothing = matches!(name, None | Some("ping"))
             || (name == Some("content_block_start")
                 && v["content_block"]["type"] == "text"
@@ -624,8 +621,7 @@ impl StreamWriter for EventStream {
             (Some("content_block_start"), Some(i)) => {
                 out.extend_from_slice(raw);
                 self.opened = self.opened.max(i.saturating_add(1));
-                // Written text goes only into a text block, waiting text
-                // for it first.
+                // Written text waiting for this text block goes in first.
                 if v["content_block"]["type"] == "text" {
                     self.provider_open = Some((i, None));
                     let now = self
@@ -728,7 +724,7 @@ mod tests {
 
     use super::*;
 
-    /// The rebuilt event, or none.
+    /// The rebuilt event, or empty bytes.
     fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Bytes, Fault> {
         EventStream::rebuild(raw, events).map(Option::unwrap_or_default)
     }
@@ -868,7 +864,7 @@ mod tests {
         });
         let mut expected = body;
         expected["messages"][0]["content"] = "HI".into();
-        // No max_tokens is added: the client's body is theirs.
+        // A patch adds no `max_tokens`: it changes only what was edited.
         assert_eq!(edited.ok(), Some(expected));
     }
 
