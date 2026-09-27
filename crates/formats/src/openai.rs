@@ -1,30 +1,29 @@
-//! OpenAI Chat Completions: `POST /v1/chat/completions`, JSON or SSE, of
-//! the conversation kind.
+//! OpenAI Chat Completions: `POST /chat/completions`, JSON or SSE, of the
+//! conversation kind.
 
 use bytes::{Bytes, BytesMut};
 use http::StatusCode;
-use respan_gateway_core::{
-    Decoder, Doc, Encoder, Fault, Format, Item, Kind, Part, RequestView, Usage,
-};
+use respan_gateway_core::{ClientView, Decoder, Doc, Encoder, Fault, Format, Item, Part, Usage};
 use respan_gateway_core::{bytes, http, serde_json};
 use serde_json::{Map, Value, json};
 
 use crate::common::{
-    Names, SoFar, StreamEncoder, StreamWriter, Totals, UnaryEncoder, Wire, decoder_for, edit,
-    json_model, kind, made_head, merge_details, pass_credentials, pass_headers, patch_messages,
-    patch_sampling, post_json, provider_error, read_message, reads_back, says, says_error, set,
-    stop_json, streams, unary_decoder, unix_now, unless_taken, unreadable_event,
+    Names, SoFar, StreamEncoder, StreamWriter, Totals, UnaryEncoder, Wire, decode_request,
+    decoder_for, edit, encode_request, json_model, made_head, merge_details, pass_headers,
+    patch_messages, patch_sampling, post_json, provider_error, read_message, reads_back, says,
+    says_error, set, stop_json, streams, unary_decoder, unix_now, unless_taken, unreadable_event,
     unsupported_fields, unwritable_content, write_message, write_model,
 };
-use crate::conversation::{Conversation, Event, Finish, Role, units};
+use crate::conversation::{Conversation, Finish, Reply, Role, units};
 use crate::sse::{SseDecoder, event, event_as, event_data, event_json, is_stream};
 
 const OPENAI: &str = "openai-chat";
 
-/// OpenAI Chat Completions, `POST /v1/chat/completions`, named
-/// `openai-chat`. From a client of this format it passes on `openai-`
-/// headers; `authorization`, `api-key`, `openai-organization` and
-/// `openai-project` pass only to a provider that sets no credential.
+/// OpenAI Chat Completions, `POST /chat/completions`, named
+/// `openai-chat`. It accepts a client's `POST` to any path ending in
+/// `/chat/completions`. As with OpenAI's SDKs, the provider's base URL holds the
+/// version, such as `https://api.openai.com/v1` or
+/// `https://api.groq.com/openai/v1`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenAiChat;
 
@@ -37,36 +36,43 @@ const FINISH: Names<Finish> = Names(&[
 ]);
 
 impl Format for OpenAiChat {
+    type Input = Conversation;
+    type Output = Reply;
+
     fn name(&self) -> &str {
         OPENAI
+    }
+
+    fn accepts(&self, head: &http::request::Parts) -> bool {
+        crate::posts_to(head, "/chat/completions")
     }
 
     fn model(&self, _head: &http::request::Parts, body: &Doc) -> Option<String> {
         json_model(body)
     }
 
-    fn prepare(
+    fn decode(&self, _head: &http::request::Parts, body: &Doc) -> Result<Conversation, Fault> {
+        decode_request::<Self>(body)
+    }
+
+    fn encode(
         &self,
-        body: Doc,
-        client: RequestView<'_>,
-        provider: &http::HeaderMap,
-    ) -> Result<http::Request<Doc>, Fault> {
-        let mut req = post_json(body, "/v1/chat/completions");
-        let credentials = [
-            "authorization",
-            "api-key",
-            "openai-organization",
-            "openai-project",
-        ];
-        pass_headers(&mut req, client, &["openai-"]);
-        pass_credentials(&mut req, client, provider, &credentials);
+        chat: &Conversation,
+        original: Option<(&Doc, &Conversation)>,
+    ) -> Result<Doc, Fault> {
+        encode_request::<Self>(chat, original)
+    }
+
+    fn prepare(&self, body: Doc, client: ClientView<'_>) -> Result<http::Request<Doc>, Fault> {
+        let mut req = post_json(body, "/chat/completions", client)?;
+        pass_headers(&mut req, client);
         let body = req.body_mut();
         write_model(body, client.model())?;
         add_usage(body)?;
         Ok(req)
     }
 
-    fn decoder(&self, head: &http::response::Parts, client: RequestView<'_>) -> Box<dyn Decoder> {
+    fn decoder(&self, head: &http::response::Parts, client: ClientView<'_>) -> Box<dyn Decoder> {
         if !is_stream(head) {
             return decoder_for(head, client, unary_decoder::<Self>(head.status));
         }
@@ -82,7 +88,7 @@ impl Format for OpenAiChat {
     fn encoder(
         &self,
         head: &mut http::response::Parts,
-        client: RequestView<'_>,
+        client: ClientView<'_>,
         relayed: bool,
     ) -> Box<dyn Encoder> {
         let relayed = made_head(head, client, relayed);
@@ -94,10 +100,6 @@ impl Format for OpenAiChat {
             ..Chunks::default()
         };
         Box::new(StreamEncoder::new(relayed, chunks))
-    }
-
-    fn kind(&self) -> Option<Kind> {
-        Some(kind::<Self>())
     }
 }
 
@@ -148,7 +150,7 @@ const ROLES: Names<Role> = Names(&[
 ]);
 
 impl Wire for OpenAiChat {
-    fn decode(v: &Value) -> Conversation {
+    fn read(v: &Value) -> Conversation {
         let mut chat = Conversation {
             stream: v["stream"] == true,
             max_tokens: v["max_completion_tokens"]
@@ -173,7 +175,7 @@ impl Wire for OpenAiChat {
         chat
     }
 
-    fn encode(chat: &Conversation) -> Result<Value, Fault> {
+    fn write(chat: &Conversation) -> Result<Value, Fault> {
         let mut v = Map::new();
         let messages = chat.messages.iter().map(|m| write_message(m, &ROLES));
         let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
@@ -221,8 +223,8 @@ impl Wire for OpenAiChat {
     }
 
     /// Text as block 0.
-    fn events(v: &Value) -> Vec<Event> {
-        let start = Event::start(
+    fn replies(v: &Value) -> Vec<Reply> {
+        let start = Reply::start(
             v["id"].as_str().unwrap_or_default(),
             v["model"].as_str().unwrap_or_default(),
         );
@@ -276,11 +278,11 @@ impl Wire for OpenAiChat {
         })
     }
 
-    fn in_order(events: &[Event]) -> Vec<Event> {
+    fn in_order(events: &[Reply]) -> Vec<Reply> {
         in_order(events)
     }
 
-    fn put(v: &mut Value, events: &[Event]) {
+    fn put(v: &mut Value, events: &[Reply]) {
         put_choice(v, events, "message");
     }
 
@@ -294,22 +296,22 @@ impl Wire for OpenAiChat {
 
 /// `events` as a choice reads back: start, one text of every block, other
 /// content, then finish, whatever order a filter left them in.
-fn in_order(events: &[Event]) -> Vec<Event> {
-    let rank = |e: &Event| match e {
-        Event::Start { .. } => 0,
-        Event::Text { .. } => 1,
-        Event::Other { .. } => 2,
+fn in_order(events: &[Reply]) -> Vec<Reply> {
+    let rank = |e: &Reply| match e {
+        Reply::Start { .. } => 0,
+        Reply::Text { .. } => 1,
+        Reply::Other { .. } => 2,
         _ => 3,
     };
     let mut events = events.to_vec();
     events.sort_by_key(rank);
-    let mut joined: Vec<Event> = Vec::with_capacity(events.len());
+    let mut joined: Vec<Reply> = Vec::with_capacity(events.len());
     for e in events {
         match (joined.last_mut(), e) {
-            (Some(Event::Text { text, .. }), Event::Text { text: more, .. }) => {
+            (Some(Reply::Text { text, .. }), Reply::Text { text: more, .. }) => {
                 text.push_str(&more)
             }
-            (_, Event::Text { text, .. }) => joined.push(Event::text(0, text)),
+            (_, Reply::Text { text, .. }) => joined.push(Reply::text(0, text)),
             (_, e) => joined.push(e),
         }
     }
@@ -319,10 +321,10 @@ fn in_order(events: &[Event]) -> Vec<Event> {
 /// Put edited events back into a whole response's choices, under
 /// `message`, or a chunk's, under `delta`. Other content is written as it
 /// came, so a changed one fails the response.
-fn put_choice(v: &mut Value, events: &[Event], key: &str) {
+fn put_choice(v: &mut Value, events: &[Reply], key: &str) {
     for event in events {
         // Every chunk may name them, though some leave the model out.
-        if let Event::Start { id, model } = event {
+        if let Reply::Start { id, model } = event {
             for (field, value) in [("id", id), ("model", model)] {
                 if let Some(fields) = v.as_object_mut()
                     && (fields.contains_key(field) || !value.is_empty())
@@ -338,7 +340,7 @@ fn put_choice(v: &mut Value, events: &[Event], key: &str) {
     let rest = rest_of(v, key);
     let old_finish = v.pointer("/choices/0/finish_reason").cloned();
     let other = events.iter().find_map(|e| match e {
-        Event::Other { format, raw } if **format == *OPENAI && raw.is_array() => {
+        Reply::Other { format, raw } if **format == *OPENAI && raw.is_array() => {
             Some((**raw).clone())
         }
         _ => None,
@@ -379,7 +381,7 @@ fn put_choice(v: &mut Value, events: &[Event], key: &str) {
     let mut texts: Vec<(u32, &str)> = events
         .iter()
         .filter_map(|e| match e {
-            Event::Text { block, text } => Some((*block, text.as_str())),
+            Reply::Text { block, text } => Some((*block, text.as_str())),
             _ => None,
         })
         .collect();
@@ -399,7 +401,7 @@ fn put_choice(v: &mut Value, events: &[Event], key: &str) {
         // The provider's spelling unless a filter changed the finish; null
         // if a filter took it.
         let finish = events.iter().find_map(|e| match e {
-            Event::Finish(f) => Some(f),
+            Reply::Finish(f) => Some(f),
             _ => None,
         });
         let reason = match (finish, old_finish) {
@@ -433,7 +435,7 @@ fn rest_of(v: &Value, key: &str) -> Value {
 }
 
 /// Whether the client, if it speaks OpenAI, asked for the usage chunk.
-fn client_asks_for_usage(client: RequestView<'_>) -> bool {
+fn client_asks_for_usage(client: ClientView<'_>) -> bool {
     client
         .body()
         .and_then(Doc::json)
@@ -506,7 +508,7 @@ impl StreamState {
             // Not a chunk: filters see it rather than it passing unseen.
             return out.push(unreadable_event(OPENAI, raw));
         }
-        let events = chunk_events(&v);
+        let events = chunk_replies(&v);
         // A chunk with no events, such as an id-less one of filter
         // results, is a Frame.
         if events.is_empty() {
@@ -523,9 +525,9 @@ impl StreamState {
 /// The events of a chunk: a start, its content and a finish. Every chunk
 /// names its response, so an edit to the start reaches each; an id-less
 /// one of filter results, which some servers open with, has no start.
-fn chunk_events(v: &Value) -> Vec<Event> {
+fn chunk_replies(v: &Value) -> Vec<Reply> {
     let id = v["id"].as_str().filter(|id| !id.is_empty());
-    let start = id.map(|id| Event::start(id, v["model"].as_str().unwrap_or_default()));
+    let start = id.map(|id| Reply::start(id, v["model"].as_str().unwrap_or_default()));
     start
         .into_iter()
         .chain(content(v, "delta"))
@@ -545,13 +547,13 @@ fn first_choice(v: &Value) -> Option<&Value> {
 /// else, such as a tool call, logprobs or another choice, is one `Other`
 /// holding all the choices without that text and finish. Null fields say
 /// nothing.
-fn content(v: &Value, key: &str) -> Vec<Event> {
+fn content(v: &Value, key: &str) -> Vec<Reply> {
     let text = first_choice(v).and_then(|c| c[key]["content"].as_str());
     let rest = rest_of(v, key);
-    let mut events: Vec<Event> = text.map(|t| Event::text(0, t)).into_iter().collect();
+    let mut events: Vec<Reply> = text.map(|t| Reply::text(0, t)).into_iter().collect();
     let choices = rest.as_array().into_iter().flatten();
     if choices.clone().any(|c| says_more(c, key)) {
-        events.push(Event::other(OPENAI, rest));
+        events.push(Reply::other(OPENAI, rest));
     }
     events
 }
@@ -582,9 +584,9 @@ fn says_more(choice: &Value, key: &str) -> bool {
 }
 
 /// The first choice's finish.
-fn finish(v: &Value) -> Option<Event> {
+fn finish(v: &Value) -> Option<Reply> {
     let reason = first_choice(v)?["finish_reason"].as_str()?;
-    Some(Event::Finish(FINISH.finish(reason)))
+    Some(Reply::Finish(FINISH.finish(reason)))
 }
 
 /// Writes OpenAI chunks from events.
@@ -639,9 +641,9 @@ impl Chunks {
 
 impl StreamWriter for Chunks {
     /// A chunk holds text and a finish only if it has a first choice.
-    fn holds(raw: &Bytes, event: &Event) -> bool {
+    fn holds(raw: &Bytes, event: &Reply) -> bool {
         match event {
-            Event::Text { .. } | Event::Finish(_) => {
+            Reply::Text { .. } | Reply::Finish(_) => {
                 event_json(raw).is_some_and(|v| first_choice(&v).is_some())
             }
             _ => true,
@@ -655,9 +657,9 @@ impl StreamWriter for Chunks {
         // content, such as another choice's, releases it.
         let v = event_json(raw).unwrap_or_default();
         let choices = v["choices"].as_array().is_some_and(|c| !c.is_empty());
-        let content = chunk_events(&v)
+        let content = chunk_replies(&v)
             .iter()
-            .any(|e| !matches!(e, Event::Start { .. }));
+            .any(|e| !matches!(e, Reply::Start { .. }));
         if finish(&v).is_some() || (!choices && !v["usage"].is_null()) {
             self.held.get_or_insert_default().extend_from_slice(raw);
         } else if let (Some(held), false) = (&mut self.held, content) {
@@ -671,25 +673,25 @@ impl StreamWriter for Chunks {
 
     /// A chunk with its edited events put back. `None` if a filter took all
     /// but its start and it has no role or usage.
-    fn rebuild(raw: &Bytes, events: &[Event]) -> Result<Option<Bytes>, Fault> {
+    fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Option<Bytes>, Fault> {
         let mut chunk = event_json(raw).unwrap_or_default();
         put_choice(&mut chunk, events, "delta");
-        let silent = events.iter().all(|e| matches!(e, Event::Start { .. }))
+        let silent = events.iter().all(|e| matches!(e, Reply::Start { .. }))
             && chunk["usage"].is_null()
             && chunk.pointer("/choices/0/delta/role").is_none();
         if silent {
             return Ok(None);
         }
-        let again = unless_taken(events, chunk_events(&chunk));
+        let again = unless_taken(events, chunk_replies(&chunk));
         reads_back(&in_order(events), &in_order(&again))?;
         Ok(Some(event(None, &chunk).into()))
     }
 
-    fn write(&mut self, e: &Event, so_far: &SoFar, out: &mut BytesMut) -> Result<(), Fault> {
+    fn write(&mut self, e: &Reply, so_far: &SoFar, out: &mut BytesMut) -> Result<(), Fault> {
         match e {
-            Event::Text { text, .. } => self.choice(so_far, out, json!({ "content": text }), None),
+            Reply::Text { text, .. } => self.choice(so_far, out, json!({ "content": text }), None),
             // Held for the end, as the provider's finish is.
-            Event::Finish(f) => {
+            Reply::Finish(f) => {
                 self.begin(so_far, out);
                 let mut finish = BytesMut::new();
                 let choices =
@@ -699,7 +701,7 @@ impl StreamWriter for Chunks {
             }
             // OpenAI content a filter held, such as a tool call, as it
             // came: its choices, or an event that could not be read.
-            Event::Other { format, raw } if so_far.relayed && **format == *OPENAI => {
+            Reply::Other { format, raw } if so_far.relayed && **format == *OPENAI => {
                 self.begin(so_far, out);
                 match &**raw {
                     Value::String(data) => out.extend_from_slice(event(None, data).as_bytes()),
@@ -724,7 +726,7 @@ impl StreamWriter for Chunks {
             return Ok(());
         }
         if !so_far.relayed && so_far.finish.is_none() {
-            self.write(&Event::Finish(Finish::Stop), so_far, out)?;
+            self.write(&Reply::Finish(Finish::Stop), so_far, out)?;
         }
         self.begin(so_far, out);
         out.extend_from_slice(&self.finish.take().unwrap_or_default());
@@ -744,7 +746,7 @@ mod tests {
     use super::*;
 
     /// The rebuilt event, or none.
-    fn rebuild(raw: &Bytes, events: &[Event]) -> Result<Bytes, Fault> {
+    fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Bytes, Fault> {
         Chunks::rebuild(raw, events).map(Option::unwrap_or_default)
     }
     use crate::common::encode_request;
@@ -762,10 +764,10 @@ mod tests {
     }
 
     /// The events of the items in `out`, in order.
-    fn events(out: &[Part]) -> Vec<&Event> {
+    fn replies(out: &[Part]) -> Vec<&Reply> {
         out.iter()
             .filter_map(|p| match p {
-                Part::Item(i) => i.events::<Event>().ok(),
+                Part::Item(i) => i.events::<Reply>().ok(),
                 _ => None,
             })
             .flatten()
@@ -783,7 +785,7 @@ mod tests {
 
     /// The client's `body` with `edit` made to its conversation.
     fn patched(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
-        let before = OpenAiChat::decode(&body);
+        let before = OpenAiChat::read(&body);
         let mut chat = before.clone();
         edit(&mut chat);
         let doc = encode_request::<OpenAiChat>(&chat, Some((&Doc::from(body), &before)))?;
@@ -791,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_decodes_into_conversation_events() {
+    fn a_stream_decodes_into_conversation_replies() {
         let out = decode_all(&[
             "data: {\"id\":\"x\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"He",
             "llo\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
@@ -799,11 +801,11 @@ mod tests {
             "data: [DONE]\n\n",
         ]);
         assert_eq!(
-            events(&out),
+            replies(&out),
             [
-                &Event::start("x", "m"),
-                &Event::text(0, "Hello"),
-                &Event::Finish(Finish::Stop)
+                &Reply::start("x", "m"),
+                &Reply::text(0, "Hello"),
+                &Reply::Finish(Finish::Stop)
             ]
         );
         let usage = usage(&out);
@@ -825,20 +827,20 @@ mod tests {
             "data: [DONE]\n\n",
         ]);
         assert_eq!(
-            events(&out),
+            replies(&out),
             [
-                &Event::start("c1", "gpt"),
-                &Event::text(0, ""),
+                &Reply::start("c1", "gpt"),
+                &Reply::text(0, ""),
                 // Every chunk names its response.
-                &Event::start("c1", "gpt"),
-                &Event::text(0, "Hi"),
-                &Event::start("c1", ""),
-                &Event::other(
+                &Reply::start("c1", "gpt"),
+                &Reply::text(0, "Hi"),
+                &Reply::start("c1", ""),
+                &Reply::other(
                     OPENAI,
                     json!([{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "id": "call_1", "type": "function", "function": { "name": "f", "arguments": "" } }] } }])
                 ),
-                &Event::start("c1", ""),
-                &Event::Finish(Finish::ToolUse),
+                &Reply::start("c1", ""),
+                &Reply::Finish(Finish::ToolUse),
             ]
         );
         // Each chunk's bytes are carried once.
@@ -856,10 +858,10 @@ mod tests {
         ]);
         // Its text is text, as in a whole response, so a filter sees it.
         assert_eq!(
-            events(&out)[1..],
+            replies(&out)[1..],
             [
-                &Event::text(0, "Hi"),
-                &Event::other(
+                &Reply::text(0, "Hi"),
+                &Reply::other(
                     OPENAI,
                     json!([{ "index": 0, "delta": {}, "logprobs": { "content": [] } }])
                 ),
@@ -868,8 +870,8 @@ mod tests {
         let raw = Bytes::from_static(
             b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"logprobs\":{\"content\":[]}}]}\n\n",
         );
-        let mut edited = chunk_events(&event_json(&raw).unwrap_or_default());
-        edited[1] = Event::text(0, "HI");
+        let mut edited = chunk_replies(&event_json(&raw).unwrap_or_default());
+        edited[1] = Reply::text(0, "HI");
         let out = rebuild(&raw, &edited);
         assert!(out.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"content\":\"HI\"")));
     }
@@ -879,7 +881,7 @@ mod tests {
         let out = decode_all(&[
             "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\",\"stop_reason\":null}]}\n\n",
         ]);
-        assert_eq!(events(&out)[1..], [&Event::Finish(Finish::Stop)]);
+        assert_eq!(replies(&out)[1..], [&Reply::Finish(Finish::Stop)]);
     }
 
     #[test]
@@ -887,7 +889,7 @@ mod tests {
         let out = decode_all(&[
             "data: {\"id\":\"x\",\"choices\":[{\"index\":1,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         ]);
-        assert!(!events(&out).iter().any(|e| matches!(e, Event::Finish(_))));
+        assert!(!replies(&out).iter().any(|e| matches!(e, Reply::Finish(_))));
     }
 
     #[test]
@@ -897,8 +899,8 @@ mod tests {
         ]);
         let reasoning = json!([{ "index": 0, "delta": { "reasoning_content": "hm" } }]);
         assert_eq!(
-            events(&out),
-            [&Event::start("x", ""), &Event::other(OPENAI, reasoning)]
+            replies(&out),
+            [&Reply::start("x", ""), &Reply::other(OPENAI, reasoning)]
         );
     }
 
@@ -911,12 +913,12 @@ mod tests {
             panic!("{out:?}");
         };
         assert_eq!(
-            chunk.events::<Event>().ok(),
+            chunk.events::<Reply>().ok(),
             Some(
                 &[
-                    Event::start("x", ""),
-                    Event::text(0, "hi"),
-                    Event::Finish(Finish::Stop)
+                    Reply::start("x", ""),
+                    Reply::text(0, "hi"),
+                    Reply::Finish(Finish::Stop)
                 ][..]
             )
         );
@@ -959,13 +961,13 @@ mod tests {
             b"data: {\"id\":\"x\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
         );
         assert_eq!(
-            rebuild(&raw, &[Event::start("y", "m"), Event::text(0, "HI")]).ok(),
+            rebuild(&raw, &[Reply::start("y", "m"), Reply::text(0, "HI")]).ok(),
             Some(Bytes::from_static(
                 b"data: {\"id\":\"y\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"HI\"}}]}\n\n"
             ))
         );
         // Text a filter replaced with a finish is the finish.
-        let finish = rebuild(&raw, &[Event::Finish(Finish::Length)]).unwrap_or_default();
+        let finish = rebuild(&raw, &[Reply::Finish(Finish::Length)]).unwrap_or_default();
         assert!(String::from_utf8_lossy(&finish).contains("\"finish_reason\":\"length\""));
     }
 
@@ -974,11 +976,11 @@ mod tests {
         let raw = Bytes::from_static(
             b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
         );
-        let other = Event::other(
+        let other = Reply::other(
             OPENAI,
             json!([{ "index": 0, "delta": { "tool_calls": [{ "index": 0 }] } }]),
         );
-        let events = [Event::start("x", ""), other, Event::Finish(Finish::Stop)];
+        let events = [Reply::start("x", ""), other, Reply::Finish(Finish::Stop)];
         let out = rebuild(&raw, &events);
         assert!(
             out.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"finish_reason\":\"stop\""))
@@ -990,7 +992,7 @@ mod tests {
         let raw = Bytes::from_static(
             b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0}]}}]}\n\n",
         );
-        assert!(rebuild(&raw, &[Event::other(OPENAI, json!({}))]).is_err());
+        assert!(rebuild(&raw, &[Reply::other(OPENAI, json!({}))]).is_err());
     }
 
     #[test]
@@ -998,7 +1000,7 @@ mod tests {
         let raw = Bytes::from_static(
             b"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
         );
-        let events = [Event::start("c1", "alias"), Event::text(0, "hi")];
+        let events = [Reply::start("c1", "alias"), Reply::text(0, "hi")];
         let out = rebuild(&raw, &events);
         assert!(out.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"model\":\"alias\"")));
     }
@@ -1008,7 +1010,7 @@ mod tests {
         let raw = Bytes::from_static(
             b"data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"SECRET\"}}]}\n\n",
         );
-        let out = rebuild(&raw, &[Event::start("c1", "m"), Event::text(0, "")]);
+        let out = rebuild(&raw, &[Reply::start("c1", "m"), Reply::text(0, "")]);
         assert!(out.is_ok_and(|b| !String::from_utf8_lossy(&b).contains("SECRET")));
     }
 
@@ -1017,7 +1019,7 @@ mod tests {
         let raw = Bytes::from_static(
             b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0}]}}]}\n\n",
         );
-        let out = rebuild(&raw, &[Event::text(0, "[removed]")]).unwrap_or_default();
+        let out = rebuild(&raw, &[Reply::text(0, "[removed]")]).unwrap_or_default();
         let out = String::from_utf8_lossy(&out);
         assert!(
             out.contains("\"content\":\"[removed]\"") && !out.contains("tool_calls"),
@@ -1030,10 +1032,10 @@ mod tests {
             .to_string(),
         );
         let events = [
-            Event::start("c1", "m"),
-            Event::text(0, "ok"),
-            Event::other(OPENAI, json!({ "not": "choices" })),
-            Event::Finish(Finish::ToolUse),
+            Reply::start("c1", "m"),
+            Reply::text(0, "ok"),
+            Reply::other(OPENAI, json!({ "not": "choices" })),
+            Reply::Finish(Finish::ToolUse),
         ];
         assert!(crate::common::rebuild_whole::<OpenAiChat>(&whole, &events).is_err());
     }
@@ -1048,23 +1050,23 @@ mod tests {
             }}],
         });
         assert_eq!(
-            OpenAiChat::events(&v),
+            OpenAiChat::replies(&v),
             [
-                Event::start("c1", "gpt"),
-                Event::text(0, "ok"),
-                Event::other(
+                Reply::start("c1", "gpt"),
+                Reply::text(0, "ok"),
+                Reply::other(
                     OPENAI,
                     json!([{ "index": 0, "message": {
                         "role": "assistant", "refusal": null,
                         "tool_calls": [{ "id": "t", "type": "function", "function": { "name": "f", "arguments": "{}" } }],
                     }}])
                 ),
-                Event::Finish(Finish::ToolUse),
+                Reply::Finish(Finish::ToolUse),
             ]
         );
         // Its text can be edited beside the tool call.
-        let mut events = OpenAiChat::events(&v);
-        events[1] = Event::text(0, "OK");
+        let mut events = OpenAiChat::replies(&v);
+        events[1] = Reply::text(0, "OK");
         let raw = Bytes::from(v.to_string());
         let out = crate::common::rebuild_whole::<OpenAiChat>(&raw, &events).unwrap_or_default();
         assert!(String::from_utf8_lossy(&out).contains("\"content\":\"OK\""));
@@ -1072,21 +1074,21 @@ mod tests {
         let logprobs = json!({ "choices": [{ "index": 0, "logprobs": { "content": [] },
             "message": { "role": "assistant", "content": "ok" } }] });
         assert!(matches!(
-            OpenAiChat::events(&logprobs).last(),
-            Some(Event::Other { .. })
+            OpenAiChat::replies(&logprobs).last(),
+            Some(Reply::Other { .. })
         ));
         let parts = json!({ "choices": [{ "index": 0,
             "message": { "role": "assistant", "content": [{ "type": "text", "text": "ok" }] } }] });
         assert!(matches!(
-            OpenAiChat::events(&parts).last(),
-            Some(Event::Other { .. })
+            OpenAiChat::replies(&parts).last(),
+            Some(Reply::Other { .. })
         ));
         let mut patched = v.clone();
-        OpenAiChat::put(&mut patched, &[Event::text(0, "OK")]);
+        OpenAiChat::put(&mut patched, &[Reply::text(0, "OK")]);
         assert_eq!(patched["choices"][0]["message"]["content"], "OK");
         // An edit that points nowhere changes nothing, rather than panicking.
         let mut empty = json!({});
-        OpenAiChat::put(&mut empty, &[Event::text(3, "x")]);
+        OpenAiChat::put(&mut empty, &[Reply::text(3, "x")]);
         assert_eq!(empty, json!({}));
     }
 
@@ -1170,9 +1172,9 @@ mod tests {
             "stop": "x",
             "n": 1,
         });
-        let chat = OpenAiChat::decode(&body);
+        let chat = OpenAiChat::read(&body);
         assert_eq!(
-            OpenAiChat::encode(&chat).ok(),
+            OpenAiChat::write(&chat).ok(),
             Some(json!({
                 "messages": [
                     { "role": "system", "content": "be brief" },
@@ -1190,7 +1192,7 @@ mod tests {
         let body = json!({ "model": "m", "messages": [
             { "role": "user", "name": "alice", "content": "hi" },
         ], "tools": [{ "type": "function", "function": { "name": "f" } }], "n": 2 });
-        let chat = OpenAiChat::decode(&body);
+        let chat = OpenAiChat::read(&body);
         assert_eq!(
             chat.unsupported,
             *json!({ "tools": [{ "type": "function", "function": { "name": "f" } }], "n": 2 })
@@ -1278,7 +1280,7 @@ mod tests {
             { "role": "user", "name": null, "content": "hi" },
             { "role": "assistant", "content": "yo", "refusal": null },
         ]});
-        let chat = OpenAiChat::decode(&body);
+        let chat = OpenAiChat::read(&body);
         assert!(chat.unsupported.is_empty(), "{:?}", chat.unsupported);
         assert_eq!(chat.messages.len(), 2);
     }
@@ -1325,7 +1327,7 @@ mod tests {
             { "role": "user", "content": [{ "type": "text", "text": "what is this?" }, image] },
             tool,
         ]});
-        let chat = OpenAiChat::decode(&body);
+        let chat = OpenAiChat::read(&body);
         assert_eq!(chat.messages[0].text(), "what is this?");
         assert_eq!(chat.messages[1].role, Role::Other("tool".into()));
         assert_eq!(
@@ -1457,7 +1459,7 @@ mod tests {
             removed.map(|v| v["messages"].clone()).ok(),
             Some(json!([{ "role": "user", "content": "hi" }]))
         );
-        let chat = OpenAiChat::decode(&body);
+        let chat = OpenAiChat::read(&body);
         assert!(encode_request::<OpenAiChat>(&chat, None).is_err());
     }
 
@@ -1465,7 +1467,7 @@ mod tests {
     fn a_stream_made_from_events_always_finishes() {
         let mut enc = StreamEncoder::<Chunks>::default();
         let mut out = BytesMut::new();
-        let text = Item::new([Event::start("x", "m"), Event::text(0, "hi")]);
+        let text = Item::new([Reply::start("x", "m"), Reply::text(0, "hi")]);
         let written = [Part::Item(text), Part::End(Ok(()))]
             .iter()
             .try_for_each(|p| enc.encode(p, &mut out));
@@ -1476,7 +1478,7 @@ mod tests {
     #[test]
     fn a_translated_tool_call_is_refused() {
         let mut enc = StreamEncoder::<Chunks>::default();
-        let other = Item::new([Event::other(OPENAI, json!({}))]);
+        let other = Item::new([Reply::other(OPENAI, json!({}))]);
         assert!(
             enc.encode(&Part::Item(other), &mut BytesMut::new())
                 .is_err()

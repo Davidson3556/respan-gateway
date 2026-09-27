@@ -2,29 +2,35 @@
 # keys. Keep it local.
 listen: 127.0.0.1:8080
 
+# A base URL is what the provider's own SDK takes: OpenAI's holds the
+# version (https://api.groq.com/openai/v1 for Groq), Anthropic's does not.
+# A provider with `auth` (any header) sends only its own credentials:
+# clients' are removed. Without it, clients' pass through.
 providers:
   openai:
     format: openai-chat
-    base_url: https://api.openai.com
+    base_url: https://api.openai.com/v1
     auth: { type: bearer, key: env:OPENAI_API_KEY }
   anthropic:
     format: anthropic-messages
     base_url: https://api.anthropic.com
     auth: { type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }
 
-# Keyed by the path each is served at. Translation is text only: a request
-# with tools is refused unless it goes to a provider of its own format.
-routes:
-  # Claude models go to Anthropic, translated.
-  /v1/chat/completions:
-    format: openai-chat
+# The formats clients speak, tried in order; each recognises its own
+# requests: openai-chat a POST to .../chat/completions, anthropic-messages a
+# POST to .../v1/messages. Anything else is a 404.
+serve: [openai-chat, anthropic-messages]
+
+# Compiled-in plugins, run on every request in the order listed, unless an
+# entry's `after` names plugins that must run before it.
+plugins:
+  # Claude models go to Anthropic: relayed for Anthropic clients,
+  # anthropic-beta header included, translated for OpenAI ones.
+  - name: models
     models:
       - { prefix: claude, provider: anthropic }
-    target: openai
-  # Claude models are relayed, anthropic-beta header included; others go to
-  # OpenAI, translated.
-  /v1/messages:
-    format: anthropic-messages
-    models:
-      - { prefix: claude, provider: anthropic }
-    target: openai
+
+# The provider for requests no plugin targets. Translation is text only: a
+# request with tools is refused unless it goes to a provider of its own
+# format.
+target: openai

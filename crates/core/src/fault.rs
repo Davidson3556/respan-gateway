@@ -19,12 +19,13 @@ pub mod codes {
     pub const UPSTREAM: &str = "upstream_error";
     /// A provider's stream stopped before its end.
     pub const TRUNCATED: &str = "truncated";
-    /// The client left before the response ended.
+    /// A response was given up before its end: the client left, or a
+    /// call's response was dropped, or still open as its request closed.
     pub const ABANDONED: &str = "abandoned";
     /// The gateway is set up in a way that cannot work.
     pub const CONFIG: &str = "config_error";
     /// A plugin or format asked for, or made, a type of another kind than
-    /// the route's.
+    /// the client's format's.
     pub const WRONG_KIND: &str = "wrong_kind";
     /// A bug, such as a plugin or format that panicked.
     pub const INTERNAL: &str = "internal_error";
@@ -45,7 +46,7 @@ struct Inner {
     message: String,
     details: Option<Value>,
     source: Option<Arc<dyn Error + Send + Sync>>,
-    relayed: bool,
+    said: bool,
 }
 
 impl Fault {
@@ -62,7 +63,7 @@ impl Fault {
             message: message.into(),
             details: None,
             source: None,
-            relayed: false,
+            said: false,
         }))
     }
 
@@ -84,19 +85,19 @@ impl Fault {
     /// Marks the fault as already said: its decoder passed the error body on
     /// as a Frame, so an encoder writing the provider's bytes is not handed
     /// the `Part::End` carrying it.
-    pub fn relayed(mut self) -> Self {
-        self.0.relayed = true;
+    pub fn said(mut self) -> Self {
+        self.0.said = true;
         self
     }
 
-    pub(crate) fn is_relayed(&self) -> bool {
-        self.0.relayed
+    pub(crate) fn is_said(&self) -> bool {
+        self.0.said
     }
 
     /// Not said after all: for a decoder that drops the Frame the fault was
-    /// relayed with.
+    /// said with.
     pub fn unsaid(mut self) -> Self {
-        self.0.relayed = false;
+        self.0.said = false;
         self
     }
 
@@ -145,9 +146,9 @@ impl Fault {
     }
 
     pub(crate) fn abandoned() -> Self {
-        // 499 is the de facto status for a client that closed the request.
-        let status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
-        Self::new(status, codes::ABANDONED, "client closed the request")
+        // 499 is the de facto status for a request given up before its end.
+        let status = StatusCode::from_u16(499).expect("499 is a status code");
+        Self::new(status, codes::ABANDONED, "abandoned")
     }
 
     /// A setup that cannot work: a 500.
@@ -160,15 +161,15 @@ impl Fault {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, codes::INTERNAL, message)
     }
 
-    /// Something asked for `T`, which is not the route's kind.
+    /// Something asked for `T`, which is not the client's kind.
     pub(crate) fn wrong_kind<T>() -> Self {
         Self::another_kind(format!("asked for {}", std::any::type_name::<T>()))
     }
 
-    /// A type of another kind than the route's was asked for or made: a
-    /// misconfiguration. `what` goes to logs only.
+    /// A type of another kind than the client's was asked for or made: a
+    /// misconfiguration, or traffic a plugin should skip. `what` goes to logs only.
     pub(crate) fn another_kind(what: String) -> Self {
-        let message = "a type of another kind than this route's was asked for or made";
+        let message = "a type of another kind than this request's was asked for or made";
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             codes::WRONG_KIND,
@@ -186,7 +187,7 @@ impl fmt::Debug for Fault {
             .field("message", &self.0.message)
             .field("details", &self.0.details)
             .field("source", &self.0.source.as_ref().map(|s| s.to_string()))
-            .field("relayed", &self.0.relayed)
+            .field("said", &self.0.said)
             .finish()
     }
 }
@@ -222,7 +223,7 @@ impl Error for Fault {
 }
 
 /// Faults are equal when the client would read them alike: the source and
-/// whether it was relayed are not compared.
+/// whether it was said are not compared.
 impl PartialEq for Fault {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);

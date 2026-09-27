@@ -2,9 +2,9 @@ use respan_gateway_core::async_trait;
 use respan_gateway_core::{Context, Fault, Plugin, Response, Target};
 
 /// Targets each request at the provider of the first prefix its model
-/// matches. Later plugins still run. An unmatched request keeps its target.
-/// A provider the route cannot use fails the call with `config_error`;
-/// check each with
+/// matches, over the gateway's default target. Later plugins still run. An
+/// unmatched request keeps its target. A provider the request cannot use
+/// fails the call with `config_error`; check each with
 /// [`Gateway::check_target`](respan_gateway_core::Gateway::check_target).
 #[derive(Debug, Clone, Default)]
 pub struct ModelRouter {
@@ -27,7 +27,7 @@ impl ModelRouter {
 
 #[async_trait]
 impl Plugin for ModelRouter {
-    async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
         let Some(model) = cx.model() else {
             return Ok(None);
         };

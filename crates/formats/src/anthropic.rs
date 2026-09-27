@@ -3,24 +3,23 @@
 
 use bytes::{Bytes, BytesMut};
 use http::{HeaderValue, StatusCode};
-use respan_gateway_core::{
-    Decoder, Doc, Encoder, Fault, Format, Item, Kind, Part, RequestView, Usage,
-};
+use respan_gateway_core::{ClientView, Decoder, Doc, Encoder, Fault, Format, Item, Part, Usage};
 use respan_gateway_core::{bytes, http, serde_json};
 use serde_json::{Map, Value, json};
 
 use crate::common::{
-    Names, SoFar, StreamEncoder, StreamWriter, Totals, UnaryEncoder, Wire, decoder_for, json_model,
-    kind, made_head, merge_details, pass_credentials, pass_headers, patch_content, patch_messages,
-    patch_sampling, post_json, provider_error, read_content, read_message, reads_back, replace,
-    says, says_error, set, stop_json, unary_decoder, unless_taken, unpatchable, unreadable_event,
-    unsupported_fields, unwritable_content, write_content, write_message, write_model,
+    Names, SoFar, StreamEncoder, StreamWriter, Totals, UnaryEncoder, Wire, decode_request,
+    decoder_for, encode_request, json_model, made_head, merge_details, pass_headers, patch_content,
+    patch_messages, patch_sampling, post_json, provider_error, read_content, read_message,
+    reads_back, replace, says, says_error, set, stop_json, unary_decoder, unless_taken,
+    unpatchable, unreadable_event, unsupported_fields, unwritable_content, write_content,
+    write_message, write_model,
 };
-use crate::conversation::{Content, Conversation, Event, Finish, Message, Role, units};
+use crate::conversation::{Content, Conversation, Finish, Message, Reply, Role, units};
 use crate::sse::{SseDecoder, event, event_json, is_stream};
 
-/// The API version sent when the client names none. A provider's headers
-/// override it.
+/// The API version sent when the client names none. Headers a provider's
+/// transport adds override it.
 const VERSION: &str = "2023-06-01";
 const VERSION_HEADER: &str = "anthropic-version";
 
@@ -39,39 +38,52 @@ const FINISH: Names<Finish> = Names(&[
 const ANTHROPIC: &str = "anthropic-messages";
 
 /// Anthropic Messages, `POST /v1/messages`, named `anthropic-messages`.
-/// From a client of this format it passes on `anthropic-` headers;
-/// `authorization` and `x-api-key` pass only to a provider that sets no
-/// credential. It sends `anthropic-version: 2023-06-01` if none is set.
+/// It accepts a client's `POST` to any path ending in `/v1/messages`.
+/// As with Anthropic's SDKs, the provider's base URL leaves out the
+/// version, such as `https://api.anthropic.com`. It sends
+/// `anthropic-version: 2023-06-01` if none is set.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnthropicMessages;
 
 impl Format for AnthropicMessages {
+    type Input = Conversation;
+    type Output = Reply;
+
     fn name(&self) -> &str {
         ANTHROPIC
+    }
+
+    fn accepts(&self, head: &http::request::Parts) -> bool {
+        crate::posts_to(head, "/v1/messages")
     }
 
     fn model(&self, _head: &http::request::Parts, body: &Doc) -> Option<String> {
         json_model(body)
     }
 
-    fn prepare(
+    fn decode(&self, _head: &http::request::Parts, body: &Doc) -> Result<Conversation, Fault> {
+        decode_request::<Self>(body)
+    }
+
+    fn encode(
         &self,
-        body: Doc,
-        client: RequestView<'_>,
-        provider: &http::HeaderMap,
-    ) -> Result<http::Request<Doc>, Fault> {
-        let mut req = post_json(body, "/v1/messages");
+        chat: &Conversation,
+        original: Option<(&Doc, &Conversation)>,
+    ) -> Result<Doc, Fault> {
+        encode_request::<Self>(chat, original)
+    }
+
+    fn prepare(&self, body: Doc, client: ClientView<'_>) -> Result<http::Request<Doc>, Fault> {
+        let mut req = post_json(body, "/v1/messages", client)?;
         // `anthropic-` headers carry the API version and beta features.
-        let credentials = ["authorization", "x-api-key"];
-        pass_headers(&mut req, client, &["anthropic-"]);
-        pass_credentials(&mut req, client, provider, &credentials);
+        pass_headers(&mut req, client);
         let version = HeaderValue::from_static(VERSION);
         req.headers_mut().entry(VERSION_HEADER).or_insert(version);
         write_model(req.body_mut(), client.model())?;
         Ok(req)
     }
 
-    fn decoder(&self, head: &http::response::Parts, client: RequestView<'_>) -> Box<dyn Decoder> {
+    fn decoder(&self, head: &http::response::Parts, client: ClientView<'_>) -> Box<dyn Decoder> {
         if !is_stream(head) {
             return decoder_for(head, client, unary_decoder::<Self>(head.status));
         }
@@ -85,7 +97,7 @@ impl Format for AnthropicMessages {
     fn encoder(
         &self,
         head: &mut http::response::Parts,
-        client: RequestView<'_>,
+        client: ClientView<'_>,
         relayed: bool,
     ) -> Box<dyn Encoder> {
         let relayed = made_head(head, client, relayed);
@@ -94,10 +106,6 @@ impl Format for AnthropicMessages {
         } else {
             Box::new(UnaryEncoder::<Self>::new(head))
         }
-    }
-
-    fn kind(&self) -> Option<Kind> {
-        Some(kind::<Self>())
     }
 }
 
@@ -176,7 +184,7 @@ fn patch_system(
 
 impl Wire for AnthropicMessages {
     /// The system prompt becomes a leading system message.
-    fn decode(v: &Value) -> Conversation {
+    fn read(v: &Value) -> Conversation {
         let mut chat = Conversation {
             stream: v["stream"] == true,
             max_tokens: v["max_tokens"].as_u64(),
@@ -202,7 +210,7 @@ impl Wire for AnthropicMessages {
         chat
     }
 
-    fn encode(chat: &Conversation) -> Result<Value, Fault> {
+    fn write(chat: &Conversation) -> Result<Value, Fault> {
         let (system, rest) = split_system(chat)?;
         let mut v = Map::new();
         let max_tokens = chat.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
@@ -251,8 +259,8 @@ impl Wire for AnthropicMessages {
     }
 
     /// One event per content block.
-    fn events(v: &Value) -> Vec<Event> {
-        let mut events = vec![Event::start(
+    fn replies(v: &Value) -> Vec<Reply> {
+        let mut events = vec![Reply::start(
             v["id"].as_str().unwrap_or_default(),
             v["model"].as_str().unwrap_or_default(),
         )];
@@ -264,13 +272,13 @@ impl Wire for AnthropicMessages {
             let plain = !b.as_object().into_iter().flatten().any(more);
             events.push(match (b["type"].as_str(), b["text"].as_str()) {
                 (Some("text"), Some(text)) if plain => {
-                    Event::text(u32::try_from(i).unwrap_or(u32::MAX), text)
+                    Reply::text(u32::try_from(i).unwrap_or(u32::MAX), text)
                 }
-                _ => Event::other(ANTHROPIC, b.clone()),
+                _ => Reply::other(ANTHROPIC, b.clone()),
             });
         }
         let finish = v["stop_reason"].as_str();
-        events.extend(finish.map(|r| Event::Finish(FINISH.finish(r))));
+        events.extend(finish.map(|r| Reply::Finish(FINISH.finish(r))));
         events
     }
 
@@ -301,17 +309,17 @@ impl Wire for AnthropicMessages {
     /// Rebuild the content from the events, one block each, in order: the
     /// provider's text block of that number with the text put in, new text
     /// as a new block, and other content as it came.
-    fn put(v: &mut Value, events: &[Event]) {
+    fn put(v: &mut Value, events: &[Reply]) {
         let old = v["content"].take();
         let mut content = Vec::new();
         for e in events {
             match e {
-                Event::Start { id, model } => {
+                Reply::Start { id, model } => {
                     replace(v, "/id", id.as_str());
                     replace(v, "/model", model.as_str());
                 }
-                Event::Finish(f) => FINISH.rewrite(v, "/stop_reason", f),
-                Event::Text { block, text } => {
+                Reply::Finish(f) => FINISH.rewrite(v, "/stop_reason", f),
+                Reply::Text { block, text } => {
                     let mut b = old
                         .get(*block as usize)
                         .cloned()
@@ -320,7 +328,7 @@ impl Wire for AnthropicMessages {
                     b["text"] = text.as_str().into();
                     content.push(b.clone());
                 }
-                Event::Other { raw, .. } => content.push((**raw).clone()),
+                Reply::Other { raw, .. } => content.push((**raw).clone()),
             }
         }
         v["content"] = content.into();
@@ -333,27 +341,27 @@ impl Wire for AnthropicMessages {
 }
 
 /// Put edited events back into a stream event.
-fn put_event(v: &mut Value, events: &[Event]) {
+fn put_event(v: &mut Value, events: &[Reply]) {
     // A block that opened with text a filter took opens empty.
-    if v["type"] == "content_block_start" && !events.iter().any(|e| matches!(e, Event::Text { .. }))
+    if v["type"] == "content_block_start" && !events.iter().any(|e| matches!(e, Reply::Text { .. }))
     {
         replace(v, "/content_block/text", "");
     }
     for e in events {
         match e {
-            Event::Start { id, model } => {
+            Reply::Start { id, model } => {
                 replace(v, "/message/id", id.as_str());
                 replace(v, "/message/model", model.as_str());
             }
-            Event::Finish(f) => FINISH.rewrite(v, "/delta/stop_reason", f),
-            Event::Text { text, .. } => {
+            Reply::Finish(f) => FINISH.rewrite(v, "/delta/stop_reason", f),
+            Reply::Text { text, .. } => {
                 let at = match v["type"].as_str() {
                     Some("content_block_start") => "/content_block/text",
                     _ => "/delta/text",
                 };
                 replace(v, at, text.as_str());
             }
-            Event::Other { .. } => {}
+            Reply::Other { .. } => {}
         }
     }
 }
@@ -411,7 +419,7 @@ fn decode_event(totals: &mut Totals, raw: Bytes, out: &mut Vec<Part>) {
         _ => &Value::Null,
     };
     let usage = totals.increment(&usage_of(usage));
-    match event_of(&v) {
+    match reply_of(&v) {
         Some(e) => out.push(Item::decoded(vec![e], raw).into()),
         None => out.push(Part::Frame(raw)),
     }
@@ -421,7 +429,7 @@ fn decode_event(totals: &mut Totals, raw: Bytes, out: &mut Vec<Part>) {
 }
 
 /// The conversation event a stream event holds, if any.
-fn event_of(v: &Value) -> Option<Event> {
+fn reply_of(v: &Value) -> Option<Reply> {
     let block = v["index"]
         .as_u64()
         .and_then(|i| u32::try_from(i).ok())
@@ -430,7 +438,7 @@ fn event_of(v: &Value) -> Option<Event> {
         "message_start" => {
             let message = &v["message"];
             let id = message["id"].as_str().unwrap_or_default();
-            Some(Event::start(
+            Some(Reply::start(
                 id,
                 message["model"].as_str().unwrap_or_default(),
             ))
@@ -441,26 +449,26 @@ fn event_of(v: &Value) -> Option<Event> {
                 // A text block opens empty and its text comes in deltas, but
                 // one that opens with text holds that text.
                 (Some("text"), None | Some("")) => None,
-                (Some("text"), Some(text)) => Some(Event::text(block, text)),
-                _ => Some(Event::other(ANTHROPIC, content.clone())),
+                (Some("text"), Some(text)) => Some(Reply::text(block, text)),
+                _ => Some(Reply::other(ANTHROPIC, content.clone())),
             }
         }
         "content_block_delta" => {
             let delta = &v["delta"];
             Some(match delta["type"].as_str() {
                 Some("text_delta") => {
-                    Event::text(block, delta["text"].as_str().unwrap_or_default())
+                    Reply::text(block, delta["text"].as_str().unwrap_or_default())
                 }
-                _ => Event::other(ANTHROPIC, delta.clone()),
+                _ => Reply::other(ANTHROPIC, delta.clone()),
             })
         }
         "message_delta" => {
             let finish = v.pointer("/delta/stop_reason").and_then(Value::as_str)?;
-            Some(Event::Finish(FINISH.finish(finish)))
+            Some(Reply::Finish(FINISH.finish(finish)))
         }
         "ping" | "content_block_stop" => None,
         // An event type this format does not know may hold content.
-        _ => Some(Event::other(ANTHROPIC, v.clone())),
+        _ => Some(Reply::other(ANTHROPIC, v.clone())),
     }
 }
 
@@ -570,16 +578,16 @@ impl StreamWriter for EventStream {
     /// An event holds only its own kind: a start in `message_start`, a
     /// finish in `message_delta`, text in a text block's start or delta of
     /// that index, other content in another block's.
-    fn holds(raw: &Bytes, event: &Event) -> bool {
+    fn holds(raw: &Bytes, event: &Reply) -> bool {
         let v = event_json(raw).unwrap_or_default();
         let text = v["content_block"]["type"] == "text" || v["delta"]["type"] == "text_delta";
         match (v["type"].as_str(), event) {
-            (Some("message_start"), Event::Start { .. }) => true,
-            (Some("message_delta"), Event::Finish(_)) => true,
-            (Some("content_block_start" | "content_block_delta"), Event::Text { block, .. }) => {
+            (Some("message_start"), Reply::Start { .. }) => true,
+            (Some("message_delta"), Reply::Finish(_)) => true,
+            (Some("content_block_start" | "content_block_delta"), Reply::Text { block, .. }) => {
                 text && v["index"].as_u64() == Some(u64::from(*block))
             }
-            (Some("content_block_start" | "content_block_delta"), Event::Other { .. }) => !text,
+            (Some("content_block_start" | "content_block_delta"), Reply::Other { .. }) => !text,
             _ => false,
         }
     }
@@ -636,25 +644,25 @@ impl StreamWriter for EventStream {
 
     /// An event with its edits put back; `None` if a filter took all it
     /// said, unless it opens a message or a block, which is kept emptied.
-    fn rebuild(raw: &Bytes, events: &[Event]) -> Result<Option<Bytes>, Fault> {
+    fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Option<Bytes>, Fault> {
         let mut v = event_json(raw).unwrap_or_default();
         let opens = matches!(
             v["type"].as_str(),
             Some("message_start" | "content_block_start")
         );
-        if !opens && events.iter().all(|e| matches!(e, Event::Start { .. })) {
+        if !opens && events.iter().all(|e| matches!(e, Reply::Start { .. })) {
             return Ok(None);
         }
         put_event(&mut v, events);
-        reads_back(events, &unless_taken(events, Vec::from_iter(event_of(&v))))?;
+        reads_back(events, &unless_taken(events, Vec::from_iter(reply_of(&v))))?;
         // It read back as an event, so it has its type.
         let name = v["type"].as_str().unwrap_or_default().to_owned();
         Ok(Some(event(Some(&name), &v).into()))
     }
 
-    fn write(&mut self, e: &Event, so_far: &SoFar, out: &mut BytesMut) -> Result<(), Fault> {
+    fn write(&mut self, e: &Reply, so_far: &SoFar, out: &mut BytesMut) -> Result<(), Fault> {
         match e {
-            Event::Text { block, text } => {
+            Reply::Text { block, text } => {
                 self.begin(so_far, out);
                 match &self.provider_open {
                     // Text waits behind waiting text, to keep order.
@@ -665,9 +673,9 @@ impl StreamWriter for EventStream {
                     _ => self.text(*block, text, out),
                 }
             }
-            Event::Finish(_) => {}
+            Reply::Finish(_) => {}
             // A provider block held and released has lost its position.
-            Event::Other { .. } if so_far.relayed => {
+            Reply::Other { .. } if so_far.relayed => {
                 return Err(unpatchable(
                     "Anthropic's own blocks other than text cannot be held",
                 ));
@@ -721,13 +729,13 @@ mod tests {
     use super::*;
 
     /// The rebuilt event, or none.
-    fn rebuild(raw: &Bytes, events: &[Event]) -> Result<Bytes, Fault> {
+    fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Bytes, Fault> {
         EventStream::rebuild(raw, events).map(Option::unwrap_or_default)
     }
     use crate::common::encode_request;
 
     fn patched(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
-        let before = AnthropicMessages::decode(&body);
+        let before = AnthropicMessages::read(&body);
         let mut chat = before.clone();
         edit(&mut chat);
         let body = Doc::from(body);
@@ -745,9 +753,9 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }],
             "stop_sequences": ["x"],
         });
-        let chat = AnthropicMessages::decode(&body);
+        let chat = AnthropicMessages::read(&body);
         assert_eq!(
-            AnthropicMessages::encode(&chat).ok(),
+            AnthropicMessages::write(&chat).ok(),
             Some(json!({
                 "max_tokens": 10,
                 "system": "be brief",
@@ -790,7 +798,7 @@ mod tests {
         assert_eq!(total.get(units::INPUT_TOKENS), 5.0);
         assert_eq!(total.get(units::OUTPUT_TOKENS), 7.0);
         let other = out.iter().any(
-            |p| matches!(p, Part::Item(e) if matches!(e.events::<Event>().ok(), Some([Event::Other { .. }]))),
+            |p| matches!(p, Part::Item(e) if matches!(e.events::<Reply>().ok(), Some([Reply::Other { .. }]))),
         );
         assert!(other);
     }
@@ -810,7 +818,7 @@ mod tests {
                 &mut out,
             );
         }
-        let other = |p: &Part| matches!(p, Part::Item(i) if matches!(i.events::<Event>(), Ok([Event::Other { .. }])));
+        let other = |p: &Part| matches!(p, Part::Item(i) if matches!(i.events::<Reply>(), Ok([Reply::Other { .. }])));
         assert!(other(&out[0]) && other(&out[1]));
         assert!(matches!(&out[2..], [Part::Frame(_), Part::Frame(_)]));
     }
@@ -824,10 +832,10 @@ mod tests {
             Bytes::from_static(e.as_bytes()),
             &mut out,
         );
-        let text = [Event::text(0, "Hi ")];
-        assert!(matches!(&out[..], [Part::Item(i)] if i.events::<Event>().ok() == Some(&text[..])));
+        let text = [Reply::text(0, "Hi ")];
+        assert!(matches!(&out[..], [Part::Item(i)] if i.events::<Reply>().ok() == Some(&text[..])));
         let raw = Bytes::from_static(e.as_bytes());
-        let edited = rebuild(&raw, &[Event::text(0, "HI ")]);
+        let edited = rebuild(&raw, &[Reply::text(0, "HI ")]);
         assert!(edited.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"text\":\"HI \"")));
     }
 
@@ -840,11 +848,11 @@ mod tests {
             ],
             ..Conversation::default()
         };
-        let body = AnthropicMessages::encode(&chat).ok();
+        let body = AnthropicMessages::write(&chat).ok();
         assert_eq!(body.map(|v| v["system"].clone()), Some(json!("be brief")));
         chat.messages
             .push(Message::new(Role::System, "now be long"));
-        assert!(AnthropicMessages::encode(&chat).is_err());
+        assert!(AnthropicMessages::write(&chat).is_err());
     }
 
     #[test]
@@ -921,25 +929,25 @@ mod tests {
             ],
         });
         assert_eq!(
-            AnthropicMessages::events(&v),
+            AnthropicMessages::replies(&v),
             [
-                Event::start("m", "c"),
-                Event::text(0, "ok"),
-                Event::other(
+                Reply::start("m", "c"),
+                Reply::text(0, "ok"),
+                Reply::other(
                     ANTHROPIC,
                     json!({ "type": "tool_use", "id": "t", "name": "f", "input": {} })
                 ),
-                Event::Finish(Finish::ToolUse),
+                Reply::Finish(Finish::ToolUse),
             ]
         );
         let mut patched = v.clone();
-        let mut events = AnthropicMessages::events(&v);
-        events[1] = Event::text(0, "OK");
+        let mut events = AnthropicMessages::replies(&v);
+        events[1] = Reply::text(0, "OK");
         AnthropicMessages::put(&mut patched, &events);
         assert_eq!(patched["content"][0]["text"], "OK");
         assert_eq!(patched["content"][1]["type"], "tool_use");
         // Text of a block that is not there is a block of its own.
-        events.insert(3, Event::text(9, "x"));
+        events.insert(3, Reply::text(9, "x"));
         AnthropicMessages::put(&mut patched, &events);
         assert_eq!(
             patched["content"][2],
@@ -976,9 +984,9 @@ mod tests {
     #[test]
     fn an_unchanged_finish_keeps_the_providers_reason() {
         let mut v = json!({ "stop_reason": "stop_sequence", "stop_sequence": "X" });
-        AnthropicMessages::put(&mut v, &[Event::Finish(Finish::Stop)]);
+        AnthropicMessages::put(&mut v, &[Reply::Finish(Finish::Stop)]);
         assert_eq!(v["stop_reason"], "stop_sequence");
-        AnthropicMessages::put(&mut v, &[Event::Finish(Finish::Length)]);
+        AnthropicMessages::put(&mut v, &[Reply::Finish(Finish::Length)]);
         assert_eq!(v["stop_reason"], "max_tokens");
     }
 
@@ -986,7 +994,7 @@ mod tests {
     fn blocks_are_numbered_in_the_order_they_open() {
         let mut enc = StreamEncoder::<EventStream>::default();
         let mut out = BytesMut::new();
-        for part in [Item::new([Event::text(5, "hi")]).into(), Part::End(Ok(()))] {
+        for part in [Item::new([Reply::text(5, "hi")]).into(), Part::End(Ok(()))] {
             enc.encode(&part, &mut out).ok();
         }
         let text = String::from_utf8_lossy(&out);
@@ -1003,9 +1011,9 @@ mod tests {
             .to_string(),
         );
         let events = [
-            Event::start("m", "c"),
-            Event::text(0, "[removed]"),
-            Event::Finish(Finish::ToolUse),
+            Reply::start("m", "c"),
+            Reply::text(0, "[removed]"),
+            Reply::Finish(Finish::ToolUse),
         ];
         let rebuilt = crate::common::rebuild_whole::<AnthropicMessages>(&raw, &events);
         let rebuilt: Value = rebuilt.map_or(Value::Null, |b| {
@@ -1022,8 +1030,8 @@ mod tests {
         let cited = json!({ "type": "text", "text": "Paris", "citations": [{ "type": "web" }] });
         let v = json!({ "id": "m", "model": "c", "content": [cited, { "type": "text", "text": "!", "citations": null }] });
         assert_eq!(
-            AnthropicMessages::events(&v)[1..],
-            [Event::other(ANTHROPIC, cited), Event::text(1, "!")]
+            AnthropicMessages::replies(&v)[1..],
+            [Reply::other(ANTHROPIC, cited), Reply::text(1, "!")]
         );
     }
 
@@ -1032,11 +1040,11 @@ mod tests {
         let raw = Bytes::from_static(
             b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"rm_rf\",\"input\":{}}}\n\n",
         );
-        assert!(rebuild(&raw, &[Event::text(0, "[removed]")]).is_err());
+        assert!(rebuild(&raw, &[Reply::text(0, "[removed]")]).is_err());
         let text = Bytes::from_static(
             b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
         );
-        let out = rebuild(&text, &[Event::text(0, "HI")]).unwrap_or_default();
+        let out = rebuild(&text, &[Reply::text(0, "HI")]).unwrap_or_default();
         assert!(String::from_utf8_lossy(&out).contains("\"text\":\"HI\""));
     }
 
@@ -1126,9 +1134,9 @@ mod tests {
     fn an_empty_answer_has_no_empty_text_block() {
         let mut whole = crate::common::SoFar::default();
         let added = [
-            Event::start("m", "c"),
-            Event::text(0, ""),
-            Event::Finish(Finish::Length),
+            Reply::start("m", "c"),
+            Reply::text(0, ""),
+            Reply::Finish(Finish::Length),
         ]
         .iter()
         .try_for_each(|e| whole.add(e));

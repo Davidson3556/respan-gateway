@@ -999,6 +999,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-plugins",
+ "respan-gateway-server",
  "tokio",
 ]
 

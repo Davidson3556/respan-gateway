@@ -8,17 +8,32 @@ use respan_gateway_core::http::{self, HeaderMap, StatusCode};
 use respan_gateway_core::{
     Body, Context, Fault, Filter, Gateway, Outcome, Plugin, Response, async_trait,
 };
-use respan_gateway_formats::conversation::{Conversation, Event};
+use respan_gateway_formats::conversation::{Conversation, Reply};
 use respan_gateway_testkit::{MockTransport, Outcomes, collect, post};
 
-pub const OPENAI: &str = "http://openai.test";
+pub const OPENAI: &str = "http://openai.test/v1";
 
-/// A route and a request for it.
-pub type Call = (&'static str, http::Request<Body>);
+/// Where OpenAI Chat clients send.
+pub const CHAT: &str = "/v1/chat/completions";
 
-/// `body` sent to `route`.
-pub fn call(route: &'static str, body: impl Into<Bytes>) -> Call {
-    (route, post(body))
+/// Where Anthropic Messages clients send.
+pub const MESSAGES: &str = "/v1/messages";
+
+/// A client's request.
+pub type Call = http::Request<Body>;
+
+/// `body` posted to `path`.
+pub fn call(path: &str, body: impl Into<Bytes>) -> Call {
+    post(path, body)
+}
+
+/// `gateway` with `plugins` registered in order, named by position.
+pub fn with_plugins(
+    gateway: Gateway,
+    plugins: impl IntoIterator<Item = std::sync::Arc<dyn Plugin>>,
+) -> Result<Gateway, Fault> {
+    let mut named = plugins.into_iter().enumerate();
+    named.try_fold(gateway, |gw, (i, p)| gw.plugin(format!("p{i}"), p))
 }
 
 /// A gateway on a mock transport, recording every outcome.
@@ -29,9 +44,9 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// Send, read the whole response, and wait for the close hooks.
-    pub async fn send(&self, (route, req): Call) -> (StatusCode, HeaderMap, Result<Bytes, Fault>) {
-        let out = collect(self.gw.handle(route, req).await).await;
+    /// Send, read the whole response, and wait for the end hooks.
+    pub async fn send(&self, req: Call) -> (StatusCode, HeaderMap, Result<Bytes, Fault>) {
+        let out = collect(self.gw.handle(req).await).await;
         self.gw.idle().await;
         out
     }
@@ -54,8 +69,8 @@ pub struct Flip;
 
 #[async_trait]
 impl Plugin for Flip {
-    async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
-        let chat = cx.request_mut::<Conversation>()?;
+    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+        let chat = cx.input_mut::<Conversation>()?;
         chat.stream = !chat.stream;
         Ok(None)
     }
@@ -67,14 +82,14 @@ pub struct Shout;
 
 #[async_trait]
 impl Plugin for Shout {
-    async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
         cx.filter(shout)?;
         Ok(None)
     }
 }
 
-fn shout(event: &mut Event) -> Result<(), Fault> {
-    if let Event::Text { text, .. } = event {
+fn shout(event: &mut Reply) -> Result<(), Fault> {
+    if let Reply::Text { text, .. } = event {
         *text = text.to_uppercase();
     }
     Ok(())
@@ -86,7 +101,7 @@ pub struct Unmask;
 
 #[async_trait]
 impl Plugin for Unmask {
-    async fn on_request(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
         cx.filter(Restore::default())?;
         Ok(None)
     }
@@ -99,11 +114,11 @@ struct Restore {
     block: u32,
 }
 
-impl Filter<Event> for Restore {
-    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
-        let Event::Text { block, text, .. } = event else {
+impl Filter<Reply> for Restore {
+    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let Reply::Text { block, text, .. } = event else {
             // Held text goes out before any other content.
-            if !matches!(event, Event::Start { .. }) {
+            if !matches!(event, Reply::Start { .. }) {
                 self.release(out);
             }
             out.push(event);
@@ -115,36 +130,36 @@ impl Filter<Event> for Restore {
         }
         self.block = block;
         if !text.is_empty() {
-            out.push(Event::text(block, text.replace("<P1>", "Alice")));
+            out.push(Reply::text(block, text.replace("<P1>", "Alice")));
         }
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Event>) -> Result<(), Fault> {
+    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
         self.release(out);
         Ok(())
     }
 }
 
 impl Restore {
-    fn release(&mut self, out: &mut Vec<Event>) {
+    fn release(&mut self, out: &mut Vec<Reply>) {
         if !self.held.is_empty() {
-            out.push(Event::text(self.block, std::mem::take(&mut self.held)));
+            out.push(Reply::text(self.block, std::mem::take(&mut self.held)));
         }
     }
 }
 
 /// Holds back every event and releases them all at the end.
 #[derive(Clone)]
-pub struct HoldAll(pub Vec<Event>);
+pub struct HoldAll(pub Vec<Reply>);
 
-impl Filter<Event> for HoldAll {
-    fn event(&mut self, event: Event, _out: &mut Vec<Event>) -> Result<(), Fault> {
+impl Filter<Reply> for HoldAll {
+    fn event(&mut self, event: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
         self.0.push(event);
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Event>) -> Result<(), Fault> {
+    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
         out.append(&mut self.0);
         Ok(())
     }
@@ -154,10 +169,10 @@ impl Filter<Event> for HoldAll {
 #[derive(Clone)]
 pub struct Disclaimer;
 
-impl Filter<Event> for Disclaimer {
-    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
-        if matches!(event, Event::Start { .. }) {
-            out.push(Event::text(0, "NOTE: "));
+impl Filter<Reply> for Disclaimer {
+    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if matches!(event, Reply::Start { .. }) {
+            out.push(Reply::text(0, "NOTE: "));
         }
         out.push(event);
         Ok(())
@@ -168,9 +183,9 @@ impl Filter<Event> for Disclaimer {
 #[derive(Clone)]
 pub struct Nameless;
 
-impl Filter<Event> for Nameless {
-    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
-        if !matches!(event, Event::Start { .. }) {
+impl Filter<Reply> for Nameless {
+    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if !matches!(event, Reply::Start { .. }) {
             out.push(event);
         }
         Ok(())
@@ -181,9 +196,9 @@ impl Filter<Event> for Nameless {
 #[derive(Clone)]
 pub struct Silence;
 
-impl Filter<Event> for Silence {
-    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
-        if !matches!(event, Event::Text { .. }) {
+impl Filter<Reply> for Silence {
+    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if !matches!(event, Reply::Text { .. }) {
             out.push(event);
         }
         Ok(())
@@ -192,19 +207,19 @@ impl Filter<Event> for Silence {
 
 /// Appends a footer to block `.0`, holding the finish until the end.
 #[derive(Clone)]
-pub struct Footer(pub u32, pub Option<Event>);
+pub struct Footer(pub u32, pub Option<Reply>);
 
-impl Filter<Event> for Footer {
-    fn event(&mut self, event: Event, out: &mut Vec<Event>) -> Result<(), Fault> {
+impl Filter<Reply> for Footer {
+    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
         match event {
-            Event::Finish(_) => self.1 = Some(event),
+            Reply::Finish(_) => self.1 = Some(event),
             event => out.push(event),
         }
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Event>) -> Result<(), Fault> {
-        out.push(Event::text(self.0, " [footer]"));
+    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        out.push(Reply::text(self.0, " [footer]"));
         out.extend(self.1.take());
         Ok(())
     }

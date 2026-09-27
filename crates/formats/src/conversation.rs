@@ -1,8 +1,8 @@
 //! The conversation kind: chats with a language model. OpenAI Chat
 //! Completions and Anthropic Messages translate to each other through these
 //! types. Plugins that work on any conversation, such as PII redaction, use
-//! them too: `cx.request_mut::<Conversation>()` for the request and
-//! `cx.filter(|e: &mut Event| ..)` for the response, streamed or not.
+//! them too: `cx.input_mut::<Conversation>()` for the request and
+//! `cx.filter(|r: &mut Reply| ..)` for the response, streamed or not.
 //!
 //! What the kind has no form for stays as the client's format has it: a
 //! request's fields in [`Conversation::unsupported`], a message's in
@@ -32,7 +32,7 @@ pub mod units {
     pub const REASONING_TOKENS: &str = "reasoning_tokens";
 }
 
-/// A conversation request: the kind's request type. The model is held by
+/// A conversation request: the kind's input type. The model is held by
 /// the kernel, as [`Context::model`](respan_gateway_core::Context::model).
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
@@ -205,10 +205,11 @@ impl From<String> for Content {
     }
 }
 
-/// An event of a response, streamed or whole: the kind's event type.
+/// A reply: an event of a response, streamed or whole, the kind's output
+/// type.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub enum Event {
+pub enum Reply {
     /// Which response this is: the provider's id and model as it gave
     /// them, even after translation, or a plugin's own. A stream may repeat
     /// it, as OpenAI's chunks do, so it says nothing about the content
@@ -244,10 +245,10 @@ pub enum Event {
     Finish(Finish),
 }
 
-impl Event {
+impl Reply {
     /// Which response this is.
     pub fn start(id: impl Into<String>, model: impl Into<String>) -> Self {
-        Event::Start {
+        Reply::Start {
             id: id.into(),
             model: model.into(),
         }
@@ -255,7 +256,7 @@ impl Event {
 
     /// Content of `format` the kind has no form for.
     pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
-        Event::Other {
+        Reply::Other {
             format: format.into(),
             raw: Arc::new(raw.into()),
         }
@@ -263,7 +264,7 @@ impl Event {
 
     /// Text of content block `block`.
     pub fn text(block: u32, text: impl Into<String>) -> Self {
-        Event::Text {
+        Reply::Text {
             block,
             text: text.into(),
         }

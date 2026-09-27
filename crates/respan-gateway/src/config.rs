@@ -1,13 +1,13 @@
-//! The YAML config: providers, and HTTP routes that relay, translate, or pick
-//! a provider by model.
+//! The YAML config: providers, the formats served, plugins in order, and
+//! the default target.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use respan_gateway_core::http::HeaderMap;
 use respan_gateway_core::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
-use respan_gateway_core::http::uri::PathAndQuery;
-use respan_gateway_core::{Fault, Format, Gateway, Provider, Route, Transport};
+use std::sync::Arc;
+
+use respan_gateway_core::{Fault, Format, Gateway, Provider, Transport};
 use respan_gateway_plugins::ModelRouter;
 use serde::Deserialize;
 
@@ -17,8 +17,13 @@ pub struct Config {
     pub listen: Option<std::net::SocketAddr>,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
-    /// Keyed by the path each is served at, which also names the route.
-    pub routes: BTreeMap<String, RouteConfig>,
+    /// The formats served to clients, by name, tried in order.
+    pub serve: Vec<String>,
+    /// Compiled-in plugins, in order unless `after` says otherwise.
+    #[serde(default)]
+    pub plugins: Vec<PluginConfig>,
+    /// The provider that answers when no plugin sets one.
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,15 +43,16 @@ pub enum Auth {
     Header { name: String, key: String },
 }
 
+/// One plugin: its name, the plugins it runs after, and which plugin it
+/// is, by the one field that configures it.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RouteConfig {
-    pub format: String,
-    /// The provider for requests no `models` prefix matches.
-    pub target: Option<String>,
-    /// Model prefix to provider, tried in order.
+pub struct PluginConfig {
+    pub name: String,
     #[serde(default)]
-    pub models: Vec<ModelRoute>,
+    pub after: Vec<String>,
+    /// A [`ModelRouter`]: model prefix to provider, tried in order.
+    pub models: Option<Vec<ModelRoute>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,67 +62,83 @@ pub struct ModelRoute {
     pub provider: String,
 }
 
+/// A format compiled into the binary: its name, and how to build a
+/// provider that speaks it or serve its clients.
+pub struct KnownFormat {
+    pub name: String,
+    pub provider: fn(name: String, transport: Arc<dyn Transport>) -> Provider,
+    pub serve: fn(Gateway) -> Result<Gateway, Fault>,
+}
+
+impl KnownFormat {
+    pub fn of<F: Format + Default>() -> Self {
+        Self {
+            name: F::default().name().to_owned(),
+            provider: |name, transport| Provider::new(name, F::default(), transport),
+            serve: |gateway| gateway.serve(F::default()),
+        }
+    }
+}
+
 impl Config {
     pub fn parse(yaml: &str) -> Result<Self, Fault> {
         serde_norway::from_str(yaml).map_err(|e| Fault::config(e.to_string()))
     }
 
-    /// A gateway from this config, reaching providers through `transport`,
+    /// A gateway from this config, reaching each provider through the
+    /// transport `transport` builds from its base URL and auth headers,
     /// with formats looked up in `formats`.
-    pub fn build(
+    pub fn build<T: Transport>(
         &self,
-        transport: impl Transport,
-        formats: &[Arc<dyn Format>],
+        transport: impl Fn(&str, HeaderMap) -> Result<T, Fault>,
+        formats: &[KnownFormat],
     ) -> Result<Gateway, Fault> {
-        let format = |name: &str, owner: String| {
-            formats
-                .iter()
-                .find(|f| f.name() == name)
-                .cloned()
-                .ok_or_else(|| {
-                    let known: Vec<_> = formats.iter().map(|f| f.name()).collect();
-                    Fault::config(format!(
-                        "{owner}: unknown format '{name}'; compiled-in formats: [{}]",
-                        known.join(", ")
-                    ))
-                })
+        let format = |name: &str, owner: &str| {
+            formats.iter().find(|f| f.name == name).ok_or_else(|| {
+                let known: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
+                Fault::config(format!(
+                    "{owner}: unknown format '{name}'; compiled-in formats: [{}]",
+                    known.join(", ")
+                ))
+            })
         };
         let mut providers = Vec::new();
         for (name, p) in &self.providers {
-            let format = format(&p.format, format!("provider '{name}'"))?;
+            let format = format(&p.format, &format!("provider '{name}'"))?;
             let auth = auth_headers(name, p.auth.as_ref())?;
-            let provider = Provider::new(name.clone(), format, p.base_url.clone());
-            providers.push(provider.with_headers(auth));
+            let reach = transport(&p.base_url, auth)
+                .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
+            providers.push((format.provider)(name.clone(), Arc::new(reach)));
         }
-        let mut routes = Vec::new();
-        for (path, r) in &self.routes {
-            // Matched exactly, so it must be a bare request path.
-            let whole = path.parse::<PathAndQuery>();
-            if !whole.is_ok_and(|p| p.query().is_none() && p.as_str() == path) {
-                return Err(Fault::config(format!(
-                    "route '{path}': not a path, such as '/v1/chat/completions'"
+        let mut gateway = Gateway::new(providers)?;
+        for name in &self.serve {
+            gateway = (format(name, "serve")?.serve)(gateway)?;
+        }
+        for p in &self.plugins {
+            let bad = |e: Fault| Fault::config(format!("plugin '{}': {}", p.name, e.message()));
+            let Some(models) = &p.models else {
+                return Err(bad(Fault::config(
+                    "no plugin given; compiled-in plugins: [models]",
                 )));
+            };
+            // An unreachable model route fails here, not per request.
+            for m in models {
+                gateway.check_target(m.provider.as_str()).map_err(bad)?;
             }
-            let mut route = Route::new(path.clone(), format(&r.format, format!("route '{path}'"))?);
-            if !r.models.is_empty() {
-                let router = r.models.iter().fold(ModelRouter::new(), |router, m| {
-                    router.route(m.prefix.clone(), m.provider.clone())
-                });
-                route = route.with_plugin(router);
-            }
-            if let Some(t) = &r.target {
-                route = route.with_target(t.clone());
-            }
-            routes.push(route);
+            let router = models.iter().fold(ModelRouter::new(), |router, m| {
+                router.route(m.prefix.clone(), m.provider.clone())
+            });
+            gateway = gateway.plugin(p.name.clone(), router)?;
         }
-        let gateway = Gateway::new(transport, providers, routes)?;
-        // An unreachable model route fails here, not per request.
-        for (path, r) in &self.routes {
-            for m in &r.models {
-                gateway.check_target(path, m.provider.as_str())?;
-            }
+        for p in &self.plugins {
+            gateway = gateway.after(&p.name, &p.after)?;
         }
-        Ok(gateway)
+        match &self.target {
+            Some(target) => gateway
+                .target(target.as_str())
+                .map_err(|e| Fault::config(format!("target: {}", e.message()))),
+            None => Ok(gateway),
+        }
     }
 }
 
@@ -151,83 +173,113 @@ fn auth_headers(provider: &str, auth: Option<&Auth>) -> Result<HeaderMap, Fault>
 
 #[cfg(test)]
 mod tests {
+    use respan_gateway_core::http::StatusCode;
+    use respan_gateway_testkit::{MockTransport, collect, mock, post};
+
     use super::*;
 
+    /// A gateway from `yaml` reaching its providers over HTTP.
     fn resolve(yaml: &str) -> Result<Gateway, String> {
-        let transport = respan_gateway_testkit::MockTransport::new();
         Config::parse(yaml)
-            .and_then(|c| c.build(transport, &crate::formats()))
+            .and_then(|c| c.build(crate::http, &crate::formats()))
             .map_err(|e| e.message().to_owned())
+    }
+
+    /// A gateway from `yaml` whose providers answer from `mock`.
+    fn mocked(yaml: &str, mock: &MockTransport) -> Gateway {
+        let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
+        let transport = |url: &str, auth| Ok(mock.at(url).with_headers(auth));
+        config
+            .build(transport, &crate::formats())
+            .unwrap_or_else(|e| panic!("gateway: {e}"))
+    }
+
+    const TWO: &str = "providers:
+  a: { format: openai-chat, base_url: 'https://a.test/v1' }
+  b: { format: openai-chat, base_url: 'https://b.test/v1' }
+serve: [openai-chat]
+";
+
+    /// The URLs `gateway` called for an OpenAI Chat `request`.
+    async fn sent_to(gateway: &Gateway, mock: &MockTransport, request: &str) -> Vec<String> {
+        let req = post("/v1/chat/completions", request.to_owned());
+        drop(gateway.handle(req).await);
+        mock.sent().iter().map(|s| s.uri().to_string()).collect()
     }
 
     #[tokio::test]
     async fn the_first_listed_prefix_a_model_matches_wins() {
-        use respan_gateway_core::http::StatusCode;
-        use respan_gateway_testkit::{MockTransport, mock, post};
-
-        let yaml = "providers:
-  a: { format: openai-chat, base_url: 'https://a.test' }
-  b: { format: openai-chat, base_url: 'https://b.test' }
-routes:
-  /chat:
-    format: openai-chat
-    models: [{ prefix: claude, provider: a }, { prefix: claude-3, provider: b }]
-";
+        let yaml = format!(
+            "{TWO}plugins:
+  - name: models
+    models: [{{ prefix: claude, provider: a }}, {{ prefix: claude-3, provider: b }}]
+"
+        );
         let mock = MockTransport::new();
-        let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
-        let gateway = config
-            .build(mock.clone(), &crate::formats())
-            .unwrap_or_else(|e| panic!("{e}"));
-        mock.reply("https://a.test", mock::json(StatusCode::OK, "{}"));
+        let gateway = mocked(&yaml, &mock);
+        mock.reply("https://a.test/v1", mock::json(StatusCode::OK, "{}"));
 
-        let request = r#"{"model":"claude-3-x","messages":[]}"#;
-        drop(gateway.handle("/chat", post(request)).await);
-
-        let sent = mock.sent();
-        let urls: Vec<String> = sent.iter().map(|s| s.uri().to_string()).collect();
+        let urls = sent_to(&gateway, &mock, r#"{"model":"claude-3-x","messages":[]}"#).await;
         assert_eq!(urls, ["https://a.test/v1/chat/completions"]);
     }
 
     #[tokio::test]
-    async fn the_example_config_routes_by_model_both_ways() {
-        use respan_gateway_testkit::{MockTransport, collect, mock, post};
+    async fn plugins_run_in_the_order_after_says() {
+        // `first` is listed first but runs after `second`, so the target it
+        // sets, last, wins.
+        let yaml = format!(
+            "{TWO}plugins:
+  - {{ name: first, after: [second], models: [{{ prefix: gpt, provider: a }}] }}
+  - {{ name: second, models: [{{ prefix: gpt, provider: b }}] }}
+"
+        );
+        let mock = MockTransport::new();
+        let gateway = mocked(&yaml, &mock);
+        mock.reply("https://a.test/v1", mock::json(StatusCode::OK, "{}"));
 
+        let urls = sent_to(&gateway, &mock, r#"{"model":"gpt-x","messages":[]}"#).await;
+        assert_eq!(urls, ["https://a.test/v1/chat/completions"]);
+    }
+
+    #[tokio::test]
+    async fn the_default_target_answers_what_no_router_targets() {
+        let yaml = format!(
+            "{TWO}target: b
+plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
+"
+        );
+        let mock = MockTransport::new();
+        let gateway = mocked(&yaml, &mock);
+        mock.reply("https://b.test/v1", mock::json(StatusCode::OK, "{}"));
+
+        let urls = sent_to(&gateway, &mock, r#"{"model":"gpt-x","messages":[]}"#).await;
+        assert_eq!(urls, ["https://b.test/v1/chat/completions"]);
+    }
+
+    #[tokio::test]
+    async fn the_example_config_routes_by_model_both_ways() {
         let yaml = include_str!("../../../gateway.example.yaml")
             .replace("env:OPENAI_API_KEY", "sk")
             .replace("env:ANTHROPIC_API_KEY", "sk");
-        let config = Config::parse(&yaml).unwrap_or_else(|e| panic!("{e}"));
         let mock = MockTransport::new();
-        let gateway = config
-            .build(mock.clone(), &crate::formats())
-            .unwrap_or_else(|e| panic!("gateway: {e}"));
+        let gateway = mocked(&yaml, &mock);
         let claude = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
         let gpt = r#"{"id":"c1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
         mock.reply(
             "https://api.anthropic.com",
-            mock::json(respan_gateway_core::http::StatusCode::OK, claude),
+            mock::json(StatusCode::OK, claude),
         );
-        mock.reply(
-            "https://api.openai.com",
-            mock::json(respan_gateway_core::http::StatusCode::OK, gpt),
-        );
+        mock.reply("https://api.openai.com/v1", mock::json(StatusCode::OK, gpt));
 
         let openai_client = r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#;
         let anthropic_client =
             r#"{"model":"gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
-        let (_, _, to_claude) = collect(
-            gateway
-                .handle("/v1/chat/completions", post(openai_client))
-                .await,
-        )
-        .await;
-        let (_, _, to_gpt) =
-            collect(gateway.handle("/v1/messages", post(anthropic_client)).await).await;
+        let to_claude = gateway.handle(post("/v1/chat/completions", openai_client));
+        let (_, _, to_claude) = collect(to_claude.await).await;
+        let to_gpt = gateway.handle(post("/v1/messages", anthropic_client));
+        let (_, _, to_gpt) = collect(to_gpt.await).await;
 
-        let urls: Vec<String> = mock
-            .sent()
-            .into_iter()
-            .map(|s| s.uri().to_string())
-            .collect();
+        let urls: Vec<String> = mock.sent().iter().map(|s| s.uri().to_string()).collect();
         assert_eq!(
             urls,
             [
@@ -235,10 +287,10 @@ routes:
                 "https://api.openai.com/v1/chat/completions"
             ]
         );
-        let json = |b: Result<respan_gateway_core::bytes::Bytes, respan_gateway_core::Fault>| -> respan_gateway_core::serde_json::Value {
+        let json = |b: Result<respan_gateway_core::bytes::Bytes, Fault>| {
             b.ok()
                 .and_then(|b| respan_gateway_core::serde_json::from_slice(&b).ok())
-                .unwrap_or_default()
+                .unwrap_or(respan_gateway_core::serde_json::Value::Null)
         };
         assert_eq!(json(to_claude)["object"], "chat.completion");
         assert_eq!(json(to_gpt)["type"], "message");
@@ -255,7 +307,7 @@ routes:
 
     #[test]
     fn a_missing_environment_variable_is_an_error() {
-        let yaml = "providers: { p: { format: openai-chat, base_url: 'http://x', auth: { type: bearer, key: 'env:RESPAN_TEST_UNSET' } } }\nroutes: {}";
+        let yaml = "providers: { p: { format: openai-chat, base_url: 'http://x', auth: { type: bearer, key: 'env:RESPAN_TEST_UNSET' } } }\nserve: []";
         assert_eq!(
             resolve(yaml).err().as_deref(),
             Some("provider 'p': environment variable RESPAN_TEST_UNSET is not set")
@@ -263,43 +315,76 @@ routes:
     }
 
     #[test]
-    fn a_model_route_to_an_unknown_provider_is_an_error() {
-        let yaml =
-            "routes: { /x: { format: openai-chat, models: [{ prefix: c, provider: nope }] } }";
+    fn a_bad_base_url_or_auth_header_is_an_error() {
+        let provider =
+            |p: &str| format!("providers: {{ p: {{ format: openai-chat, {p} }} }}\nserve: []");
+        let url = provider("base_url: 'https://k:s@x.test'");
+        let said = resolve(&url).err().unwrap_or_default();
+        assert!(said.starts_with("provider 'p': bad base URL"), "{said}");
+        assert!(!said.contains("k:s"), "{said}");
+        let host =
+            provider("base_url: 'https://x.test', auth: { type: header, name: host, key: k }");
         assert_eq!(
-            resolve(yaml).err().as_deref(),
-            Some("route '/x': unknown provider 'nope'")
+            resolve(&host).err().as_deref(),
+            Some("provider 'p': header 'host' is the connection's")
         );
     }
 
     #[test]
-    fn a_listen_address_is_a_socket_address() {
-        let bad = Config::parse("listen: 127.0.0.1\nroutes: {}").err();
-        assert!(bad.is_some_and(|e| e.message().contains("listen")));
-        let good = Config::parse("listen: 127.0.0.1:8080\nroutes: {}");
-        assert!(good.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8080)));
+    fn a_model_route_to_an_unknown_provider_is_an_error() {
+        let yaml = "serve: [openai-chat]
+plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
+        assert_eq!(
+            resolve(yaml).err().as_deref(),
+            Some("plugin 'models': unknown provider 'nope'")
+        );
     }
 
     #[test]
-    fn a_route_is_served_at_a_path() {
-        for path in ["x", "/x?y=1", "/x y", "/x#y"] {
-            let yaml = format!("routes: {{ '{path}': {{ format: openai-chat, target: p }} }}");
-            assert_eq!(
-                resolve(&yaml).err(),
-                Some(format!(
-                    "route '{path}': not a path, such as '/v1/chat/completions'"
-                ))
-            );
+    fn a_bad_plugin_order_or_target_is_an_error() {
+        let router = "models: [{ prefix: c, provider: a }]";
+        let cases = [
+            (
+                format!("plugins: [{{ name: x, after: [y], {router} }}]"),
+                "plugin 'x' runs after unknown plugin 'y'",
+            ),
+            (
+                format!(
+                    "plugins: [{{ name: x, after: [y], {router} }}, {{ name: y, after: [x], {router} }}]"
+                ),
+                "plugin 'y' cannot run after 'x', which runs after it",
+            ),
+            (
+                format!("plugins: [{{ name: x, {router} }}, {{ name: x, {router} }}]"),
+                "plugin 'x' is registered twice",
+            ),
+            (
+                "plugins: [{ name: x }]".to_owned(),
+                "plugin 'x': no plugin given; compiled-in plugins: [models]",
+            ),
+            ("target: nope".to_owned(), "target: unknown provider 'nope'"),
+        ];
+        for (yaml, expected) in cases {
+            let yaml = format!("{TWO}{yaml}");
+            assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
         }
     }
 
     #[test]
+    fn a_listen_address_is_a_socket_address() {
+        let bad = Config::parse("listen: 127.0.0.1\nserve: []").err();
+        assert!(bad.is_some_and(|e| e.message().contains("listen")));
+        let good = Config::parse("listen: 127.0.0.1:8080\nserve: []");
+        assert!(good.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8080)));
+    }
+
+    #[test]
     fn an_unknown_format_names_the_compiled_in_ones() {
-        let yaml = "routes: { /x: { format: nope, target: p } }";
+        let yaml = "serve: [openai-chat, nope]";
         assert_eq!(
             resolve(yaml).err().as_deref(),
             Some(
-                "route '/x': unknown format 'nope'; compiled-in formats: [openai-chat, anthropic-messages]"
+                "serve: unknown format 'nope'; compiled-in formats: [openai-chat, anthropic-messages]"
             )
         );
     }

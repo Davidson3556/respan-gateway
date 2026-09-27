@@ -14,7 +14,7 @@ pub mod conversation;
 mod openai;
 
 pub use anthropic::AnthropicMessages;
-pub use common::{json_model, pass_credentials, pass_headers, write_model};
+pub use common::{json_model, pass_headers, write_model};
 pub use openai::OpenAiChat;
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
@@ -30,6 +30,14 @@ pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
         .or_else(|| sse::event_json(raw))
 }
 
+/// Whether a client request is a `POST` to a path ending in `suffix`, such
+/// as `/chat/completions`, whatever its query: the usual
+/// [`Format::accepts`](respan_gateway_core::Format::accepts), for a format of
+/// a kind or of none.
+pub fn posts_to(head: &http::request::Parts, suffix: &str) -> bool {
+    head.method == http::Method::POST && head.uri.path().ends_with(suffix)
+}
+
 /// Set a made response's content type to `value`, unless it has one.
 pub fn default_content_type(head: &mut http::response::Parts, value: &'static str) {
     let value = HeaderValue::from_static(value);
@@ -37,6 +45,8 @@ pub fn default_content_type(head: &mut http::response::Parts, value: &'static st
 }
 
 /// The decoder of a format of no kind, which the gateway only passes on.
+/// Such a format tells its requests itself, as any does, such as with
+/// [`posts_to`] or a path prefix.
 /// A success becomes Frames as its bytes come. A failure is read whole, as
 /// [`whole::decoder`] reads one, keeping the provider's words.
 pub fn frames_decoder(head: &http::response::Parts) -> Box<dyn Decoder> {

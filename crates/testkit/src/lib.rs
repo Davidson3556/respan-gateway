@@ -10,7 +10,7 @@ use futures::{StreamExt, stream};
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
 use http_body::Frame;
-use http_body_util::{BodyExt, Full, StreamBody};
+use http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{Body, Context, Fault, Outcome, Plugin, Transport};
 use respan_gateway_core::{async_trait, bytes, futures, http, http_body, http_body_util};
 
@@ -57,9 +57,11 @@ pub mod mock {
 /// Responses queued for one base URL.
 type Script = (String, VecDeque<mock::Reply>);
 
-/// A [`Transport`] that answers from scripts, by the first base URL that
-/// prefixes the request URL. Each reply answers one request; a request
-/// with none queued gets an `Err` with `upstream_error` (502).
+/// Scripted providers: [`at`](Self::at) hands out a [`Transport`] for one
+/// provider, tagged with a base URL, and every request any of them sends is
+/// recorded here with its full URL. Each reply answers one request to its
+/// base URL; a request with none queued gets an `Err` with
+/// `upstream_error` (502).
 #[derive(Debug, Clone, Default)]
 pub struct MockTransport {
     scripts: Arc<Mutex<Vec<Script>>>,
@@ -67,13 +69,24 @@ pub struct MockTransport {
 }
 
 impl MockTransport {
-    /// A transport with nothing queued.
+    /// Scripts with nothing queued.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Queues a response for requests whose URL starts with `base_url`.
+    /// The transport of a provider at `base_url`, answered from the replies
+    /// queued for it.
+    pub fn at(&self, base_url: &str) -> MockAt {
+        MockAt {
+            mock: self.clone(),
+            base: base_url.trim_end_matches('/').to_owned(),
+            headers: http::HeaderMap::new(),
+        }
+    }
+
+    /// Queues a response for requests to the provider at `base_url`.
     pub fn reply(&self, base_url: &str, response: mock::Reply) -> &Self {
+        let base_url = base_url.trim_end_matches('/');
         let mut scripts = self.scripts.lock().unwrap_or_else(PoisonError::into_inner);
         match scripts.iter_mut().find(|(base, _)| base == base_url) {
             Some((_, queue)) => queue.push_back(response),
@@ -83,7 +96,8 @@ impl MockTransport {
         self
     }
 
-    /// Every request sent so far, in order.
+    /// Every request sent so far, in order, each with its full URL and the
+    /// headers its transport added.
     pub fn sent(&self) -> Vec<http::Request<Bytes>> {
         self.sent
             .lock()
@@ -92,21 +106,52 @@ impl MockTransport {
     }
 }
 
+/// One provider's transport, from [`MockTransport::at`]: it joins its base
+/// URL with each request's path and adds its own headers and the call's
+/// [`CallHeaders`](respan_gateway_server::CallHeaders), as
+/// `HttpTransport` does
+/// ([`add_own_headers`](respan_gateway_server::add_own_headers)).
+#[derive(Debug, Clone)]
+pub struct MockAt {
+    mock: MockTransport,
+    base: String,
+    headers: http::HeaderMap,
+}
+
+impl MockAt {
+    /// Send `headers` with every request, replacing same-named ones; a name
+    /// given several values sends them all. With any, clients' credentials
+    /// are not passed on.
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = headers;
+        self
+    }
+}
+
 #[async_trait]
-impl Transport for MockTransport {
+impl Transport for MockAt {
     async fn send(&self, req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let url = req.uri().to_string();
-        let (head, body) = req.into_parts();
+        // Joins the URL and adds headers as `HttpTransport::send` does, in
+        // the server crate; keep the two alike.
+        let (mut head, body) = req.into_parts();
+        respan_gateway_server::add_own_headers(&mut head, &self.headers)?;
+        let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
+        let url = format!("{}{path}", self.base);
+        head.uri = url
+            .parse()
+            .map_err(|e| Fault::config(format!("bad mock URL {url}")).with_source(e))?;
         let body = body.collect().await?.to_bytes();
-        self.sent
+        let mock = &self.mock;
+        let sent = http::Request::from_parts(head, body);
+        mock.sent
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(http::Request::from_parts(head, body));
+            .push(sent);
         let script = {
-            let mut scripts = self.scripts.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut scripts = mock.scripts.lock().unwrap_or_else(PoisonError::into_inner);
             scripts
                 .iter_mut()
-                .find(|(base, _)| url.starts_with(base.as_str()))
+                .find(|(base, _)| *base == self.base)
                 .and_then(|(_, q)| q.pop_front())
         };
         let script =
@@ -120,12 +165,12 @@ impl Transport for MockTransport {
     }
 }
 
-/// A request of just `body`, as `POST /`, for
+/// A request of just `body`, as a `POST` to `path`, for
 /// [`Gateway::handle`](respan_gateway_core::Gateway::handle).
-pub fn post(body: impl Into<Bytes>) -> http::Request<Body> {
-    let body = Full::new(body.into()).map_err(Fault::from).boxed_unsync();
-    let mut req = http::Request::new(body);
+pub fn post(path: &str, body: impl Into<Bytes>) -> http::Request<Body> {
+    let mut req = http::Request::new(respan_gateway_core::body(body));
     *req.method_mut() = http::Method::POST;
+    *req.uri_mut() = path.parse().unwrap_or_else(|e| panic!("path {path}: {e}"));
     req
 }
 
@@ -139,14 +184,14 @@ pub async fn collect(
     (parts.status, parts.headers, body)
 }
 
-/// A plugin that records the outcome of each request it sees. Put it first
-/// to see every request whose chain ran; a body refused before the chain,
-/// such as one that broke off, runs no hooks.
+/// A plugin that records the outcome of each request it sees. Register it
+/// first to see every request whose plugins ran; a body refused before
+/// them, such as one that broke off, runs no hooks.
 #[derive(Debug, Clone, Default)]
 pub struct Outcomes(Arc<Mutex<Vec<Outcome>>>);
 
 impl Outcomes {
-    /// Every outcome recorded so far, in the order their close hooks ran.
+    /// Every outcome recorded so far, in the order their end hooks ran.
     pub fn all(&self) -> Vec<Outcome> {
         self.0
             .lock()
@@ -164,7 +209,7 @@ impl Outcomes {
 
 #[async_trait]
 impl Plugin for Outcomes {
-    async fn on_close(&self, _cx: &Context, outcome: &Outcome) {
+    async fn on_client_end(&self, _cx: &Context, outcome: &Outcome) {
         let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         all.push(outcome.clone());
     }

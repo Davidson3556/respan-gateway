@@ -1,25 +1,35 @@
 use std::future::IntoFuture;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Duration;
 
-use respan_gateway_core::Format;
+use respan_gateway_core::Fault;
+use respan_gateway_core::http::HeaderMap;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_server::{HttpTransport, router};
 
 mod config;
 
+use config::KnownFormat;
+
 const USAGE: &str = "usage: respan-gateway [-c|--config <path>] [check] [-V|--version]";
 const DEFAULT_LISTEN: std::net::SocketAddr =
     std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// How long open responses and close hooks get, together, after a signal.
+/// How long open responses and end hooks get, together, after a signal.
 const SHUTDOWN: Duration = Duration::from_secs(30);
 
 /// Every format this binary speaks. A custom gateway builds its own
 /// `Gateway` in its own `main.rs`.
-fn formats() -> Vec<Arc<dyn Format>> {
-    vec![Arc::new(OpenAiChat), Arc::new(AnthropicMessages)]
+fn formats() -> [KnownFormat; 2] {
+    [
+        KnownFormat::of::<OpenAiChat>(),
+        KnownFormat::of::<AnthropicMessages>(),
+    ]
+}
+
+/// A provider's transport: HTTP to `base_url`, sending `auth`.
+fn http(base_url: &str, auth: HeaderMap) -> Result<HttpTransport, Fault> {
+    HttpTransport::new(base_url)?.with_headers(auth)
 }
 
 #[tokio::main]
@@ -49,7 +59,7 @@ async fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(&format!("{config_path}: {e}")),
     };
-    let built = HttpTransport::new().and_then(|t| config.build(t, &formats()));
+    let built = config.build(http, &formats());
     let gateway = match built {
         Ok(built) => built,
         Err(e) => return fail(&format!("{config_path}: {}", e.message())),
@@ -66,18 +76,15 @@ async fn main() -> ExitCode {
     };
     let bound = listener.local_addr().unwrap_or(addr);
     println!("respan-gateway {VERSION} listening on {bound}");
-    // On a signal, open responses and then close hooks share one deadline.
-    // Responses open at it are cut and lose their close hooks.
+    // On a signal, open responses and then end hooks share one deadline.
+    // Responses open at it are cut and lose their end hooks.
     let (stopping, mut stopped) = tokio::sync::oneshot::channel();
-    let serve = axum::serve(
-        listener,
-        router(gateway.clone(), config.routes.keys().map(|p| (p, p))),
-    )
-    .with_graceful_shutdown(async {
-        shutdown().await;
-        let _ = stopping.send(tokio::time::Instant::now() + SHUTDOWN);
-    })
-    .into_future();
+    let serve = axum::serve(listener, router(gateway.clone()))
+        .with_graceful_shutdown(async {
+            shutdown().await;
+            let _ = stopping.send(tokio::time::Instant::now() + SHUTDOWN);
+        })
+        .into_future();
     let mut serve = std::pin::pin!(serve);
     let mut deadline = None;
     let served = tokio::select! {
@@ -100,7 +107,7 @@ async fn main() -> ExitCode {
         .await
         .is_err()
     {
-        eprintln!("shutdown: close hooks still running at the deadline were dropped");
+        eprintln!("shutdown: end hooks still running at the deadline were dropped");
     }
     match served {
         Ok(()) => ExitCode::SUCCESS,

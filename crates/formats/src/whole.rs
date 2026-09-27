@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::http::{self, StatusCode};
-use respan_gateway_core::{Decoder, Encoder, Fault, KindType, Part};
+use respan_gateway_core::{Decoder, Encoder, Event, Fault, Part};
 
 /// A decoder for a body read whole. For a success, `on_body` gets all the
 /// bytes when the body ends; the response ends `Ok` unless `on_body` pushed
@@ -25,7 +25,7 @@ where
                 let v = crate::sse::failure_json(&raw).unwrap_or_default();
                 let fault = crate::common::provider_error(status, &v);
                 out.push(Part::Frame(raw));
-                out.push(Part::End(Err(fault.relayed())));
+                out.push(Part::End(Err(fault.said())));
             }
             true => {
                 if let Err(fault) = on_body(raw, out) {
@@ -145,7 +145,7 @@ where
 
 impl<T, W, F, B> Encoder for Relay<T, W, F, B>
 where
-    T: KindType,
+    T: Event,
     W: FnMut(&[T], Option<&Bytes>) -> Result<B, Fault> + Send + 'static,
     F: FnMut(&Fault) -> B + Send + 'static,
     B: AsRef<[u8]> + 'static,

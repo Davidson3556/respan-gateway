@@ -7,7 +7,7 @@ use bytes::Bytes;
 use http::StatusCode;
 use serde_json::Value;
 
-use crate::{Fault, KindType};
+use crate::{Event, Fault};
 
 /// A response head with `status` and nothing else.
 pub(crate) fn head(status: StatusCode) -> http::response::Parts {
@@ -20,8 +20,8 @@ pub(crate) fn head(status: StatusCode) -> http::response::Parts {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Part {
-    /// One message of the response: its events, of the kind's event type,
-    /// and the bytes they came from, if any.
+    /// One message of the response: its output events, and the bytes they
+    /// came from, if any.
     Item(Item),
     /// Bytes that hold no content: framing, a keep-alive, bookkeeping, or a
     /// failed response's error body, which an `Err` end follows. Content
@@ -45,7 +45,7 @@ pub enum Part {
 /// then rebuilt from them; translated or made by a plugin, it is written
 /// from its events.
 pub struct Item {
-    /// A `Vec<T>` of the kind's event type `T`.
+    /// A `Vec<T>` of the kind's output type `T`.
     events: Box<dyn Any + Send + Sync>,
     /// `T`.
     event_type: TypeId,
@@ -64,7 +64,7 @@ impl std::fmt::Debug for Item {
 
 impl Item {
     /// An item of `events`, with no bytes behind it.
-    pub fn new<T: KindType>(events: impl IntoIterator<Item = T>) -> Self {
+    pub fn new<T: Event>(events: impl IntoIterator<Item = T>) -> Self {
         Self {
             events: Box::new(events.into_iter().collect::<Vec<T>>()),
             event_type: TypeId::of::<T>(),
@@ -74,7 +74,7 @@ impl Item {
     }
 
     /// For decoders: the events of the message `raw`.
-    pub fn decoded<T: KindType>(events: impl IntoIterator<Item = T>, raw: Bytes) -> Self {
+    pub fn decoded<T: Event>(events: impl IntoIterator<Item = T>, raw: Bytes) -> Self {
         Self {
             raw: Some(raw),
             ..Self::new(events)
@@ -83,7 +83,7 @@ impl Item {
 
     /// The events; `Err` with [`codes::WRONG_KIND`](crate::codes::WRONG_KIND)
     /// if they are not `T`s.
-    pub fn events<T: KindType>(&self) -> Result<&[T], Fault> {
+    pub fn events<T: Event>(&self) -> Result<&[T], Fault> {
         let events = self.events.downcast_ref::<Vec<T>>();
         events.map(Vec::as_slice).ok_or_else(Fault::wrong_kind::<T>)
     }
@@ -154,7 +154,7 @@ impl From<Usage> for Part {
 #[derive(Debug, Clone)]
 pub struct Doc {
     raw: Bytes,
-    parsed: Arc<OnceLock<Option<Value>>>,
+    parsed: Arc<OnceLock<Result<Value, Invalid>>>,
     /// The value it is written from, once changed or made from one.
     changed: Option<Arc<Value>>,
 }
@@ -188,12 +188,23 @@ impl From<Value> for Doc {
     }
 }
 
+/// Why bytes are not JSON a [`Doc`] can hold.
+#[derive(Debug)]
+enum Invalid {
+    NotJson,
+    /// Nested 128 levels deep or more.
+    TooDeep,
+}
+
 impl Doc {
-    /// The message as JSON; `None` if it is not JSON.
+    /// The message as JSON; `None` if it is not JSON, or nests 128 levels
+    /// deep or more. A client's request that deep is refused once its
+    /// format reads the model from it
+    /// ([`Gateway::handle`](crate::Gateway::handle)).
     pub fn json(&self) -> Option<&Value> {
         match &self.changed {
             Some(value) => Some(value),
-            None => self.parsed().as_ref(),
+            None => self.parsed().as_ref().ok(),
         }
     }
 
@@ -201,9 +212,14 @@ impl Doc {
     /// Once changed, it is written from its value.
     pub fn json_mut(&mut self) -> Option<&mut Value> {
         if self.changed.is_none() {
-            self.changed = Some(Arc::new(self.parsed().clone()?));
+            self.changed = Some(Arc::new(self.parsed().as_ref().ok()?.clone()));
         }
         self.changed.as_mut().map(Arc::make_mut)
+    }
+
+    /// Whether it was read as JSON and found nested too deeply.
+    pub(crate) fn too_deep(&self) -> bool {
+        matches!(self.parsed.get(), Some(Err(Invalid::TooDeep)))
     }
 
     /// The bytes it arrived as, or those of its value once changed.
@@ -214,9 +230,15 @@ impl Doc {
         }
     }
 
-    fn parsed(&self) -> &Option<Value> {
-        self.parsed
-            .get_or_init(|| serde_json::from_slice(&self.raw).ok())
+    fn parsed(&self) -> &Result<Value, Invalid> {
+        self.parsed.get_or_init(|| {
+            serde_json::from_slice(&self.raw).map_err(|e| {
+                match e.to_string().starts_with("recursion limit exceeded") {
+                    true => Invalid::TooDeep,
+                    false => Invalid::NotJson,
+                }
+            })
+        })
     }
 }
 
@@ -285,6 +307,15 @@ mod tests {
         }
         assert_eq!(changed.to_bytes(), Bytes::from_static(b"{\"a\":2}"));
         assert_eq!(original.to_bytes(), raw);
+    }
+
+    #[test]
+    fn json_nested_too_deeply_is_told_from_bytes_that_are_not_json() {
+        let nested = |n| Doc::from(Bytes::from(format!("{}{}", "[".repeat(n), "]".repeat(n))));
+        let (shallow, deep, broken) = (nested(127), nested(128), Doc::from(Bytes::from("[")));
+        assert!(shallow.json().is_some() && !shallow.too_deep());
+        assert!(deep.json().is_none() && deep.too_deep());
+        assert!(broken.json().is_none() && !broken.too_deep());
     }
 
     #[test]

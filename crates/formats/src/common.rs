@@ -11,18 +11,18 @@ use bytes::{Bytes, BytesMut};
 use http::HeaderValue;
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
-use respan_gateway_core::{Decoder, Doc, Encoder, Fault, Item, Kind, Part, RequestView, Usage};
+use respan_gateway_core::{ClientView, Decoder, Doc, Encoder, Fault, Item, Part, Usage};
 use serde_json::{Map, Value, json};
 
-use crate::conversation::{Content, Conversation, Event, Finish, Message, Role};
+use crate::conversation::{Content, Conversation, Finish, Message, Reply, Role};
 use crate::sse::{content_type, event_data};
 
 /// What a conversation format supplies; the plumbing around it is shared.
 pub(crate) trait Wire: Send + Sync + 'static {
     /// A JSON request as a conversation, noting what it has no place for.
-    fn decode(v: &Value) -> Conversation;
+    fn read(v: &Value) -> Conversation;
     /// A conversation as a request, refusing what this format cannot say.
-    fn encode(chat: &Conversation) -> Result<Value, Fault>;
+    fn write(chat: &Conversation) -> Result<Value, Fault>;
     /// Write into the client's request the fields `after` changed from
     /// `before`, its decoding. Everything else keeps its original form.
     fn patch(
@@ -34,37 +34,29 @@ pub(crate) trait Wire: Send + Sync + 'static {
     /// Whether a successful body is a whole response of this format.
     fn is_response(v: &Value) -> bool;
     /// A whole response as events.
-    fn events(v: &Value) -> Vec<Event>;
+    fn replies(v: &Value) -> Vec<Reply>;
     /// The usage totals of a whole response.
     fn usage(v: &Value) -> Usage;
     /// A whole response from the events of another format, or a plugin.
     fn render(so_far: &SoFar) -> Value;
     /// Put edited events back into a whole response of this format.
-    fn put(v: &mut Value, events: &[Event]);
+    fn put(v: &mut Value, events: &[Reply]);
     /// `events` in the order this format reads them back, where the order
     /// means nothing, such as a choice's one text and one other.
-    fn in_order(events: &[Event]) -> Vec<Event> {
+    fn in_order(events: &[Reply]) -> Vec<Reply> {
         events.to_vec()
     }
     /// The error body for `fault`, its details merged by [`merge_details`].
     fn error_body(fault: &Fault) -> Value;
 }
 
-/// The conversation kind for a format, read and written by its [`Wire`].
-pub(crate) fn kind<W: Wire>() -> Kind {
-    Kind::new::<Conversation, Event>(decode_request::<W>, encode_request::<W>)
-}
-
 /// A JSON request as a conversation.
-fn decode_request<W: Wire>(
-    _head: &http::request::Parts,
-    body: &Doc,
-) -> Result<Conversation, Fault> {
+pub(crate) fn decode_request<W: Wire>(body: &Doc) -> Result<Conversation, Fault> {
     let v = body
         .json()
         .filter(|v| v.is_object())
         .ok_or_else(|| Fault::bad_request("request body is not a JSON object"))?;
-    Ok(W::decode(v))
+    Ok(W::read(v))
 }
 
 /// A conversation as a body: the client's body patched, or a new body if
@@ -81,7 +73,7 @@ pub(crate) fn encode_request<W: Wire>(
         if !chat.messages.iter().all(Message::is_plain) {
             return Err(untranslatable("messages other than text"));
         }
-        return W::encode(chat).map(Doc::from);
+        return W::write(chat).map(Doc::from);
     };
     let mut v = v.clone();
     let obj = v
@@ -100,67 +92,65 @@ pub(crate) fn encode_request<W: Wire>(
     Ok(Doc::from(v))
 }
 
-/// Pass on the client's headers whose names start with one of `prefixes`,
-/// such as beta features it opted into, when the client speaks this format;
-/// `&[""]` passes all. For any format's
+/// Pass on the client's end-to-end headers, such as `user-agent`, an
+/// app's own, beta features it opted into or its credentials, when the
+/// client speaks this format ([`ClientView::is_own`]); across formats they
+/// are another protocol's, so none pass. Whose keys reach the provider is
+/// the transport's to decide. For any format's
 /// [`Format::prepare`](respan_gateway_core::Format::prepare), whose header
-/// rules apply after it.
+/// rules apply after it; a header the format already set is kept.
 ///
-/// Never passes `authorization` or `cookie` (see [`pass_credentials`]), nor
-/// `accept-encoding`, as the gateway reads what it relays. A credential of
-/// another name, such as the gateway's own key, must be removed before the
-/// request reaches the format.
-pub fn pass_headers(req: &mut http::Request<Doc>, client: RequestView<'_>, prefixes: &[&str]) {
-    pass(req, client, |name| {
-        let own = matches!(name, "authorization" | "cookie" | "accept-encoding");
-        !own && prefixes.iter().any(|p| name.starts_with(p))
-    });
-}
-
-/// Pass on the client's credential headers `names` when the client speaks
-/// this format and `provider` sets no credential; otherwise remove them,
-/// even if [`pass_headers`] passed them. A `provider` header counts as a
-/// credential if it is in `names` or marked sensitive. For any format's
-/// `prepare`, after `pass_headers`.
-pub fn pass_credentials(
-    req: &mut http::Request<Doc>,
-    client: RequestView<'_>,
-    provider: &http::HeaderMap,
-    names: &[&str],
-) {
-    // A header the provider marks sensitive is a credential too, whatever
-    // its name, such as Azure's `api-key`.
-    let keyed = provider
-        .iter()
-        .any(|(name, value)| value.is_sensitive() || names.contains(&name.as_str()));
-    // Remove what `pass_headers` passed, so each is sent once.
-    for name in names {
-        req.headers_mut().remove(*name);
-    }
-    if !keyed {
-        pass(req, client, |name| names.contains(&name));
-    }
-}
-
-fn pass(req: &mut http::Request<Doc>, client: RequestView<'_>, passes: impl Fn(&str) -> bool) {
+/// Never passes what would change how the provider reads the request or
+/// who sent it: `cookie`, `accept-encoding` (the gateway reads what it
+/// relays), `forwarded`, `via`, `x-real-ip`, `x-forwarded-*`, method
+/// overrides, `if-*` and `range`.
+pub fn pass_headers(req: &mut http::Request<Doc>, client: ClientView<'_>) {
     if !client.is_own() {
         return;
     }
+    let set: Vec<_> = req.headers().keys().cloned().collect();
     for (name, value) in &client.head().headers {
-        if passes(name.as_str()) {
+        if passes(name.as_str()) && !set.contains(name) {
             req.headers_mut().append(name.clone(), value.clone());
         }
     }
 }
 
-/// A JSON `POST` to `path`, as both formats send.
-pub(crate) fn post_json(body: Doc, path: &'static str) -> http::Request<Doc> {
+/// Whether [`pass_headers`] may pass on the client's header `name`.
+fn passes(name: &str) -> bool {
+    let denied = matches!(
+        name,
+        "cookie"
+            | "accept-encoding"
+            | "forwarded"
+            | "via"
+            | "x-real-ip"
+            | "x-http-method-override"
+            | "x-method-override"
+            | "range"
+    );
+    !denied && !name.starts_with("x-forwarded-") && !name.starts_with("if-")
+}
+
+/// A JSON `POST` to `path`, as both formats send, with the client's query
+/// when the client speaks this format.
+pub(crate) fn post_json(
+    body: Doc,
+    path: &'static str,
+    client: ClientView<'_>,
+) -> Result<http::Request<Doc>, Fault> {
     let mut req = http::Request::new(body);
     *req.method_mut() = http::Method::POST;
-    *req.uri_mut() = http::Uri::from_static(path);
+    let query = client.head().uri.query().filter(|_| client.is_own());
+    *req.uri_mut() = match query.filter(|q| !q.is_empty()) {
+        Some(query) => format!("{path}?{query}").parse().map_err(|e| {
+            Fault::bad_request("the request's query cannot be passed on").with_source(e)
+        })?,
+        None => http::Uri::from_static(path),
+    };
     req.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    req
+    Ok(req)
 }
 
 /// Finish a response's head and return whether it is still relayed. A
@@ -169,7 +159,7 @@ pub(crate) fn post_json(body: Doc, path: &'static str) -> http::Request<Doc> {
 /// successful stream, otherwise JSON.
 pub(crate) fn made_head(
     head: &mut http::response::Parts,
-    client: RequestView<'_>,
+    client: ClientView<'_>,
     relayed: bool,
 ) -> bool {
     let reframe = relayed && reframed(head, client);
@@ -193,7 +183,7 @@ pub(crate) fn made_head(
 /// asked, as when a plugin changed `stream`. Its bytes cannot be relayed,
 /// so it is written from its events. Decoder and encoder both ask it of the
 /// provider's head, so they agree.
-fn reframed(head: &http::response::Parts, client: RequestView<'_>) -> bool {
+fn reframed(head: &http::response::Parts, client: ClientView<'_>) -> bool {
     let streamed = crate::sse::is_stream(head);
     client.is_own() && head.status.is_success() && streamed != client.body().is_some_and(streams)
 }
@@ -202,7 +192,7 @@ fn reframed(head: &http::response::Parts, client: RequestView<'_>) -> bool {
 /// the bytes of its items.
 pub(crate) fn decoder_for(
     head: &http::response::Parts,
-    client: RequestView<'_>,
+    client: ClientView<'_>,
     decoder: Box<dyn Decoder>,
 ) -> Box<dyn Decoder> {
     match reframed(head, client) {
@@ -217,7 +207,7 @@ impl Reframed {
     fn remake(from: usize, out: &mut Vec<Part>) {
         for part in out.split_off(from) {
             match part {
-                Part::Item(item) => out.push(match item.events::<Event>() {
+                Part::Item(item) => out.push(match item.events::<Reply>() {
                     Ok(events) => Item::new(events.to_vec()).into(),
                     Err(f) => Part::End(Err(f)),
                 }),
@@ -256,7 +246,7 @@ pub(crate) fn unary_decoder<W: Wire>(status: StatusCode) -> Box<dyn Decoder> {
                 if !usage.is_empty() {
                     out.push(usage.into());
                 }
-                out.push(Item::decoded(W::events(v), raw).into());
+                out.push(Item::decoded(W::replies(v), raw).into());
                 return out.push(Part::End(Ok(())));
             }
             // An error in a success, even one framed as events, or a
@@ -272,7 +262,7 @@ pub(crate) fn unary_decoder<W: Wire>(status: StatusCode) -> Box<dyn Decoder> {
         };
         // Relayed as it is.
         out.push(Part::Frame(raw));
-        out.push(Part::End(Err(end.relayed())));
+        out.push(Part::End(Err(end.said())));
     }))
 }
 
@@ -290,10 +280,10 @@ pub(crate) struct UnaryEncoder<W> {
 /// The provider's own message in a unary response.
 struct Relayed {
     raw: Bytes,
-    events: Vec<Event>,
+    events: Vec<Reply>,
     edited: bool,
     /// Events a filter released after it.
-    added: Vec<Event>,
+    added: Vec<Reply>,
 }
 
 impl<W: Wire> UnaryEncoder<W> {
@@ -323,7 +313,7 @@ impl<W: Wire> Encoder for UnaryEncoder<W> {
                 }
                 (None, Some(own)) => own.added.extend_from_slice(item.events()?),
                 (None, None) => {
-                    for event in item.events::<Event>()? {
+                    for event in item.events::<Reply>()? {
                         self.so_far.add(event)?;
                     }
                 }
@@ -351,11 +341,11 @@ impl<W: Wire> Encoder for UnaryEncoder<W> {
 }
 
 /// A whole response with its edited events put back.
-pub(crate) fn rebuild_whole<W: Wire>(raw: &Bytes, events: &[Event]) -> Result<Bytes, Fault> {
+pub(crate) fn rebuild_whole<W: Wire>(raw: &Bytes, events: &[Reply]) -> Result<Bytes, Fault> {
     let mut v: Value = serde_json::from_slice(raw).unwrap_or_default();
     W::put(&mut v, events);
     // Blocks are numbered by position, which a dropped block changes.
-    let again = unless_taken(events, W::events(&v));
+    let again = unless_taken(events, W::replies(&v));
     reads_back(
         &by_position(&W::in_order(events)),
         &by_position(&W::in_order(&again)),
@@ -365,8 +355,8 @@ pub(crate) fn rebuild_whole<W: Wire>(raw: &Bytes, events: &[Event]) -> Result<By
 
 /// `again`, events a message read back as, without their starts if a filter
 /// took `events`' start: the message still names itself.
-pub(crate) fn unless_taken(events: &[Event], again: Vec<Event>) -> Vec<Event> {
-    let is_start = |e: &Event| matches!(e, Event::Start { .. });
+pub(crate) fn unless_taken(events: &[Reply], again: Vec<Reply>) -> Vec<Reply> {
+    let is_start = |e: &Reply| matches!(e, Reply::Start { .. });
     match events.iter().any(is_start) {
         true => again,
         false => again.into_iter().filter(|e| !is_start(e)).collect(),
@@ -375,11 +365,11 @@ pub(crate) fn unless_taken(events: &[Event], again: Vec<Event>) -> Vec<Event> {
 
 /// `events` with their texts numbered in order, as a message's positions
 /// number them.
-fn by_position(events: &[Event]) -> Vec<Event> {
+fn by_position(events: &[Reply]) -> Vec<Reply> {
     let mut blocks: Vec<u32> = Vec::new();
     let mut numbered = events.to_vec();
     for e in &mut numbered {
-        if let Event::Text { block, .. } = e {
+        if let Reply::Text { block, .. } = e {
             let at = blocks.iter().position(|b| b == block).unwrap_or_else(|| {
                 blocks.push(*block);
                 blocks.len() - 1
@@ -393,7 +383,7 @@ fn by_position(events: &[Event]) -> Vec<Event> {
 /// Checks that a message rebuilt with edited events reads back as them. An
 /// edit the message has no place for, such as a tool call turned into text,
 /// fails the response rather than go out unwritten.
-pub(crate) fn reads_back(events: &[Event], again: &[Event]) -> Result<(), Fault> {
+pub(crate) fn reads_back(events: &[Reply], again: &[Reply]) -> Result<(), Fault> {
     if events == again {
         return Ok(());
     }
@@ -409,16 +399,16 @@ pub(crate) fn unknown_part() -> Fault {
 pub(crate) trait StreamWriter: Default + Send + 'static {
     /// A provider's event rebuilt with its edited events, or `None` if it
     /// has nothing left to say.
-    fn rebuild(raw: &Bytes, events: &[Event]) -> Result<Option<Bytes>, Fault>;
+    fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Option<Bytes>, Fault>;
     /// Relay the provider's event `raw`. Its end, such as finish and usage,
     /// is held back so events a filter releases at the end go before it.
     fn relay(&mut self, raw: &Bytes, out: &mut BytesMut);
     /// Whether the provider's event `raw` can hold `event`, such as text in
     /// a text event.
-    fn holds(raw: &Bytes, event: &Event) -> bool;
+    fn holds(raw: &Bytes, event: &Reply) -> bool;
     /// Write text or a finish the provider did not send, in a new stream or
     /// among the provider's events (`so_far.relayed`). Else an `Err`.
-    fn write(&mut self, e: &Event, so_far: &SoFar, out: &mut BytesMut) -> Result<(), Fault>;
+    fn write(&mut self, e: &Reply, so_far: &SoFar, out: &mut BytesMut) -> Result<(), Fault>;
     /// Write the end, after what is held. A new stream that succeeded is
     /// opened and closed even if it said nothing; a failure is written in
     /// this format's framing.
@@ -446,25 +436,25 @@ pub(crate) struct SoFar {
 impl SoFar {
     /// Note the first start and the finish. Stream chunks repeat the
     /// start, some without the model, so only the first counts.
-    pub(crate) fn note(&mut self, event: &Event) {
+    pub(crate) fn note(&mut self, event: &Reply) {
         match event {
-            Event::Start { id, model } => {
+            Reply::Start { id, model } => {
                 self.start
                     .get_or_insert_with(|| (id.clone(), model.clone()));
             }
-            Event::Finish(f) => self.finish = Some(f.clone()),
+            Reply::Finish(f) => self.finish = Some(f.clone()),
             _ => {}
         }
     }
 
     /// Add an event to a whole response. Content it cannot write, such as
     /// a tool call, is an `Err`.
-    pub(crate) fn add(&mut self, event: &Event) -> Result<(), Fault> {
+    pub(crate) fn add(&mut self, event: &Reply) -> Result<(), Fault> {
         self.note(event);
         match event {
             _ if skips(event) => {}
-            Event::Text { block, text } => self.text.entry(*block).or_default().push_str(text),
-            Event::Finish(_) => {}
+            Reply::Text { block, text } => self.text.entry(*block).or_default().push_str(text),
+            Reply::Finish(_) => {}
             _ => return Err(unwritable_content()),
         }
         Ok(())
@@ -473,10 +463,10 @@ impl SoFar {
 
 /// Whether writers leave `event` out: a start, which they place
 /// themselves, or an empty text, which some providers refuse as a block.
-fn skips(event: &Event) -> bool {
+fn skips(event: &Reply) -> bool {
     match event {
-        Event::Start { .. } => true,
-        Event::Text { text, .. } => text.is_empty(),
+        Reply::Start { .. } => true,
+        Reply::Text { text, .. } => text.is_empty(),
         _ => false,
     }
 }
@@ -504,7 +494,7 @@ impl<S: StreamWriter> Encoder for StreamEncoder<S> {
         match part {
             Part::Frame(b) => self.stream.relay(b, out),
             Part::Item(item) => {
-                let events = item.events::<Event>()?;
+                let events = item.events::<Reply>()?;
                 let (made, bytes, after) = match (item.unedited(), item.raw()) {
                     (Some(raw), _) => (Vec::new(), Some(raw.clone()), Vec::new()),
                     (None, Some(raw)) => rebuild_after::<S>(raw, events)?,
@@ -541,11 +531,11 @@ impl<S: StreamWriter> Encoder for StreamEncoder<S> {
 /// such as text released before a finish, and after it, such as a finish
 /// added after text, are written anew. Starts stay with `raw`, which names
 /// the response.
-fn rebuild_after<S: StreamWriter>(raw: &Bytes, events: &[Event]) -> Result<Rebuilt, Fault> {
+fn rebuild_after<S: StreamWriter>(raw: &Bytes, events: &[Reply]) -> Result<Rebuilt, Fault> {
     let mut events = join(events.to_vec());
     let starts = events
         .iter()
-        .take_while(|e| matches!(e, Event::Start { .. }))
+        .take_while(|e| matches!(e, Reply::Start { .. }))
         .count();
     let before = events[starts..]
         .iter()
@@ -555,37 +545,37 @@ fn rebuild_after<S: StreamWriter>(raw: &Bytes, events: &[Event]) -> Result<Rebui
         .iter()
         .take_while(|e| S::holds(raw, e))
         .count();
-    let after: Vec<Event> = events.split_off(starts + before + held);
-    let before: Vec<Event> = events.drain(starts..starts + before).collect();
+    let after: Vec<Reply> = events.split_off(starts + before + held);
+    let before: Vec<Reply> = events.drain(starts..starts + before).collect();
     Ok((before, S::rebuild(raw, &events)?, after))
 }
 
 /// Events written before a rebuilt provider event, the event, and events
 /// written after it.
-type Rebuilt = (Vec<Event>, Option<Bytes>, Vec<Event>);
+type Rebuilt = (Vec<Reply>, Option<Bytes>, Vec<Reply>);
 
 /// `events` as a message holds them: starts first, texts of one block
 /// joined across whatever came between, and the finish last.
-fn join(events: Vec<Event>) -> Vec<Event> {
-    let (starts, events): (Vec<Event>, Vec<Event>) = events
+fn join(events: Vec<Reply>) -> Vec<Reply> {
+    let (starts, events): (Vec<Reply>, Vec<Reply>) = events
         .into_iter()
-        .partition(|e| matches!(e, Event::Start { .. }));
-    let mut joined: Vec<Event> = starts;
+        .partition(|e| matches!(e, Reply::Start { .. }));
+    let mut joined: Vec<Reply> = starts;
     for e in events {
-        let block = |had: &Event| match had {
-            Event::Text { block, .. } => Some(*block),
+        let block = |had: &Reply| match had {
+            Reply::Text { block, .. } => Some(*block),
             _ => None,
         };
         let same =
             block(&e).and_then(|b| joined.iter_mut().rev().find(|had| block(had) == Some(b)));
         match (same, e) {
-            (Some(Event::Text { text, .. }), Event::Text { text: more, .. }) => {
+            (Some(Reply::Text { text, .. }), Reply::Text { text: more, .. }) => {
                 text.push_str(&more);
             }
             (_, e) => {
                 let finish = joined
                     .iter()
-                    .position(|had| matches!(had, Event::Finish(_)));
+                    .position(|had| matches!(had, Reply::Finish(_)));
                 joined.insert(finish.unwrap_or(joined.len()), e);
             }
         }
@@ -972,7 +962,7 @@ pub(crate) fn unwritable_content() -> Fault {
 /// a comment, is a Frame.
 pub(crate) fn unreadable_event(format: &str, raw: Bytes) -> Part {
     match event_data(&raw) {
-        Some(data) => Item::decoded([Event::other(format, data)], raw).into(),
+        Some(data) => Item::decoded([Reply::other(format, data)], raw).into(),
         None => Part::Frame(raw),
     }
 }

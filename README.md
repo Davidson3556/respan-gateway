@@ -34,6 +34,16 @@ curl localhost:8080/v1/messages \
   -d '{"model":"gpt-4o-mini","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
+Each format served recognises its own requests (OpenAI Chat a `POST` to
+`.../chat/completions`, Anthropic Messages to `.../v1/messages`); anything
+else is a 404.
+
+A provider's `base_url` is the one its own SDK takes. OpenAI-compatible
+ones hold the version, such as `https://api.openai.com/v1`,
+`https://api.groq.com/openai/v1` or
+`https://generativelanguage.googleapis.com/v1beta/openai`; Anthropic's does
+not: `https://api.anthropic.com`.
+
 ## Roadmap
 
 Goal for 0.1: all 14 [use cases](docs/use-cases.md) pass as integration
@@ -43,7 +53,7 @@ test when its milestone lands. The kernel API is frozen after M2.
 | Milestone | Delivers |
 |---|---|
 | M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic with correct usage, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
-| M2 Plugin API | Per-call hooks, async stream filters, reading provider responses, the shared store; API fixes before the freeze |
+| M2 Plugin API | More of the provider edge (waiting, signing, calls from it), async stream filters, reading provider responses, the shared store; API fixes before the freeze |
 | M3 Formats | Gemini, Responses, embeddings |
 | M4 Plugins | Fallback, hedge, limits, memo, ledger |
 | M5 Translation | Tool calls, images and reasoning across formats |
