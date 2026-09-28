@@ -16,7 +16,9 @@ JSON inside a string, such as a tool call's arguments, is read string by
 string, its numbers and keys too, so an edit may rename a key.
 
 Not handled: a match split across streamed tool-argument fragments, or
-across two text blocks (Anthropic's citations make many); Anthropic tool
-blocks, which are refused as content with no text form.
+across two text blocks (Anthropic's citations make many); an edit of a
+bare number in a streamed tool-argument fragment, which is written
+unquoted; Anthropic tool blocks, which are refused as content with no
+text form.
 
 Used by: [guardrail](../../examples/guardrail.rs), [pii](../../examples/pii.rs).

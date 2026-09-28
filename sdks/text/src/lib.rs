@@ -33,8 +33,12 @@ type Edit<'a> = dyn FnMut(&mut String) -> Result<(), Fault> + 'a;
 /// name inside it, so an edit may rename a key. A string there holding a
 /// JSON object or array, such as a tool call's arguments, is parsed and
 /// read the same way, its numbers too, so a card number in it is read; a
-/// number an edit changes is written back as the edit's text. Booleans,
-/// the request's own numbers and field names are not texts.
+/// number an edit changes is written back as the edit's text. In a reply,
+/// a tool call's streamed arguments are pieces of JSON text: what an edit
+/// writes into them is escaped, so a value restored into a string stays
+/// whole; an edit of a bare number there, outside any string, is not
+/// quoted. Booleans, and the request's own numbers and field names, are
+/// not texts.
 pub trait Readable: Clone {
     /// Runs `edit` on each of its texts, or `Err` with [`UNREADABLE`],
     /// before any edit, if it carries content with no text form, such as an
@@ -55,10 +59,6 @@ pub trait Readable: Clone {
     }
 }
 
-/// Fields whose string is JSON text, streamed in pieces: a tool call's
-/// arguments (OpenAI `arguments`, Anthropic `partial_json`).
-const JSON_TEXT: [&str; 2] = ["arguments", "partial_json"];
-
 /// Runs `edit` on every string and name in `v`, and on every number if
 /// `numbers`.
 fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault> {
@@ -75,18 +75,37 @@ fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault>
         Value::Array(a) => a.iter_mut().try_for_each(|v| edit_json(v, numbers, edit)),
         Value::Object(o) => {
             for (mut name, mut value) in std::mem::take(o) {
+                edit(&mut name)?;
+                edit_json(&mut value, numbers, edit)?;
+                o.insert(name, value);
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Runs `edit` on content a format kept as it came, as [`edit_json`] does,
+/// but a tool call's streamed arguments (OpenAI `function.arguments`,
+/// Anthropic `partial_json`) are JSON text: see [`edit_string`]. `parent`
+/// is the name of the object `v` is in.
+fn edit_raw(v: &mut Value, parent: &str, edit: &mut Edit) -> Result<(), Fault> {
+    match v {
+        Value::Array(a) => a.iter_mut().try_for_each(|v| edit_raw(v, parent, edit)),
+        Value::Object(o) => {
+            for (mut name, mut value) in std::mem::take(o) {
+                let json_text = (parent == "function" && name == "arguments")
+                    || (parent.is_empty() && name == "partial_json");
                 match &mut value {
-                    Value::String(s) if JSON_TEXT.contains(&name.as_str()) => {
-                        edit_string(s, true, edit)?;
-                    }
-                    _ => edit_json(&mut value, numbers, edit)?,
+                    Value::String(s) if json_text => edit_string(s, true, edit)?,
+                    _ => edit_raw(&mut value, &name, edit)?,
                 }
                 edit(&mut name)?;
                 o.insert(name, value);
             }
             Ok(())
         }
-        _ => Ok(()),
+        _ => edit_json(v, false, edit),
     }
 }
 
@@ -193,7 +212,7 @@ impl Readable for Reply {
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
-        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), false, edit),
+        Piece::Other { raw, .. } => edit_raw(Arc::make_mut(raw), "", edit),
         _ => Ok(()),
     }
 }

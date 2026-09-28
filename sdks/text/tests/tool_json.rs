@@ -128,3 +128,45 @@ fn an_anthropic_partial_json_piece_is_escaped() {
     let v = restored(delta, vault);
     assert_eq!(v["partial_json"], "Robert \\\"Bob\\\" Smith");
 }
+
+/// A tool's own parameter named `arguments` is a decoded value, not JSON text.
+#[test]
+fn a_parameter_named_arguments_is_restored_once() {
+    let vault = Placeholders::default();
+    let name = vault.hide("NAME", "Robert \"Bob\" Smith");
+    let args = json!({ "program": "greet", "arguments": name }).to_string();
+    let raw = json!([{ "index": 0, "message": { "tool_calls": [{ "id": "t", "type": "function",
+        "function": { "name": "run", "arguments": args } }] } }]);
+    let v = restored(raw, vault.clone());
+    let text = v[0]["message"]["tool_calls"][0]["function"]["arguments"].as_str();
+    let a: Value = serde_json::from_str(text.unwrap_or_default()).unwrap_or_default();
+    assert_eq!(a["arguments"], "Robert \"Bob\" Smith");
+    let name = vault.hide("NAME", "Robert \"Bob\" Smith");
+    let block =
+        json!({ "type": "tool_use", "id": "t", "name": "run", "input": { "arguments": name } });
+    assert_eq!(
+        restored(block, vault)["input"]["arguments"],
+        "Robert \"Bob\" Smith"
+    );
+}
+
+/// A request's text after a backslash is read whole: nothing is skipped.
+#[test]
+fn text_after_a_backslash_in_a_tool_call_is_read() {
+    let mut call = Message::new(Role::Assistant, "");
+    call.content.clear();
+    let args = json!({ "arguments": "C:\\dir\\bob@x.io" }).to_string();
+    call.unsupported.insert(
+        "tool_calls".into(),
+        json!([{ "id": "t", "type": "function",
+        "function": { "name": "run", "arguments": args } }]),
+    );
+    let mut chat = Conversation::new([Message::new(Role::User, "hi"), call]);
+    let mut seen = Vec::new();
+    let read = chat.edit_all(|t| {
+        seen.push(t.clone());
+        Ok(())
+    });
+    assert!(read.is_ok());
+    assert!(seen.iter().any(|t| t.contains("bob@x.io")), "{seen:?}");
+}

@@ -163,7 +163,11 @@ async fn an_earlier_tool_call_with_quoted_emails_is_redacted() -> Result<(), Fau
         { "role": "assistant", "content": null, "tool_calls": [{ "id": "c1", "type": "function",
             "function": { "name": "mail", "arguments": args } }] },
         { "role": "tool", "tool_call_id": "c1", "content": "sent" } ] });
-    let (status, text, _) = ask(&mock, post("/v1/chat/completions", body.to_string())).await?;
+    let (status, text, sent) = ask(&mock, post("/v1/chat/completions", body.to_string())).await?;
     assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(
+        !sent.contains("ops@x.io") && !sent.contains("help@x.io"),
+        "{sent}"
+    );
     Ok(())
 }
