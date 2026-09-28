@@ -23,6 +23,15 @@ use crate::response::Batch;
 use crate::transport::one_frame;
 use crate::{ClientContext, Fault, ProviderContext, Response};
 
+/// The mark the kernel puts in a call's extensions, as its transport gets
+/// them, when the call relays the client's own message: its inputs, not a
+/// call's own, to a provider of the client's format's name, the call
+/// starting from the client's head. It is on no other call, whatever
+/// [`Call::with_extension`] or a plugin set before; a transport may pass
+/// on what belongs to the client only when it is there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Relayed;
+
 /// A call from [`ClientContext::call`]: a copy of the request as it was
 /// then, sent when first awaited, which may outlive the hook. A clone is an
 /// unsent copy. Its settings apply to it alone.
@@ -230,7 +239,8 @@ async fn send_call(
 }
 
 /// The call as its format writes it, from the `client`'s head if it relays
-/// the client's message, with the call's `extensions` and its first frame
+/// the client's message, with the call's `extensions`, marked [`Relayed`]
+/// if it does and never otherwise, and its first frame
 /// as its body (the client's bytes if relayed unread, else the encoder's
 /// opening bytes, the input, and the end unless it `streams`), and the
 /// encoder. Content that cannot be written is whose it is (`Whose`).
@@ -247,6 +257,10 @@ fn first_frame(
         None => http::Request::new(body),
     };
     *call.extensions_mut() = extensions;
+    call.extensions_mut().remove::<Relayed>();
+    if client.is_some() {
+        call.extensions_mut().insert(Relayed);
+    }
     let mut encoder = p.format.request_encoder(&mut call, first.as_ref(), streams);
     // What cannot be opened is the format's to say, whoever's input it is.
     let mut more = BytesMut::new();

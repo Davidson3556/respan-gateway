@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
-use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response, codes};
+use respan_gateway_core::{
+    Body, ClientContext, Fault, Plugin, ProviderContext, Relayed, Response, Transport, codes,
+};
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply, units};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_plugins::ModelRouter;
@@ -167,6 +169,102 @@ async fn only_a_relay_carries_the_clients_anthropic_version() {
     let said = |i: usize| sent[i].headers().get("anthropic-version").cloned();
     assert_eq!(said(0), Some(HeaderValue::from_static("2023-06-01")));
     assert_eq!(said(1), Some(version));
+}
+
+/// Sends every request to OpenAI, and marks every call a relay in
+/// `on_provider`, as no plugin can.
+struct Forges;
+
+#[async_trait]
+impl Plugin for Forges {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.set_target("openai");
+        Ok(None)
+    }
+
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        px.extensions_mut().insert(Relayed);
+        Ok(())
+    }
+}
+
+/// A transport that notes whether each call came marked [`Relayed`].
+struct Marks<T>(T, Arc<Mutex<Vec<bool>>>);
+
+#[async_trait]
+impl<T: Transport> Transport for Marks<T> {
+    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        let relayed = call.extensions().get::<Relayed>().is_some();
+        self.1
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(relayed);
+        self.0.send(call).await
+    }
+}
+
+// The kernel marks a call `Relayed` when it relays the client's own
+// message, and no other, whatever a plugin set; only a relay carries the
+// client's key to a provider with none of its own.
+#[tokio::test]
+async fn only_a_relay_is_marked_and_carries_the_clients_key() {
+    let (mock, marks) = (MockTransport::new(), Arc::default());
+    let at = |base| Marks(mock.at(base), Arc::clone(&marks));
+    let gw = providers([
+        add_provider("openai", OpenAiChat, at(OPENAI)),
+        add_provider("anthropic", AnthropicMessages, at(ANTHROPIC)),
+    ])
+    .and_then(|gw| gw.serve(OpenAiChat))
+    .and_then(|gw| {
+        let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
+        let plugins: Vec<Arc<dyn Plugin>> = vec![
+            Arc::new(Forges),
+            Arc::new(router.route("claude", "anthropic")),
+        ];
+        with_plugins(gw, plugins)
+    })
+    .unwrap_or_else(|e| panic!("gateway: {e}"));
+    let unary = |model| {
+        let body = json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }] });
+        let mut req = call(CHAT, body.to_string());
+        let key = HeaderValue::from_static("Bearer sk-client");
+        req.headers_mut().insert("authorization", key);
+        req
+    };
+    let openai = json!({
+        "id": "c1", "object": "chat.completion", "model": "gpt-x",
+        "choices": [{ "index": 0, "message": { "role": "assistant", "content": "hi" },
+            "finish_reason": "stop" }],
+    });
+    let anthropic = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{ "type": "text", "text": "hi" }],
+        "stop_reason": "end_turn", "usage": { "input_tokens": 1, "output_tokens": 1 },
+    });
+    mock.reply(OPENAI, mock::json(StatusCode::OK, &openai.to_string()));
+    mock.reply(
+        ANTHROPIC,
+        mock::json(StatusCode::OK, &anthropic.to_string()),
+    );
+    for model in ["gpt-x", "claude-x"] {
+        let (resp, _) = serve(&gw, unary(model)).await;
+        let (status, _, _) = read_whole(resp).await;
+        assert_eq!(status, StatusCode::OK, "{model}");
+    }
+    gw.idle().await;
+
+    assert_eq!(
+        *marks.lock().unwrap_or_else(|e| e.into_inner()),
+        [true, false]
+    );
+    let sent = mock.sent();
+    let key = |i: usize, name| sent[i].headers().get(name).cloned();
+    assert_eq!(
+        key(0, "authorization"),
+        Some(HeaderValue::from_static("Bearer sk-client"))
+    );
+    assert_eq!(key(1, "authorization"), None);
+    assert_eq!(key(1, "x-api-key"), None);
 }
 
 #[tokio::test]

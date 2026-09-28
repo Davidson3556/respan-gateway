@@ -12,7 +12,8 @@ use respan_gateway_core::http;
 /// `credential` or `credentials`, but not an idempotency key.
 ///
 /// It sits in the request's extensions, which calls copy. A transport
-/// without keys of its own passes it through ([`credentials`](crate::credentials));
+/// without keys of its own passes it through on a call that relays the
+/// client's own message, never a translated one ([`credentials`](crate::credentials));
 /// a plugin that authenticates the client with it removes it
 /// (`cx.extensions_mut().remove::<Credential>()`), so the gateway's own key
 /// never reaches a provider.

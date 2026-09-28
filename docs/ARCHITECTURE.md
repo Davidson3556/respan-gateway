@@ -115,7 +115,7 @@ whose request encoder reads it from the first input
 
 ## Core types
 
-13 public types, plus `Body`, `codes` and re-exports; `handle` needs a
+14 public types, plus `Body`, `codes` and re-exports; `handle` needs a
 tokio runtime, which runs end hooks detached.
 
 - `Gateway`, `Transport`; `Plugin`, whose hooks get a `ClientContext` (a

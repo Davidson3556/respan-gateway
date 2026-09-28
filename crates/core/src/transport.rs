@@ -31,7 +31,8 @@ pub trait Transport: Send + Sync + 'static {
     /// a streaming request's as they arrive, a WebSocket transport picking
     /// each message's type from the subprotocol. The transport decides
     /// whose keys reach the provider. Its extensions are the call's
-    /// ([`ProviderContext::extensions`](crate::ProviderContext::extensions)).
+    /// ([`ProviderContext::extensions`](crate::ProviderContext::extensions)),
+    /// with [`Relayed`](crate::Relayed) on a relay alone.
     ///
     /// `Err` if the call could not be sent: [`Fault::upstream`] if the
     /// provider is unreachable, [`Fault::config`] if this transport cannot

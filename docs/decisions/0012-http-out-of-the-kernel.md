@@ -54,6 +54,7 @@ a relay.
    `head_mut` are gone for `extensions` and `extensions_mut`. A transport
    sends `CallHeaders`, else its own headers, else the client's
    `Credential`.
+   The last only on a relay, which the kernel marks with `Relayed` in the call's extensions (a 14th public core type), so no key crosses a translation.
 5. `edit_response_head` and `edit_call` stay, typed as `http`.
 6. stdio MCP returns faults for 404, 409 and 503; only the session header
    and its successes are its own.

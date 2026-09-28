@@ -430,6 +430,54 @@ async fn an_anthropic_client_gets_an_openai_stream_in_anthropic_shape() {
     assert_eq!(seen["max_completion_tokens"], 16, "{seen}");
 }
 
+// Before Stage A, no client header crossed a translation; a client's key
+// is for a provider of its own protocol alone (use case 12, a relay).
+#[tokio::test]
+async fn an_openai_clients_key_does_not_reach_an_anthropic_provider_without_one() {
+    let openai = MockServer::start().await;
+    let anthropic = MockServer::start().await;
+    // As Anthropic answers a call without a key.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_raw(
+            r#"{"type":"error","error":{"type":"authentication_error","message":"x-api-key header is required"}}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&anthropic)
+        .await;
+    let gw = Gateway::start(&both(&openai.uri(), &anthropic.uri())).await;
+
+    let resp = client()
+        .post(gw.url("/v1/chat/completions"))
+        .header("authorization", "Bearer sk-client")
+        .body(r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+        .unwrap();
+
+    // The gateway sends the call without a key; the provider refuses it,
+    // and the client gets that refusal in its own format.
+    assert_eq!(resp.status(), 401);
+    let body = json(&resp.text().await.unwrap());
+    assert_eq!(
+        body["error"]["message"], "x-api-key header is required",
+        "{body}"
+    );
+    assert!(openai.received_requests().await.unwrap().is_empty());
+    let got = &anthropic.received_requests().await.unwrap()[0];
+    for (name, value) in &got.headers {
+        let value = value.to_str().unwrap_or_default();
+        assert!(
+            !value.contains("sk-client"),
+            "{name} carries the client's key"
+        );
+    }
+    assert!(got.headers.get("authorization").is_none());
+    assert!(got.headers.get("x-api-key").is_none());
+    assert!(!got.url.as_str().contains("sk-client"));
+}
+
 // 4. Errors.
 
 #[tokio::test]

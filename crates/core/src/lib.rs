@@ -16,7 +16,7 @@ mod provider;
 mod response;
 mod transport;
 
-pub use call::Call;
+pub use call::{Call, Relayed};
 pub use context::ClientContext;
 pub use fault::{Fault, codes};
 pub use format::{Decoder, Encoder, Format};

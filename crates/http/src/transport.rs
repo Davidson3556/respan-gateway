@@ -2,7 +2,7 @@
 
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue};
-use respan_gateway_core::http;
+use respan_gateway_core::{Relayed, http};
 
 use crate::credential::{Credential, is_credential, take_query};
 use crate::{is_hop_by_hop, strip_named};
@@ -99,7 +99,8 @@ impl std::fmt::Debug for CallHeaders {
 /// replacing any of the same name, with any credential header or query
 /// parameter the call has removed first ([`Credential`] says which); else,
 /// with neither, the client's [`Credential`] from the call's extensions,
-/// passed through.
+/// passed through if the call relays the client's own message
+/// ([`Relayed`]), as a key is for its own protocol's provider alone.
 pub fn credentials(head: &mut http::request::Parts, headers: &HeaderMap) {
     let mut own = headers.clone();
     if let Some(CallHeaders(call)) = head.extensions.get::<CallHeaders>() {
@@ -112,7 +113,9 @@ pub fn credentials(head: &mut http::request::Parts, headers: &HeaderMap) {
         }
     }
     if own.is_empty() {
-        if let Some(client) = head.extensions.get::<Credential>().cloned() {
+        let relayed = head.extensions.get::<Relayed>().is_some();
+        let client = head.extensions.get::<Credential>().filter(|_| relayed);
+        if let Some(client) = client.cloned() {
             client.restore(head);
         }
         return;
@@ -168,6 +171,7 @@ mod tests {
         let mut client = HeaderMap::new();
         client.insert("x-api-key", HeaderValue::from_static("k"));
         parts.extensions.insert(Credential::of(client));
+        parts.extensions.insert(Relayed);
         credentials(&mut parts, &HeaderMap::new());
         assert_eq!(parts.headers["x-api-key"], "k");
         let mut own = HeaderMap::new();
@@ -179,5 +183,31 @@ mod tests {
         credentials(&mut parts, &own);
         assert!(parts.headers.get("x-api-key").is_none());
         assert_eq!(parts.headers["authorization"], "Bearer own");
+    }
+
+    #[test]
+    fn the_clients_credentials_pass_only_through_a_relay() {
+        // A translated call, or any not marked a relay, carries none of
+        // the client's keys, even to a provider with none of its own.
+        let mut client = HeaderMap::new();
+        client.insert("authorization", HeaderValue::from_static("Bearer sk-c"));
+        client.insert("x-api-key", HeaderValue::from_static("k"));
+        let mut parts = head(&[]);
+        parts.extensions.insert(Credential::of(client.clone()));
+        credentials(&mut parts, &HeaderMap::new());
+        assert!(parts.headers.is_empty());
+
+        // A relay whose Credential a plugin removed carries none either.
+        let mut parts = head(&[]);
+        parts.extensions.insert(Relayed);
+        credentials(&mut parts, &HeaderMap::new());
+        assert!(parts.headers.is_empty());
+
+        let mut parts = head(&[]);
+        parts.extensions.insert(Credential::of(client));
+        parts.extensions.insert(Relayed);
+        credentials(&mut parts, &HeaderMap::new());
+        assert_eq!(parts.headers["authorization"], "Bearer sk-c");
+        assert_eq!(parts.headers["x-api-key"], "k");
     }
 }

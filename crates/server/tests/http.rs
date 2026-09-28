@@ -405,6 +405,7 @@ fn without_headers_of_its_own_the_clients_credentials_pass_through() {
     let before = head.headers.clone();
     let lifted = Credential::lift(&mut head).unwrap_or_else(|| panic!("no credentials"));
     head.extensions.insert(lifted);
+    head.extensions.insert(respan_gateway_core::Relayed);
 
     credentials(&mut head, &http::HeaderMap::new());
 
