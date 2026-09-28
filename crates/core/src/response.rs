@@ -171,8 +171,7 @@ impl Response {
         // What is ahead was judged by an earlier read.
         let mut content = switched || !self.ahead.is_empty();
         loop {
-            let end = self.ahead.iter().find_map(|batch| batch.end.as_ref());
-            match end {
+            match self.end() {
                 Some(Err(fault)) if !content && self.head.status.is_success() => {
                     return Err(fault.clone());
                 }
@@ -187,6 +186,12 @@ impl Response {
                 }
             }
         }
+    }
+
+    /// How the response ended, once it has been read to its end
+    /// ([`Response::until_end`]); `None` before that.
+    pub fn end(&self) -> Option<&Result<(), Fault>> {
+        self.ahead.iter().find_map(|batch| batch.end.as_ref())
     }
 
     /// Read it rather than send it, such as a judge's verdict: its outputs

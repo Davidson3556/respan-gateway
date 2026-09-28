@@ -4,7 +4,8 @@ Attempt control for plugins: retry with `Retry-After`, fallback, a staggered
 race, a stall bound, and each attempt's role. Each answer is read `Until` a
 stopping point before it is judged: its `Head`, its first `Content`
 (`Response::until_content`, the default), or its `End`
-(`Response::until_end`, held whole, to race for completion). A success
+(`Response::until_end`, held whole, to race for completion; a success
+that failed on the way, `Response::end`, does not count). A success
 counts only once read that far; nothing is retried after that.
 
 - `first_success(calls, &Backoff, Until) -> Result<Response, Fault>`: each

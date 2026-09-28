@@ -181,8 +181,8 @@ last.map(Some)
 
 `until_end` reads to the end and holds it all, head, outputs and end,
 `Ok` or a failure, so a plugin can race calls for completion; sent, it
-goes out as it would have unread, byte for byte for an unedited relay.
-Either way the call ends when the batch holding its end is sent, read or
+goes out as it would have unread, byte for byte for an unedited relay,
+and `Response::end` says how it ended. Either way the call ends when the batch holding its end is sent, read or
 dropped ([0011](decisions/0011-read-until-content-or-end.md)).
 `sdks/routing` takes the stopping point as `Until { Head, Content, End }`.
 

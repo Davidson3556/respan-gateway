@@ -36,7 +36,8 @@ came. This amends 0003, 0006, 0008, 0009 and 0010, whose rules name
 
 - `until_end` keeps a whole response in memory until it is sent or
   dropped; a plugin chooses it knowing the answer's size.
-- A response does not say how it ended, so `until_end` cannot tell a
-  racer that a success failed after its content: such a response counts
-  as finished.
-- 13 public core types; `Response` has one more method.
+- `Response::end` says how a response read to its end ended, without
+  settling its call or changing what is delivered, so with `Until::End` a
+  success that fails after its content is not a success: `first_success`
+  retries or moves on, and it does not win a race.
+- 13 public core types; `Response` has two more methods.

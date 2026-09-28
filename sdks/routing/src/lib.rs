@@ -137,8 +137,8 @@ pub enum Until {
     #[default]
     Content,
     /// Its end ([`Response::until_end`]), held whole until sent: the first
-    /// to finish wins. A success failing after its first content counts as
-    /// finished, as the response does not say how it ended.
+    /// to finish cleanly wins. A success failing after its first content
+    /// ([`Response::end`]) does not count as one.
     End,
 }
 
@@ -158,8 +158,19 @@ async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
     (attempt, answer)
 }
 
-fn is_success(answer: &Result<Response, Fault>) -> bool {
-    answer.as_ref().is_ok_and(|r| r.head().status.is_success())
+/// How `answer` failed, if it did: its fault, or, read to its end, the
+/// failure a success ended with.
+fn failure(answer: &Result<Response, Fault>, until: Until) -> Option<&Fault> {
+    match answer {
+        Err(fault) => Some(fault),
+        Ok(resp) if until == Until::End => resp.end().and_then(|end| end.as_ref().err()),
+        Ok(_) => None,
+    }
+}
+
+fn is_success(answer: &Result<Response, Fault>, until: Until) -> bool {
+    let ok = answer.as_ref().is_ok_and(|r| r.head().status.is_success());
+    ok && failure(answer, until).is_none()
 }
 
 /// Return `answer`, promoting its attempt if it is a response. A fault
@@ -180,7 +191,8 @@ fn last(answer: Option<Answer>) -> Result<Response, Fault> {
 /// success read `until` its stopping point; else the last answer, so the
 /// client sees the last 429 and its `Retry-After`. A call that is refused
 /// or cannot be made, such as with a `config` fault, moves on at once; an
-/// unreachable provider or a success failing before the point is retried.
+/// unreachable provider or a success failing before the point is retried;
+/// with [`Until::End`], one failing anywhere before its end.
 pub async fn first_success(
     calls: impl IntoIterator<Item = Call>,
     backoff: &Backoff,
@@ -191,15 +203,18 @@ pub async fn first_success(
         for tries in 1.. {
             let (attempt, answer) = send(call.clone(), Attempt::new(index), until).await;
             index += 1;
-            if is_success(&answer) {
+            if is_success(&answer, until) {
                 return win((attempt, answer));
             }
-            let wait = match &answer {
-                Ok(resp) => backoff.wait(tries, Some(resp.head())),
-                Err(f) if f.code() == codes::UPSTREAM || f.code() == codes::TRUNCATED => {
+            let wait = match failure(&answer, until) {
+                Some(f) if f.code() == codes::UPSTREAM || f.code() == codes::TRUNCATED => {
                     backoff.wait(tries, None)
                 }
-                Err(_) => None,
+                Some(_) => None,
+                None => answer
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| backoff.wait(tries, Some(r.head()))),
             };
             let Some(wait) = wait else {
                 previous = Some((attempt, answer));
@@ -213,8 +228,8 @@ pub async fn first_success(
 
 /// Start each call `stagger` after the one before, or at once when every
 /// call started has failed. The first success read `until` its stopping
-/// point wins; the others are dropped, so they end `abandoned`. With none,
-/// the last answer.
+/// point wins, with [`Until::End`] only if it ended cleanly; the others
+/// are dropped, so they end `abandoned`. With none, the last answer.
 pub async fn race(
     calls: impl IntoIterator<Item = Call>,
     stagger: Duration,
@@ -230,7 +245,7 @@ pub async fn race(
     loop {
         tokio::select! {
             Some((attempt, answer)) = running.next() => {
-                if is_success(&answer) {
+                if is_success(&answer, until) {
                     return win((attempt, answer));
                 }
                 previous = Some((attempt, answer));

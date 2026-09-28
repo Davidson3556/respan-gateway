@@ -6600,6 +6600,59 @@ async fn until_end_holds_a_failure_and_it_is_delivered_as_it_would_have_been() {
 }
 
 #[tokio::test]
+async fn end_says_how_a_response_read_to_its_end_ended_and_changes_nothing() {
+    /// Records `end()` before and after `until_end`, and answers with it.
+    struct Ending(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl Plugin for Ending {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            let show = |end: Option<&Result<(), Fault>>| match end {
+                None => "none".to_owned(),
+                Some(end) => end.as_ref().err().map_or("ok", |f| f.code()).to_owned(),
+            };
+            let resp = cx.call("openai").await?;
+            let before = show(resp.end());
+            let resp = resp.until_end().await?;
+            let after = show(resp.end());
+            self.0.lock().map(|mut e| e.extend([before, after])).ok();
+            Ok(Some(resp))
+        }
+    }
+
+    let broken = || {
+        let mut broken = mock::sse(STREAM);
+        broken.body_mut().truncate(2);
+        broken.body_mut().push(Err(Fault::upstream("reset")));
+        broken
+    };
+    let clean = || mock::sse(STREAM);
+    let cases: [(&dyn Fn() -> mock::Reply, &str); 2] = [(&clean, "ok"), (&broken, codes::UPSTREAM)];
+    for (reply, seen) in cases {
+        let text = |(status, headers, body): (StatusCode, HeaderMap, Result<_, Fault>)| {
+            let body: bytes::Bytes = body.unwrap_or_default();
+            (status, headers, String::from_utf8_lossy(&body).into_owned())
+        };
+        let relayed = Harness::new(Vec::new(), Some("openai"));
+        relayed.mock.reply(OPENAI, reply());
+        let relayed = text(relayed.send(chat()).await);
+
+        let (seen_ends, ends) = (Arc::new(Mutex::new(Vec::new())), Ends::default());
+        let plugins: Vec<Arc<dyn Plugin>> =
+            vec![Arc::new(ends.clone()), Arc::new(Ending(seen_ends.clone()))];
+        let h = Harness::new(plugins, None);
+        h.mock.reply(OPENAI, reply());
+        let read = text(h.send(chat()).await);
+
+        let seen_ends = seen_ends.lock().map(|e| e.clone()).unwrap_or_default();
+        assert_eq!(seen_ends, ["none", seen]);
+        // Asking settled nothing: the call ends as its end is sent, as it came.
+        assert_eq!(read, relayed);
+        assert_eq!(ends.all(), [format!("openai {seen}"), "client".into()]);
+    }
+}
+
+#[tokio::test]
 async fn a_response_dropped_after_until_end_ends_its_call_as_it_ended() {
     /// Reads `openai` to its end, drops it, and answers with `backup`.
     struct ReadAndDrop;

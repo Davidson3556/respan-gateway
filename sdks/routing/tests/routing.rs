@@ -622,3 +622,56 @@ async fn a_race_until_end_picks_the_call_that_finishes_first() {
         }
     }
 }
+
+/// Read to its end, `a` fails after its content: not a success, so `b`'s
+/// answer goes out, and `a`'s ends as it ended.
+#[tokio::test(start_paused = true)]
+async fn until_end_a_stream_failing_after_content_is_not_a_winner() {
+    let plans = [
+        Plan::First(vec!["a", "b"], Backoff::once(), Until::End),
+        Plan::Race(vec!["a", "b"], secs(1), Until::End),
+    ];
+    for plan in plans {
+        let h = harness(plan);
+        h.mock.reply(A, cut(&[ROLE, HELLO]));
+        h.mock.reply(B, ok());
+
+        let (status, _, body, outcome) = h.send().await;
+
+        assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+        assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
+        assert_eq!(h.sent_to(), ["a.test", "b.test"]);
+        let mut roles: Vec<_> = h
+            .record
+            .all()
+            .into_iter()
+            .map(|r| (r.0, r.2, r.3))
+            .collect();
+        roles.sort_by(|x, y| x.0.cmp(&y.0));
+        let (a, b) = ("a".to_owned(), "b".to_owned());
+        let expected = [
+            (a, Role::Loser, codes::UPSTREAM.to_owned()),
+            (b, Role::Winner, "ok".to_owned()),
+        ];
+        assert_eq!(roles, expected);
+    }
+}
+
+/// With retries, a stream failing after its content is retried when read
+/// to its end; with none that succeed, the last answer goes out as it came.
+#[tokio::test(start_paused = true)]
+async fn until_end_retries_a_stream_failing_after_content_and_returns_the_last() {
+    let h = harness(Plan::First(vec!["a"], retries(2), Until::End));
+    h.mock.reply(A, cut(&[ROLE, HELLO]));
+    h.mock.reply(A, cut(&[ROLE, HELLO]));
+
+    let (status, _, body, outcome) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(&[ROLE, HELLO].concat()), "{body}");
+    assert!(body.contains("\"code\":\"upstream\""), "{body}");
+    assert!(matches!(outcome.end, Err(f) if f.code() == codes::UPSTREAM));
+    assert_eq!(h.sent_to(), ["a.test", "a.test"]);
+    let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
+    assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);
+}
