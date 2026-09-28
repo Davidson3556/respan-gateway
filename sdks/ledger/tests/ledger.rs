@@ -147,7 +147,9 @@ async fn settling_huge_amounts_saturates_never_wraps() -> Result<(), Fault> {
 async fn a_ttl_of_forever_does_not_panic() -> Result<(), Fault> {
     let ledger = MemoryLedger::new();
     ledger.open("a", None, 100);
-    ledger.reserve(&HoldId::new(), &["a".to_owned()], 1, Duration::MAX).await?;
+    ledger
+        .reserve(&HoldId::new(), &["a".to_owned()], 1, Duration::MAX)
+        .await?;
     assert_eq!(ledger.available("a"), 99);
     Ok(())
 }

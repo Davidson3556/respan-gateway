@@ -242,7 +242,10 @@ fn streamed_reasoning_is_plain_text() {
     let text = format!("{{\"a\": \"{name}\",  \"b\": 1.0}}");
     let openai = json!([{ "index": 0, "delta": { "reasoning_content": text } }]);
     let v = restored(openai, vault.clone());
-    assert_eq!(v[0]["delta"]["reasoning_content"], "{\"a\": \"bob\",  \"b\": 1.0}");
+    assert_eq!(
+        v[0]["delta"]["reasoning_content"],
+        "{\"a\": \"bob\",  \"b\": 1.0}"
+    );
     let name = vault.hide("NAME", "bob");
     let thinking = json!({ "type": "thinking_delta", "thinking": format!("[\"{name}\", 1.0]") });
     assert_eq!(restored(thinking, vault)["thinking"], "[\"bob\", 1.0]");

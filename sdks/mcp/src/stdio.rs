@@ -20,7 +20,6 @@ use tokio::process::Command;
 use crate::session::Session;
 use crate::{SESSION, error, lock, read};
 
-
 /// Stands for "never": `Duration::MAX` would overflow a deadline.
 const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 /// Sessions by id and a keyed hash of their owner; `None` while starting.
