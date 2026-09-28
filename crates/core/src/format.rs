@@ -109,7 +109,8 @@ pub trait Format: Send + Sync + 'static {
     ) -> Box<dyn Encoder<Self::Output>>;
 
     /// The usage `output` reports, as an increment. It counts as decoded,
-    /// before any filter, on the edge that decoded it. By default, none.
+    /// before any filter, only in a provider's response, on its call's
+    /// provider edge. By default, none.
     fn usage<'a>(&self, _output: &'a Self::Output) -> Option<&'a Usage> {
         None
     }
@@ -117,7 +118,8 @@ pub trait Format: Send + Sync + 'static {
     /// Whether a reader sees anything in `output`. One that says nothing,
     /// such as a keep-alive, framing or usage alone, passes no filter, is no
     /// content for [`Response::ready`](crate::Response::ready), and is
-    /// written where it came. By default, true.
+    /// written where it came; [`Response::outputs`](crate::Response::outputs)
+    /// still yields it. By default, true.
     fn says(&self, _output: &Self::Output) -> bool {
         true
     }

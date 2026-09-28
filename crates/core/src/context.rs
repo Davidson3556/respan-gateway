@@ -15,7 +15,6 @@ use crate::gateway::Inner;
 use crate::input::{Input, Later, locked, stream};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::{Filters, all};
-use crate::provider::provider_for;
 use crate::{Call, Fault, Filter, Outcome, Plugin, Response, Usage};
 
 pub(crate) type HeadEdit = Box<dyn FnOnce(&mut http::response::Parts) -> Result<(), Fault> + Send>;
@@ -52,14 +51,13 @@ pub struct ClientContext {
     running: Option<InFlightGuard>,
     /// The runtime end hooks run on.
     pub(crate) runtime: Handle,
-    /// Its calls that ended, until their end hooks finish; a new call's
-    /// `on_provider` and its own end hooks wait for them.
+    /// Its calls that ended, until their end hooks finish; its own end
+    /// hooks wait for them.
     pub(crate) settling: Arc<InFlight>,
     /// Its calls being sent or with an open response, ended when it ends.
     pub(crate) open: Arc<OpenCalls>,
-    /// Usage no call reported that plugins read ([`Response::outputs`]),
-    /// counted on this edge when it ends.
-    pub(crate) unreported: Arc<Mutex<Usage>>,
+    /// The usage of its calls that ended, added up for its `Outcome`.
+    pub(crate) spent: Arc<Mutex<Usage>>,
     pub(crate) edits: Mutex<Edits>,
     pub(crate) gateway: Arc<Inner>,
 }
@@ -82,15 +80,15 @@ impl Edge for ClientContext {
     }
 
     /// Open calls end abandoned, the inputs left are cut off, output
-    /// filters still open end as the request did, and usage no call
-    /// reported that plugins read counts.
+    /// filters still open end as the request did, and its calls' usage,
+    /// all ended now, is added up.
     fn close(&mut self, end: &Result<(), Fault>, usage: &mut Usage) {
         self.running = None;
         self.open.abandon();
         if let Some(later) = &self.later {
             later.end(Err(Fault::abandoned()));
         }
-        *usage += std::mem::take(&mut *locked(&self.unreported));
+        *usage += std::mem::take(&mut *locked(&self.spent));
         let edits = unlocked(&mut self.edits);
         let _ = edits.outputs.end(end.clone(), &mut None, &all);
     }
@@ -105,8 +103,7 @@ impl ClientContext {
         runtime: Handle,
         gateway: Arc<Inner>,
     ) -> Self {
-        let usable = |t: &&String| provider_for(&*format, &gateway.providers, t).is_ok();
-        let target = gateway.targets.iter().find(usable).cloned();
+        let target = gateway.target.clone();
         let head = Arc::new(head);
         let cut = Arc::default();
         Self {
@@ -120,7 +117,7 @@ impl ClientContext {
             runtime,
             settling: Arc::default(),
             open: Arc::default(),
-            unreported: Arc::default(),
+            spent: Arc::default(),
             edits: Mutex::default(),
             gateway,
         }
@@ -196,8 +193,7 @@ impl ClientContext {
         }
     }
 
-    /// The provider called if every plugin passes; initially the first of
-    /// the gateway's targets this request can use
+    /// The provider called if every plugin passes; initially the gateway's
     /// ([`Gateway::target`](crate::Gateway::target)).
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
@@ -222,7 +218,7 @@ impl ClientContext {
             runtime: self.runtime.clone(),
             settling: self.settling.clone(),
             open: self.open.clone(),
-            unreported: self.unreported.clone(),
+            spent: self.spent.clone(),
             edits: Mutex::default(),
             gateway: self.gateway.clone(),
         }
@@ -293,8 +289,7 @@ impl ClientContext {
     /// unknown or cannot take the client's inputs (neither format nor kind
     /// shared, or an upgrading request's to a call not switching
     /// protocols); with [`codes::INTERNAL`](crate::codes::INTERNAL) for a
-    /// [`Call::with_input`] or [`Call::with_filter`] of another kind, or
-    /// once the request ended; with
+    /// [`Call::with_input`] of another kind, or once the request ended; with
     /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the request ends
     /// while it is pending; or the `Err` of an `on_provider`, an
     /// [`edit_call`](crate::ProviderContext::edit_call), the format's
@@ -306,17 +301,14 @@ impl ClientContext {
     /// Relay a plugin's own response in the client's format, such as a
     /// cached one. The client's format decodes it as a provider's, so it
     /// can be read ([`Response::ready`], [`Response::outputs`]), and writes
-    /// it as it came until edited. Its usage counts on the client edge of
-    /// the request it is sent to, or, read, of the one it came from.
+    /// it as it came until edited. Its usage counts nowhere, as no provider
+    /// sent it: to bill it, carry it in an extension.
     pub fn relay<B>(&self, response: http::Response<B>) -> Response
     where
         B: http_body::Body<Data = Bytes> + Send + 'static,
         B::Error: Into<Fault>,
     {
         let response = response.map(|body| body.map_err(Into::into).boxed_unsync());
-        Response {
-            unreported: Some(self.unreported.clone()),
-            ..Response::decoded(&self.format, &self.request(), response, true)
-        }
+        Response::decoded(&self.format, &self.request(), response, true)
     }
 }

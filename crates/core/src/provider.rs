@@ -43,7 +43,7 @@ pub struct ProviderContext {
     /// so a reader still waiting wakes.
     pub(crate) cut: Arc<InFlight>,
     /// In `cut` until it ends, then in its request's `settling` until its
-    /// end hooks finish, as its request's next call waits for them.
+    /// end hooks finish, as its request's end hooks wait for them.
     pub(crate) running: InFlightGuard,
 }
 
@@ -66,9 +66,10 @@ impl Edge for ProviderContext {
 
     /// Its response and inputs are cut off, and filters still open end,
     /// dropping what they keep back. Its end hooks settle for its request
-    /// from here.
-    fn close(&mut self, end: &Result<(), Fault>, _usage: &mut Usage) {
+    /// from here, and its `usage` adds to its request's.
+    fn close(&mut self, end: &Result<(), Fault>, usage: &mut Usage) {
         self.running = InFlight::enter(&self.client.settling);
+        *locked(&self.client.spent) += &*usage;
         let _ = locked(&self.inputs).end(end.clone(), &mut None, &all);
         let _ = unlocked(&mut self.outputs).end(end.clone(), &mut None, &all);
     }

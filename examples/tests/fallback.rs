@@ -2,9 +2,10 @@ use tokio::time::Instant;
 
 use super::*;
 
-const LOST_0: &str = "openai #0 Loser upstream";
-const LOST_1: &str = "openai #1 Loser upstream";
-const CLAUDE: &str = "anthropic #2 Winner ok";
+const LOST_0: &str = "openai gpt-4o #0 Loser upstream";
+const LOST_1: &str = "openai gpt-4o #1 Loser upstream";
+/// The fallback asked Anthropic for its own model name (`on_provider`).
+const CLAUDE: &str = "anthropic claude-sonnet-4-5 #2 Winner ok";
 
 #[tokio::test(start_paused = true)]
 async fn retry_after_is_honoured_then_it_falls_back_across_formats() -> Result<(), Fault> {
@@ -19,7 +20,7 @@ async fn retry_after_is_honoured_then_it_falls_back_across_formats() -> Result<(
 async fn a_stream_cut_after_its_first_byte_is_not_retried() -> Result<(), Fault> {
     let (body, attempts) = cut_after_first_words().await?;
     assert!(body.contains("Hello") && body.contains("reset"), "{body}");
-    assert_eq!(attempts, ["openai #0 Winner upstream"]);
+    assert_eq!(attempts, ["openai gpt-4o #0 Winner upstream"]);
     Ok(())
 }
 
@@ -40,7 +41,7 @@ async fn a_stalled_provider_is_cut_by_the_watchdog_and_falls_back() -> Result<()
 async fn a_whole_answer_slower_than_the_gap_bound_is_not_cut() -> Result<(), Fault> {
     let (body, attempts) = slow_whole_answer().await?;
     assert!(body.contains("an essay"), "{body}");
-    assert_eq!(attempts, ["openai #0 Winner ok"]);
+    assert_eq!(attempts, ["openai gpt-4o #0 Winner ok"]);
     Ok(())
 }
 
@@ -48,7 +49,7 @@ async fn a_whole_answer_slower_than_the_gap_bound_is_not_cut() -> Result<(), Fau
 async fn a_hedge_keeps_the_first_to_answer_and_abandons_the_other() -> Result<(), Fault> {
     let (body, attempts) = hedged().await?;
     assert!(body.contains("fast") && !body.contains("late"), "{body}");
-    let lost = "openai #0 Loser abandoned";
-    assert_eq!(attempts, [lost, "openai-eu #1 Winner ok"]);
+    let lost = "openai gpt-4o #0 Loser abandoned";
+    assert_eq!(attempts, [lost, "openai-eu gpt-4o #1 Winner ok"]);
     Ok(())
 }

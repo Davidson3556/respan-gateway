@@ -1,6 +1,6 @@
 # 0005. No routes: formats recognise requests, plugins are global
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md)
 - Date: 2026-09-26
 
 ## Context
@@ -50,11 +50,11 @@ registered once per route, in orders that could differ.
 
 ### The default target
 
-- `Gateway::target(provider)` names a provider called when no plugin sets
-  one; given more than once, a request's target is the first it can use.
-  Routers override it with `cx.set_target`.
-- With no target, a request is refused 404 `NOT_FOUND`; with targets none
-  of which can take it, 500 `CONFIG`, as the setup is at fault.
+- `Gateway::target(provider)` names the provider called when no plugin
+  sets one; given again, it replaces it. Routers override it with
+  `cx.set_target`, routing by format or kind included.
+- With no target, a request is refused 404 `NOT_FOUND`; with one that
+  cannot take it, 500 `CONFIG`, as the call fails.
 - Whether a request can use a provider is decided when it is called;
   `target` checks only that the provider exists.
 
@@ -97,3 +97,5 @@ registered once per route, in orders that could differ.
 - 0008: `()` as the kind of a format of no kind, `is_kind::<()>`, the
   check that such a format has a provider, and usage filters working for
   every format went; opaque traffic is a kind of one format.
+- 0009: several default targets, the first a request can use, became
+  one, as choosing by kind is routing.

@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use http::StatusCode;
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
-    Response, Usage, async_trait,
+    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
+    ProviderContext, Response, Usage, async_trait,
 };
 use respan_gateway_core::{bytes, futures, http};
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
@@ -331,27 +331,48 @@ async fn a_filter_that_cuts_a_stream_leaves_every_increment_counted() {
     assert_eq!(call.usage.get(units::OUTPUT_TOKENS), Some(20.0));
 }
 
-// Usage in values a plugin makes is shown, not counted; `with_usage` counts,
-// and is not shown.
+// Usage in values a plugin makes is shown, never counted: only a provider's
+// response counts (0009, which removed `with_usage`). A cached answer's usage
+// reaches billing in an extension.
 #[tokio::test]
-async fn usage_a_plugin_makes_is_shown_and_with_usage_is_counted() {
+async fn usage_a_plugin_makes_is_shown_not_counted_and_an_extension_bills_it() {
+    #[derive(Clone)]
+    struct CachedUsage(Usage);
+
     struct Answers;
 
     #[async_trait]
     impl Plugin for Answers {
-        async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let (mut shown, mut counted) = (Usage::default(), Usage::default());
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            let (mut shown, mut cached) = (Usage::default(), Usage::default());
             shown.add(units::INPUT_TOKENS, 7.0);
-            counted.add(units::INPUT_TOKENS, 3.0);
+            cached.add(units::INPUT_TOKENS, 3.0);
+            cx.head_mut().extensions.insert(CachedUsage(cached));
             let mut hi = Reply::text(0, "hi");
             hi.usage = shown;
             let answer = futures::stream::iter([Ok(Reply::start("own", "m")), Ok(hi)]);
-            Ok(Some(Response::stream(answer).with_usage(counted)))
+            Ok(Some(Response::stream(answer)))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct Bills(Arc<Mutex<Usage>>);
+
+    #[async_trait]
+    impl Plugin for Bills {
+        async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
+            let mut billed = outcome.usage.clone();
+            if let Some(CachedUsage(cached)) = cx.head().extensions.get() {
+                billed += cached;
+            }
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = billed;
         }
     }
 
     let mock = MockTransport::new();
-    let (gw, log, _) = gateway(OpenAiChat, &mock, OPENAI, vec![Arc::new(Answers)]);
+    let bills = Bills::default();
+    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(bills.clone()), Arc::new(Answers)];
+    let (gw, log, _) = gateway(OpenAiChat, &mock, OPENAI, plugins);
     let chat = r#"{"model":"m","messages":[]}"#;
 
     let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
@@ -360,7 +381,9 @@ async fn usage_a_plugin_makes_is_shown_and_with_usage_is_counted() {
     let body: respan_gateway_core::serde_json::Value =
         respan_gateway_core::serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["usage"]["prompt_tokens"], 7);
-    assert_eq!(log.only().usage.get(units::INPUT_TOKENS), Some(3.0));
+    assert!(log.only().usage.is_empty());
+    let billed = bills.0.lock().map(|u| u.get(units::INPUT_TOKENS)).ok();
+    assert_eq!(billed, Some(Some(3.0)));
 }
 
 /// Fails on every reply it sees.

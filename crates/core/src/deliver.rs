@@ -65,7 +65,6 @@ pub(crate) async fn deliver(
         mut head,
         body,
         ahead,
-        usage,
         ..
     } = resp;
     strip_named(&mut head.headers);
@@ -110,8 +109,6 @@ pub(crate) async fn deliver(
         abort: None,
     };
     pipe.out.push(opening);
-    // The usage the response was given counts first.
-    pipe.hooks.usage += &usage;
     let first = match refusal || !now {
         true => pipe.first(refusable).await,
         false => Ok(()),
@@ -142,19 +139,13 @@ pub(crate) async fn deliver(
     if pipe.out.is_empty() {
         pipe.tell_end();
     }
-    // A call's body is read to its end unwritten, as its usage counts; a
-    // plugin's own, which may never end, ends with the head.
+    // Nothing more is read: a call whose end was decoded, as a provider's
+    // bodiless response's is, ends so; one with a body left ends abandoned.
     if bodiless(head.status, to_head) {
-        match pipe.source.call() {
-            Some(_) => {
-                let runtime = pipe.hooks.cx().runtime.clone();
-                drop(runtime.spawn(async move { while pipe.next().await.is_some() {} }));
-            }
-            None => {
-                pipe.tell_end();
-                pipe.hooks.finish(Ok(()));
-            }
-        }
+        pipe.ahead.clear();
+        pipe.source.end(Err(Fault::abandoned()));
+        pipe.tell_end();
+        pipe.hooks.finish(Ok(()));
         return http::Response::from_parts(head, one_frame(Bytes::new()));
     }
     let body = stream::unfold(pipe, |mut p| async move { p.next().await.map(|b| (b, p)) });
@@ -256,9 +247,7 @@ impl Pipe {
         };
         batch.read();
         let mut end = batch.end.take();
-        let (mut values, usage) = (batch.values.take(), std::mem::take(&mut batch.usage));
-        // Usage no call counted counts here.
-        self.hooks.usage += &usage;
+        let mut values = batch.values.take();
         if let Some(values) = &mut values {
             let format = self.format.clone();
             let says = |v: &dyn std::any::Any| format.says(v);
@@ -376,7 +365,7 @@ pub(crate) const HOP_BY_HOP: [HeaderName; 10] = [
     UPGRADE,
 ];
 
-/// Remove the headers `Connection` names but `TE` and `Upgrade`.
+/// Remove the headers `Connection` names but `Upgrade`.
 pub(crate) fn strip_named(headers: &mut http::HeaderMap) {
     let named: Vec<HeaderName> = headers
         .get_all(CONNECTION)
@@ -384,7 +373,7 @@ pub(crate) fn strip_named(headers: &mut http::HeaderMap) {
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
         .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
-        .filter(|name| name != TE && name != UPGRADE)
+        .filter(|name| name != UPGRADE)
         .collect();
     for name in named {
         headers.remove(name);

@@ -1,6 +1,6 @@
 # 0008. Events carry their bytes
 
-- Status: accepted
+- Status: accepted, amended by [0009](0009-core-cleanups.md)
 - Date: 2026-09-28
 
 ## Context
@@ -29,12 +29,13 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
   (`Fault::with_raw(format, raw)`), as only that format writes it.
 - `Format::says`: a value a reader sees nothing in, such as a keep-alive,
   framing or usage alone, passes no filter, is no content for `ready`, and
-  is written where it came.
+  is written where it came; `outputs` still yields it
+  ([0009](0009-core-cleanups.md)).
 - Usage is what a provider's messages report (`Format::usage`), counted as
-  decoded, on the edge that decoded it, before any filter: a failure stops
+  decoded, on the call's provider edge, before any filter: a failure stops
   writing, never counting. It is written as the value says after filters,
-  and read in `Outcome.usage`. What a plugin makes is shown, never
-  counted; `Response::with_usage` counts, and is not written.
+  and read in `Outcome.usage`. What a plugin makes or relays is shown,
+  never counted ([0009](0009-core-cleanups.md)).
 - An input, first or later, that cannot be written is the client's fault
   (`BAD_REQUEST`) if filters left it equal to its decoding, else `CONFIG`;
   the first is not retried on a fresh encoder.
@@ -79,3 +80,8 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
 - A provider's error event in a stream, or an error in a 200, goes as it
   came to a client of the same format; to another, in the client's words,
   as a refusal must be.
+
+## History
+
+- 0009: `Response::with_usage` and counting a plugin's own bytes went, and
+  `outputs` stopped hiding values that say nothing.

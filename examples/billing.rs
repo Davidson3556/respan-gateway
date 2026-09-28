@@ -95,8 +95,8 @@ impl<S: UsageStore> Plugin for Billing<S> {
             model,
             usage: outcome.usage.clone(),
         };
-        // Keep it fast or spawn: the request's next call waits for this
-        // hook. An `Err` here is yours to log or queue for retry.
+        // Keep it fast or spawn: the request's `on_client_end` waits for
+        // this hook. An `Err` here is yours to log or queue for retry.
         let _ = self.store.record(row).await;
     }
 }

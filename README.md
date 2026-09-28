@@ -57,8 +57,7 @@ whole: its body, even empty, is its one input.
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, or its own (`with_input`). The
   target is the provider called when every plugin passes: the one
-  `set_target` names, else the first of the gateway's defaults
-  (`Gateway::target`) the request can use.
+  `set_target` names, else the gateway's default (`Gateway::target`).
 - **Edge**: where hooks run. The client edge runs once per request
   (`on_client`), the provider edge once per call (`on_provider`). Each
   edge's end hook (`on_client_end`, `on_provider_end`) runs once after
@@ -66,7 +65,8 @@ whole: its body, even empty, is its one input.
   a response and skips the plugins after it, or refuses.
 - **Filter**: code that edits a request's inputs or a response's
   outputs as they stream; its type says which. Messages that say nothing,
-  such as keep-alives, pass no filter.
+  such as keep-alives, pass no filter; a reader (`outputs`) still sees
+  them.
 - **Format**: one protocol's codec, such as OpenAI Chat: it recognises
   its requests, and reads and writes its requests and responses.
 - **Kind**: a format's two types, `Input` and `Output`. Formats of one
@@ -75,9 +75,12 @@ whole: its body, even empty, is its one input.
 - **Message**: one message of a body, such as an SSE event, a WebSocket
   frame or a whole body, decoded into one value of the kind: every one,
   even one the kind cannot read, keeps the bytes it came in. Usage is what
-  a provider's messages report, counted as decoded, in `Outcome.usage`. A
-  cost cap reserves before the call and settles from it; the kernel had a
-  meter once, but providers report output usage at a stream's end.
+  a provider's messages report, counted as decoded on the call's provider
+  edge, in `Outcome.usage`; a request's `Outcome.usage` sums its calls'.
+  A plugin's own answer counts nothing: a cache carries its stored usage
+  in an extension. A cost cap reserves before the call and settles from
+  it; the kernel had a meter once, but providers report output usage at a
+  stream's end.
 - **Refusal**: a failure before the response head goes out, sent in the
   client's format with the fault's status.
 - **Relay**: a format's promise to write each message as the bytes it

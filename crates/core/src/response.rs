@@ -1,6 +1,6 @@
 use std::any::{Any, TypeId};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream::{self, BoxStream, Stream};
@@ -22,12 +22,8 @@ pub struct Response {
     pub(crate) body: Source,
     /// What [`Response::ready`] read, to be read again first.
     pub(crate) ahead: VecDeque<Batch>,
-    /// Usage a plugin added, counted where it is sent or read.
-    pub(crate) usage: Usage,
     /// Its outputs' type; `None` for a refusal, which has none.
     pub(crate) output: Option<TypeId>,
-    /// Where usage no call reported counts when a plugin reads it.
-    pub(crate) unreported: Option<Arc<Mutex<Usage>>>,
 }
 
 impl std::fmt::Debug for Response {
@@ -38,18 +34,11 @@ impl std::fmt::Debug for Response {
     }
 }
 
-tokio::task_local! {
-    /// The client's format while its request's plugins answer, which judges
-    /// what they make as delivery does.
-    pub(crate) static CLIENT_FORMAT: Arc<dyn AnyFormat>;
-}
-
-/// Outputs decoded or made, the end if it came, and usage no call counted.
+/// Outputs decoded or made, and the end if it came.
 #[derive(Default)]
 pub(crate) struct Batch {
     pub(crate) values: Option<Values>,
     pub(crate) end: Option<Result<(), Fault>>,
-    pub(crate) usage: Usage,
     /// The call whose end this holds, ended once it is read.
     pub(crate) unread: Unread,
 }
@@ -79,7 +68,7 @@ impl Batch {
     }
 
     fn is_empty(&self) -> bool {
-        self.values.is_none() && self.end.is_none() && self.usage.is_empty()
+        self.values.is_none() && self.end.is_none()
     }
 
     /// Read by whoever reads or sends the response: the end of its call, if
@@ -96,10 +85,10 @@ impl Batch {
         }
     }
 
-    /// Decoded from `call`'s response: counted and filtered; its end, if
-    /// any, waits to be read.
-    fn of(mut self, call: &SharedCall) -> Self {
-        if locked(call).events(&mut self)
+    /// Decoded from `call`'s response, reporting `usage`: counted and
+    /// filtered; its end, if any, waits to be read.
+    fn of(mut self, call: &SharedCall, usage: &Usage) -> Self {
+        if locked(call).events(&mut self, usage)
             && let Some(end) = &self.end
         {
             self.unread = Unread(Some((call.clone(), end.clone())));
@@ -114,9 +103,7 @@ impl Response {
             head,
             body,
             ahead: VecDeque::new(),
-            usage: Usage::default(),
             output,
-            unreported: None,
         }
     }
 
@@ -127,9 +114,9 @@ impl Response {
     /// at once if the client's format opens it
     /// ([`Encoder::open`](crate::Encoder::open)). Outputs of another type
     /// fail it with [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
-    /// The usage its outputs report is shown, never counted
-    /// ([`Response::with_usage`]). A plugin's error is a [`Fault`], not
-    /// outputs under an error status.
+    /// The usage its outputs report is shown, never counted: to bill it,
+    /// such as a cached answer's, carry it in an extension. A plugin's
+    /// error is a [`Fault`], not outputs under an error status.
     pub fn stream<T, S>(stream: S) -> Self
     where
         T: Any + Send + Sync,
@@ -143,19 +130,8 @@ impl Response {
             Err(fault) => Batch::end(Err(fault)),
         });
         let done = stream::once(async { Batch::end(Ok(())) });
-        let format = CLIENT_FORMAT.try_with(Arc::clone).ok();
-        let format = format.filter(|f| f.kind().1 == TypeId::of::<T>());
-        let body = Source::Made(batches.chain(done).boxed(), format);
+        let body = Source::Made(batches.chain(done).boxed());
         Self::new(head(StatusCode::OK), body, Some(TypeId::of::<T>()))
-    }
-
-    /// Count `usage` no call reported, such as a cached response's; it is
-    /// not written, so put it in the outputs to show it. It counts on the
-    /// client edge of the request it is sent to, or, read through
-    /// [`Response::outputs`], of the one it came from, if any.
-    pub fn with_usage(mut self, usage: Usage) -> Self {
-        self.usage += &usage;
-        self
     }
 
     /// Send it with `status`, which the client's format writes for.
@@ -166,11 +142,10 @@ impl Response {
 
     /// Read it to its first content or its end, keeping what was read for
     /// whoever reads or sends it next, such as to fall back or race. Content
-    /// is an output that says something
-    /// ([`Format::says`](crate::Format::says)): a provider's to its format,
-    /// before any filter; one a plugin made in `on_client` to the client's,
-    /// as delivery judges it. A bodiless response, a 101 or one already ready is ready
-    /// at once. `Err` with its fault if a success fails first; an error
+    /// is a provider's output that says something to its format
+    /// ([`Format::says`](crate::Format::says)), before any filter, or any
+    /// output a plugin made. A bodiless response, a 101 or one already
+    /// ready is ready at once. `Err` with its fault if a success fails first; an error
     /// status is the provider's answer, to send as it came.
     pub async fn ready(mut self) -> Result<Response, Fault> {
         // What is ahead was judged by an earlier `ready`.
@@ -196,8 +171,9 @@ impl Response {
     }
 
     /// Read it rather than send it, such as a judge's verdict: its outputs
-    /// of `T`, the kind's output type, that say something, as the provider
-    /// edge's filters left them, ending with an `Err` if it fails; at once
+    /// of `T`, the kind's output type, as the provider edge's filters left
+    /// them, keep-alives and usage alone included (filter with the kind's
+    /// own check), ending with an `Err` if it fails; at once
     /// with [`codes::INTERNAL`](crate::codes::INTERNAL) for another type.
     /// Its call ends with the stream, or abandoned if dropped first.
     pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T, Fault>> {
@@ -215,19 +191,14 @@ impl Response {
                 if ended {
                     return None;
                 }
-                let given = std::mem::take(&mut resp.usage);
-                resp.unreported(&given);
                 let mut batch = match resp.ahead.pop_front() {
                     Some(batch) => batch,
                     None => resp.body.next().await.0,
                 };
                 batch.read();
-                resp.unreported(&batch.usage);
                 if let Some(values) = batch.values {
                     let read = values.downcast::<Vec<T>>().map(|v| *v);
-                    let read = read.unwrap_or_default().into_iter();
-                    let says = |v: &T| resp.body.says(v);
-                    outputs.extend(read.filter(says).map(Ok));
+                    outputs.extend(read.unwrap_or_default().into_iter().map(Ok));
                 }
                 if let Some(end) = batch.end {
                     resp.body.end(end.clone());
@@ -239,16 +210,9 @@ impl Response {
         .boxed()
     }
 
-    /// Count `usage` no call reported on the client edge it came from.
-    fn unreported(&self, usage: &Usage) {
-        if let Some(to) = self.unreported.as_ref().filter(|_| !usage.is_empty()) {
-            *locked(to) += usage;
-        }
-    }
-
     /// A kernel-made response that just ends, such as a refusal.
     pub(crate) fn made(status: StatusCode, end: Result<(), Fault>) -> Self {
-        let body = Source::Made(stream::iter([Batch::end(end)]).boxed(), None);
+        let body = Source::Made(stream::iter([Batch::end(end)]).boxed());
         Self::new(head(status), body, None)
     }
 
@@ -288,11 +252,11 @@ impl Response {
             let cut = call.cx().cut.idle();
             let taken = std::mem::take(body);
             *body = StreamBody::new(BodyStream::new(taken).take_until(cut)).boxed_unsync();
-            self.unreported = Some(call.cx().client.unreported.clone());
             let call = call.share();
             // A bodiless response's end is decoded already.
             let ahead = std::mem::take(&mut self.ahead).into_iter();
-            self.ahead = ahead.map(|batch| batch.of(&call)).collect();
+            let none = Usage::default();
+            self.ahead = ahead.map(|batch| batch.of(&call, &none)).collect();
             *slot = Some(call);
         }
         self
@@ -313,8 +277,8 @@ pub(crate) enum Source {
         relayed: bool,
         call: Option<SharedCall>,
     },
-    /// Outputs a plugin made, and the client's format, which judges them.
-    Made(BoxStream<'static, Batch>, Option<Arc<dyn AnyFormat>>),
+    /// Outputs a plugin made, each of which says something.
+    Made(BoxStream<'static, Batch>),
 }
 
 impl Source {
@@ -331,17 +295,9 @@ impl Source {
         }
     }
 
-    /// Whether `output` says something: every output a plugin made does.
-    fn says(&self, output: &dyn Any) -> bool {
-        match self {
-            Source::Bytes { format, .. } => format.says(output),
-            Source::Made(..) => true,
-        }
-    }
-
     /// The next batch, eventually one with the end, not to be read past,
     /// and whether it held content before any filter. A call's usage counts
-    /// on its provider edge; other usage comes back in the batch. The call
+    /// on its provider edge; other usage counts nowhere. The call
     /// ends when the batch with its end is read ([`Batch::read`]) or
     /// dropped. A panic ends the call internal.
     pub(crate) async fn next(&mut self) -> (Batch, bool) {
@@ -353,11 +309,10 @@ impl Source {
                 call,
                 ..
             } => (body, decoder, format, call),
-            Source::Made(made, format) => {
+            Source::Made(made) => {
                 let truncated = || Batch::end(Err(Fault::truncated()));
                 let batch = made.next().await.unwrap_or_else(truncated);
-                let says = |v: &Values| format.as_ref().is_none_or(|f| f.read(v).1);
-                let content = batch.values.as_ref().is_some_and(says);
+                let content = batch.values.is_some();
                 return (batch, content);
             }
         };
@@ -374,13 +329,14 @@ impl Source {
                 Some(Err(f)) => (None, Some(Err(f))),
                 None => decoder.decode(None),
             };
+            let mut usage = Usage::default();
             if let Some(values) = &values {
-                (batch.usage, content) = format.read(values);
+                (usage, content) = format.read(values);
             }
             batch.values = values;
             batch.end = end;
             if let Some(call) = call {
-                batch = std::mem::take(&mut batch).of(call);
+                batch = std::mem::take(&mut batch).of(call, &usage);
             }
         });
         if let Err(panic) = std::panic::catch_unwind(decode) {

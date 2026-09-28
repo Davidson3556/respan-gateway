@@ -391,20 +391,50 @@ async fn a_default_target_of_another_kind_is_not_used() {
     assert!(mock.sent().is_empty());
 }
 
+// Changed in 0009: one default target, which a later `target` replaces; a
+// request it cannot take fails CONFIG, and routing by format is a plugin.
 #[tokio::test]
-async fn a_request_goes_to_the_first_default_target_it_can_use() {
+async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format() {
+    /// Sends chat requests to OpenAI; the rest keep the default target.
+    struct ByFormat;
+
+    #[async_trait]
+    impl Plugin for ByFormat {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            if cx.format() == respan_gateway_formats::OpenAiChat.name() {
+                cx.set_target("openai");
+            }
+            Ok(None)
+        }
+    }
+
     let mock = MockTransport::new();
-    let gw = providers([
-        add_provider(
+    let gw = |plugins: Vec<Arc<dyn Plugin>>| {
+        let openai = add_provider(
             "openai",
             respan_gateway_formats::OpenAiChat,
             mock.at("http://o.test"),
-        ),
-        add_provider("v2", V2, mock.at("http://v2.test")),
-    ])
-    .and_then(|gw| gw.serve(V1)?.serve(respan_gateway_formats::OpenAiChat))
-    .and_then(|gw| gw.target("openai")?.target("v2"))
-    .unwrap_or_else(|e| panic!("{e}"));
+        );
+        providers([openai, add_provider("v2", V2, mock.at("http://v2.test"))])
+            .and_then(|gw| gw.serve(V1)?.serve(respan_gateway_formats::OpenAiChat))
+            .and_then(|gw| {
+                plugins
+                    .into_iter()
+                    .try_fold(gw, |gw, p| gw.plugin("by-format", p))
+            })
+            .and_then(|gw| gw.target("openai")?.target("v2"))
+            .unwrap_or_else(|e| panic!("{e}"))
+    };
+    let chat = || post("/v1/chat/completions", r#"{"model":"m","messages":[]}"#);
+
+    // Without the plugin, a chat request goes to `v2`, which cannot take it.
+    let (resp, ended) = gw(Vec::new()).handle(chat()).await;
+    assert_eq!(read_whole(resp).await.0, StatusCode::INTERNAL_SERVER_ERROR);
+    let end = ended.await.end.map_err(|f| f.code().to_owned());
+    assert_eq!(end, Err(codes::CONFIG.to_owned()));
+    assert!(mock.sent().is_empty());
+
+    let gw = gw(vec![Arc::new(ByFormat)]);
     mock.reply(
         "http://v2.test",
         mock::json(StatusCode::OK, r#"{"text":"jev"}"#),
@@ -413,10 +443,8 @@ async fn a_request_goes_to_the_first_default_target_it_can_use() {
         "http://o.test",
         mock::json(StatusCode::OK, r#"{"id":"c","choices":[]}"#),
     );
-
     let jev = read_whole(gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
-    let chat = post("/v1/chat/completions", r#"{"model":"m","messages":[]}"#);
-    let chat = read_whole(gw.handle(chat).await.0).await;
+    let chat = read_whole(gw.handle(chat()).await.0).await;
 
     assert_eq!((jev.0, chat.0), (StatusCode::OK, StatusCode::OK));
     let sent: Vec<String> = mock.sent().iter().map(|r| r.uri().to_string()).collect();
@@ -757,7 +785,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     );
 
     // Client headers reach the provider, save hop-by-hop, host, credential
-    // and encoding ones.
+    // and encoding ones, and the cookies the transport strips.
     let mut ping = to("opaque", "ping");
     let headers = ping.headers_mut();
     headers.insert("host", HeaderValue::from_static("gateway.example"));
@@ -782,7 +810,9 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     for gone in ["x-hop", "expect", "content-length"] {
         assert!(sent.headers().get(gone).is_none(), "{gone}");
     }
-    assert_eq!(sent.headers()["te"], "trailers");
+    // Changed in 0009: `TE` goes like every connection header, as trailers
+    // are not delivered.
+    assert!(sent.headers().get("te").is_none());
     // A header `Connection` names is dropped; the provider's own still goes.
     assert_eq!(sent.headers()["x-key"], "provider");
     for credential in [

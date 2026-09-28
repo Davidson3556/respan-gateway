@@ -108,7 +108,8 @@ impl MockTransport {
 
 /// One provider's transport, from [`MockTransport::at`]: it handles headers
 /// as `HttpTransport` does
-/// ([`add_own_headers`](respan_gateway_server::add_own_headers),
+/// ([`strip_client_origin_headers`](respan_gateway_server::strip_client_origin_headers),
+/// [`add_own_headers`](respan_gateway_server::add_own_headers),
 /// [`strip_origin_headers`](respan_gateway_server::strip_origin_headers)),
 /// and reads the call's body whole before it replies.
 #[derive(Debug, Clone)]
@@ -132,6 +133,7 @@ impl Transport for MockAt {
     async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
         // Keep alike with `HttpTransport::send` in the server crate.
         let (mut head, body) = call.into_parts();
+        respan_gateway_server::strip_client_origin_headers(&mut head.headers);
         respan_gateway_server::add_own_headers(&mut head, &self.headers)?;
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);

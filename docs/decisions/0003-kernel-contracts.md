@@ -1,6 +1,6 @@
 # 0003. Kernel contracts: minimal, typed by kind, grown without breaking
 
-- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md)
+- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md)
 - Date: 2026-09-25
 
 ## Context
@@ -35,9 +35,11 @@ the square of the formats and give plugins no typed view.
   plugin meant.
 - A `Call` runs in the task awaiting it; its request ends it, before its
   own end hooks.
-- Usage counts once, as decoded, on the edge that decoded it, before any
-  filter; a failure stops writing, never counting, as usage records what
-  was spent ([0008](0008-events-carry-their-bytes.md)).
+- Usage counts once, as a provider's response is decoded, on its call's
+  provider edge, before any filter; a failure stops writing, never
+  counting, as usage records what was spent
+  ([0008](0008-events-carry-their-bytes.md),
+  [0009](0009-core-cleanups.md)).
 - Every filter gets exactly one end, even after a failure, drop or panic
   elsewhere, so what it keeps back is released. A list remembers its end,
   so a filter added later sees no value, then that end. A failing input
@@ -52,10 +54,10 @@ the square of the formats and give plugins no typed view.
 ### HTTP rules
 
 - Connection headers (RFC 9110 7.6.1), the proxy's own (RFC 9110 11.7),
-  `Content-Length`, which edits and reframing change, and `Trailer`, as
-  trailers are not delivered, are removed. `te: trailers` stays (RFC 9110
-  10.1.4), for gRPC; so does `Upgrade` where a switch needs it, with the
-  `Connection: upgrade` RFC 9110 7.8 requires.
+  `Content-Length`, which edits and reframing change, and `Trailer` and
+  `TE`, as trailers are not delivered, are removed. `Upgrade` stays where
+  a switch needs it, with the `Connection: upgrade` RFC 9110 7.8
+  requires.
 - An upgrading request's head goes at once, as its client waits for it. A
   101 goes only to a request that asked to switch (RFC 9110 15.2.2): an
   unasked one fails a call `UPSTREAM`, and refuses a plugin's response
@@ -66,10 +68,10 @@ the square of the formats and give plugins no typed view.
   streams its inputs, or whose body differs from the client's, drops
   `Content-Encoding`.
 - A 204, 205, 304 or response to a `HEAD` has no body (RFC 9110 9.3.2,
-  15.3.5, 15.3.6, 15.4.5), so its head goes at once; a call's body is
-  still read to its end, unwritten, as its usage counts, and a plugin's
-  own, which may never end, ends with the head. `ready` and `outputs` go
-  by the call's method; sending, by the client's.
+  15.3.5, 15.3.6, 15.4.5), so its head goes at once and nothing more is
+  read: a call ends as decoded, or `abandoned` if a body was left.
+  `ready` and `outputs` go by the call's method; sending, by the
+  client's.
 - A translated head keeps its status and `Retry-After` (RFC 9110 10.2),
   the one piece of response context true across a translation.
 - A response whose client left ends 499 `abandoned`, nginx's status.
@@ -132,7 +134,7 @@ transports, deadlines and draining to the embedder (`idle`).
 
 - A call with its own `http::Request`, to any format and provider.
 - An async stream filter beside `Filter`, calling models mid-stream.
-- Usage told to the client that calls already count, beside `with_usage`.
+- Usage told to the client that calls already count.
 - A large body passed on unread, the target chosen from the head or a
   prefix, only if every plugin says it does not need the body.
 - Trailers, through defaulted codec methods: relayed untouched;
@@ -157,3 +159,5 @@ transports, deadlines and draining to the embedder (`idle`).
 - 0008: usage filters, held usage, `()` as no kind and "a later Part
   comes with a refusing method" went, as each message now is one value
   carrying its bytes and usage.
+- 0009: client-edge usage, `te: trailers` and reading a bodiless
+  response's call to its end went.

@@ -551,6 +551,45 @@ async fn it_strips_the_provider_origins_own_headers() {
     assert_eq!(resp.headers()["x-request-id"], "req_1");
 }
 
+// The client's cookies and forwarding headers are the transport's to strip
+// (moved out of the kernel in 0009); other end-to-end headers pass.
+#[tokio::test]
+async fn it_strips_the_clients_cookies_and_forwarding_headers() {
+    let provider = spawn(Router::new().route(
+        "/v1/chat/completions",
+        post(|headers: http::HeaderMap| async move {
+            let hop = ["cookie", "forwarded", "via", "x-forwarded-for", "x-real-ip"];
+            let leaked: Vec<&str> = hop
+                .into_iter()
+                .filter(|h| headers.contains_key(*h))
+                .collect();
+            let body = match (leaked.is_empty(), headers.contains_key("openai-beta")) {
+                (true, true) => SSE.to_owned(),
+                _ => format!("leaked {leaked:?}"),
+            };
+            ([("content-type", "text/event-stream")], body).into_response()
+        }),
+    ))
+    .await;
+    let gateway = openai_gateway(format!("{provider}/v1"));
+    let base = spawn(router(gateway)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .header("cookie", "session=1")
+        .header("forwarded", "for=1.2.3.4")
+        .header("via", "1.1 edge")
+        .header("x-forwarded-for", "1.2.3.4")
+        .header("x-real-ip", "1.2.3.4")
+        .header("openai-beta", "b")
+        .body(r#"{"model":"m","stream":true,"messages":[]}"#)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("send: {e}"));
+
+    assert_eq!(resp.text().await.unwrap_or_default(), SSE);
+}
+
 #[tokio::test]
 async fn it_sends_a_whole_body_with_its_length_and_streams_one_of_unknown_size() {
     use respan_gateway_core::http_body_util::{BodyExt, Full, StreamBody};

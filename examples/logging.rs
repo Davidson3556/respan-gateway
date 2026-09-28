@@ -40,8 +40,8 @@ struct Record {
     completion: Option<String>,
 }
 
-/// Where records go. End hooks await it, and a request's next call waits
-/// for its end hooks: keep it fast or spawn. To add your own, implement it,
+/// Where records go. End hooks await it, and a request's `on_client_end`
+/// waits for its calls' end hooks: keep it fast or spawn. To add your own, implement it,
 /// such as a Postgres insert or a `tracing::info!(?record)`.
 #[async_trait]
 trait Sink: Send + Sync + 'static {

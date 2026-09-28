@@ -22,11 +22,11 @@ pub struct Outcome {
     /// [`codes::ABANDONED`](crate::codes::ABANDONED) if it was dropped or cut
     /// off first. A fault's message may carry a provider's words.
     pub end: Result<(), Fault>,
-    /// The usage this edge decoded, so none counts twice: on the provider
-    /// edge the call's; on the client edge what no call reported, such as
-    /// [`Response::with_usage`] and a plugin's own bytes
-    /// ([`ClientContext::relay`]). It counts as decoded, even after a
-    /// failure; values a plugin makes never count.
+    /// The usage a provider reported: on the provider edge the call's, as
+    /// its response was decoded, even after a failure; on the client edge
+    /// the sum of the request's calls', so bill on one edge only. What a
+    /// plugin makes or relays ([`ClientContext::relay`]) never counts; a
+    /// cached answer's usage travels in an extension.
     pub usage: Usage,
 }
 
@@ -106,7 +106,8 @@ pub trait Plugin: Send + Sync + 'static {
 
     /// The provider edge, before every call the request makes, for each
     /// plugin in order until one refuses, whether or not its `on_client`
-    /// ran, once the end hooks of the request's ended calls finished. `Err`
+    /// ran, without waiting for the end hooks of the request's earlier
+    /// calls, so a limit reserves here and settles in its end hook. `Err`
     /// fails the call before anything is sent. It may stop at any await,
     /// such as when a raced call is dropped, and its `on_provider_end` still
     /// runs, so record what it reserves before awaiting.
@@ -118,8 +119,7 @@ pub trait Plugin: Send + Sync + 'static {
     /// call fails, its response's end is decoded, or its reader stops at a
     /// failure, whoever reads it. One dropped or cut off first, as when its
     /// request ends, ends [`codes::ABANDONED`](crate::codes::ABANDONED). Runs
-    /// like `on_client_end`, before it. The request's next call waits for
-    /// it, so spawn slow work, and never wait on what `on_client` holds.
+    /// like `on_client_end`, before it.
     async fn on_provider_end(&self, _px: &ProviderContext, _outcome: &Outcome) {}
 }
 

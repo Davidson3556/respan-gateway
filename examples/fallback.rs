@@ -35,17 +35,23 @@ impl Plugin for Resilient {
             let calls = [cx.call(target), cx.call("openai-eu")];
             return race(calls, Duration::from_millis(200)).await.map(Some);
         }
-        // Anthropic names its models its own way.
-        let backup = cx.call("anthropic");
-        let backup = backup.with_filter(set_model("claude-sonnet-4-5"));
         let backoff = Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5));
-        first_success([cx.call(target), backup], &backoff)
+        first_success([cx.call(target), cx.call("anthropic")], &backoff)
             .await
             .map(Some)
     }
+
+    /// Anthropic names its models its own way: a change for one provider's
+    /// calls goes here, keyed on the provider.
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        if px.provider() == "anthropic" && px.is_kind::<Conversation>() {
+            px.filter(set_model("claude-sonnet-4-5"))?;
+        }
+        Ok(())
+    }
 }
 
-/// Prints each attempt as "provider #index role end", and keeps it for the tests;
+/// Prints each attempt as "provider model #index role end", and keeps it for the tests;
 /// a deployment would send it to its log or billing store. Only the
 /// attempt whose response reached the client is `Winner`.
 #[derive(Clone, Default)]
@@ -59,7 +65,9 @@ impl Plugin for Log {
         };
         let (index, role) = (attempt.index(), attempt.role());
         let end = outcome.end.as_ref().err().map_or("ok", |f| f.code());
-        let line = format!("{} #{index} {role:?} {end}", px.provider());
+        let chat = px.input::<Conversation>().ok();
+        let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
+        let line = format!("{} {model} #{index} {role:?} {end}", px.provider());
         println!("  attempt {line}, usage {:?}", outcome.usage);
         let mut lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         lines.push(line);

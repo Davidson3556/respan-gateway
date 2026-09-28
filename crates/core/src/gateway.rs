@@ -15,7 +15,6 @@ use crate::format::AnyFormat;
 use crate::input::Later;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
-use crate::response::CLIENT_FORMAT;
 use crate::{Body, ClientContext, Fault, Format, Outcome, Plugin, Response, Transport};
 
 /// A registered plugin and the plugins it runs after, by index.
@@ -35,9 +34,8 @@ pub(crate) struct Inner {
     /// The plugins in the order their hooks run, on both edges.
     pub(crate) chain: Vec<Arc<dyn Plugin>>,
     pub(crate) providers: HashMap<String, Provider>,
-    /// The providers called if no plugin sets a target: for each request,
-    /// the first it can use.
-    pub(crate) targets: Vec<String>,
+    /// The provider called if no plugin sets a target.
+    pub(crate) target: Option<String>,
     /// Requests, calls and end hooks still running.
     pub(crate) in_flight: Arc<InFlight>,
 }
@@ -58,7 +56,7 @@ impl std::fmt::Debug for Gateway {
             .field("formats", &self.inner.formats.len())
             .field("plugins", &names)
             .field("providers", &self.inner.providers.len())
-            .field("targets", &self.inner.targets)
+            .field("target", &self.inner.target)
             .finish()
     }
 }
@@ -156,16 +154,18 @@ impl Gateway {
         Ok(self)
     }
 
-    /// A provider called if every plugin passes and none set a target
-    /// ([`ClientContext::set_target`]); of several, the first a request can
-    /// use. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) for an unknown
-    /// provider.
+    /// The provider called if every plugin passes and none set a target
+    /// ([`ClientContext::set_target`]), replacing any set before. A request
+    /// it cannot take is refused with
+    /// [`codes::CONFIG`](crate::codes::CONFIG), as [`ClientContext::call`]
+    /// fails. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) for an
+    /// unknown provider.
     pub fn target(mut self, provider: impl Into<String>) -> Result<Gateway, Fault> {
         let target = provider.into();
         if !self.inner.providers.contains_key(&target) {
             return Err(Fault::config(format!("unknown provider '{target}'")));
         }
-        self.inner_mut().targets.push(target);
+        self.inner_mut().target = Some(target);
         Ok(self)
     }
 
@@ -243,8 +243,7 @@ impl Gateway {
             Some(fault) => refuse(format, fault, hooks).await,
             None => {
                 // A plugin panic is refused like a failure.
-                let ran = CLIENT_FORMAT.scope(format.clone(), run(&self.inner, &mut hooks));
-                let ran = AssertUnwindSafe(ran).catch_unwind();
+                let ran = AssertUnwindSafe(run(&self.inner, &mut hooks)).catch_unwind();
                 match ran.await {
                     Ok(Ok(resp)) => deliver(format, resp, hooks).await,
                     Ok(Err(f)) => refuse(format, f, hooks).await,
@@ -354,10 +353,6 @@ async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Res
     let cx = hooks.cx();
     match cx.target.clone() {
         Some(target) => cx.call(target).await,
-        None if !gateway.targets.is_empty() => Err(Fault::config(
-            "no target of the gateway can take this request",
-        )
-        .with_source("every target shares neither format nor kind with the client")),
         None => Err(Fault::not_found("nothing answers this request")
             .with_source("no target: the gateway has none, and no plugin set one")),
     }

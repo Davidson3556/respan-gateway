@@ -1,6 +1,6 @@
 # 0004. Two edges, typed formats
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md)
 - Date: 2026-09-26
 
 ## Context
@@ -36,11 +36,10 @@ and gets, whatever the format.
   `on_client_end(&ClientContext, &Outcome)` runs once, at the end, for
   each plugin whose `on_client` started.
 - The provider edge: `on_provider(&mut ProviderContext)` runs before
-  every call, for each plugin in order until one fails the call. It
-  starts once the end hooks of the request's calls that already ended
-  have finished, so a limit sees their usage. It may be cancelled at any
-  await; its `on_provider_end` still runs, so a plugin records what it
-  reserves before awaiting.
+  every call, for each plugin in order until one fails the call, without
+  waiting for the end hooks of the request's earlier calls. It may be
+  cancelled at any await; its `on_provider_end` still runs, so a plugin
+  records what it reserves before awaiting.
 - `px.client()` is the request as it was when the call was made, by `&`,
   so `call` and `take_inputs`, which take `&mut`, do not compile there:
   calling from a call's hooks would recurse. End hooks get `&` too.
@@ -48,28 +47,25 @@ and gets, whatever the format.
   and extensions (the request's plus its own), may fail the call, edit
   its HTTP request after its format writes it (`px.edit_call`), filter
   its inputs after the client edge's input filters, and filter its
-  outputs and meter its usage before the client edge, so each edge sees
-  what it is nearer to. `Call::with_filter` adds such a filter to one
-  call, as if before every `on_provider`.
+  outputs before the client edge, so each edge sees what it is nearer
+  to. A filter for one call alone is added here, keyed on the provider
+  or a mark in the call's extensions.
 - The provider edge sees its response as decoded, whoever reads it, so
-  no reader skips its filters, meters or count.
+  no reader skips its filters or count.
 - `on_provider_end(&ProviderContext, &Outcome)` runs once per call whose
   `on_provider` started: when the call fails before a response, its
   body ends, or its reader stops first at a failure. Dropped or cut off
   before its end, or pending or open when its request ends, it ends
-  `abandoned`, before the request's `on_client_end`. The request's next
-  call waits for it, so it spawns slow work and never waits on what
-  `on_client` keeps.
+  `abandoned`, before the request's `on_client_end`, which waits for
+  it, so it spawns slow work.
 - An `Outcome` has the response's `head` (the provider's on the provider
   edge, the one sent on the client edge), its `end` (how it was read: a
   500 dropped unread ends `abandoned`; a response refused before its
   first byte ends its call with that failure), and its `usage`.
-- Usage never overlaps between the edges: the provider edge has its
-  call's, the client edge only what no call reported
-  (`Response::with_usage`, a plugin's own bytes). Usage no call reported
-  counts on the request its response is sent to, or, read through
-  `outputs`, the one it came from. Billing counts every call on the
-  provider edge.
+- Only a provider's response counts: the provider edge has its call's
+  usage, the client edge the sum of its calls'. What a plugin makes or
+  relays counts nothing; a cached answer's usage travels in an
+  extension. Billing counts on one edge.
 - Client-edge filters end with the request, even when the client leaves,
   so what they kept back is dropped.
 
@@ -94,7 +90,9 @@ and gets, whatever the format.
   query on as a proxy does, credentials included. The transport decides
   whose keys reach the provider: `HttpTransport` with headers of its own
   removes the client's credentials, and with none passes them through;
-  it strips headers bound to the provider's origin, such as `set-cookie`.
+  it strips headers bound to the gateway's origin from the call
+  (`Cookie`, `Forwarded`, `Via`, `X-Forwarded-*`, `X-Real-IP`) and
+  those bound to the provider's from the response, such as `set-cookie`.
 - A per-call key is a value in the call's extensions for the transport to
   read (the server crate's `CallHeaders`); `edit_call` is not for
   credentials, which such a transport strips.
@@ -110,3 +108,6 @@ and gets, whatever the format.
 - 0008: usage filters (`filter::<Usage>`) went, replaced by read-only
   meters, as usage now counts as decoded; `()` no longer marks a format
   of no kind.
+- 0009: `Call::with_filter`, `Response::with_usage`, client-edge usage
+  and `on_provider` waiting for earlier calls' end hooks went; cookies
+  and forwarding headers became the transport's to strip.

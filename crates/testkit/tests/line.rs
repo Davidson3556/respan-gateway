@@ -879,22 +879,30 @@ async fn r9_1_a_204_read_through_outputs_ends_ok() {
 }
 
 // A call filter added before one of the wrong kind still gets its end.
+// (`Call::with_filter` went in 0009; a marked call's `on_provider` adds them.)
 #[tokio::test]
 async fn r9_2_a_call_filter_before_a_failing_one_gets_its_end() {
+    #[derive(Clone)]
+    struct Mark;
+
     struct P(Log);
 
     #[async_trait]
     impl Plugin for P {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let call = cx
-                .call("p")
-                .with_filter(noting::<LOut>(&self.0, "first"))
-                .with_filter(|_: &mut u32| Ok(()));
-            let failed = call.await.is_err();
+            let failed = cx.call("p").with_extension(Mark).await.is_err();
             self.0.note(format!("failed {failed}"));
             Ok(Some(Response::stream(futures::stream::iter([Ok(out(
                 "x",
             ))]))))
+        }
+
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+            if px.extensions().get::<Mark>().is_some() {
+                px.filter(noting::<LOut>(&self.0, "first"))?;
+                px.filter(|_: &mut u32| Ok(()))?;
+            }
+            Ok(())
         }
     }
 
@@ -1162,10 +1170,10 @@ async fn k9_7_usage_a_call_filter_fails_on_counts_unwritten() {
     assert_eq!(t(&log.calls()[0]), Some(5.0));
 }
 
-// Usage in the frame a client filter fails on counts on the client edge,
-// unwritten.
+// A client filter's failure stops a plugin's own bytes; their usage counts
+// nowhere (changed in 0009: only a provider's response counts).
 #[tokio::test]
-async fn k9_7_usage_a_client_filter_fails_on_counts_unwritten() {
+async fn k9_7_a_client_filter_fails_a_plugins_own_bytes_which_count_nothing() {
     struct P;
 
     #[async_trait]
@@ -1182,7 +1190,7 @@ async fn k9_7_usage_a_client_filter_fails_on_counts_unwritten() {
     let gw = gateway(Script::default(), &log, P);
     let (_, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(&body.unwrap_or_default()[..], b"i:ok\nx:over budget\n");
-    assert_eq!(t(&log.clients()[0]), Some(5.0));
+    assert_eq!(t(&log.clients()[0]), None);
 }
 
 // An `edit_response_head` `Err` refuses the request with that fault.
@@ -1504,40 +1512,6 @@ async fn r10_4_ready_judges_a_head_as_the_provider_sent_it() {
     assert_eq!(log.notes(), ["ready false"]);
 }
 
-// A plugin's own usage decoded after a failing output filter, in one batch,
-// counts.
-#[tokio::test]
-async fn r10_5_own_usage_after_a_failure_in_one_batch_counts() {
-    struct P(&'static [&'static str]);
-
-    #[async_trait]
-    impl Plugin for P {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|o: &mut LOut| match o.0.as_str() {
-                "bad" => Err(Fault::internal("refused")),
-                _ => Ok(()),
-            })?;
-            let frames = futures::stream::iter(self.0.iter())
-                .map(|f| Ok::<_, Fault>(Frame::data(Bytes::from_static(f.as_bytes()))));
-            Ok(Some(cx.relay(http::Response::new(StreamBody::new(frames)))))
-        }
-    }
-
-    let mut counted = Vec::new();
-    for frames in [
-        &["i:ok\n", "i:bad\n", "u:5\ne\n"][..],
-        &["i:ok\n", "i:bad\nu:5\ne\n"],
-    ] {
-        let log = Log::default();
-        let gw = gateway(Script::default(), &log, P(frames));
-        let _ = run(&gw, req(http::Method::POST)).await;
-        counted.push(t(&log.clients()[0]));
-    }
-    // Split apart, the usage is never read; in one batch it is decoded, so it
-    // counts.
-    assert_eq!(counted, [None, Some(5.0)]);
-}
-
 /// Line under its own name, so calls to it relay, noting whether its
 /// request encoder got a first input.
 struct Seen(Shared<bool>);
@@ -1645,9 +1619,10 @@ async fn r11_5_a_plugins_answer_to_an_upgrading_request_heads_out_at_once() {
 }
 
 // A client `HEAD` whose call is a `POST` gets no body, and the call's body is
-// read to its end, so its usage counts.
+// not read: it ends abandoned as the head goes out (changed in 0009, which
+// ends bodiless client responses directly).
 #[tokio::test]
-async fn r11_a_heads_post_call_is_read_to_its_end_so_its_usage_counts() {
+async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec!["i:hi\n", "u:5\ne\n"]);
     let gw = Gateway::new()
@@ -1659,7 +1634,11 @@ async fn r11_a_heads_post_call_is_read_to_its_end_so_its_usage_counts() {
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
     let call = &log.calls()[0];
-    assert_eq!((t(call), call.end.clone()), (Some(5.0), Ok(())));
+    let end = call.end.clone().map_err(|f| f.code().to_owned());
+    assert_eq!(
+        (t(call), end),
+        (None, Err(respan_gateway_core::codes::ABANDONED.to_owned()))
+    );
 }
 
 /// Line's kind, whose request encoder writes a change into the client's

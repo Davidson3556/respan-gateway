@@ -84,7 +84,9 @@ fn too_large() -> Fault {
 /// Reaches one provider over HTTP(S) at a base URL, which each request's
 /// path extends, with headers of its own. Instances share one connection
 /// pool unless given their own client. A body of exact size is sent whole,
-/// a streaming one as it comes.
+/// a streaming one as it comes. It strips the client's cookies and
+/// forwarding headers from each call ([`strip_client_origin_headers`]) and
+/// the provider origin's from each response ([`strip_origin_headers`]).
 #[derive(Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
@@ -191,6 +193,7 @@ const CONNECTION_HEADERS: [HeaderName; 12] = [
 impl Transport for HttpTransport {
     async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
         let (mut parts, body) = call.into_parts();
+        strip_client_origin_headers(&mut parts.headers);
         add_own_headers(&mut parts, &self.headers)?;
         let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
@@ -216,6 +219,27 @@ impl Transport for HttpTransport {
         let mut resp = http::Response::from(resp).map(|body| body.map_err(broke).boxed_unsync());
         strip_origin_headers(resp.headers_mut());
         Ok(resp)
+    }
+}
+
+/// Remove the headers of the client's hop to the gateway from a call, as
+/// they belong to the gateway's origin, not the provider's: `Cookie`, the
+/// gateway origin's credentials, and the forwarding headers (`Forwarded`,
+/// RFC 7239; `Via`; `X-Forwarded-*`; `X-Real-IP`). Plugins still see them
+/// in the client's head; a call's [`CallHeaders`], written after, may set
+/// them again.
+pub fn strip_client_origin_headers(headers: &mut HeaderMap) {
+    let names: Vec<HeaderName> = headers
+        .keys()
+        .filter(|name| {
+            let name = name.as_str();
+            matches!(name, "cookie" | "forwarded" | "via" | "x-real-ip")
+                || name.starts_with("x-forwarded-")
+        })
+        .cloned()
+        .collect();
+    for name in names {
+        headers.remove(name);
     }
 }
 

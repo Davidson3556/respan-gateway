@@ -17,6 +17,7 @@ and call once. Tests state its promises; the
 | [0006](decisions/0006-streams-both-ways.md) | Inputs and outputs may both stream |
 | [0007](decisions/0007-format-is-a-codec.md) | A format is one protocol's codec |
 | [0008](decisions/0008-events-carry-their-bytes.md) | Each message is one value that keeps its bytes; usage counts as decoded |
+| [0009](decisions/0009-core-cleanups.md) | Only providers' responses count; one default target; less policy in the kernel |
 
 ## Two edges
 
@@ -28,8 +29,10 @@ and call once. Tests state its promises; the
           once per request        once per call
 ```
 
-`on_provider` runs before every call, so a check there covers them all.
-Each hook that started gets its end hook once, a request's calls first.
+`on_provider` runs before every call, so a check there covers them all;
+it waits for no earlier call's end hooks, so a limit reserves there and
+settles in `on_provider_end`. Each hook that started gets its end hook
+once, a request's calls first.
 Order is explicit (`after`); a plugin that answers skips those after it.
 Only `on_client` may `call` or `take_inputs`
 ([0004](decisions/0004-two-edges-typed-formats.md#two-edges)).
@@ -119,19 +122,23 @@ tokio runtime, which runs end hooks detached.
    failing before any is refused; `Encoder::open` opens a quiet stream at
    once. An upgrading request's head goes at once, so the encoder makes a
    plugin's success a 101. A 204, 205, 304 or response to a `HEAD` goes at
-   once with no body; a call's body is still read to its end, unwritten,
-   as its usage counts.
-3. **Decode.** Each message is one value. Its usage counts as decoded, on
-   the edge that decoded it: a call's on its provider edge, whoever reads
-   it; a plugin's own bytes and `with_usage` on the client edge; what a
-   plugin makes, never. A cost cap is a reservation in `on_provider`,
+   once with no body and nothing more is read: a call whose end was
+   decoded, as a provider's bodiless response's is, ends so; one with a
+   body left ends `abandoned`.
+3. **Decode.** Each message is one value. Only a provider's response
+   counts: its usage counts as decoded, on its call's provider edge,
+   whoever reads it, and a request's `Outcome.usage` sums its calls'. A
+   plugin's own bytes (`cx.relay`) or outputs count nothing; a cache
+   carries a hit's stored usage in an extension for billing to read. A
+   cost cap is a reservation in `on_provider`,
    settled from `Outcome.usage`, plus a provider-edge filter that
    estimates from text to cut a stream; a meter once saw each increment,
    but providers report output usage at a stream's end.
 4. **Edit.** Output filters run provider edge first, the last added
    first; input filters the first added first: a plugin sees inputs after
    earlier plugins, outputs before. A value that says nothing, such as a
-   keep-alive, passes no filter and is written where it came. An `Err`
+   keep-alive, passes no filter and is written where it came; `outputs`
+   still yields it, for its reader to filter with the kind's own check. An `Err`
    stops writing, never counting, and a failed filter
    releases nothing.
 5. **End.** A body ends at the end of its bytes; one cut short ends
@@ -148,9 +155,10 @@ tokio runtime, which runs end hooks detached.
 
 A router sets the target and passes. A fallback answers with the first
 ready success, else the last answer, so a client sees the last 429 and its
-`Retry-After`. `ready` reads to the first content (an output that says
-something) as the provider sent it, before filters; it is `Err` for a
-success that fails first, and passes an error status:
+`Retry-After`. `ready` reads to the first content (a provider's output
+that says something, as sent, before filters, or any output a plugin
+made); it is `Err` for a success that fails first, and passes an error
+status:
 
 ```rust
 let mut last = Err(Fault::upstream("no provider to try"));
@@ -165,7 +173,10 @@ last.map(Some)
 ```
 
 A judge's call brings its own input and is read:
-`cx.call(p).with_input(prompt).await?.outputs::<Reply>()`. Routing by
+`cx.call(p).with_input(prompt).await?.outputs::<Reply>()`. A change for
+one call alone is made in `on_provider`, keyed on `px.provider()` or on a
+mark the call carries (`with_extension`). The gateway has one default
+target; routing by format or kind is a plugin that sets the target. Routing by
 model reads the input, so upgrading requests route by their head, and
 opaque traffic by its body
 ([0003](decisions/0003-kernel-contracts.md#kinds)).
@@ -177,7 +188,7 @@ opaque traffic by its body
 | `core` | The kernel: no HTTP, config or kinds. |
 | `formats` | The `conversation` kind, `OpenAiChat`, `AnthropicMessages`, `relayed`, `opaque`, helpers. |
 | `plugins` | `ModelRouter<I>`, given an accessor for the kind's model. |
-| `server` | `router` (bodies up to 32 MiB, no upgrades), `HttpTransport`, `CallHeaders`. |
+| `server` | `router` (bodies up to 32 MiB, no upgrades), `HttpTransport` (strips the client's credentials when it has its own, cookies and forwarding headers), `CallHeaders`. |
 | `testkit` | `MockTransport` and the kernel's tests. |
 | `respan-gateway` | The binary: YAML config, routing by model, `check`. |
 | `sdks/routing` | Retry, fallback, race and a stall watchdog for plugins. |

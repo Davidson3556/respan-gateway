@@ -402,7 +402,8 @@ fn chat(mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
 }
 
 // A relay passes the client's end-to-end headers and query as a proxy does,
-// minus who sent it, conditions, ranges, overrides, cookies and encodings; a
+// minus conditions, ranges, overrides and encodings, and the transport strips
+// who sent it and cookies (MockTransport as HttpTransport does, since 0009); a
 // translated call carries none.
 #[tokio::test]
 async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
@@ -437,6 +438,57 @@ async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
     }
     assert_eq!(translated.uri().query(), None);
     assert!(translated.headers().get("x-trace").is_none());
+}
+
+// Changed in 0009: the kernel passes the client's cookies and forwarding
+// headers on; stripping them is the transport's policy, so one of its own
+// gets them, while conditions, ranges, overrides and encodings stay out.
+#[tokio::test]
+async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
+    #[derive(Clone, Default)]
+    struct Keeps(Arc<Mutex<Option<http::HeaderMap>>>);
+
+    #[async_trait]
+    impl Transport for Keeps {
+        async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(call.headers().clone());
+            let body = http_body_util::Full::new(Bytes::from(UNARY)).map_err(Fault::from);
+            let mut resp = http::Response::new(body.boxed_unsync());
+            let json = HeaderValue::from_static("application/json");
+            resp.headers_mut().insert("content-type", json);
+            Ok(resp)
+        }
+    }
+
+    let keeps = Keeps::default();
+    let gw = Gateway::new()
+        .provider("openai", OpenAiChat, keeps.clone())
+        .and_then(|g| g.serve(OpenAiChat)?.target("openai"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let _ = read_whole(
+        gw.handle(with_headers("/v1/chat/completions", CHAT))
+            .await
+            .0,
+    )
+    .await;
+
+    let sent = keeps
+        .0
+        .lock()
+        .ok()
+        .and_then(|s| s.clone())
+        .unwrap_or_default();
+    for passed in ["forwarded", "x-forwarded-for", "cookie", "x-trace"] {
+        assert!(sent.get(passed).is_some(), "{passed}");
+    }
+    for kept in [
+        "if-none-match",
+        "range",
+        "accept-encoding",
+        "x-http-method-override",
+    ] {
+        assert!(sent.get(kept).is_none(), "{kept}");
+    }
 }
 
 // A call's own input is written from its value, with none of the client's

@@ -1465,27 +1465,29 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
 
 // ---- r6 internals probes ----
 
-/// Dropping a sent call ends it abandoned, so the request's next call's
-/// `on_provider` must start after its `on_provider_end` (Plugin docs: "It
-/// starts once the end hooks of the request's calls that already ended have
-/// finished"), as a budget's reservation must be released first.
+/// The request's next call's `on_provider` does not wait for the end hooks
+/// of a call that ended (changed in 0009, which removed that wait): here the
+/// dropped call's `on_provider_end` waits for the next call's `on_provider`,
+/// which the old rule deadlocked. The request's own end hooks still come
+/// after its calls'.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn r6_a_dropped_calls_end_hooks_finish_before_the_next_calls_on_provider() {
-    for _ in 0..200 {
-        dropped_then_retried().await;
+async fn r6_the_next_calls_on_provider_does_not_wait_for_an_ended_calls_end_hooks() {
+    for _ in 0..50 {
+        let run = tokio::time::timeout(std::time::Duration::from_secs(5), dropped_then_retried());
+        assert!(run.await.is_ok(), "on_provider waited for an end hook");
     }
 }
 
 async fn dropped_then_retried() {
-    /// Notes each hook, and says when an `on_provider` ran.
+    /// Notes each hook; says when an `on_provider` ran, and when `never2`'s
+    /// did, which `never`'s end hook waits for.
     #[derive(Clone, Default)]
-    struct Retry(Notes, Arc<tokio::sync::Notify>);
+    struct Retry(Notes, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 
     #[async_trait]
     impl Plugin for Retry {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            // Each call is given up on once its `on_provider` ran, so the
-            // second's `on_provider` must wait for the first's end hooks.
+            // Each call is given up on once its `on_provider` ran.
             for provider in ["never", "never2"] {
                 let call = cx.call(provider);
                 tokio::select! {
@@ -1499,13 +1501,22 @@ async fn dropped_then_retried() {
         }
 
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            self.0.note(format!("on_provider {}", px.provider()));
+            if px.provider() == "never2" {
+                self.2.notify_one();
+            }
             self.1.notify_one();
             Ok(())
         }
 
         async fn on_provider_end(&self, px: &ProviderContext, _o: &respan_gateway_core::Outcome) {
+            if px.provider() == "never" {
+                self.2.notified().await;
+            }
             self.0.note(format!("on_provider_end {}", px.provider()));
+        }
+
+        async fn on_client_end(&self, _cx: &ClientContext, _o: &respan_gateway_core::Outcome) {
+            self.0.note("on_client_end");
         }
     }
 
@@ -1521,15 +1532,10 @@ async fn dropped_then_retried() {
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
-    assert_eq!(
-        retry.0.all(),
-        [
-            "on_provider never",
-            "on_provider_end never",
-            "on_provider never2",
-            "on_provider_end never2"
-        ]
-    );
+    let mut notes = retry.0.all();
+    assert_eq!(notes.pop().as_deref(), Some("on_client_end"));
+    notes.sort();
+    assert_eq!(notes, ["on_provider_end never", "on_provider_end never2"]);
 }
 
 tokio::task_local! {

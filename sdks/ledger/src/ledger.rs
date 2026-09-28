@@ -44,7 +44,9 @@ impl std::fmt::Display for HoldId {
 }
 
 /// Where holds and spending are kept. Keep both methods fast: a request's
-/// next call waits for the last one's settlement.
+/// `on_client_end` waits for its calls' settlements, and a call's hold is
+/// held until its settlement, so a fallback's next attempt may see the
+/// last one's hold still in place.
 #[async_trait]
 pub trait Ledger: Send + Sync + 'static {
     /// Hold `amount` on every account in `accounts`, or on none, until

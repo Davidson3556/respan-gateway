@@ -1,6 +1,6 @@
 # 0007. A format is one protocol's codec
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md)
 - Date: 2026-09-27
 
 ## Context
@@ -41,9 +41,10 @@ call's body, and three rules had no principle of their own. This amends
 - The client's own message in its own format goes as a proxy sends it,
   with the client's query and the end-to-end headers. Not: the
   connection's (RFC 9110 7.6.1), keeping `Upgrade`; `Host`; `Expect`;
-  the `Forwarded` family (RFC 7239); conditions and ranges (RFC 9110 13,
-  14), which ask of the client's copy; method overrides; cookies; and
-  `Accept-Encoding`, as the gateway decodes what it reads.
+  conditions and ranges (RFC 9110 13, 14), which ask of the client's
+  copy; method overrides; and `Accept-Encoding`, as the gateway decodes
+  what it reads. Cookies and the `Forwarded` family are the transport's
+  to strip ([0009](0009-core-cleanups.md)).
 - Content that cannot be written is whose it is, by one rule for every
   input, first or later: `BAD_REQUEST` if filters left it equal to its
   decoding, else `CONFIG`, as is a call's own input. (The first input
@@ -68,3 +69,4 @@ call's body, and three rules had no principle of their own. This amends
   per message instead of erased `Part`s; the request codecs see
   `http::Request<Bytes>`; the kernel no longer strips another format's
   bytes or tells edits, as each value keeps its own.
+- 0009: cookies and the `Forwarded` family moved to the transport.

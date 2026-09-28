@@ -9,7 +9,7 @@ use bytes::{Bytes, BytesMut};
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, Stream};
 use futures::{FutureExt, StreamExt, stream};
-use http::header::{CONNECTION, CONTENT_ENCODING, HeaderName, LOCATION, TE, UPGRADE};
+use http::header::{CONNECTION, CONTENT_ENCODING, HeaderName, LOCATION, UPGRADE};
 use http::{Extensions, HeaderValue, StatusCode};
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
@@ -23,10 +23,7 @@ use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::{Provider, provider_for};
 use crate::response::Batch;
 use crate::transport::one_frame;
-use crate::{ClientContext, Fault, Filter, ProviderContext, Response};
-
-/// A call's own filter, added to each copy it sends.
-type CallFilter = Arc<dyn Fn(&mut ProviderContext) -> Result<(), Fault> + Send + Sync>;
+use crate::{ClientContext, Fault, ProviderContext, Response, Usage};
 
 /// A call from [`ClientContext::call`]: a copy of the request as it was
 /// then, sent when first awaited, which may outlive the hook. A clone is an
@@ -38,7 +35,6 @@ pub struct Call {
     /// Its own input.
     input: Option<AnyInput>,
     extensions: Extensions,
-    filters: Vec<CallFilter>,
     /// The call once sent, shared with its request, which drops it at its end.
     sent: Option<Arc<Sending>>,
 }
@@ -59,7 +55,6 @@ impl Clone for Call {
             provider: self.provider.clone(),
             input: self.input.clone(),
             extensions: self.extensions.clone(),
-            filters: self.filters.clone(),
             sent: None,
         }
     }
@@ -72,7 +67,6 @@ impl Call {
             provider,
             input: None,
             extensions: Extensions::new(),
-            filters: Vec::new(),
             sent: None,
         }
     }
@@ -87,26 +81,10 @@ impl Call {
     }
 
     /// Put `value` in this call's extensions
-    /// ([`ProviderContext::extensions`]), for its hooks and transport.
+    /// ([`ProviderContext::extensions`]), for its hooks and transport, such
+    /// as a mark a plugin's `on_provider` reads to filter this call alone.
     pub fn with_extension<T: Clone + Send + Sync + 'static>(mut self, value: T) -> Self {
         self.extensions.insert(value);
-        self
-    }
-
-    /// Run `filter` over this call as [`ProviderContext::filter`] does,
-    /// added before every plugin's `on_provider`: it sees the inputs first
-    /// and the outputs last. Each clone sent gets its own copy. The call
-    /// fails with [`codes::INTERNAL`](crate::codes::INTERNAL) if `T` is not
-    /// of the call's kind.
-    pub fn with_filter<T, F>(mut self, filter: F) -> Self
-    where
-        T: Clone + PartialEq + Send + Sync + 'static,
-        F: Filter<T> + Clone,
-    {
-        // In a `Mutex`, so a `Call` stays `Sync` though a filter need not be.
-        let filter = Mutex::new(filter);
-        let add = move |px: &mut ProviderContext| px.filter(locked(&filter).clone());
-        self.filters.push(Arc::new(add));
         self
     }
 }
@@ -122,7 +100,6 @@ impl Future for Call {
                 call.provider.clone(),
                 call.input.clone(),
                 call.extensions.clone(),
-                call.filters.clone(),
             );
             let sent = Arc::new(Mutex::new((Some(sent.boxed()), None)));
             if !call.request.open.add(&sent) {
@@ -155,7 +132,6 @@ async fn send(
     provider: String,
     own: Option<AnyInput>,
     extensions: Extensions,
-    filters: Vec<CallFilter>,
 ) -> Result<Response, Fault> {
     // An own input sends nothing of the client's, so only its type must
     // match; provider details go to logs.
@@ -198,10 +174,6 @@ async fn send(
     };
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
     let sent = async {
-        // Added once the edge exists, so each gets its end if one fails.
-        for add in &filters {
-            add(edge.cx())?;
-        }
         edge.start().await?;
         send_call(&cx, p, relay, &mut edge).await
     };
@@ -332,13 +304,6 @@ fn fill(client: &http::request::Parts, body: Bytes, relay: bool) -> Request {
         for (name, value) in client.headers.iter().filter(|(name, _)| passes(name)) {
             headers.append(name.clone(), value.clone());
         }
-        // `te: trailers` is the one `TE` value that is end to end (RFC 9110
-        // 10.1.4), and gRPC needs it.
-        let trailers = |t: &str| t.trim().eq_ignore_ascii_case("trailers");
-        let mut te = client.headers.get_all(TE).iter();
-        if te.any(|v| v.to_str().unwrap_or_default().split(',').any(trailers)) {
-            headers.insert(TE, HeaderValue::from_static("trailers"));
-        }
     }
     call
 }
@@ -370,11 +335,11 @@ fn later_frames(
 }
 
 /// Whether a proxy passes on the client's header `name`. Not: connection
-/// headers (RFC 9110 7.6.1) but `Upgrade`; `Host`; `Expect`; the
-/// `Forwarded` family (RFC 7239); conditions and ranges (RFC 9110 13, 14),
-/// which ask of the client's copy; method overrides, as the format says the
-/// method; cookies, the gateway origin's; or `Accept-Encoding`, as the
-/// gateway decodes what it reads.
+/// headers (RFC 9110 7.6.1), `TE` included, but `Upgrade`; `Host`;
+/// `Expect`; conditions and ranges (RFC 9110 13, 14), which ask of the
+/// client's copy; method overrides, as the format says the method; or
+/// `Accept-Encoding`, as the gateway decodes what it reads. Cookies and
+/// forwarding headers are the transport's to strip.
 fn passes(name: &HeaderName) -> bool {
     let hop = HOP_BY_HOP.contains(name) && name != UPGRADE;
     let name = name.as_str();
@@ -382,16 +347,12 @@ fn passes(name: &HeaderName) -> bool {
         name,
         "host"
             | "expect"
-            | "forwarded"
-            | "via"
-            | "x-real-ip"
             | "range"
             | "x-http-method-override"
             | "x-method-override"
-            | "cookie"
             | "accept-encoding"
     );
-    !hop && !denied && !name.starts_with("x-forwarded-") && !name.starts_with("if-")
+    !hop && !denied && !name.starts_with("if-")
 }
 
 /// One call's provider edge, whose end hooks run exactly once.
@@ -472,11 +433,8 @@ impl CallEdge {
         call
     }
 
-    /// Run each plugin's `on_provider` until one refuses, once the end hooks
-    /// of the request's ended calls finished.
+    /// Run each plugin's `on_provider` until one refuses.
     pub(crate) async fn start(&mut self) -> Result<(), Fault> {
-        let settling = self.cx().client.settling.clone();
-        settling.idle().await;
         let gateway = self.cx().client.gateway.clone();
         for plugin in &gateway.chain {
             self.ran += 1;
@@ -486,16 +444,17 @@ impl CallEdge {
     }
 
     /// Turn `batch` of this call's response into what its reader gets, as
-    /// decoded: its usage counted and its outputs filtered. Whether it holds
-    /// an end, a failed filter's too, for [`CallEdge::settle`] once read.
-    /// Once the call ended, just an abandoned end.
-    pub(crate) fn events(&mut self, batch: &mut Batch) -> bool {
+    /// decoded: the `usage` it reports counted and its outputs filtered.
+    /// Whether it holds an end, a failed filter's too, for
+    /// [`CallEdge::settle`] once read. Once the call ended, just an
+    /// abandoned end.
+    pub(crate) fn events(&mut self, batch: &mut Batch, usage: &Usage) -> bool {
         if self.is_finished() {
             *batch = Batch::end(Err(Fault::abandoned()));
             return false;
         }
         // Counted as decoded, even if a filter fails.
-        self.usage += &std::mem::take(&mut batch.usage);
+        self.usage += usage;
         let px = self.cx();
         let format = px.format.clone();
         let says = |v: &dyn std::any::Any| format.says(v);
