@@ -23,3 +23,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sig
 
 [dev-dependencies]
 respan-gateway-testkit.workspace = true
+axum.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "process", "io-util", "time"] }
+wiremock = "0.6"

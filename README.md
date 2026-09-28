@@ -127,6 +127,20 @@ test when its milestone lands. The kernel API is frozen after M2.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+### End-to-end tests
+
+`crates/respan-gateway/tests/e2e.rs` starts the built binary on a free
+port with a temp config, and talks real HTTP to it and to fake providers
+on localhost (wiremock, and a small axum server for streams). They run
+with the rest, in about a second:
+
+```bash
+cargo test -p respan-gateway --test e2e
+# A couple of cheap calls to real providers, skipped for a missing key:
+OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-... \
+  cargo test -p respan-gateway --test real_providers -- --ignored
+```
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
