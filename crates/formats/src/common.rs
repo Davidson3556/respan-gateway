@@ -9,6 +9,7 @@ use respan_gateway_core::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_core::serde_json::{self, Map, Value, json};
 use respan_gateway_core::{Decoder, Encoder, Fault};
+use respan_gateway_http::bodiless;
 
 use crate::Usage;
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
@@ -76,23 +77,35 @@ fn not_an_object() -> Fault {
 }
 
 /// Make `request` a JSON `POST` to `path`, adding to a relayed body what
-/// the format needs ([`Wire::finish`]).
+/// the format needs ([`Wire::finish`]). Its `Content-Encoding` goes unless
+/// it carries the client's bytes unread; a call whose inputs stream cannot
+/// be one.
 pub(crate) fn post_json<W: Wire>(
     request: &mut http::Request<Bytes>,
     path: &str,
+    first: Option<&Conversation>,
+    streams: bool,
 ) -> Box<dyn Encoder<Conversation>> {
     *request.method_mut() = http::Method::POST;
     crate::set_path(request, path);
     let json = HeaderValue::from_static("application/json");
     request.headers_mut().insert(CONTENT_TYPE, json);
     let body = request.body_mut();
+    let mut changed = first.is_some() || streams;
     if W::unfinished(body)
         && let Ok(mut v) = object(body)
     {
         W::finish(&mut v);
         *body = to_bytes(&v).unwrap_or_else(|_| body.clone());
+        changed = true;
     }
-    Box::new(RequestEncoder::<W>(PhantomData))
+    if changed {
+        crate::body_changed(request);
+    }
+    match streams {
+        true => crate::whole::unstreamable(W::NAME),
+        false => Box::new(RequestEncoder::<W>(PhantomData)),
+    }
 }
 
 /// Writes a conversation as the client's bytes, with changes written in, or
@@ -202,16 +215,16 @@ pub(crate) fn probe(raw: &[u8]) -> Asked {
     }
 }
 
-/// Finish a response's head and return whether its replies are relayed as
-/// their bytes. A success framed otherwise than the client asked is
-/// reframed; a head without a content type gets the client's framing.
-pub(crate) fn made_head(head: &mut http::response::Parts, asks_stream: bool) -> bool {
-    let reframe = head.status.is_success() && crate::sse::is_stream(head) != asks_stream;
+/// Finish a success's head and return whether its replies are relayed as
+/// their bytes. One framed otherwise than the client asked is reframed; a
+/// head without a content type gets the client's framing.
+fn made_head(head: &mut http::response::Parts, asks_stream: bool) -> bool {
+    let reframe = crate::sse::is_stream(head) != asks_stream;
     if reframe {
         head.headers.remove(CONTENT_TYPE);
     }
     if content_type(head).is_none() {
-        let content_type = match asks_stream && head.status.is_success() {
+        let content_type = match asks_stream {
             true => "text/event-stream",
             false => "application/json",
         };
@@ -219,6 +232,74 @@ pub(crate) fn made_head(head: &mut http::response::Parts, asks_stream: bool) -> 
             .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     }
     !reframe
+}
+
+/// A response of format `W` to `request`: nothing if it has no body, else
+/// SSE events decoded by `stream` for a stream, else one JSON message.
+pub(crate) fn response_decoder<W: Wire>(
+    head: &http::response::Parts,
+    request: &http::Request<Bytes>,
+    stream: impl FnOnce() -> Box<dyn Decoder<Reply>>,
+) -> Box<dyn Decoder<Reply>> {
+    if head.status.is_success() && bodiless(request.method(), head.status) {
+        return crate::whole::nothing();
+    }
+    match crate::sse::is_stream(head) {
+        true => stream(),
+        false => unary_decoder::<W>(head),
+    }
+}
+
+/// A response of format `W` to the client's `request`, with `head`: a
+/// refusal ([`refused`]), nothing for a bodiless one, else `encoder` of
+/// the head, whether it relays the provider's replies as their bytes, and
+/// the client's request's [`Asked`].
+pub(crate) fn response_encoder<W: Wire>(
+    head: &mut http::response::Parts,
+    request: &http::Request<Bytes>,
+    refusal: Option<&Fault>,
+    encoder: impl FnOnce(&http::response::Parts, bool, Asked) -> Box<dyn Encoder<Reply>>,
+) -> Box<dyn Encoder<Reply>> {
+    if let Some(fault) = refusal {
+        return refused::<W>(head, request, fault);
+    }
+    if bodiless(request.method(), head.status) {
+        return crate::whole::no_body();
+    }
+    let asked = probe(request.body());
+    let relayed = made_head(head, asked.stream);
+    encoder(head, relayed, asked)
+}
+
+/// A refusal in format `W`: the provider's answer as it came, else its
+/// words in this format ([`Fault::with_words`]) or the fault as this
+/// format's error, as JSON under the fault's status and retry; no body
+/// where HTTP has none. A fault whose status is no error's cannot be
+/// written.
+pub(crate) fn refused<W: Wire>(
+    head: &mut http::response::Parts,
+    request: &http::Request<Bytes>,
+    fault: &Fault,
+) -> Box<dyn Encoder<Reply>> {
+    let json = HeaderValue::from_static("application/json");
+    let body = match respan_gateway_http::answered(W::NAME, fault, head) {
+        Some(body) => {
+            head.headers.entry(CONTENT_TYPE).or_insert(json);
+            body
+        }
+        None if !crate::whole::is_error(fault.status()) => return crate::whole::unwritable(),
+        None => {
+            head.headers.insert(CONTENT_TYPE, json);
+            match fault.answer::<Bytes>(W::NAME) {
+                Some(words) => words.clone(),
+                None => W::error_body(fault).to_string().into(),
+            }
+        }
+    };
+    match bodiless(request.method(), head.status) {
+        true => crate::whole::written(Bytes::new()),
+        false => crate::whole::written(body),
+    }
 }
 
 /// One JSON message, decoded whole: one reply on success, else the
@@ -235,26 +316,25 @@ pub(crate) fn unary_decoder<W: Wire>(head: &http::response::Parts) -> Box<dyn De
         }
         // An error in a success goes as it came to a client of this format.
         Err(match crate::sse::failure_json(&raw).filter(says_error) {
-            Some(v) => provider_error(status, &v).with_raw(W::NAME, raw),
+            Some(v) => provider_error(status, &v).with_words(W::NAME, raw),
             None => Fault::upstream("the provider's success is not a response of its format"),
         })
     })
 }
 
-/// Writes one message at its end: the provider's with edits put back, one
-/// made from replies, or the error. Unless `relayed`, it writes from values.
+/// Writes one message at its end: the provider's with edits put back, or
+/// one made from replies. Unless `relayed`, it writes from values. A
+/// failure, before any byte, is refused.
 pub(crate) struct UnaryEncoder<W> {
-    ok: bool,
     relayed: bool,
     replies: Vec<Reply>,
     wire: PhantomData<W>,
 }
 
 impl<W: Wire> UnaryEncoder<W> {
-    pub(crate) fn new(head: &http::response::Parts, relayed: bool) -> Self {
-        let (ok, replies, wire) = (head.status.is_success(), Vec::new(), PhantomData);
+    pub(crate) fn new(relayed: bool) -> Self {
+        let (replies, wire) = (Vec::new(), PhantomData);
         Self {
-            ok,
             relayed,
             replies,
             wire,
@@ -269,14 +349,7 @@ impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
     }
 
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        if let Err(f) = end {
-            match f.raw(W::NAME) {
-                Some(body) => out.extend_from_slice(body),
-                None if self.ok => return Err(f.clone()),
-                None => out.extend_from_slice(W::error_body(f).to_string().as_bytes()),
-            }
-            return Ok(());
-        }
+        end.clone()?;
         let replies = std::mem::take(&mut self.replies);
         let own = replies.iter().find_map(|r| r.origin(W::NAME));
         let body = match own.filter(|_| self.relayed) {
@@ -746,8 +819,8 @@ pub(crate) fn says_error(v: &Value) -> bool {
     says(error) && *error != false && *error != "" && error.as_f64() != Some(0.0)
 }
 
-/// The fault for a provider's error body in a response of `status`, a 502
-/// for a success, with the error's fields as details.
+/// The fault for a provider's error body in a response of `status`: an
+/// error's status, else a 502, with the error's fields as details.
 pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
     // `{"error": {..}}` (OpenAI, Anthropic), the first of a list under
     // `error` or `errors` (Gemini, Cloudflare), or fields at the top.
@@ -776,10 +849,9 @@ pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
         .or(said(v));
     let answered = || crate::whole::answered(status);
     let message = message.map_or_else(answered, str::to_owned);
-    let to = if status.is_success() {
-        StatusCode::BAD_GATEWAY
-    } else {
-        status
+    let to = match status.is_client_error() || status.is_server_error() {
+        true => status,
+        false => StatusCode::BAD_GATEWAY,
     };
     let fault = Fault::new(to, code.to_owned(), message);
     let Some(fields) = fields else { return fault };

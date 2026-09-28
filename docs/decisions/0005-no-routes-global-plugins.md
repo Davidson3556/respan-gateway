@@ -1,6 +1,6 @@
 # 0005. No routes: formats recognise requests, plugins are global
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-26
 
 ## Context
@@ -19,11 +19,14 @@ registered once per route, in orders that could differ.
   given only to providers is never asked.
 - `Gateway::serve(format)` adds a format clients speak; a request goes to
   the first that accepts it, and one none accepts gets a plain-text 404.
+  *Amended by 0012:* `handle` returns it `Err`, which the adapter writes
+  as plain text.
 - First-party formats match method and path suffix (`formats::posts_to`):
   OpenAI Chat a `POST` to `.../chat/completions`, Anthropic Messages to
   `.../v1/messages`.
 - `Gateway::handle(req)` takes the request alone; the adapter sends every
-  path to it and bounds the body. `ClientContext::format()` names the
+  path to it and bounds the body. *Superseded by 0012:*
+  `handle(req, streaming)`, the adapter saying whether inputs stream. `ClientContext::format()` names the
   client's format.
 
 ### One plugin registry
@@ -99,3 +102,5 @@ registered once per route, in orders that could differ.
   every format went; opaque traffic is a kind of one format.
 - 0009: several default targets, the first a request can use, became
   one, as choosing by kind is routing.
+- 0012: `handle` takes whether the request streams, and hands back what no
+  format can write.

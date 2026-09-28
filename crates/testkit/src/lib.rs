@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! Test kit for plugin authors: a scripted provider, recorders of outcomes
-//! on both edges, and request and response helpers.
+//! on both edges, and request and response helpers. Hand a request to a
+//! gateway as the HTTP adapter does with [`serve`].
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,6 +17,11 @@ use respan_gateway_core::{
     Body, ClientContext, Fault, Outcome, Plugin, ProviderContext, Transport,
 };
 use respan_gateway_core::{async_trait, bytes, futures, http, http_body, http_body_util};
+use respan_gateway_http::{
+    credentials, proxy_call, strip_client_origin_headers, strip_origin_headers,
+};
+
+pub use respan_gateway_http::serve;
 
 /// Scripted provider responses: the body arrives chunk by chunk, and an
 /// `Err` chunk breaks it off.
@@ -106,12 +112,10 @@ impl MockTransport {
     }
 }
 
-/// One provider's transport, from [`MockTransport::at`]: it handles headers
-/// as `HttpTransport` does
-/// ([`strip_client_origin_headers`](respan_gateway_server::strip_client_origin_headers),
-/// [`add_own_headers`](respan_gateway_server::add_own_headers),
-/// [`strip_origin_headers`](respan_gateway_server::strip_origin_headers)),
-/// and reads the call's body whole before it replies.
+/// One provider's transport, from [`MockTransport::at`]: it handles heads
+/// as `HttpTransport` does ([`proxy_call`], [`strip_client_origin_headers`],
+/// [`credentials`], [`strip_origin_headers`]), and reads the call's body
+/// whole before it replies.
 #[derive(Debug, Clone)]
 pub struct MockAt {
     mock: MockTransport,
@@ -121,7 +125,7 @@ pub struct MockAt {
 
 impl MockAt {
     /// Sends `headers` with every request, replacing same-named ones; with
-    /// any, clients' credentials are not passed on.
+    /// any, clients' credentials are not passed through.
     pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
         self.headers = headers;
         self
@@ -133,8 +137,9 @@ impl Transport for MockAt {
     async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
         // Keep alike with `HttpTransport::send` in the server crate.
         let (mut head, body) = call.into_parts();
-        respan_gateway_server::strip_client_origin_headers(&mut head.headers);
-        respan_gateway_server::add_own_headers(&mut head, &self.headers)?;
+        proxy_call(&mut head);
+        strip_client_origin_headers(&mut head.headers);
+        credentials(&mut head, &self.headers);
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
         head.uri = url
@@ -160,7 +165,7 @@ impl Transport for MockAt {
         let script =
             script.ok_or_else(|| Fault::upstream(format!("no mock response for {url}")))?;
         let (mut head, chunks) = script.into_parts();
-        respan_gateway_server::strip_origin_headers(&mut head.headers);
+        strip_origin_headers(&mut head.headers);
         let body = stream::iter(chunks).map(|c| c.map(Frame::data));
         Ok(http::Response::from_parts(
             head,
@@ -169,8 +174,7 @@ impl Transport for MockAt {
     }
 }
 
-/// A `POST` of `body` to `path`, for
-/// [`Gateway::handle`](respan_gateway_core::Gateway::handle).
+/// A `POST` of `body` to `path`, for [`serve`].
 pub fn post(path: &str, body: impl Into<Bytes>) -> http::Request<Body> {
     let body = Full::new(body.into()).map_err(Fault::from).boxed_unsync();
     let mut req = http::Request::new(body);

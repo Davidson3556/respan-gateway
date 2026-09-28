@@ -5,7 +5,7 @@ use respan_gateway_formats::AnthropicMessages;
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
     let (status, headers, body) =
-        read_whole(gw.handle(post("/v1/chat/completions", req)).await.0).await;
+        read_whole(serve(gw, post("/v1/chat/completions", req)).await.0).await;
     assert_eq!(status, http::StatusCode::OK);
     Ok((headers, String::from_utf8_lossy(&body?).into_owned()))
 }
@@ -39,7 +39,7 @@ async fn the_same_model_answers_in_anthropics_format() -> Result<(), Fault> {
         .serve(AnthropicMessages)?
         .target("local")?;
     let req = r#"{"model":"echo","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
-    let (_, _, body) = read_whole(gw.handle(post("/v1/messages", req)).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, post("/v1/messages", req)).await.0).await;
     let sse = String::from_utf8_lossy(&body?).into_owned();
     assert!(
         sse.contains("event: content_block_delta") && sse.contains(r#""text":"said: ""#),
@@ -76,7 +76,7 @@ async fn the_provider_edge_sees_and_bills_its_calls() -> Result<(), Fault> {
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(4.0));
 
     let gw = gateway()?.plugin("closed", Closed)?;
-    let (status, _, _) = read_whole(gw.handle(post("/v1/chat/completions", UNARY)).await.0).await;
+    let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", UNARY)).await.0).await;
     assert_eq!(status, http::StatusCode::TOO_MANY_REQUESTS);
     Ok(())
 }

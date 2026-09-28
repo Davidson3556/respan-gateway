@@ -16,7 +16,8 @@ async fn content_is_logged_except_for_a_zero_retention_tenant() -> Result<(), Fa
     assert_eq!(acme.completion.as_deref(), Some("Hello world"));
     let zdr = &records[3];
     assert_eq!((&zdr.prompt, &zdr.completion), (&None, &None));
-    assert_eq!((zdr.status, zdr.end.as_str()), (Some(200), "ok"));
+    // Changed: an outcome has no head, so a success logs no status.
+    assert_eq!((zdr.status, zdr.end.as_str()), (None, "ok"));
     // Billing and audit still flow: the call's usage is on its record.
     assert_eq!(records[2].usage.get(units::OUTPUT_TOKENS), Some(2.0));
     Ok(())

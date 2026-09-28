@@ -18,7 +18,8 @@ use std::time::Duration;
 use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_http::Asked;
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -105,24 +106,23 @@ struct Admission {
 #[async_trait]
 impl Plugin for Admission {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let paid = cx.head().headers.get("x-tier").is_some_and(|t| t == "paid");
+        let asked = cx.extensions().get::<Asked>();
+        let paid = asked
+            .and_then(|a| a.headers.get("x-tier"))
+            .is_some_and(|t| t == "paid");
         let (priority, wait) = if paid { (1, self.paid) } else { (0, self.free) };
         let Some(slot) = self.slots.acquire(priority, Instant::now() + wait).await else {
-            cx.edit_response_head(|head| {
-                head.headers
-                    .insert(RETRY_AFTER, HeaderValue::from_static("1"));
-                Ok(())
-            });
             let busy = "every slot is busy; retry later";
-            return Err(Fault::new(StatusCode::TOO_MANY_REQUESTS, "busy", busy));
+            let fault = Fault::new(StatusCode::TOO_MANY_REQUESTS, "busy", busy);
+            return Err(fault.with_retry_after(Duration::from_secs(1)));
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));
-        cx.head_mut().extensions.insert(held);
+        cx.extensions_mut().insert(held);
         Ok(None)
     }
 
     async fn on_client_end(&self, cx: &ClientContext, _outcome: &Outcome) {
-        if let Some(Held(slot)) = cx.head().extensions.get::<Held>() {
+        if let Some(Held(slot)) = cx.extensions().get::<Held>() {
             slot.lock().unwrap_or_else(PoisonError::into_inner).take();
         }
     }
@@ -159,8 +159,8 @@ async fn main() -> Result<(), Fault> {
     mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
     let gw = gateway(&mock, &Slots::new(1), Duration::from_millis(200))?;
     // The only slot is held while this response is unread.
-    let (held, _) = gw.handle(request("a", "paid")).await;
-    let (status, headers, _) = read_whole(gw.handle(request("b", "free")).await.0).await;
+    let (held, _) = serve(&gw, request("a", "paid")).await;
+    let (status, headers, _) = read_whole(serve(&gw, request("b", "free")).await.0).await;
     let retry = headers.get(RETRY_AFTER);
     println!("a free request, after 200 ms parked: {status}, retry-after {retry:?}");
     drop(held);

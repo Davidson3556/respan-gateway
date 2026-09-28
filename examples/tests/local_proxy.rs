@@ -5,7 +5,7 @@ async fn credentials_beta_headers_and_unknown_fields_pass_untouched() -> Result<
     let mock = MockTransport::new();
     mock.reply(ANTHROPIC, mock::sse(STREAM));
     let gw = gateway(mock.at(ANTHROPIC))?;
-    let (status, _, body) = read_whole(gw.handle(request()).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
     assert_eq!(status, http::StatusCode::OK);
     // The response, unknown event and field included, is the provider's bytes.
     assert_eq!(body?, STREAM.concat());
@@ -40,7 +40,7 @@ async fn a_provider_error_reaches_the_client_as_the_provider_wrote_it() -> Resul
         ),
     );
     let gw = gateway(mock.at(ANTHROPIC))?;
-    let (status, _, body) = read_whole(gw.handle(request()).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
     assert_eq!((status.as_u16(), body?), (529, error.into()));
     Ok(())
 }

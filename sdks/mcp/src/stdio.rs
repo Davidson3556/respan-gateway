@@ -1,7 +1,8 @@
 //! An MCP server over stdio as a [`Transport`]: one child process per
 //! session, one JSON-RPC message per line. It answers the requests
 //! [`StreamableHttp`](crate::StreamableHttp) sends, as an HTTP MCP server
-//! would.
+//! would: messages under the success statuses, the session in its header,
+//! and every failure as a [`Fault`], which the client's format writes.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
@@ -10,15 +11,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use respan_gateway_core::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use respan_gateway_core::http::header::AUTHORIZATION;
 use respan_gateway_core::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_core::http_body_util::{BodyExt, Full};
-use respan_gateway_core::serde_json::Value;
 use respan_gateway_core::{Body, Fault, Transport, async_trait};
+use respan_gateway_http::Credential;
 use tokio::process::Command;
 
 use crate::session::Session;
-use crate::{SESSION, error, lock, read};
+use crate::{SESSION, lock, read};
 
 /// Stands for "never": `Duration::MAX` would overflow a deadline.
 const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
@@ -26,15 +27,22 @@ const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 type Reply = http::Response<Body>;
 
-const NO_SESSION: &str = "no such session";
+/// The code of a failure for a session that is not there, or not the
+/// caller's.
+pub const NO_SESSION: &str = "no_session";
+/// The code of a second `GET` while a session's stream is open.
+pub const BUSY: &str = "busy";
+/// The code of a new session past a limit.
+pub const TOO_MANY_SESSIONS: &str = "too_many_sessions";
 
 /// Runs `program` for each new session (an `initialize` without a session
 /// id), and sends each line it writes to the request waiting for it.
 ///
 /// A session belongs to the owner that started it: the call's [`Owner`]
-/// extension if any, else its `Authorization` header. A request from
-/// another owner gets 404, as if the session did not exist. A second `GET`
-/// while the session's stream is open gets 409. A session ends when its
+/// extension if any, else the client's `Authorization`, as the adapter
+/// lifted it ([`Credential`]). A request from another owner fails 404
+/// [`NO_SESSION`], as if the session did not exist. A second `GET` while
+/// the session's stream is open fails 409 [`BUSY`]. A session ends when its
 /// child exits, on `DELETE`, or when idle; its child is then killed and
 /// reaped. A `POST` whose requests are not all answered in time ends with
 /// a [`TIMED_OUT`](crate::TIMED_OUT) error for each.
@@ -59,7 +67,7 @@ pub struct StdioTransport {
 
 /// Who a call's session belongs to, set as an extension by a plugin that
 /// knows the caller, such as one that authenticates it
-/// (`cx.head_mut().extensions.insert(Owner(tenant))`).
+/// (`cx.extensions_mut().insert(Owner(tenant))`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Owner(pub String);
 
@@ -80,14 +88,14 @@ impl StdioTransport {
     }
 
     /// At most `n` sessions per owner at once (default 8); a new one past
-    /// it gets 503.
+    /// it fails 503 [`TOO_MANY_SESSIONS`].
     pub fn max_sessions(mut self, n: usize) -> Self {
         self.max_sessions = n;
         self
     }
 
     /// At most `n` sessions at once in all (default 64); a new one past it
-    /// gets 503.
+    /// fails 503 [`TOO_MANY_SESSIONS`].
     pub fn max_total(mut self, n: usize) -> Self {
         self.max_total = n;
         self
@@ -111,7 +119,7 @@ impl StdioTransport {
     async fn start(&self, owner: u64, body: &[u8]) -> Result<Reply, Fault> {
         let messages = read(body).map(|(m, _)| m).unwrap_or_default();
         if !messages.iter().any(|m| m["method"] == "initialize") {
-            return Ok(reply(StatusCode::NOT_FOUND, Some(NO_SESSION)));
+            return Err(no_session());
         }
         let n = self.minted.fetch_add(1, Ordering::Relaxed);
         let hash = |i: u8| self.keys.hash_one((n, i));
@@ -121,8 +129,9 @@ impl StdioTransport {
             let mut sessions = lock(&self.sessions);
             let owned = sessions.keys().filter(|(_, o)| *o == owner).count();
             if owned >= self.max_sessions || sessions.len() >= self.max_total {
-                let full = Some("too many sessions");
-                return Ok(reply(StatusCode::SERVICE_UNAVAILABLE, full));
+                let full = "too many sessions";
+                let status = StatusCode::SERVICE_UNAVAILABLE;
+                return Err(Fault::new(status, TOO_MANY_SESSIONS, full));
             }
             sessions.insert(key.clone(), None);
         }
@@ -154,17 +163,17 @@ impl StdioTransport {
     }
 }
 
-/// A response of `status`, with a JSON-RPC error of `message` if any.
-pub(crate) fn reply(status: StatusCode, message: Option<&str>) -> Reply {
-    let error = message.map(|m| error(Value::Null, -32600, m).to_string());
-    let body = Full::from(error.clone().unwrap_or_default());
-    let mut resp = http::Response::new(body.map_err(Fault::from).boxed_unsync());
+/// A success of `status` with no body, such as a 202.
+pub(crate) fn reply(status: StatusCode) -> Reply {
+    let body = Full::default().map_err(Fault::from).boxed_unsync();
+    let mut resp = http::Response::new(body);
     *resp.status_mut() = status;
-    if error.is_some() {
-        let json = HeaderValue::from_static("application/json");
-        resp.headers_mut().insert(CONTENT_TYPE, json);
-    }
     resp
+}
+
+/// A session that is not there, or not the caller's: 404.
+fn no_session() -> Fault {
+    Fault::new(StatusCode::NOT_FOUND, NO_SESSION, "no such session")
 }
 
 #[async_trait]
@@ -174,35 +183,38 @@ impl Transport for StdioTransport {
         let owner = match head.extensions.get::<Owner>() {
             Some(Owner(owner)) => self.keys.hash_one((true, Some(owner.as_bytes()))),
             None => {
-                let credential = head.headers.get(AUTHORIZATION).map(HeaderValue::as_bytes);
-                self.keys.hash_one((false, credential))
+                let credential = head.extensions.get::<Credential>();
+                let authorization = credential.and_then(|c| c.get(AUTHORIZATION.as_str()));
+                self.keys
+                    .hash_one((false, authorization.map(HeaderValue::as_bytes)))
             }
         };
         let body = body.collect().await?.to_bytes();
         let Some(id) = head.headers.get(SESSION) else {
             return match head.method {
                 Method::POST => self.start(owner, &body).await,
-                _ => Ok(reply(StatusCode::BAD_REQUEST, Some("no session"))),
+                _ => Err(Fault::bad_request("no session")),
             };
         };
         let key = (id.to_str().unwrap_or_default().to_owned(), owner);
         let Some(session) = lock(&self.sessions).get(&key).cloned().flatten() else {
-            return Ok(reply(StatusCode::NOT_FOUND, Some(NO_SESSION)));
+            return Err(no_session());
         };
         session.touch();
         match head.method {
             Method::POST => match read(&body) {
                 Some((messages, _)) => session.post(messages).await,
-                None => Ok(reply(StatusCode::BAD_REQUEST, Some("not JSON-RPC"))),
+                None => Err(Fault::bad_request("not JSON-RPC")),
             },
-            Method::GET => Ok(session.listen().unwrap_or_else(|| {
-                reply(StatusCode::CONFLICT, Some("the stream is already open"))
-            })),
+            Method::GET => session.listen().ok_or_else(|| {
+                let open = "the stream is already open";
+                Fault::new(StatusCode::CONFLICT, BUSY, open)
+            }),
             Method::DELETE => {
                 lock(&self.sessions).remove(&key);
-                Ok(reply(StatusCode::NO_CONTENT, None))
+                Ok(reply(StatusCode::NO_CONTENT))
             }
-            _ => Ok(reply(StatusCode::METHOD_NOT_ALLOWED, None)),
+            _ => Err(Fault::bad_request("not an MCP method")),
         }
     }
 }

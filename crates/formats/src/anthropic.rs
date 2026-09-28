@@ -9,10 +9,10 @@ use serde_json::{Map, Value, json};
 
 use crate::Usage;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, made_head, merge_details,
-    patch_content, patch_messages, patch_sampling, post_json, probe, provider_error, read_content,
-    read_message, reads_back, replace, request_decoder, says, says_error, set, split_around,
-    stop_json, unary_decoder, unpatchable, unreadable_event, unsupported_fields,
+    Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, merge_details, patch_content,
+    patch_messages, patch_sampling, post_json, provider_error, read_content, read_message,
+    reads_back, replace, request_decoder, response_decoder, response_encoder, says, says_error,
+    set, split_around, stop_json, unpatchable, unreadable_event, unsupported_fields,
     unwritable_content, write_content, write_message,
 };
 use crate::conversation::{
@@ -64,9 +64,10 @@ impl Format for AnthropicMessages {
     fn request_encoder(
         &self,
         request: &mut Request<Bytes>,
-        _first: Option<&Conversation>,
+        first: Option<&Conversation>,
+        streams: bool,
     ) -> Box<dyn Encoder<Conversation>> {
-        let encoder = post_json::<Self>(request, "/v1/messages");
+        let encoder = post_json::<Self>(request, "/v1/messages", first, streams);
         let version = request.headers_mut().entry(VERSION_HEADER);
         version.or_insert(HeaderValue::from_static(VERSION));
         encoder
@@ -75,25 +76,24 @@ impl Format for AnthropicMessages {
     fn response_decoder(
         &self,
         head: &http::response::Parts,
-        _request: &Request<Bytes>,
+        request: &Request<Bytes>,
     ) -> Box<dyn Decoder<Reply>> {
-        if !is_stream(head) {
-            return unary_decoder::<Self>(head);
-        }
-        holding_start(SseDecoder::new(Reading::<Self>::new()))
+        let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
+        response_decoder::<Self>(head, request, stream)
     }
 
     fn response_encoder(
         &self,
         head: &mut http::response::Parts,
         request: &Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Reply>> {
-        let relayed = made_head(head, probe(request.body()).stream);
-        if is_stream(head) {
-            Box::new(EventStream::new(relayed))
-        } else {
-            Box::new(UnaryEncoder::<Self>::new(head, relayed))
-        }
+        response_encoder::<Self>(head, request, refusal, |head, relayed, _| {
+            match is_stream(head) {
+                true => Box::new(EventStream::new(relayed)),
+                false => Box::new(UnaryEncoder::<Self>::new(relayed)),
+            }
+        })
     }
 
     fn is_content(&self, reply: &Reply) -> bool {
@@ -437,7 +437,7 @@ impl Events<Reply> for Reading<AnthropicMessages> {
         // Its data goes as it came to a client of this format.
         if says_error(&v) || v["type"] == "error" {
             let data = Bytes::from(event_data(&raw).unwrap_or_default());
-            return Err(provider_error(StatusCode::OK, &v).with_raw(&self.name, data));
+            return Err(provider_error(StatusCode::OK, &v).with_words(&self.name, data));
         }
         let usage = match v["type"].as_str() {
             Some("message_start") => &v["message"]["usage"],
@@ -780,7 +780,7 @@ impl Encoder<Reply> for EventStream {
         let held = self.held.take();
         if let Err(f) = end {
             out.extend_from_slice(&held.unwrap_or_default());
-            let body = match f.raw(ANTHROPIC) {
+            let body = match f.answer::<Bytes>(ANTHROPIC) {
                 Some(raw) => String::from_utf8_lossy(raw).into_owned(),
                 None => AnthropicMessages::error_body(f).to_string(),
             };

@@ -32,7 +32,6 @@ pub(crate) struct EndHooks<E: Edge> {
     pub(crate) ran: usize,
     /// Taken when the hooks start.
     cx: Option<E>,
-    pub(crate) head: Option<http::response::Parts>,
     /// End hooks that must finish before these start.
     pub(crate) after: Option<Arc<InFlight>>,
     /// Also receives the `Outcome`, for `Gateway::handle`'s future.
@@ -49,7 +48,6 @@ impl<E: Edge> EndHooks<E> {
             live: Some(InFlight::enter(in_flight)),
             ran: 0,
             cx: Some(cx),
-            head: None,
             after: None,
             report,
         }
@@ -72,10 +70,7 @@ impl<E: Edge> EndHooks<E> {
         };
         // The end is known, so a panic neither changes it nor stops the hooks.
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| cx.close(&end)));
-        let outcome = Outcome {
-            head: self.head.clone(),
-            end,
-        };
+        let outcome = Outcome { end };
         if let Some(to) = self.report.take() {
             let _ = to.send(outcome.clone());
         }

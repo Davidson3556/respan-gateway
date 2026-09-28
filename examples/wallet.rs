@@ -14,8 +14,9 @@ use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
+use respan_gateway_http::Credential;
 use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// Your table; a model not in it has no cost bound.
 fn prices() -> HashMap<String, Price> {
@@ -31,8 +32,10 @@ fn quote(
     tally: Tally,
     prices: &HashMap<String, Price>,
 ) -> Result<Quote, Fault> {
-    let auth = px.client().head().headers.get("authorization");
-    let key = auth.and_then(|v| v.to_str().ok()?.strip_prefix("Bearer "));
+    let key = px
+        .extensions()
+        .get::<Credential>()
+        .and_then(Credential::bearer);
     let key = key.ok_or_else(|| Fault::new(StatusCode::UNAUTHORIZED, "no_key", "no key"))?;
     let chat = px.input::<Conversation>()?;
     let model = chat.model.as_deref().unwrap_or_default();
@@ -95,7 +98,7 @@ async fn send(gw: &Gateway, key: &str, body: &'static str) -> Result<StatusCode,
     let mut req = post("/v1/chat/completions", body);
     let auth = HeaderValue::from_str(&format!("Bearer {key}")).map_err(http::Error::from)?;
     req.headers_mut().insert("authorization", auth);
-    let (status, _, _) = read_whole(gw.handle(req).await.0).await;
+    let (status, _, _) = read_whole(serve(gw, req).await.0).await;
     gw.idle().await;
     Ok(status)
 }

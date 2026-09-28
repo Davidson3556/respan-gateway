@@ -64,7 +64,7 @@ async fn non_text_input_is_refused_before_it_is_sent() -> Result<(), Fault> {
     let (mock, ledger) = (MockTransport::new(), team());
     let gw = gateway(&mock, ledger.clone())?;
     let image = r#"{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x.test/cat.png"}}]}]}"#;
-    let (status, _, _) = read_whole(gw.handle(post("/v1/chat/completions", image)).await.0).await;
+    let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", image)).await.0).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(mock.sent().is_empty());
     assert_eq!(ledger.spent("team"), 0);
@@ -87,7 +87,7 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
         let gw = gw.clone();
         tokio::spawn(async move {
             let (status, _, _) =
-                read_whole(gw.handle(post("/v1/chat/completions", body)).await.0).await;
+                read_whole(serve(&gw, post("/v1/chat/completions", body)).await.0).await;
             gw.idle().await;
             status
         })
@@ -127,7 +127,7 @@ async fn two_spellings_of_max_tokens_are_both_capped() -> Result<(), Fault> {
     let body = r#"{"model":"m","max_tokens":5000,"max_completion_tokens":100,"messages":[{"role":"user","content":"hi"}]}"#;
     let answer = r#"{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":7}}"#;
     mock.reply(OPENAI, mock::json(StatusCode::OK, answer));
-    let (status, _, _) = read_whole(gw.handle(post("/v1/chat/completions", body)).await.0).await;
+    let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", body)).await.0).await;
     assert_eq!(status, StatusCode::OK);
     let sent: serde_json::Value = serde_json::from_slice(mock.sent()[0].body())
         .map_err(|e| Fault::internal("json").with_source(e))?;

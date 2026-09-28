@@ -9,15 +9,13 @@ use bytes::{Bytes, BytesMut};
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, Stream};
 use futures::{FutureExt, StreamExt, stream};
-use http::header::{CONNECTION, CONTENT_ENCODING, HeaderName, LOCATION, UPGRADE};
-use http::{Extensions, HeaderValue, StatusCode};
+use http::Extensions;
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
 
 use crate::context::unlocked;
-use crate::deliver::HOP_BY_HOP;
 use crate::fault::PANICKED;
-use crate::format::{AnyEncoder, AnyInput, Request};
+use crate::format::{AnyEncoder, AnyInput};
 use crate::input::{Frame as InputFrame, Input, locked, stream as inputs};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::{Provider, provider_for};
@@ -157,9 +155,7 @@ async fn send(
     // A call's own input is none of the client's, so never relayed.
     let relay = input.own_format.is_none() && cx.format.name() == p.format.name();
     let mut client = cx.copy();
-    if !extensions.is_empty() {
-        client.head_mut().extensions.extend(extensions);
-    }
+    client.extensions.extend(extensions);
     let cut = Arc::default();
     let px = ProviderContext {
         client,
@@ -200,26 +196,13 @@ async fn send_call(
     edge: &mut CallEdge,
 ) -> Result<Response, Fault> {
     let px = edge.cx();
-    // An upgrading request's later inputs follow, unless the call has its own.
+    // A streaming request's later inputs follow, unless the call has its own.
     let later = cx.later.as_ref().filter(|_| px.input.own_format.is_none());
-    let (mut call, encoder) = first_frame(&px.input, p, &px.client.head, relay, later.is_none())?;
-    // A streamed or changed body is not the client's bytes, so not encoded.
-    if later.is_some() || call.body() != cx.body() {
-        call.headers_mut().remove(CONTENT_ENCODING);
-    }
-    // `Upgrade` goes with the `Connection` option it needs (RFC 9110 7.8).
-    if call.headers().contains_key(UPGRADE) {
-        let upgrade = HeaderValue::from_static("upgrade");
-        call.headers_mut().insert(CONNECTION, upgrade);
-    }
+    let client = relay.then(|| &*px.client.head);
+    let extensions = px.client.extensions.clone();
+    let (mut call, encoder) = first_frame(&px.input, p, client, extensions, later.is_some())?;
     for edit in std::mem::take(unlocked(&mut px.call_edits)) {
         edit(&mut call)?;
-    }
-    // Only a call that switches protocols can carry inputs after its head.
-    if later.is_some() && !call.headers().contains_key(UPGRADE) {
-        return Err(Fault::config(
-            "an upgrading request's inputs can go only to a call that switches protocols",
-        ));
     }
     let (head, first) = call.into_parts();
     let sent = head.clone();
@@ -234,78 +217,57 @@ async fn send_call(
         }
     };
     let call = http::Request::from_parts(head, body);
-    let (head, body) = p.transport.send(call).await?.into_parts();
-    edge.head = Some(head.clone());
-    // A provider switches protocols only if asked (RFC 9110 15.2.2), and a
-    // translated redirect points at a resource in another format.
-    let switched =
-        head.status == StatusCode::SWITCHING_PROTOCOLS && !sent.headers.contains_key(UPGRADE);
-    let redirect = !relay && head.status.is_redirection() && head.headers.contains_key(LOCATION);
-    if switched || redirect {
-        let status = head.status.as_u16();
-        return Err(Fault::upstream(format!("the provider returned {status}")));
-    }
+    let resp = p.transport.send(call).await?;
     // The decoder reads the provider's head as it came, for the call as sent.
-    let resp = http::Response::from_parts(head, body);
     let sent = http::Request::from_parts(sent, first);
-    Ok(Response::decoded(&p.format, &sent, resp, relay))
+    Ok(Response::decoded(
+        &p.format,
+        &sent,
+        resp,
+        relay,
+        later.is_some(),
+    ))
 }
 
-/// The call, filled from the client's `request` ([`fill`]) and edited by
-/// its format, with its first frame as its body (the client's bytes if
-/// relayed unread, else the encoder's opening bytes, the input, and the end
-/// if `whole`), and the encoder. Content that cannot be written is whose it
-/// is (`Whose`).
+/// The call as its format writes it, from the `client`'s head if it relays
+/// the client's message, with the call's `extensions` and its first frame
+/// as its body (the client's bytes if relayed unread, else the encoder's
+/// opening bytes, the input, and the end unless it `streams`), and the
+/// encoder. Content that cannot be written is whose it is (`Whose`).
 fn first_frame(
     input: &Input,
     p: &Provider,
-    request: &http::request::Parts,
-    relay: bool,
-    whole: bool,
+    client: Option<&http::request::Parts>,
+    extensions: Extensions,
+    streams: bool,
 ) -> Result<(http::Request<Bytes>, Box<dyn AnyEncoder>), Fault> {
-    let ((body, first), whose) = input.sent(relay)?;
-    let write = || {
-        let mut call = fill(request, body, relay);
-        let mut encoder = p.format.request_encoder(&mut call, first.as_ref());
-        let mut more = BytesMut::new();
-        encoder.open(&mut more);
+    let ((body, first), whose) = input.sent(client.is_some())?;
+    let mut call = match client {
+        Some(head) => http::Request::from_parts(head.clone(), body),
+        None => http::Request::new(body),
+    };
+    *call.extensions_mut() = extensions;
+    let mut encoder = p.format.request_encoder(&mut call, first.as_ref(), streams);
+    // What cannot be opened is the format's to say, whoever's input it is.
+    let mut more = BytesMut::new();
+    encoder.open(&mut more)?;
+    let mut write = || {
         if let Some(first) = &first {
             encoder.input(first, &mut more)?;
         }
-        if whole {
-            encoder.end(&Ok(()), &mut more)?;
+        match streams {
+            true => Ok(()),
+            false => encoder.end(&Ok(()), &mut more),
         }
-        if !more.is_empty() {
-            let body = call.body_mut();
-            let mut all = BytesMut::from(&body[..]);
-            all.unsplit(more);
-            *body = all.freeze();
-        }
-        Ok((call, encoder))
     };
-    write().map_err(|fault| whose.fault(fault))
-}
-
-/// The call as the kernel fills it for its format: the `client`'s method,
-/// path and extensions, and `body`; if `relay`, also the client's query and
-/// the headers [`passes`] lets through, as a proxy sends it.
-fn fill(client: &http::request::Parts, body: Bytes, relay: bool) -> Request {
-    let mut call = http::Request::new(body);
-    *call.method_mut() = client.method.clone();
-    let path = client.uri.path_and_query().map(|pq| match relay {
-        true => pq.as_str(),
-        false => pq.path(),
-    });
-    // A part of a URI that parsed parses.
-    *call.uri_mut() = path.unwrap_or("/").parse().unwrap_or_default();
-    *call.extensions_mut() = client.extensions.clone();
-    if relay {
-        let headers = call.headers_mut();
-        for (name, value) in client.headers.iter().filter(|(name, _)| passes(name)) {
-            headers.append(name.clone(), value.clone());
-        }
+    write().map_err(|fault| whose.fault(fault))?;
+    if !more.is_empty() {
+        let body = call.body_mut();
+        let mut all = BytesMut::from(&body[..]);
+        all.unsplit(more);
+        *body = all.freeze();
     }
-    call
+    Ok((call, encoder))
 }
 
 /// A streamed call's frames after its first: each of `frames` written by
@@ -332,27 +294,6 @@ fn later_frames(
         });
         ready(written.transpose())
     })
-}
-
-/// Whether a proxy passes on the client's header `name`. Not: connection
-/// headers (RFC 9110 7.6.1), `TE` included, but `Upgrade`; `Host`;
-/// `Expect`; conditions and ranges (RFC 9110 13, 14), which ask of the
-/// client's copy; method overrides, as the format says the method; or
-/// `Accept-Encoding`, as the gateway decodes what it reads. Cookies and
-/// forwarding headers are the transport's to strip.
-fn passes(name: &HeaderName) -> bool {
-    let hop = HOP_BY_HOP.contains(name) && name != UPGRADE;
-    let name = name.as_str();
-    let denied = matches!(
-        name,
-        "host"
-            | "expect"
-            | "range"
-            | "x-http-method-override"
-            | "x-method-override"
-            | "accept-encoding"
-    );
-    !hop && !denied && !name.starts_with("if-")
 }
 
 /// One call's provider edge, whose end hooks run exactly once.

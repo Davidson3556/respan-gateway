@@ -11,7 +11,10 @@ that keep their bytes, so an unedited message relays byte for byte.
   process per session. `.max_sessions(n)` per owner (default 8),
   `.max_total(n)` in all (default 64), `.idle(d)`, `.timeout(d)` for a
   `POST`'s answers (default 5 minutes; then a `TIMED_OUT` error). The owner is the call's
-  `Owner` extension, else its `Authorization` header: authenticate first.
+  `Owner` extension, else the client's `Authorization`, as the HTTP
+  adapter lifted it (`respan_gateway_http::Credential`): authenticate
+  first. Its failures are faults the client's format writes:
+  `NO_SESSION` (404), `BUSY` (409), `TOO_MANY_SESSIONS` (503).
 - `error(id, code, message)`: a JSON-RPC error.
 
 Used by: [mcp_proxy](../../examples/mcp_proxy.rs).

@@ -158,7 +158,7 @@ impl Session {
             Err(_) => return Err(late()),
         }
         if !asks {
-            return Ok(reply(StatusCode::ACCEPTED, None));
+            return Ok(reply(StatusCode::ACCEPTED));
         }
         Ok(events(rx, Some(until)))
     }

@@ -1,6 +1,6 @@
 # 0003. Kernel contracts: minimal, typed by kind, grown without breaking
 
-- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0011](0011-read-until-content-or-end.md)
+- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-25
 
 ## Context
@@ -19,7 +19,8 @@ the square of the formats and give plugins no typed view.
 - Four hooks ([0004](0004-two-edges-typed-formats.md)) and one response
   pipeline. A new hook needs a use case and a test: each is kept forever.
 - `on_client` changes the head and target, never the body's bytes, so
-  every change is written by a format. Filters edit inputs and outputs
+  every change is written by a format. *Superseded by 0012:* it changes
+  the target and extensions; a call's head is edited with `edit_call`. Filters edit inputs and outputs
   as they stream, and are the one way to edit inputs.
 - `Gateway::handle`, the only entry point, returns the response and a
   future of its `Outcome`; the tokio runtime runs end hooks detached, so
@@ -32,7 +33,8 @@ the square of the formats and give plugins no typed view.
 - The encoder writes for the status `Response::with_status` set; head
   edits come after and return `Result`, like `edit_call`. An edit's `Err`
   or panic refuses with no edits, as a half-run list makes a head no
-  plugin meant.
+  plugin meant. *Superseded by 0012:* `with_status` is gone; head edits
+  stay as they were.
 - A `Call` runs in the task awaiting it; its request ends it, before its
   own end hooks.
 - Usage counts once, as a provider's response is decoded, on its call's
@@ -52,6 +54,12 @@ the square of the formats and give plugins no typed view.
 - The seven `codes` say whose fault a failure is; a plugin may add its own.
 
 ### HTTP rules
+
+*Superseded by [0012](0012-http-out-of-the-kernel.md):* every rule in
+this section left the kernel, for the formats, the adapter and the
+transports (`crates/http`), which keep them; a translated success keeps
+no status or `Retry-After`, a fault carries both, and whose content is
+whose (the last bullet) stays the kernel's.
 
 - Connection headers (RFC 9110 7.6.1), the proxy's own (RFC 9110 11.7),
   `Content-Length`, which edits and reframing change, and `Trailer` and
@@ -99,7 +107,9 @@ the square of the formats and give plugins no typed view.
 - Decoding refuses only a body that is not the format; what the kind has
   no place for is relayed within one format.
 - The gateway's own credentials are removed before `handle` or by a
-  plugin (`head_mut`); the transport decides the rest.
+  plugin (`head_mut`); the transport decides the rest. *Superseded by
+  0012:* the adapter lifts them into a `Credential` extension, which a
+  plugin removes.
 - Values are cloned and compared, so large payloads sit in an `Arc` of an
   `Eq` type.
 - The model belongs to the kind (`Conversation.model`), edited by an input
@@ -108,7 +118,8 @@ the square of the formats and give plugins no typed view.
   first input, to put a model in the path, say.
 - Routing by model reads the input, so an upgrading request, which has no
   input at its head, routes by its head, and opaque traffic by its body
-  (`cx.body()`). A body that does not decode is still relayed: a router
+  (`cx.body()`). *Amended by 0012:* a streaming request, which the adapter
+  names, routes by the adapter's view of its head (`http::Asked`). A body that does not decode is still relayed: a router
   may ignore an `input` `Err`; a plugin that vets input refuses on it.
 
 ### Growing without breaking
@@ -161,3 +172,5 @@ transports, deadlines and draining to the embedder (`idle`).
   carrying its bytes and usage.
 - 0009: client-edge usage, `te: trailers` and reading a bodiless
   response's call to its end went.
+- 0012: the HTTP rules, `head_mut` and `with_status` went; the `http`
+  types stay as an envelope the kernel never reads.

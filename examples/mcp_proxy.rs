@@ -20,7 +20,7 @@ use respan_gateway_core::{
 use respan_gateway_mcp::{
     self as mcp, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer,
 };
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// Lets clients see and call only these tools.
 struct ToolAllowList(Arc<[&'static str]>);
@@ -110,7 +110,7 @@ async fn send(
     if let Some(session) = session.and_then(|s| HeaderValue::from_str(s).ok()) {
         req.headers_mut().insert(SESSION, session);
     }
-    let (status, headers, body) = read_whole(gw.handle(req).await.0).await;
+    let (status, headers, body) = read_whole(serve(gw, req).await.0).await;
     let session = headers
         .get(SESSION)
         .and_then(|s| s.to_str().ok())

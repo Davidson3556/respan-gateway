@@ -1,6 +1,6 @@
 # 0010. Usage out of the core
 
-- Status: accepted, amended by [0011](0011-read-until-content-or-end.md)
+- Status: accepted, amended by [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-28
 
 ## Context
@@ -60,5 +60,6 @@ everything was already able to delay a stream's framing.
   that opened with a keep-alive and then failed can now be refused.
 - `Outcome` has only `head` and `end`; there is no request-level sum. A
   plugin that wants one keeps it in a request extension its calls share.
+  *Amended by 0012:* only `end`.
 - The testkit's `Calls::usage` is gone; tests meter through a filter.
 - 13 public core types; `Format` has 9 members.

@@ -29,13 +29,15 @@ use respan_gateway_core::{
 use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply};
 use respan_gateway_formats::{OpenAiChat, Usage};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_http::Asked;
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// One record: a request, or one of its calls (`call` names the provider).
 #[derive(Debug, Clone, PartialEq)]
 struct Record {
     request: u64,
     call: Option<String>,
+    /// The status of the fault that ended it; none for a success.
     status: Option<u16>,
     /// `ok`, or the code of the fault that ended it.
     end: String,
@@ -89,7 +91,7 @@ impl Record {
         Self {
             request: ext.get::<RequestId>().map_or(0, |id| id.0),
             call: call.map(Into::into),
-            status: outcome.head.as_ref().map(|h| h.status.as_u16()),
+            status: outcome.end.as_ref().err().map(|f| f.status().as_u16()),
             end: outcome
                 .end
                 .as_ref()
@@ -105,8 +107,8 @@ impl Record {
 impl<S: Sink> Plugin for Log<S> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let id = RequestId(self.next.fetch_add(1, Ordering::Relaxed));
-        cx.head_mut().extensions.insert(id);
-        if cx.head().extensions.get::<NoContent>().is_some() || !cx.is_kind::<Conversation>() {
+        cx.extensions_mut().insert(id);
+        if cx.extensions().get::<NoContent>().is_some() || !cx.is_kind::<Conversation>() {
             return Ok(None);
         }
         let captured = Captured::default();
@@ -117,7 +119,7 @@ impl<S: Sink> Plugin for Log<S> {
                 .extend(reply.texts());
             Ok(())
         })?;
-        cx.head_mut().extensions.insert(captured);
+        cx.extensions_mut().insert(captured);
         Ok(None)
     }
 
@@ -132,7 +134,7 @@ impl<S: Sink> Plugin for Log<S> {
     }
 
     async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
-        let ext = &cx.head().extensions;
+        let ext = &cx.extensions();
         let mut record = Record::new(ext, None, outcome);
         // Checked again: a marker set after `on_client` still holds.
         let captured = ext
@@ -149,17 +151,18 @@ impl<S: Sink> Plugin for Log<S> {
     }
 }
 
-/// Marks requests of zero-retention tenants, named by `x-tenant` here; in
-/// practice, by the tenant your auth plugin resolved.
+/// Marks requests of zero-retention tenants, named by `x-tenant` here
+/// (the adapter's view of the head, [`Asked`]); in practice, by the tenant
+/// your auth plugin resolved.
 struct Tenancy(&'static [&'static str]);
 
 #[async_trait]
 impl Plugin for Tenancy {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let headers = &cx.head().headers;
-        let tenant = headers.get("x-tenant").and_then(|v| v.to_str().ok());
+        let asked = cx.extensions().get::<Asked>();
+        let tenant = asked.and_then(|a| a.headers.get("x-tenant")?.to_str().ok());
         if tenant.is_some_and(|t| self.0.contains(&t)) {
-            cx.head_mut().extensions.insert(NoContent);
+            cx.extensions_mut().insert(NoContent);
         }
         Ok(None)
     }
@@ -197,7 +200,7 @@ async fn run(mock: &MockTransport) -> Result<Vec<Record>, Fault> {
         let mut req = post("/v1/chat/completions", REQUEST);
         req.headers_mut()
             .insert("x-tenant", HeaderValue::from_static(tenant));
-        read_whole(gw.handle(req).await.0).await.2?;
+        read_whole(serve(&gw, req).await.0).await.2?;
         gw.idle().await;
     }
     let records = memory.0.lock().unwrap_or_else(PoisonError::into_inner);

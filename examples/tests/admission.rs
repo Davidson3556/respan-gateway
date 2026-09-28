@@ -21,9 +21,9 @@ async fn a_request_past_its_deadline_gets_429_with_retry_after() -> Result<(), F
     let mock = MockTransport::new();
     mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
     let gw = gateway(&mock, &Slots::new(1), Duration::from_millis(50))?;
-    let (held, _) = gw.handle(request("a", "paid")).await;
+    let (held, _) = serve(&gw, request("a", "paid")).await;
     let started = Instant::now();
-    let (status, headers, _) = read_whole(gw.handle(request("b", "free")).await.0).await;
+    let (status, headers, _) = read_whole(serve(&gw, request("b", "free")).await.0).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(headers[RETRY_AFTER], "1");
     assert_eq!(started.elapsed(), Duration::from_millis(50), "it waited");
@@ -39,10 +39,10 @@ async fn parked_requests_are_admitted_by_priority_when_a_slot_frees() -> Result<
     }
     let slots = Slots::new(1);
     let gw = gateway(&mock, &slots, Duration::from_secs(5))?;
-    let (held, _) = gw.handle(request("first", "paid")).await;
+    let (held, _) = serve(&gw, request("first", "paid")).await;
     let park = |model: &'static str, tier| {
         let gw = gw.clone();
-        tokio::spawn(async move { read_whole(gw.handle(request(model, tier)).await.0).await.0 })
+        tokio::spawn(async move { read_whole(serve(&gw, request(model, tier)).await.0).await.0 })
     };
     let free = park("free", "free");
     parked(&slots, 1).await;
@@ -61,10 +61,10 @@ async fn a_parked_request_that_leaves_loses_no_slot() -> Result<(), Fault> {
     mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
     let slots = Slots::new(1);
     let gw = gateway(&mock, &slots, Duration::from_secs(5))?;
-    let (held, _) = gw.handle(request("first", "paid")).await;
+    let (held, _) = serve(&gw, request("first", "paid")).await;
     let gone = tokio::spawn({
         let gw = gw.clone();
-        async move { drop(gw.handle(request("gone", "paid")).await) }
+        async move { drop(serve(&gw, request("gone", "paid")).await) }
     });
     parked(&slots, 1).await;
     gone.abort();

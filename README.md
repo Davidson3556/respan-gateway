@@ -50,9 +50,11 @@ not: `https://api.anthropic.com`.
 In plain words: a client sends a request, plugins look at it, the gateway
 sends it on to a provider, and the response streams back through the
 plugins. A request carries inputs and its response carries outputs. A
-request that asks to switch protocols (`Upgrade`), such as a WebSocket,
-is upgrading: its inputs stream after its head. Any other request is
-whole: its body, even empty, is its one input.
+streaming request, as the HTTP adapter makes one that asks to switch
+protocols (`Upgrade`), such as a WebSocket, has its inputs stream after
+its head. Any other request is whole: its body, even empty, is its one
+input. The kernel reads no HTTP: the adapter, transports and formats own
+its rules ([0012](docs/decisions/0012-http-out-of-the-kernel.md)).
 
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, or its own (`with_input`). The
@@ -85,7 +87,9 @@ whole: its body, even empty, is its one input.
   extension. A cost cap reserves before the call (`sdks/ledger`) and
   settles from what that filter priced.
 - **Refusal**: a failure before the response head goes out, sent in the
-  client's format with the fault's status.
+  client's format with the fault's status and `Retry-After`; a provider's
+  error answer is one (`Fault::is_answer`), sent as it came to a client of
+  its format.
 - **Relay**: a format's promise to write each message as the bytes it
   came in while it says the same, an edit written into them: the client's
   inputs to a provider of that format, and the provider's response (or a
@@ -114,10 +118,11 @@ test when its milestone lands. The kernel API is frozen after M2.
 
 | Path | What it is |
 |---|---|
-| `crates/core` | The kernel: plugins, calls, filters; no HTTP, config or kinds. |
+| `crates/core` | The kernel: plugins, calls, filters; no HTTP rules, config or kinds. |
+| `crates/http` | HTTP's rules at the edges: the adapter, credentials, what a transport strips. |
 | `crates/formats` | The chat kind, OpenAI Chat and Anthropic Messages. |
 | `crates/plugins` | First-party plugins, such as the model router. |
-| `crates/server` | The HTTP adapter and transport. |
+| `crates/server` | The axum router and the HTTP transport. |
 | `crates/testkit` | A mock transport and the kernel's tests. |
 | `crates/respan-gateway` | The binary: YAML config and `check`. |
 | `sdks/` | Building blocks for plugins: `routing`, `text`, `ledger`, `mcp`. |

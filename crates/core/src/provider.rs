@@ -75,8 +75,8 @@ impl Edge for ProviderContext {
 }
 
 impl ProviderContext {
-    /// The request as it was when this call was made, its head's
-    /// extensions this call's ([`ProviderContext::extensions`]).
+    /// The request as it was when this call was made, its extensions this
+    /// call's ([`ProviderContext::extensions`]).
     pub fn client(&self) -> &ClientContext {
         &self.client
     }
@@ -114,7 +114,7 @@ impl ProviderContext {
     ) -> Result<(), Fault> {
         match is_input::<T>(&*self.format)? {
             false => unlocked(&mut self.outputs).add(filter, false),
-            // Later inputs follow only an upgrading request, never an own input.
+            // Later inputs follow only a streaming request, never an own input.
             true if self.client.later.is_some() && self.input.own_format.is_none() => {
                 locked(&self.inputs).add(filter, true)
             }
@@ -122,25 +122,26 @@ impl ProviderContext {
         }
     }
 
-    /// This call's extensions, in [`ProviderContext::client`]'s head: the
+    /// This call's extensions, [`ProviderContext::client`]'s: the
     /// request's, its own ([`Call::with_extension`](crate::Call::with_extension)),
-    /// and what its hooks set.
+    /// and what its hooks set. The transport gets them with the call.
     pub fn extensions(&self) -> &Extensions {
-        &self.client.head.extensions
+        &self.client.extensions
     }
 
     /// Like [`ProviderContext::extensions`], for changing them, such as to
     /// hand a tenant's key to the transport
     /// ([`Transport::send`](crate::Transport::send)).
     pub fn extensions_mut(&mut self) -> &mut Extensions {
-        &mut self.client.head_mut().extensions
+        &mut self.client.extensions
     }
 
     /// Edit this call's `http::Request`, with its first frame, after its
     /// [`request_encoder`](crate::Format::request_encoder) and before the
     /// transport, in the order added; the decoder gets it as edited. `Err`
-    /// fails the call. Put credentials in an extension the transport reads
-    /// ([`ProviderContext::extensions_mut`]), as a transport may strip them.
+    /// fails the call. The kernel reads nothing of it. Put credentials in
+    /// an extension the transport reads ([`ProviderContext::extensions_mut`]),
+    /// as a transport may strip them.
     pub fn edit_call(
         &mut self,
         f: impl FnOnce(&mut http::Request<Bytes>) -> Result<(), Fault> + Send + 'static,

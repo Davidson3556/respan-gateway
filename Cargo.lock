@@ -1123,6 +1123,7 @@ dependencies = [
  "http",
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "respan-gateway-ledger",
  "respan-gateway-mcp",
  "respan-gateway-plugins",
@@ -1141,7 +1142,18 @@ name = "respan-gateway-formats"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
+ "respan-gateway-http",
  "serde",
+]
+
+[[package]]
+name = "respan-gateway-http"
+version = "0.0.0"
+dependencies = [
+ "respan-gateway-core",
+ "respan-gateway-formats",
+ "respan-gateway-testkit",
+ "tokio",
 ]
 
 [[package]]
@@ -1160,6 +1172,7 @@ version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "respan-gateway-testkit",
  "tokio",
 ]
@@ -1191,6 +1204,7 @@ dependencies = [
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "tokio",
  "tower",
 ]
@@ -1201,8 +1215,8 @@ version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "respan-gateway-plugins",
- "respan-gateway-server",
  "tokio",
 ]
 

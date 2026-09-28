@@ -20,7 +20,7 @@ struct Base {
     /// The client's head as it arrived, which decoding reads.
     head: Arc<http::request::Parts>,
     raw: Bytes,
-    /// Whether `raw` is a message, as an upgrading request's head is not.
+    /// Whether `raw` is a message, as a streaming request's head is not.
     message: bool,
     input: OnceLock<Result<AnyInput, Fault>>,
 }
@@ -68,7 +68,7 @@ impl Whose {
 pub(crate) type Sent = (Bytes, Option<AnyInput>);
 
 impl Input {
-    /// The input in `raw`; `None` for an upgrading request's head.
+    /// The input in `raw`; `None` for a streaming request's head.
     pub(crate) fn new(
         format: Arc<dyn AnyFormat>,
         head: Arc<http::request::Parts>,
@@ -77,7 +77,7 @@ impl Input {
         let input = OnceLock::new();
         if raw.is_none() {
             let later =
-                "an upgrading request's inputs come after its head, to filters and take_inputs";
+                "a streaming request's inputs come after its head, to filters and take_inputs";
             let _ = input.set(Err(Fault::internal(later)));
         }
         let base = Base {
@@ -97,11 +97,6 @@ impl Input {
     /// The bytes it came in; empty if it came in none.
     pub(crate) fn raw(&self) -> &Bytes {
         &self.base.raw
-    }
-
-    /// The client's head as it arrived.
-    pub(crate) fn head(&self) -> &http::request::Parts {
-        &self.base.head
     }
 
     /// Bring `input`, a call's own, of `format`'s kind.
@@ -215,7 +210,7 @@ impl Input {
     }
 }
 
-/// An upgrading request's inputs after its head: its body, read once, and
+/// A streaming request's inputs after its head: its body, read once, and
 /// the client edge's input filters.
 pub(crate) struct Later {
     body: Mutex<Option<Body>>,
@@ -247,7 +242,7 @@ pub(crate) fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// A call's or reader's filters of the inputs.
 pub(crate) type InputFilters = Arc<Mutex<Filters>>;
 
-/// One input an upgrading request sends after its head.
+/// One input a streaming request sends after its head.
 pub(crate) struct Frame {
     pub(crate) input: AnyInput,
     pub(crate) whose: Whose,

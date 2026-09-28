@@ -1,6 +1,6 @@
 # 0008. Events carry their bytes
 
-- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md)
+- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-28
 
 ## Context
@@ -27,6 +27,8 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
   is each kind's obligation, stated in `Format`'s documentation. A
   provider's error body keeps its format's name
   (`Fault::with_raw(format, raw)`), as only that format writes it.
+  *Superseded by 0012:* `Fault::with_answer(format, answer)`, the whole
+  answer, or `with_words` for an error within a response.
 - `Format::says`: a value a reader sees nothing in, such as a keep-alive,
   framing or usage alone, passes no filter, is no content for `ready`, and
   is written where it came; `outputs` still yields it
@@ -80,7 +82,8 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
   a format of the client's writes it into the client's bytes.
 - A request encoder tells an upgrading call by the `Upgrade` a relay
   passes on; one translating an upgrading request has neither a first
-  input nor a body to tell it by.
+  input nor a body to tell it by. *Superseded by 0012:* it is told
+  (`streams`).
 - A provider's error event in a stream, or an error in a 200, goes as it
   came to a client of the same format; to another, in the client's words,
   as a refusal must be.
@@ -93,3 +96,5 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
   and filters see every value.
 - 0011: `ready` became `until_content`, and `until_end` holds a whole
   response.
+- 0012: `with_raw` became `with_answer` and `with_words`; encoders are
+  told a call streams.

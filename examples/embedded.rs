@@ -1,7 +1,8 @@
 //! Use case 14, the gateway as a library: another Rust service runs the
 //! pipeline in-process, with no server and no second hop. It builds a
-//! [`Gateway`], hands [`Gateway::handle`] an `http::Request`, reads the
-//! response and awaits the request's [`Outcome`].
+//! [`Gateway`], hands [`Gateway::handle`] an `http::Request`, whole, reads
+//! the response and awaits the request's [`Outcome`]. With no HTTP hop,
+//! it needs no adapter; `Err` is what no format could write.
 //!
 //! The request's `Outcome` says how it ended. The kernel counts no usage:
 //! the embedder tallies it with a plugin that sums what each call's
@@ -28,9 +29,9 @@ fn gateway(mock: &MockTransport, tally: Meter) -> Result<Gateway, Fault> {
         .target("openai")
 }
 
-/// One chat request through the pipeline: the answer's body and the
-/// request's outcome.
-async fn ask(gw: &Gateway, prompt: &str) -> Result<(Bytes, Outcome), Fault> {
+/// One chat request through the pipeline: the answer's status and body,
+/// and the request's outcome.
+async fn ask(gw: &Gateway, prompt: &str) -> Result<(http::StatusCode, Bytes, Outcome), Fault> {
     let body = serde_json::json!({
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
@@ -38,10 +39,11 @@ async fn ask(gw: &Gateway, prompt: &str) -> Result<(Bytes, Outcome), Fault> {
     let req = http::Request::post("/v1/chat/completions")
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from(body.to_string())))?;
-    let (resp, outcome) = gw.handle(req).await;
+    let (resp, outcome) = gw.handle(req, false).await;
+    let (head, body) = resp?.into_parts();
     // Read the body first: the outcome resolves once the response ends.
-    let body = resp.into_body().collect().await?.to_bytes();
-    Ok((body, outcome.await))
+    let body = body.collect().await?.to_bytes();
+    Ok((head.status, body, outcome.await))
 }
 
 #[tokio::main]
@@ -50,11 +52,10 @@ async fn main() -> Result<(), Fault> {
     mock.reply(OPENAI, mock::json(http::StatusCode::OK, ANSWER));
     let tally = Meter::default();
     let gw = gateway(&mock, tally.clone())?;
-    let (body, outcome) = ask(&gw, "Say hi").await?;
+    let (status, body, outcome) = ask(&gw, "Say hi").await?;
     // End hooks run detached; wait for them before reading the tally.
     gw.idle().await;
-    let status = outcome.head.map(|h| h.status);
-    println!("status: {status:?}, ended: {:?}", outcome.end);
+    println!("status: {status}, ended: {:?}", outcome.end);
     println!("body:   {}", String::from_utf8_lossy(&body));
     println!("usage:  {:?}", tally.usage());
     Ok(())

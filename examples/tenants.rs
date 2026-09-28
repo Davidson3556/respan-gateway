@@ -21,8 +21,8 @@ use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_server::CallHeaders;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_http::{CallHeaders, Credential};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// One tenant's policy, at one version.
 #[derive(Debug, Clone, Default)]
@@ -65,14 +65,12 @@ impl Tenants {
 impl Plugin for Tenants {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         // The gateway key is ours: take it off before anything is sent.
-        let key = cx.head_mut().headers.remove(AUTHORIZATION);
-        let key = key
-            .as_ref()
-            .and_then(|v| v.to_str().ok()?.strip_prefix("Bearer "));
+        let credential = cx.extensions_mut().remove::<Credential>();
+        let key = credential.as_ref().and_then(Credential::bearer);
         let unknown = || Fault::new(StatusCode::UNAUTHORIZED, "unauthorized", "unknown key");
         let tenant = self.get(key.unwrap_or_default()).ok_or_else(unknown)?;
         cx.set_target(tenant.target.clone());
-        cx.head_mut().extensions.insert(tenant);
+        cx.extensions_mut().insert(tenant);
         Ok(None)
     }
 
@@ -121,7 +119,7 @@ async fn send(gw: &Gateway, gateway_key: &str) -> Result<StatusCode, Fault> {
     let mut req = post("/v1/chat/completions", body);
     req.headers_mut()
         .insert(AUTHORIZATION, bearer(gateway_key)?);
-    Ok(read_whole(gw.handle(req).await.0).await.0)
+    Ok(read_whole(serve(gw, req).await.0).await.0)
 }
 
 const OK: &str =

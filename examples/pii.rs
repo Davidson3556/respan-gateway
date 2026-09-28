@@ -28,7 +28,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::Conversation;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -98,7 +98,7 @@ impl Plugin for Pii {
         }
         let vault = Placeholders::default();
         cx.filter(Holdback::new(vault.clone()))?;
-        cx.head_mut().extensions.insert(vault);
+        cx.extensions_mut().insert(vault);
         Ok(None)
     }
 }
@@ -173,7 +173,7 @@ async fn ask_via(
     mock: &MockTransport,
     req: http::Request<Body>,
 ) -> Result<(StatusCode, String, String), Fault> {
-    let (status, _, body) = read_whole(gw.handle(req).await.0).await;
+    let (status, _, body) = read_whole(serve(gw, req).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     let data = body.lines().filter_map(|l| l.strip_prefix("data: "));
     let json = data.filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok());

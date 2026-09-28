@@ -17,7 +17,8 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_http::Asked;
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 const JUDGE: &str = "http://judge.test/v1";
 const CHEAP: &str = "http://cheap.test/v1";
@@ -68,7 +69,8 @@ struct Egress(Arc<Mutex<Vec<String>>>);
 impl Plugin for Egress {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         self.seen().push(px.provider().to_owned());
-        if px.client().head().headers.contains_key("x-blocked") {
+        let asked = px.extensions().get::<Asked>();
+        if asked.is_some_and(|a| a.headers.contains_key("x-blocked")) {
             return Err(Fault::new(
                 http::StatusCode::FORBIDDEN,
                 "egress",
@@ -113,7 +115,7 @@ async fn main() -> Result<(), Fault> {
     let egress = Egress::default();
     let gw = gateway(&mock, egress.clone())?;
     let (status, _, body) =
-        read_whole(gw.handle(post("/v1/chat/completions", REQUEST)).await.0).await;
+        read_whole(serve(&gw, post("/v1/chat/completions", REQUEST)).await.0).await;
     println!("{status} {}", String::from_utf8_lossy(&body?));
     for sent in mock.sent() {
         println!(

@@ -8,7 +8,7 @@ use respan_gateway_core::http::{self, StatusCode};
 use respan_gateway_core::http_body_util::{BodyExt, Full};
 use respan_gateway_core::{Body, Fault, Gateway, Transport, async_trait, serde_json};
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_testkit::{post, read_whole};
+use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Reads each call's body and answers with `.0`, as JSON or SSE.
 struct Canned(Bytes, &'static str);
@@ -55,7 +55,7 @@ async fn time(name: &str, stream: bool, reply: &str, content_type: &'static str)
         async move {
             for _ in 0..n {
                 let req = post("/v1/chat/completions", body.clone());
-                let (status, _, out) = read_whole(gw.handle(req).await.0).await;
+                let (status, _, out) = read_whole(serve(&gw, req).await.0).await;
                 assert!(status == StatusCode::OK && out.is_ok());
             }
         }

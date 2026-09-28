@@ -18,8 +18,9 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::conversation::{Conversation, set_model};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_http::Asked;
 use respan_gateway_routing::{Attempt, Backoff, Until, Watchdog, first_success, race};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// Falls back from the target to Anthropic, or hedges it with `openai-eu`.
 struct Resilient;
@@ -33,7 +34,8 @@ impl Plugin for Resilient {
         };
         // Each answer is judged at its first content; `Until::End` would
         // hold each whole and race for the first to finish.
-        if cx.head().headers.contains_key("x-hedge") {
+        let asked = cx.extensions().get::<Asked>();
+        if asked.is_some_and(|a| a.headers.contains_key("x-hedge")) {
             let calls = [cx.call(target), cx.call("openai-eu")];
             let stagger = Duration::from_millis(200);
             return race(calls, stagger, Until::Content).await.map(Some);
@@ -124,7 +126,7 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     for (url, reply) in replies.into_iter().chain([(ANTHROPIC, anthropic())]) {
         mock.reply(url, reply);
     }
-    let (status, _, body) = read_whole(gw.handle(req).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
     gw.idle().await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     let last = body.trim_end().lines().last().unwrap_or_default();

@@ -7,7 +7,8 @@ knows no usage format.
 - `Accounting::new(ledger, quote)`: a plugin that holds each call's worst
   case before it is sent (402 if it does not fit) and settles it from the
   call's `Tally`, or at least the hold when its cost may be partial (never
-  reported, or cut off). `.ttl(..)` bounds a hold.
+  reported, or cut off); nothing when the provider answered with an error
+  (`Fault::is_answer`). `.ttl(..)` bounds a hold.
 - `Quote::new(accounts, reserve)`: who pays and the most the call can cost.
   The quote gets the call (`&mut ProviderContext`) and its `Tally`, so it
   can add a filter of its kind that prices each usage increment into it.

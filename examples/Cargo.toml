@@ -23,6 +23,7 @@ respan-gateway-formats.workspace = true
 [dev-dependencies]
 respan-gateway-plugins.workspace = true
 respan-gateway-server.workspace = true
+respan-gateway-http.workspace = true
 respan-gateway-testkit.workspace = true
 respan-gateway-routing.workspace = true
 respan-gateway-text.workspace = true

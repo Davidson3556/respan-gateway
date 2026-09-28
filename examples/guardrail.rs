@@ -23,7 +23,7 @@ use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Plugin, ProviderC
 use respan_gateway_core::{Response, async_trait};
 use respan_gateway_formats::conversation::{Conversation, Piece, Reply};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -154,7 +154,7 @@ fn deltas(deltas: &[&str]) -> mock::Reply {
 }
 
 async fn send(gw: &Gateway, req: Request<Body>) -> (StatusCode, String) {
-    let (status, _, body) = read_whole(gw.handle(req).await.0).await;
+    let (status, _, body) = read_whole(serve(gw, req).await.0).await;
     let body = body.unwrap_or_else(|f| Bytes::from(f.to_string()));
     (status, String::from_utf8_lossy(&body).into_owned())
 }

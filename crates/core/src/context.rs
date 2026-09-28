@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
+use http::Extensions;
 use http_body_util::BodyExt;
 use tokio::runtime::Handle;
 
@@ -34,17 +35,20 @@ pub(crate) fn unlocked<T>(edits: &mut Mutex<T>) -> &mut T {
     edits.get_mut().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// One client request, as the client edge's hooks see it: head, body,
-/// inputs, target, response edits and provider calls.
+/// One client request, as the client edge's hooks see it: body, inputs,
+/// extensions, target, response edits and provider calls.
 pub struct ClientContext {
     /// The first format served that accepted the request.
     pub(crate) format: Arc<dyn AnyFormat>,
+    /// The head as the adapter handed it over, without its extensions: the
+    /// formats' alone to read.
     pub(crate) head: Arc<http::request::Parts>,
+    pub(crate) extensions: Extensions,
     /// The provider called if every plugin passes.
     pub(crate) target: Option<String>,
-    /// The input that came with the head; none for an upgrading request.
+    /// The input that came with the head; none for a streaming request.
     pub(crate) input: Input,
-    /// An upgrading request's later inputs.
+    /// A streaming request's later inputs.
     pub(crate) later: Option<Arc<Later>>,
     /// Idle once the request ends, as `running` is dropped; copies share it.
     pub(crate) cut: Arc<InFlight>,
@@ -93,19 +97,21 @@ impl Edge for ClientContext {
 impl ClientContext {
     pub(crate) fn new(
         format: Arc<dyn AnyFormat>,
-        head: http::request::Parts,
+        mut head: http::request::Parts,
         body: Option<Bytes>,
         later: Option<Later>,
         runtime: Handle,
         gateway: Arc<Inner>,
     ) -> Self {
         let target = gateway.target.clone();
+        let extensions = std::mem::take(&mut head.extensions);
         let head = Arc::new(head);
         let cut = Arc::default();
         Self {
             input: Input::new(format.clone(), head.clone(), body),
             format,
             head,
+            extensions,
             target,
             later: later.map(Arc::new),
             running: Some(InFlight::enter(&cut)),
@@ -124,24 +130,23 @@ impl ClientContext {
         self.format.name()
     }
 
-    /// The client's request line and headers, without those its
-    /// `Connection` names. Its `extensions` carry values set by the adapter
-    /// or earlier plugins, and on a provider edge the call's
+    /// The request's extensions: values the adapter set, such as the
+    /// client's credentials or a view of its head, or earlier plugins; on
+    /// a provider edge, the call's
     /// ([`ProviderContext::extensions`](crate::ProviderContext::extensions)).
-    pub fn head(&self) -> &http::request::Parts {
-        &self.head
+    /// The kernel reads none of them.
+    pub fn extensions(&self) -> &Extensions {
+        &self.extensions
     }
 
-    /// Like [`ClientContext::head`], for changing it, such as to remove the
-    /// gateway's own credential before a relay passes headers on. Later
-    /// calls are filled from it; the
-    /// [`request_decoder`](crate::Format::request_decoder) reads the head as
-    /// it arrived.
-    pub fn head_mut(&mut self) -> &mut http::request::Parts {
-        Arc::make_mut(&mut self.head)
+    /// Like [`ClientContext::extensions`], for changing them, such as to
+    /// mark the request for later plugins or remove a credential no call
+    /// should carry. Calls made later copy them.
+    pub fn extensions_mut(&mut self) -> &mut Extensions {
+        &mut self.extensions
     }
 
-    /// The client's body as it arrived; empty for an upgrading request.
+    /// The client's body as it arrived; empty for a streaming request.
     pub fn body(&self) -> &Bytes {
         self.input.raw()
     }
@@ -156,8 +161,8 @@ impl ClientContext {
     /// The input that came with the head as `T`, the client's
     /// [`Input`](crate::Format::Input) type, as plugins' filters left it.
     /// `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
-    /// type or an upgrading request, whose inputs come after its head (it
-    /// has `Upgrade`); or the decoder's or a filter's `Err`, the same on
+    /// type or a streaming request, whose inputs come after its head; or
+    /// the decoder's or a filter's `Err`, the same on
     /// every read. A relay sends the client's body unread, so a plugin that
     /// must vet the input refuses what it cannot read.
     pub fn input<T: Any>(&self) -> Result<&T, Fault> {
@@ -166,8 +171,8 @@ impl ClientContext {
 
     /// The request's inputs as `T`, the client's
     /// [`Input`](crate::Format::Input) type, as plugins' filters left them:
-    /// a copy of a whole request's one input, which calls still carry; an
-    /// upgrading request's as they arrive, read once, so no call gets what
+    /// a copy of a whole request's one input, which calls still carry; a
+    /// streaming request's as they arrive, read once, so no call gets what
     /// this takes. They are taken when first awaited, and given back if
     /// none was read. It ends when the client stops sending or the request
     /// ends, with an `Err` if the body broke; one `Err` with
@@ -205,6 +210,7 @@ impl ClientContext {
         Self {
             format: self.format.clone(),
             head: self.head.clone(),
+            extensions: self.extensions.clone(),
             target: self.target.clone(),
             input: self.input.clone(),
             later: self.later.clone(),
@@ -218,8 +224,7 @@ impl ClientContext {
         }
     }
 
-    /// The client's request, its head as plugins left it and its body as
-    /// it arrived.
+    /// The client's request, head and body as they arrived.
     pub(crate) fn request(&self) -> Request {
         http::Request::from_parts((*self.head).clone(), self.body().clone())
     }
@@ -228,12 +233,10 @@ impl ClientContext {
         unlocked(&mut self.edits)
     }
 
-    /// Edit the status or headers sent to the client, refusals included.
-    /// Edits apply the last added first, as output filters do. An edit's
-    /// `Err` or panic, or a 101 to a request that did not ask to switch
-    /// protocols, refuses the request with no edits. Connection headers are
-    /// removed afterwards. The client's format writes for the status before
-    /// these edits ([`Response::with_status`]).
+    /// Edit the head sent to the client, refusals included, after the
+    /// client's format wrote it. Edits apply the last added first, as
+    /// output filters do. An edit's `Err` or panic refuses the request with
+    /// no edits. The adapter removes what a hop must not carry afterwards.
     pub fn edit_response_head(
         &mut self,
         f: impl FnOnce(&mut http::response::Parts) -> Result<(), Fault> + Send + 'static,
@@ -249,7 +252,7 @@ impl ClientContext {
     /// Input filters are the one way to edit inputs, the first added first,
     /// before calls and [`ClientContext::take_inputs`] get them. A whole
     /// request's one input is edited at once and the filter ended; it must
-    /// stay one input, as refusing is `Err`'s job. An upgrading request's
+    /// stay one input, as refusing is `Err`'s job. A streaming request's
     /// inputs are edited as they are read; once they ended, a filter sees
     /// their end at once. Output filters run after the provider edge's, the
     /// last added first.
@@ -275,14 +278,15 @@ impl ClientContext {
     /// request as it is now, sent when first awaited, until the request
     /// ends. It carries the request's inputs as plugins left them,
     /// translated if the provider speaks another format of the kind: a
-    /// whole request's one, or an upgrading request's later ones no other
+    /// whole request's one, or a streaming request's later ones no other
     /// reader took. Every plugin's [`on_provider`](crate::Plugin::on_provider)
-    /// runs first. An error status is still `Ok`.
+    /// runs first. A provider's error answer is still `Ok` here: it fails
+    /// the response as read ([`Response::until_content`]).
     ///
     /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if `provider` is
     /// unknown or cannot take the client's inputs (neither format nor kind
-    /// shared, or an upgrading request's to a call not switching
-    /// protocols); with [`codes::INTERNAL`](crate::codes::INTERNAL) for a
+    /// shared, or a streaming request's to a format that cannot carry
+    /// them); with [`codes::INTERNAL`](crate::codes::INTERNAL) for a
     /// [`Call::with_input`] of another kind, or once the request ended; with
     /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the request ends
     /// while it is pending; or the `Err` of an `on_provider`, an
@@ -304,6 +308,7 @@ impl ClientContext {
         B::Error: Into<Fault>,
     {
         let response = response.map(|body| body.map_err(Into::into).boxed_unsync());
-        Response::decoded(&self.format, &self.request(), response, true)
+        let streams = self.later.is_some();
+        Response::decoded(&self.format, &self.request(), response, true, streams)
     }
 }

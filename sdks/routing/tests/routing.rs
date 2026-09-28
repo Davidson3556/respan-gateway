@@ -14,7 +14,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_routing::{Attempt, Backoff, Role, Until, Watchdog, first_success, race};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;
 
 const A: &str = "http://a.test/v1";
@@ -203,7 +203,7 @@ impl Harness {
     }
 
     async fn post(&self, request: &'static str) -> (StatusCode, http::HeaderMap, String, Outcome) {
-        let (resp, outcome) = self.gw.handle(post("/v1/chat/completions", request)).await;
+        let (resp, outcome) = serve(&self.gw, post("/v1/chat/completions", request)).await;
         let (status, headers, body) = read_whole(resp).await;
         let body = body.map_or_else(
             |f| format!("aborted: {f}"),
@@ -308,8 +308,10 @@ async fn with_no_success_the_client_gets_the_last_429_and_its_retry_after() {
         headers.get(RETRY_AFTER).map(|v| v.as_bytes()),
         Some(&b"7"[..])
     );
+    // Changed: the 429 is a fault, which ended its call as it was read, so
+    // no attempt won.
     let roles: Vec<_> = h.record.all().into_iter().map(|r| r.2).collect();
-    assert_eq!(roles, [Role::Loser, Role::Winner]);
+    assert_eq!(roles, [Role::Loser, Role::Loser]);
 }
 
 #[tokio::test(start_paused = true)]

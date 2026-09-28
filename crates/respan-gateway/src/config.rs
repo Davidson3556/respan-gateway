@@ -179,7 +179,7 @@ fn auth_headers(provider: &str, auth: Option<&Auth>) -> Result<HeaderMap, Fault>
 #[cfg(test)]
 mod tests {
     use respan_gateway_core::http::StatusCode;
-    use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+    use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
     use super::*;
 
@@ -208,7 +208,7 @@ serve: [openai-chat]
     /// The URLs `gateway` called for an OpenAI Chat `request`.
     async fn sent_to(gateway: &Gateway, mock: &MockTransport, request: &str) -> Vec<String> {
         let req = post("/v1/chat/completions", request.to_owned());
-        drop(gateway.handle(req).await);
+        drop(serve(gateway, req).await);
         mock.sent().iter().map(|s| s.uri().to_string()).collect()
     }
 
@@ -279,9 +279,9 @@ plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
         let openai_client = r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#;
         let anthropic_client =
             r#"{"model":"gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
-        let to_claude = gateway.handle(post("/v1/chat/completions", openai_client));
+        let to_claude = serve(&gateway, post("/v1/chat/completions", openai_client));
         let (_, _, to_claude) = read_whole(to_claude.await.0).await;
-        let to_gpt = gateway.handle(post("/v1/messages", anthropic_client));
+        let to_gpt = serve(&gateway, post("/v1/messages", anthropic_client));
         let (_, _, to_gpt) = read_whole(to_gpt.await.0).await;
 
         let urls: Vec<String> = mock.sent().iter().map(|s| s.uri().to_string()).collect();

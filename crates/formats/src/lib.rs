@@ -20,7 +20,9 @@ pub use openai::OpenAiChat;
 pub use usage::Usage;
 
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::http::{self, HeaderValue, header::CONTENT_TYPE};
+use respan_gateway_core::http::{
+    self, HeaderValue, header::CONTENT_ENCODING, header::CONTENT_TYPE,
+};
 use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_core::{Decoder, Fault};
 
@@ -46,6 +48,13 @@ pub fn set_path(request: &mut http::Request<Bytes>, path: &str) {
     };
     // A path and a query that parsed parse.
     *request.uri_mut() = uri.parse().unwrap_or_default();
+}
+
+/// Mark a call whose body is not the client's bytes as sent, as when a
+/// value was written or its inputs stream: its `Content-Encoding`, the
+/// client's, goes.
+pub fn body_changed(request: &mut http::Request<Bytes>) {
+    request.headers_mut().remove(CONTENT_ENCODING);
 }
 
 /// Set a response's content type to `value` if it has none (RFC 9110 8.3).

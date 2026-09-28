@@ -17,7 +17,7 @@ mod session;
 mod stdio;
 mod streamable;
 
-pub use stdio::{Owner, StdioTransport};
+pub use stdio::{BUSY, NO_SESSION, Owner, StdioTransport, TOO_MANY_SESSIONS};
 pub use streamable::{SESSION, StreamableHttp};
 
 /// The code of the fault that ends a `POST` whose requests the server did

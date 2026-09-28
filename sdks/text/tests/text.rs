@@ -6,7 +6,7 @@ use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role,
 };
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -429,7 +429,7 @@ async fn a_placeholder_split_across_three_deltas_is_restored_in_either_stream() 
     let mock = MockTransport::new();
     mock.reply(OPENAI, openai_stream(&["Mail <EMA", "IL_", "1> now"]));
     let gw = gateway(&mock, "openai", Restore(email()))?;
-    let (status, _, body) = read_whole(gw.handle(openai_request(json!("hi"))).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, openai_request(json!("hi"))).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(streamed_text(&body), "Mail bob@x.io now", "{body}");
@@ -437,7 +437,7 @@ async fn a_placeholder_split_across_three_deltas_is_restored_in_either_stream() 
 
     mock.reply(ANTHROPIC, anthropic_stream(&["Mail <EMA", "IL_", "1> now"]));
     let gw = gateway(&mock, "anthropic", Restore(email()))?;
-    let (status, _, body) = read_whole(gw.handle(anthropic_request()).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, anthropic_request()).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(streamed_text(&body), "Mail bob@x.io now", "{body}");
@@ -465,7 +465,7 @@ async fn a_violation_in_the_held_start_is_refused_before_any_byte() -> Result<()
             reply,
         );
         let gw = gateway(&mock, target, Guard)?;
-        let (resp, outcome) = gw.handle(openai_request(json!("hi"))).await;
+        let (resp, outcome) = serve(&gw, openai_request(json!("hi"))).await;
         let (status, _, body) = read_whole(resp).await;
         let body = String::from_utf8_lossy(&body?).into_owned();
         assert_eq!(status, StatusCode::BAD_REQUEST, "{target}: {body}");
@@ -491,7 +491,7 @@ async fn an_unreadable_request_is_refused_before_any_call() -> Result<(), Fault>
     let mock = MockTransport::new();
     let gw = gateway(&mock, "openai", Guard)?;
     let image = json!([{ "type": "image_url", "image_url": { "url": "data:," } }]);
-    let (status, _, body) = read_whole(gw.handle(openai_request(image)).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, openai_request(image)).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     assert!(body.contains(UNREADABLE), "{body}");
@@ -504,7 +504,7 @@ async fn a_clean_stream_passes_unchanged() -> Result<(), Fault> {
     let mock = MockTransport::new();
     mock.reply(OPENAI, openai_stream(&["bo", "at trip ", "is b", "o"]));
     let gw = gateway(&mock, "openai", Guard)?;
-    let (status, _, body) = read_whole(gw.handle(openai_request(json!("hi"))).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, openai_request(json!("hi"))).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(streamed_text(&body), "boat trip is bo", "{body}");
@@ -532,7 +532,7 @@ async fn text_split_inside_a_character_by_the_transport_is_restored() -> Result<
     let chunk = chunk("h\u{e9}llo <EMAIL_1> \u{1F600}!");
     mock.reply(OPENAI, cut(&[&chunk, "data: [DONE]\n\n"], 3));
     let gw = gateway(&mock, "openai", Restore(email()))?;
-    let (status, _, body) = read_whole(gw.handle(openai_request(json!("hi"))).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, openai_request(json!("hi"))).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -550,7 +550,7 @@ async fn a_stream_cut_while_text_is_held_sends_it_then_the_error() -> Result<(),
     reply.body_mut().push(Err(Fault::upstream("reset")));
     mock.reply(OPENAI, reply);
     let gw = gateway(&mock, "openai", Restore(email()))?;
-    let (_, _, body) = read_whole(gw.handle(openai_request(json!("hi"))).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, openai_request(json!("hi"))).await.0).await;
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert_eq!(streamed_text(&body), "Mail <EMA", "{body}");
     assert!(body.contains("error"), "{body}");
@@ -601,7 +601,7 @@ async fn a_keep_alive_and_usage_pass_a_holdback_in_place() -> Result<(), Fault> 
     let body = json!({ "model": "m", "stream": true, "stream_options": { "include_usage": true },
         "messages": [{ "role": "user", "content": "hi" }] });
     let req = post("/v1/chat/completions", body.to_string());
-    let (status, _, body) = read_whole(gw.handle(req).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body?, Bytes::from(chunks.concat()));
     Ok(())

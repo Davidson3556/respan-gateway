@@ -9,7 +9,8 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::conversation::Reply;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
-use respan_gateway_server::{CallHeaders, HttpTransport, add_own_headers, router};
+use respan_gateway_http::{CallHeaders, Credential, credentials};
+use respan_gateway_server::{HttpTransport, router};
 use tokio::net::TcpListener;
 
 const SSE: &str =
@@ -396,15 +397,19 @@ const CLIENT: [(&str, &str); 7] = [
     ("x-tokenizer", "t"),
 ];
 
+// Changed: the adapter lifts the client's credentials into an extension,
+// which the transport puts back when it has no keys of its own.
 #[test]
 fn without_headers_of_its_own_the_clients_credentials_pass_through() {
     let mut head = call_head("/v1/chat?key=k&beta=1", &CLIENT);
     let before = head.headers.clone();
+    let lifted = Credential::lift(&mut head).unwrap_or_else(|| panic!("no credentials"));
+    head.extensions.insert(lifted);
 
-    add_own_headers(&mut head, &http::HeaderMap::new()).unwrap_or_else(|e| panic!("{e}"));
+    credentials(&mut head, &http::HeaderMap::new());
 
     assert_eq!(head.headers, before);
-    assert_eq!(head.uri, "/v1/chat?key=k&beta=1");
+    assert_eq!(head.uri, "/v1/chat?beta=1&key=k");
 }
 
 #[test]
@@ -413,7 +418,7 @@ fn headers_of_its_own_take_the_clients_credentials_off() {
     let mut head = call_head(query, &CLIENT);
 
     let own = headers(&[("x-team", "t")]);
-    add_own_headers(&mut head, &own).unwrap_or_else(|e| panic!("{e}"));
+    credentials(&mut head, &own);
 
     let got = |name| head.headers.get(name).and_then(|v| v.to_str().ok());
     for gone in ["authorization", "x-api-key", "x-auth-token"] {
@@ -434,7 +439,7 @@ fn a_calls_own_headers_are_the_transports_for_that_call() {
     head.extensions.insert(CallHeaders(call));
     let own = headers(&[("authorization", "Bearer operator"), ("x-team", "t")]);
 
-    add_own_headers(&mut head, &own).unwrap_or_else(|e| panic!("{e}"));
+    credentials(&mut head, &own);
 
     let all = |name| {
         head.headers
@@ -455,7 +460,7 @@ fn a_calls_own_headers_are_the_transports_for_that_call() {
     let call = headers(&[("x-api-key", "tenant")]);
     head.extensions.insert(CallHeaders(call));
 
-    add_own_headers(&mut head, &http::HeaderMap::new()).unwrap_or_else(|e| panic!("{e}"));
+    credentials(&mut head, &http::HeaderMap::new());
 
     let all = |name| {
         head.headers

@@ -7,10 +7,11 @@ use respan_gateway_core::http_body_util::{self, BodyExt, Full};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Outcome, Plugin, Response};
 use respan_gateway_core::{Transport, async_trait, codes};
+use respan_gateway_http::Credential;
 use respan_gateway_mcp::{
     Owner, SESSION, StdioTransport, StreamableHttp, TIMED_OUT, ToClient, ToServer,
 };
-use respan_gateway_testkit::{MockTransport, mock};
+use respan_gateway_testkit::{MockTransport, mock, serve};
 
 const AT: &str = "http://mcp.test";
 
@@ -63,7 +64,7 @@ fn request(method: Method, body: &str, headers: &[(&str, &str)]) -> http::Reques
 }
 
 async fn send(gw: &Gateway, req: http::Request<Body>) -> (StatusCode, HeaderMap, String, Outcome) {
-    let (resp, outcome) = gw.handle(req).await;
+    let (resp, outcome) = serve(gw, req).await;
     let (head, body) = resp.into_parts();
     let body = body.collect().await.map(|b| b.to_bytes());
     let body = body.unwrap_or_else(|f| panic!("aborted: {f}"));
@@ -279,7 +280,7 @@ impl Transport for Quiet {
 #[tokio::test]
 async fn a_quiet_get_stream_opens_at_once() {
     let gw = gateway(Quiet, None);
-    let get = gw.handle(request(Method::GET, "", &[(SESSION, "s1")]));
+    let get = serve(&gw, request(Method::GET, "", &[(SESSION, "s1")]));
     let (resp, _) = tokio::time::timeout(Duration::from_secs(2), get)
         .await
         .unwrap_or_else(|_| panic!("the head waited"));
@@ -365,10 +366,10 @@ echo '{"jsonrpc":"2.0","method":"notifications/message"}'; sleep 3"#;
     let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
     let session = init(&gw, &[]).await;
     let with = [(SESSION, &session[..])];
-    let (listen, _) = gw.handle(request(Method::GET, "", &with)).await;
+    let (listen, _) = serve(&gw, request(Method::GET, "", &with)).await;
     let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#;
     // The client leaves before the server says anything.
-    let posted = gw.handle(request(Method::POST, call, &with));
+    let posted = serve(&gw, request(Method::POST, call, &with));
     assert!(
         tokio::time::timeout(Duration::from_millis(100), posted)
             .await
@@ -404,9 +405,9 @@ async fn a_session_belongs_to_the_credential_that_started_it() {
     let (status, ..) = send(&gw, request(Method::POST, LIST, &a)).await;
     assert_eq!(status, StatusCode::OK);
     // The session's stream is not taken over by a second GET.
-    let (first, _) = gw.handle(request(Method::GET, "", &a)).await;
+    let (first, _) = serve(&gw, request(Method::GET, "", &a)).await;
     assert_eq!(first.status(), StatusCode::OK);
-    let (second, _) = gw.handle(request(Method::GET, "", &a)).await;
+    let (second, _) = serve(&gw, request(Method::GET, "", &a)).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
 }
 
@@ -459,10 +460,10 @@ struct Authenticates;
 #[async_trait]
 impl Plugin for Authenticates {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let head = cx.head_mut();
-        let key = head.headers.remove("authorization");
+        let credential = cx.extensions_mut().remove::<Credential>();
+        let key = credential.and_then(|c| c.get("authorization").cloned());
         let key = key.and_then(|k| k.to_str().ok().map(String::from));
-        head.extensions.insert(Owner(key.unwrap_or_default()));
+        cx.extensions_mut().insert(Owner(key.unwrap_or_default()));
         Ok(None)
     }
 }
@@ -497,7 +498,7 @@ for i in $(seq 500); do echo '{"jsonrpc":"2.0","method":"notifications/message"}
     let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
     let session = init(&gw, &[]).await;
     let with = [(SESSION, &session[..])];
-    let (listen, _) = gw.handle(request(Method::GET, "", &with)).await;
+    let (listen, _) = serve(&gw, request(Method::GET, "", &with)).await;
     let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     send(&gw, request(Method::POST, note, &with)).await;
     // The client reads nothing until the server has said everything.
@@ -521,7 +522,7 @@ echo '{"jsonrpc":"2.0","id":3,"result":{"fast":true}}'; exec sleep 100"#;
     let with = [(SESSION, &session[..])];
     let slow = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#;
     // The client gives up on id 2; the server answers it anyway, later.
-    let posted = gw.handle(request(Method::POST, slow, &with));
+    let posted = serve(&gw, request(Method::POST, slow, &with));
     let gave_up = tokio::time::timeout(Duration::from_millis(100), posted).await;
     assert!(gave_up.is_err());
     let other = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#;
@@ -547,7 +548,7 @@ sed -u -n -e '/"jsonrpc".*"jsonrpc"/{s/.*/{"jsonrpc":"2.0","id":null,"error":{"c
     // Far past a pipe's buffer, so writing it waits on the busy server.
     let big = json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":"echo","arguments":{"text":"x".repeat(1 << 20)}}});
-    let posted = gw.handle(request(Method::POST, &big.to_string(), &with));
+    let posted = serve(&gw, request(Method::POST, &big.to_string(), &with));
     let gave_up = tokio::time::timeout(Duration::from_millis(200), posted).await;
     assert!(
         gave_up.is_err(),

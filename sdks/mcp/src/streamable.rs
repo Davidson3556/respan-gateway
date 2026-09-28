@@ -17,6 +17,7 @@ use respan_gateway_core::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Decoder, Encoder, Fault, Format, codes};
 use respan_gateway_formats::{self as formats, relayed::Relayed, sse, whole::Relay};
+use respan_gateway_http::bodiless;
 
 use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, requests};
 
@@ -85,7 +86,14 @@ impl Format for StreamableHttp {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&ToServer>,
+        streams: bool,
     ) -> Box<dyn Encoder<ToServer>> {
+        if streams {
+            return formats::whole::unstreamable(NAME);
+        }
+        if first.is_some() {
+            formats::body_changed(request);
+        }
         formats::set_path(request, self.path);
         if let Some(first) = first {
             *request.method_mut() = first.method.clone();
@@ -116,6 +124,9 @@ impl Format for StreamableHttp {
         head: &http::response::Parts,
         request: &http::Request<Bytes>,
     ) -> Box<dyn Decoder<ToClient>> {
+        if head.status.is_success() && bodiless(request.method(), head.status) {
+            return formats::whole::nothing();
+        }
         let name = Arc::from(NAME);
         let on_message = move |raw: Bytes, out: &mut Vec<ToClient>| {
             if !raw.is_empty() {
@@ -132,12 +143,28 @@ impl Format for StreamableHttp {
     }
 
     /// Messages as events or one JSON body, each as its bytes while it says
-    /// the same, and a failure as a JSON-RPC error per request unanswered.
+    /// the same, and a failure as a JSON-RPC error per request unanswered:
+    /// a refusal under its status, unless a provider's answer in this
+    /// format, which goes as it came. A 202, a 204 and a response to a
+    /// `HEAD` have no body.
     fn response_encoder(
         &self,
         head: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<ToClient>> {
+        if let Some(fault) = refusal {
+            let body = respan_gateway_http::answered(NAME, fault, head).unwrap_or_else(|| {
+                formats::default_content_type(head, JSON);
+                let (pending, batch) = posted(request);
+                failure(fault, &pending, false, batch).into()
+            });
+            let bodiless = bodiless(request.method(), head.status);
+            return formats::whole::written(if bodiless { Bytes::new() } else { body });
+        }
+        if bodiless(request.method(), head.status) || head.status == StatusCode::ACCEPTED {
+            return formats::whole::no_body();
+        }
         let listen = request.method() == Method::GET;
         if !matches!(head.status, StatusCode::ACCEPTED | StatusCode::NO_CONTENT) {
             let stream = listen && head.status.is_success();
@@ -156,12 +183,9 @@ impl Format for StreamableHttp {
                 whole(outputs)
             })
         };
-        let fail = move |f: &Fault| match f.raw(NAME) {
-            Some(raw) => raw.clone(),
-            None => {
-                let pending = lock(&pending);
-                failure(f, &pending, stream, batch).into()
-            }
+        let fail = move |f: &Fault| -> Bytes {
+            let pending = lock(&pending);
+            failure(f, &pending, stream, batch).into()
         };
         let relay = Relay::new(write, fail, stream);
         // A quiet stream opens with a comment, so its head goes at once.

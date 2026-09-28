@@ -16,7 +16,7 @@ use respan_gateway_core::{bytes, futures, http};
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
-use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole};
+use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
 
 const OPENAI: &str = "http://openai.test/v1";
 const ANTHROPIC: &str = "http://anthropic.test";
@@ -42,26 +42,28 @@ impl Format for Raw {
 
     fn request_encoder(
         &self,
-        _request: &mut http::Request<Bytes>,
-        _first: Option<&Sent<Raw>>,
+        request: &mut http::Request<Bytes>,
+        first: Option<&Sent<Raw>>,
+        streams: bool,
     ) -> Box<dyn Encoder<Sent<Raw>>> {
-        opaque::request_encoder()
+        opaque::request_encoder(request, first, streams)
     }
 
     fn response_decoder(
         &self,
         head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        request: &http::Request<Bytes>,
     ) -> Box<dyn Decoder<Got<Raw>>> {
-        opaque::response_decoder("raw", head)
+        opaque::response_decoder("raw", head, request)
     }
 
     fn response_encoder(
         &self,
         head: &mut http::response::Parts,
-        _request: &http::Request<Bytes>,
+        request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Got<Raw>>> {
-        opaque::response_encoder("raw", head)
+        opaque::response_encoder("raw", head, request, refusal)
     }
 }
 
@@ -106,7 +108,7 @@ async fn a_passthrough_of_no_kind_relays_an_event_stream_byte_for_byte() {
     ];
     mock.reply("http://raw.test", mock::sse(&stream));
 
-    let (status, _, body) = read_whole(gw.handle(post("/raw", "anything")).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, post("/raw", "anything")).await.0).await;
     gw.idle().await;
 
     assert_eq!(status, StatusCode::OK);
@@ -124,7 +126,7 @@ async fn a_passthrough_of_no_kind_relays_a_whole_body_and_a_failure_as_they_came
         let status = StatusCode::from_u16(status).unwrap_or_default();
         mock.reply("http://raw.test", mock::json(status, body));
 
-        let (got, _, read) = read_whole(gw.handle(post("/raw", "x")).await.0).await;
+        let (got, _, read) = read_whole(serve(&gw, post("/raw", "x")).await.0).await;
 
         assert_eq!((got, read.ok()), (status, Some(Bytes::from(body))));
     }
@@ -176,7 +178,7 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
     let chat =
         r#"{"model":"m","stream":true,"stream_options":{"include_usage":true},"messages":[]}"#;
 
-    let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
 
     assert_eq!(body.ok(), Some(Bytes::from(openai.concat())));
     assert_eq!((seen.silent(), seen.all()), (2, 4));
@@ -202,7 +204,7 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
     mock.reply(ANTHROPIC, mock::sse(&anthropic));
     let chat = r#"{"model":"c","max_tokens":5,"stream":true,"messages":[]}"#;
 
-    let (_, _, body) = read_whole(gw.handle(post("/v1/messages", chat)).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, post("/v1/messages", chat)).await.0).await;
 
     assert_eq!(body.ok(), Some(Bytes::from(anthropic.concat())));
     assert_eq!((seen.silent(), seen.all()), (4, 7));
@@ -233,8 +235,9 @@ impl Format for Counted {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&Conversation>,
+        streams: bool,
     ) -> Box<dyn Encoder<Conversation>> {
-        OpenAiChat.request_encoder(request, first)
+        OpenAiChat.request_encoder(request, first, streams)
     }
 
     fn response_decoder(
@@ -249,8 +252,9 @@ impl Format for Counted {
         &self,
         head: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Reply>> {
-        OpenAiChat.response_encoder(head, request)
+        OpenAiChat.response_encoder(head, request, refusal)
     }
 }
 
@@ -280,7 +284,7 @@ async fn a_request_no_plugin_reads_stays_undecoded() {
         mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
 
         let (status, _, _) =
-            read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
+            read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(format.0.load(Ordering::Relaxed), decoded);
@@ -334,7 +338,7 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
         mock.reply(OPENAI, mock::sse(&chunks));
         let chat = r#"{"model":"m","stream":true,"messages":[]}"#;
 
-        let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
+        let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
         gw.idle().await;
 
         let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
@@ -366,7 +370,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
             let (mut shown, mut cached) = (Usage::default(), Usage::default());
             shown.add(units::INPUT_TOKENS, 7.0);
             cached.add(units::INPUT_TOKENS, 3.0);
-            cx.head_mut().extensions.insert(CachedUsage(cached));
+            cx.extensions_mut().insert(CachedUsage(cached));
             let mut hi = Reply::text(0, "hi");
             hi.usage = shown;
             let answer = futures::stream::iter([Ok(Reply::start("own", "m")), Ok(hi)]);
@@ -380,7 +384,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     #[async_trait]
     impl Plugin for Bills {
         async fn on_client_end(&self, cx: &ClientContext, _outcome: &Outcome) {
-            if let Some(CachedUsage(cached)) = cx.head().extensions.get() {
+            if let Some(CachedUsage(cached)) = cx.extensions().get() {
                 *self.0.lock().unwrap_or_else(|e| e.into_inner()) = cached.clone();
             }
         }
@@ -396,7 +400,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     let (gw, _, _) = gateway(OpenAiChat, &mock, OPENAI, plugins);
     let chat = r#"{"model":"m","messages":[]}"#;
 
-    let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
     gw.idle().await;
 
     let body: respan_gateway_core::serde_json::Value =
@@ -436,7 +440,7 @@ async fn a_meter_after_a_guard_sees_the_usage_in_the_reply_it_refuses() {
     let (gw, _, _) = gateway(OpenAiChat, &mock, OPENAI, plugins);
     mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
 
-    let (status, _, _) = read_whole(gw.handle(post("/v1/chat/completions", "{}")).await.0).await;
+    let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", "{}")).await.0).await;
     gw.idle().await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);

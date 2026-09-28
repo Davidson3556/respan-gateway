@@ -6,10 +6,9 @@ use bytes::Bytes;
 use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use http::header::UPGRADE;
 use http_body_util::BodyExt;
 
-use crate::deliver::{deliver, plain, refuse, strip_named};
+use crate::deliver::{Handed, deliver, refuse};
 use crate::fault::PANICKED;
 use crate::format::AnyFormat;
 use crate::input::Later;
@@ -40,8 +39,8 @@ pub(crate) struct Inner {
     pub(crate) in_flight: Arc<InFlight>,
 }
 
-/// The gateway. It has no server: an HTTP adapter or an embedding program
-/// hands it requests. Built by value, each setting checked as it is given:
+/// The gateway. It has no server: an adapter or an embedding program hands
+/// it requests, and owns the rules of their transport. Built by value, each setting checked as it is given:
 /// `Gateway::new().provider(name, format, transport)?.serve(format)?.plugin(name, plugin)?`,
 /// then [`after`](Gateway::after) and [`target`](Gateway::target).
 #[derive(Clone, Default)]
@@ -177,21 +176,24 @@ impl Gateway {
         self.inner.in_flight.idle().await;
     }
 
-    /// Run `req` in the first format served that accepts it. Remove the
-    /// gateway's own credentials first, here or in a plugin
-    /// ([`ClientContext::head_mut`]), as formats may pass client headers on.
+    /// Run `req` in the first format served that accepts it. The adapter
+    /// owns the transport's rules: it takes out what no plugin or format
+    /// should see or pass on, such as the gateway's own credentials, before
+    /// this, and what a hop must not carry from the response after.
     ///
-    /// A request no format accepts gets a text/plain 404, and a format panic
-    /// before it can write a text/plain 500; all else is in the client's
-    /// format. A request with `Upgrade` is upgrading ([`Format`]): its body's
-    /// data frames, split by the adapter, are inputs as they arrive, and the
-    /// adapter switches protocols on a 101. An adapter removes `Upgrade`, and
-    /// its `Connection` option, from a request it will not switch (RFC 9110
-    /// 7.8), which is then read whole. A whole body is read in full, so the
-    /// caller bounds it; one that fails while read is refused. The response
-    /// body is `Send`, not `Sync`. For a WebSocket, the adapter picks each
-    /// message's type from the subprotocol and turns a body's `Err` into a
-    /// close code.
+    /// If `streaming`, the request's inputs stream: its body's data frames,
+    /// split by the adapter, are inputs as they arrive, and its response's
+    /// head goes out at once, as its client waits for it; for a WebSocket,
+    /// the adapter picks each message's type from the subprotocol and turns
+    /// a body's `Err` into a close code. Else its body is read in full, so
+    /// the caller bounds it; one that fails while read is refused. The
+    /// response body is `Send`, not `Sync`.
+    ///
+    /// `Err` for what no format can write, for the adapter to write in
+    /// plain form: [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no
+    /// format accepts the request, or
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if a format panicked or
+    /// could not write a refusal. All else is in the client's format.
     ///
     /// It comes with a future of the request's [`Outcome`], which resolves
     /// once the response ends, before end hooks finish: await it after
@@ -200,16 +202,18 @@ impl Gateway {
     pub async fn handle<B>(
         &self,
         req: http::Request<B>,
-    ) -> (http::Response<Body>, BoxFuture<'static, Outcome>)
+        streaming: bool,
+    ) -> (
+        Result<http::Response<Body>, Fault>,
+        BoxFuture<'static, Outcome>,
+    )
     where
         B: http_body::Body<Data = Bytes> + Send + 'static,
         B::Error: Into<Fault>,
     {
         let runtime = tokio::runtime::Handle::current();
-        let (mut head, body) = req.into_parts();
-        // Stripped once, here, so never what a plugin or format sets.
-        strip_named(&mut head.headers);
-        // A format that panics in `accepts` gets a text/plain refusal.
+        let (head, body) = req.into_parts();
+        // A format that panics in `accepts` is the adapter's to write.
         let formats = &self.inner.formats;
         let accepts = || formats.iter().find(|f| f.accepts(&head)).cloned();
         let format = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
@@ -217,14 +221,12 @@ impl Gateway {
             Ok(None) => {
                 let (method, path) = (&head.method, head.uri.path());
                 let text = format!("no format served accepts {method} {path}");
-                return plain_refusal(Fault::not_found(text));
+                return unwritten(Fault::not_found(text));
             }
-            Err(_) => return plain_refusal(Fault::internal(PANICKED)),
+            Err(_) => return unwritten(Fault::internal(PANICKED)),
         };
-        // The adapter frames an upgrading request's body (RFC 9110 7.8).
-        let upgrading = head.headers.contains_key(UPGRADE);
         let body = body.map_err(Into::into);
-        let (body, later, broken) = match upgrading {
+        let (body, later, broken) = match streaming {
             true => (None, Some(Later::new(body.boxed_unsync())), None),
             false => match body.collect().await {
                 Ok(collected) => (Some(collected.to_bytes()), None, None),
@@ -329,18 +331,12 @@ fn runs_after(plugins: &[Registered], later: usize, first: usize) -> bool {
     false
 }
 
-/// A text/plain refusal with `fault`, for a request no format can write.
-fn plain_refusal(fault: Fault) -> (http::Response<Body>, BoxFuture<'static, Outcome>) {
-    let (head, body) = plain(fault.status(), fault.message().to_owned()).into_parts();
+/// `fault` for the adapter to write, for a request no format took.
+fn unwritten(fault: Fault) -> (Handed, BoxFuture<'static, Outcome>) {
     let outcome = Outcome {
-        head: Some(head.clone()),
-        end: Err(fault),
-        ..Outcome::default()
+        end: Err(fault.clone()),
     };
-    (
-        http::Response::from_parts(head, body),
-        futures::future::ready(outcome).boxed(),
-    )
+    (Err(fault), futures::future::ready(outcome).boxed())
 }
 
 async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response, Fault> {
@@ -362,5 +358,5 @@ async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Res
 #[cfg(test)]
 fn _handle_is_send(g: &Gateway, req: http::Request<Body>) {
     fn send<T: Send>(_: T) {}
-    send(g.handle(req));
+    send(g.handle(req, false));
 }

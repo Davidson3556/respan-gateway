@@ -12,7 +12,7 @@ use respan_gateway_core::http::{self, HeaderValue};
 use respan_gateway_core::{Fault, Gateway, Transport};
 use respan_gateway_formats::AnthropicMessages;
 use respan_gateway_server::{HttpTransport, router};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 const ANTHROPIC: &str = "https://api.anthropic.com";
 
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mock = MockTransport::new();
     mock.reply(ANTHROPIC, mock::sse(STREAM));
     let gw = gateway(mock.at(ANTHROPIC))?;
-    let (status, _, body) = read_whole(gw.handle(request()).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
     let sent = &mock.sent()[0];
     println!("provider got: {} {:?}", sent.uri(), sent.headers());
     println!(

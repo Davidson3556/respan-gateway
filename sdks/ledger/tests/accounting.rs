@@ -13,7 +13,7 @@ use respan_gateway_core::{
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_ledger::{Accounting, Amount, HoldId, Ledger, MemoryLedger, Quote, Tally};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 const P: &str = "http://p.test/v1";
 const CHAT: &str = "/v1/chat/completions";
@@ -76,7 +76,7 @@ struct Nothing;
 impl Plugin for Nothing {}
 
 async fn send(gw: &Gateway, body: String) -> (StatusCode, Result<Bytes, Fault>) {
-    let (status, _, body) = read_whole(gw.handle(post(CHAT, body)).await.0).await;
+    let (status, _, body) = read_whole(serve(gw, post(CHAT, body)).await.0).await;
     gw.idle().await;
     (status, body)
 }
@@ -175,7 +175,7 @@ async fn every_call_settles_exactly_once() {
             mock.reply(P, reply);
         }
         let gw = gateway(&mock, Nothing, ledger.clone());
-        let (resp, _) = gw.handle(post(CHAT, ask(stream))).await;
+        let (resp, _) = serve(&gw, post(CHAT, ask(stream))).await;
         if read {
             drop(read_whole(resp).await);
         } else {

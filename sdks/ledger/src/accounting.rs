@@ -65,7 +65,8 @@ impl Tally {
 /// (its `Err`) is refused before anything is sent. A call the provider may
 /// have billed without its cost reported in full (a tally never added to,
 /// a stream cut off, or a call sent that failed before its head) is
-/// charged at least its reserve. It uses the provider edge alone: register
+/// charged at least its reserve; one the provider answered with an error
+/// ([`Fault::is_answer`]) is charged nothing. It uses the provider edge alone: register
 /// it last, so it prices the call as every other plugin left it, and once
 /// per gateway. A filter the quote adds is then the call's last, so it
 /// sees each output first, before another plugin's filter can fail on it.
@@ -108,23 +109,17 @@ impl<L: Ledger> Accounting<L> {
     /// What a call cost, as far as the gateway can tell.
     fn charge(&self, hold: &Hold, outcome: &Outcome) -> Amount {
         let spent = hold.tally.spent();
-        let Some(head) = &outcome.head else {
-            // No answer. Sent, it may have reached the provider, such as a
-            // call given up or timed out waiting for its head; else it never
-            // left the gateway.
-            if !hold.sent.load(Ordering::Relaxed) {
-                return 0;
-            }
-            return spent.max(hold.reserve);
-        };
-        if !head.status.is_success() {
-            return 0; // the provider refused it
+        match &outcome.end {
+            // The provider answered with an error in place of a response.
+            Err(fault) if fault.is_answer() => 0,
+            // It never left the gateway.
+            _ if !hold.sent.load(Ordering::Relaxed) => 0,
+            Ok(()) if hold.tally.is_reported() => spent,
+            // Cut off, never reported, or sent and given up, such as timed
+            // out waiting for its head: it may have reached the provider,
+            // and its cost may be partial.
+            _ => spent.max(hold.reserve),
         }
-        if outcome.end.is_ok() && hold.tally.is_reported() {
-            return spent;
-        }
-        // Cut off, or never reported: its cost may be partial.
-        spent.max(hold.reserve)
     }
 }
 

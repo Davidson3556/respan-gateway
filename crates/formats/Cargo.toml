@@ -13,4 +13,5 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
 serde.workspace = true

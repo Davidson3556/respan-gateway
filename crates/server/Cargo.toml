@@ -13,10 +13,12 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
 axum.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
+respan-gateway-http.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 respan-gateway-formats.workspace = true
 tower = { version = "0.5", features = ["util"] }

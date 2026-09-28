@@ -26,16 +26,26 @@ impl Format for Responses {
         opaque::request_decoder()
     }
 
-    fn request_encoder(&self, _: &mut Req, _: Option<&Sent<Self>>) -> Box<dyn Encoder<Sent<Self>>> {
-        opaque::request_encoder()
+    fn request_encoder(
+        &self,
+        call: &mut Req,
+        first: Option<&Sent<Self>>,
+        streams: bool,
+    ) -> Box<dyn Encoder<Sent<Self>>> {
+        opaque::request_encoder(call, first, streams)
     }
 
-    fn response_decoder(&self, head: &Parts, _: &Req) -> Box<dyn Decoder<Got<Self>>> {
-        opaque::response_decoder("responses", head)
+    fn response_decoder(&self, head: &Parts, call: &Req) -> Box<dyn Decoder<Got<Self>>> {
+        opaque::response_decoder("responses", head, call)
     }
 
-    fn response_encoder(&self, head: &mut Parts, _: &Req) -> Box<dyn Encoder<Got<Self>>> {
-        opaque::response_encoder("responses", head)
+    fn response_encoder(
+        &self,
+        head: &mut Parts,
+        request: &Req,
+        refusal: Option<&Fault>,
+    ) -> Box<dyn Encoder<Got<Self>>> {
+        opaque::response_encoder("responses", head, request, refusal)
     }
 }
 

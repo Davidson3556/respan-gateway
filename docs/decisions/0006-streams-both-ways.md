@@ -1,6 +1,6 @@
 # 0006. Streams both ways
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0011](0011-read-until-content-or-end.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-27
 
 ## Context
@@ -18,7 +18,9 @@ a streaming request was missing. This amends 0003 and 0004.
   RFC 9110 7.8): they come after its head, one per data frame, split by
   the adapter, which removes an `Upgrade` it will not perform. Any other
   request is whole: its body, even empty, is one input, so a quiet stream
-  such as an MCP `GET` is an ordinary request.
+  such as an MCP `GET` is an ordinary request. *Superseded by 0012:* it
+  streams if the adapter says so (`handle(req, streaming)`); the HTTP
+  adapter says so for `Upgrade`.
 - `on_client` runs at the head and the input that came with it, as
   waiting for more would deadlock a client waiting for the 101. For an
   upgrading request `cx.input` is an `INTERNAL` `Err`.
@@ -36,10 +38,14 @@ a streaming request was missing. This amends 0003 and 0004.
   without a lock.
 - A call carries the request's inputs, later ones only if the head its
   format writes upgrades too, else it fails `CONFIG`, as a whole call is
-  sent at once. `Transport::send` takes `http::Request<Body>`, whole or
+  sent at once. *Superseded by 0012:* the format is told the call
+  streams, and one that cannot carry it fails `Encoder::open` `CONFIG`. `Transport::send` takes `http::Request<Body>`, whole or
   streaming.
 - An upgrading request's head goes at once, so the client's encoder makes
   a plugin's success a 101, and `ready` returns on a 101 at once.
+  *Amended by 0012:* a streaming request's head goes at once, and
+  `until_content` returns at once for a call that streams its inputs; a
+  101 is the formats' and the adapter's.
 - In an upgrading request each data frame is one message both ways.
   Message types, close codes, keys, compression and pings belong to the
   adapter or transport, which own the framing.
@@ -66,3 +72,4 @@ a streaming request was missing. This amends 0003 and 0004.
 - 0008: a frame's message is one value carrying its bytes, so "an input a
   filter releases at the end has no bytes" and splitting a frame into
   one item per value went.
+- 0012: the adapter, not `Upgrade`, says whether a request streams.

@@ -24,7 +24,8 @@ use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::Conversation;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_http::Asked;
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// One billed call.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,8 +98,9 @@ impl<S: UsageStore> Plugin for Billing<S> {
             return;
         };
         // Who pays: here a header an auth plugin vouched for.
-        let header = px.client().head().headers.get("x-account");
-        let account = header.and_then(|v| v.to_str().ok()).unwrap_or("anonymous");
+        let asked = px.extensions().get::<Asked>();
+        let header = asked.and_then(|a| a.headers.get("x-account")?.to_str().ok());
+        let account = header.unwrap_or("anonymous");
         // The model this call asked for, as every plugin left it.
         let chat = px.input::<Conversation>().ok();
         let model = chat.and_then(|c| c.model.clone()).unwrap_or_default();
@@ -149,7 +151,7 @@ async fn ask(
     let mut req = post("/v1/chat/completions", body);
     let account = HeaderValue::from_static(account);
     req.headers_mut().insert("x-account", account);
-    let _ = read_whole(gw.handle(req).await.0).await;
+    let _ = read_whole(serve(gw, req).await.0).await;
     gw.idle().await;
 }
 

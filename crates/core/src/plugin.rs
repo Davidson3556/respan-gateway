@@ -12,25 +12,20 @@ use crate::{ClientContext, Fault, ProviderContext, Response};
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Outcome {
-    /// The head sent to the client, after head edits; on the provider edge,
-    /// the provider's. `None` if no response started.
-    pub head: Option<http::response::Parts>,
     /// `Ok` if the response was read to its end: delivered, or on the
-    /// provider edge read by whoever read it; the head says whether it was
-    /// a success. `Err` with the fault that refused, failed or stopped it:
-    /// a provider error its format read, an internal fault for a panic, or
-    /// [`codes::ABANDONED`](crate::codes::ABANDONED) if it was dropped or cut
-    /// off first. A fault's message may carry a provider's words.
+    /// provider edge read by whoever read it. `Err` with the fault that
+    /// refused, failed or stopped it: a provider's error its format read
+    /// ([`Fault::is_answer`] if the provider answered with it), an internal
+    /// fault for a panic, or [`codes::ABANDONED`](crate::codes::ABANDONED)
+    /// if it was dropped or cut off first. A fault's message may carry a
+    /// provider's words.
     pub end: Result<(), Fault>,
 }
 
-/// Ended `Ok`, with no head.
+/// Ended `Ok`.
 impl Default for Outcome {
     fn default() -> Self {
-        Self {
-            head: None,
-            end: Ok(()),
-        }
+        Self { end: Ok(()) }
     }
 }
 
@@ -80,13 +75,13 @@ impl Default for Outcome {
 pub trait Plugin: Send + Sync + 'static {
     /// The client edge, once per request, at its head. `Ok(None)` passes to
     /// the next plugin; `Ok(Some(response))` answers, skipping the rest;
-    /// `Err` refuses, in the client's format with the fault's status. If all
-    /// pass, the target is called ([`ClientContext::set_target`]); with none,
-    /// the request is refused 404 [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
+    /// `Err` refuses, as the client's format writes the fault. If all pass,
+    /// the target is called ([`ClientContext::set_target`]); with none, the
+    /// request is refused [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
     ///
-    /// To fall back, answer with the first call whose response, read to its
-    /// content ([`Response::until_content`]), is a success, else the last
-    /// one's.
+    /// To fall back, answer with the first call whose response reads to its
+    /// content ([`Response::until_content`]), else the last one's failure,
+    /// which carries a provider's answer.
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         Ok(None)
     }
@@ -156,7 +151,7 @@ pub trait Filter<T>: Send + 'static {
     /// The inputs or the response end `end`. Runs once at every end, a
     /// failure, drop or panic included: push what it kept back to `out`,
     /// sent before the end. Once it failed, what it passes on is dropped.
-    /// `Err` fails the inputs or response, keeping a provider error's body.
+    /// `Err` fails the inputs or response, keeping a provider's answer.
     fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<T>) -> Result<(), Fault> {
         Ok(())
     }
@@ -331,10 +326,10 @@ impl Filters {
 }
 
 /// `fault` failing a response that ended `end`, keeping the provider's
-/// error body `end` carries.
+/// answer `end` carries.
 pub(crate) fn failed(fault: Fault, end: &Result<(), Fault>) -> Result<(), Fault> {
     match end {
-        Err(end) => Err(fault.with_raw_of(end)),
+        Err(end) => Err(fault.with_answer_of(end)),
         Ok(()) => Err(fault),
     }
 }

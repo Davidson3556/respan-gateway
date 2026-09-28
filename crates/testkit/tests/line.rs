@@ -19,6 +19,8 @@ use respan_gateway_core::{
 };
 use respan_gateway_core::{bytes, futures, http, http_body, http_body_util};
 use respan_gateway_formats::Usage;
+use respan_gateway_http::bodiless;
+use respan_gateway_testkit::serve;
 
 /// What a client sends: one message, which keeps the bytes it came in.
 #[derive(Debug, Clone, PartialEq)]
@@ -65,24 +67,38 @@ impl Format for Line {
         &self,
         request: &mut http::Request<Bytes>,
         _first: Option<&LIn>,
+        _streams: bool,
     ) -> Box<dyn Encoder<LIn>> {
         respan_gateway_formats::set_path(request, "/line");
         Box::new(Lines)
     }
 
+    /// Nothing for a success HTTP gives no body, as the standard formats.
     fn response_decoder(
         &self,
-        _head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        head: &http::response::Parts,
+        request: &http::Request<Bytes>,
     ) -> Box<dyn Decoder<LOut>> {
+        if head.status.is_success() && bodiless(request.method(), head.status) {
+            return respan_gateway_formats::whole::nothing();
+        }
         Box::new(LineDecoder::default())
     }
 
+    /// A refusal under its fault's status; no body where HTTP has none.
     fn response_encoder(
         &self,
-        _head: &mut http::response::Parts,
+        head: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<LOut>> {
+        match refusal {
+            Some(fault) => respan_gateway_http::error_head(head, fault),
+            None if bodiless(request.method(), head.status) => {
+                return respan_gateway_formats::whole::no_body();
+            }
+            None => {}
+        }
         Box::new(LineEncoder(request.method() == http::Method::GET, None))
     }
 
@@ -113,8 +129,9 @@ macro_rules! as_line {
             &self,
             head: &mut http::response::Parts,
             request: &http::Request<Bytes>,
+            refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<LOut>> {
-            Line.response_encoder(head, request)
+            Line.response_encoder(head, request, refusal)
         }
 
         fn is_content(&self, output: &LOut) -> bool {
@@ -197,10 +214,11 @@ impl LineEncoder {
 }
 
 impl Encoder<LOut> for LineEncoder {
-    fn open(&mut self, out: &mut BytesMut) {
+    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
         if self.0 {
             out.extend_from_slice(respan_gateway_formats::sse::comment("open").as_bytes());
         }
+        Ok(())
     }
 
     fn encode(&mut self, o: &LOut, out: &mut BytesMut) -> Result<(), Fault> {
@@ -349,7 +367,7 @@ fn req(method: http::Method) -> http::Request<Body> {
 }
 
 async fn run(gw: &Gateway, r: http::Request<Body>) -> (StatusCode, Result<Bytes, Fault>) {
-    let (resp, ended) = gw.handle(r).await;
+    let (resp, ended) = serve(gw, r).await;
     let status = resp.status();
     let body = resp.into_body().collect().await.map(|b| b.to_bytes());
     let _ = ended.await;
@@ -430,8 +448,10 @@ async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
 }
 
 /// The same for a provider's 204, translated between the standard formats.
+/// Changed: a translated success's head is the client's format's, so the
+/// status goes; the call still ends as its head says.
 #[tokio::test]
-async fn f3b_a_translated_204_passes_as_its_status() {
+async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
     use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
     use respan_gateway_testkit::MockTransport;
     const ANTHROPIC: &str = "http://anthropic.test";
@@ -448,7 +468,7 @@ async fn f3b_a_translated_204_passes_as_its_status() {
         r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#,
     );
     let (status, _) = run(&gw, r).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(status, StatusCode::OK);
 }
 
 // A filter whose edit failed still gets its end.
@@ -603,6 +623,8 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
 }
 
 // A 101 to a whole request is refused whoever set it, here a call edit.
+// Changed: the adapter refuses it ([`respan_gateway_http::handle`]), so the
+// provider's body must be one this format reads for its head to get there.
 
 #[tokio::test]
 async fn f9_a_101_to_a_whole_request_is_refused_whoever_asked() {
@@ -621,7 +643,7 @@ async fn f9_a_101_to_a_whole_request_is_refused_whoever_asked() {
     }
 
     let log = Log::default();
-    let script = Script::default().then(StatusCode::SWITCHING_PROTOCOLS, vec![]);
+    let script = Script::default().then(StatusCode::SWITCHING_PROTOCOLS, vec!["e\n"]);
     let gw = gateway(script, &log, Upgrade);
     let (status, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -680,7 +702,7 @@ async fn y3_an_opened_quiet_stream_sends_its_head_at_once() {
     let log = Log::default();
     let gw = gateway(Script::default(), &log, Quiet(Mutex::new(Some(outputs))));
     let wait = std::time::Duration::from_secs(5);
-    let handled = tokio::time::timeout(wait, gw.handle(req(http::Method::GET))).await;
+    let handled = tokio::time::timeout(wait, serve(&gw, req(http::Method::GET))).await;
     let (resp, _) = handled.expect("the head waited for an output");
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -1113,7 +1135,7 @@ async fn r9_5b_a_panicking_input_filter_end_skips_no_output_filter() {
         http::header::UPGRADE,
         http::HeaderValue::from_static("websocket"),
     );
-    let (resp, ended) = gw.handle(r).await;
+    let (resp, ended) = serve(&gw, r).await;
     drop(resp); // the client leaves
     let _ = ended.await;
     gw.idle().await;
@@ -1271,6 +1293,7 @@ impl Format for Pathed {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&LIn>,
+        _streams: bool,
     ) -> Box<dyn Encoder<LIn>> {
         // The model: the input, translated or changed.
         let model = first.map_or("none", |i| &i.0).to_owned();
@@ -1517,9 +1540,10 @@ impl Format for Posted {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&LIn>,
+        streams: bool,
     ) -> Box<dyn Encoder<LIn>> {
         *request.method_mut() = http::Method::POST;
-        Line.request_encoder(request, first)
+        Line.request_encoder(request, first, streams)
     }
 }
 
@@ -1569,9 +1593,10 @@ impl Format for Seen {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&LIn>,
+        streams: bool,
     ) -> Box<dyn Encoder<LIn>> {
         lock(&self.0).push(first.is_some());
-        Line.request_encoder(request, first)
+        Line.request_encoder(request, first, streams)
     }
 }
 
@@ -1649,7 +1674,7 @@ async fn r11_5_a_plugins_answer_to_an_upgrading_request_heads_out_at_once() {
         http::header::UPGRADE,
         http::HeaderValue::from_static("websocket"),
     );
-    let headed = tokio::time::timeout(std::time::Duration::from_secs(1), gw.handle(r)).await;
+    let headed = tokio::time::timeout(std::time::Duration::from_secs(1), serve(&gw, r)).await;
     assert!(
         headed.is_ok(),
         "the head waits for the client, which waits for it"
@@ -1700,12 +1725,13 @@ impl Format for InPath {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&LIn>,
+        streams: bool,
     ) -> Box<dyn Encoder<LIn>> {
         let raw = first
             .and_then(|i| i.1.origin(LINE))
             .map(|o| o.bytes.clone());
         lock(&self.0).push((first.is_some(), raw.unwrap_or_default()));
-        let _ = Line.request_encoder(request, first);
+        let _ = Line.request_encoder(request, first, streams);
         Box::new(AsItCame)
     }
 }

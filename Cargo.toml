@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 respan-gateway-core = { path = "crates/core" }
 respan-gateway-formats = { path = "crates/formats" }
+respan-gateway-http = { path = "crates/http" }
 respan-gateway-plugins = { path = "crates/plugins" }
 respan-gateway-server = { path = "crates/server" }
 respan-gateway-testkit = { path = "crates/testkit" }

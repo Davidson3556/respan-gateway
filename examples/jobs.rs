@@ -5,8 +5,9 @@
 //! hash of the body: the same key with another body runs on its own. A
 //! retry, or a duplicate sent while the first runs, gets the stored result
 //! or waits for the run in flight: the provider is called once. The tenant
-//! is a hash of `Authorization`, so replaying another tenant's result takes
-//! its credential, not just its key. A zero-retention request (marked
+//! is a hash of `Authorization`, which the adapter lifted into a
+//! [`Credential`], so replaying another tenant's result takes its
+//! credential, not just its key. A zero-retention request (marked
 //! `NoContent`, as in `logging.rs`) stores nothing: it runs every time.
 //!
 //! **What core cannot do:** keep a call running once its client left. A
@@ -31,7 +32,8 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_http::{Asked, Credential};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::sync::watch;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -119,20 +121,21 @@ struct Running(Key, Arc<Mutex<Vec<Reply>>>);
 
 /// Runs each keyed request once. Register it after the plugin that marks
 /// zero-retention requests, and before any that edits the request or takes
-/// `Authorization` off.
+/// the [`Credential`] off.
 struct Idempotent<S>(Arc<S>);
 
 #[async_trait]
 impl<S: Store> Plugin for Idempotent<S> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let header = |name| cx.head().headers.get(name).and_then(|v| v.to_str().ok());
-        let stores =
-            cx.is_kind::<Conversation>() && cx.head().extensions.get::<NoContent>().is_none();
-        let Some(key) = header("idempotency-key").filter(|_| stores) else {
+        let asked = cx.extensions().get::<Asked>();
+        let header = asked.and_then(|a| a.headers.get("idempotency-key")?.to_str().ok());
+        let stores = cx.is_kind::<Conversation>() && cx.extensions().get::<NoContent>().is_none();
+        let Some(key) = header.filter(|_| stores) else {
             return Ok(None);
         };
+        let tenant = cx.extensions().get::<Credential>();
         let key = (
-            hash(cx.head().headers.get(AUTHORIZATION)),
+            hash(tenant.and_then(|c| c.get(AUTHORIZATION.as_str()))),
             key.to_owned(),
             hash(cx.body()),
         );
@@ -143,7 +146,7 @@ impl<S: Store> Plugin for Idempotent<S> {
         // In the extensions first, so `on_client_end` releases it whatever follows.
         let sent = Arc::default();
         let running = Running(key, Arc::clone(&sent));
-        cx.head_mut().extensions.insert(running);
+        cx.extensions_mut().insert(running);
         cx.filter(move |reply: &mut Reply| {
             locked(&sent).push(reply.clone());
             Ok(())
@@ -152,12 +155,10 @@ impl<S: Store> Plugin for Idempotent<S> {
     }
 
     async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
-        let Some(Running(key, sent)) = cx.head().extensions.get::<Running>() else {
+        let Some(Running(key, sent)) = cx.extensions().get::<Running>() else {
             return;
         };
-        let success = outcome.head.as_ref().is_some_and(|h| h.status.is_success());
-        let ok = success && outcome.end.is_ok();
-        let result = ok.then(|| locked(sent).clone().into());
+        let result = outcome.end.is_ok().then(|| locked(sent).clone().into());
         self.0.finish(key, result).await;
     }
 }
@@ -190,7 +191,7 @@ fn keyed(token: &'static str, key: &'static str, body: &'static str) -> http::Re
 }
 
 async fn send(gw: &Gateway, req: http::Request<Body>) -> Result<String, Fault> {
-    let (_, _, body) = read_whole(gw.handle(req).await.0).await;
+    let (_, _, body) = read_whole(serve(gw, req).await.0).await;
     gw.idle().await;
     Ok(String::from_utf8_lossy(&body?).into_owned())
 }

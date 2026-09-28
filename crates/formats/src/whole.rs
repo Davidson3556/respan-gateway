@@ -7,8 +7,7 @@ use respan_gateway_core::http::{self, StatusCode};
 use respan_gateway_core::{Decoder, Encoder, Fault};
 
 /// A decoder for a body of `format` read whole: a success's bytes go to
-/// `on_body` at the end; a failure ends `Err` with the provider's status,
-/// code, message and error fields, carrying its body ([`Fault::with_raw`]).
+/// `on_body` at the end; any other answer ends `Err` ([`answer`]).
 pub fn decoder<T, F>(
     format: &str,
     head: &http::response::Parts,
@@ -18,17 +17,142 @@ where
     T: 'static,
     F: FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
-    let (status, format) = (head.status, format.to_owned());
-    Box::new(Whole::new(
-        move |raw: Bytes, out: &mut Vec<T>| match status.is_success() {
-            false => {
-                let v = crate::sse::failure_json(&raw).unwrap_or_default();
-                let fault = crate::common::provider_error(status, &v);
-                Err(fault.with_raw(&format, raw))
-            }
+    let (head, format) = (head.clone(), format.to_owned());
+    Box::new(Whole::new(move |raw: Bytes, out: &mut Vec<T>| {
+        match head.status.is_success() {
+            false => Err(answer(&format, &head, raw)),
             true => on_body(raw, out),
-        },
-    ))
+        }
+    }))
+}
+
+/// The fault of a provider's answer in `format` that is no success, with
+/// head `head` and body `body`: the provider's code, message and error
+/// fields; an error's status and `Retry-After`, else a 502. Unless it is
+/// informational, such as a 101 no one asked for, it carries the answer as
+/// `http::Response<Bytes>` ([`Fault::with_answer`]), so a client of
+/// `format` gets it as it came, a redirect included.
+pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault {
+    let v = crate::sse::failure_json(&body).unwrap_or_default();
+    let fault = crate::common::provider_error(head.status, &v);
+    if head.status.is_informational() {
+        return fault;
+    }
+    let fault = match respan_gateway_http::retry_after(&head.headers) {
+        Some(wait) => fault.with_retry_after(wait),
+        None => fault,
+    };
+    fault.with_answer(format, http::Response::from_parts(head.clone(), body))
+}
+
+/// A decoder of nothing, for a response with no body
+/// ([`bodiless`](respan_gateway_http::bodiless)): it ends at once, whatever
+/// bytes came.
+pub fn nothing<T: 'static>() -> Box<dyn Decoder<T>> {
+    Box::new(Nothing)
+}
+
+struct Nothing;
+
+impl<T> Decoder<T> for Nothing {
+    fn decode(&mut self, _bytes: Bytes, _out: &mut Vec<T>) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, _out: &mut Vec<T>) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+/// A request encoder for a protocol whose calls carry one body, not
+/// streamed inputs: it fails to open ([`Encoder::open`]) with
+/// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG).
+pub fn unstreamable<T: 'static>(format: &str) -> Box<dyn Encoder<T>> {
+    Box::new(Unstreamable(format.to_owned()))
+}
+
+struct Unstreamable(String);
+
+impl<T> Encoder<T> for Unstreamable {
+    fn open(&mut self, _out: &mut BytesMut) -> Result<(), Fault> {
+        let format = &self.0;
+        let message = format!("a call in {format} carries one body, not streamed inputs");
+        Err(Fault::config(message))
+    }
+
+    fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+/// An encoder of a response with no body at all
+/// ([`bodiless`](respan_gateway_http::bodiless)): its head goes at once and
+/// nothing more is read ([`Encoder::done`]).
+pub fn no_body<T: 'static>() -> Box<dyn Encoder<T>> {
+    Box::new(NoBody)
+}
+
+struct NoBody;
+
+impl<T> Encoder<T> for NoBody {
+    fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn done(&self) -> bool {
+        true
+    }
+}
+
+/// An encoder of a refusal a protocol cannot write, such as a fault whose
+/// status is no error's: it writes nothing and fails at the end, so the
+/// adapter writes it ([`Gateway::handle`](respan_gateway_core::Gateway::handle)).
+pub fn unwritable<T: 'static>() -> Box<dyn Encoder<T>> {
+    Box::new(Unwritable)
+}
+
+struct Unwritable;
+
+impl<T> Encoder<T> for Unwritable {
+    fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        end.clone()
+    }
+}
+
+/// Whether `status` says an error, as a refusal's must to be written.
+pub(crate) fn is_error(status: StatusCode) -> bool {
+    status.is_client_error() || status.is_server_error()
+}
+
+/// An encoder that writes `body` at the end, however it ends, and no
+/// value: a refusal's.
+pub fn written<T: 'static>(body: Bytes) -> Box<dyn Encoder<T>> {
+    Box::new(Written(body))
+}
+
+struct Written(Bytes);
+
+impl<T> Encoder<T> for Written {
+    fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        out.extend_from_slice(&std::mem::take(&mut self.0));
+        Ok(())
+    }
 }
 
 /// Hands a whole body to `on_body` at its end.
@@ -65,7 +189,7 @@ pub(crate) fn answered(status: StatusCode) -> String {
 }
 
 /// Encodes outputs of `T` through `write`, which returns their bytes or
-/// `Err`, and a failure through `fail` ([`Fault::raw`]). A stream is
+/// `Err`, and a failure through `fail` ([`Fault::answer`]). A stream is
 /// written output by output; a whole body once, at its end.
 pub struct Relay<T, W, F, B> {
     write: W,
@@ -115,8 +239,9 @@ where
     F: FnMut(&Fault) -> B + Send + 'static,
     B: AsRef<[u8]> + 'static,
 {
-    fn open(&mut self, out: &mut BytesMut) {
+    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(&self.open);
+        Ok(())
     }
 
     fn encode(&mut self, value: &T, out: &mut BytesMut) -> Result<(), Fault> {
@@ -160,7 +285,7 @@ mod tests {
         let relay = Relay::new(write, |_: &Fault| String::new(), true);
         let mut relay = relay.with_open(": open\n\n");
         let mut out = BytesMut::new();
-        relay.open(&mut out);
+        assert!(relay.open(&mut out).is_ok());
         assert_eq!(&out[..], b": open\n\n");
     }
 

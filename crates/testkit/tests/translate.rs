@@ -9,7 +9,7 @@ use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Respons
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply, units};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_plugins::ModelRouter;
-use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve};
 
 mod common;
 use common::{
@@ -854,7 +854,7 @@ async fn a_translated_response_keeps_the_providers_retry_after() {
         .insert("retry-after", HeaderValue::from_static("7"));
     h.mock.reply(OPENAI, limited);
 
-    let (status, headers, _) = read_whole(h.gw.handle(anthropic_request(false)).await.0).await;
+    let (status, headers, _) = read_whole(serve(&h.gw, anthropic_request(false)).await.0).await;
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
@@ -1862,13 +1862,15 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     assert!(headers.get("location").is_none());
     let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["error"]["code"], "upstream", "{body}");
-    // The call ends with the refusal and the provider's status.
+    // The call ends with the refusal, which carries the provider's answer
+    // (changed: the outcome has no head; the answer holds it).
     let ends = ends.0.lock().map(|all| all.clone()).unwrap_or_default();
     assert!(matches!(&ends[..], [o] if o.end.as_ref().is_err_and(|f| f.code() == codes::UPSTREAM)));
-    assert_eq!(
-        ends[0].head.as_ref().map(|h| h.status),
-        Some(StatusCode::FOUND)
-    );
+    let answer = ends[0].end.as_ref().err();
+    let answer = answer.and_then(|f| {
+        f.answer::<http::Response<respan_gateway_core::bytes::Bytes>>("anthropic-messages")
+    });
+    assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
 }
 
 #[tokio::test]

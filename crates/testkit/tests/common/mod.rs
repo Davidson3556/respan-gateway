@@ -15,7 +15,7 @@ use respan_gateway_core::{
 use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply};
 pub use respan_gateway_testkit::Calls;
-use respan_gateway_testkit::{MockTransport, Outcomes, post, read_whole};
+use respan_gateway_testkit::{MockTransport, Outcomes, post, read_whole, serve};
 
 pub const OPENAI: &str = "http://openai.test/v1";
 
@@ -137,7 +137,7 @@ impl Plugin for Metered {
 impl Harness {
     /// Send, read the whole response, and wait for the end hooks.
     pub async fn send(&self, req: Call) -> (StatusCode, HeaderMap, Result<Bytes, Fault>) {
-        let out = read_whole(self.gw.handle(req).await.0).await;
+        let out = read_whole(serve(&self.gw, req).await.0).await;
         self.gw.idle().await;
         out
     }

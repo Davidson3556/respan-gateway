@@ -21,7 +21,8 @@ use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{OpenAiChat, message_decoder, set_path};
-use respan_gateway_testkit::{Calls, MockTransport, mock, post, streamed};
+use respan_gateway_http::Asked;
+use respan_gateway_testkit::{Calls, MockTransport, mock, post, serve, streamed};
 use serde_json::{Value, json};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -72,24 +73,39 @@ impl Format for Talk {
         talk_decoder(false)
     }
 
+    /// A call carrying streamed inputs asks to switch protocols, with the
+    /// `Connection` option that needs (RFC 9110 7.8); one whose body is not
+    /// the client's bytes loses their encoding.
     fn request_encoder(
         &self,
         request: &mut http::Request<Bytes>,
-        _first: Option<&Say>,
+        first: Option<&Say>,
+        streams: bool,
     ) -> Box<dyn Encoder<Say>> {
         set_path(request, "/talk");
-        if upgrades(request) {
+        if streams {
             let websocket = HeaderValue::from_static("websocket");
             request.headers_mut().insert(UPGRADE, websocket);
+            let upgrade = HeaderValue::from_static("upgrade");
+            request.headers_mut().insert(CONNECTION, upgrade);
+        }
+        if streams || first.is_some() {
+            respan_gateway_formats::body_changed(request);
         }
         Box::new(Says("talk"))
     }
 
+    /// A success, or a 101 its call asked for, as messages; any other
+    /// answer, a 101 no one asked for included, fails the call.
     fn response_decoder(
         &self,
-        _head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        head: &http::response::Parts,
+        request: &http::Request<Bytes>,
     ) -> Box<dyn Decoder<Heard>> {
+        let switched = head.status == StatusCode::SWITCHING_PROTOCOLS && upgrades(request);
+        if !head.status.is_success() && !switched {
+            return respan_gateway_formats::whole::decoder("talk", head, |_, _| Ok(()));
+        }
         Box::new(Messages)
     }
 
@@ -97,7 +113,11 @@ impl Format for Talk {
         &self,
         head: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Heard>> {
+        if let Some(fault) = refusal {
+            respan_gateway_http::error_head(head, fault);
+        }
         if upgrades(request) && head.status == StatusCode::OK {
             head.status = StatusCode::SWITCHING_PROTOCOLS;
             let websocket = HeaderValue::from_static("websocket");
@@ -283,7 +303,7 @@ async fn a_101_head_goes_out_at_once() {
     let (send, req) = upgrade();
 
     // Nothing is sent either way until the client hears the 101.
-    let handled = tokio::time::timeout(Duration::from_secs(5), gw.handle(req)).await;
+    let handled = tokio::time::timeout(Duration::from_secs(5), serve(&gw, req)).await;
     let (resp, _) = handled.unwrap_or_else(|_| panic!("the head waited for a first byte"));
 
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
@@ -299,7 +319,7 @@ async fn a_framed_requests_inputs_are_relayed_as_one_call_each_as_it_came() {
     let (gw, calls) = talk(&echo, &mock, Vec::new());
     let (send, req) = upgrade();
 
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     say(&send, r#"{ "say": "b" }"#);
     drop(send);
@@ -333,7 +353,7 @@ async fn a_provider_edge_input_filter_redacts_streamed_inputs() {
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Redact)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     say(&send, r#"{"say":"my secret","id":7}"#);
     say(&send, r#"{ "say": "fine" }"#);
     drop(send);
@@ -372,7 +392,7 @@ async fn client_edge_input_filters_apply_the_first_added_first() {
     );
     let (send, req) = upgrade();
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     say(&send, r#"{"say":"x"}"#);
     drop(send);
     let _ = frames(resp).await;
@@ -411,9 +431,7 @@ async fn an_input_filter_edits_the_input_that_came_with_the_head_at_once() {
     let (echo, mock, seen) = (Echo::default(), MockTransport::new(), Seen::default());
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Redact), Arc::new(seen.clone())]);
 
-    let (resp, _) = gw
-        .handle(post("/v1/talk", r#"{"say":"my secret","id":1}"#))
-        .await;
+    let (resp, _) = serve(&gw, post("/v1/talk", r#"{"say":"my secret","id":1}"#)).await;
     let frames = frames(resp).await;
 
     let seen = seen.0.lock().map(|s| s.clone()).ok().flatten();
@@ -435,7 +453,8 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
                 Ok(say) => format!("{say:?}"),
                 Err(f) => format!("{}: {}", f.code(), f.message()),
             };
-            let count = match cx.head().headers.contains_key(UPGRADE) {
+            let asked = cx.extensions().get::<Asked>();
+            let count = match asked.is_some_and(|a| a.headers.contains_key(UPGRADE)) {
                 // A framed request's inputs are left for the call.
                 true => 0,
                 false => cx.take_inputs::<Say>().count().await,
@@ -449,10 +468,10 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
     let (gw, calls) = talk(&echo, &mock, vec![Arc::new(quiet.clone())]);
 
     // An empty whole body, and a framed request that closes at once.
-    let (whole, whole_ended) = gw.handle(post("/v1/talk", "")).await;
+    let (whole, whole_ended) = serve(&gw, post("/v1/talk", "")).await;
     let (send, req) = upgrade();
     drop(send);
-    let (framed, framed_ended) = gw.handle(req).await;
+    let (framed, framed_ended) = serve(&gw, req).await;
 
     assert_eq!(whole.status(), StatusCode::OK);
     assert_eq!(framed.status(), StatusCode::SWITCHING_PROTOCOLS);
@@ -464,7 +483,7 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
     );
     gw.idle().await;
     let none = format!(
-        "{}: an upgrading request's inputs come after its head, to filters and take_inputs",
+        "{}: a streaming request's inputs come after its head, to filters and take_inputs",
         codes::INTERNAL
     );
     let noted = quiet.0.lock().map(|s| s.clone()).unwrap_or_default();
@@ -500,7 +519,7 @@ async fn each_output_of_a_framed_response_is_its_own_frame() {
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Echoes)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     drop(send);
 
@@ -541,7 +560,7 @@ async fn a_bridge_calls_a_provider_of_another_kind_once_per_input_and_streams_ba
     }
     let (send, req) = upgrade();
 
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     say(&send, r#"{"say":"x"}"#);
     say(&send, r#"{"say":"y"}"#);
@@ -682,7 +701,7 @@ async fn inputs_are_cut_at_the_requests_end_and_a_calls_input_filters_end_with_i
     let gw = gw.target("early").unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
 
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert!(frames(resp).await.is_empty());
     let _ = ended.await;
     gw.idle().await;
@@ -737,7 +756,7 @@ async fn an_input_filters_failure_ends_every_input_filter_with_it() {
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(guard.clone())]);
     let (send, req) = upgrade();
 
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     say(&send, r#"{"say":"bad"}"#);
     let _ = resp.into_body().collect().await;
     let _ = ended.await;
@@ -784,7 +803,7 @@ async fn a_panic_ending_a_call_keeps_its_end() {
     let gw = gw.target("early").unwrap_or_else(|e| panic!("{e}"));
     let (_send, req) = upgrade();
 
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
@@ -836,7 +855,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
         vec![Arc::new(spawner.clone())],
     );
 
-    let (resp, ended) = gw.handle(post("/v1/talk", r#"{"say":"x"}"#)).await;
+    let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     tokio::time::timeout(Duration::from_secs(5), gw.idle())
@@ -873,7 +892,7 @@ async fn a_retry_after_a_call_that_failed_unread_gets_every_input() {
     let (gw, _) = talk_to(list, vec![Arc::new(Retry)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     say(&send, r#"{"say":"b"}"#);
     drop(send);
@@ -899,7 +918,7 @@ async fn inputs_are_taken_only_by_a_reader_that_is_polled() {
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Peek)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     drop(send);
 
@@ -923,7 +942,7 @@ async fn a_101_is_read_until_content_at_once() {
     let (send, req) = upgrade();
 
     // The echo says nothing until the client does, which waits for the 101.
-    let handled = tokio::time::timeout(Duration::from_secs(5), gw.handle(req)).await;
+    let handled = tokio::time::timeout(Duration::from_secs(5), serve(&gw, req)).await;
     let (resp, _) = handled.unwrap_or_else(|_| panic!("until_content waited for a 101's content"));
     say(&send, r#"{"say":"a"}"#);
     drop(send);
@@ -938,7 +957,7 @@ async fn a_101_and_an_upgrading_call_carry_connection_upgrade() {
     let (gw, _) = talk(&echo, &mock, Vec::new());
     let (send, req) = upgrade();
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     drop(send);
 
     assert_eq!(resp.headers()[CONNECTION], "upgrade");
@@ -957,13 +976,13 @@ async fn a_streamed_call_goes_without_the_clients_content_encoding() {
     let gzip = HeaderValue::from_static("gzip");
     req.headers_mut().insert(CONTENT_ENCODING, gzip.clone());
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     drop(send);
     let _ = frames(resp).await;
     // A whole body relayed as it came keeps it.
     let mut whole = post("/v1/talk", r#"{"say":"a"}"#);
     whole.headers_mut().insert(CONTENT_ENCODING, gzip);
-    let _ = frames(gw.handle(whole).await.0).await;
+    let _ = frames(serve(&gw, whole).await.0).await;
 
     let heads = echo.heads();
     assert_eq!(heads.len(), 2);
@@ -990,11 +1009,16 @@ impl Format for TalkHttp {
         Talk.request_decoder(request)
     }
 
+    /// One request and one answer: no streamed inputs.
     fn request_encoder(
         &self,
         request: &mut http::Request<Bytes>,
         _first: Option<&Say>,
+        streams: bool,
     ) -> Box<dyn Encoder<Say>> {
+        if streams {
+            return respan_gateway_formats::whole::unstreamable("talk-http");
+        }
         set_path(request, "/talk");
         Box::new(Says("talk-http"))
     }
@@ -1011,8 +1035,9 @@ impl Format for TalkHttp {
         &self,
         head: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Heard>> {
-        Talk.response_encoder(head, request)
+        Talk.response_encoder(head, request, refusal)
     }
 }
 
@@ -1024,7 +1049,7 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
     let gw = gw.target("http").unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
 
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     drop(send);
 
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -1060,26 +1085,28 @@ impl Format for Raw {
     fn request_encoder(
         &self,
         request: &mut http::Request<Bytes>,
-        _first: Option<&Sent<Raw>>,
+        first: Option<&Sent<Raw>>,
+        streams: bool,
     ) -> Box<dyn Encoder<Sent<Raw>>> {
         set_path(request, "/");
-        opaque::request_encoder()
+        opaque::request_encoder(request, first, streams)
     }
 
     fn response_decoder(
         &self,
         head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        request: &http::Request<Bytes>,
     ) -> Box<dyn Decoder<Got<Raw>>> {
-        opaque::response_decoder("raw", head)
+        opaque::response_decoder("raw", head, request)
     }
 
     fn response_encoder(
         &self,
         head: &mut http::response::Parts,
-        _request: &http::Request<Bytes>,
+        request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Got<Raw>>> {
-        opaque::response_encoder("raw", head)
+        opaque::response_encoder("raw", head, request, refusal)
     }
 }
 
@@ -1092,7 +1119,7 @@ async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
     let (send, req) = upgrade();
 
     // Raw says nothing of framing: the request's `Upgrade` does.
-    let handled = tokio::time::timeout(Duration::from_secs(5), gw.handle(req)).await;
+    let handled = tokio::time::timeout(Duration::from_secs(5), serve(&gw, req)).await;
     let (resp, _) = handled.unwrap_or_else(|_| panic!("the body was read whole"));
     say(&send, r#"{"say":"a"}"#);
     say(&send, "");
@@ -1123,7 +1150,7 @@ async fn a_101_goes_only_to_a_request_that_asked() {
     let (gw, _) = talk_to(vec![add_provider("switches", Talk, Switches)], Vec::new());
     let gw = gw.target("switches").unwrap_or_else(|e| panic!("{e}"));
 
-    let (resp, ended) = gw.handle(post("/v1/talk", r#"{"say":"a"}"#)).await;
+    let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"a"}"#)).await;
 
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let _ = frames(resp).await;
@@ -1152,28 +1179,34 @@ async fn a_head_edit_that_sets_101_unasked_is_refused() {
     let (echo, mock) = (Echo::default(), MockTransport::new());
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Switch)]);
 
-    let (resp, ended) = gw.handle(post("/v1/talk", r#"{"say":"a"}"#)).await;
+    let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"a"}"#)).await;
 
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let _ = frames(resp).await;
+    // Changed: the adapter refuses it and drops the gateway's response, so
+    // the request ends abandoned.
     assert_eq!(
         ended.await.end.map_err(|f| f.code().to_owned()),
-        Err(codes::INTERNAL.into())
+        Err(codes::ABANDONED.into())
     );
 }
 
+// Changed: `Response::with_status` is gone; a plugin sets its own status
+// with a head edit, after the format wrote the head.
 #[tokio::test]
-async fn a_plugins_own_status_reaches_the_encoder() {
+async fn a_plugins_head_edit_sets_its_status() {
     /// Accepts the request with nothing to say.
     struct Accept;
 
     #[async_trait]
     impl Plugin for Accept {
-        async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.edit_response_head(|head| {
+                head.status = StatusCode::ACCEPTED;
+                Ok(())
+            });
             let none = futures::stream::empty::<Result<Heard, Fault>>();
-            Ok(Some(
-                Response::stream(none).with_status(StatusCode::ACCEPTED),
-            ))
+            Ok(Some(Response::stream(none)))
         }
     }
 
@@ -1181,10 +1214,9 @@ async fn a_plugins_own_status_reaches_the_encoder() {
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Accept)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     drop(send);
 
-    // Talk switches protocols only for a 200.
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     assert!(frames(resp).await.is_empty());
 }
@@ -1205,7 +1237,7 @@ async fn a_clone_of_a_polled_call_keeps_its_settings() {
 
     let (echo, mock) = (Echo::default(), MockTransport::new());
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Again)]);
-    let (resp, ended) = gw.handle(post("/v1/talk", r#"{"say":"x"}"#)).await;
+    let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
     let status = resp.status();
     let _ = resp.into_body().collect().await;
     let end = ended
@@ -1256,7 +1288,7 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
         vec![add_provider("never", Talk, Never)],
         vec![Arc::new(hold.clone())],
     );
-    let (resp, ended) = gw.handle(post("/v1/talk", r#"{"say":"x"}"#)).await;
+    let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     let idle = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
@@ -1305,7 +1337,7 @@ async fn a_call_kept_past_its_request_does_not_keep_the_clients_body() {
     req.headers_mut()
         .insert(UPGRADE, HeaderValue::from_static("websocket"));
 
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
@@ -1352,7 +1384,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
     let (send, req) = upgrade();
     // The client says nothing and closes.
     drop(send);
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     let mut body = resp.into_body();
     let mut got = Vec::new();
     while let Some(frame) = body.frame().await {
@@ -1405,7 +1437,7 @@ async fn without_a_kept_call_the_clients_body_is_dropped() {
     *req.uri_mut() = http::Uri::from_static("/v1/talk");
     req.headers_mut()
         .insert(UPGRADE, HeaderValue::from_static("websocket"));
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
@@ -1432,7 +1464,7 @@ async fn a_head_request_to_an_endless_stream_gets_its_head() {
     let (gw, _) = talk(&echo, &mock, vec![Arc::new(Endless)]);
     let mut req = post("/v1/talk", r#"{"say":"x"}"#);
     *req.method_mut() = http::Method::HEAD;
-    let handled = tokio::time::timeout(Duration::from_secs(2), gw.handle(req)).await;
+    let handled = tokio::time::timeout(Duration::from_secs(2), serve(&gw, req)).await;
     assert!(
         handled.is_ok(),
         "a HEAD waited for the whole body it never sends"
@@ -1452,7 +1484,7 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
         .unwrap_or_default();
     mock.reply(RAW, empty);
 
-    let (resp, ended) = gw.handle(post("/any", "x")).await;
+    let (resp, ended) = serve(&gw, post("/any", "x")).await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     // A host never polls a 204's body.
     drop(resp);
@@ -1528,7 +1560,7 @@ async fn dropped_then_retried() {
         ],
         vec![Arc::new(retry.clone())],
     );
-    let (resp, ended) = gw.handle(post("/v1/talk", r#"{"say":"x"}"#)).await;
+    let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
@@ -1572,7 +1604,7 @@ async fn r6_on_provider_sees_the_requests_task_locals() {
     );
     TRACE
         .scope(7, async {
-            let (resp, _) = gw.handle(post("/v1/talk", r#"{"say":"x"}"#)).await;
+            let (resp, _) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
             let _ = frames(resp).await;
         })
         .await;
@@ -1599,8 +1631,9 @@ impl Format for Strict {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&Say>,
+        streams: bool,
     ) -> Box<dyn Encoder<Say>> {
-        Talk.request_encoder(request, first)
+        Talk.request_encoder(request, first, streams)
     }
     fn response_decoder(
         &self,
@@ -1613,8 +1646,9 @@ impl Format for Strict {
         &self,
         h: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Heard>> {
-        Talk.response_encoder(h, request)
+        Talk.response_encoder(h, request, refusal)
     }
 }
 
@@ -1652,7 +1686,7 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
         .and_then(|g| g.target("echo"))
         .unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     say(&send, r#"{"say":"hi"}"#);
     drop(send);
     let frames = frames(resp).await;
@@ -1706,7 +1740,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
     let (send, req) = upgrade();
     say(&send, r#"{"say":"hi"}"#);
     drop(send);
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     drop(frames(resp).await);
     gw.idle().await;
     let noted = noted.lock().map(|n| n.clone()).unwrap_or_default();
@@ -1722,7 +1756,8 @@ struct WsToSse(&'static str);
 #[async_trait]
 impl Plugin for WsToSse {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if !cx.is_kind::<Say>() || !cx.head().headers.contains_key(UPGRADE) {
+        let asked = cx.extensions().get::<Asked>();
+        if !cx.is_kind::<Say>() || !asked.is_some_and(|a| a.headers.contains_key(UPGRADE)) {
             return Ok(None);
         }
         let call = cx.call(self.0);
@@ -1752,7 +1787,7 @@ async fn r11_plugin_ws_to_sse_bridge() {
         );
     }
     let (send, req) = upgrade();
-    let (resp, ended) = gw.handle(req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     say(&send, r#"{"say":"x"}"#);
     say(&send, r#"{"say":"y"}"#);

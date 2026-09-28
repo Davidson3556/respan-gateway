@@ -9,9 +9,9 @@ use serde_json::{Map, Value, json};
 
 use crate::Usage;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, made_head, merge_details,
-    patch_messages, patch_sampling, post_json, probe, provider_error, read_message, reads_back,
-    request_decoder, says, says_error, set, split_around, stop_json, unary_decoder, unix_now,
+    Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, merge_details, patch_messages,
+    patch_sampling, post_json, probe, provider_error, read_message, reads_back, request_decoder,
+    response_decoder, response_encoder, says, says_error, set, split_around, stop_json, unix_now,
     unreadable_event, unsupported_fields, unwritable_content, write_message,
 };
 use crate::conversation::{Conversation, Finish, Piece, Reply, Role, Start, units};
@@ -52,33 +52,36 @@ impl Format for OpenAiChat {
     fn request_encoder(
         &self,
         request: &mut Request<Bytes>,
-        _first: Option<&Conversation>,
+        first: Option<&Conversation>,
+        streams: bool,
     ) -> Box<dyn Encoder<Conversation>> {
-        post_json::<Self>(request, "/chat/completions")
+        post_json::<Self>(request, "/chat/completions", first, streams)
     }
 
     fn response_decoder(
         &self,
         head: &http::response::Parts,
-        _request: &Request<Bytes>,
+        request: &Request<Bytes>,
     ) -> Box<dyn Decoder<Reply>> {
-        if !is_stream(head) {
-            return unary_decoder::<Self>(head);
-        }
-        holding_start(SseDecoder::new(Reading::<Self>::new()))
+        let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
+        response_decoder::<Self>(head, request, stream)
     }
 
     fn response_encoder(
         &self,
         head: &mut http::response::Parts,
         request: &Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Reply>> {
-        let asked = probe(request.body());
-        let relayed = made_head(head, asked.stream);
-        if !is_stream(head) {
-            return Box::new(UnaryEncoder::<Self>::new(head, relayed));
-        }
-        Box::new(Chunks::new(relayed, asked.usage))
+        response_encoder::<Self>(
+            head,
+            request,
+            refusal,
+            |head, relayed, asked| match is_stream(head) {
+                false => Box::new(UnaryEncoder::<Self>::new(relayed)),
+                true => Box::new(Chunks::new(relayed, asked.usage)),
+            },
+        )
     }
 
     fn is_content(&self, reply: &Reply) -> bool {
@@ -442,7 +445,7 @@ impl Events<Reply> for Reading<OpenAiChat> {
         // Its data goes as it came to a client of this format.
         if says_error(&v) {
             let data = Bytes::from(data.unwrap_or_default());
-            return Err(provider_error(StatusCode::OK, &v).with_raw(&self.name, data));
+            return Err(provider_error(StatusCode::OK, &v).with_words(&self.name, data));
         }
         let mut reply = chunk_reply(&v);
         reply.usage = self.totals.increment(&<OpenAiChat as Wire>::usage(&v));
@@ -700,7 +703,7 @@ impl Encoder<Reply> for Chunks {
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         if let Err(f) = end {
             out.extend_from_slice(&self.held.take().unwrap_or_default());
-            let body = match f.raw(OPENAI) {
+            let body = match f.answer::<Bytes>(OPENAI) {
                 Some(raw) => String::from_utf8_lossy(raw).into_owned(),
                 None => OpenAiChat::error_body(f).to_string(),
             };
@@ -1110,7 +1113,7 @@ mod tests {
     /// `body`, relayed unread, as it goes to a provider.
     fn with_usage(body: &'static str) -> Bytes {
         let mut request = http::Request::new(Bytes::from_static(body.as_bytes()));
-        let _ = OpenAiChat.request_encoder(&mut request, None);
+        let _ = OpenAiChat.request_encoder(&mut request, None, false);
         request.into_body()
     }
 

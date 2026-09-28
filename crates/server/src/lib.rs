@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
-//! HTTP for the kernel: an axum router that hands requests to a [`Gateway`],
-//! and a [`Transport`] that reaches a provider over HTTP.
+//! HTTP for the kernel: an axum router that hands requests to a [`Gateway`]
+//! through the HTTP adapter ([`respan_gateway_http::handle`]), and a
+//! [`Transport`] that reaches a provider over HTTP.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -8,40 +9,44 @@ use std::time::Duration;
 use axum::Router;
 use axum::extract::{Request, State};
 use axum::response::Response;
-use http::header::{self, HeaderName};
+use http::header;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use respan_gateway_core::{Body, Fault, Gateway, Transport};
 use respan_gateway_core::{async_trait, http, http_body, http_body_util};
+use respan_gateway_http::{
+    credentials, is_connection_header, proxy_call, strip_client_origin_headers,
+    strip_origin_headers,
+};
 
 pub use reqwest;
 
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-/// A router sending every request to [`Gateway::handle`]. It switches no
-/// protocols, so it ignores `Upgrade` and reads every body whole. A body
-/// over 32 MiB is refused 413 `too_large`, and one that breaks off 400
-/// `bad_request`, both in the client's format.
+/// A router sending every request to [`Gateway::handle`] through the HTTP
+/// adapter ([`respan_gateway_http::handle`]). It switches no protocols, so
+/// it ignores `Upgrade` and reads every body whole. A body over 32 MiB is
+/// refused 413 `too_large`, and one that breaks off 400 `bad_request`, both
+/// in the client's format.
 pub fn router(gateway: Gateway) -> Router {
     Router::new().fallback(handle).with_state(gateway)
 }
 
 async fn handle(State(gateway): State<Gateway>, mut req: Request) -> Response {
-    // The kernel frames a request that carries `Upgrade`, which is right
-    // only if the adapter switches it; this one switches none.
+    // It switches no protocols, so a client's `Upgrade` is not relayed.
     ignore_upgrade(req.headers_mut());
     let req = req.map(|body| {
         Limited::new(body, MAX_BODY_BYTES)
             .map_err(body_fault)
             .boxed_unsync()
     });
-    let (resp, _ended) = gateway.handle(req).await;
+    let (resp, _ended) = respan_gateway_http::handle(&gateway, req, false).await;
     let (parts, body) = resp.into_parts();
     Response::from_parts(parts, axum::body::Body::new(body))
 }
 
 /// Remove `Upgrade` and its `Connection` option (RFC 9110 7.8), keeping
-/// the other options, which name headers the kernel strips.
+/// the other options, which name headers the adapter strips.
 fn ignore_upgrade(headers: &mut HeaderMap) {
     headers.remove(header::UPGRADE);
     let kept: Vec<HeaderValue> = headers
@@ -84,9 +89,11 @@ fn too_large() -> Fault {
 /// Reaches one provider over HTTP(S) at a base URL, which each request's
 /// path extends, with headers of its own. Instances share one connection
 /// pool unless given their own client. A body of exact size is sent whole,
-/// a streaming one as it comes. It strips the client's cookies and
-/// forwarding headers from each call ([`strip_client_origin_headers`]) and
-/// the provider origin's from each response ([`strip_origin_headers`]).
+/// a streaming one as it comes. It strips from each call what a proxy does
+/// not pass on ([`proxy_call`]) and the client's cookies and forwarding
+/// headers ([`strip_client_origin_headers`]), sends the call's keys
+/// ([`credentials`]), and strips the provider origin's headers from each
+/// response ([`strip_origin_headers`]).
 #[derive(Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
@@ -125,8 +132,9 @@ fn shared_client() -> Result<reqwest::Client, Fault> {
 impl HttpTransport {
     /// A transport to `base_url`: `http` or `https`, a host, an optional path
     /// prefix such as `/v1`, and no query, fragment or credentials. With no
-    /// [`with_headers`](Self::with_headers), clients' credentials pass
-    /// through. `Err` with `config` for any other URL.
+    /// [`with_headers`](Self::with_headers), clients' credentials
+    /// ([`Credential`](respan_gateway_http::Credential)) pass through.
+    /// `Err` with `config` for any other URL.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Fault> {
         // The URL may contain a key, so the error does not echo it.
         let url = reqwest::Url::parse(&base_url.into()).ok().filter(|u| {
@@ -152,10 +160,10 @@ impl HttpTransport {
     }
 
     /// Send `headers`, such as the API key, with every call, replacing any set
-    /// before; with any, clients' credentials are removed
-    /// ([`add_own_headers`]). `Err` with `config` for a connection header.
+    /// before; with any, clients' credentials are not passed through
+    /// ([`credentials`]). `Err` with `config` for a connection header.
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
-        if let Some(name) = headers.keys().find(|k| CONNECTION_HEADERS.contains(k)) {
+        if let Some(name) = headers.keys().find(|k| is_connection_header(k)) {
             let name = name.as_str();
             return Err(Fault::config(format!(
                 "header '{name}' is the connection's"
@@ -173,28 +181,13 @@ impl HttpTransport {
     }
 }
 
-/// Headers the kernel strips from every call ([`Transport::send`]).
-const CONNECTION_HEADERS: [HeaderName; 12] = [
-    header::CONNECTION,
-    header::CONTENT_LENGTH,
-    header::EXPECT,
-    header::HOST,
-    HeaderName::from_static("keep-alive"),
-    HeaderName::from_static("proxy-connection"),
-    header::PROXY_AUTHENTICATE,
-    header::PROXY_AUTHORIZATION,
-    header::TE,
-    header::TRAILER,
-    header::TRANSFER_ENCODING,
-    header::UPGRADE,
-];
-
 #[async_trait]
 impl Transport for HttpTransport {
     async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
         let (mut parts, body) = call.into_parts();
+        proxy_call(&mut parts);
         strip_client_origin_headers(&mut parts.headers);
-        add_own_headers(&mut parts, &self.headers)?;
+        credentials(&mut parts, &self.headers);
         let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
         parts.uri = url
@@ -220,117 +213,4 @@ impl Transport for HttpTransport {
         strip_origin_headers(resp.headers_mut());
         Ok(resp)
     }
-}
-
-/// Remove the headers of the client's hop to the gateway from a call, as
-/// they belong to the gateway's origin, not the provider's: `Cookie`, the
-/// gateway origin's credentials, and the forwarding headers (`Forwarded`,
-/// RFC 7239; `Via`; `X-Forwarded-*`; `X-Real-IP`). Plugins still see them
-/// in the client's head; a call's [`CallHeaders`], written after, may set
-/// them again.
-pub fn strip_client_origin_headers(headers: &mut HeaderMap) {
-    let names: Vec<HeaderName> = headers
-        .keys()
-        .filter(|name| {
-            let name = name.as_str();
-            matches!(name, "cookie" | "forwarded" | "via" | "x-real-ip")
-                || name.starts_with("x-forwarded-")
-        })
-        .cloned()
-        .collect();
-    for name in names {
-        headers.remove(name);
-    }
-}
-
-/// Remove a provider origin's own headers from its response: cookies,
-/// alternative services and HSTS bind to the origin, which the gateway is not.
-pub fn strip_origin_headers(headers: &mut HeaderMap) {
-    for name in [
-        header::SET_COOKIE,
-        header::ALT_SVC,
-        header::STRICT_TRANSPORT_SECURITY,
-    ] {
-        headers.remove(name);
-    }
-}
-
-/// Headers for one call, sent as the transport's own and replacing those
-/// of the same name from [`HttpTransport::with_headers`], such as a
-/// tenant's key set in `on_provider`
-/// (`px.extensions_mut().insert(CallHeaders(headers))`).
-#[derive(Clone, Default)]
-pub struct CallHeaders(pub HeaderMap);
-
-impl std::fmt::Debug for CallHeaders {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Header values may be keys.
-        let names: Vec<_> = self.0.keys().collect();
-        f.debug_tuple("CallHeaders").field(&names).finish()
-    }
-}
-
-/// Write a transport's own `headers`, then the call's [`CallHeaders`]
-/// (minus connection headers), onto a call's `head`, each replacing any of
-/// the same name. If there are any, the client's credential headers and
-/// query parameters are removed first. A credential is a name whose last `-`
-/// or `_` segment is `authorization`, `auth`, `key`, `token`, `secret`,
-/// `password`, `credential` or `credentials`, but not an idempotency key.
-/// `Err` with `config` if the query cannot be rewritten.
-pub fn add_own_headers(head: &mut http::request::Parts, headers: &HeaderMap) -> Result<(), Fault> {
-    let mut own = headers.clone();
-    if let Some(CallHeaders(call)) = head.extensions.get::<CallHeaders>() {
-        let sent = |n: &&HeaderName| !CONNECTION_HEADERS.contains(*n);
-        for name in call.keys().filter(sent) {
-            own.remove(name);
-        }
-        for (name, value) in call.iter().filter(|(n, _)| sent(n)) {
-            own.append(name, value.clone());
-        }
-    }
-    if own.is_empty() {
-        return Ok(());
-    }
-    let names: Vec<HeaderName> = head.headers.keys().cloned().collect();
-    for name in names.iter().filter(|n| is_credential(n.as_str())) {
-        head.headers.remove(name);
-    }
-    if let Some(query) = head.uri.query() {
-        let kept: Vec<&str> = query
-            .split('&')
-            .filter(|p| !is_credential(p.split('=').next().unwrap_or_default()))
-            .collect();
-        let path = head.uri.path();
-        let uri = match kept.is_empty() {
-            true => path.to_owned(),
-            false => format!("{path}?{}", kept.join("&")),
-        };
-        head.uri = uri
-            .parse()
-            .map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
-    }
-    for name in own.keys() {
-        head.headers.remove(name);
-    }
-    head.headers.extend(own);
-    Ok(())
-}
-
-/// Whether a header or query parameter `name` names a credential
-/// ([`add_own_headers`]).
-fn is_credential(name: &str) -> bool {
-    const CREDENTIALS: [&str; 8] = [
-        "authorization",
-        "auth",
-        "key",
-        "token",
-        "secret",
-        "password",
-        "credential",
-        "credentials",
-    ];
-    let name = name.to_ascii_lowercase();
-    let last = name.rsplit(['-', '_']).next().unwrap_or_default();
-    let idempotency = matches!(&*name, "idempotency-key" | "x-idempotency-key");
-    !idempotency && CREDENTIALS.contains(&last)
 }

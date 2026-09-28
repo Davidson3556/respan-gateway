@@ -15,7 +15,8 @@ use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::whole::Relay;
 use respan_gateway_formats::{self as formats, default_content_type, sse};
-use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole};
+use respan_gateway_http::Asked;
+use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -130,6 +131,7 @@ impl Format for JevFormat {
         &self,
         request: &mut http::Request<Bytes>,
         _first: Option<&Jev>,
+        _streams: bool,
     ) -> Box<dyn Encoder<Jev>> {
         *request.method_mut() = http::Method::POST;
         formats::set_path(request, "/complete");
@@ -154,7 +156,7 @@ impl Format for JevFormat {
             let v = formats::json(&raw);
             // An error inside a success is the provider's, relayed.
             if let Some(message) = v.as_ref().and_then(|v| v["error"]["message"].as_str()) {
-                return Err(Fault::upstream(message).with_raw(&name, raw));
+                return Err(Fault::upstream(message).with_words(&name, raw));
             }
             let text = v.as_ref().and_then(|v| v[answer].as_str());
             let text = text.ok_or_else(|| Fault::upstream("not a jev answer"))?;
@@ -167,7 +169,15 @@ impl Format for JevFormat {
         &self,
         head: &mut http::response::Parts,
         _request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Answer>> {
+        // A refusal is the provider's answer as it came, else jev's error
+        // under the fault's status.
+        if let Some(fault) = refusal
+            && let Some(body) = respan_gateway_http::answered(self.name, fault, head)
+        {
+            return formats::whole::written(body);
+        }
         default_content_type(head, "application/json");
         // Answers are written as they came, edits in their shape; others and
         // failures in jev: in a stream, as an event shaped like the original.
@@ -193,7 +203,7 @@ impl Format for JevFormat {
             let like = like.map(|o| &o.bytes);
             Ok(frame(like, json!({ key: texts.concat() })))
         };
-        let fail = move |f: &Fault| match f.raw(name) {
+        let fail = move |f: &Fault| match f.answer::<Bytes>(name) {
             Some(raw) => raw.clone(),
             None => frame(None, json!({ "error": f.message() })),
         };
@@ -311,7 +321,7 @@ async fn a_kind_the_kernel_has_never_seen_translates_between_its_formats() {
     );
 
     let request = r#"{"input":"hi","model":"j1"}"#;
-    let (_, _, body) = read_whole(gw.handle(to("jev-v1", request)).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, to("jev-v1", request)).await.0).await;
 
     let sent: Value = serde_json::from_slice(mock.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent, json!({ "prompt": "hi", "model": "j1" }));
@@ -336,12 +346,12 @@ async fn a_field_jev_has_no_place_for_is_kept_or_refused() {
     let request = r#"{"prompt":"hi","seed":7}"#;
 
     // Untranslated, the edited body keeps the field.
-    let _ = read_whole(same.handle(to("jev-v2", request)).await.0).await;
+    let _ = read_whole(serve(&same, to("jev-v2", request)).await.0).await;
     let sent: Value = serde_json::from_slice(mock.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent, json!({ "prompt": "please, hi", "seed": 7 }));
 
     // Translation would lose it, so it is refused.
-    let (status, _, _) = read_whole(other.handle(to("jev-v2", request)).await.0).await;
+    let (status, _, _) = read_whole(serve(&other, to("jev-v2", request)).await.0).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(mock.sent().len(), 1);
 }
@@ -361,7 +371,7 @@ async fn a_plugin_works_on_every_format_of_its_kind() {
         mock::json(StatusCode::OK, r#"{"text":"hello"}"#),
     );
 
-    let (_, _, body) = read_whole(gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
 
     let sent: Value = serde_json::from_slice(mock.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent, json!({ "prompt": "please, hi" }));
@@ -381,7 +391,7 @@ async fn a_default_target_of_another_kind_is_not_used() {
     );
     let gw = serving(V1, [openai], Vec::new(), Some("openai")).expect("builds");
 
-    let (resp, ended) = gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await;
+    let (resp, ended) = serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await;
     let (status, _, _) = read_whole(resp).await;
 
     // A target exists, so the setup, not the request, is at fault.
@@ -428,7 +438,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
     let chat = || post("/v1/chat/completions", r#"{"model":"m","messages":[]}"#);
 
     // Without the plugin, a chat request goes to `v2`, which cannot take it.
-    let (resp, ended) = gw(Vec::new()).handle(chat()).await;
+    let (resp, ended) = serve(&gw(Vec::new()), chat()).await;
     assert_eq!(read_whole(resp).await.0, StatusCode::INTERNAL_SERVER_ERROR);
     let end = ended.await.end.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err(codes::CONFIG.to_owned()));
@@ -443,8 +453,8 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
         "http://o.test",
         mock::json(StatusCode::OK, r#"{"id":"c","choices":[]}"#),
     );
-    let jev = read_whole(gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
-    let chat = read_whole(gw.handle(chat()).await.0).await;
+    let jev = read_whole(serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
+    let chat = read_whole(serve(&gw, chat()).await.0).await;
 
     assert_eq!((jev.0, chat.0), (StatusCode::OK, StatusCode::OK));
     let sent: Vec<String> = mock.sent().iter().map(|r| r.uri().to_string()).collect();
@@ -479,7 +489,7 @@ async fn a_call_to_a_provider_of_another_kind_is_refused_when_made() {
     );
     let gw = serving(V1, [openai], vec![Arc::new(Stray)], None).expect("builds");
 
-    let (resp, ended) = gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await;
+    let (resp, ended) = serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await;
     let (status, _, body) = read_whole(resp).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -511,7 +521,8 @@ async fn a_plugin_for_another_kind_is_refused_not_ignored() {
     )
     .unwrap_or_else(|e| panic!("{e}"));
 
-    let (status, _, body) = read_whole(gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+    let (status, _, body) =
+        read_whole(serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
@@ -534,7 +545,7 @@ async fn a_plugin_made_response_of_another_kind_fails_loudly() {
 
     let gw = serving(V2, [], vec![Arc::new(Wrong)], None).unwrap_or_else(|e| panic!("{e}"));
 
-    let (_, _, body) = read_whole(gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+    let (_, _, body) = read_whole(serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
 
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert!(body.contains("another kind"), "{body}");
@@ -558,7 +569,7 @@ async fn a_plugin_asking_for_another_kind_is_told_so_before_decoding() {
     let gw = serving(V2, [], vec![Arc::new(Chatty)], None).unwrap_or_else(|e| panic!("{e}"));
 
     // The plugin's kind, not the bad body, is the fault.
-    let (status, _, body) = read_whole(gw.handle(to("jev-v2", "not json")).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, to("jev-v2", "not json")).await.0).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
@@ -597,7 +608,7 @@ async fn a_request_a_plugin_only_looked_at_keeps_its_bytes() {
     // Bytes a re-encoding would not reproduce.
     let request = r#"{"prompt":"hi",  "seed":7}"#;
 
-    let _ = read_whole(gw.handle(to("jev-v2", request)).await.0).await;
+    let _ = read_whole(serve(&gw, to("jev-v2", request)).await.0).await;
 
     assert_eq!(&mock.sent()[0].body()[..], request.as_bytes());
 }
@@ -648,8 +659,9 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
             &self,
             request: &mut http::Request<Bytes>,
             first: Option<&Jev>,
+            streams: bool,
         ) -> Box<dyn Encoder<Jev>> {
-            V1.request_encoder(request, first)
+            V1.request_encoder(request, first, streams)
         }
 
         fn response_decoder(
@@ -664,8 +676,9 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
             &self,
             _head: &mut http::response::Parts,
             _request: &http::Request<Bytes>,
+            _refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<Jev>> {
-            V1.request_encoder(&mut http::Request::new(Bytes::new()), None)
+            V1.request_encoder(&mut http::Request::new(Bytes::new()), None, false)
         }
     }
 
@@ -710,27 +723,29 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
         fn request_encoder(
             &self,
             request: &mut http::Request<Bytes>,
-            _first: Option<&Self::Input>,
+            first: Option<&Self::Input>,
+            streams: bool,
         ) -> Box<dyn Encoder<Self::Input>> {
             *request.method_mut() = http::Method::POST;
             formats::set_path(request, "/");
-            opaque::request_encoder()
+            opaque::request_encoder(request, first, streams)
         }
 
         fn response_decoder(
             &self,
             head: &http::response::Parts,
-            _request: &http::Request<Bytes>,
+            request: &http::Request<Bytes>,
         ) -> Box<dyn Decoder<Self::Output>> {
-            opaque::response_decoder("opaque", head)
+            opaque::response_decoder("opaque", head, request)
         }
 
         fn response_encoder(
             &self,
             head: &mut http::response::Parts,
-            _request: &http::Request<Bytes>,
+            request: &http::Request<Bytes>,
+            refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<Self::Output>> {
-            opaque::response_encoder("opaque", head)
+            opaque::response_encoder("opaque", head, request, refusal)
         }
     }
 
@@ -799,7 +814,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     headers.insert("proxy-authorization", HeaderValue::from_static("Basic x"));
     headers.insert("cookie", HeaderValue::from_static("session=1"));
     headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
-    let (_, head, body) = read_whole(open.handle(ping).await.0).await;
+    let (_, head, body) = read_whole(serve(&open, ping).await.0).await;
     assert_eq!(body.ok().as_deref(), Some(&b"anything at all"[..]));
     // The provider's head is unchanged; no content type is invented.
     assert!(head.get("content-type").is_none());
@@ -825,7 +840,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     }
 
     // A provider's failure is relayed as is and ends `Err`.
-    let (resp, ended) = open.handle(to("opaque", "ping")).await;
+    let (resp, ended) = serve(&open, to("opaque", "ping")).await;
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(&b"busy"[..]));
@@ -833,18 +848,18 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE));
 
     // A body cut short upstream is cut short for the client.
-    let (status, _, body) = read_whole(open.handle(to("opaque", "ping")).await.0).await;
+    let (status, _, body) = read_whole(serve(&open, to("opaque", "ping")).await.0).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_err(), "{body:?}");
 
     // A refusal says why, in plain text.
-    let (status, headers, body) = read_whole(limited.handle(to("opaque", "ping")).await.0).await;
+    let (status, headers, body) = read_whole(serve(&limited, to("opaque", "ping")).await.0).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
     assert_eq!(body.ok().as_deref(), Some(&b"slow down"[..]));
 
     // A plugin for jev that does not skip other traffic refuses it.
-    let (status, _, _) = read_whole(guarded.handle(to("opaque", "ping")).await.0).await;
+    let (status, _, _) = read_whole(serve(&guarded, to("opaque", "ping")).await.0).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(mock.sent().len(), 3, "the guarded request never left");
 }
@@ -874,8 +889,9 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
             &self,
             request: &mut http::Request<Bytes>,
             first: Option<&Jev>,
+            streams: bool,
         ) -> Box<dyn Encoder<Jev>> {
-            V2.request_encoder(request, first)
+            V2.request_encoder(request, first, streams)
         }
 
         fn response_decoder(
@@ -890,9 +906,13 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
             &self,
             head: &mut http::response::Parts,
             request: &http::Request<Bytes>,
+            refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<Answer>> {
+            // Changed: a format writes a refusal's status, so this one
+            // overrides it after.
+            let encoder = V2.response_encoder(head, request, refusal);
             head.status = StatusCode::OK;
-            V2.response_encoder(head, request)
+            encoder
         }
     }
 
@@ -907,7 +927,7 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
 
     let gw = serving(InBand, [], vec![Arc::new(Deny)], None).unwrap_or_else(|e| panic!("{e}"));
 
-    let (status, _, _) = read_whole(gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+    let (status, _, _) = read_whole(serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -935,8 +955,9 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
             &self,
             request: &mut http::Request<Bytes>,
             first: Option<&Jev>,
+            streams: bool,
         ) -> Box<dyn Encoder<Jev>> {
-            V2.request_encoder(request, first)
+            V2.request_encoder(request, first, streams)
         }
 
         fn response_decoder(
@@ -951,6 +972,7 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
             &self,
             head: &mut http::response::Parts,
             request: &http::Request<Bytes>,
+            _refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<Answer>> {
             let _ = (head, request);
             panic!("a buggy format")
@@ -962,7 +984,7 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
         serving(Broken, [], vec![Arc::new(log.clone())], None).unwrap_or_else(|e| panic!("{e}"));
 
     let (status, headers, _) =
-        read_whole(gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+        read_whole(serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
     gw.idle().await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -987,7 +1009,8 @@ async fn a_providers_error_body_is_relayed_once() {
         mock::json(StatusCode::TOO_MANY_REQUESTS, refusal),
     );
 
-    let (status, _, body) = read_whole(gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+    let (status, _, body) =
+        read_whole(serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(body.ok().as_deref(), Some(refusal.as_bytes()));
@@ -1034,9 +1057,9 @@ async fn a_jev_stream_is_relayed_and_edited_event_by_event() {
         .reply("http://v2.test", mock::sse(&stream));
 
     let hi = || to("jev-v2", r#"{"prompt":"hi"}"#);
-    let (_, _, plain) = read_whole(plain.handle(hi()).await.0).await;
-    let (_, _, polite) = read_whole(polite.handle(hi()).await.0).await;
-    let (_, _, dropped) = read_whole(drop.handle(hi()).await.0).await;
+    let (_, _, plain) = read_whole(serve(&plain, hi()).await.0).await;
+    let (_, _, polite) = read_whole(serve(&polite, hi()).await.0).await;
+    let (_, _, dropped) = read_whole(serve(&drop, hi()).await.0).await;
 
     assert_eq!(dropped.ok().as_deref(), Some(stream[0].as_bytes()));
 
@@ -1086,8 +1109,8 @@ async fn a_translated_jev_stream_and_a_whole_body_with_a_tail_are_one_document_e
         mock::json(StatusCode::OK, r#"{"text":"hi"}"#),
     );
 
-    let (_, _, v1) = read_whole(v1.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
-    let (_, _, tail) = read_whole(tail.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+    let (_, _, v1) = read_whole(serve(&v1, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
+    let (_, _, tail) = read_whole(serve(&tail, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
 
     assert_eq!(v1.ok().as_deref(), Some(&br#"{"output":"ab"}"#[..]));
     assert_eq!(tail.ok().as_deref(), Some(&br#"{"text":"hi!"}"#[..]));
@@ -1110,14 +1133,26 @@ async fn a_redirect_is_passed_on_as_it_came_not_read_as_an_answer() {
         .unwrap_or_default();
     mock.reply("http://v2.test", moved);
 
-    let (resp, ended) = gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await;
+    let (resp, ended) = serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await;
     let (status, headers, body) = read_whole(resp).await;
 
     assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
     assert_eq!(headers["content-type"], "text/html");
     assert_eq!(body.ok().as_deref(), Some(&b"<html>moved</html>"[..]));
-    let end = ended.await.end.map_err(|f| f.status());
-    assert_eq!(end, Err(StatusCode::MOVED_PERMANENTLY));
+    // Changed: the redirect is a fault, a 502 to any other format, that
+    // carries the provider's answer, 301 and all.
+    let end = ended.await.end.err();
+    assert_eq!(
+        end.as_ref().map(Fault::status),
+        Some(StatusCode::BAD_GATEWAY)
+    );
+    let answer = end
+        .as_ref()
+        .and_then(|f| f.answer::<http::Response<Bytes>>("jev-v2"));
+    assert_eq!(
+        answer.map(|a| a.status()),
+        Some(StatusCode::MOVED_PERMANENTLY)
+    );
 }
 
 #[tokio::test]
@@ -1133,7 +1168,7 @@ async fn a_user_formats_failure_keeps_the_providers_words() {
     let error = r#"{"error":{"type":"invalid_request_error","message":"bad prompt"}}"#;
     mock.reply("http://v2.test", mock::json(StatusCode::BAD_REQUEST, error));
 
-    let (resp, ended) = gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await;
+    let (resp, ended) = serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await;
     let (status, _, body) = read_whole(resp).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1168,7 +1203,7 @@ async fn a_jev_stream_keeps_its_comments_and_says_a_providers_error() {
 
     let mut ends = Vec::new();
     for _ in 0..3 {
-        let (resp, ended) = gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await;
+        let (resp, ended) = serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await;
         let (status, _, body) = read_whole(resp).await;
         let end = ended.await.end.map_err(|f| f.message().to_owned());
         ends.push((status, body.unwrap_or_default(), end));
@@ -1202,7 +1237,7 @@ async fn a_jev_error_inside_a_success_translated_is_refused_in_the_clients_words
         mock::json(StatusCode::OK, r#"{"error":{"message":"overloaded"}}"#),
     );
 
-    let (status, _, body) = read_whole(gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(
@@ -1253,8 +1288,9 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
             &self,
             request: &mut http::Request<Bytes>,
             first: Option<&Jev>,
+            streams: bool,
         ) -> Box<dyn Encoder<Jev>> {
-            V2.request_encoder(request, first)
+            V2.request_encoder(request, first, streams)
         }
 
         fn response_decoder(
@@ -1269,23 +1305,35 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
             &self,
             head: &mut http::response::Parts,
             request: &http::Request<Bytes>,
+            refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<Answer>> {
-            V2.response_encoder(head, request)
+            V2.response_encoder(head, request, refusal)
         }
     }
 
-    /// Edits the header, then reads the input.
+    /// Reads the input, and edits the header on the call (changed: a
+    /// plugin edits no client head; it edits a call's with `edit_call`).
     #[derive(Clone, Default)]
     struct Edit(std::sync::Arc<std::sync::Mutex<String>>);
 
     #[async_trait]
     impl Plugin for Edit {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let edited = HeaderValue::from_static("edited");
-            cx.head_mut().headers.insert("x-prompt", edited);
             let prompt = cx.input::<Jev>()?.prompt.clone();
             self.0.lock().map(|mut seen| *seen = prompt).ok();
             Ok(None)
+        }
+
+        async fn on_provider(
+            &self,
+            px: &mut respan_gateway_core::ProviderContext,
+        ) -> Result<(), Fault> {
+            px.edit_call(|call| {
+                let edited = HeaderValue::from_static("edited");
+                call.headers_mut().insert("x-prompt", edited);
+                Ok(())
+            });
+            Ok(())
         }
     }
 
@@ -1306,11 +1354,11 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
     let arrived = HeaderValue::from_static("arrived");
     req.headers_mut().insert("x-prompt", arrived);
 
-    assert_eq!(read_whole(gw.handle(req).await.0).await.0, StatusCode::OK);
+    assert_eq!(read_whole(serve(&gw, req).await.0).await.0, StatusCode::OK);
 
     let seen = edit.0.lock().map(|s| s.clone()).unwrap_or_default();
     assert_eq!(seen, "arrived");
-    // A relay passes the head as plugins left it; the body goes as it came.
+    // A relay passes the head as edited; the body goes as it came.
     let sent = mock.sent();
     assert_eq!(sent[0].headers()["x-prompt"], "edited");
     assert_eq!(sent[0].body(), &br#"{"model":"j1"}"#[..]);
@@ -1338,27 +1386,29 @@ impl Format for Anywhere {
     fn request_encoder(
         &self,
         request: &mut http::Request<Bytes>,
-        _first: Option<&Self::Input>,
+        first: Option<&Self::Input>,
+        streams: bool,
     ) -> Box<dyn Encoder<Self::Input>> {
         *request.method_mut() = http::Method::POST;
         formats::set_path(request, "/");
-        opaque::request_encoder()
+        opaque::request_encoder(request, first, streams)
     }
 
     fn response_decoder(
         &self,
         head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        request: &http::Request<Bytes>,
     ) -> Box<dyn Decoder<Self::Output>> {
-        opaque::response_decoder("anywhere", head)
+        opaque::response_decoder("anywhere", head, request)
     }
 
     fn response_encoder(
         &self,
         head: &mut http::response::Parts,
-        _request: &http::Request<Bytes>,
+        request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Self::Output>> {
-        opaque::response_encoder("anywhere", head)
+        opaque::response_encoder("anywhere", head, request, refusal)
     }
 }
 
@@ -1379,7 +1429,7 @@ impl Plugin for NoteFormat {
 
 #[tokio::test]
 async fn the_first_format_served_that_accepts_a_request_serves_it() {
-    let serve = |gw: Gateway, anywhere_first: bool| match anywhere_first {
+    let serving_by = |gw: Gateway, anywhere_first: bool| match anywhere_first {
         true => gw.serve(Anywhere)?.serve(V1),
         false => gw.serve(V1)?.serve(V2)?.serve(Anywhere),
     };
@@ -1387,7 +1437,7 @@ async fn the_first_format_served_that_accepts_a_request_serves_it() {
         let note = NoteFormat::default();
         let any = add_provider("any", Anywhere, MockTransport::new().at("http://any.test"));
         let gw = providers([any])
-            .and_then(|gw| serve(gw, anywhere_first)?.plugin("note", note.clone()))
+            .and_then(|gw| serving_by(gw, anywhere_first)?.plugin("note", note.clone()))
             .unwrap_or_else(|e| panic!("{e}"));
         let mut get = to("jev-v1", "{}");
         *get.method_mut() = http::Method::GET;
@@ -1398,7 +1448,7 @@ async fn the_first_format_served_that_accepts_a_request_serves_it() {
             to("other", "{}"),
             get,
         ] {
-            statuses.push(read_whole(gw.handle(req).await.0).await.0.as_u16());
+            statuses.push(read_whole(serve(&gw, req).await.0).await.0.as_u16());
         }
         let noted = note.0.lock().map(|n| n.clone()).unwrap_or_default();
         (noted, statuses)
@@ -1428,7 +1478,7 @@ async fn a_router_overrides_the_default_target() {
 
     for model in ["old-1", "new-1"] {
         let request = format!(r#"{{"prompt":"hi","model":"{model}"}}"#);
-        let (status, _, body) = read_whole(gw.handle(to("jev-v2", request)).await.0).await;
+        let (status, _, body) = read_whole(serve(&gw, to("jev-v2", request)).await.0).await;
         assert_eq!(status, StatusCode::OK, "{model}");
         assert_eq!(body.ok().as_deref(), Some(&br#"{"text":"hello"}"#[..]));
     }
@@ -1481,8 +1531,8 @@ async fn a_plugin_for_one_kind_lets_other_traffic_pass_when_it_says_so() {
     })
     .unwrap_or_else(|e| panic!("{e}"));
 
-    let (_, _, jev) = read_whole(gw.handle(jev).await.0).await;
-    let (status, _, other) = read_whole(gw.handle(other).await.0).await;
+    let (_, _, jev) = read_whole(serve(&gw, jev).await.0).await;
+    let (status, _, other) = read_whole(serve(&gw, other).await.0).await;
 
     assert_eq!(jev.ok().as_deref(), Some(&br#"{"text":"hi, thanks"}"#[..]));
     assert_eq!(status, StatusCode::OK);
@@ -1499,7 +1549,8 @@ struct ToHeader;
 #[async_trait]
 impl Plugin for ToHeader {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let to = cx.head().headers.get("x-to").and_then(|v| v.to_str().ok());
+        let asked = cx.extensions().get::<Asked>();
+        let to = asked.and_then(|a| a.headers.get("x-to")?.to_str().ok());
         if let Some(to) = to.map(str::to_owned) {
             cx.set_target(to);
         }
@@ -1553,7 +1604,8 @@ async fn what_filters_kept_back_goes_before_a_relayed_providers_error() {
         mock::sse(&[": ping\n\n", "data: {\"text\":\"a\"}\n\n", error]),
     );
 
-    let (status, _, body) = read_whole(gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+    let (status, _, body) =
+        read_whole(serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
 
     assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
@@ -1583,43 +1635,16 @@ async fn an_input_that_cannot_be_translated_is_the_fault_of_whoever_brought_it()
     let adding = adding.unwrap_or_else(|e| panic!("{e}"));
 
     let sent = read_whole(
-        plain
-            .handle(to("jev-v1", r#"{"input":"hi","extra":1}"#))
+        serve(&plain, to("jev-v1", r#"{"input":"hi","extra":1}"#))
             .await
             .0,
     )
     .await;
-    let added = read_whole(adding.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
+    let added = read_whole(serve(&adding, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
 
     assert_eq!(sent.0, StatusCode::BAD_REQUEST);
     assert_eq!(added.0, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(mock.sent().is_empty());
-}
-
-#[tokio::test]
-async fn a_head_edited_to_head_still_gets_its_body() {
-    /// Says the request was a `HEAD`.
-    struct Relabel;
-
-    #[async_trait]
-    impl Plugin for Relabel {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.head_mut().method = http::Method::HEAD;
-            Ok(None)
-        }
-    }
-
-    let mock = MockTransport::new();
-    let any = add_provider("any", Anywhere, mock.at("http://any.test"));
-    let gw = serving(Anywhere, [any], vec![Arc::new(Relabel)], Some("any"));
-    let gw = gw.unwrap_or_else(|e| panic!("{e}"));
-    mock.reply("http://any.test", mock::json(StatusCode::OK, "pong"));
-
-    let (status, _, body) = read_whole(gw.handle(to("any", "ping")).await.0).await;
-
-    // Whether a body goes out follows the method the client sent.
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.ok().as_deref(), Some(&b"pong"[..]));
 }
 
 #[tokio::test]
@@ -1657,8 +1682,8 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
         })
         .unwrap_or_else(|e| panic!("{e}"));
 
-    let _ = read_whole(gw.handle(to("any", "ping")).await.0).await;
-    let _ = read_whole(gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
+    let _ = read_whole(serve(&gw, to("any", "ping")).await.0).await;
+    let _ = read_whole(serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
 
     assert_eq!(
         kinds.0.lock().map(|k| k.clone()).ok(),
@@ -1681,7 +1706,8 @@ async fn a_refusal_goes_out_with_its_faults_status_even_a_success() {
     let mock = MockTransport::new();
     let gw = jev_relay(Rpc, &mock);
 
-    let (status, _, body) = read_whole(gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
+    let (status, _, body) =
+        read_whole(serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await.0).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.ok().as_deref(), Some(&br#"{"error":"no"}"#[..]));
@@ -1722,7 +1748,7 @@ async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_f
     let gw = gw.unwrap_or_else(|e| panic!("{e}"));
     let started = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        gw.handle(to("any", "ping")),
+        serve(&gw, to("any", "ping")),
     );
     assert!(
         started.await.is_ok(),
@@ -1738,15 +1764,17 @@ async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_f
         mock::json(StatusCode::SERVICE_UNAVAILABLE, "busy"),
     );
 
-    let (status, _, body) = read_whole(gw.handle(to("any", "ping")).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, to("any", "ping")).await.0).await;
 
     // The provider's error response, as the client gets it when sent.
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(&b"busy"[..]));
 }
 
+// Changed: a translated success's head is the client format's alone; a
+// `Retry-After` crosses a translation only on a fault (`retry_after`).
 #[tokio::test]
-async fn a_translating_encoder_gets_of_the_providers_head_what_any_protocol_carries() {
+async fn a_translating_encoder_gets_none_of_the_providers_head() {
     /// jev v1, noting the headers its encoder is given.
     #[derive(Clone, Default)]
     struct Noting(Arc<std::sync::Mutex<Option<http::HeaderMap>>>);
@@ -1771,8 +1799,9 @@ async fn a_translating_encoder_gets_of_the_providers_head_what_any_protocol_carr
             &self,
             request: &mut http::Request<Bytes>,
             first: Option<&Jev>,
+            streams: bool,
         ) -> Box<dyn Encoder<Jev>> {
-            V1.request_encoder(request, first)
+            V1.request_encoder(request, first, streams)
         }
 
         fn response_decoder(
@@ -1787,12 +1816,13 @@ async fn a_translating_encoder_gets_of_the_providers_head_what_any_protocol_carr
             &self,
             head: &mut http::response::Parts,
             request: &http::Request<Bytes>,
+            refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<Answer>> {
             self.0
                 .lock()
                 .map(|mut h| *h = Some(head.headers.clone()))
                 .ok();
-            V1.response_encoder(head, request)
+            V1.response_encoder(head, request, refusal)
         }
     }
 
@@ -1807,7 +1837,7 @@ async fn a_translating_encoder_gets_of_the_providers_head_what_any_protocol_carr
     mock.reply("http://v2.test", answer);
 
     let (status, headers, body) =
-        read_whole(gw.handle(to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
+        read_whole(serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.ok().as_deref(), Some(&br#"{"output":"hi"}"#[..]));
@@ -1818,9 +1848,9 @@ async fn a_translating_encoder_gets_of_the_providers_head_what_any_protocol_carr
         .ok()
         .flatten()
         .unwrap_or_default();
-    // The rest describes the provider's protocol, which is not the client's.
+    // It describes the provider's protocol, which is not the client's.
     assert!(given.get("x-jev-trace").is_none());
-    assert_eq!(given["retry-after"], "7");
+    assert!(given.get("retry-after").is_none());
     assert!(headers.get("x-jev-trace").is_none());
 }
 
@@ -1856,7 +1886,7 @@ async fn a_keep_alive_reaches_filters_and_goes_where_it_came() {
     ];
     mock.reply("http://v2.test", mock::sse(&stream));
 
-    let (resp, ended) = gw.handle(to("jev-v2", r#"{"prompt":"hi"}"#)).await;
+    let (resp, ended) = serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await;
     let (_, _, body) = read_whole(resp).await;
 
     assert_eq!(body.ok().as_deref(), Some(stream.concat().as_bytes()));

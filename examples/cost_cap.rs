@@ -29,7 +29,7 @@ use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::conversation::{Conversation, Piece, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
 use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// The most output tokens an answer may have.
 const CAP: u64 = 100;
@@ -177,7 +177,7 @@ async fn ask(gw: &Gateway, stream: bool) -> String {
     let body = format!(
         r#"{{"model":"m","max_tokens":5000,"stream":{stream},"messages":[{{"role":"user","content":"hi"}}]}}"#
     );
-    let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", body)).await.0).await;
+    let (_, _, body) = read_whole(serve(gw, post("/v1/chat/completions", body)).await.0).await;
     gw.idle().await;
     match body {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),

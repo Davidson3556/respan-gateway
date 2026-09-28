@@ -1,6 +1,6 @@
 # 0011. Read a response until its content or its end
 
-- Status: accepted
+- Status: accepted, amended by [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-28
 
 ## Context
@@ -18,19 +18,24 @@ came. This amends 0003, 0006, 0008, 0009 and 0010, whose rules name
 1. **`Response::ready` is renamed `Response::until_content`**, same
    signature and behaviour: it reads until the first content
    (`Format::is_content`), a failure, or the end, and holds what it read.
+   *Amended by 0012:* a provider's error answer is such a failure, so
+   there is no error status to pass.
 2. **`Response::until_end`** reads to the end and holds everything: the
    head as it came, every output, and the end, `Ok` or a failure. Sent, it
    is delivered as it would have been unread, byte for byte for an
    unedited relay. It is `Err` only where `until_content` is, for a
    success that fails before any content; a later failure is held. A 101
-   returns at once, as its body streams only once sent.
+   returns at once, as its body streams only once sent. *Amended by 0012:*
+   one whose call streams the request's inputs returns at once; the head
+   goes to the client's format only for a relay.
 3. Both go through one reader and keep what they read as decoded
    batches, so the rule from `until_content` holds for both: a call ends
    when the batch holding its end is sent, read or dropped, and a request
    that closes first ends it `abandoned`.
 4. `sdks/routing` takes the stopping point as one neutral argument,
    `Until { Head, Content, End }` (default `Content`), on `first_success`
-   and `race`.
+   and `race`. *Amended by 0012:* `Head` no longer tells an error answer
+   from a success, which shows only once read.
 
 ## Consequences
 

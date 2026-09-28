@@ -20,6 +20,7 @@ and call once. Tests state its promises; the
 | [0009](decisions/0009-core-cleanups.md) | One default target; less policy in the kernel (usage amended by 0010) |
 | [0010](decisions/0010-usage-out-of-core.md) | The kernel counts no usage; filters see every message; `is_content` |
 | [0011](decisions/0011-read-until-content-or-end.md) | Read a response `until_content` or `until_end`, held unsent |
+| [0012](decisions/0012-http-out-of-the-kernel.md) | HTTP's rules live in the adapter, transports and formats; heads are an envelope |
 
 ## Two edges
 
@@ -42,23 +43,30 @@ Only `on_client` may `call` or `take_inputs`
 ## The request path
 
 ```
- http::Request ─▶ handle ─▶ first format that accepts (none: plain 404)
-   Upgrade? no:  whole: body read in full, its one input
-            yes: upgrading: no input with the head; one per data frame after
+ adapter (crates/http): strip connection headers, lift the Credential,
+   add Asked; Upgrade? says streaming
+                  ▼
+ handle(req, streaming) ─▶ first format that accepts (none: Err, plain 404)
+   streaming? no:  whole: body read in full, its one input
+              yes: no input with the head; one per data frame after
                   ▼
  on_client, each plugin ─Some─▶ own response ─────┐
                   │ all pass  └─Err─▶ refusal ────┤
  cx.call(target) ─▶ on_provider ─Err─▶ refusal ───┤
                   ▼                               │
- input filters ─▶ fill call ─▶ request encoder   │
-   ─▶ edit_call ─▶ Transport::send(Request<Body>) │
+ input filters ─▶ request encoder (a relay: the  │
+   client's head) ─▶ edit_call ─▶ Transport::send │
+   (strips what a proxy must, sends the keys)     │
                   ▼                               │
- response decoder ─▶ outputs ─▶ provider filters  │
+ response decoder (an error answer: a Fault) ─▶   │
+   outputs ─▶ provider filters                    │
                   ▼                               │
  client-edge filters ◀────────────────────────────┘
                   ▼
- response encoder: open ─▶ head with the first byte, or at
-          once for upgrading, HEAD, 204, 205, 304
+ response encoder (a refusal: its answer or its words):
+   open ─▶ head with the first byte, or at once for a
+   streaming request or a body done before it began
+                  ▼ adapter: strip hop-by-hop headers
                   ▼ at the end
  on_provider_end, each call ─▶ on_client_end;  the Outcome future resolves
 ```
@@ -69,8 +77,9 @@ Four flows:
  chat POST    1 input, maybe empty ─▶ call(target) ─▶ SSE
  quiet GET    Response::stream; Encoder::open (sse::comment,
               whole::Relay::with_open) ─▶ head at once
- WS→WS relay  call(target): its head sets Upgrade ─▶ 101 at once;
-              client frames ─▶ input filters ─▶ that call's encoder
+ WS→WS relay  call(target), its encoder told it streams, sets
+              Upgrade ─▶ 101 at once; client frames ─▶ input
+              filters ─▶ that call's encoder
  WS→SSE       on_client keeps call = cx.call(p), returns
  bridge       Response::stream, which the encoder makes a 101;
               take_inputs() ─▶ per message call.clone()
@@ -89,15 +98,20 @@ it as them while it says the same, an edit written into them
 relay; formats of one kind translate through their values; traffic the
 gateway does not read is a kind of one (`formats::opaque`).
 
-The kernel keeps no bytes. It relays only heads (a translated head keeps
-its status and `Retry-After`) and fills a relay's call with the client's
-headers and query as a proxy does. A whole body is decoded only when
-read, so a plain relay's call carries the client's bytes, which its
-request encoder may edit; an upgrading request's frames are decoded as
-they pass. `Upgrade` (RFC 9110 7.8), not the format, says whether inputs
-stream. The model belongs to the kind (`Conversation.model`); its place on
-the wire is the format's, whose request encoder reads it from the first
-input ([0003](decisions/0003-kernel-contracts.md#kinds)).
+The kernel keeps no bytes and reads no head: `http` heads are an envelope
+it hands, like bytes, only to a format of the name they came in, and
+only for a relay ([0012](decisions/0012-http-out-of-the-kernel.md)). So
+a relay's call starts from the client's head, and a relayed response's
+head is the provider's; a translated one starts empty. A whole body is
+decoded only when read, so a plain relay's call carries the client's
+bytes, which its request encoder may edit; a streaming request's frames
+are decoded as they pass. The adapter, not the format, says whether
+inputs stream. A provider's error answer is a `Fault` carrying its
+status, `Retry-After` and the answer, which the client's format writes as
+it came if it read it, else in its own words. The model belongs to the
+kind (`Conversation.model`); its place on the wire is the format's,
+whose request encoder reads it from the first input
+([0003](decisions/0003-kernel-contracts.md#kinds)).
 
 ## Core types
 
@@ -110,23 +124,24 @@ tokio runtime, which runs end hooks detached.
 - `Filter<T>` edits inputs (the only way) or outputs; `Outcome` says how
   an edge ended; `Response` is a call's, `cx.relay`'s or
   `Response::stream`'s, held with `until_content` or `until_end`, or read
-  with `outputs`; `Fault` is the one error type.
+  with `outputs`; `Fault` is the one error type, with a status, a retry
+  and a provider's answer (`is_answer`).
 - `Format`, `Decoder<T>`, `Encoder<T>`: a protocol's codec, bytes to
   values of its kind and back.
 
 ## The response pipeline
 
-1. **Head.** Relayed, the provider's minus connection headers;
-   translated, its status and `Retry-After`, plus what the client's
-   encoder sets. A provider's unasked 101, or a redirect to translate,
-   fails the call `UPSTREAM`.
-2. **First byte.** A head waits for its body's first byte, so a success
+1. **Head.** Relayed, the provider's; translated, empty; the client's
+   encoder writes it, and a refusal's status and `Retry-After`. The
+   adapter strips what a hop must not carry. A provider's error answer,
+   an unasked 101 or a redirect fails the call, as its format decodes it.
+2. **First byte.** A head waits for its body's first byte, so a response
    failing before any is refused; `Encoder::open` opens a quiet stream at
-   once. An upgrading request's head goes at once, so the encoder makes a
-   plugin's success a 101. A 204, 205, 304 or response to a `HEAD` goes at
-   once with no body and nothing more is read: a call whose end was
-   decoded, as a provider's bodiless response's is, ends so; one with a
-   body left ends `abandoned`.
+   once. A streaming request's head goes at once, so the encoder makes a
+   plugin's success a 101. A body done before it began (`Encoder::done`,
+   as HTTP formats say of a `HEAD`, 204, 205 or 304) goes at once and
+   nothing more is read: a call whose decoder says its body is complete
+   ends so; one with a body left ends `abandoned`.
 3. **Decode.** Each message is one value, run through its call's
    provider-edge filters as decoded, whoever reads it. The kernel counts
    no usage ([0010](decisions/0010-usage-out-of-core.md)): a plugin
@@ -159,13 +174,13 @@ tokio runtime, which runs end hooks detached.
 ## Routing
 
 A router sets the target and passes. A fallback answers with the first
-success read to its content, else the last answer, so a client sees the
-last 429 and its `Retry-After`. `until_content` reads until the first
-content (a provider's output its format calls content,
-`Format::is_content`, as sent, before filters, so neither a keep-alive
-nor usage alone; or any output a plugin made), a failure or the end, and
-holds what it read, unsent; it is `Err` for a success that fails first,
-and passes an error status:
+success read to its content, else the last failure, so a client sees the
+last 429 as it came, or in its own words with its `Retry-After`.
+`until_content` reads until the first content (a provider's output its
+format calls content, `Format::is_content`, as sent, before filters, so
+neither a keep-alive nor usage alone; or any output a plugin made), a
+failure or the end, and holds what it read, unsent; it is `Err` for a
+response that fails first, a provider's error answer included:
 
 ```rust
 let mut last = Err(Fault::upstream("no provider to try"));
@@ -174,12 +189,12 @@ for name in &self.0 {
         Ok(resp) => resp.until_content().await,
         Err(fault) => Err(fault),
     };
-    if last.as_ref().is_ok_and(|r| r.head().status.is_success()) { break }
+    if last.is_ok() { break }
 }
 last.map(Some)
 ```
 
-`until_end` reads to the end and holds it all, head, outputs and end,
+`until_end` reads to the end and holds it all, outputs and end,
 `Ok` or a failure, so a plugin can race calls for completion; sent, it
 goes out as it would have unread, byte for byte for an unedited relay,
 and `Response::end` says how it ended. Either way the call ends when the batch holding its end is sent, read or
@@ -191,18 +206,19 @@ A judge's call brings its own input and is read:
 one call alone is made in `on_provider`, keyed on `px.provider()` or on a
 mark the call carries (`with_extension`). The gateway has one default
 target; routing by format or kind is a plugin that sets the target. Routing by
-model reads the input, so upgrading requests route by their head, and
-opaque traffic by its body
+model reads the input, so streaming requests route by the adapter's view
+of their head (`http::Asked`), and opaque traffic by its body
 ([0003](decisions/0003-kernel-contracts.md#kinds)).
 
 ## Crates
 
 | Crate | What it is |
 |---|---|
-| `core` | The kernel: no HTTP, config or kinds. |
+| `core` | The kernel: no HTTP rules, config or kinds; `http` types only as an envelope. |
+| `http` | HTTP at the edges: the adapter (`serve`, `handle`), `Credential`, `Asked`, the transport's rules (`proxy_call`, `credentials`, `CallHeaders`), helpers for HTTP formats (`error_head`, `answered`, `bodiless`). |
 | `formats` | The `conversation` kind, `Usage`, `OpenAiChat`, `AnthropicMessages`, `relayed`, `opaque`, helpers. |
 | `plugins` | `ModelRouter<I>`, given an accessor for the kind's model. |
-| `server` | `router` (bodies up to 32 MiB, no upgrades), `HttpTransport` (strips the client's credentials when it has its own, cookies and forwarding headers), `CallHeaders`. |
+| `server` | `router` (the HTTP adapter; bodies up to 32 MiB, no upgrades), `HttpTransport` (a proxy's stripping, cookies and forwarding headers; its own keys, else the client's `Credential`). |
 | `testkit` | `MockTransport` and the kernel's tests. |
 | `respan-gateway` | The binary: YAML config, routing by model, `check`. |
 | `sdks/routing` | Retry, fallback, race and a stall watchdog for plugins. |

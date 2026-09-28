@@ -18,7 +18,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::conversation::units::INPUT_TOKENS;
 use respan_gateway_formats::{self as formats, Usage, relayed::Relayed, whole::Relay};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// The kind's input: texts to embed.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -70,11 +70,20 @@ impl Format for OpenAiEmbeddings {
         })
     }
 
+    /// The client's head if it relays, which the transport cleans; the
+    /// path and content type are this format's.
     fn request_encoder(
         &self,
         request: &mut http::Request<Bytes>,
-        _first: Option<&EmbedRequest>,
+        first: Option<&EmbedRequest>,
+        streams: bool,
     ) -> Box<dyn Encoder<EmbedRequest>> {
+        if streams {
+            return formats::whole::unstreamable(NAME);
+        }
+        if first.is_some() {
+            formats::body_changed(request);
+        }
         formats::set_path(request, "/embeddings");
         let json = HeaderValue::from_static("application/json");
         request.headers_mut().insert(CONTENT_TYPE, json);
@@ -87,7 +96,7 @@ impl Format for OpenAiEmbeddings {
         _request: &http::Request<Bytes>,
     ) -> Box<dyn Decoder<Embeddings>> {
         let name: Arc<str> = Arc::from(NAME);
-        // A failure is decoded for us: its fault carries the provider's body.
+        // A failure is decoded for us: its fault carries the provider's answer.
         formats::whole::decoder(NAME, head, move |raw, out| {
             let v: Value = serde_json::from_slice(&raw).map_err(|_| Fault::upstream("not JSON"))?;
             let mut said = Embeddings::default();
@@ -104,17 +113,24 @@ impl Format for OpenAiEmbeddings {
         })
     }
 
+    /// A refusal is the provider's answer as it came, else the fault as
+    /// this protocol's error under its status and `Retry-After`.
     fn response_encoder(
         &self,
         head: &mut http::response::Parts,
         _request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Embeddings>> {
+        let error =
+            |f: &Fault| Bytes::from(json!({ "error": { "message": f.message() } }).to_string());
+        if let Some(fault) = refusal {
+            let body =
+                respan_gateway_http::answered(NAME, fault, head).unwrap_or_else(|| error(fault));
+            formats::default_content_type(head, "application/json");
+            return formats::whole::written(body);
+        }
         formats::default_content_type(head, "application/json");
-        let fail = |f: &Fault| match f.raw(NAME) {
-            Some(body) => body.clone(),
-            None => Bytes::from(json!({ "error": { "message": f.message() } }).to_string()),
-        };
-        Box::new(Relay::new(write_embeddings, fail, false))
+        Box::new(Relay::new(write_embeddings, error, false))
     }
 }
 
@@ -205,7 +221,7 @@ async fn embed(body: &'static str) -> Result<(Bytes, StatusCode, Bytes, Usage), 
         .provider("openai", OpenAiEmbeddings, mock.at(AT))?
         .serve(OpenAiEmbeddings)?
         .target("openai")?;
-    let (status, _, answered) = read_whole(gw.handle(post("/v1/embeddings", body)).await.0).await;
+    let (status, _, answered) = read_whole(serve(&gw, post("/v1/embeddings", body)).await.0).await;
     gw.idle().await;
     let sent = mock.sent()[0].body().clone();
     let usage = metered

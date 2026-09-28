@@ -1,6 +1,6 @@
 # 0007. A format is one protocol's codec
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-27
 
 ## Context
@@ -28,7 +28,8 @@ call's body, and three rules had no principle of their own. This amends
   client's method and path and the call's extensions; the request encoder
   edits it, as the response encoder edits the response head. What the
   format sets is its own, and it labels a head without a content type
-  (RFC 9110 8.3).
+  (RFC 9110 8.3). *Superseded by 0012:* a relay's call starts from the
+  client's head, any other from an empty one, with the call's extensions.
 - Factories never fail: a failure travels in the stream, and an encoder
   that cannot write its head fails its first encode, which the kernel
   runs before sending.
@@ -38,13 +39,16 @@ call's body, and three rules had no principle of their own. This amends
   its stream, fed each later input.
 - A format is never told whether it relays. The kernel knows only who
   relays heads: a translated head keeps its status and `Retry-After`.
+  *Superseded by 0012:* a translated head is empty; a fault carries its
+  status and `Retry-After`, which the client's format writes.
 - The client's own message in its own format goes as a proxy sends it,
   with the client's query and the end-to-end headers. Not: the
   connection's (RFC 9110 7.6.1), keeping `Upgrade`; `Host`; `Expect`;
   conditions and ranges (RFC 9110 13, 14), which ask of the client's
   copy; method overrides; and `Accept-Encoding`, as the gateway decodes
   what it reads. Cookies and the `Forwarded` family are the transport's
-  to strip ([0009](0009-core-cleanups.md)).
+  to strip ([0009](0009-core-cleanups.md)). *Superseded by 0012:* the
+  list is the transport's (`http::proxy_call`).
 - Content that cannot be written is whose it is, by one rule for every
   input, first or later: `BAD_REQUEST` if filters left it equal to its
   decoding, else `CONFIG`, as is a call's own input. (The first input
@@ -70,3 +74,5 @@ call's body, and three rules had no principle of their own. This amends
   `http::Request<Bytes>`; the kernel no longer strips another format's
   bytes or tells edits, as each value keeps its own.
 - 0009: cookies and the `Forwarded` family moved to the transport.
+- 0012: the kernel stopped filling calls and keeping a translated head's
+  status; the proxy's header list moved to the transport.

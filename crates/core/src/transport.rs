@@ -19,25 +19,24 @@ pub(crate) fn one_frame(bytes: impl Into<Bytes>) -> Body {
 /// calls share, such as a connection pool.
 #[async_trait]
 pub trait Transport: Send + Sync + 'static {
-    /// Send `call` and return the provider's response, whatever its status,
+    /// Send `call` and return the provider's response, whatever it says,
     /// once its head arrives; return redirects rather than follow them.
     /// `call` is as its format
     /// ([`Format::request_encoder`](crate::Format::request_encoder)) and
     /// [`ProviderContext::edit_call`](crate::ProviderContext::edit_call) left
-    /// it: its URI relative to this transport, without the client's
-    /// connection headers, `Host` or `Expect`, with `Upgrade` and
-    /// `Connection: upgrade` if it switches protocols. Its body carries the
+    /// it, its URI relative to this transport; a relay's carries the
+    /// client's head as the adapter handed it over, so the transport strips
+    /// what its protocol forbids a proxy to pass on. Its body carries the
     /// inputs, one per data frame: a whole call's at once, its size exact;
-    /// an upgrading request's as they arrive, a WebSocket transport picking
-    /// each message's type from the subprotocol. It may carry the client's
-    /// credentials: the transport decides whose keys reach the provider. Its
-    /// extensions are the call's
+    /// a streaming request's as they arrive, a WebSocket transport picking
+    /// each message's type from the subprotocol. The transport decides
+    /// whose keys reach the provider. Its extensions are the call's
     /// ([`ProviderContext::extensions`](crate::ProviderContext::extensions)).
     ///
     /// `Err` if the call could not be sent: [`Fault::upstream`] if the
     /// provider is unreachable, [`Fault::config`] if this transport cannot
-    /// express it. A body left unread gives an upgrading request's inputs
-    /// back, so a retry gets them.
+    /// express it, or a failure of its own. A body left unread gives a
+    /// streaming request's inputs back, so a retry gets them.
     async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault>;
 }
 

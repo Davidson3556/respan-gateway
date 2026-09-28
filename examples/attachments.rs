@@ -34,8 +34,9 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Content, Conversation};
+use respan_gateway_http::Asked;
 use respan_gateway_routing::{Backoff, Until, first_success};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;
 
 /// How many texts the memo keeps, across tenants.
@@ -144,7 +145,7 @@ impl PdfToText {
 impl Plugin for PdfToText {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let deadline = Deadline(Instant::now() + self.budget);
-        cx.head_mut().extensions.insert(deadline);
+        cx.extensions_mut().insert(deadline);
         Ok(None)
     }
 
@@ -153,13 +154,13 @@ impl Plugin for PdfToText {
             return Ok(());
         }
         // Named by `x-tenant` here; in practice, by your auth plugin.
-        let head = px.client().head();
-        let until = head.extensions.get::<Deadline>().map(|d| d.0);
+        let ext = px.extensions();
+        let until = ext.get::<Deadline>().map(|d| d.0);
         let until = until.unwrap_or_else(|| Instant::now() + self.budget);
-        let headers = &head.headers;
-        let tenant = headers.get("x-tenant").and_then(|t| t.to_str().ok());
+        let asked = ext.get::<Asked>();
+        let tenant = asked.and_then(|a| a.headers.get("x-tenant")?.to_str().ok());
         let tenant = tenant.unwrap_or_default().to_owned();
-        let keep = head.extensions.get::<NoContent>().is_none();
+        let keep = ext.get::<NoContent>().is_none();
         let chat = px.input::<Conversation>()?;
         let mut pdfs = Vec::new();
         for part in chat.messages.iter().flat_map(|m| &m.content) {
@@ -216,7 +217,7 @@ async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
     let mut req = post("/v1/chat/completions", body.to_owned());
     req.headers_mut()
         .insert("x-tenant", HeaderValue::from_static(tenant));
-    read_whole(gw.handle(req).await.0).await.0
+    read_whole(serve(gw, req).await.0).await.0
 }
 
 #[tokio::main]

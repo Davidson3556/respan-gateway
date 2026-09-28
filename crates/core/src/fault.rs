@@ -1,9 +1,10 @@
+use std::any::Any;
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
-use bytes::Bytes;
 use http::StatusCode;
 use serde_json::Value;
 
@@ -39,9 +40,12 @@ pub mod codes {
 }
 
 /// The one error type at the plugin boundary: a status, code, message and
-/// optional details for the client, an optional source for logs, and
-/// optionally the provider's error body ([`Fault::raw`]). Plugins implement
-/// `From<TheirError> for Fault` so `?` works in hooks.
+/// optional details for the client, when to retry, an optional source for
+/// logs, and optionally the provider's own answer ([`Fault::answer`]).
+/// Plugins implement `From<TheirError> for Fault` so `?` works in hooks.
+///
+/// The kernel never reads the status or the answer: the client's format
+/// writes them ([`Format::response_encoder`](crate::Format::response_encoder)).
 #[derive(Clone)]
 pub struct Fault(Box<Inner>);
 
@@ -51,9 +55,12 @@ struct Inner {
     code: Cow<'static, str>,
     message: String,
     details: Option<Value>,
+    retry_after: Option<Duration>,
     source: Option<Arc<dyn Error + Send + Sync>>,
-    /// The provider's error body, and the name of the format it is in.
-    raw: Option<(Arc<str>, Bytes)>,
+    /// A provider's own words for it, and the format that read them.
+    answer: Option<(Arc<str>, Arc<dyn Any + Send + Sync>)>,
+    /// Whether the provider answered with it in place of a response.
+    answered: bool,
 }
 
 impl Fault {
@@ -69,8 +76,10 @@ impl Fault {
             code: code.into(),
             message: message.into(),
             details: None,
+            retry_after: None,
             source: None,
-            raw: None,
+            answer: None,
+            answered: false,
         }))
     }
 
@@ -87,25 +96,69 @@ impl Fault {
         self
     }
 
-    /// The provider's error body in `format`, which an encoder of that
-    /// format writes in place of the fault.
-    pub fn with_raw(mut self, format: &str, raw: Bytes) -> Self {
-        self.0.raw = Some((Arc::from(format), raw));
+    /// How long the client should wait before it tries again, which the
+    /// client's format writes, such as a provider's `Retry-After`.
+    pub fn with_retry_after(mut self, wait: Duration) -> Self {
+        self.0.retry_after = Some(wait);
         self
     }
 
-    /// The provider's error body, if one in `format` came with it
-    /// ([`Fault::with_raw`]).
-    pub fn raw(&self, format: &str) -> Option<&Bytes> {
-        let raw = self.0.raw.as_ref().filter(|(of, _)| **of == *format);
-        raw.map(|(_, raw)| raw)
+    /// How long to wait before trying again, if said
+    /// ([`Fault::with_retry_after`]).
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.0.retry_after
     }
 
-    /// The same fault with `other`'s error body, if any.
-    pub(crate) fn with_raw_of(mut self, other: &Fault) -> Self {
-        if let Some(raw) = &other.0.raw {
-            self.0.raw = Some(raw.clone());
+    /// The provider answered with this failure in place of a response:
+    /// `answer` is its answer as `format` read it, such as its head and
+    /// body, which an encoder of that format writes as it came
+    /// ([`Fault::is_answer`]).
+    pub fn with_answer<A: Any + Send + Sync>(self, format: &str, answer: A) -> Self {
+        self.answered(format, answer, true)
+    }
+
+    /// Like [`Fault::with_answer`], for a failure the provider reported
+    /// within a response it had begun, such as an error event in a stream:
+    /// its words go as they came to a client of `format`, but it is no
+    /// answer ([`Fault::is_answer`]).
+    pub fn with_words<A: Any + Send + Sync>(self, format: &str, words: A) -> Self {
+        self.answered(format, words, false)
+    }
+
+    fn answered<A: Any + Send + Sync>(mut self, format: &str, value: A, whole: bool) -> Self {
+        self.0.answer = Some((Arc::from(format), Arc::new(value)));
+        self.0.answered = whole;
+        self
+    }
+
+    /// The provider's answer or words as `A`, if they came in `format`
+    /// ([`Fault::with_answer`], [`Fault::with_words`]).
+    pub fn answer<A: Any>(&self, format: &str) -> Option<&A> {
+        let (_, answer) = self.0.answer.as_ref().filter(|(of, _)| **of == *format)?;
+        answer.downcast_ref()
+    }
+
+    /// Whether a provider answered with this failure in place of a
+    /// response ([`Fault::with_answer`]), such as with an error status: it
+    /// began no response, so a biller may charge nothing for it.
+    pub fn is_answer(&self) -> bool {
+        self.0.answered
+    }
+
+    /// The same fault with `other`'s answer and retry, if any.
+    pub(crate) fn with_answer_of(mut self, other: &Fault) -> Self {
+        if other.0.answer.is_some() {
+            self.0.answer = other.0.answer.clone();
+            self.0.answered = other.0.answered;
         }
+        self.0.retry_after = self.0.retry_after.or(other.0.retry_after);
+        self
+    }
+
+    /// The same fault without the provider's words, which go only to a
+    /// client whose own message the call relayed, as a head does.
+    pub(crate) fn unrelayed(mut self) -> Self {
+        self.0.answer = None;
         self
     }
 
@@ -116,7 +169,8 @@ impl Fault {
         self
     }
 
-    /// The status it was made with ([`Fault::new`]).
+    /// The status it was made with ([`Fault::new`]), in HTTP's numbering,
+    /// which a format of another protocol maps to its own.
     pub fn status(&self) -> StatusCode {
         self.0.status
     }
@@ -160,8 +214,8 @@ impl Fault {
         )
     }
 
+    /// Its status is never written: no one waits for it.
     pub(crate) fn abandoned() -> Self {
-        // nginx's 499: the client left.
         let status = StatusCode::from_u16(499).expect("499 is a status code");
         Self::new(status, codes::ABANDONED, "abandoned")
     }
@@ -195,8 +249,10 @@ impl fmt::Debug for Fault {
             .field("code", &self.0.code)
             .field("message", &self.0.message)
             .field("details", &self.0.details)
+            .field("retry_after", &self.0.retry_after)
             .field("source", &self.0.source.as_ref().map(|s| s.to_string()))
-            .field("raw", &self.0.raw)
+            .field("answer", &self.0.answer.as_ref().map(|(of, _)| &**of))
+            .field("answered", &self.0.answered)
             .finish()
     }
 }
@@ -230,11 +286,15 @@ impl Error for Fault {
     }
 }
 
-/// Equal when the client would read them alike: source and raw body ignored.
+/// Equal when the client would read them alike: source and answer ignored.
 impl PartialEq for Fault {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
-        a.status == b.status && a.code == b.code && a.message == b.message && a.details == b.details
+        a.status == b.status
+            && a.code == b.code
+            && a.message == b.message
+            && a.details == b.details
+            && a.retry_after == b.retry_after
     }
 }
 
@@ -278,6 +338,17 @@ mod tests {
             Some(&serde_json::json!({ "limit": 3 }))
         );
         assert!(f.as_ref().and_then(|f| f.source()).is_some());
+    }
+
+    #[test]
+    fn an_answer_is_read_only_by_its_format_and_as_its_type() {
+        let f = Fault::upstream("x").with_answer("f", 7_u8);
+        assert_eq!(f.answer::<u8>("f"), Some(&7));
+        assert_eq!(f.answer::<u8>("g"), None);
+        assert_eq!(f.answer::<u16>("f"), None);
+        assert!(f.is_answer());
+        let words = Fault::upstream("x").with_words("f", 7_u8);
+        assert!(!words.is_answer() && words.answer::<u8>("f").is_some());
     }
 
     #[test]

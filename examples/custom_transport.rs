@@ -18,7 +18,7 @@ use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{Body, Fault, Format, Gateway, Transport, async_trait, http};
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
-use respan_gateway_testkit::{post, read_whole};
+use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Your model: a conversation in, its answer out.
 trait LocalModel: Send + Sync + 'static {
@@ -95,10 +95,10 @@ fn write_replies<F: Format<Output = Reply>>(
     replies: &[Reply],
 ) -> Result<http::Response<Body>, Fault> {
     let (mut head, ()) = http::Response::new(()).into_parts();
-    let mut encoder = format.response_encoder(&mut head, call);
+    let mut encoder = format.response_encoder(&mut head, call, None);
     let mut frames = Vec::new();
     let mut out = BytesMut::new();
-    encoder.open(&mut out);
+    encoder.open(&mut out)?;
     for reply in replies {
         encoder.encode(reply, &mut out)?;
         frames.push(out.split().freeze());
@@ -132,7 +132,7 @@ async fn main() -> Result<(), Fault> {
     let gw = gateway()?;
     for req in [UNARY, STREAM] {
         let (status, _, body) =
-            read_whole(gw.handle(post("/v1/chat/completions", req)).await.0).await;
+            read_whole(serve(&gw, post("/v1/chat/completions", req)).await.0).await;
         println!("{status}\n{}\n", String::from_utf8_lossy(&body?));
     }
     Ok(())

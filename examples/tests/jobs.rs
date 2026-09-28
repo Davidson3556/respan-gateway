@@ -18,7 +18,7 @@ async fn a_duplicate_waits_for_the_run_in_flight_and_the_provider_is_called_once
     let store = Arc::new(Memory::default());
     let gw = gateway(&mock, &store)?;
     // The first is in flight while its body is unread.
-    let (first, _) = gw.handle(keyed(ACME, "op-1", BODY)).await;
+    let (first, _) = serve(&gw, keyed(ACME, "op-1", BODY)).await;
     let duplicate = tokio::spawn({
         let gw = gw.clone();
         async move { send(&gw, keyed(ACME, "op-1", BODY)).await }
@@ -89,7 +89,7 @@ async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(),
     mock.reply(OPENAI, mock::sse(STREAM))
         .reply(OPENAI, mock::sse(STREAM));
     let gw = gateway(&mock, &Arc::default())?;
-    let (resp, outcome) = gw.handle(keyed(ACME, "op-1", BODY)).await;
+    let (resp, outcome) = serve(&gw, keyed(ACME, "op-1", BODY)).await;
     let mut body = resp.into_body();
     let frame = body.frame().await.transpose()?;
     assert!(frame.is_some(), "the client got the start");

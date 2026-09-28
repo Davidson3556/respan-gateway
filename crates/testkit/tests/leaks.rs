@@ -10,7 +10,7 @@ use http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Plugin, Response, Transport};
 use respan_gateway_core::{async_trait, bytes::Bytes, futures, http, http_body, http_body_util};
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_testkit::{mock, post, read_whole};
+use respan_gateway_testkit::{mock, post, read_whole, serve};
 
 const CHAT: &str = "/v1/chat/completions";
 const WHOLE_REQ: &str = r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#;
@@ -72,7 +72,7 @@ impl Drop for Probing {
 impl Plugin for Probing {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let probe = Arc::new(Probe(self.request.clone()));
-        cx.head_mut().extensions.insert(probe);
+        cx.extensions_mut().insert(probe);
         match self.answer {
             Answer::Target => Ok(None),
             Answer::Fallback => {
@@ -141,7 +141,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|f| panic!("{f}"));
     let req = post(CHAT, if whole { WHOLE_REQ } else { STREAM_REQ });
-    let (resp, outcome) = gw.handle(req).await;
+    let (resp, outcome) = serve(&gw, req).await;
     assert_eq!(resp.status(), StatusCode::OK, "{case}");
     if read {
         let (_, _, body) = read_whole(resp).await;

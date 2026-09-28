@@ -5,11 +5,6 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use futures::stream::{self, TryStreamExt};
-use http::header::{
-    CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
-    RETRY_AFTER, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
-};
-use http::{HeaderValue, StatusCode};
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
 
@@ -17,31 +12,43 @@ use crate::fault::{PANICKED, guarded};
 use crate::format::{AnyEncoder, AnyFormat, Values};
 use crate::lifecycle::EndHooks;
 use crate::plugin::failed;
-use crate::response::{Batch, Source, bodiless, head};
+use crate::response::{Batch, Source, fresh};
 use crate::transport::one_frame;
 use crate::{Body, ClientContext, Fault, Response};
 
-/// A refusal: a response that fails at once, in the client's format, with
-/// its fault's status.
+/// What `Gateway::handle` hands the adapter: the response, or a failure
+/// no format can write.
+pub(crate) type Handed = Result<http::Response<Body>, Fault>;
+
+/// A refusal: a response that is `fault` alone, which the client's format
+/// writes.
 pub(crate) async fn refuse(
     format: &Arc<dyn AnyFormat>,
     fault: Fault,
     hooks: EndHooks<ClientContext>,
-) -> http::Response<Body> {
-    let status = fault.status();
-    deliver(format, Response::made(status, Err(fault)), hooks).await
+) -> Handed {
+    let resp = Response::made(Err(fault.clone()));
+    send(format, resp, Some(fault), hooks).await
 }
 
 /// Send `resp` to the client. Its head goes out with its body's first byte,
-/// so a success that fails before any is refused instead; a refusal its
-/// format cannot write goes as text/plain. A response with no body, or to
-/// an upgrading request, goes out at once. Head edits apply to the outgoing
-/// head, which the `Outcome` gets.
+/// so a response that fails before any is refused instead; a refusal its
+/// format cannot write goes back to the adapter. A streaming request's
+/// head goes out at once. Head edits apply to the outgoing head.
 pub(crate) async fn deliver(
     format: &Arc<dyn AnyFormat>,
     resp: Response,
+    hooks: EndHooks<ClientContext>,
+) -> Handed {
+    send(format, resp, None, hooks).await
+}
+
+async fn send(
+    format: &Arc<dyn AnyFormat>,
+    resp: Response,
+    refusal: Option<Fault>,
     mut hooks: EndHooks<ClientContext>,
-) -> http::Response<Body> {
+) -> Handed {
     let cx = hooks.cx();
     if let Some(c) = resp.body.call() {
         // A call's response goes only to its own request.
@@ -58,98 +65,86 @@ pub(crate) async fn deliver(
         return Box::pin(refuse(format, fault, hooks)).await;
     }
     let request = cx.request();
-    let upgrading = cx.later.is_some();
-    // Only a refusal has no outputs' type.
-    let refusal = resp.output.is_none();
+    let streaming = cx.later.is_some();
     let Response {
-        mut head,
-        body,
+        head,
+        mut body,
         ahead,
         ..
     } = resp;
-    strip_named(&mut head.headers);
-    // Of another format's head, only the response context that stays true
-    // across a translation (RFC 9110 10.2) is kept: `Retry-After`.
-    if !body.relayed() {
-        let retry = head.headers.remove(RETRY_AFTER);
-        head.headers.clear();
-        head.headers.extend(retry.map(|v| (RETRY_AFTER, v)));
-    }
+    // A head goes only to a format of the name it came in.
+    let mut head = if body.relayed() { head } else { fresh() };
     let build = || {
-        // Judged before the encoder or head edits touch the head.
-        let refusable = !refusal && head.status.is_success();
-        let mut encoder = format.response_encoder(&mut head, &request);
+        let mut encoder = format.response_encoder(&mut head, &request, refusal.as_ref());
         let mut opening = BytesMut::new();
-        if !refusal {
-            encoder.open(&mut opening);
-        }
-        (encoder, opening, refusable)
+        let opened = match refusal {
+            Some(_) => Ok(()),
+            None => encoder.open(&mut opening),
+        };
+        opened.map(|()| (encoder, opening))
     };
     // A format that panics building its encoder cannot write a refusal.
-    let Ok((encoder, opening, refusable)) = std::panic::catch_unwind(AssertUnwindSafe(build))
-    else {
-        return unwritable(hooks, Fault::internal(PANICKED));
+    let (encoder, opening) = match std::panic::catch_unwind(AssertUnwindSafe(build)) {
+        Ok(Ok(built)) => built,
+        Ok(Err(fault)) => {
+            body.end(Err(fault.clone()));
+            return Box::pin(refuse(format, fault, hooks)).await;
+        }
+        Err(_) => return unwritable(hooks, Fault::internal(PANICKED)),
     };
-    // Its body, if any, is never read; a refusal is read for its fault.
-    let to_head = hooks.cx().input.head().method == http::Method::HEAD;
-    // An upgrading request's client waits for the head before it sends.
-    let now = bodiless(head.status, to_head) || upgrading;
+    let refused = refusal.is_some();
+    // A body done before it began reads nothing, and its head goes at once.
+    let done = !refused && encoder.done();
     let mut pipe = Pipe {
         source: body,
-        refusal,
+        refusal: refused,
         ahead,
         encoder,
         hooks,
         out: Out {
-            upgrading,
+            streaming,
             ..Out::default()
         },
         ended: None,
         abort: None,
     };
     pipe.out.push(opening);
-    let first = match refusal || !now {
-        true => pipe.first(refusable).await,
+    // A streaming request's client waits for the head before it sends.
+    let first = match refused || !(streaming || done) {
+        true => pipe.first(!refused).await,
         false => Ok(()),
     };
-    // An edit that fails or panics, or a 101 unasked (RFC 9110 15.2.2),
-    // fails the head before it goes out.
+    // An edit that fails or panics fails the head before it goes out.
     let first = first.and_then(|()| {
         let edits = std::mem::take(&mut pipe.hooks.cx().edits().head);
-        guarded(|| edits.into_iter().rev().try_for_each(|edit| edit(&mut head)))?;
-        match head.status == StatusCode::SWITCHING_PROTOCOLS && !upgrading {
-            true => Err(Fault::internal(
-                "a 101 to a request that did not ask to switch protocols",
-            )),
-            false => Ok(()),
-        }
+        guarded(|| edits.into_iter().rev().try_for_each(|edit| edit(&mut head)))
     });
     match first {
         Ok(()) => {}
-        Err(fault) if refusal => return unwritable(pipe.hooks, fault),
+        Err(fault) if refused => return unwritable(pipe.hooks, fault),
         Err(fault) => {
             pipe.source.end(Err(fault.clone()));
+            // A provider's words go only where its head would.
+            let fault = match pipe.source.relayed() {
+                true => fault,
+                false => fault.unrelayed(),
+            };
             return Box::pin(refuse(format, fault, pipe.hooks)).await;
         }
     }
-    let head = outgoing(head);
-    pipe.hooks.head = Some(head.clone());
+    if done {
+        pipe.ahead.clear();
+        pipe.source.close_unread();
+        pipe.hooks.finish(Ok(()));
+        return Ok(http::Response::from_parts(head, one_frame(Bytes::new())));
+    }
     // With no bytes, it ends as its head goes out.
     if pipe.out.is_empty() {
         pipe.tell_end();
     }
-    // Nothing more is read: a call whose end was decoded, as a provider's
-    // bodiless response's is, ends so; one with a body left ends abandoned.
-    if bodiless(head.status, to_head) {
-        pipe.ahead.clear();
-        pipe.source.end(Err(Fault::abandoned()));
-        pipe.tell_end();
-        pipe.hooks.finish(Ok(()));
-        return http::Response::from_parts(head, one_frame(Bytes::new()));
-    }
     let body = stream::unfold(pipe, |mut p| async move { p.next().await.map(|b| (b, p)) });
     let body = StreamBody::new(body.map_ok(Frame::data)).boxed_unsync();
-    http::Response::from_parts(head, body)
+    Ok(http::Response::from_parts(head, body))
 }
 
 /// Turns the response sent to the client into its body.
@@ -263,7 +258,7 @@ impl Pipe {
         bytes_before_end
     }
 
-    /// Write `values`, each output its own frame in an upgrading request.
+    /// Write `values`, each output its own frame in a streaming request.
     fn encode(&mut self, values: &Values) -> Result<(), Fault> {
         let out = &mut self.out;
         self.encoder.encode(values, &mut |bytes| out.push(bytes))
@@ -298,18 +293,18 @@ impl Pipe {
     }
 }
 
-/// Bytes not yet handed out, as data frames: one per output to an upgrading
+/// Bytes not yet handed out, as data frames: one per output to a streaming
 /// request, else one per batch.
 #[derive(Default)]
 struct Out {
-    upgrading: bool,
+    streaming: bool,
     frames: VecDeque<Bytes>,
     batch: BytesMut,
 }
 
 impl Out {
     fn push(&mut self, bytes: BytesMut) {
-        match self.upgrading {
+        match self.streaming {
             _ if bytes.is_empty() => {}
             true => self.frames.push_back(bytes.freeze()),
             false => self.batch.unsplit(bytes),
@@ -327,64 +322,10 @@ impl Out {
     }
 }
 
-/// A text/plain response, for what no format can write.
-pub(crate) fn plain(status: StatusCode, text: String) -> http::Response<Body> {
-    let mut head = head(status);
-    let plain = HeaderValue::from_static("text/plain; charset=utf-8");
-    head.headers.insert(CONTENT_TYPE, plain);
-    http::Response::from_parts(outgoing(head), one_frame(text))
-}
-
-/// A text/plain 500 for a response its format could not write.
-fn unwritable(mut hooks: EndHooks<ClientContext>, fault: Fault) -> http::Response<Body> {
-    let status = StatusCode::INTERNAL_SERVER_ERROR;
-    let (head, body) = plain(status, fault.message().to_owned()).into_parts();
-    hooks.head = Some(head.clone());
+/// A refusal its format could not write: the adapter writes it, as an
+/// internal fault; the request ends with `fault`.
+fn unwritable(mut hooks: EndHooks<ClientContext>, fault: Fault) -> Handed {
+    let handed = Fault::internal(fault.message().to_owned()).with_source(fault.clone());
     hooks.finish(Err(fault));
-    http::Response::from_parts(head, body)
-}
-
-/// Connection headers (RFC 9110 7.6.1), the proxy's own (11.7), `Trailer`,
-/// as trailers are not delivered, and the length, which reframing changes.
-pub(crate) const HOP_BY_HOP: [HeaderName; 10] = [
-    CONNECTION,
-    CONTENT_LENGTH,
-    HeaderName::from_static("keep-alive"),
-    HeaderName::from_static("proxy-connection"),
-    PROXY_AUTHENTICATE,
-    PROXY_AUTHORIZATION,
-    TE,
-    TRAILER,
-    TRANSFER_ENCODING,
-    UPGRADE,
-];
-
-/// Remove the headers `Connection` names but `Upgrade`.
-pub(crate) fn strip_named(headers: &mut http::HeaderMap) {
-    let named: Vec<HeaderName> = headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
-        .filter(|name| name != UPGRADE)
-        .collect();
-    for name in named {
-        headers.remove(name);
-    }
-}
-
-/// `head` as sent to the client: no connection headers, but a 101's
-/// `Upgrade` and its `Connection` option (RFC 9110 7.8).
-fn outgoing(mut head: http::response::Parts) -> http::response::Parts {
-    let upgrade = head.status == StatusCode::SWITCHING_PROTOCOLS;
-    for name in HOP_BY_HOP.iter().filter(|&n| !upgrade || n != UPGRADE) {
-        head.headers.remove(name);
-    }
-    if upgrade {
-        let option = HeaderValue::from_static("upgrade");
-        head.headers.insert(CONNECTION, option);
-    }
-    head.version = http::Version::default();
-    head
+    Err(handed)
 }

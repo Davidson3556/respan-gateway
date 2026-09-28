@@ -17,7 +17,7 @@ use respan_gateway_core::{bytes, futures, http, http_body, http_body_util, serde
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
-use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, streamed};
+use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve, streamed};
 
 /// A message in: its number in its stream, its text, and the bytes it came
 /// in.
@@ -65,6 +65,7 @@ impl Format for Msg {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&In>,
+        _streams: bool,
     ) -> Box<dyn Encoder<In>> {
         // The path names the input's text once changed; the client's path
         // says it for the client's own.
@@ -100,7 +101,13 @@ impl Format for Msg {
         &self,
         head: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Out>> {
+        if let Some(fault) = refusal {
+            respan_gateway_http::error_head(head, fault);
+        } else if respan_gateway_http::bodiless(request.method(), head.status) {
+            return respan_gateway_formats::whole::no_body();
+        }
         if request.headers().contains_key(UPGRADE) && head.status == StatusCode::OK {
             head.status = StatusCode::SWITCHING_PROTOCOLS;
         }
@@ -241,7 +248,7 @@ async fn talk(gw: &Gateway, frames: &[&'static str]) -> (StatusCode, Vec<Result<
     let (send, mut req) = streamed("/msg");
     let upgrade = HeaderValue::from_static("msg");
     req.headers_mut().insert(UPGRADE, upgrade);
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(gw, req).await;
     for frame in frames {
         let _ = send.unbounded_send(Bytes::from_static(frame.as_bytes()));
     }
@@ -305,7 +312,7 @@ async fn r8_the_fault_of_content_that_cannot_be_written_is_whose_it_is() {
     for (body, edit, code) in cases {
         let echo = Echo::default();
         let gw = msg(&echo, Edit(edit, Arc::default()));
-        let (_, ended) = gw.handle(post("/msg", body)).await;
+        let (_, ended) = serve(&gw, post("/msg", body)).await;
         let end = ended.await.end.map_err(|f| f.code().to_owned());
         assert_eq!(end, Err(code.to_owned()), "{body} {edit:?}");
         assert!(echo.seen().is_empty(), "nothing is sent");
@@ -326,7 +333,7 @@ async fn r10_the_request_encoder_reads_the_head_from_the_first_part() {
     for (edit, path) in [(None, "/msg/x"), (Some(("a", "b")), "/msg/b")] {
         let echo = Echo::default();
         let gw = msg(&echo, Edit(edit, Arc::default()));
-        let _ = read_whole(gw.handle(post("/msg/x", "a")).await.0).await;
+        let _ = read_whole(serve(&gw, post("/msg/x", "a")).await.0).await;
         assert_eq!(echo.seen()[0], path, "{edit:?}");
     }
 }
@@ -354,7 +361,7 @@ async fn o11_1_a_head_to_an_endless_plugin_stream_ends_at_its_head() {
     let mut head = post("/msg", "");
     *head.method_mut() = http::Method::HEAD;
 
-    let (status, _, body) = read_whole(gw.handle(head).await.0).await;
+    let (status, _, body) = read_whole(serve(&gw, head).await.0).await;
     let idle = tokio::time::timeout(Duration::from_secs(5), gw.idle()).await;
 
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
@@ -411,14 +418,14 @@ async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
     let gw = chat(&mock, Vec::new());
     mock.reply("http://openai.test/v1", mock::json(StatusCode::OK, UNARY));
     let _ = read_whole(
-        gw.handle(with_headers("/v1/chat/completions", CHAT))
+        serve(&gw, with_headers("/v1/chat/completions", CHAT))
             .await
             .0,
     )
     .await;
     let messages = r#"{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#;
     mock.reply("http://openai.test/v1", mock::json(StatusCode::OK, UNARY));
-    let _ = read_whole(gw.handle(with_headers("/v1/messages", messages)).await.0).await;
+    let _ = read_whole(serve(&gw, with_headers("/v1/messages", messages)).await.0).await;
 
     let sent = mock.sent();
     let (relayed, translated) = (&sent[0], &sent[1]);
@@ -442,7 +449,9 @@ async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
 
 // Changed in 0009: the kernel passes the client's cookies and forwarding
 // headers on; stripping them is the transport's policy, so one of its own
-// gets them, while conditions, ranges, overrides and encodings stay out.
+// gets them. Changed in 0012: conditions, ranges, overrides and encodings
+// are the transport's to strip too ([`respan_gateway_http::proxy_call`]),
+// which this one does, as an HTTP transport would.
 #[tokio::test]
 async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
     #[derive(Clone, Default)]
@@ -451,7 +460,9 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
     #[async_trait]
     impl Transport for Keeps {
         async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(call.headers().clone());
+            let (mut head, _) = call.into_parts();
+            respan_gateway_http::proxy_call(&mut head);
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(head.headers);
             let body = http_body_util::Full::new(Bytes::from(UNARY)).map_err(Fault::from);
             let mut resp = http::Response::new(body.boxed_unsync());
             let json = HeaderValue::from_static("application/json");
@@ -466,7 +477,7 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
         .and_then(|g| g.serve(OpenAiChat)?.target("openai"))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = read_whole(
-        gw.handle(with_headers("/v1/chat/completions", CHAT))
+        serve(&gw, with_headers("/v1/chat/completions", CHAT))
             .await
             .0,
     )
@@ -514,7 +525,7 @@ async fn r9_a_calls_own_input_is_written_from_its_value_alone() {
         mock.reply("http://openai.test/v1", mock::json(StatusCode::OK, UNARY));
     }
     let _ = read_whole(
-        gw.handle(with_headers("/v1/chat/completions", CHAT))
+        serve(&gw, with_headers("/v1/chat/completions", CHAT))
             .await
             .0,
     )
@@ -553,8 +564,9 @@ impl Format for Noted {
         &self,
         request: &mut http::Request<Bytes>,
         first: Option<&Conversation>,
+        streams: bool,
     ) -> Box<dyn Encoder<Conversation>> {
-        AnthropicMessages.request_encoder(request, first)
+        AnthropicMessages.request_encoder(request, first, streams)
     }
 
     fn response_decoder(
@@ -569,8 +581,9 @@ impl Format for Noted {
         &self,
         head: &mut http::response::Parts,
         request: &http::Request<Bytes>,
+        refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Reply>> {
-        let encoder = AnthropicMessages.response_encoder(head, request);
+        let encoder = AnthropicMessages.response_encoder(head, request, refusal);
         Box::new(Noting(self.0.clone(), encoder))
     }
 
@@ -633,7 +646,7 @@ async fn r2_an_encoder_gets_another_formats_replies_with_their_origin() {
                 mock::sse(&[": ping\n\n", chunk, "data: [DONE]\n\n"]),
             ),
         };
-        let (_, _, out) = read_whole(gw.handle(post("/v1/messages", body)).await.0).await;
+        let (_, _, out) = read_whole(serve(&gw, post("/v1/messages", body)).await.0).await;
         bodies.push(String::from_utf8_lossy(&out.unwrap_or_default()).into_owned());
         noted.push(noting.0.lock().map(|n| n.clone()).unwrap_or_default());
     }
@@ -676,7 +689,7 @@ async fn r13_a_filter_added_once_frames_pass_sees_the_later_ones() {
         let _ = send.unbounded_send(Bytes::from_static(frame.as_bytes()));
     }
     drop(send);
-    let (resp, _) = gw.handle(req).await;
+    let (resp, _) = serve(&gw, req).await;
     let _ = read_whole(resp).await;
 
     assert_eq!(echo.seen(), ["/msg", "1|a", "2|B"]);
@@ -693,8 +706,9 @@ async fn r13_a_request_decoders_two_inputs_of_one_frame_go_as_two() {
     assert_eq!(echo.seen(), ["/msg", "1|a", "2|two", "3|two"]);
 }
 
-// A call carries what a proxy passes of the client's, never its `Host`; what
-// the format sets is its own.
+// What the format sets is its own. Changed in 0012: a relay's call carries
+// the client's head as the adapter handed it over, `Host` included, which a
+// transport strips ([`respan_gateway_http::proxy_call`]); this one does not.
 #[tokio::test]
 async fn r13_the_format_sets_what_the_kernel_never_passes() {
     struct Named(Option<&'static str>);
@@ -703,21 +717,21 @@ async fn r13_the_format_sets_what_the_kernel_never_passes() {
     impl Plugin for Named {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             if let Some(host) = self.0 {
-                cx.head_mut().extensions.insert(Host(host));
+                cx.extensions_mut().insert(Host(host));
             }
             Ok(None)
         }
     }
 
     for (named, seen) in [
-        (None, None),
+        (None, Some("host=gateway.example")),
         (Some("msg.example"), Some("host=msg.example")),
     ] {
         let echo = Echo::default();
         let mut req = post("/msg", "a");
         req.headers_mut()
             .insert(HOST, HeaderValue::from_static("gateway.example"));
-        let _ = read_whole(msg(&echo, Named(named)).handle(req).await.0).await;
+        let _ = read_whole(serve(&msg(&echo, Named(named)), req).await.0).await;
         let host = echo.seen().into_iter().find(|s| s.starts_with("host="));
         assert_eq!(host.as_deref(), seen);
     }

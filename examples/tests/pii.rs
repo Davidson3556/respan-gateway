@@ -98,7 +98,7 @@ async fn an_agent_request_is_redacted_and_its_tool_call_restored() -> Result<(),
         { "role": "tool", "tool_call_id": "t1", "content": "sent" },
     ] });
     let req = chat("".into(), more);
-    let (status, _, body) = read_whole(gateway(&mock)?.handle(req).await.0).await;
+    let (status, _, body) = read_whole(serve(&gateway(&mock)?, req).await.0).await;
     assert_eq!(status, StatusCode::OK);
     let sent = mock
         .sent()
@@ -130,7 +130,7 @@ async fn several_streamed_choices_are_refused() -> Result<(), Fault> {
         { "index": 1, "message": { "role": "assistant", "content": "b <EMAIL_1>" } }] });
     mock.reply(OPENAI, mock::json(StatusCode::OK, &answer.to_string()));
     let whole = chat(PROMPT.into(), json!({ "n": 2, "stream": false }));
-    let (status, _, body) = read_whole(gateway(&mock)?.handle(whole).await.0).await;
+    let (status, _, body) = read_whole(serve(&gateway(&mock)?, whole).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(

@@ -1,6 +1,6 @@
 # 0009. Core cleanups
 
-- Status: accepted, amended by [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md)
+- Status: accepted, amended by [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
 - Date: 2026-09-28
 
 ## Context
@@ -54,7 +54,9 @@ plugins, extensions or transports already do. This amends 0003, 0004,
    `set-cookie` stripping), and plugins still see them in the head. The
    kernel still drops `Host`, `Expect`, `Accept-Encoding`, conditions,
    ranges and method overrides. *Back:* a custom transport calls
-   `respan_gateway_server::strip_client_origin_headers`.
+   `respan_gateway_server::strip_client_origin_headers`. *Amended by
+   0012:* those move to the transport too (`http::proxy_call`), and the
+   helpers to `respan_gateway_http`.
 7. **One default target.** `Gateway::target` sets one provider, and a
    later call replaces it. A request it cannot take fails `CONFIG`
    through `cx.call`, like any call. Choosing a default by kind was
@@ -65,7 +67,9 @@ plugins, extensions or transports already do. This amends 0003, 0004,
    bodiless response's end already is, or `abandoned` if a body was left.
    The old reason, counting usage in a body no client gets, applied only
    when a plugin changed the status over a real body. *Back:* such a
-   plugin reads the body (`outputs`) before it answers.
+   plugin reads the body (`outputs`) before it answers. *Superseded by
+   0012:* the formats say a body is empty (`Encoder::done`), and the HTTP
+   adapter reads a bodiless response's body to its end unsent.
 9. **No hidden client format.** `Response::stream` no longer captures the
    client's format from a task-local to judge content for `ready`: every
    output a plugin makes is content. A plugin knows what it makes.

@@ -23,7 +23,7 @@ use std::time::Duration;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::{self, FuturesUnordered};
 use respan_gateway_core::futures::{FutureExt, StreamExt};
-use respan_gateway_core::http::{self, HeaderMap, StatusCode, header::RETRY_AFTER};
+use respan_gateway_core::http::{self, StatusCode};
 use respan_gateway_core::http_body_util::{BodyExt, BodyStream, StreamBody};
 use respan_gateway_core::{Body, Call, Fault, Response, Transport, async_trait, codes};
 
@@ -49,18 +49,18 @@ impl Backoff {
     }
 
     /// The wait before another try, after `tries` tries of which the last
-    /// was answered with `head`, or with none if it failed first; `None`
-    /// if it should not be retried.
-    fn wait(&self, tries: u32, head: Option<&http::response::Parts>) -> Option<Duration> {
+    /// was answered with `answer` ([`Fault::is_answer`]), or with none if it
+    /// failed first; `None` if it should not be retried.
+    fn wait(&self, tries: u32, answer: Option<&Fault>) -> Option<Duration> {
         if tries >= self.tries {
             return None;
         }
         let doubled = 2u32.saturating_pow(tries.saturating_sub(1));
         let backoff = self.base.saturating_mul(doubled).min(self.max);
-        match head {
+        match answer {
             None => Some(backoff),
-            Some(head) if !retryable(head.status) => None,
-            Some(head) => match retry_after(&head.headers) {
+            Some(answer) if !retryable(answer.status()) => None,
+            Some(answer) => match answer.retry_after() {
                 Some(asked) if asked > self.max => None,
                 Some(asked) => Some(asked),
                 None => Some(backoff),
@@ -73,12 +73,6 @@ impl Backoff {
 /// not. 529, "overloaded" from some providers, is as safe to retry as a 503.
 fn retryable(status: StatusCode) -> bool {
     [408, 425, 429, 500, 502, 503, 504, 529].contains(&status.as_u16())
-}
-
-/// `Retry-After` in seconds. An HTTP date counts as none.
-fn retry_after(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get(RETRY_AFTER)?.to_str().ok()?;
-    value.trim().parse().ok().map(Duration::from_secs)
 }
 
 /// Put on every call [`first_success`] and [`race`] send
@@ -130,7 +124,8 @@ impl Attempt {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Until {
-    /// Its head: the first success status wins, however its body goes.
+    /// Its head, unread: the first call a provider answered wins, however
+    /// its body goes, an error answer too, which shows only once read.
     Head,
     /// Its first content ([`Response::until_content`]): what a client
     /// streaming it would see first.
@@ -169,8 +164,7 @@ fn failure(answer: &Result<Response, Fault>, until: Until) -> Option<&Fault> {
 }
 
 fn is_success(answer: &Result<Response, Fault>, until: Until) -> bool {
-    let ok = answer.as_ref().is_ok_and(|r| r.head().status.is_success());
-    ok && failure(answer, until).is_none()
+    answer.is_ok() && failure(answer, until).is_none()
 }
 
 /// Return `answer`, promoting its attempt if it is a response. A fault
@@ -189,10 +183,12 @@ fn last(answer: Option<Answer>) -> Result<Response, Fault> {
 
 /// Each call in turn, retried as `backoff` says, until one's response is a
 /// success read `until` its stopping point; else the last answer, so the
-/// client sees the last 429 and its `Retry-After`. A call that is refused
-/// or cannot be made, such as with a `config` fault, moves on at once; an
-/// unreachable provider or a success failing before the point is retried;
-/// with [`Until::End`], one failing anywhere before its end.
+/// client sees the last 429 and its `Retry-After`. A provider's error
+/// answer ([`Fault::is_answer`]) is retried if its status may be answered
+/// otherwise, as long as its `Retry-After` says; a call that cannot be
+/// made, such as with a `config` fault, moves on at once; an unreachable
+/// provider or a success failing before the point is retried; with
+/// [`Until::End`], one failing anywhere before its end.
 pub async fn first_success(
     calls: impl IntoIterator<Item = Call>,
     backoff: &Backoff,
@@ -207,14 +203,11 @@ pub async fn first_success(
                 return win((attempt, answer));
             }
             let wait = match failure(&answer, until) {
+                Some(f) if f.is_answer() => backoff.wait(tries, Some(f)),
                 Some(f) if f.code() == codes::UPSTREAM || f.code() == codes::TRUNCATED => {
                     backoff.wait(tries, None)
                 }
-                Some(_) => None,
-                None => answer
-                    .as_ref()
-                    .ok()
-                    .and_then(|r| backoff.wait(tries, Some(r.head()))),
+                _ => None,
             };
             let Some(wait) = wait else {
                 previous = Some((attempt, answer));
@@ -309,18 +302,17 @@ impl<T: Transport> Transport for Watchdog<T> {
 mod tests {
     use std::time::Duration;
 
-    use respan_gateway_core::http::{self, StatusCode, header::RETRY_AFTER};
+    use respan_gateway_core::Fault;
+    use respan_gateway_core::http::StatusCode;
 
     use super::Backoff;
 
-    fn head(status: StatusCode, retry_after: Option<&'static str>) -> http::response::Parts {
-        let mut resp = http::Response::new(());
-        *resp.status_mut() = status;
-        if let Some(value) = retry_after {
-            let value = http::HeaderValue::from_static(value);
-            resp.headers_mut().insert(RETRY_AFTER, value);
+    fn answer(status: StatusCode, retry_after: Option<u64>) -> Fault {
+        let fault = Fault::new(status, "x", "x").with_answer("f", ());
+        match retry_after {
+            Some(secs) => fault.with_retry_after(Duration::from_secs(secs)),
+            None => fault,
         }
-        resp.into_parts().0
     }
 
     #[test]
@@ -329,11 +321,11 @@ mod tests {
         let waits: Vec<_> = (1..=5).map(|n| backoff.wait(n, None)).collect();
         let ms = |n| Some(Duration::from_millis(n));
         assert_eq!(waits, [ms(400), ms(800), ms(1000), ms(1000), None]);
-        let busy = head(StatusCode::TOO_MANY_REQUESTS, Some("1"));
+        let busy = answer(StatusCode::TOO_MANY_REQUESTS, Some(1));
         assert_eq!(backoff.wait(1, Some(&busy)), ms(1000));
-        let too_long = head(StatusCode::TOO_MANY_REQUESTS, Some("2"));
+        let too_long = answer(StatusCode::TOO_MANY_REQUESTS, Some(2));
         assert_eq!(backoff.wait(1, Some(&too_long)), None);
-        let bad_request = head(StatusCode::BAD_REQUEST, None);
+        let bad_request = answer(StatusCode::BAD_REQUEST, None);
         assert_eq!(backoff.wait(1, Some(&bad_request)), None);
     }
 }

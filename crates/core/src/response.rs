@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream::{self, BoxStream, Stream};
-use http::StatusCode;
 use http_body_util::{BodyExt, BodyStream, StreamBody};
 
 use crate::call::{CallEdge, SharedCall};
@@ -18,8 +17,13 @@ use crate::{Body, Fault};
 /// abandoned.
 #[must_use = "a response does nothing unless sent or read"]
 pub struct Response {
+    /// The provider's head, handed to the client's format only if the
+    /// response is in it ([`Source::relayed`]).
     pub(crate) head: http::response::Parts,
     pub(crate) body: Source,
+    /// Whether its call streams the request's inputs, so its body flows
+    /// only once it is sent.
+    pub(crate) streams: bool,
     /// What [`Response::until_content`] or [`Response::until_end`] read,
     /// to be read again first.
     pub(crate) ahead: VecDeque<Batch>,
@@ -30,7 +34,7 @@ pub struct Response {
 impl std::fmt::Debug for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Response")
-            .field("status", &self.head.status)
+            .field("relayed", &self.body.relayed())
             .finish_non_exhaustive()
     }
 }
@@ -103,12 +107,13 @@ impl Response {
         Self {
             head,
             body,
+            streams: false,
             ahead: VecDeque::new(),
             output,
         }
     }
 
-    /// A 200 of outputs of the client's kind, streamed by `stream`, such as
+    /// A success of outputs of the client's kind, streamed by `stream`, such as
     /// `stream::iter(outputs.map(Ok))` or a merge of calls'
     /// [`outputs`](Response::outputs); the first `Err` fails it. Its head
     /// goes out with its first byte, so a failure before any is refused, or
@@ -116,8 +121,7 @@ impl Response {
     /// ([`Encoder::open`](crate::Encoder::open)). Outputs of another type
     /// fail it with [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
     /// It passes no provider edge: to bill a cached answer, carry what it
-    /// cost in an extension. A plugin's error is a [`Fault`], not outputs
-    /// under an error status.
+    /// cost in an extension. A plugin's error is a [`Fault`], not outputs.
     pub fn stream<T, S>(stream: S) -> Self
     where
         T: Any + Send + Sync,
@@ -132,23 +136,17 @@ impl Response {
         });
         let done = stream::once(async { Batch::end(Ok(())) });
         let body = Source::Made(batches.chain(done).boxed());
-        Self::new(head(StatusCode::OK), body, Some(TypeId::of::<T>()))
-    }
-
-    /// Send it with `status`, which the client's format writes for.
-    pub fn with_status(mut self, status: StatusCode) -> Self {
-        self.head.status = status;
-        self
+        Self::new(fresh(), body, Some(TypeId::of::<T>()))
     }
 
     /// Read it until its first content, a failure, or its end, and hold
     /// what was read, so it is still unsent and a plugin can decide on it
     /// or fall back. Content is a provider's output its format calls
     /// content ([`Format::is_content`](crate::Format::is_content)), before
-    /// any filter, or any output a plugin made. A bodiless response, a 101
-    /// or one read this far already returns at once. `Err` with its fault
-    /// if a success fails first; an error status is the provider's answer,
-    /// to send as it came.
+    /// any filter, or any output a plugin made. One whose call streams the
+    /// request's inputs, or read this far already, returns at once. `Err`
+    /// with its fault if it fails first, such as a provider's error answer
+    /// ([`Fault::is_answer`]), which a refusal sends as it came.
     pub async fn until_content(self) -> Result<Response, Fault> {
         self.read_until(false).await
     }
@@ -157,9 +155,9 @@ impl Response {
     /// output, and its end, `Ok` or a failure, such as to race calls for
     /// completion. Sent, it is delivered as it would have been unread,
     /// byte for byte when relayed unedited. Its call ends as the batch
-    /// holding its end is sent, read or dropped. A 101, whose body streams
-    /// only once sent, returns at once. `Err` as for
-    /// [`until_content`](Response::until_content): a success failing
+    /// holding its end is sent, read or dropped. One whose call streams the
+    /// request's inputs, whose body flows only once sent, returns at once.
+    /// `Err` as for [`until_content`](Response::until_content): a failure
     /// before any content; a later failure is held.
     pub async fn until_end(self) -> Result<Response, Fault> {
         self.read_until(true).await
@@ -167,16 +165,13 @@ impl Response {
 
     /// Read until its first content, or its end if `to_end`, into `ahead`.
     async fn read_until(mut self, to_end: bool) -> Result<Response, Fault> {
-        let switched = self.head.status == StatusCode::SWITCHING_PROTOCOLS;
         // What is ahead was judged by an earlier read.
-        let mut content = switched || !self.ahead.is_empty();
+        let mut content = self.streams || !self.ahead.is_empty();
         loop {
             match self.end() {
-                Some(Err(fault)) if !content && self.head.status.is_success() => {
-                    return Err(fault.clone());
-                }
+                Some(Err(fault)) if !content => return Err(fault.clone()),
                 Some(_) => return Ok(self),
-                None if switched || (content && !to_end) => return Ok(self),
+                None if self.streams || (content && !to_end) => return Ok(self),
                 None => {
                     let (batch, read) = self.body.next().await;
                     content |= read;
@@ -234,24 +229,23 @@ impl Response {
     }
 
     /// A kernel-made response that just ends, such as a refusal.
-    pub(crate) fn made(status: StatusCode, end: Result<(), Fault>) -> Self {
+    pub(crate) fn made(end: Result<(), Fault>) -> Self {
         let body = Source::Made(stream::iter([Batch::end(end)]).boxed());
-        Self::new(head(status), body, None)
+        Self::new(fresh(), body, None)
     }
 
     /// A response of bytes in `format` to `request`, `relayed` if in the
-    /// client's format. One with no body is at its end already.
+    /// client's format, whose body flows only once sent if `streams`.
     pub(crate) fn decoded(
         format: &Arc<dyn AnyFormat>,
         request: &Request,
         response: http::Response<Body>,
         relayed: bool,
+        streams: bool,
     ) -> Self {
         let (head, body) = response.into_parts();
         let decoder = format.response_decoder(&head, request);
         let output = Some(format.kind().1);
-        let to_head = request.method() == http::Method::HEAD;
-        let bodiless = bodiless(head.status, to_head);
         let body = Source::Bytes {
             body,
             decoder,
@@ -260,7 +254,7 @@ impl Response {
             call: None,
         };
         Self {
-            ahead: bodiless.then(|| Batch::end(Ok(()))).into_iter().collect(),
+            streams,
             ..Self::new(head, body, output)
         }
     }
@@ -275,18 +269,9 @@ impl Response {
             let cut = call.cx().cut.idle();
             let taken = std::mem::take(body);
             *body = StreamBody::new(BodyStream::new(taken).take_until(cut)).boxed_unsync();
-            let call = call.share();
-            // A bodiless response's end is decoded already.
-            let ahead = std::mem::take(&mut self.ahead).into_iter();
-            self.ahead = ahead.map(|batch| batch.of(&call)).collect();
-            *slot = Some(call);
+            *slot = Some(call.share());
         }
         self
-    }
-
-    /// Its status and headers, such as a provider's error status.
-    pub fn head(&self) -> &http::response::Parts {
-        &self.head
     }
 }
 
@@ -304,7 +289,7 @@ pub(crate) enum Source {
 }
 
 impl Source {
-    /// Whether it is in the client's format, so its head is relayed.
+    /// Whether it is in the client's format, so its head goes to it.
     pub(crate) fn relayed(&self) -> bool {
         matches!(self, Source::Bytes { relayed: true, .. })
     }
@@ -366,6 +351,34 @@ impl Source {
         (batch, content)
     }
 
+    /// Its reader stops before reading on: a call's decoder is told the
+    /// body ended, and the call ends `Ok` if it says the body is complete,
+    /// else abandoned, as a body was left. A panic ends the call internal.
+    pub(crate) fn close_unread(&mut self) {
+        let Source::Bytes { decoder, call, .. } = self else {
+            return;
+        };
+        let close = std::panic::AssertUnwindSafe(|| {
+            let (values, end) = decoder.decode(None);
+            let end = Some(match end {
+                Some(Err(_)) => Err(Fault::abandoned()),
+                _ => Ok(()),
+            });
+            if let Some(call) = call {
+                Batch {
+                    values,
+                    end,
+                    ..Batch::default()
+                }
+                .of(call)
+                .read();
+            }
+        });
+        if std::panic::catch_unwind(close).is_err() {
+            self.end(Err(Fault::internal(PANICKED)));
+        }
+    }
+
     /// Its reader stopped with `end`; its call ends so.
     pub(crate) fn end(&mut self, end: Result<(), Fault>) {
         if let Some(call) = self.call() {
@@ -374,15 +387,7 @@ impl Source {
     }
 }
 
-/// Whether a response with `status`, to a `HEAD` if `to_head`, has no body
-/// (RFC 9110 9.3.2, 15.3.5, 15.3.6, 15.4.5).
-pub(crate) fn bodiless(status: StatusCode, to_head: bool) -> bool {
-    to_head || matches!(status.as_u16(), 204 | 205 | 304)
-}
-
-/// A response head with `status` and nothing else.
-pub(crate) fn head(status: StatusCode) -> http::response::Parts {
-    let (mut head, ()) = http::Response::new(()).into_parts();
-    head.status = status;
-    head
+/// An empty response head, for a format to fill.
+pub(crate) fn fresh() -> http::response::Parts {
+    http::Response::new(()).into_parts().0
 }
