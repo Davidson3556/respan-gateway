@@ -115,3 +115,27 @@ async fn an_agent_request_is_redacted_and_its_tool_call_restored() -> Result<(),
     assert_eq!(arguments, r#"{"to":"bob@x.io"}"#, "{body}");
     Ok(())
 }
+
+/// `n: 2` streamed: OpenAI interleaves the choices' deltas, and choice 1
+/// comes as other content, which would release choice 0's held `<EMA`
+/// unrestored. So it is refused before any call; unstreamed, it passes.
+#[tokio::test]
+async fn several_streamed_choices_are_refused() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    let (status, body, _) = ask(&mock, chat(PROMPT.into(), json!({ "n": 2 }))).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(body.contains(UNCOVERED) && mock.sent().is_empty(), "{body}");
+    let answer = json!({ "id": "c1", "model": "gpt", "choices": [
+        { "index": 0, "message": { "role": "assistant", "content": "a <EMAIL_1>" } },
+        { "index": 1, "message": { "role": "assistant", "content": "b <EMAIL_1>" } }] });
+    mock.reply(OPENAI, mock::json(StatusCode::OK, &answer.to_string()));
+    let whole = chat(PROMPT.into(), json!({ "n": 2, "stream": false }));
+    let (status, _, body) = read_whole(gateway(&mock)?.handle(whole).await.0).await;
+    let body = String::from_utf8_lossy(&body?).into_owned();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("a bob@x.io") && body.contains("b bob@x.io"),
+        "{body}"
+    );
+    Ok(())
+}

@@ -124,9 +124,11 @@ impl Wire for OpenAiChat {
     fn read(v: &Value) -> Conversation {
         let mut chat = Conversation {
             stream: v["stream"] == true,
+            // The larger of both spellings, so the limit read bounds what
+            // any provider enforces, and a lower one patches every spelling.
             max_tokens: v["max_completion_tokens"]
                 .as_u64()
-                .or(v["max_tokens"].as_u64()),
+                .max(v["max_tokens"].as_u64()),
             temperature: v["temperature"].as_f64(),
             top_p: v["top_p"].as_f64(),
             stop: match &v["stop"] {
@@ -1530,5 +1532,13 @@ mod tests {
             out.contains("\"content\":\"note \"") && out.contains("\"index\":1"),
             "{out}"
         );
+    }
+    #[test]
+    fn the_limit_read_is_the_larger_spelling_and_a_lower_one_patches_both() {
+        let v = json!({ "max_tokens": 100_000, "max_completion_tokens": 10, "messages": [] });
+        assert_eq!(OpenAiChat::read(&v).max_tokens, Some(100_000));
+        let body = json!({ "max_tokens": 100_000, "max_completion_tokens": 10 });
+        let want = json!({ "max_tokens": 10, "max_completion_tokens": 10 });
+        assert_eq!(patched(body, |c| c.max_tokens = Some(10)).ok(), Some(want));
     }
 }

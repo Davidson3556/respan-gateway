@@ -20,6 +20,10 @@ mod streamable;
 pub use stdio::{Owner, StdioTransport};
 pub use streamable::{SESSION, StreamableHttp};
 
+/// The code of the fault that ends a `POST` whose requests the server did
+/// not answer in time ([`StdioTransport::timeout`]).
+pub const TIMED_OUT: &str = "timed_out";
+
 /// The kind's input: one HTTP request from an MCP client.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToServer {

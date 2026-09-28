@@ -82,6 +82,7 @@ const STREAM: &[&str] = &[
     "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
     "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 ];
+
 #[cfg(test)]
 #[path = "tests/local_proxy.rs"]
 mod tests;

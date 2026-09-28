@@ -9,7 +9,9 @@
 //! JSON arguments). What it cannot read, such as an image, is refused, as it
 //! might hold PII. A tool call in the answer is restored when it comes
 //! whole; streamed, its arguments come in fragments, and a placeholder
-//! split across two of them is not restored.
+//! split across two of them is not restored. A streamed call asking for
+//! several choices (`n` other than 1) is refused: choices after the first
+//! come as other content, which the restore cannot hold per choice.
 //!
 //! So it is two plugins: `pii` registered first restores every response the
 //! client gets, whoever answers; `pii-input` registered last redacts, as
@@ -64,12 +66,28 @@ struct Pii;
 /// The provider edge: every call's input, redacted into the vault.
 struct PiiInput;
 
+const UNCOVERED: &str = "pii_uncovered";
+
 fn uncovered() -> Fault {
     Fault::new(
         StatusCode::FORBIDDEN,
-        "pii_uncovered",
+        UNCOVERED,
         "no redaction reads this kind",
     )
+}
+
+/// `Err` for a streamed call of several choices, whose placeholders the
+/// restore cannot hold per choice.
+fn one_streamed_choice(chat: &Conversation) -> Result<(), Fault> {
+    if chat.stream && chat.unsupported.get("n").is_some_and(|n| *n != json!(1)) {
+        let message = "placeholders cannot be restored in several streamed choices";
+        return Err(Fault::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            UNCOVERED,
+            message,
+        ));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -100,7 +118,10 @@ impl Plugin for PiiInput {
                 vault
             }
         };
-        px.filter(move |chat: &mut Conversation| redact(chat, &vault))
+        px.filter(move |chat: &mut Conversation| {
+            one_streamed_choice(chat)?;
+            redact(chat, &vault)
+        })
     }
 }
 

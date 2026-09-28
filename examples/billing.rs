@@ -11,25 +11,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::http::{HeaderValue, StatusCode};
 use respan_gateway_core::{Fault, Gateway, Outcome, Plugin, ProviderContext, Usage, async_trait};
+use respan_gateway_examples::Price;
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_formats::conversation::{Conversation, units};
+use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
-
-/// A model's price per million tokens, in micro-dollars. Add fields for
-/// what else you price, such as cached input.
-#[derive(Clone, Copy)]
-struct Price {
-    input: i64,
-    output: i64,
-}
-
-impl Price {
-    /// What `input` and `output` tokens cost, rounded up.
-    fn cost(&self, input: u64, output: u64) -> i64 {
-        let per_million = input as i64 * self.input + output as i64 * self.output;
-        (per_million + 999_999) / 1_000_000
-    }
-}
 
 /// One billed call.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,10 +89,9 @@ impl<S: UsageStore> Plugin for Billing<S> {
         let chat = px.input::<Conversation>().ok();
         let model = chat.and_then(|c| c.model.clone()).unwrap_or_default();
         let price = self.prices.get(model.as_str());
-        let n = |unit| outcome.usage.get(unit).unwrap_or(0.0).max(0.0).ceil() as u64;
         let row = Row {
             account: account.to_owned(),
-            micros: price.map(|p| p.cost(n(units::INPUT_TOKENS), n(units::OUTPUT_TOKENS))),
+            micros: price.map(|p| p.of(&outcome.usage)),
             model,
             usage: outcome.usage.clone(),
         };
@@ -121,20 +105,8 @@ const OPENAI: &str = "http://openai.test/v1";
 
 fn gateway(mock: &MockTransport, store: Memory) -> Result<Gateway, Fault> {
     let prices = HashMap::from([
-        (
-            "small",
-            Price {
-                input: 150_000,
-                output: 600_000,
-            },
-        ),
-        (
-            "large",
-            Price {
-                input: 2_500_000,
-                output: 10_000_000,
-            },
-        ),
+        ("small", Price::new(150_000, 600_000)),
+        ("large", Price::new(2_500_000, 10_000_000)),
     ]);
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?

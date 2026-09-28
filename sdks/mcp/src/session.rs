@@ -14,18 +14,22 @@ use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_core::{Body, Fault};
 use respan_gateway_formats::sse;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::process::Command;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep_until, timeout_at};
 
 use crate::stdio::reply;
-use crate::{lock, requests};
+use crate::{TIMED_OUT, lock, requests};
 
 #[derive(Debug)]
 pub(crate) struct Session {
-    stdin: tokio::sync::Mutex<ChildStdin>,
+    /// Whole lines for the child's stdin, written by one task, so a `POST`
+    /// dropped mid-write cannot leave half a line.
+    stdin: Sender<Bytes>,
     routes: Arc<Mutex<Routes>>,
+    /// How long a `POST` waits for its answers.
+    timeout: Duration,
     /// Dropped with the session, which ends its child.
     _alive: oneshot::Sender<()>,
 }
@@ -33,10 +37,10 @@ pub(crate) struct Session {
 /// Messages a stream may fall behind by; past it, the stream ends.
 const BACKLOG: usize = 64;
 
-/// Where the child's messages go: a response to the `POST` that asked; a
-/// request or notification to the oldest open `POST`, else the `GET`
-/// stream, else nowhere. A response that answers no open request, such as
-/// a parse error, ends the oldest `POST`, whose requests the server won't
+/// Where the child's messages go: a response to the `POST` that asked, or
+/// nowhere if that `POST` closed; a request or notification to the oldest
+/// open `POST`, else the `GET` stream. A response to `null`, such as a
+/// parse error, ends the oldest `POST`, whose requests the server won't
 /// answer either.
 #[derive(Debug, Default)]
 struct Routes {
@@ -48,10 +52,12 @@ struct Routes {
 
 impl Session {
     /// Runs `command` until it exits, the session is dropped, or it is idle
-    /// for `idle`; then kills and reaps it, and calls `ended`.
+    /// for `idle`; then kills and reaps it, and calls `ended`. A `POST`
+    /// waits `timeout` for its answers.
     pub(crate) fn start(
         command: &mut Command,
         idle: Duration,
+        timeout: Duration,
         ended: impl FnOnce() + Send + 'static,
     ) -> Result<Self, Fault> {
         let command = command.stdin(Stdio::piped()).stdout(Stdio::piped());
@@ -59,9 +65,17 @@ impl Session {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| Fault::upstream("the MCP server could not be started").with_source(e))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(Fault::upstream("the MCP server has no stdio"));
         };
+        let (lines, mut written) = mpsc::channel::<Bytes>(BACKLOG);
+        tokio::spawn(async move {
+            while let Some(line) = written.recv().await {
+                if stdin.write_all(&line).await.is_err() || stdin.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
         let routes = Arc::new(Mutex::new(Routes::default()));
         let (alive, mut gone) = oneshot::channel();
         let reader = routes.clone();
@@ -81,7 +95,8 @@ impl Session {
                     () = sleep_until(due) => {
                         let mut routes = lock(&reader);
                         routes.posts.retain(|(_, tx)| !tx.is_closed());
-                        let (since, now) = (routes.touched.unwrap_or(due), Instant::now());
+                        let since = routes.touched.unwrap_or(due);
+                        let now = Instant::now();
                         if routes.posts.is_empty() && since + idle <= now {
                             break;
                         }
@@ -95,8 +110,9 @@ impl Session {
             ended();
         });
         Ok(Self {
-            stdin: tokio::sync::Mutex::new(stdin),
+            stdin: lines,
             routes,
+            timeout,
             _alive: alive,
         })
     }
@@ -114,7 +130,7 @@ impl Session {
         }
         let (tx, rx) = mpsc::channel(BACKLOG);
         routes.listener = Some(tx);
-        Some(events(rx))
+        Some(events(rx, None))
     }
 
     /// Writes `messages` to the child: an event stream of the answers, or
@@ -127,37 +143,44 @@ impl Session {
         if asks {
             lock(&self.routes).posts.push((ids, tx));
         }
-        let mut stdin = self.stdin.lock().await;
-        for m in &messages {
-            let written = stdin.write_all(format!("{m}\n").as_bytes()).await;
-            written.map_err(|e| Fault::upstream("the MCP server stopped").with_source(e))?;
-        }
-        let _ = stdin.flush().await;
+        let lines: String = messages.iter().map(|m| format!("{m}\n")).collect();
+        let sent = self.stdin.send(lines.into()).await;
+        sent.map_err(|_| Fault::upstream("the MCP server stopped"))?;
         if !asks {
             return Ok(reply(StatusCode::ACCEPTED, None));
         }
-        Ok(events(rx))
+        Ok(events(rx, Some(Instant::now() + self.timeout)))
     }
 }
 
 fn route(routes: &mut Routes, v: Value) {
     routes.posts.retain(|(_, tx)| !tx.is_closed());
     let answer = v.get("method").is_none();
-    let id = v.get("id").filter(|_| answer);
-    let asked = id.and_then(|id| routes.posts.iter().position(|(ids, _)| ids.contains(id)));
-    let Some(i) = asked.or((!routes.posts.is_empty()).then_some(0)) else {
-        if let Some(tx) = &routes.listener
-            && tx.try_send(v).is_err()
-        {
-            routes.listener = None;
+    let id = v.get("id").filter(|id| answer && !id.is_null()).cloned();
+    let i = match &id {
+        Some(id) => match routes.posts.iter().position(|(ids, _)| ids.contains(id)) {
+            Some(i) => i,
+            // Its `POST` closed, as when the client gave up: no one waits.
+            None => return,
+        },
+        // A request, a notification, or an answer to `null`: the oldest POST.
+        None if !routes.posts.is_empty() => 0,
+        None if answer => return,
+        // The server's own stream.
+        None => {
+            if let Some(tx) = &routes.listener
+                && tx.try_send(v).is_err()
+            {
+                routes.listener = None;
+            }
+            return;
         }
-        return;
     };
     let (ids, tx) = &mut routes.posts[i];
-    if asked.is_some() {
-        ids.retain(|x| Some(x) != id);
-    } else if answer {
-        ids.clear();
+    match &id {
+        Some(id) => ids.retain(|x| x != id),
+        None if answer => ids.clear(),
+        None => {}
     }
     let fell_behind = tx.try_send(v).is_err();
     if ids.is_empty() || fell_behind {
@@ -166,11 +189,22 @@ fn route(routes: &mut Routes, v: Value) {
     }
 }
 
-/// An event stream of what `rx` receives, until it closes.
-fn events(rx: mpsc::Receiver<Value>) -> http::Response<Body> {
-    let events = stream::unfold(rx, |mut rx| async move {
-        let event = Bytes::from(sse::event(None, rx.recv().await?));
-        Some((Ok::<_, Fault>(Frame::data(event)), rx))
+/// An event stream of what `rx` receives, until it closes, or failing at
+/// `until` if any.
+fn events(rx: mpsc::Receiver<Value>, until: Option<Instant>) -> http::Response<Body> {
+    let events = stream::unfold(Some(rx), move |rx| async move {
+        let mut rx = rx?;
+        let next = match until {
+            Some(until) => timeout_at(until, rx.recv()).await,
+            None => Ok(rx.recv().await),
+        };
+        let Ok(next) = next else {
+            let late = "the MCP server did not answer in time";
+            let fault = Fault::new(StatusCode::GATEWAY_TIMEOUT, TIMED_OUT, late);
+            return Some((Err(fault), None));
+        };
+        let event = Bytes::from(sse::event(None, next?));
+        Some((Ok(Frame::data(event)), Some(rx)))
     });
     let mut resp = http::Response::new(StreamBody::new(events.boxed()).boxed_unsync());
     let sse = HeaderValue::from_static("text/event-stream");

@@ -7,7 +7,9 @@ use respan_gateway_core::http_body_util::{self, BodyExt, Full};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Outcome, Plugin, Response};
 use respan_gateway_core::{Transport, async_trait, codes};
-use respan_gateway_mcp::{Owner, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer};
+use respan_gateway_mcp::{
+    Owner, SESSION, StdioTransport, StreamableHttp, TIMED_OUT, ToClient, ToServer,
+};
 use respan_gateway_testkit::{MockTransport, mock};
 
 const AT: &str = "http://mcp.test";
@@ -332,7 +334,7 @@ async fn sessions_are_capped() {
     init(&gw, &[]).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn an_idle_session_ends() {
     let transport = StdioTransport::new("sh", ["-c", ECHO]).max_sessions(1);
     let gw = gateway(transport.idle(Duration::from_secs(60)), None);
@@ -340,6 +342,9 @@ async fn an_idle_session_ends() {
     assert_eq!(list(&gw, &session).await, StatusCode::OK);
     let (status, ..) = send(&gw, request(Method::POST, INIT, &[])).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // Paused only now: a paused clock would jump past a waiting POST's
+    // timeout.
+    tokio::time::pause();
     tokio::time::sleep(Duration::from_secs(600)).await;
     // Its child is killed and reaped in real time; a new session, which
     // does not touch the old one, fits once it is gone.
@@ -436,7 +441,7 @@ async fn a_flood_from_many_owners_hits_the_total() {
 async fn an_answer_to_no_open_request_ends_the_oldest_post() {
     // The server answers `tools/list` with a parse error, id null.
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
-echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}'; sleep 100"#;
+echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}'; exec sleep 100"#;
     let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
     let session = init(&gw, &[]).await;
     let posted = send(&gw, request(Method::POST, LIST, &[(SESSION, &session)]));
@@ -488,7 +493,7 @@ async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
 #[tokio::test]
 async fn a_get_stream_that_falls_behind_ends() {
     let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
-for i in $(seq 500); do echo '{"jsonrpc":"2.0","method":"notifications/message"}'; done; sleep 100"#;
+for i in $(seq 500); do echo '{"jsonrpc":"2.0","method":"notifications/message"}'; done; exec sleep 100"#;
     let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
     let session = init(&gw, &[]).await;
     let with = [(SESSION, &session[..])];
@@ -503,4 +508,90 @@ for i in $(seq 500); do echo '{"jsonrpc":"2.0","method":"notifications/message"}
     let body =
         String::from_utf8_lossy(&body.map(|b| b.to_bytes()).unwrap_or_default()).into_owned();
     assert!(messages(&body).len() < 500, "{}", messages(&body).len());
+}
+
+#[tokio::test]
+async fn a_late_answer_to_a_post_the_client_left_reaches_no_other_post() {
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'
+read b; read c; sleep 0.5
+echo '{"jsonrpc":"2.0","id":2,"result":{"slow":true}}'; sleep 0.5
+echo '{"jsonrpc":"2.0","id":3,"result":{"fast":true}}'; exec sleep 100"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
+    let session = init(&gw, &[]).await;
+    let with = [(SESSION, &session[..])];
+    let slow = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#;
+    // The client gives up on id 2; the server answers it anyway, later.
+    let posted = gw.handle(request(Method::POST, slow, &with));
+    let gave_up = tokio::time::timeout(Duration::from_millis(100), posted).await;
+    assert!(gave_up.is_err());
+    let other = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#;
+    let posted = send(&gw, request(Method::POST, other, &with));
+    let (_, _, body, outcome) = tokio::time::timeout(Duration::from_secs(5), posted)
+        .await
+        .unwrap_or_else(|_| panic!("the POST is still waiting"));
+    let fast = json!({"jsonrpc":"2.0","id":3,"result":{"fast":true}});
+    assert_eq!(messages(&body), [fast], "{body}");
+    assert!(outcome.end.is_ok());
+}
+
+#[tokio::test]
+async fn a_post_dropped_while_written_leaves_whole_lines() {
+    // Busy for a second after `initialize`, then answers each whole line;
+    // a line with two messages glued is a parse error.
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; sleep 1
+sed -u -n -e '/"jsonrpc".*"jsonrpc"/{s/.*/{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}/p;d;}' \
+  -e 's/.*"id":\([0-9]*\).*/{"jsonrpc":"2.0","id":\1,"result":{"ok":true}}/p'"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
+    let session = init(&gw, &[]).await;
+    let with = [(SESSION, &session[..])];
+    // Far past a pipe's buffer, so writing it waits on the busy server.
+    let big = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"echo","arguments":{"text":"x".repeat(1 << 20)}}});
+    let posted = gw.handle(request(Method::POST, &big.to_string(), &with));
+    let gave_up = tokio::time::timeout(Duration::from_millis(200), posted).await;
+    assert!(
+        gave_up.is_err(),
+        "the POST was answered before the client left"
+    );
+    let posted = send(&gw, request(Method::POST, LIST, &with));
+    let (_, _, body, _) = tokio::time::timeout(Duration::from_secs(5), posted)
+        .await
+        .unwrap_or_else(|_| panic!("the POST is still waiting"));
+    let ok = json!({"jsonrpc":"2.0","id":2,"result":{"ok":true}});
+    assert_eq!(messages(&body), [ok], "{body}");
+}
+
+#[tokio::test]
+async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
+    // Answers `initialize` only.
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exec sleep 100"#;
+    let transport = StdioTransport::new("sh", ["-c", script]).max_sessions(1);
+    let transport = transport.idle(Duration::from_secs(60));
+    let gw = gateway(transport.timeout(Duration::from_secs(30)), None);
+    let session = init(&gw, &[]).await;
+    tokio::time::pause();
+    let (status, _, body, outcome) =
+        send(&gw, request(Method::POST, LIST, &[(SESSION, &session)])).await;
+    let [error] = &messages(&body)[..] else {
+        panic!("{body}")
+    };
+    assert_eq!(
+        (status, &error["id"]),
+        (StatusCode::GATEWAY_TIMEOUT, &json!(2))
+    );
+    assert_eq!(error["error"]["data"]["code"], TIMED_OUT);
+    assert_eq!(
+        outcome.end.err().map(|f| f.code().to_owned()),
+        Some(TIMED_OUT.into())
+    );
+    // With nothing waiting, the session idles out and a new one fits.
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    tokio::time::resume();
+    for _ in 0..50 {
+        if send(&gw, request(Method::POST, INIT, &[])).await.0 == StatusCode::OK {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the session of a timed-out POST is still held");
 }

@@ -80,3 +80,33 @@ async fn the_budget_is_for_the_whole_request() -> Result<(), Fault> {
     assert_eq!(mock.sent().len(), 1, "only the first request's call");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_zero_retention_pdf_is_converted_but_never_remembered() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    for _ in 0..3 {
+        mock.reply(TEXT, mock::json(StatusCode::OK, OK));
+    }
+    let pdfs = Arc::new(PdfToText::new(&["text-only"]));
+    let gw = gateway(&mock, pdfs.clone())?;
+    for _ in 0..2 {
+        let mut req = post("/v1/chat/completions", REQUEST.to_owned());
+        req.headers_mut()
+            .insert("x-tenant", HeaderValue::from_static("acme"));
+        req.extensions_mut().insert(NoContent);
+        assert_eq!(read_whole(gw.handle(req).await.0).await.0, StatusCode::OK);
+    }
+    assert_eq!(
+        pdfs.conversions.load(Ordering::Relaxed),
+        2,
+        "converted each time"
+    );
+    assert!(pdfs.memo().is_empty(), "nothing stored");
+    assert_eq!(send(&gw, "acme", REQUEST).await, StatusCode::OK);
+    assert_eq!(
+        pdfs.conversions.load(Ordering::Relaxed),
+        3,
+        "not served from a memo"
+    );
+    Ok(())
+}

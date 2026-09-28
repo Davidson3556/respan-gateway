@@ -30,9 +30,11 @@ type Edit<'a> = dyn FnMut(&mut String) -> Result<(), Fault> + 'a;
 
 /// A value whose text a check must see all of. Its texts include the JSON
 /// the kind has no form for (tools, a tool call): each string and each
-/// name inside it; a string there holding a JSON object or array, such as a
-/// tool call's arguments, is parsed and read the same way. Numbers,
-/// booleans and the request's own field names are not texts.
+/// name inside it, so an edit may rename a key. A string there holding a
+/// JSON object or array, such as a tool call's arguments, is parsed and
+/// read the same way, its numbers too, so a card number in it is read; a
+/// number an edit changes is written back as the edit's text. Booleans,
+/// the request's own numbers and field names are not texts.
 pub trait Readable: Clone {
     /// Runs `edit` on each of its texts, or `Err` with [`UNREADABLE`],
     /// before any edit, if it carries content with no text form, such as an
@@ -53,15 +55,24 @@ pub trait Readable: Clone {
     }
 }
 
-/// Runs `edit` on every string and name in `v`.
-fn edit_json(v: &mut Value, edit: &mut Edit) -> Result<(), Fault> {
+/// Runs `edit` on every string and name in `v`, and on every number if
+/// `numbers`.
+fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault> {
     match v {
         Value::String(s) => edit_string(s, edit),
-        Value::Array(a) => a.iter_mut().try_for_each(|v| edit_json(v, edit)),
+        Value::Number(n) if numbers => {
+            let mut text = n.to_string();
+            edit(&mut text)?;
+            if text != n.to_string() {
+                *v = serde_json::from_str(&text).unwrap_or(Value::String(text));
+            }
+            Ok(())
+        }
+        Value::Array(a) => a.iter_mut().try_for_each(|v| edit_json(v, numbers, edit)),
         Value::Object(o) => {
             for (mut name, mut value) in std::mem::take(o) {
                 edit(&mut name)?;
-                edit_json(&mut value, edit)?;
+                edit_json(&mut value, numbers, edit)?;
                 o.insert(name, value);
             }
             Ok(())
@@ -72,16 +83,18 @@ fn edit_json(v: &mut Value, edit: &mut Edit) -> Result<(), Fault> {
 
 /// Runs `edit` on the values of `fields`, not their names.
 fn edit_fields(fields: &mut Map<String, Value>, edit: &mut Edit) -> Result<(), Fault> {
-    fields.values_mut().try_for_each(|v| edit_json(v, edit))
+    fields
+        .values_mut()
+        .try_for_each(|v| edit_json(v, false, edit))
 }
 
-/// Runs `edit` on `text`, or inside it if it holds a JSON object or array,
-/// written back only if changed.
+/// Runs `edit` on `text`, or inside it, numbers included, if it holds a
+/// JSON object or array, written back only if changed.
 fn edit_string(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
     match serde_json::from_str::<Value>(text) {
         Ok(mut json @ (Value::Object(_) | Value::Array(_))) => {
             let before = json.clone();
-            edit_json(&mut json, edit)?;
+            edit_json(&mut json, true, edit)?;
             if json != before {
                 *text = json.to_string();
             }
@@ -140,7 +153,7 @@ impl Readable for Reply {
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
-        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), edit),
+        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), false, edit),
         _ => Ok(()),
     }
 }
@@ -183,7 +196,10 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
 
 /// A [`Reply`] filter that runs every text through a [`Rewrite`], holding
 /// back what may start a match. Text is held per block: text of another
-/// block, other content, a finish or the end releases it. A reply left
+/// block, other content, a finish or the end releases it, so a match split
+/// across two text blocks (Anthropic's citations make many) is not seen
+/// whole; holding across would move text into a block that does not say
+/// it. A reply left
 /// showing nothing waits, whole, until one that shows something, so nothing
 /// is sent while the start is held. Other content, such as a tool call, is
 /// rewritten as [`Readable`] reads it, nothing held: a match split across a

@@ -18,10 +18,10 @@ async fn a_duplicate_waits_for_the_run_in_flight_and_the_provider_is_called_once
     let store = Arc::new(Memory::default());
     let gw = gateway(&mock, &store)?;
     // The first is in flight while its body is unread.
-    let (first, _) = gw.handle(request(ACME, "op-1")).await;
+    let (first, _) = gw.handle(keyed(ACME, "op-1", BODY)).await;
     let duplicate = tokio::spawn({
         let gw = gw.clone();
-        async move { send(&gw, request(ACME, "op-1")).await }
+        async move { send(&gw, keyed(ACME, "op-1", BODY)).await }
     });
     let waiting = || {
         locked(&store.0)
@@ -37,7 +37,7 @@ async fn a_duplicate_waits_for_the_run_in_flight_and_the_provider_is_called_once
         .await
         .map_err(|e| Fault::internal(e.to_string()))??;
     assert!(whole(&duplicate), "{duplicate}");
-    let retry = send(&gw, request(ACME, "op-1")).await?;
+    let retry = send(&gw, keyed(ACME, "op-1", BODY)).await?;
     assert!(whole(&retry), "a later retry too");
     assert_eq!(mock.sent().len(), 1);
     Ok(())
@@ -50,10 +50,10 @@ async fn the_key_is_bound_to_the_credential_and_the_body() -> Result<(), Fault> 
         mock.reply(OPENAI, mock::sse(STREAM));
     }
     let gw = gateway(&mock, &Arc::default())?;
-    send(&gw, request(ACME, "op-1")).await?;
+    send(&gw, keyed(ACME, "op-1", BODY)).await?;
     // Another credential with the same key, even claiming acme in a
     // header, runs on its own.
-    let mut spoof = request("Bearer beta-key", "op-1");
+    let mut spoof = keyed("Bearer beta-key", "op-1", BODY);
     spoof
         .headers_mut()
         .insert("x-tenant", HeaderValue::from_static("acme"));
@@ -74,7 +74,7 @@ async fn a_zero_retention_request_stores_nothing() -> Result<(), Fault> {
     let store = Arc::new(Memory::default());
     let gw = gateway(&mock, &store)?;
     for _ in 0..2 {
-        let mut req = request(ACME, "op-1");
+        let mut req = keyed(ACME, "op-1", BODY);
         req.extensions_mut().insert(NoContent);
         assert!(whole(&send(&gw, req).await?));
     }
@@ -89,7 +89,7 @@ async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(),
     mock.reply(OPENAI, mock::sse(STREAM))
         .reply(OPENAI, mock::sse(STREAM));
     let gw = gateway(&mock, &Arc::default())?;
-    let (resp, outcome) = gw.handle(request(ACME, "op-1")).await;
+    let (resp, outcome) = gw.handle(keyed(ACME, "op-1", BODY)).await;
     let mut body = resp.into_body();
     let frame = body.frame().await.transpose()?;
     assert!(frame.is_some(), "the client got the start");
@@ -98,11 +98,11 @@ async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(),
     assert_eq!(end, Err("abandoned".into()), "core cut the call");
     gw.idle().await;
 
-    let retry = send(&gw, request(ACME, "op-1")).await?;
+    let retry = send(&gw, keyed(ACME, "op-1", BODY)).await?;
     assert!(whole(&retry), "not half an answer: {retry}");
     assert_eq!(mock.sent().len(), 2, "the cut run cost a second call");
     assert!(
-        whole(&send(&gw, request(ACME, "op-1")).await?),
+        whole(&send(&gw, keyed(ACME, "op-1", BODY)).await?),
         "now it is stored"
     );
     assert_eq!(mock.sent().len(), 2);

@@ -4,7 +4,8 @@
 //!
 //! Each value keeps the bytes it came in (`Relayed`), so a message no one
 //! changed relays byte for byte, and a changed one is written into them.
-//! `cargo run --example custom_format` runs it against a mock provider.
+//! `cargo run -p respan-gateway-examples --example custom_format` runs it
+//! against a mock provider.
 
 use std::sync::Arc;
 

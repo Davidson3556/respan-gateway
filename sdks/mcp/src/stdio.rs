@@ -20,8 +20,8 @@ use tokio::process::Command;
 use crate::session::Session;
 use crate::{SESSION, error, lock, read};
 
-/// Sessions by id and a keyed hash of their owner.
-type Sessions = Mutex<HashMap<(String, u64), Arc<Session>>>;
+/// Sessions by id and a keyed hash of their owner; `None` while starting.
+type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 type Reply = http::Response<Body>;
 
 const NO_SESSION: &str = "no such session";
@@ -34,7 +34,8 @@ const NO_SESSION: &str = "no such session";
 /// another owner gets 404, as if the session did not exist. A second `GET`
 /// while the session's stream is open gets 409. A session ends when its
 /// child exits, on `DELETE`, or when idle; its child is then killed and
-/// reaped.
+/// reaped. A `POST` whose requests are not all answered in time ends with
+/// a [`TIMED_OUT`](crate::TIMED_OUT) error for each.
 ///
 /// Authenticate callers before this transport. Owners taken from an
 /// unauthenticated `Authorization` header are unbounded, since anyone can
@@ -47,6 +48,7 @@ pub struct StdioTransport {
     max_sessions: usize,
     max_total: usize,
     idle: Duration,
+    timeout: Duration,
     sessions: Arc<Sessions>,
     minted: AtomicU64,
     /// Secret keys, so a session id cannot be guessed.
@@ -68,6 +70,7 @@ impl StdioTransport {
             max_sessions: 8,
             max_total: 64,
             idle: Duration::from_secs(600),
+            timeout: Duration::from_secs(300),
             sessions: Arc::default(),
             minted: AtomicU64::new(0),
             keys: RandomState::new(),
@@ -95,6 +98,13 @@ impl StdioTransport {
         self
     }
 
+    /// Ends a `POST` whose requests are not all answered within `timeout`
+    /// (default 5 minutes).
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Starts a session for `owner` with the `initialize` in `body`.
     async fn start(&self, owner: u64, body: &[u8]) -> Result<Reply, Fault> {
         let messages = read(body).map(|(m, _)| m).unwrap_or_default();
@@ -104,26 +114,36 @@ impl StdioTransport {
         let n = self.minted.fetch_add(1, Ordering::Relaxed);
         let hash = |i: u8| self.keys.hash_one((n, i));
         let key = (format!("{:016x}{:016x}", hash(0), hash(1)), owner);
-        let session = {
+        {
+            // Its place is held while the child starts, outside the lock.
             let mut sessions = lock(&self.sessions);
             let owned = sessions.keys().filter(|(_, o)| *o == owner).count();
             if owned >= self.max_sessions || sessions.len() >= self.max_total {
-                return Ok(reply(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Some("too many sessions"),
-                ));
+                let full = Some("too many sessions");
+                return Ok(reply(StatusCode::SERVICE_UNAVAILABLE, full));
             }
-            let (all, forget) = (Arc::downgrade(&self.sessions), key.clone());
-            let ended = move || {
-                if let Some(all) = all.upgrade() {
-                    lock(&all).remove(&forget);
+            sessions.insert(key.clone(), None);
+        }
+        let all = Arc::downgrade(&self.sessions);
+        let forget = key.clone();
+        let ended = move || {
+            if let Some(all) = all.upgrade() {
+                lock(&all).remove(&forget);
+            }
+        };
+        let mut command = Command::new(&self.program);
+        let started = Session::start(command.args(&self.args), self.idle, self.timeout, ended);
+        let session = {
+            let mut sessions = lock(&self.sessions);
+            match (started, sessions.get_mut(&key)) {
+                (Ok(session), Some(slot)) => slot.insert(Arc::new(session)).clone(),
+                (Err(fault), _) => {
+                    sessions.remove(&key);
+                    return Err(fault);
                 }
-            };
-            let mut command = Command::new(&self.program);
-            let session = Session::start(command.args(&self.args), self.idle, ended)?;
-            let session = Arc::new(session);
-            sessions.insert(key.clone(), session.clone());
-            session
+                // It ended already.
+                (Ok(_), None) => return Err(Fault::upstream("the MCP server stopped")),
+            }
         };
         let mut resp = session.post(messages).await?;
         let id = HeaderValue::from_str(&key.0).map_err(|e| Fault::internal("an id").with_source(e));
@@ -164,7 +184,7 @@ impl Transport for StdioTransport {
             };
         };
         let key = (id.to_str().unwrap_or_default().to_owned(), owner);
-        let Some(session) = lock(&self.sessions).get(&key).cloned() else {
+        let Some(session) = lock(&self.sessions).get(&key).cloned().flatten() else {
             return Ok(reply(StatusCode::NOT_FOUND, Some(NO_SESSION)));
         };
         session.touch();

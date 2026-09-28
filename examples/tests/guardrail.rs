@@ -1,5 +1,51 @@
 use super::*;
+use respan_gateway_core::http::{self, response::Parts};
+use respan_gateway_core::{Decoder, Encoder, Format};
 use respan_gateway_formats::conversation::{Message, Role};
+use respan_gateway_formats::opaque::{self, Got, Sent};
+use respan_gateway_formats::posts_to;
+
+/// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
+struct Responses;
+
+type Req = Request<Bytes>;
+
+impl Format for Responses {
+    type Input = Sent<Responses>;
+    type Output = Got<Responses>;
+
+    fn name(&self) -> &str {
+        "responses"
+    }
+
+    fn accepts(&self, head: &http::request::Parts) -> bool {
+        posts_to(head, "/responses")
+    }
+
+    fn request_decoder(&self, _: &Req) -> Box<dyn Decoder<Sent<Self>>> {
+        opaque::request_decoder()
+    }
+
+    fn request_encoder(&self, _: &mut Req, _: Option<&Sent<Self>>) -> Box<dyn Encoder<Sent<Self>>> {
+        opaque::request_encoder()
+    }
+
+    fn response_decoder(&self, head: &Parts, _: &Req) -> Box<dyn Decoder<Got<Self>>> {
+        opaque::response_decoder("responses", head)
+    }
+
+    fn response_encoder(&self, head: &mut Parts, _: &Req) -> Box<dyn Encoder<Got<Self>>> {
+        opaque::response_encoder("responses", head)
+    }
+}
+
+/// The example's gateway, also serving the Responses API.
+fn gateway_with_responses(mock: &MockTransport) -> Result<Gateway, Fault> {
+    gateway(mock)?
+        .provider("responses", Responses, mock.at(OPENAI))?
+        .serve(Responses)?
+        .target("responses")
+}
 
 #[tokio::test]
 async fn a_term_split_across_deltas_is_cut_before_its_start_is_sent() -> Result<(), Fault> {
@@ -36,7 +82,7 @@ async fn a_blocked_prompt_in_any_format_or_field_never_reaches_the_provider() ->
 #[tokio::test]
 async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
     let mock = MockTransport::new();
-    let gw = gateway(&mock)?;
+    let gw = gateway_with_responses(&mock)?;
     let image = json!([{ "type": "image_url", "image_url": { "url": "data:," } }]);
     let (status, body) = send(&gw, chat("gpt", image)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");

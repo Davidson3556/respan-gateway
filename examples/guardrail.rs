@@ -3,10 +3,10 @@
 //! split across stream deltas is seen whole, and a response a plugin
 //! answers with is covered too; and every call's input on the provider
 //! edge, tools included, as the provider receives it, so a call any plugin
-//! makes, or text any plugin adds, is covered. What it cannot read (another
-//! kind, an image, a tool call in the answer) is refused, never passed:
-//! this gateway also serves Anthropic clients, which the guard reads, and
-//! the Responses API relayed unread, which it refuses.
+//! makes, or text any plugin adds, is covered. What it cannot read (an
+//! image, a tool call in the answer) is refused, never passed; this gateway
+//! also serves Anthropic clients, which the guard reads. Traffic of another
+//! kind is refused (see tests).
 //!
 //! So it is two plugins. A plugin that answers skips the plugins after it,
 //! so `guard` is registered first. Input filters run in plugin order, so
@@ -17,13 +17,12 @@
 
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::http::{self, Request, StatusCode, response::Parts};
+use respan_gateway_core::http::{Request, StatusCode};
 use respan_gateway_core::serde_json::{Value, json};
-use respan_gateway_core::{Body, ClientContext, Decoder, Encoder, Fault, Format, Gateway};
-use respan_gateway_core::{Plugin, ProviderContext, Response, async_trait};
+use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Plugin, ProviderContext};
+use respan_gateway_core::{Response, async_trait};
 use respan_gateway_formats::conversation::{Conversation, Piece, Reply};
-use respan_gateway_formats::opaque::{self, Got, Sent};
-use respan_gateway_formats::{AnthropicMessages, OpenAiChat, posts_to};
+use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 use respan_gateway_text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};
 
@@ -77,19 +76,20 @@ impl Plugin for Guard {
         // A streamed tool call's arguments come in fragments no check sees
         // whole, so the guard refuses tool calls in answers.
         cx.filter(|reply: &mut Reply| {
-            if reply
+            let text_only = reply
                 .content
                 .iter()
-                .all(|p| matches!(p, Piece::Text { .. }))
-            {
-                return Ok(());
+                .all(|p| matches!(p, Piece::Text { .. }));
+            if text_only {
+                Ok(())
+            } else {
+                let message = "the guard cannot read a tool call in the answer";
+                Err(Fault::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    UNREADABLE,
+                    message,
+                ))
             }
-            let message = "the guard cannot read a tool call in the answer";
-            Err(Fault::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                UNREADABLE,
-                message,
-            ))
         })?;
         Ok(None)
     }
@@ -122,55 +122,18 @@ impl Plugin for Cache {
     }
 }
 
-/// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
-struct Responses;
-
-type Req = Request<Bytes>;
-
-impl Format for Responses {
-    type Input = Sent<Responses>;
-    type Output = Got<Responses>;
-
-    fn name(&self) -> &str {
-        "responses"
-    }
-
-    fn accepts(&self, head: &http::request::Parts) -> bool {
-        posts_to(head, "/responses")
-    }
-
-    fn request_decoder(&self, _: &Req) -> Box<dyn Decoder<Sent<Self>>> {
-        opaque::request_decoder()
-    }
-
-    fn request_encoder(&self, _: &mut Req, _: Option<&Sent<Self>>) -> Box<dyn Encoder<Sent<Self>>> {
-        opaque::request_encoder()
-    }
-
-    fn response_decoder(&self, head: &Parts, _: &Req) -> Box<dyn Decoder<Got<Self>>> {
-        opaque::response_decoder("responses", head)
-    }
-
-    fn response_encoder(&self, head: &mut Parts, _: &Req) -> Box<dyn Encoder<Got<Self>>> {
-        opaque::response_encoder("responses", head)
-    }
-}
-
 /// `guard` first, `guard-input` last. For real use, the transport is
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
     let terms = Terms(vec!["bomb", "launch code"]);
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .provider("responses", Responses, mock.at(OPENAI))?
         .serve(OpenAiChat)?
         .serve(AnthropicMessages)?
-        .serve(Responses)?
         .plugin("guard", Guard(terms.clone()))?
         .plugin("cache", Cache)?
         .plugin("guard-input", GuardInput(terms))?
-        .target("openai")?
-        .target("responses")
+        .target("openai")
 }
 
 /// A streamed OpenAI chat of one user message.
@@ -201,11 +164,9 @@ async fn main() -> Result<(), Fault> {
     let mock = MockTransport::new();
     let gw = gateway(&mock)?;
     mock.reply(OPENAI, deltas(&["Chemistry is fun. A bo", "mb is not."]));
-    let responses = post("/v1/responses", r#"{"input":"hi"}"#);
     for (what, req) in [
         ("term split across deltas", chat("gpt", "chemistry?".into())),
         ("poisoned cache", chat("cached", "hi".into())),
-        ("the Responses API", responses),
     ] {
         let (status, body) = send(&gw, req).await;
         println!("{what}: {status}\n{body}\n");

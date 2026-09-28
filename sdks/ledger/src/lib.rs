@@ -17,7 +17,7 @@
 mod accounting;
 mod ledger;
 
-pub use accounting::{Accounting, Quote, Unreported};
+pub use accounting::{Accounting, Quote};
 pub use ledger::{Amount, HoldId, Ledger, MemoryLedger};
 
 /// A 402: an account cannot cover a call's hold.

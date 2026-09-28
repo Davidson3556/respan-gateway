@@ -253,6 +253,29 @@ fn tools_and_tool_calls_are_read_and_edited_as_text() -> Result<(), Fault> {
 }
 
 #[test]
+fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault> {
+    let arguments = json!({ "card": 4111111111111111u64, "ok": true }).to_string();
+    let calls = json!([{ "function": { "arguments": arguments } }]);
+    let mut call = Message::new(Role::Assistant, "");
+    call.unsupported.insert("tool_calls".into(), calls);
+    let mut chat = Conversation::new([call]);
+    chat.unsupported
+        .insert("seed".into(), json!(4111111111111111u64));
+    assert!(chat.read_all()?.contains("\n4111111111111111\n"));
+    chat.edit_all(|text| {
+        *text = text.replace("4111111111111111", "<CARD_1>");
+        Ok(())
+    })?;
+    let arguments = &chat.messages[0].unsupported["tool_calls"][0]["function"]["arguments"];
+    let arguments: serde_json::Value = serde_json::from_str(arguments.as_str().unwrap_or(""))
+        .map_err(|e| Fault::internal(e.to_string()))?;
+    assert_eq!(arguments, json!({ "card": "<CARD_1>", "ok": true }));
+    // The request's own numbers are not texts.
+    assert_eq!(chat.unsupported["seed"], json!(4111111111111111u64));
+    Ok(())
+}
+
+#[test]
 fn a_whole_tool_call_is_restored_but_not_one_split_across_fragments() {
     let call = |arguments: &str| {
         let raw =

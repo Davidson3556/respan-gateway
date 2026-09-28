@@ -12,8 +12,9 @@
 //! Agents resend the same PDF every turn, so the text is remembered per
 //! tenant and content hash, here in a bounded map; in production, a shared
 //! store keyed by tenant and SHA-256. There is no single-flight: two turns
-//! in flight at once each convert the same PDF. Swap `fake_pdf_to_text` for
-//! a real extractor.
+//! in flight at once each convert the same PDF. A zero-retention request
+//! (marked `NoContent`, as in `logging.rs`) is converted but not remembered.
+//! Swap `fake_pdf_to_text` for a real extractor.
 //!
 //! **Partial:** a fallback in another format (OpenAI to Anthropic) cannot
 //! take the file part; a `file_id` (a file uploaded earlier) is refused for
@@ -63,6 +64,10 @@ fn pdf(part: &Content) -> Result<Option<&str>, Fault> {
 #[derive(Clone, Copy)]
 struct Deadline(Instant);
 
+/// Marks a zero-retention request; your tenancy plugin sets it.
+#[derive(Clone)]
+struct NoContent;
+
 /// Texts by tenant and content hash.
 type Memo = HashMap<(String, u64), Arc<str>>;
 
@@ -95,14 +100,21 @@ impl PdfToText {
         self.memo.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The text of `base64`, a PDF of `tenant`'s, remembered or converted.
-    async fn text(&self, tenant: &str, base64: String, until: Instant) -> Result<Arc<str>, Fault> {
+    /// The text of `base64`, a PDF of `tenant`'s, remembered or converted;
+    /// with `keep` false, converted and not remembered.
+    async fn text(
+        &self,
+        tenant: &str,
+        base64: String,
+        until: Instant,
+        keep: bool,
+    ) -> Result<Arc<str>, Fault> {
         let large = Fault::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "PDF too large");
         if base64.len() > self.max {
             return Err(large);
         }
         let key = (tenant.to_owned(), self.hasher.hash_one(&base64));
-        if let Some(text) = self.memo().get(&key) {
+        if keep && let Some(text) = self.memo().get(&key) {
             return Ok(text.clone());
         }
         let convert = self.convert;
@@ -113,6 +125,9 @@ impl PdfToText {
         let text = tokio::time::timeout_at(until, work).await;
         let text: Arc<str> = text.map_err(slow)?.map_err(panicked)??.into();
         self.conversions.fetch_add(1, Ordering::Relaxed);
+        if !keep {
+            return Ok(text);
+        }
         let mut memo = self.memo();
         // Full: drop any one. A shared cache would drop the least recently used.
         if memo.len() >= MEMO_SIZE
@@ -144,14 +159,16 @@ impl Plugin for PdfToText {
         let headers = &head.headers;
         let tenant = headers.get("x-tenant").and_then(|t| t.to_str().ok());
         let tenant = tenant.unwrap_or_default().to_owned();
-        let (chat, mut pdfs) = (px.input::<Conversation>()?, Vec::new());
+        let keep = head.extensions.get::<NoContent>().is_none();
+        let chat = px.input::<Conversation>()?;
+        let mut pdfs = Vec::new();
         for part in chat.messages.iter().flat_map(|m| &m.content) {
             pdfs.extend(pdf(part)?.map(str::to_owned));
         }
         // Filters are synchronous: convert here, then swap the parts in.
         let mut texts = Vec::with_capacity(pdfs.len());
         for base64 in pdfs {
-            texts.push(self.text(&tenant, base64, until).await?);
+            texts.push(self.text(&tenant, base64, until, keep).await?);
         }
         let mut texts = texts.into_iter();
         px.filter(move |chat: &mut Conversation| {

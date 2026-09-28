@@ -12,7 +12,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
@@ -54,7 +54,7 @@ impl Slots {
         })))
     }
 
-    fn queue(&self) -> std::sync::MutexGuard<'_, Queue> {
+    fn queue(&self) -> MutexGuard<'_, Queue> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 

@@ -96,6 +96,47 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
     let served = statuses.iter().flatten().filter(|s| s.is_success()).count();
     let spent = ledger.spent("team");
     assert!(spent <= 10_000, "overspent: {spent} of 10,000");
-    assert_eq!(spent, served as Amount * PRICE.cost(3, 300));
+    assert_eq!(spent, served as i64 * PRICE.cost(3, 300));
+    Ok(())
+}
+
+/// A stream cut before its usage and before any text (a reasoning model
+/// thinks first, or the upstream resets): the provider may have billed the
+/// whole cap, so the team is charged the reserve.
+#[tokio::test]
+async fn a_stream_cut_before_any_text_is_charged_its_reserve() -> Result<(), Fault> {
+    let (mock, ledger) = (MockTransport::new(), team());
+    let role = r#"{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}"#;
+    let mut reply = sse(&[role]);
+    reply
+        .body_mut()
+        .push(Err(Fault::upstream("connection reset")));
+    mock.reply(OPENAI, reply);
+    let gw = gateway(&mock, ledger.clone())?;
+    ask(&gw, true).await;
+    assert_eq!(ledger.spent("team"), PRICE.cost(14, CAP));
+    Ok(())
+}
+
+/// The kind reads the larger of two spellings, so the cap is lower and is
+/// written under both: a provider reading either is capped.
+#[tokio::test]
+async fn two_spellings_of_max_tokens_are_both_capped() -> Result<(), Fault> {
+    let (mock, ledger) = (MockTransport::new(), team());
+    let gw = gateway(&mock, ledger.clone())?;
+    let body = r#"{"model":"m","max_tokens":5000,"max_completion_tokens":100,"messages":[{"role":"user","content":"hi"}]}"#;
+    let answer = r#"{"id":"c1","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":7}}"#;
+    mock.reply(OPENAI, mock::json(StatusCode::OK, answer));
+    let (status, _, _) = read_whole(gw.handle(post("/v1/chat/completions", body)).await.0).await;
+    assert_eq!(status, StatusCode::OK);
+    let sent: serde_json::Value = serde_json::from_slice(mock.sent()[0].body())
+        .map_err(|e| Fault::internal("json").with_source(e))?;
+    assert_eq!(
+        (
+            sent["max_tokens"].as_u64(),
+            sent["max_completion_tokens"].as_u64()
+        ),
+        (Some(CAP), Some(CAP))
+    );
     Ok(())
 }

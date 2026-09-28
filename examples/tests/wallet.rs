@@ -7,7 +7,7 @@ async fn fifty_parallel_requests_never_overspend_a_one_dollar_wallet() -> Result
     let served = fifty(&gw, &mock, "sk-b1").await;
     let spent = ledger.spent("acme");
     assert!(spent <= 1_000_000, "overspent: {spent}");
-    assert_eq!(spent, served as Amount * 80_020, "each settled once");
+    assert_eq!(spent, served as i64 * 80_020, "each settled once");
     assert!(served >= 10, "held about $0.1 each: {served}");
     assert_eq!(ledger.spent("team-b"), spent);
     Ok(())
@@ -72,5 +72,22 @@ async fn n_answers_cannot_overspend_the_wallet() -> Result<(), Fault> {
     // Each holds about $0.40 of acme's $1: two are served.
     assert_eq!(statuses, [200, 200, 402, 402]);
     assert_eq!(ledger.spent("acme"), 2 * 400_020);
+    Ok(())
+}
+
+/// The kind reads the larger of two spellings, so the hold covers whichever
+/// one a provider reads.
+#[tokio::test]
+async fn two_spellings_of_max_tokens_cannot_overspend() -> Result<(), Fault> {
+    let (mock, ledger) = (MockTransport::new(), wallets());
+    let gw = gateway(&mock, ledger.clone())?;
+    let body = r#"{"model":"gpt-x","max_tokens":100000,"max_completion_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
+    // Priced at the larger limit, 100,000 tokens: more than team-a has.
+    assert_eq!(
+        send(&gw, "sk-a1", body).await?,
+        StatusCode::PAYMENT_REQUIRED
+    );
+    assert!(mock.sent().is_empty());
+    assert_eq!(ledger.spent("team-a"), 0);
     Ok(())
 }

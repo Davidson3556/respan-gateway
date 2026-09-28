@@ -26,7 +26,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::http::{self, HeaderValue, header::AUTHORIZATION};
-use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait};
+use respan_gateway_core::{
+    Body, ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait,
+};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
@@ -178,16 +180,8 @@ const STREAM: &[&str] = &[
 
 const BODY: &str = r#"{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
 
-/// A request from the tenant whose credential is `token`.
-fn request(token: &'static str, key: &'static str) -> http::Request<respan_gateway_core::Body> {
-    keyed(token, key, BODY)
-}
-
-fn keyed(
-    token: &'static str,
-    key: &'static str,
-    body: &'static str,
-) -> http::Request<respan_gateway_core::Body> {
+/// A request with idempotency key `key` from the tenant whose credential is `token`.
+fn keyed(token: &'static str, key: &'static str, body: &'static str) -> http::Request<Body> {
     let mut req = post("/v1/chat/completions", body);
     let headers = req.headers_mut();
     headers.insert(AUTHORIZATION, HeaderValue::from_static(token));
@@ -195,10 +189,7 @@ fn keyed(
     req
 }
 
-async fn send(
-    gw: &Gateway,
-    req: http::Request<respan_gateway_core::Body>,
-) -> Result<String, Fault> {
+async fn send(gw: &Gateway, req: http::Request<Body>) -> Result<String, Fault> {
     let (_, _, body) = read_whole(gw.handle(req).await.0).await;
     gw.idle().await;
     Ok(String::from_utf8_lossy(&body?).into_owned())
@@ -211,8 +202,8 @@ async fn main() -> Result<(), Fault> {
     let mock = MockTransport::new();
     mock.reply(OPENAI, mock::sse(STREAM));
     let gw = gateway(&mock, &Arc::default())?;
-    println!("first:\n{}", send(&gw, request(ACME, "op-1")).await?);
-    println!("retry:\n{}", send(&gw, request(ACME, "op-1")).await?);
+    println!("first:\n{}", send(&gw, keyed(ACME, "op-1", BODY)).await?);
+    println!("retry:\n{}", send(&gw, keyed(ACME, "op-1", BODY)).await?);
     println!("provider calls: {}", mock.sent().len());
     Ok(())
 }

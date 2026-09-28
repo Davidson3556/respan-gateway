@@ -10,39 +10,21 @@ use std::collections::HashMap;
 
 use respan_gateway_core::http::{HeaderValue, StatusCode};
 use respan_gateway_core::{Fault, Gateway, ProviderContext, Usage, futures, http};
+use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_formats::conversation::{Conversation, units};
-use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote};
+use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_ledger::{Accounting, MemoryLedger, Quote};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
-
-/// A model's price per million tokens, in micro-dollars.
-#[derive(Clone, Copy)]
-struct Price {
-    input: Amount,
-    output: Amount,
-}
-
-impl Price {
-    /// What `input` and `output` tokens cost, rounded up.
-    fn cost(&self, input: u64, output: u64) -> Amount {
-        let per_million = input as Amount * self.input + output as Amount * self.output;
-        (per_million + 999_999) / 1_000_000
-    }
-}
 
 /// Your table; a model not in it has no cost bound.
 fn prices() -> HashMap<String, Price> {
-    let gpt_x = Price {
-        input: 2_000_000,
-        output: 8_000_000,
-    };
-    HashMap::from([("gpt-x".to_owned(), gpt_x)])
+    HashMap::from([("gpt-x".to_owned(), Price::new(2_000_000, 8_000_000))])
 }
 
 /// Who pays, the most the call can cost, and its price. A call with no
 /// price, no `max_tokens` or non-text input has no bound, so it is refused;
-/// `n` answers may each be `max_tokens` long.
+/// `n` answers may each be `max_tokens` long, as the provider reads it.
 fn quote(px: &ProviderContext, prices: &HashMap<String, Price>) -> Result<Quote, Fault> {
     let auth = px.client().head().headers.get("authorization");
     let key = auth.and_then(|v| v.to_str().ok()?.strip_prefix("Bearer "));
@@ -56,10 +38,8 @@ fn quote(px: &ProviderContext, prices: &HashMap<String, Price>) -> Result<Quote,
         .max_tokens
         .ok_or_else(|| Fault::bad_request("set max_tokens"))?;
     let reserve = price.cost(input_bound(chat)?, max_output * answers(chat)?);
-    let n = |u: &Usage, unit| u.get(unit).unwrap_or(0.0).max(0.0).ceil() as u64;
-    let price = move |u: &Usage| price.cost(n(u, units::INPUT_TOKENS), n(u, units::OUTPUT_TOKENS));
     // The ledger holds the key's team and customer with it.
-    Ok(Quote::new([key], reserve, price))
+    Ok(Quote::new([key], reserve, move |u: &Usage| price.of(u)))
 }
 
 /// acme ($1) has team-a ($0.30, keys sk-a1 and sk-a2) and team-b (sk-b1).

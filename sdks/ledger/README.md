@@ -5,8 +5,8 @@ prices you supply. Amounts are whatever unit you count.
 
 - `Accounting::new(ledger, quote)`: a plugin that holds each call's worst
   case before it is sent (402 if it does not fit) and settles it from the
-  call's usage. `.ttl(..)` bounds a hold; `.unreported(Unreported::..)` says
-  what to charge when no usage came.
+  call's usage, or at least the hold when its usage may be partial.
+  `.ttl(..)` bounds a hold.
 - `Quote::new(accounts, reserve, price)`: who pays, the most the call can
   cost, and its price from usage.
 - `Ledger`: the store trait to implement; `MemoryLedger` is an in-memory one

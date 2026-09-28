@@ -6,7 +6,7 @@
 //! its first content reached the client is never retried. Not built here:
 //! splitting an embedding batch and merging `/v1/models`.
 //!
-//! Run: `cargo run -p respan-gateway-examples --example fallback`
+//! `cargo run -p respan-gateway-examples --example fallback`
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;

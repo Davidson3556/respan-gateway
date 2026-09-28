@@ -1,9 +1,10 @@
 //! MCP proxy: MCP clients speak streamable HTTP to the gateway, which lets
 //! them see and call only the tools on an allow-list.
 //!
-//! `cargo run --example mcp_proxy` runs it against a mock MCP server with
-//! tools `echo` and `wipe`. Add `-- --stdio PROGRAM [ARGS...]` to run a real
-//! server as a child process instead, such as
+//! `cargo run -p respan-gateway-examples --example mcp_proxy` runs it
+//! against a mock MCP server with tools `echo` and `wipe`. Add
+//! `-- --stdio PROGRAM [ARGS...]` to run a real server as a child process
+//! instead, such as
 //! `-- --stdio npx -y @modelcontextprotocol/server-everything`.
 //!
 //! Not built: realtime WebSocket sessions and per-turn billing (use case 7).

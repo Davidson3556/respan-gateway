@@ -46,37 +46,23 @@ impl std::fmt::Debug for Quote {
     }
 }
 
-/// What to charge a call the provider may have billed without reporting
-/// its usage in full: a stream cut off, or a call sent that failed before
-/// its answer's head.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Unreported {
-    /// The reserve, or the price of what was reported if more: never less
-    /// than the call may have cost.
-    #[default]
-    Reserve,
-    /// The price of what was reported, perhaps nothing: for a price that
-    /// estimates what is missing.
-    Price,
-}
-
 /// Holds each call's quote on a [`Ledger`] before it is sent, and settles
 /// it exactly once when it ends, from its [`Outcome::usage`]. A call with
-/// no quote (its `Err`) is refused before anything is sent. It uses the
-/// provider edge alone: register it last, so it prices the call as every
-/// other plugin left it, and once per gateway.
+/// no quote (its `Err`) is refused before anything is sent. A call the
+/// provider may have billed without reporting its usage in full (a stream
+/// cut off, or a call sent that failed before its head) is charged at least
+/// its reserve. It uses the provider edge alone: register it last, so it
+/// prices the call as every other plugin left it, and once per gateway.
 pub struct Accounting<L> {
     ledger: L,
     quote: Box<QuoteFn>,
     ttl: Duration,
-    unreported: Unreported,
 }
 
 impl<L> std::fmt::Debug for Accounting<L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Accounting")
             .field("ttl", &self.ttl)
-            .field("unreported", &self.unreported)
             .finish_non_exhaustive()
     }
 }
@@ -91,7 +77,6 @@ impl<L: Ledger> Accounting<L> {
             ledger,
             quote: Box::new(quote),
             ttl: Duration::from_secs(15 * 60),
-            unreported: Unreported::default(),
         }
     }
 
@@ -99,12 +84,6 @@ impl<L: Ledger> Accounting<L> {
     /// settlement was lost; longer than any call lasts.
     pub fn ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
-        self
-    }
-
-    /// What to charge a call whose usage was not reported in full.
-    pub fn unreported(mut self, unreported: Unreported) -> Self {
-        self.unreported = unreported;
         self
     }
 
@@ -118,7 +97,7 @@ impl<L: Ledger> Accounting<L> {
             if !hold.sent.load(Ordering::Relaxed) {
                 return 0;
             }
-            return self.partial(hold, price(usage));
+            return price(usage).max(hold.reserve);
         };
         if !head.status.is_success() {
             return 0; // the provider refused it
@@ -126,15 +105,8 @@ impl<L: Ledger> Accounting<L> {
         if outcome.end.is_ok() && !usage.is_empty() {
             return price(usage);
         }
-        self.partial(hold, price(usage))
-    }
-
-    /// What to charge a call whose usage, priced `priced`, may be partial.
-    fn partial(&self, hold: &Hold, priced: Amount) -> Amount {
-        match self.unreported {
-            Unreported::Reserve => priced.max(hold.reserve),
-            Unreported::Price => priced,
-        }
+        // Cut off: its usage may be partial.
+        price(usage).max(hold.reserve)
     }
 }
 

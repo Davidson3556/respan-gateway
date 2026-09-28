@@ -3,6 +3,39 @@
 //! `cargo run -p respan-gateway-examples --example <name>`. Each has tests that
 //! `cargo test` runs; see `examples/README.md` for the list.
 
+use respan_gateway_core::Usage;
+use respan_gateway_formats::conversation::units;
+
+/// A model's price per million tokens, in micro-dollars. Add fields for
+/// what else you price, such as cached input. Used by `billing.rs`,
+/// `wallet.rs` and `cost_cap.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Price {
+    /// Per million input tokens.
+    pub input: i64,
+    /// Per million output tokens.
+    pub output: i64,
+}
+
+impl Price {
+    /// `input` and `output` per million tokens.
+    pub const fn new(input: i64, output: i64) -> Self {
+        Self { input, output }
+    }
+
+    /// What `input` and `output` tokens cost, rounded up.
+    pub fn cost(&self, input: u64, output: u64) -> i64 {
+        let per_million = input as i64 * self.input + output as i64 * self.output;
+        (per_million + 999_999) / 1_000_000
+    }
+
+    /// What `usage`'s input and output tokens cost; a missing count is 0.
+    pub fn of(&self, usage: &Usage) -> i64 {
+        let n = |unit| usage.get(unit).unwrap_or(0.0).max(0.0).ceil() as u64;
+        self.cost(n(units::INPUT_TOKENS), n(units::OUTPUT_TOKENS))
+    }
+}
+
 pub mod chat_bound {
     //! Bounds on what a chat call can cost, before it is sent. Used by
     //! `wallet.rs` and `cost_cap.rs`.

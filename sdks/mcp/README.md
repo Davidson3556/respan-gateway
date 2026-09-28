@@ -9,7 +9,8 @@ that keep their bytes, so an unedited message relays byte for byte.
   `SESSION` is its session header.
 - `StdioTransport::new(program, args)`: an MCP server run as a child
   process per session. `.max_sessions(n)` per owner (default 8),
-  `.max_total(n)` in all (default 64), `.idle(d)`. The owner is the call's
+  `.max_total(n)` in all (default 64), `.idle(d)`, `.timeout(d)` for a
+  `POST`'s answers (default 5 minutes; then a `TIMED_OUT` error). The owner is the call's
   `Owner` extension, else its `Authorization` header: authenticate first.
 - `error(id, code, message)`: a JSON-RPC error.
 

@@ -7,7 +7,9 @@
 //!    and tool calls, and cuts a stream that runs past the bound, for a
 //!    provider that ignores `max_tokens`;
 //! 3. the call settles from its reported usage, or, cut before the usage
-//!    came, from the estimate.
+//!    came, from the estimate, never less than its hold: a stream cut
+//!    before any text (the model was thinking, the client left) may still
+//!    have cost it all.
 //!
 //! Register `Cap` before `Accounting`: Cap stores the call's `Seen`, which
 //! Accounting's quote reads, and a call without one is refused.
@@ -19,34 +21,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use respan_gateway_core::http::StatusCode;
 use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, Usage, async_trait};
+use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Piece, Reply, units};
-use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote, Unreported};
+use respan_gateway_ledger::{Accounting, MemoryLedger, Quote};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
 /// The most output tokens an answer may have.
 const CAP: u64 = 100;
 /// The model's price.
-const PRICE: Price = Price {
-    input: 1_000_000,
-    output: 4_000_000,
-};
-
-/// A model's price per million tokens, in micro-dollars.
-#[derive(Clone, Copy)]
-struct Price {
-    input: Amount,
-    output: Amount,
-}
-
-impl Price {
-    /// What `input` and `output` tokens cost, rounded up.
-    fn cost(&self, input: u64, output: u64) -> Amount {
-        let per_million = input as Amount * self.input + output as Amount * self.output;
-        (per_million + 999_999) / 1_000_000
-    }
-}
+const PRICE: Price = Price::new(1_000_000, 4_000_000);
 
 /// One call's output bound, its output as seen, and whether it was cut.
 #[derive(Clone, Default)]
@@ -77,8 +62,12 @@ impl Plugin for Cap {
             ..Seen::default()
         };
         px.extensions_mut().insert(seen.clone());
-        px.filter(|chat: &mut Conversation| {
-            chat.max_tokens = Some(chat.max_tokens.map_or(CAP, |n| n.min(CAP)));
+        let limit = px
+            .input::<Conversation>()?
+            .max_tokens
+            .map_or(CAP, |n| n.min(CAP));
+        px.filter(move |chat: &mut Conversation| {
+            chat.max_tokens = Some(limit);
             Ok(())
         })?;
         px.filter(move |reply: &mut Reply| {
@@ -102,7 +91,8 @@ impl Plugin for Cap {
 }
 
 /// Step 3's price: reported usage, else the estimate; a cut call's usage
-/// may be partial, so never less than was seen.
+/// may be partial, so never less than was seen. `Accounting` charges an
+/// unfinished call at least its reserve.
 fn quote(px: &ProviderContext) -> Result<Quote, Fault> {
     let seen = px.extensions().get::<Seen>().cloned();
     let seen = seen.ok_or_else(|| Fault::internal("register Cap before Accounting"))?;
@@ -123,8 +113,7 @@ fn quote(px: &ProviderContext) -> Result<Quote, Fault> {
 const OPENAI: &str = "http://openai.test/v1";
 
 fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault> {
-    // A cut stream's usage is unreported; its price estimates it.
-    let accounting = Accounting::new(ledger, quote).unreported(Unreported::Price);
+    let accounting = Accounting::new(ledger, quote);
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .serve(OpenAiChat)?
