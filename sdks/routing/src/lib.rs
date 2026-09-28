@@ -194,6 +194,8 @@ pub async fn race(
     calls: impl IntoIterator<Item = Call>,
     stagger: Duration,
 ) -> Result<Response, Fault> {
+    // A century stands for "never hedge": `Duration::MAX` would overflow.
+    let stagger = stagger.min(Duration::from_secs(100 * 365 * 24 * 3600));
     let mut waiting = calls.into_iter().zip(0..).peekable();
     let mut running = FuturesUnordered::<BoxFuture<'static, Answer>>::new();
     let mut previous = None;

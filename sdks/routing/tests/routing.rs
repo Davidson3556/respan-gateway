@@ -447,3 +447,13 @@ async fn a_call_failing_before_its_head_ends_a_loser() {
         assert_eq!(record, [refused, b]);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_race_that_never_hedges_still_falls_over() {
+    let h = harness(Plan::Race(vec!["a", "b"], Duration::MAX));
+    h.mock
+        .reply(A, mock::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
+    h.mock.reply(B, ok());
+    let (status, _, body, _) = h.send().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

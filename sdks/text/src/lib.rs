@@ -28,17 +28,18 @@ fn unreadable(what: &str) -> Fault {
 /// An edit of one text.
 type Edit<'a> = dyn FnMut(&mut String) -> Result<(), Fault> + 'a;
 
-/// A value whose text a check must see all of. Its texts include the JSON
-/// the kind has no form for (tools, a tool call): each string and each
-/// name inside it, so an edit may rename a key. A string there holding a
-/// JSON object or array, such as a tool call's arguments, is parsed and
-/// read the same way, its numbers too, so a card number in it is read; a
-/// number an edit changes is written back as the edit's text. In a reply,
-/// a tool call's streamed arguments are pieces of JSON text: what an edit
-/// writes into them is escaped, so a value restored into a string stays
-/// whole; an edit of a bare number there, outside any string, is not
-/// quoted. Booleans, and the request's own numbers and field names, are
-/// not texts.
+/// A value whose text a check must see all of. Its texts are:
+///
+/// - its text parts, and the strings and names inside the JSON the kind
+///   has no form for (tools, a tool call), so an edit may rename a key;
+/// - inside a string holding a JSON object or array, such as a tool call's
+///   arguments, each string, name and number (so a card number is read; a
+///   changed number is written back as the edit's text);
+/// - in a reply's streamed delta, a tool call's arguments as pieces of JSON
+///   text: what an edit writes is escaped, but a bare number there is not
+///   quoted; the delta's other strings as plain text.
+///
+/// Booleans, and the request's own numbers and field names, are not texts.
 pub trait Readable: Clone {
     /// Runs `edit` on each of its texts, or `Err` with [`UNREADABLE`],
     /// before any edit, if it carries content with no text form, such as an
@@ -156,8 +157,15 @@ fn edit_json_text(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
             out.push_str(&quoted[1..quoted.len() - 1]);
         }
         rest = &rest[plain..];
-        // A quote, or an escape and the character it escapes, as it is.
+        // A quote, or an escape (`\uXXXX` with its four digits), as it is.
         let mark = match rest.strip_prefix('\\').and_then(|r| r.chars().next()) {
+            Some('u') => {
+                2 + rest[2..]
+                    .bytes()
+                    .take(4)
+                    .take_while(u8::is_ascii_hexdigit)
+                    .count()
+            }
             Some(c) => 1 + c.len_utf8(),
             None => rest.chars().next().map_or(0, char::len_utf8),
         };

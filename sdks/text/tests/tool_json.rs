@@ -3,7 +3,7 @@
 use respan_gateway_core::serde_json::{self, Value, json};
 use respan_gateway_core::{Fault, Filter};
 use respan_gateway_formats::conversation::{Conversation, Message, Piece, Reply, Role};
-use respan_gateway_text::{Holdback, Placeholders, Readable};
+use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite};
 
 fn run(filter: &mut impl Filter<Reply>, replies: Vec<Reply>) -> Result<Vec<Reply>, Fault> {
     let mut out = Vec::new();
@@ -249,4 +249,36 @@ fn streamed_reasoning_is_plain_text() {
     let name = vault.hide("NAME", "bob");
     let thinking = json!({ "type": "thinking_delta", "thinking": format!("[\"{name}\", 1.0]") });
     assert_eq!(restored(thinking, vault)["thinking"], "[\"bob\", 1.0]");
+}
+
+/// Masks every run of four or more digits, as a card or phone redactor would.
+struct MaskDigits;
+
+impl Rewrite for MaskDigits {
+    fn pending(&self, text: &str) -> usize {
+        text.len() - text.trim_end_matches(|c: char| c.is_ascii_digit()).len()
+    }
+
+    fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
+        let (mut out, mut run) = (String::new(), String::new());
+        for c in text.chars().map(Some).chain([None]) {
+            match c {
+                Some(d) if d.is_ascii_digit() => run.push(d),
+                _ => {
+                    out.push_str(if run.len() >= 4 { "****" } else { &run });
+                    run.clear();
+                    out.extend(c);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[test]
+fn a_unicode_escape_in_streamed_arguments_is_kept_whole() {
+    let piece = "{\"note\":\"don\\u2019t call 5551234\"}";
+    let out = run(&mut Holdback::new(MaskDigits), vec![call(piece)]).unwrap_or_default();
+    let parsed: Value = serde_json::from_str(&args(&out)).unwrap_or_default();
+    assert_eq!(parsed["note"], "don\u{2019}t call ****", "{}", args(&out));
 }
