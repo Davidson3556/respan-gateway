@@ -16,7 +16,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use respan_gateway_core::futures::future::BoxFuture;
@@ -86,46 +86,40 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
 #[derive(Debug, Clone)]
 pub struct Attempt {
     index: u32,
-    role: Arc<AtomicU8>,
+    won: Arc<AtomicBool>,
 }
 
 /// What became of an attempt.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// Not decided yet. An end hook sees it only when the client's request
-    /// ended before the helper decided.
-    Pending,
     /// Its response is the one returned.
     Winner,
-    /// Any other: failed, superseded, or dropped as a race's loser.
+    /// Any other: failed, superseded, dropped, or not chosen yet.
     Loser,
 }
 
 impl Attempt {
     fn new(index: u32) -> Self {
-        let role = Arc::new(AtomicU8::new(Role::Pending as u8));
-        Self { index, role }
+        let won = Arc::new(AtomicBool::new(false));
+        Self { index, won }
     }
 
-    /// Its place among the helper's attempts, in the order sent, from 0.
+    /// Its place among the helper's attempts, in the order sent, from 0:
+    /// what tells a retry from the first try in `on_provider`.
     pub fn index(&self) -> u32 {
         self.index
     }
 
-    /// What became of it. Set as the helper decides, before it drops a
-    /// loser or returns the winner, so its `on_provider_end` sees it, even
-    /// for a whole body.
+    /// What became of it. Every attempt is a loser until the helper returns
+    /// its response, promoted before that response is read, so its
+    /// `on_provider_end` always sees the final role.
     pub fn role(&self) -> Role {
-        match self.role.load(Ordering::SeqCst) {
-            1 => Role::Winner,
-            2 => Role::Loser,
-            _ => Role::Pending,
+        if self.won.load(Ordering::SeqCst) {
+            Role::Winner
+        } else {
+            Role::Loser
         }
-    }
-
-    fn set(&self, role: Role) {
-        self.role.store(role as u8, Ordering::SeqCst);
     }
 }
 
@@ -145,18 +139,18 @@ fn is_success(answer: &Result<Response, Fault>) -> bool {
     answer.as_ref().is_ok_and(|r| r.head().status.is_success())
 }
 
-/// Drop a superseded answer, a loser.
-fn lose(answer: Option<Answer>) {
-    if let Some((attempt, _)) = answer {
-        attempt.set(Role::Loser);
+/// Return `answer`, promoting its attempt if it is a response. A fault
+/// stays a loser: its call already ended, with nothing to commit.
+fn win((attempt, answer): Answer) -> Result<Response, Fault> {
+    if answer.is_ok() {
+        attempt.won.store(true, Ordering::SeqCst);
     }
+    answer
 }
 
-/// The last answer, the winner; with none, `upstream`.
+/// The last answer; with none, `upstream`.
 fn last(answer: Option<Answer>) -> Result<Response, Fault> {
-    let (attempt, answer) = answer.ok_or_else(|| Fault::upstream("no provider to try"))?;
-    attempt.set(Role::Winner);
-    answer
+    win(answer.ok_or_else(|| Fault::upstream("no provider to try"))?)
 }
 
 /// Each call in turn, retried as `backoff` says, until one's response is a
@@ -171,12 +165,10 @@ pub async fn first_success(
     let (mut previous, mut index) = (None, 0);
     for call in calls {
         for tries in 1.. {
-            lose(previous.take());
             let (attempt, answer) = send(call.clone(), Attempt::new(index)).await;
             index += 1;
             if is_success(&answer) {
-                attempt.set(Role::Winner);
-                return answer;
+                return win((attempt, answer));
             }
             let wait = match &answer {
                 Ok(resp) => backoff.wait(tries, Some(resp.head())),
@@ -189,7 +181,6 @@ pub async fn first_success(
                 previous = Some((attempt, answer));
                 break;
             };
-            attempt.set(Role::Loser);
             tokio::time::sleep(wait).await;
         }
     }
@@ -205,7 +196,6 @@ pub async fn race(
 ) -> Result<Response, Fault> {
     let mut waiting = calls.into_iter().zip(0..).peekable();
     let mut running = FuturesUnordered::<BoxFuture<'static, Answer>>::new();
-    let mut started: Vec<Attempt> = Vec::new();
     let mut previous = None;
     let next = tokio::time::sleep(Duration::ZERO);
     tokio::pin!(next);
@@ -213,20 +203,16 @@ pub async fn race(
         tokio::select! {
             Some((attempt, answer)) = running.next() => {
                 if is_success(&answer) {
-                    started.iter().for_each(|other| other.set(Role::Loser));
-                    attempt.set(Role::Winner);
-                    return answer;
+                    return win((attempt, answer));
                 }
-                lose(previous.replace((attempt, answer)));
+                previous = Some((attempt, answer));
                 if running.is_empty() {
                     next.as_mut().reset(tokio::time::Instant::now());
                 }
             }
             () = &mut next, if waiting.peek().is_some() => {
                 if let Some((call, index)) = waiting.next() {
-                    let attempt = Attempt::new(index);
-                    started.push(attempt.clone());
-                    running.push(send(call, attempt).boxed());
+                    running.push(send(call, Attempt::new(index)).boxed());
                 }
                 next.as_mut().reset(tokio::time::Instant::now() + stagger);
             }
@@ -235,36 +221,40 @@ pub async fn race(
     }
 }
 
-/// A transport that fails a provider silent for `idle`: before its head
-/// (an `upstream` fault) or before or between body frames (the stream ends
-/// as an error in the client's framing), rather than hanging. Before any
-/// content, [`first_success`] retries it.
+/// A transport that fails a silent provider rather than hanging: one that
+/// sends no head within `head` (an `upstream` fault), or no body frame
+/// within `idle` of the head or the frame before (the stream ends as an
+/// error in the client's framing). Before any content, [`first_success`]
+/// retries it.
+///
+/// A whole (non-streaming) answer sends its head only once it is done, so
+/// `head` is the longest answer to wait for; `idle` bounds a stream's gaps.
 #[derive(Debug, Clone)]
 pub struct Watchdog<T> {
     inner: T,
+    head: Duration,
     idle: Duration,
 }
 
 impl<T: Transport> Watchdog<T> {
-    /// Bound `inner`'s silences by `idle`.
-    pub fn new(inner: T, idle: Duration) -> Self {
-        Self { inner, idle }
+    /// Bound `inner`'s wait for its head by `head`, and each gap in its body by `idle`.
+    pub fn new(inner: T, head: Duration, idle: Duration) -> Self {
+        Self { inner, head, idle }
     }
 }
 
 #[async_trait]
 impl<T: Transport> Transport for Watchdog<T> {
     async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let idle = self.idle;
-        let stalled = move || Fault::upstream(format!("the provider sent nothing for {idle:?}"));
-        let resp = tokio::time::timeout(idle, self.inner.send(call)).await;
-        let (head, body) = resp.map_err(|_| stalled())??.into_parts();
-        let frames = Some(BodyStream::new(body));
+        let stalled = |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
+        let resp = tokio::time::timeout(self.head, self.inner.send(call)).await;
+        let (head, body) = resp.map_err(|_| stalled(self.head))??.into_parts();
+        let (frames, idle) = (Some(BodyStream::new(body)), self.idle);
         let bounded = stream::unfold(frames, move |frames| async move {
             let mut frames = frames?;
             match tokio::time::timeout(idle, frames.next()).await {
                 Ok(frame) => Some((frame?, Some(frames))),
-                Err(_) => Some((Err(stalled()), None)),
+                Err(_) => Some((Err(stalled(idle)), None)),
             }
         });
         let body = StreamBody::new(bounded).boxed_unsync();

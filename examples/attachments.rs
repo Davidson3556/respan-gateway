@@ -5,10 +5,15 @@
 //! gets the client's original bytes.
 //!
 //! Parsing is slow work on untrusted bytes: after a size check, it runs on
-//! a blocking thread under a time budget. Agents resend the same PDF every
-//! turn, so the text is remembered per tenant and content hash, here in a
-//! bounded map; in production, a shared store keyed by tenant and SHA-256.
-//! Swap `fake_pdf_to_text` for a real extractor.
+//! a blocking thread under a time budget for the whole request, all its
+//! PDFs and attempts together. A conversion that runs out of time fails the
+//! call but keeps its thread until it returns (a thread cannot be killed),
+//! so give a real extractor its own limit or run it in a subprocess.
+//! Agents resend the same PDF every turn, so the text is remembered per
+//! tenant and content hash, here in a bounded map; in production, a shared
+//! store keyed by tenant and SHA-256. There is no single-flight: two turns
+//! in flight at once each convert the same PDF. Swap `fake_pdf_to_text` for
+//! a real extractor.
 //!
 //! **Partial:** a fallback in another format (OpenAI to Anthropic) cannot
 //! take the file part; a `file_id` (a file uploaded earlier) is refused for
@@ -30,6 +35,7 @@ use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Content, Conversation};
 use respan_gateway_routing::{Backoff, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use tokio::time::Instant;
 
 /// How many texts the memo keeps, across tenants.
 const MEMO_SIZE: usize = 1024;
@@ -52,6 +58,10 @@ fn pdf(part: &Content) -> Result<Option<&str>, Fault> {
     let data = file["file_data"].as_str();
     Ok(data.and_then(|d| d.strip_prefix("data:application/pdf;base64,")))
 }
+
+/// When the request's conversion budget runs out.
+#[derive(Clone, Copy)]
+struct Deadline(Instant);
 
 /// Texts by tenant and content hash.
 type Memo = HashMap<(String, u64), Arc<str>>;
@@ -86,7 +96,7 @@ impl PdfToText {
     }
 
     /// The text of `base64`, a PDF of `tenant`'s, remembered or converted.
-    async fn text(&self, tenant: &str, base64: String) -> Result<Arc<str>, Fault> {
+    async fn text(&self, tenant: &str, base64: String, until: Instant) -> Result<Arc<str>, Fault> {
         let large = Fault::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "PDF too large");
         if base64.len() > self.max {
             return Err(large);
@@ -100,7 +110,7 @@ impl PdfToText {
         let slow = "the PDF took too long to read";
         let slow = |_| Fault::new(StatusCode::GATEWAY_TIMEOUT, "conversion_timeout", slow);
         let panicked = |e| Fault::internal("the PDF converter panicked").with_source(e);
-        let text = tokio::time::timeout(self.budget, work).await;
+        let text = tokio::time::timeout_at(until, work).await;
         let text: Arc<str> = text.map_err(slow)?.map_err(panicked)??.into();
         self.conversions.fetch_add(1, Ordering::Relaxed);
         let mut memo = self.memo();
@@ -117,12 +127,21 @@ impl PdfToText {
 
 #[async_trait]
 impl Plugin for PdfToText {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let deadline = Deadline(Instant::now() + self.budget);
+        cx.head_mut().extensions.insert(deadline);
+        Ok(None)
+    }
+
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         if !self.text_only.contains(&px.provider()) || !px.is_kind::<Conversation>() {
             return Ok(());
         }
         // Named by `x-tenant` here; in practice, by your auth plugin.
-        let headers = &px.client().head().headers;
+        let head = px.client().head();
+        let until = head.extensions.get::<Deadline>().map(|d| d.0);
+        let until = until.unwrap_or_else(|| Instant::now() + self.budget);
+        let headers = &head.headers;
         let tenant = headers.get("x-tenant").and_then(|t| t.to_str().ok());
         let tenant = tenant.unwrap_or_default().to_owned();
         let (chat, mut pdfs) = (px.input::<Conversation>()?, Vec::new());
@@ -132,7 +151,7 @@ impl Plugin for PdfToText {
         // Filters are synchronous: convert here, then swap the parts in.
         let mut texts = Vec::with_capacity(pdfs.len());
         for base64 in pdfs {
-            texts.push(self.text(&tenant, base64).await?);
+            texts.push(self.text(&tenant, base64, until).await?);
         }
         let mut texts = texts.into_iter();
         px.filter(move |chat: &mut Conversation| {
@@ -196,63 +215,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn only_the_text_only_attempt_gets_text_and_the_fallback_the_original()
-    -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-        mock.reply(PDF, mock::json(StatusCode::OK, OK));
-        let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
-        assert_eq!(send(&gw, "acme", REQUEST).await, StatusCode::OK);
-        let sent = mock.sent();
-        let converted = String::from_utf8_lossy(sent[0].body());
-        assert!(converted.contains("[text of a 24-byte PDF]"), "{converted}");
-        assert!(!converted.contains("file_data"), "{converted}");
-        assert_eq!(sent[1].body(), REQUEST, "the fallback, the original");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn the_same_pdf_is_converted_once_per_tenant() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        for _ in 0..3 {
-            mock.reply(TEXT, mock::json(StatusCode::OK, OK));
-        }
-        let pdfs = Arc::new(PdfToText::new(&["text-only"]));
-        let gw = gateway(&mock, pdfs.clone())?;
-        for tenant in ["acme", "acme", "beta"] {
-            assert_eq!(send(&gw, tenant, REQUEST).await, StatusCode::OK);
-        }
-        assert_eq!(pdfs.conversions.load(Ordering::Relaxed), 2, "once each");
-        assert_eq!(mock.sent()[0].body(), mock.sent()[1].body());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stored_oversized_and_slow_pdfs_fail_before_any_call() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        // Real time: a blocking thread does not see tokio's paused clock.
-        let strict = PdfToText {
-            convert: |_| {
-                std::thread::sleep(Duration::from_millis(300));
-                Ok(String::new())
-            },
-            budget: Duration::from_millis(10),
-            max: 8,
-            ..PdfToText::new(&["text-only", "reads-pdf"])
-        };
-        let gw = gateway(&mock, Arc::new(strict))?;
-        let stored = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-abc"}}]}]}"#;
-        assert_eq!(send(&gw, "acme", stored).await, StatusCode::BAD_REQUEST);
-        let large = send(&gw, "acme", REQUEST).await;
-        assert_eq!(large, StatusCode::PAYLOAD_TOO_LARGE);
-        let small = REQUEST.replace("JVBERi0xLjcKJcfsj6IKMSAwIG9iago=", "JVBE");
-        let slow = send(&gw, "acme", &small).await;
-        assert_eq!(slow, StatusCode::GATEWAY_TIMEOUT);
-        assert!(mock.sent().is_empty());
-        Ok(())
-    }
-}
+#[path = "tests/attachments.rs"]
+mod tests;

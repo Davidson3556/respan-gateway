@@ -20,7 +20,7 @@ use tokio::process::Command;
 use crate::session::Session;
 use crate::{SESSION, error, lock, read};
 
-/// Sessions by id and a keyed hash of the `Authorization` that started them.
+/// Sessions by id and a keyed hash of their owner.
 type Sessions = Mutex<HashMap<(String, u64), Arc<Session>>>;
 type Reply = http::Response<Body>;
 
@@ -29,16 +29,23 @@ const NO_SESSION: &str = "no such session";
 /// Runs `program` for each new session (an `initialize` without a session
 /// id), and sends each line it writes to the request waiting for it.
 ///
-/// A session belongs to the `Authorization` header that started it: a
-/// request with another one gets 404, as if the session did not exist. A
-/// second `GET` while the session's stream is open gets 409. A session
-/// ends when its child exits, on `DELETE`, or when idle; its child is then
-/// killed and reaped.
+/// A session belongs to the owner that started it: the call's [`Owner`]
+/// extension if any, else its `Authorization` header. A request from
+/// another owner gets 404, as if the session did not exist. A second `GET`
+/// while the session's stream is open gets 409. A session ends when its
+/// child exits, on `DELETE`, or when idle; its child is then killed and
+/// reaped.
+///
+/// Authenticate callers before this transport. Owners taken from an
+/// unauthenticated `Authorization` header are unbounded, since anyone can
+/// send a new one; only the total limit ([`max_total`](Self::max_total))
+/// then caps the children.
 #[derive(Debug)]
 pub struct StdioTransport {
     program: PathBuf,
     args: Vec<String>,
     max_sessions: usize,
+    max_total: usize,
     idle: Duration,
     sessions: Arc<Sessions>,
     minted: AtomicU64,
@@ -46,13 +53,20 @@ pub struct StdioTransport {
     keys: RandomState,
 }
 
+/// Who a call's session belongs to, set as an extension by a plugin that
+/// knows the caller, such as one that authenticates it
+/// (`cx.head_mut().extensions.insert(Owner(tenant))`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner(pub String);
+
 impl StdioTransport {
     /// Run `program` with `args` per session.
     pub fn new(program: impl Into<PathBuf>, args: impl IntoIterator<Item: Into<String>>) -> Self {
         Self {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
-            max_sessions: 64,
+            max_sessions: 8,
+            max_total: 64,
             idle: Duration::from_secs(600),
             sessions: Arc::default(),
             minted: AtomicU64::new(0),
@@ -60,9 +74,17 @@ impl StdioTransport {
         }
     }
 
-    /// At most `n` sessions at once (default 64); a new one past it gets 503.
+    /// At most `n` sessions per owner at once (default 8); a new one past
+    /// it gets 503.
     pub fn max_sessions(mut self, n: usize) -> Self {
         self.max_sessions = n;
+        self
+    }
+
+    /// At most `n` sessions at once in all (default 64); a new one past it
+    /// gets 503.
+    pub fn max_total(mut self, n: usize) -> Self {
+        self.max_total = n;
         self
     }
 
@@ -80,18 +102,23 @@ impl StdioTransport {
             return Ok(reply(StatusCode::NOT_FOUND, Some(NO_SESSION)));
         }
         let n = self.minted.fetch_add(1, Ordering::Relaxed);
-        let id = [0, 1].map(|i| format!("{:016x}", self.keys.hash_one((n, i))));
-        let key = (id.concat(), owner);
+        let hash = |i: u8| self.keys.hash_one((n, i));
+        let key = (format!("{:016x}{:016x}", hash(0), hash(1)), owner);
         let session = {
             let mut sessions = lock(&self.sessions);
-            if sessions.len() >= self.max_sessions {
+            let owned = sessions.keys().filter(|(_, o)| *o == owner).count();
+            if owned >= self.max_sessions || sessions.len() >= self.max_total {
                 return Ok(reply(
                     StatusCode::SERVICE_UNAVAILABLE,
                     Some("too many sessions"),
                 ));
             }
             let (all, forget) = (Arc::downgrade(&self.sessions), key.clone());
-            let ended = move || drop(all.upgrade().map(|all| lock(&all).remove(&forget)));
+            let ended = move || {
+                if let Some(all) = all.upgrade() {
+                    lock(&all).remove(&forget);
+                }
+            };
             let mut command = Command::new(&self.program);
             let session = Session::start(command.args(&self.args), self.idle, ended)?;
             let session = Arc::new(session);
@@ -122,8 +149,13 @@ pub(crate) fn reply(status: StatusCode, message: Option<&str>) -> Reply {
 impl Transport for StdioTransport {
     async fn send(&self, call: http::Request<Body>) -> Result<Reply, Fault> {
         let (head, body) = call.into_parts();
-        let credential = head.headers.get(AUTHORIZATION).map(HeaderValue::as_bytes);
-        let owner = self.keys.hash_one(credential);
+        let owner = match head.extensions.get::<Owner>() {
+            Some(Owner(owner)) => self.keys.hash_one((true, Some(owner.as_bytes()))),
+            None => {
+                let credential = head.headers.get(AUTHORIZATION).map(HeaderValue::as_bytes);
+                self.keys.hash_one((false, credential))
+            }
+        };
         let body = body.collect().await?.to_bytes();
         let Some(id) = head.headers.get(SESSION) else {
             return match head.method {

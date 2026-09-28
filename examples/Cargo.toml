@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# tests/<name>.rs are the examples' own tests, included by each example.
+autotests = false
 
 [lints]
 workspace = true
@@ -14,9 +16,11 @@ workspace = true
 [lib]
 path = "src/lib.rs"
 
-[dev-dependencies]
+[dependencies]
 respan-gateway-core.workspace = true
 respan-gateway-formats.workspace = true
+
+[dev-dependencies]
 respan-gateway-plugins.workspace = true
 respan-gateway-server.workspace = true
 respan-gateway-testkit.workspace = true

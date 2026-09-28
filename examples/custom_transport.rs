@@ -13,6 +13,7 @@
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::stream;
+use respan_gateway_core::http_body::Frame;
 use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{Body, Fault, Format, Gateway, Transport, Usage, async_trait, http};
 use respan_gateway_formats::OpenAiChat;
@@ -50,13 +51,7 @@ where
         // A whole call's body is its one input.
         let (head, body) = call.into_parts();
         let call = http::Request::from_parts(head, body.collect().await?.to_bytes());
-        let mut decoder = self.format.request_decoder(&call);
-        let mut chats = Vec::new();
-        decoder.decode(call.body().clone(), &mut chats)?;
-        decoder.end(&mut chats)?;
-        let chat = chats
-            .pop()
-            .ok_or_else(|| Fault::bad_request("no conversation"))?;
+        let chat = read_chat(&self.format, &call)?;
         let answer = self.model.answer(&chat)?;
 
         // One reply per word, then the finish with usage (a word is a token here).
@@ -74,27 +69,48 @@ where
         let mut last = Reply::finished(Finish::Stop);
         last.usage = usage;
         replies.push(last);
-
-        // The encoder sets the content type: SSE if the call asked to stream.
-        let (mut head, ()) = http::Response::new(()).into_parts();
-        let mut encoder = self.format.response_encoder(&mut head, &call);
-        let mut frames = Vec::new();
-        let mut out = BytesMut::new();
-        encoder.open(&mut out);
-        for reply in &replies {
-            encoder.encode(reply, &mut out)?;
-            frames.push(out.split().freeze());
-        }
-        encoder.end(&Ok(()), &mut out)?;
-        frames.push(out.freeze());
-        let frames = frames.into_iter().filter(|f| !f.is_empty());
-        let body =
-            stream::iter(frames.map(|f: Bytes| Ok(respan_gateway_core::http_body::Frame::data(f))));
-        Ok(http::Response::from_parts(
-            head,
-            StreamBody::new(body).boxed_unsync(),
-        ))
+        write_replies(&self.format, &call, &replies)
     }
+}
+
+/// The call's conversation, read with the format's request decoder.
+fn read_chat<F: Format<Input = Conversation>>(
+    format: &F,
+    call: &http::Request<Bytes>,
+) -> Result<Conversation, Fault> {
+    let mut decoder = format.request_decoder(call);
+    let mut chats = Vec::new();
+    decoder.decode(call.body().clone(), &mut chats)?;
+    decoder.end(&mut chats)?;
+    chats
+        .pop()
+        .ok_or_else(|| Fault::bad_request("no conversation"))
+}
+
+/// The replies as a response, written with the format's response encoder,
+/// which also sets the content type: SSE if the call asked to stream.
+fn write_replies<F: Format<Output = Reply>>(
+    format: &F,
+    call: &http::Request<Bytes>,
+    replies: &[Reply],
+) -> Result<http::Response<Body>, Fault> {
+    let (mut head, ()) = http::Response::new(()).into_parts();
+    let mut encoder = format.response_encoder(&mut head, call);
+    let mut frames = Vec::new();
+    let mut out = BytesMut::new();
+    encoder.open(&mut out);
+    for reply in replies {
+        encoder.encode(reply, &mut out)?;
+        frames.push(out.split().freeze());
+    }
+    encoder.end(&Ok(()), &mut out)?;
+    frames.push(out.freeze());
+    let frames = frames.into_iter().filter(|f| !f.is_empty());
+    let body = stream::iter(frames.map(|f| Ok(Frame::data(f))));
+    Ok(http::Response::from_parts(
+        head,
+        StreamBody::new(body).boxed_unsync(),
+    ))
 }
 
 fn gateway() -> Result<Gateway, Fault> {
@@ -123,88 +139,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use respan_gateway_core::{Plugin, ProviderContext};
-    use respan_gateway_formats::AnthropicMessages;
-    use respan_gateway_testkit::Calls;
-
-    async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
-        let (status, headers, body) =
-            read_whole(gw.handle(post("/v1/chat/completions", req)).await.0).await;
-        assert_eq!(status, http::StatusCode::OK);
-        Ok((headers, String::from_utf8_lossy(&body?).into_owned()))
-    }
-
-    #[tokio::test]
-    async fn answers_json_or_sse_as_asked() -> Result<(), Fault> {
-        let gw = gateway()?;
-        let (headers, json) = ask(&gw, UNARY).await?;
-        assert_eq!(headers["content-type"], "application/json");
-        let v: serde_json::Value =
-            serde_json::from_str(&json).map_err(|e| Fault::internal(e.to_string()))?;
-        assert_eq!(
-            v["choices"][0]["message"]["content"],
-            "you said: hello there"
-        );
-        let (headers, sse) = ask(&gw, STREAM).await?;
-        assert_eq!(headers["content-type"], "text/event-stream");
-        assert!(sse.contains(r#""content":"hello ""#), "{sse}");
-        assert!(sse.ends_with("data: [DONE]\n\n"), "{sse}");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn the_same_model_answers_in_anthropics_format() -> Result<(), Fault> {
-        let local = Local {
-            format: AnthropicMessages,
-            model: Echo,
-        };
-        let gw = Gateway::new()
-            .provider("local", AnthropicMessages, local)?
-            .serve(AnthropicMessages)?
-            .target("local")?;
-        let req = r#"{"model":"echo","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
-        let (_, _, body) = read_whole(gw.handle(post("/v1/messages", req)).await.0).await;
-        let sse = String::from_utf8_lossy(&body?).into_owned();
-        assert!(
-            sse.contains("event: content_block_delta") && sse.contains(r#""text":"said: ""#),
-            "{sse}"
-        );
-        Ok(())
-    }
-
-    /// Refuses every call to "local", as a limit or guard would.
-    struct Closed;
-
-    #[async_trait]
-    impl Plugin for Closed {
-        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            match px.provider() {
-                "local" => Err(Fault::new(
-                    http::StatusCode::TOO_MANY_REQUESTS,
-                    "limit",
-                    "closed",
-                )),
-                _ => Ok(()),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn the_provider_edge_sees_and_bills_its_calls() -> Result<(), Fault> {
-        let calls = Calls::default();
-        let gw = gateway()?.plugin("calls", calls.clone())?;
-        ask(&gw, STREAM).await?;
-        gw.idle().await;
-        let usage = calls.usage();
-        assert_eq!(usage.get(units::INPUT_TOKENS), Some(2.0));
-        assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(4.0));
-
-        let gw = gateway()?.plugin("closed", Closed)?;
-        let (status, _, _) =
-            read_whole(gw.handle(post("/v1/chat/completions", UNARY)).await.0).await;
-        assert_eq!(status, http::StatusCode::TOO_MANY_REQUESTS);
-        Ok(())
-    }
-}
+#[path = "tests/custom_transport.rs"]
+mod tests;

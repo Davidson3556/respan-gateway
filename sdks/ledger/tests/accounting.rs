@@ -7,7 +7,8 @@ use std::time::Duration;
 use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::http::StatusCode;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait, bytes::Bytes,
+    Body, ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, Transport, async_trait,
+    bytes::Bytes, http,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, units};
@@ -128,7 +129,8 @@ impl Ledger for Noted {
 }
 
 /// Settled once, for `charged`, whether the call succeeded, failed or was
-/// given up.
+/// given up. A call sent may have reached the provider, so a failure with
+/// no answer is charged the reserve.
 #[tokio::test]
 async fn every_call_settles_exactly_once() {
     let cut = vec![Ok(Bytes::from(DELTA)), Err(Fault::upstream("cut"))];
@@ -147,7 +149,7 @@ async fn every_call_settles_exactly_once() {
     let cases = [
         ("reported", Some(answer(4)), false, true, 40),
         ("provider refused", Some(refused), false, true, 0),
-        ("transport failed", None, false, true, 0),
+        ("transport failed after sending", None, false, true, RESERVE),
         (
             "stream cut before usage",
             Some(cut_stream),
@@ -165,9 +167,10 @@ async fn every_call_settles_exactly_once() {
         }
         let gw = gateway(&mock, Nothing, ledger.clone());
         let (resp, _) = gw.handle(post(CHAT, ask(stream))).await;
-        match read {
-            true => drop(read_whole(resp).await),
-            false => drop(resp),
+        if read {
+            drop(read_whole(resp).await);
+        } else {
+            drop(resp); // the client left
         }
         gw.idle().await;
         let reserved = ledger
@@ -275,4 +278,33 @@ async fn a_hold_that_lands_after_its_settlement_expires_with_its_ttl() {
     assert_eq!(ledger.available("key"), 1000 - RESERVE, "the hold landed");
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!((ledger.available("key"), ledger.spent("key")), (1000, 0));
+}
+
+/// Takes the call, then gives up waiting for its head after a second, as a
+/// timeout does: the provider may be doing the work.
+struct NoHead;
+
+#[async_trait]
+impl Transport for NoHead {
+    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Err(Fault::upstream("no head within 1s"))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
+    let ledger = wallet(1000);
+    let accounting = Accounting::new(ledger.clone(), quote);
+    let gw = Gateway::new().serve(OpenAiChat);
+    let gw = gw.and_then(|g| g.provider("p", OpenAiChat, NoHead));
+    let gw = gw.and_then(|g| g.target("p"));
+    let gw = gw.and_then(|g| g.plugin("accounting", accounting));
+    let gw = gw.unwrap_or_else(|f| panic!("{f}"));
+    let (status, _) = send(&gw, ask(false)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        (ledger.spent("key"), ledger.available("key")),
+        (RESERVE, 1000 - RESERVE)
+    );
 }

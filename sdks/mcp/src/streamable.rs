@@ -18,7 +18,7 @@ use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Decoder, Encoder, Fault, Format, codes};
 use respan_gateway_formats::{self as formats, relayed::Relayed, sse, whole::Relay};
 
-use crate::{ToClient, ToServer, body, error, lock, read, requests};
+use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, requests};
 
 /// The header naming an MCP session.
 pub const SESSION: &str = "mcp-session-id";
@@ -149,13 +149,11 @@ impl Format for StreamableHttp {
         let pending = Arc::new(Mutex::new(pending));
         let left = pending.clone();
         let write = move |outputs: &[ToClient]| {
-            let mut left = lock(&left);
-            for id in outputs.iter().flat_map(ToClient::answers) {
-                left.retain(|p| p != id);
-            }
-            Ok::<_, Fault>(match stream {
-                true => outputs.first().map(event).unwrap_or_default(),
-                false => whole(outputs),
+            forget_answered(&mut lock(&left), outputs);
+            Ok::<_, Fault>(if stream {
+                outputs.first().map(event).unwrap_or_default()
+            } else {
+                whole(outputs)
             })
         };
         let fail = move |f: &Fault| match f.raw(NAME) {
@@ -183,26 +181,18 @@ struct Answered {
     pending: Vec<Value>,
 }
 
-impl Answered {
-    fn answered(&mut self, outputs: &[ToClient]) {
-        for id in outputs.iter().flat_map(ToClient::answers) {
-            self.pending.retain(|p| p != id);
-        }
-    }
-}
-
 impl Decoder<ToClient> for Answered {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<ToClient>) -> Result<(), Fault> {
         let from = out.len();
         let decoded = self.inner.decode(bytes, out);
-        self.answered(&out[from..]);
+        forget_answered(&mut self.pending, &out[from..]);
         decoded
     }
 
     fn end(&mut self, out: &mut Vec<ToClient>) -> Result<(), Fault> {
         let from = out.len();
         self.inner.end(out)?;
-        self.answered(&out[from..]);
+        forget_answered(&mut self.pending, &out[from..]);
         if !self.pending.is_empty() {
             return Err(Fault::truncated());
         }
@@ -230,10 +220,10 @@ fn whole(outputs: &[ToClient]) -> Bytes {
     }
     let batch = outputs.len() > 1 || outputs.iter().any(|o| o.batch);
     let all: Vec<Value> = outputs.iter().flat_map(|o| o.messages.clone()).collect();
-    match all.is_empty() {
-        true => Bytes::new(),
-        false => body(&all, batch || all.len() != 1).to_string().into(),
+    if all.is_empty() {
+        return Bytes::new();
     }
+    body(&all, batch || all.len() != 1).to_string().into()
 }
 
 /// A fault as a JSON-RPC error to each of `pending`, or to `null`.
@@ -253,8 +243,9 @@ fn failure(fault: &Fault, pending: &[Value], stream: bool, batch: bool) -> Strin
         e["error"]["data"] = json!({ "code": fault.code() });
         e
     });
-    match stream {
-        true => errors.map(|e| sse::event(None, e)).collect(),
-        false => body(&errors.collect::<Vec<_>>(), batch).to_string(),
+    if stream {
+        errors.map(|e| sse::event(None, e)).collect()
+    } else {
+        body(&errors.collect::<Vec<_>>(), batch).to_string()
     }
 }

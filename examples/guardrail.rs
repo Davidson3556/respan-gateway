@@ -1,14 +1,17 @@
 //! Use case 3, a guardrail no request skips. A term list checks every
-//! call's input on the provider edge, so a call any plugin makes is
-//! covered, and every response the client gets through a client-edge
-//! [`Holdback`], so a term split across stream deltas is seen whole, and a
-//! response a plugin answers with is covered too. What it cannot read
-//! (another kind, an image, a tool call) is refused, never passed: this
-//! gateway also serves Anthropic clients, which the guard reads, and the
-//! Responses API relayed unread, which it refuses.
+//! response the client gets through a client-edge [`Holdback`], so a term
+//! split across stream deltas is seen whole, and a response a plugin
+//! answers with is covered too; and every call's input on the provider
+//! edge, tools included, as the provider receives it, so a call any plugin
+//! makes, or text any plugin adds, is covered. What it cannot read (another
+//! kind, an image, a tool call in the answer) is refused, never passed:
+//! this gateway also serves Anthropic clients, which the guard reads, and
+//! the Responses API relayed unread, which it refuses.
 //!
-//! A plugin that answers skips the plugins after it, so the guard is
-//! registered first; a test pins that.
+//! So it is two plugins. A plugin that answers skips the plugins after it,
+//! so `guard` is registered first. Input filters run in plugin order, so
+//! `guard-input` runs last: a plugin registered later that edits the input
+//! goes before it, `.after("guard-input", [name])`. Tests pin both.
 //!
 //! `cargo run -p respan-gateway-examples --example guardrail`
 
@@ -18,11 +21,11 @@ use respan_gateway_core::http::{self, Request, StatusCode, response::Parts};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Body, ClientContext, Decoder, Encoder, Fault, Format, Gateway};
 use respan_gateway_core::{Plugin, ProviderContext, Response, async_trait};
-use respan_gateway_formats::conversation::{Conversation, Reply};
+use respan_gateway_formats::conversation::{Conversation, Piece, Reply};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat, posts_to};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
-use respan_gateway_text::{Holdback, Readable, Rewrite, partial_match};
+use respan_gateway_text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};
 
 const OPENAI: &str = "http://openai.test/v1";
 const BLOCKED: &str = "content_blocked";
@@ -37,10 +40,10 @@ struct Terms(Vec<&'static str>);
 impl Terms {
     fn check(&self, text: &str) -> Result<(), Fault> {
         let text = text.to_lowercase();
-        match self.0.iter().any(|term| text.contains(term)) {
-            true => Err(Fault::new(StatusCode::BAD_REQUEST, BLOCKED, "blocked")),
-            false => Ok(()),
+        if self.0.iter().any(|term| text.contains(term)) {
+            return Err(Fault::new(StatusCode::BAD_REQUEST, BLOCKED, "blocked"));
         }
+        Ok(())
     }
 }
 
@@ -54,7 +57,11 @@ impl Rewrite for Terms {
     }
 }
 
+/// The client edge: every response, whoever answers it. Registered first.
 struct Guard(Terms);
+
+/// The provider edge: every call's input. Registered last.
+struct GuardInput(Terms);
 
 fn uncovered() -> Fault {
     Fault::new(StatusCode::FORBIDDEN, UNCOVERED, "no guard reads this kind")
@@ -62,17 +69,35 @@ fn uncovered() -> Fault {
 
 #[async_trait]
 impl Plugin for Guard {
-    /// Every response the client gets, whoever answers it.
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         if !cx.is_kind::<Conversation>() {
             return Err(uncovered());
         }
         cx.filter(Holdback::new(self.0.clone()))?;
-        cx.filter(|reply: &mut Reply| reply.read_all().map(drop))?;
+        // A streamed tool call's arguments come in fragments no check sees
+        // whole, so the guard refuses tool calls in answers.
+        cx.filter(|reply: &mut Reply| {
+            if reply
+                .content
+                .iter()
+                .all(|p| matches!(p, Piece::Text { .. }))
+            {
+                return Ok(());
+            }
+            let message = "the guard cannot read a tool call in the answer";
+            Err(Fault::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                UNREADABLE,
+                message,
+            ))
+        })?;
         Ok(None)
     }
+}
 
-    /// Every call's input, a judge's own included.
+#[async_trait]
+impl Plugin for GuardInput {
+    /// Every call's input, a judge's own included, after every other edit.
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         if !px.is_kind::<Conversation>() {
             return Err(uncovered());
@@ -131,17 +156,19 @@ impl Format for Responses {
     }
 }
 
-/// The guard first. For real use, the transport is
+/// `guard` first, `guard-input` last. For real use, the transport is
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
+    let terms = Terms(vec!["bomb", "launch code"]);
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .provider("responses", Responses, mock.at(OPENAI))?
         .serve(OpenAiChat)?
         .serve(AnthropicMessages)?
         .serve(Responses)?
-        .plugin("guard", Guard(Terms(vec!["bomb", "launch code"])))?
+        .plugin("guard", Guard(terms.clone()))?
         .plugin("cache", Cache)?
+        .plugin("guard-input", GuardInput(terms))?
         .target("openai")?
         .target("responses")
 }
@@ -187,72 +214,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn a_term_split_across_deltas_is_cut_before_its_start_is_sent() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        mock.reply(OPENAI, deltas(&["Chemistry is fun. A bo", "mb is not."]));
-        let (status, body) = send(&gateway(&mock)?, chat("gpt", "hi".into())).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("A \"") && !body.contains("bo\""), "{body}");
-        assert!(body.contains(BLOCKED) && !body.contains("[DONE]"), "{body}");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn a_blocked_prompt_in_any_format_or_field_never_reaches_the_provider()
-    -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        let gw = gateway(&mock)?;
-        let anthropic = json!({ "model": "c", "max_tokens": 9,
-            "messages": [{ "role": "user", "content": "the launch code?" }] });
-        let stop = json!({ "model": "gpt", "stop": ["BOMB"],
-            "messages": [{ "role": "user", "content": "hi" }] });
-        for req in [
-            chat("gpt", "the LAUNCH CODE?".into()),
-            post("/v1/messages", anthropic.to_string()),
-            post("/v1/chat/completions", stop.to_string()),
-        ] {
-            let (status, body) = send(&gw, req).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-            assert!(body.contains(BLOCKED), "{body}");
-        }
-        assert!(mock.sent().is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        let gw = gateway(&mock)?;
-        let image = json!([{ "type": "image_url", "image_url": { "url": "data:," } }]);
-        let (status, body) = send(&gw, chat("gpt", image)).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        // The Responses API is relayed unread, so the guard refuses it.
-        let responses = post("/v1/responses", r#"{"input":"the launch code?"}"#);
-        let (status, body) = send(&gw, responses).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-        assert!(mock.sent().is_empty());
-        // A tool call in the answer, too.
-        let call = r#"data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#;
-        mock.reply(OPENAI, mock::sse(&[&format!("{call}\n\n")]));
-        let (status, body) = send(&gw, chat("gpt", "hi".into())).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        Ok(())
-    }
-
-    // A plugin that answers skips those after it: first, the guard covers
-    // the cache's answer; after it, the poisoned answer goes out.
-    #[tokio::test]
-    async fn the_guard_is_registered_first() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        let (status, body) = send(&gateway(&mock)?, chat("cached", "hi".into())).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        let late = gateway(&mock)?.after("guard", ["cache"])?;
-        let (status, body) = send(&late, chat("cached", "hi".into())).await;
-        assert!(status == StatusCode::OK && body.contains("bomb"), "{body}");
-        Ok(())
-    }
-}
+#[path = "tests/guardrail.rs"]
+mod tests;

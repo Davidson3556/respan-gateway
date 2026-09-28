@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::http::StatusCode;
-use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, Usage, async_trait, codes};
+use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, Usage, async_trait};
 
 use crate::{Amount, HoldId, Ledger, NO_ACCOUNT};
 
@@ -47,8 +47,8 @@ impl std::fmt::Debug for Quote {
 }
 
 /// What to charge a call the provider may have billed without reporting
-/// its usage in full: a stream cut off or a call given up after it was
-/// sent.
+/// its usage in full: a stream cut off, or a call sent that failed before
+/// its answer's head.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Unreported {
     /// The reserve, or the price of what was reported if more: never less
@@ -112,11 +112,10 @@ impl<L: Ledger> Accounting<L> {
     fn charge(&self, hold: &Hold, price: Price, outcome: &Outcome) -> Amount {
         let usage = &outcome.usage;
         let Some(head) = &outcome.head else {
-            // No answer. Unless it was sent and then given up, the call never
-            // reached the provider: never sent, or the transport failed.
-            let sent = hold.sent.load(Ordering::Relaxed);
-            let abandoned = matches!(&outcome.end, Err(f) if f.code() == codes::ABANDONED);
-            if !(sent && abandoned) {
+            // No answer. Sent, it may have reached the provider, such as a
+            // call given up or timed out waiting for its head; else it never
+            // left the gateway.
+            if !hold.sent.load(Ordering::Relaxed) {
                 return 0;
             }
             return self.partial(hold, price(usage));

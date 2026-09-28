@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::http_body_util::{BodyExt, Full};
 use respan_gateway_core::{
-    Fault, Gateway, Outcome, Plugin, ProviderContext, Usage, async_trait, http,
+    Fault, Gateway, Outcome, Plugin, ProviderContext, Usage, async_trait, http, serde_json,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock};
@@ -29,6 +29,15 @@ struct Tally(Arc<Mutex<Usage>>);
 impl Plugin for Tally {
     async fn on_provider_end(&self, _px: &ProviderContext, outcome: &Outcome) {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) += &outcome.usage;
+    }
+}
+
+impl Tally {
+    fn usage(&self) -> Usage {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -70,44 +79,11 @@ async fn main() -> Result<(), Fault> {
     let status = outcome.head.map(|h| h.status);
     println!("status: {status:?}, ended: {:?}", outcome.end);
     println!("body:   {}", String::from_utf8_lossy(&body));
-    println!("usage:  {:?}", tally.0.lock().map(|u| u.clone()));
+    println!("usage:  {:?}", tally.usage());
     Ok(())
 }
 
 const ANSWER: &str = r#"{"id":"c1","object":"chat.completion","model":"gpt-4o-mini","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use respan_gateway_formats::conversation::units;
-
-    #[tokio::test]
-    async fn handle_returns_the_response_and_its_outcome_with_no_server() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        mock.reply(OPENAI, mock::json(http::StatusCode::OK, ANSWER));
-        let tally = Tally::default();
-        let gw = gateway(&mock, tally.clone())?;
-        let (body, outcome) = ask(&gw, "Say hi").await?;
-        assert_eq!(body, ANSWER, "a relay passes the provider's bytes");
-        assert!(outcome.end.is_ok());
-        assert_eq!(outcome.head.map(|h| h.status), Some(http::StatusCode::OK));
-        gw.idle().await;
-        let usage = tally.0.lock().map(|u| u.clone()).unwrap_or_default();
-        assert_eq!(usage.get(units::INPUT_TOKENS), Some(3.0));
-        assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(1.0));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn a_provider_failure_is_an_outcome_not_a_panic() -> Result<(), Fault> {
-        // Nothing queued: the mock answers 502 upstream.
-        let mock = MockTransport::new();
-        let gw = gateway(&mock, Tally::default())?;
-        let (_, outcome) = ask(&gw, "Say hi").await?;
-        assert_eq!(
-            outcome.end.err().map(|f| f.code().to_owned()),
-            Some("upstream".into())
-        );
-        Ok(())
-    }
-}
+#[path = "tests/embedded.rs"]
+mod tests;

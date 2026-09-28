@@ -1,8 +1,8 @@
 //! Fallback, hedging and stalls (use cases 4 and 6). `Resilient` retries
 //! the target as `Retry-After` asks, then falls back to a provider in
 //! another format, or, for a request marked `x-hedge`, races a second
-//! deployment started 200 ms later. A `Watchdog` fails OpenAI when it is
-//! silent for 1 s, before its head or mid-stream. A stream that fails after
+//! deployment started 200 ms later. A `Watchdog` fails OpenAI when its head
+//! takes over 2 s or its stream goes silent for 1 s. A stream that fails after
 //! its first content reached the client is never retried. Not built here:
 //! splitting an embedding batch and merging `/v1/models`.
 //!
@@ -45,18 +45,21 @@ impl Plugin for Resilient {
     }
 }
 
-/// Prints each attempt as "provider role end", and keeps it for the tests;
-/// a deployment would send it to its log or billing store. The role is
-/// settled by now: it is `Pending` only if the client left first.
+/// Prints each attempt as "provider #index role end", and keeps it for the tests;
+/// a deployment would send it to its log or billing store. Only the
+/// attempt whose response reached the client is `Winner`.
 #[derive(Clone, Default)]
 struct Log(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
 impl Plugin for Log {
     async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let role = px.extensions().get::<Attempt>().map(Attempt::role);
+        let Some(attempt) = px.extensions().get::<Attempt>() else {
+            return;
+        };
+        let (index, role) = (attempt.index(), attempt.role());
         let end = outcome.end.as_ref().err().map_or("ok", |f| f.code());
-        let line = format!("{} {role:?} {end}", px.provider());
+        let line = format!("{} #{index} {role:?} {end}", px.provider());
         println!("  attempt {line}, usage {:?}", outcome.usage);
         let mut lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         lines.push(line);
@@ -81,12 +84,23 @@ const ANTHROPIC: &str = "http://anthropic.test/v1";
 /// The body the client got, and each attempt as logged, by provider.
 type Run = Result<(String, Vec<String>), Fault>;
 
-/// Runs `name` on a fresh gateway, OpenAI answering after `delay`, the
-/// providers with `replies`, the request hedged if `hedge`.
-async fn run(name: &str, delay: Duration, hedge: bool, replies: Vec<(&str, mock::Reply)>) -> Run {
+type Replies = Vec<(&'static str, mock::Reply)>;
+
+/// A streamed chat request.
+fn chat() -> http::Request<Body> {
+    let body = r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+    post("/v1/chat/completions", body)
+}
+
+/// Runs `req` as `name` on a fresh gateway, OpenAI answering after `delay`,
+/// the providers with `replies`.
+async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Replies) -> Run {
     println!("{name}");
     let (mock, log) = (MockTransport::new(), Log::default());
-    let openai = Watchdog::new(Slow(mock.at(OPENAI), delay), Duration::from_secs(1));
+    // A whole answer's head comes only once it is done: a deployment waits
+    // minutes for it, and seconds between stream events.
+    let (head, idle) = (Duration::from_secs(2), Duration::from_secs(1));
+    let openai = Watchdog::new(Slow(mock.at(OPENAI), delay), head, idle);
     let gw = Gateway::new()
         .serve(OpenAiChat)?
         .provider("openai", OpenAiChat, openai)?
@@ -97,12 +111,6 @@ async fn run(name: &str, delay: Duration, hedge: bool, replies: Vec<(&str, mock:
         .target("openai")?;
     for (url, reply) in replies.into_iter().chain([(ANTHROPIC, anthropic())]) {
         mock.reply(url, reply);
-    }
-    let body = r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
-    let mut req = post("/v1/chat/completions", body);
-    if hedge {
-        let hedge = HeaderValue::from_static("1");
-        req.headers_mut().insert("x-hedge", hedge);
     }
     let (status, _, body) = read_whole(gw.handle(req).await.0).await;
     gw.idle().await;
@@ -148,25 +156,37 @@ fn rate_limited() -> mock::Reply {
 async fn rate_limited_then_fallback() -> Run {
     let replies = vec![(OPENAI, rate_limited()), (OPENAI, rate_limited())];
     let name = "OpenAI answers 429 with Retry-After: 1, twice; Anthropic answers";
-    run(name, Duration::ZERO, false, replies).await
+    run(name, Duration::ZERO, chat(), replies).await
 }
 
 async fn cut_after_first_words() -> Run {
     let name = "OpenAI's stream breaks after its first words: committed, not retried";
     let replies = vec![(OPENAI, openai("Hello", true))];
-    run(name, Duration::ZERO, false, replies).await
+    run(name, Duration::ZERO, chat(), replies).await
 }
 
 async fn stalled_then_fallback() -> Run {
-    let name = "OpenAI never answers: the watchdog fails each try after 1 s; Anthropic answers";
-    run(name, Duration::from_secs(3600), false, vec![]).await
+    let name = "OpenAI never answers: the watchdog fails each try after 2 s; Anthropic answers";
+    run(name, Duration::from_secs(3600), chat(), vec![]).await
+}
+
+async fn slow_whole_answer() -> Run {
+    let ok = r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"an essay"}}]}"#;
+    let replies = vec![(OPENAI, mock::json(StatusCode::OK, ok))];
+    let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"write an essay"}]}"#;
+    let name = "OpenAI's whole answer takes 1.5 s: within the head bound, not cut";
+    let req = post("/v1/chat/completions", body);
+    run(name, Duration::from_millis(1500), req, replies).await
 }
 
 async fn hedged() -> Run {
     let (late, fast) = (openai("late", false), openai("fast", false));
     let replies = vec![(OPENAI, late), (OPENAI_EU, fast)];
     let name = "Hedged: OpenAI takes 900 ms; openai-eu starts 200 ms in and wins";
-    run(name, Duration::from_millis(900), true, replies).await
+    let mut req = chat();
+    req.headers_mut()
+        .insert("x-hedge", HeaderValue::from_static("1"));
+    run(name, Duration::from_millis(900), req, replies).await
 }
 
 #[tokio::main]
@@ -174,51 +194,11 @@ async fn main() -> Result<(), Fault> {
     rate_limited_then_fallback().await?;
     cut_after_first_words().await?;
     stalled_then_fallback().await?;
+    slow_whole_answer().await?;
     hedged().await?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use tokio::time::Instant;
-
-    use super::*;
-
-    const LOST: &str = "openai Some(Loser) upstream";
-    const CLAUDE: &str = "anthropic Some(Winner) ok";
-
-    #[tokio::test(start_paused = true)]
-    async fn retry_after_is_honoured_then_it_falls_back_across_formats() -> Result<(), Fault> {
-        let start = Instant::now();
-        let (body, attempts) = rate_limited_then_fallback().await?;
-        assert_eq!(attempts, [CLAUDE, LOST, LOST]);
-        assert!(body.contains("Hi from Claude") && start.elapsed() >= Duration::from_secs(1));
-        Ok(())
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_stream_cut_after_its_first_byte_is_not_retried() -> Result<(), Fault> {
-        let (body, attempts) = cut_after_first_words().await?;
-        assert!(body.contains("Hello") && body.contains("reset"), "{body}");
-        assert_eq!(attempts, ["openai Some(Winner) upstream"]);
-        Ok(())
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_stalled_provider_is_cut_by_the_watchdog_and_falls_back() -> Result<(), Fault> {
-        let start = Instant::now();
-        let (body, attempts) = stalled_then_fallback().await?;
-        assert_eq!(attempts, [CLAUDE, LOST, LOST]);
-        assert!(body.contains("Hi from Claude") && start.elapsed() < Duration::from_secs(3));
-        Ok(())
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_hedge_keeps_the_first_to_answer_and_abandons_the_other() -> Result<(), Fault> {
-        let (body, attempts) = hedged().await?;
-        assert!(body.contains("fast") && !body.contains("late"), "{body}");
-        let lost = "openai Some(Loser) abandoned";
-        assert_eq!(attempts, [lost, "openai-eu Some(Winner) ok"]);
-        Ok(())
-    }
-}
+#[path = "tests/fallback.rs"]
+mod tests;

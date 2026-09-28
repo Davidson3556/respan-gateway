@@ -105,3 +105,21 @@ async fn a_call_that_outlives_its_ttl_is_still_charged() {
     assert!(ledger.settle(&id, 250).await.is_ok());
     assert_eq!(ledger.spent("acme"), 250);
 }
+
+/// A hold never settled is forgotten one TTL after it expires, so lost
+/// settlements do not pile up; a settlement after that is a no-op.
+#[tokio::test(start_paused = true)]
+async fn a_hold_never_settled_is_forgotten_after_a_grace_period() {
+    let ledger = ledger();
+    let id = HoldId::new();
+    let ttl = Duration::from_secs(1);
+    assert!(
+        ledger
+            .reserve(&id, &names(&["key-1"]), 100, ttl)
+            .await
+            .is_ok()
+    );
+    tokio::time::advance(Duration::from_millis(2001)).await;
+    assert!(ledger.settle(&id, 250).await.is_ok());
+    assert_eq!((ledger.spent("acme"), ledger.available("acme")), (0, 1000));
+}

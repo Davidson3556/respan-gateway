@@ -9,10 +9,10 @@
 use std::collections::HashMap;
 
 use respan_gateway_core::http::{HeaderValue, StatusCode};
-use respan_gateway_core::serde_json::Map;
-use respan_gateway_core::{Fault, Gateway, ProviderContext, Usage, futures, http, serde_json};
+use respan_gateway_core::{Fault, Gateway, ProviderContext, Usage, futures, http};
+use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_formats::conversation::{Content, Conversation, units};
+use respan_gateway_formats::conversation::{Conversation, units};
 use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
@@ -40,28 +40,9 @@ fn prices() -> HashMap<String, Price> {
     HashMap::from([("gpt-x".to_owned(), gpt_x)])
 }
 
-/// The most input tokens `chat` can be. A token is at least a byte, so
-/// bytes bound them: its text, the JSON of what the kind has no place for
-/// (tools, tool calls), and 8 a message for framing. Content with no byte
-/// bound, such as an image, is refused. Copied in `cost_cap.rs`: it is
-/// chat-specific, so it stays out of the neutral ledger.
-fn input_bound(chat: &Conversation) -> Result<u64, Fault> {
-    let json = |m: &Map<_, _>| match m.is_empty() {
-        true => 0,
-        false => serde_json::to_string(m).map_or(0, |s| s.len()),
-    };
-    let mut bytes = json(&chat.unsupported);
-    for m in &chat.messages {
-        if !m.content.iter().all(|c| matches!(c, Content::Text { .. })) {
-            return Err(Fault::bad_request("no cost bound for non-text input"));
-        }
-        bytes += m.text().len() + json(&m.unsupported) + 8;
-    }
-    Ok(bytes as u64)
-}
-
 /// Who pays, the most the call can cost, and its price. A call with no
-/// price, no `max_tokens` or non-text input has no bound, so it is refused.
+/// price, no `max_tokens` or non-text input has no bound, so it is refused;
+/// `n` answers may each be `max_tokens` long.
 fn quote(px: &ProviderContext, prices: &HashMap<String, Price>) -> Result<Quote, Fault> {
     let auth = px.client().head().headers.get("authorization");
     let key = auth.and_then(|v| v.to_str().ok()?.strip_prefix("Bearer "));
@@ -74,7 +55,7 @@ fn quote(px: &ProviderContext, prices: &HashMap<String, Price>) -> Result<Quote,
     let max_output = chat
         .max_tokens
         .ok_or_else(|| Fault::bad_request("set max_tokens"))?;
-    let reserve = price.cost(input_bound(chat)?, max_output);
+    let reserve = price.cost(input_bound(chat)?, max_output * answers(chat)?);
     let n = |u: &Usage, unit| u.get(unit).unwrap_or(0.0).max(0.0).ceil() as u64;
     let price = move |u: &Usage| price.cost(n(u, units::INPUT_TOKENS), n(u, units::OUTPUT_TOKENS));
     // The ledger holds the key's team and customer with it.
@@ -158,62 +139,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn fifty_parallel_requests_never_overspend_a_one_dollar_wallet() -> Result<(), Fault> {
-        let (mock, ledger) = (MockTransport::new(), wallets());
-        let gw = gateway(&mock, ledger.clone())?;
-        let served = fifty(&gw, &mock, "sk-b1").await;
-        let spent = ledger.spent("acme");
-        assert!(spent <= 1_000_000, "overspent: {spent}");
-        assert_eq!(spent, served as Amount * 80_020, "each settled once");
-        assert!(served >= 10, "held about $0.1 each: {served}");
-        assert_eq!(ledger.spent("team-b"), spent);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn a_spent_team_stops_its_keys_and_not_the_others() -> Result<(), Fault> {
-        let (mock, ledger) = (MockTransport::new(), wallets());
-        let gw = gateway(&mock, ledger.clone())?;
-        for _ in 0..4 {
-            mock.reply(OPENAI, answer());
-        }
-        // team-a's $0.30 covers three calls; the fourth is refused, whichever key.
-        for _ in 0..3 {
-            assert!(ask(&gw, "sk-a1").await?.is_success());
-        }
-        assert_eq!(ask(&gw, "sk-a2").await?, StatusCode::PAYMENT_REQUIRED);
-        assert!(ask(&gw, "sk-b1").await?.is_success());
-        assert_eq!(ledger.spent("team-a"), 3 * 80_020);
-        assert_eq!(ledger.available("sk-a2"), 1_000_000, "nothing held");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn a_request_with_no_cost_bound_is_refused() -> Result<(), Fault> {
-        let (mock, ledger) = (MockTransport::new(), wallets());
-        let gw = gateway(&mock, ledger)?;
-        let unbounded = r#"{"model":"gpt-x","messages":[]}"#;
-        assert_eq!(
-            send(&gw, "sk-b1", unbounded).await?,
-            StatusCode::BAD_REQUEST
-        );
-        assert!(mock.sent().is_empty());
-        Ok(())
-    }
-
-    /// An image's tokens have no byte bound: 600k of them would cost $1.20.
-    #[tokio::test]
-    async fn an_image_cannot_overspend_the_wallet() -> Result<(), Fault> {
-        let (mock, ledger) = (MockTransport::new(), wallets());
-        let gw = gateway(&mock, ledger.clone())?;
-        let image = r#"{"model":"gpt-x","max_tokens":100,"messages":[{"role":"user","content":[{"type":"text","text":"what?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}"#;
-        assert_eq!(send(&gw, "sk-b1", image).await?, StatusCode::BAD_REQUEST);
-        assert!(mock.sent().is_empty());
-        assert_eq!(ledger.spent("acme"), 0);
-        Ok(())
-    }
-}
+#[path = "tests/wallet.rs"]
+mod tests;

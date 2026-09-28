@@ -142,6 +142,16 @@ impl Transport for Silent {
     }
 }
 
+/// Refuses the connection.
+struct Refused;
+
+#[async_trait]
+impl Transport for Refused {
+    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        Err(Fault::upstream("connection refused"))
+    }
+}
+
 struct Harness {
     gw: Gateway,
     mock: MockTransport,
@@ -155,8 +165,10 @@ fn harness(plan: Plan) -> Harness {
         .and_then(|g| g.provider("a", OpenAiChat, mock.at(A)))
         .and_then(|g| g.provider("b", OpenAiChat, mock.at(B)))
         .and_then(|g| g.provider("slow", OpenAiChat, Slow(mock.at(A), secs(5))))
-        .and_then(|g| g.provider("stalled", OpenAiChat, Watchdog::new(Stall, secs(1))))
-        .and_then(|g| g.provider("silent", OpenAiChat, Watchdog::new(Silent, secs(1))))
+        .and_then(|g| g.provider("stalled", OpenAiChat, watchdog(Stall)))
+        .and_then(|g| g.provider("silent", OpenAiChat, watchdog(Silent)))
+        .and_then(|g| g.provider("refused", OpenAiChat, Refused))
+        .and_then(|g| g.provider("late", OpenAiChat, watchdog(Slow(mock.at(A), secs(3)))))
         .and_then(|g| g.plugin("record", record.clone()))
         .and_then(|g| g.plugin("plan", plan))
         .unwrap_or_else(|f| panic!("{f}"));
@@ -189,6 +201,11 @@ impl Harness {
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
+}
+
+/// Waits 5 s for a head, 1 s between body frames.
+fn watchdog<T: Transport>(inner: T) -> Watchdog<T> {
+    Watchdog::new(inner, secs(5), secs(1))
 }
 
 fn retries(tries: u32) -> Backoff {
@@ -358,12 +375,33 @@ async fn the_watchdog_bounds_the_wait_for_the_head_too() {
     let (status, _, body, _) = answer.expect("still waiting for the head after 60 s");
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Hello"), "{body}");
-    assert!(start.elapsed() < secs(2), "{:?}", start.elapsed());
+    let elapsed = start.elapsed();
+    assert!(elapsed >= secs(5) && elapsed < secs(6), "{elapsed:?}");
     let record = h.record.all();
     assert_eq!(
         (record[0].0.as_str(), record[0].3.as_str()),
         ("silent", codes::UPSTREAM)
     );
+}
+
+/// A whole answer sends its head only when it is done, so a whole answer
+/// slower than `idle` but within `head` is neither cut nor sent again.
+#[tokio::test(start_paused = true)]
+async fn the_watchdog_does_not_cut_a_slow_whole_answer() {
+    const WHOLE: &str = r#"{"model":"m","messages":[{"role":"user","content":"write an essay"}]}"#;
+    const REPLY: &str = r#"{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"an essay"},"finish_reason":"stop"}]}"#;
+    let h = harness(Plan::First(vec!["late", "b"], retries(2)));
+    h.mock.reply(A, mock::json(StatusCode::OK, REPLY));
+    h.mock.reply(B, ok());
+
+    let (status, _, body, outcome) = h.post(WHOLE).await;
+
+    assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+    assert!(body.contains("an essay"), "{body}");
+    assert_eq!(h.sent_to(), ["a.test"]);
+    let record = h.record.all();
+    let late = ("late".to_owned(), 0, Role::Winner, "ok".to_owned());
+    assert_eq!(record, [late]);
 }
 
 /// A whole body ends as it is read, after the helper set its role, so
@@ -383,5 +421,29 @@ async fn a_whole_body_attempt_ends_with_its_role_set() {
         let mut roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
         roles.sort_by_key(|(index, _)| *index);
         assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);
+    }
+}
+
+/// A call failing before its head ends as it fails, before the helper sees
+/// the fault; it is a loser from the start, so its end hook never races.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_failing_before_its_head_ends_a_loser() {
+    for _ in 0..100 {
+        let h = harness(Plan::First(vec!["refused", "b"], Backoff::once()));
+        h.mock.reply(B, ok());
+
+        let (status, ..) = h.send().await;
+
+        assert_eq!(status, StatusCode::OK);
+        let mut record = h.record.all();
+        record.sort_by_key(|r| r.1);
+        let refused = (
+            "refused".to_owned(),
+            0,
+            Role::Loser,
+            codes::UPSTREAM.to_owned(),
+        );
+        let b = ("b".to_owned(), 1, Role::Winner, "ok".to_owned());
+        assert_eq!(record, [refused, b]);
     }
 }

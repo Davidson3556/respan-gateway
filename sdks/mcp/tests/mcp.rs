@@ -7,7 +7,7 @@ use respan_gateway_core::http_body_util::{self, BodyExt, Full};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Outcome, Plugin, Response};
 use respan_gateway_core::{Transport, async_trait, codes};
-use respan_gateway_mcp::{SESSION, StdioTransport, StreamableHttp, ToClient, ToServer};
+use respan_gateway_mcp::{Owner, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer};
 use respan_gateway_testkit::{MockTransport, mock};
 
 const AT: &str = "http://mcp.test";
@@ -403,4 +403,104 @@ async fn a_session_belongs_to_the_credential_that_started_it() {
     assert_eq!(first.status(), StatusCode::OK);
     let (second, _) = gw.handle(request(Method::GET, "", &a)).await;
     assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn the_session_cap_is_per_owner() {
+    let gw = gateway(
+        StdioTransport::new("sh", ["-c", ECHO]).max_sessions(3),
+        None,
+    );
+    for _ in 0..3 {
+        init(&gw, &[("authorization", "Bearer mallory")]).await;
+    }
+    let mallory = [("authorization", "Bearer mallory")];
+    let (status, ..) = send(&gw, request(Method::POST, INIT, &mallory)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    init(&gw, &[("authorization", "Bearer alice")]).await;
+}
+
+#[tokio::test]
+async fn a_flood_from_many_owners_hits_the_total() {
+    let transport = StdioTransport::new("sh", ["-c", ECHO]).max_sessions(2);
+    let gw = gateway(transport.max_total(4), None);
+    for i in 0..4 {
+        init(&gw, &[("authorization", &format!("Bearer {i}"))]).await;
+    }
+    let fresh = [("authorization", "Bearer 4")];
+    let (status, ..) = send(&gw, request(Method::POST, INIT, &fresh)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn an_answer_to_no_open_request_ends_the_oldest_post() {
+    // The server answers `tools/list` with a parse error, id null.
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
+echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}'; sleep 100"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
+    let session = init(&gw, &[]).await;
+    let posted = send(&gw, request(Method::POST, LIST, &[(SESSION, &session)]));
+    let (status, _, body, outcome) = tokio::time::timeout(Duration::from_secs(3), posted)
+        .await
+        .unwrap_or_else(|_| panic!("the POST is still waiting"));
+    let ids: Vec<_> = messages(&body).iter().map(|m| m["id"].clone()).collect();
+    assert_eq!((status, ids), (StatusCode::OK, vec![Value::Null, json!(2)]));
+    assert!(outcome.end.is_err());
+}
+
+/// Moves the caller's key into an [`Owner`], as an auth plugin would.
+struct Authenticates;
+
+#[async_trait]
+impl Plugin for Authenticates {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let head = cx.head_mut();
+        let key = head.headers.remove("authorization");
+        let key = key.and_then(|k| k.to_str().ok().map(String::from));
+        head.extensions.insert(Owner(key.unwrap_or_default()));
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
+    let gw = Gateway::new()
+        .provider(
+            "mcp",
+            StreamableHttp::default(),
+            StdioTransport::new("sh", ["-c", ECHO]),
+        )?
+        .serve(StreamableHttp::default())?
+        .plugin("auth", Authenticates)?
+        .target("mcp")?;
+    let session = init(&gw, &[("authorization", "Bearer alice")]).await;
+    for (key, status) in [
+        ("Bearer bob", StatusCode::NOT_FOUND),
+        ("Bearer alice", StatusCode::OK),
+    ] {
+        let headers = [(SESSION, &session[..]), ("authorization", key)];
+        let (got, ..) = send(&gw, request(Method::POST, LIST, &headers)).await;
+        assert_eq!(got, status, "{key}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_get_stream_that_falls_behind_ends() {
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
+for i in $(seq 500); do echo '{"jsonrpc":"2.0","method":"notifications/message"}'; done; sleep 100"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]), None);
+    let session = init(&gw, &[]).await;
+    let with = [(SESSION, &session[..])];
+    let (listen, _) = gw.handle(request(Method::GET, "", &with)).await;
+    let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    send(&gw, request(Method::POST, note, &with)).await;
+    // The client reads nothing until the server has said everything.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let body = tokio::time::timeout(Duration::from_secs(3), listen.into_body().collect())
+        .await
+        .unwrap_or_else(|_| panic!("the stream is still open"));
+    let body =
+        String::from_utf8_lossy(&body.map(|b| b.to_bytes()).unwrap_or_default()).into_owned();
+    assert!(messages(&body).len() < 500, "{}", messages(&body).len());
 }

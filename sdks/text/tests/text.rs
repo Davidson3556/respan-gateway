@@ -21,10 +21,10 @@ impl Rewrite for Terms {
     }
 
     fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
-        match text.contains("bomb") {
-            true => Err(Fault::new(StatusCode::BAD_REQUEST, "blocked", "blocked")),
-            false => Ok(text.to_owned()),
+        if text.contains("bomb") {
+            return Err(Fault::new(StatusCode::BAD_REQUEST, "blocked", "blocked"));
         }
+        Ok(text.to_owned())
     }
 }
 
@@ -179,9 +179,6 @@ fn content_that_cannot_be_read_is_refused() {
             .as_deref(),
         Some(UNREADABLE)
     );
-    let mut tools = Conversation::new([Message::new(Role::User, "hi")]);
-    tools.unsupported.insert("tools".into(), json!([]));
-    assert!(tools.read_all().is_err());
     let mut plain = Conversation::new([Message::new(Role::User, "hi")]);
     assert_eq!(plain.read_all().ok().as_deref(), Some("hi\n"));
     // The stop sequences and the end user's id are text too.
@@ -191,16 +188,91 @@ fn content_that_cannot_be_read_is_refused() {
         plain.read_all().ok().as_deref(),
         Some("hi\nbob@x.io\nbob@y.io\n")
     );
-    for text in plain.read_all_mut().unwrap_or_default() {
+    let upper = plain.edit_all(|text| {
         *text = text.to_uppercase();
-    }
+        Ok(())
+    });
+    assert!(upper.is_ok());
     assert_eq!(
         (&plain.stop[..], plain.user.as_deref()),
         (&["BOB@X.IO".to_owned()][..], Some("BOB@Y.IO"))
     );
     assert_eq!(plain.messages[0].text(), "HI");
-    assert!(Reply::other("f", json!({})).read_all().is_err());
-    assert_eq!(Reply::text(0, "hi").read_all().ok().as_deref(), Some("hi"));
+    assert_eq!(
+        Reply::text(0, "hi").read_all().ok().as_deref(),
+        Some("hi\n")
+    );
+}
+
+/// An agent's request: tools, an assistant's tool call and the tool's
+/// answer.
+fn agent_chat() -> Conversation {
+    let mut call = Message::new(Role::Assistant, "");
+    let arguments = json!({ "to": "bob@x.io", "cc": ["a@y.io"] }).to_string();
+    let calls = json!([{ "id": "c1", "function": { "name": "mail", "arguments": arguments } }]);
+    call.unsupported.insert("tool_calls".into(), calls);
+    let mut answer = Message::new(Role::Other("tool".into()), "sent to bob@x.io");
+    answer
+        .unsupported
+        .insert("tool_call_id".into(), "c1".into());
+    let mut chat = Conversation::new([Message::new(Role::User, "mail bob"), call, answer]);
+    let tools = json!([{ "function": { "name": "mail", "description": "Mail; CEO is c@z.io",
+        "parameters": { "type": "object", "properties": { "to": { "type": "string" } } } } }]);
+    chat.unsupported.insert("tools".into(), tools);
+    chat
+}
+
+#[test]
+fn tools_and_tool_calls_are_read_and_edited_as_text() -> Result<(), Fault> {
+    let mut chat = agent_chat();
+    let all = chat.read_all()?;
+    // Names inside the JSON are texts too, as a term may hide in one.
+    for text in [
+        "\nto\n",
+        "\nbob@x.io\n",
+        "\na@y.io\n",
+        "sent to bob@x.io\n",
+        "CEO is c@z.io\n",
+    ] {
+        assert!(all.contains(text), "{all}");
+    }
+    let vault = Placeholders::default();
+    chat.edit_all(|text| {
+        if text.contains('@') {
+            *text = text.replace("bob@x.io", &vault.hide("EMAIL", "bob@x.io"));
+        }
+        Ok(())
+    })?;
+    let arguments = &chat.messages[1].unsupported["tool_calls"][0]["function"]["arguments"];
+    let arguments: serde_json::Value = serde_json::from_str(arguments.as_str().unwrap_or(""))
+        .map_err(|e| Fault::internal(e.to_string()))?;
+    // Still JSON, the value hidden inside it.
+    assert_eq!(arguments, json!({ "to": "<EMAIL_1>", "cc": ["a@y.io"] }));
+    assert_eq!(chat.messages[2].text(), "sent to <EMAIL_1>");
+    Ok(())
+}
+
+#[test]
+fn a_whole_tool_call_is_restored_but_not_one_split_across_fragments() {
+    let call = |arguments: &str| {
+        let raw =
+            json!([{ "index": 0, "tool_calls": [{ "function": { "arguments": arguments } }] }]);
+        Reply::other("openai", raw)
+    };
+    let arguments = |reply: &Reply| match &reply.content[..] {
+        [Piece::Other { raw, .. }] => raw[0]["tool_calls"][0]["function"]["arguments"].clone(),
+        other => panic!("{other:?}"),
+    };
+    let whole = run(
+        &mut Holdback::new(email()),
+        vec![call(r#"{"to":"<EMAIL_1>"}"#)],
+    );
+    let whole = whole.unwrap_or_default();
+    assert_eq!(arguments(&whole[0]), r#"{"to":"bob@x.io"}"#);
+    // Streamed: each fragment on its own, so one split is not restored.
+    let fragments = vec![call(r#"{"to":"<EMA"#), call(r#"IL_1>"}"#)];
+    let split = run(&mut Holdback::new(email()), fragments).unwrap_or_default();
+    assert_eq!(arguments(&split[0]), r#"{"to":"<EMA"#);
 }
 
 /// A guard: inputs must be readable, outputs go through `Terms`.

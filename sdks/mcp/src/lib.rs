@@ -17,7 +17,7 @@ mod session;
 mod stdio;
 mod streamable;
 
-pub use stdio::StdioTransport;
+pub use stdio::{Owner, StdioTransport};
 pub use streamable::{SESSION, StreamableHttp};
 
 /// The kind's input: one HTTP request from an MCP client.
@@ -36,13 +36,11 @@ pub struct ToServer {
 impl ToServer {
     /// A request of `method` with `messages`, a batch if not exactly one.
     pub fn new(method: Method, messages: Vec<Value>) -> Self {
-        let batch = method == Method::POST && messages.len() != 1;
-        let origin = Relayed::default();
         Self {
+            batch: method == Method::POST && messages.len() != 1,
             method,
             messages,
-            batch,
-            origin,
+            origin: Relayed::default(),
         }
     }
 
@@ -66,16 +64,15 @@ pub struct ToClient {
 impl ToClient {
     /// A message of `messages`, a batch if not exactly one.
     pub fn new(messages: Vec<Value>) -> Self {
-        let (batch, origin) = (messages.len() != 1, Relayed::default());
         Self {
+            batch: messages.len() != 1,
             messages,
-            batch,
-            origin,
+            origin: Relayed::default(),
         }
     }
 
     /// The ids of the responses in it.
-    pub fn answers(&self) -> impl Iterator<Item = &Value> {
+    pub(crate) fn answers(&self) -> impl Iterator<Item = &Value> {
         let answers = self.messages.iter().filter(|m| m.get("method").is_none());
         answers.filter_map(|m| m.get("id").filter(|id| !id.is_null()))
     }
@@ -88,6 +85,13 @@ pub fn error(id: Value, code: i64, message: &str) -> Value {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Drops from `pending` the requests `outputs` answer.
+fn forget_answered(pending: &mut Vec<Value>, outputs: &[ToClient]) {
+    for id in outputs.iter().flat_map(ToClient::answers) {
+        pending.retain(|p| p != id);
+    }
 }
 
 /// The ids of the requests in `messages`.

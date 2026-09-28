@@ -104,6 +104,19 @@ test when its milestone lands. The kernel API is frozen after M2.
 | M8 MCP gateway | `mcp` kind, relay, aggregation, per-key access |
 | M9 Agent loop | Gateway-run MCP tools inside chat and Responses requests |
 
+## Crates
+
+| Path | What it is |
+|---|---|
+| `crates/core` | The kernel: plugins, calls, filters; no HTTP, config or kinds. |
+| `crates/formats` | The chat kind, OpenAI Chat and Anthropic Messages. |
+| `crates/plugins` | First-party plugins, such as the model router. |
+| `crates/server` | The HTTP adapter and transport. |
+| `crates/testkit` | A mock transport and the kernel's tests. |
+| `crates/respan-gateway` | The binary: YAML config and `check`. |
+| `sdks/` | Building blocks for plugins: `routing`, `text`, `ledger`, `mcp`. |
+| `examples/` | Runnable, tested examples of the [use cases](examples/README.md). |
+
 ## Development
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md).

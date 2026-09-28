@@ -49,7 +49,8 @@ impl std::fmt::Display for HoldId {
 pub trait Ledger: Send + Sync + 'static {
     /// Hold `amount` on every account in `accounts`, or on none, until
     /// settled or until `ttl` passes, when the hold is released but its
-    /// accounts are kept for the settlement. A known `id` is a no-op.
+    /// accounts are kept for a late settlement for one more `ttl`. A known
+    /// `id` is a no-op.
     async fn reserve(
         &self,
         id: &HoldId,
@@ -59,8 +60,8 @@ pub trait Ledger: Send + Sync + 'static {
     ) -> Result<(), Fault>;
 
     /// Release hold `id` and charge its accounts `spent`, which may exceed
-    /// it, even once its `ttl` has passed. An unknown or settled `id` is a
-    /// no-op.
+    /// it, even once its `ttl` has passed. An unknown, settled or forgotten
+    /// `id` is a no-op.
     async fn settle(&self, id: &HoldId, spent: Amount) -> Result<(), Fault>;
 }
 
@@ -89,6 +90,8 @@ struct Hold {
     /// Held on each account in `chain`; 0 once expired.
     amount: Amount,
     expires: Instant,
+    /// When a hold never settled is forgotten: one `ttl` after it expired.
+    forget: Instant,
 }
 
 impl MemoryLedger {
@@ -119,8 +122,9 @@ impl MemoryLedger {
         self.books().accounts.get(account).map_or(0, |a| a.spent)
     }
 
-    /// Books with expired holds released. An expired hold stays until
-    /// settled: expiry releases what it held, not what the call spent.
+    /// Books with expired holds released. An expired hold stays for a late
+    /// settlement, as expiry releases what it held, not what the call
+    /// spent, until it is forgotten.
     fn books(&self) -> MutexGuard<'_, Books> {
         let mut books = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
@@ -133,6 +137,7 @@ impl MemoryLedger {
             }
             hold.amount = 0;
         }
+        holds.retain(|_, h| h.forget > now);
         books
     }
 }
@@ -203,6 +208,7 @@ impl Ledger for MemoryLedger {
             chain,
             amount,
             expires,
+            forget: expires + ttl,
         };
         books.holds.insert(*id, hold);
         Ok(())

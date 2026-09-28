@@ -1,14 +1,21 @@
 //! Use case 2, PII restored across stream deltas. E-mail addresses are
-//! hidden behind placeholders on the provider edge, so no call carries them,
-//! whichever plugin makes it, and restored on the client edge, where a
-//! [`Holdback`] keeps `<EMA` back until `IL_1>` says it is a placeholder.
-//! Plugins after this one see only placeholders, both ways.
+//! hidden behind placeholders in every call's input as the provider
+//! receives it, so no call carries them, whichever plugin makes it or adds
+//! to it, and restored on the client edge, where a [`Holdback`] keeps
+//! `<EMA` back until `IL_1>` says it is a placeholder.
 //!
 //! Every text of the request is scanned: messages, the system prompt, stop
-//! sequences and the end user's id. What it cannot read, such as an image,
-//! is refused, as it might hold PII. A placeholder the model writes into a
-//! tool call's arguments is not restored: the kind carries those as other
-//! content.
+//! sequences, the end user's id, tools and earlier tool calls (inside their
+//! JSON arguments). What it cannot read, such as an image, is refused, as it
+//! might hold PII. A tool call in the answer is restored when it comes
+//! whole; streamed, its arguments come in fragments, and a placeholder
+//! split across two of them is not restored.
+//!
+//! So it is two plugins: `pii` registered first restores every response the
+//! client gets, whoever answers; `pii-input` registered last redacts, as
+//! input filters run in plugin order. A plugin registered later that adds
+//! to the input goes before it, `.after("pii-input", [name])`; plugins in
+//! between see the input before redaction and responses before restoring.
 //!
 //! `cargo run -p respan-gateway-examples --example pii`
 
@@ -45,13 +52,17 @@ fn hide_emails(text: &str, vault: &Placeholders) -> String {
 /// Every text of `chat` with its e-mail addresses hidden in `vault`; `Err`
 /// for what it cannot read.
 fn redact(chat: &mut Conversation, vault: &Placeholders) -> Result<(), Fault> {
-    for text in chat.read_all_mut()? {
+    chat.edit_all(|text| {
         *text = hide_emails(text, vault);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
+/// The client edge: one vault per request, restored in every response.
 struct Pii;
+
+/// The provider edge: every call's input, redacted into the vault.
+struct PiiInput;
 
 fn uncovered() -> Fault {
     Fault::new(
@@ -63,7 +74,6 @@ fn uncovered() -> Fault {
 
 #[async_trait]
 impl Plugin for Pii {
-    /// One vault per request, restored in every response the client gets.
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         if !cx.is_kind::<Conversation>() {
             return Err(uncovered());
@@ -73,15 +83,17 @@ impl Plugin for Pii {
         cx.head_mut().extensions.insert(vault);
         Ok(None)
     }
+}
 
-    /// Every call's input, redacted into the request's vault.
+#[async_trait]
+impl Plugin for PiiInput {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         if !px.is_kind::<Conversation>() {
             return Err(uncovered());
         }
         let vault = match px.extensions().get::<Placeholders>() {
             Some(vault) => vault.clone(),
-            // A call a plugin before this one makes: restore its response.
+            // A call a plugin before `pii` makes: restore its response.
             None => {
                 let vault = Placeholders::default();
                 px.filter(Holdback::new(vault.clone()))?;
@@ -92,13 +104,14 @@ impl Plugin for Pii {
     }
 }
 
-/// For real use, the transport is
+/// `pii` first, `pii-input` last. For real use, the transport is
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .serve(OpenAiChat)?
         .plugin("pii", Pii)?
+        .plugin("pii-input", PiiInput)?
         .target("openai")
 }
 
@@ -131,7 +144,15 @@ async fn ask(
     mock: &MockTransport,
     req: http::Request<Body>,
 ) -> Result<(StatusCode, String, String), Fault> {
-    let (status, _, body) = read_whole(gateway(mock)?.handle(req).await.0).await;
+    ask_via(&gateway(mock)?, mock, req).await
+}
+
+async fn ask_via(
+    gw: &Gateway,
+    mock: &MockTransport,
+    req: http::Request<Body>,
+) -> Result<(StatusCode, String, String), Fault> {
+    let (status, _, body) = read_whole(gw.handle(req).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
     let data = body.lines().filter_map(|l| l.strip_prefix("data: "));
     let json = data.filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok());
@@ -140,9 +161,10 @@ async fn ask(
             .as_str()
             .map(str::to_owned)
     });
-    let text = match status.is_success() {
-        true => text.collect(),
-        false => body,
+    let text = if status.is_success() {
+        text.collect()
+    } else {
+        body
     };
     let sent = mock.sent().last().map(|r| r.body().to_vec());
     let sent = String::from_utf8(sent.unwrap_or_default()).unwrap_or_default();
@@ -161,53 +183,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hides_addresses_only() {
-        let vault = Placeholders::default();
-        let text = "bob@x.io, (a@b.co) or 42; not a@b, @x.io or x.io.";
-        assert_eq!(
-            hide_emails(text, &vault),
-            "<EMAIL_1>, (<EMAIL_2>) or 42; not a@b, @x.io or x.io."
-        );
-    }
-
-    #[tokio::test]
-    async fn a_placeholder_split_across_three_deltas_is_restored() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        mock.reply(OPENAI, deltas(&["Sure: <EMA", "IL_", "1> and <EMAIL_2>."]));
-        let (status, text, sent) = ask(&mock, chat(PROMPT.into(), json!({}))).await?;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(text, "Sure: bob@x.io and alice@y.org.");
-        assert!(sent.contains("Mail <EMAIL_1>, or <<EMAIL_2>>."), "{sent}");
-        assert!(!sent.contains('@'), "{sent}");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stop_sequences_and_the_user_id_are_redacted_too() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        mock.reply(OPENAI, deltas(&["ok"]));
-        let more = json!({ "stop": ["bob@x.io"], "user": "carol@z.io" });
-        let (status, _, sent) = ask(&mock, chat("hi".into(), more)).await?;
-        assert_eq!(status, StatusCode::OK);
-        let sent: serde_json::Value = serde_json::from_str(&sent).unwrap_or_default();
-        assert_eq!(
-            (&sent["stop"], &sent["user"]),
-            (&json!(["<EMAIL_1>"]), &json!("<EMAIL_2>"))
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
-        let mock = MockTransport::new();
-        let image = json!([{ "type": "image_url", "image_url": { "url": "data:," } }]);
-        let (status, body, _) = ask(&mock, chat(image, json!({}))).await?;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert!(mock.sent().is_empty());
-        Ok(())
-    }
-}
+#[path = "tests/pii.rs"]
+mod tests;

@@ -180,3 +180,10 @@ opaque traffic by its body
 | `server` | `router` (bodies up to 32 MiB, no upgrades), `HttpTransport`, `CallHeaders`. |
 | `testkit` | `MockTransport` and the kernel's tests. |
 | `respan-gateway` | The binary: YAML config, routing by model, `check`. |
+| `sdks/routing` | Retry, fallback, race and a stall watchdog for plugins. |
+| `sdks/text` | Read and rewrite chat text across stream deltas; refuse what cannot be read. |
+| `sdks/ledger` | Reserve before a call, settle once from its usage. |
+| `sdks/mcp` | The MCP kind, streamable HTTP format and stdio transport. |
+| `examples` | One runnable, tested example per use case ([list](../examples/README.md)). |
+
+SDKs and examples use only the public API of the crates above.

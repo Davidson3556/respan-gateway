@@ -15,7 +15,7 @@ use respan_gateway_core::{Body, Fault};
 use respan_gateway_formats::sse;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep_until};
 
@@ -30,13 +30,18 @@ pub(crate) struct Session {
     _alive: oneshot::Sender<()>,
 }
 
+/// Messages a stream may fall behind by; past it, the stream ends.
+const BACKLOG: usize = 64;
+
 /// Where the child's messages go: a response to the `POST` that asked; a
 /// request or notification to the oldest open `POST`, else the `GET`
-/// stream, else nowhere.
+/// stream, else nowhere. A response that answers no open request, such as
+/// a parse error, ends the oldest `POST`, whose requests the server won't
+/// answer either.
 #[derive(Debug, Default)]
 struct Routes {
-    posts: Vec<(Vec<Value>, UnboundedSender<Value>)>,
-    listener: Option<UnboundedSender<Value>>,
+    posts: Vec<(Vec<Value>, Sender<Value>)>,
+    listener: Option<Sender<Value>>,
     /// The last request, or the last `POST` answered.
     touched: Option<Instant>,
 }
@@ -57,8 +62,8 @@ impl Session {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(Fault::upstream("the MCP server has no stdio"));
         };
-        let (routes, (alive, mut gone)) =
-            (Arc::new(Mutex::new(Routes::default())), oneshot::channel());
+        let routes = Arc::new(Mutex::new(Routes::default()));
+        let (alive, mut gone) = oneshot::channel();
         let reader = routes.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -77,10 +82,10 @@ impl Session {
                         let mut routes = lock(&reader);
                         routes.posts.retain(|(_, tx)| !tx.is_closed());
                         let (since, now) = (routes.touched.unwrap_or(due), Instant::now());
-                        match routes.posts.is_empty() && since + idle <= now {
-                            true => break,
-                            false => due = now.max(since) + idle,
+                        if routes.posts.is_empty() && since + idle <= now {
+                            break;
                         }
+                        due = now.max(since) + idle;
                     }
                 }
             }
@@ -89,12 +94,10 @@ impl Session {
             let _ = child.wait().await;
             ended();
         });
-        let stdin = tokio::sync::Mutex::new(stdin);
-        let _alive = alive;
         Ok(Self {
-            stdin,
+            stdin: tokio::sync::Mutex::new(stdin),
             routes,
-            _alive,
+            _alive: alive,
         })
     }
 
@@ -109,7 +112,7 @@ impl Session {
         if routes.listener.as_ref().is_some_and(|l| !l.is_closed()) {
             return None;
         }
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(BACKLOG);
         routes.listener = Some(tx);
         Some(events(rx))
     }
@@ -118,7 +121,8 @@ impl Session {
     /// 202 if nothing asks.
     pub(crate) async fn post(&self, messages: Vec<Value>) -> Result<http::Response<Body>, Fault> {
         let ids: Vec<Value> = requests(&messages).cloned().collect();
-        let (asks, (tx, rx)) = (!ids.is_empty(), mpsc::unbounded_channel());
+        let asks = !ids.is_empty();
+        let (tx, rx) = mpsc::channel(BACKLOG);
         // Registered before writing, so no answer is missed.
         if asks {
             lock(&self.routes).posts.push((ids, tx));
@@ -138,26 +142,32 @@ impl Session {
 
 fn route(routes: &mut Routes, v: Value) {
     routes.posts.retain(|(_, tx)| !tx.is_closed());
-    let Some(id) = v.get("id").filter(|_| v.get("method").is_none()) else {
-        let first = routes.posts.first().map(|(_, tx)| tx);
-        if let Some(tx) = first.or(routes.listener.as_ref()) {
-            let _ = tx.send(v);
+    let answer = v.get("method").is_none();
+    let id = v.get("id").filter(|_| answer);
+    let asked = id.and_then(|id| routes.posts.iter().position(|(ids, _)| ids.contains(id)));
+    let Some(i) = asked.or((!routes.posts.is_empty()).then_some(0)) else {
+        if let Some(tx) = &routes.listener
+            && tx.try_send(v).is_err()
+        {
+            routes.listener = None;
         }
         return;
     };
-    if let Some(i) = routes.posts.iter().position(|(ids, _)| ids.contains(id)) {
-        let (ids, tx) = &mut routes.posts[i];
-        ids.retain(|x| x != id);
-        let _ = tx.send(v);
-        if ids.is_empty() {
-            routes.posts.remove(i);
-            routes.touched = Some(Instant::now());
-        }
+    let (ids, tx) = &mut routes.posts[i];
+    if asked.is_some() {
+        ids.retain(|x| Some(x) != id);
+    } else if answer {
+        ids.clear();
+    }
+    let fell_behind = tx.try_send(v).is_err();
+    if ids.is_empty() || fell_behind {
+        routes.posts.remove(i);
+        routes.touched = Some(Instant::now());
     }
 }
 
 /// An event stream of what `rx` receives, until it closes.
-fn events(rx: mpsc::UnboundedReceiver<Value>) -> http::Response<Body> {
+fn events(rx: mpsc::Receiver<Value>) -> http::Response<Body> {
     let events = stream::unfold(rx, |mut rx| async move {
         let event = Bytes::from(sse::event(None, rx.recv().await?));
         Some((Ok::<_, Fault>(Frame::data(event)), rx))

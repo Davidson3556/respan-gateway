@@ -18,6 +18,9 @@ is being designed.
   private access, the kernel API is missing something; fix that instead.
 - Formats, first-party plugins, the server adapter, the testkit and the binary
   are separate crates.
+- `sdks/*` and `examples` are workspace members that use only the public API
+  of the crates. Every example has tests (`examples/tests/<name>.rs`) that
+  `cargo test` runs.
 
 ## Commands
 

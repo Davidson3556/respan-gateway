@@ -2,8 +2,9 @@
 //! Read and rewrite the chat kind's text safely across stream deltas; refuse
 //! what cannot be read.
 //!
-//! - [`Readable::read_all`]: all the text of a [`Conversation`] or a
-//!   [`Reply`], or a refusal if it carries anything else.
+//! - [`Readable`]: all the text of a [`Conversation`] or a [`Reply`], tools
+//!   and tool calls included, to read or edit, or a refusal if it carries
+//!   content with no text form, such as an image.
 //! - [`Holdback`]: a [`Reply`] filter that holds back trailing text that may
 //!   start a match, so a [`Rewrite`] sees each match whole.
 //! - [`Placeholders`]: hide values behind `<LABEL_n>` and restore them, a
@@ -12,6 +13,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::http::StatusCode;
+use respan_gateway_core::serde_json::{self, Map, Value};
 use respan_gateway_core::{Fault, Filter};
 use respan_gateway_formats::conversation::{Content, Conversation, Piece, Reply};
 
@@ -23,79 +25,128 @@ fn unreadable(what: &str) -> Fault {
     Fault::new(StatusCode::UNPROCESSABLE_ENTITY, UNREADABLE, message)
 }
 
-/// A value whose text a check must see all of.
-pub trait Readable {
-    /// All its text, one text per line, or `Err` with [`UNREADABLE`] if it
-    /// carries content the kind has no text form for, such as an image, a
-    /// tool call or a field the kind has no place for.
-    fn read_all(&self) -> Result<String, Fault>;
+/// An edit of one text.
+type Edit<'a> = dyn FnMut(&mut String) -> Result<(), Fault> + 'a;
 
-    /// All its text, to change in place, or `Err` as
-    /// [`read_all`](Readable::read_all).
-    fn read_all_mut(&mut self) -> Result<Vec<&mut String>, Fault>;
+/// A value whose text a check must see all of. Its texts include the JSON
+/// the kind has no form for (tools, a tool call): each string and each
+/// name inside it; a string there holding a JSON object or array, such as a
+/// tool call's arguments, is parsed and read the same way. Numbers,
+/// booleans and the request's own field names are not texts.
+pub trait Readable: Clone {
+    /// Runs `edit` on each of its texts, or `Err` with [`UNREADABLE`],
+    /// before any edit, if it carries content with no text form, such as an
+    /// image.
+    fn edit_all(&mut self, edit: impl FnMut(&mut String) -> Result<(), Fault>)
+    -> Result<(), Fault>;
+
+    /// All its texts, one per line, or `Err` as
+    /// [`edit_all`](Readable::edit_all).
+    fn read_all(&self) -> Result<String, Fault> {
+        let mut all = String::new();
+        self.clone().edit_all(|text| {
+            all.push_str(text);
+            all.push('\n');
+            Ok(())
+        })?;
+        Ok(all)
+    }
 }
 
-/// Refuses what [`Readable`] cannot read in `chat`.
-fn readable(chat: &Conversation) -> Result<(), Fault> {
-    if let Some(field) = chat.unsupported.keys().next() {
-        return Err(unreadable(&format!("the request's field '{field}'")));
-    }
-    match chat.messages.iter().all(|m| m.is_plain()) {
-        true => Ok(()),
-        false => Err(unreadable("a message other than text")),
+/// Runs `edit` on every string and name in `v`.
+fn edit_json(v: &mut Value, edit: &mut Edit) -> Result<(), Fault> {
+    match v {
+        Value::String(s) => edit_string(s, edit),
+        Value::Array(a) => a.iter_mut().try_for_each(|v| edit_json(v, edit)),
+        Value::Object(o) => {
+            for (mut name, mut value) in std::mem::take(o) {
+                edit(&mut name)?;
+                edit_json(&mut value, edit)?;
+                o.insert(name, value);
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
-/// Every text part of every message, the system prompt included, then the
-/// stop sequences and the end user's id.
+/// Runs `edit` on the values of `fields`, not their names.
+fn edit_fields(fields: &mut Map<String, Value>, edit: &mut Edit) -> Result<(), Fault> {
+    fields.values_mut().try_for_each(|v| edit_json(v, edit))
+}
+
+/// Runs `edit` on `text`, or inside it if it holds a JSON object or array,
+/// written back only if changed.
+fn edit_string(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
+    match serde_json::from_str::<Value>(text) {
+        Ok(mut json @ (Value::Object(_) | Value::Array(_))) => {
+            let before = json.clone();
+            edit_json(&mut json, edit)?;
+            if json != before {
+                *text = json.to_string();
+            }
+            Ok(())
+        }
+        _ => edit(text),
+    }
+}
+
+/// Every text part of every message, the system prompt included, the
+/// messages' and the request's fields the kind has no place for (a tool
+/// call, tools), the stop sequences and the end user's id. A part other
+/// than text, such as an image, is refused.
 impl Readable for Conversation {
-    fn read_all(&self) -> Result<String, Fault> {
-        readable(self)?;
+    fn edit_all(
+        &mut self,
+        mut edit: impl FnMut(&mut String) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
         let parts = self.messages.iter().flat_map(|m| &m.content);
-        let texts = parts.filter_map(|c| match c {
-            Content::Text { text, .. } => Some(text),
-            _ => None,
-        });
-        let all = texts.chain(&self.stop).chain(&self.user);
-        Ok(all.map(|t| format!("{t}\n")).collect())
-    }
-
-    fn read_all_mut(&mut self) -> Result<Vec<&mut String>, Fault> {
-        readable(self)?;
-        let parts = self.messages.iter_mut().flat_map(|m| &mut m.content);
-        let texts = parts.filter_map(|c| match c {
-            Content::Text { text, .. } => Some(text),
-            _ => None,
-        });
-        Ok(texts.chain(&mut self.stop).chain(&mut self.user).collect())
+        if !parts.clone().all(|c| matches!(c, Content::Text { .. })) {
+            return Err(unreadable("a part other than text, such as an image"));
+        }
+        for message in &mut self.messages {
+            for part in &mut message.content {
+                if let Content::Text { text, .. } = part {
+                    edit(text)?;
+                }
+            }
+            edit_fields(&mut message.unsupported, &mut edit)?;
+        }
+        for text in self.stop.iter_mut().chain(&mut self.user) {
+            edit(text)?;
+        }
+        edit_fields(&mut self.unsupported, &mut edit)
     }
 }
 
-/// Its texts.
+/// Its texts and other content, such as a tool call. In a stream, a tool
+/// call's arguments come in fragments, each read on its own: a match split
+/// across fragments is not seen whole.
 impl Readable for Reply {
-    fn read_all(&self) -> Result<String, Fault> {
-        readable_reply(self)?;
-        Ok(self.texts().collect())
-    }
-
-    fn read_all_mut(&mut self) -> Result<Vec<&mut String>, Fault> {
-        readable_reply(self)?;
-        Ok(self.texts_mut().collect())
-    }
-}
-
-fn readable_reply(reply: &Reply) -> Result<(), Fault> {
-    match reply
-        .content
-        .iter()
-        .all(|p| matches!(p, Piece::Text { .. }))
-    {
-        true => Ok(()),
-        false => Err(unreadable("content other than text, such as a tool call")),
+    fn edit_all(
+        &mut self,
+        mut edit: impl FnMut(&mut String) -> Result<(), Fault>,
+    ) -> Result<(), Fault> {
+        let known = |p: &Piece| matches!(p, Piece::Text { .. } | Piece::Other { .. });
+        if !self.content.iter().all(known) {
+            return Err(unreadable("content this reader does not know"));
+        }
+        self.content
+            .iter_mut()
+            .try_for_each(|p| edit_piece(p, &mut edit))
     }
 }
 
-/// What a [`Holdback`] does with the text it releases.
+fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
+    match piece {
+        Piece::Text { text, .. } => edit(text),
+        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), edit),
+        _ => Ok(()),
+    }
+}
+
+/// What a [`Holdback`] does with the text it releases. A check returns
+/// `text` unchanged, or `Err`.
 pub trait Rewrite: Send + 'static {
     /// How many trailing bytes of `text` may start a match: they are held
     /// until more text or the block's end says.
@@ -119,22 +170,24 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
         };
         terms.iter().any(spans)
     };
-    let starts = terms.iter().flat_map(|term| {
-        let n = (1..term.len()).filter(|&n| term.is_char_boundary(n));
-        n.filter(|&n| text.ends_with(&term[..n]))
-    });
-    let mut starts: Vec<usize> = starts.collect();
-    starts.sort_unstable();
-    let whole = starts.into_iter().rev().find(|&n| !cuts(text.len() - n));
-    whole.unwrap_or(0)
+    let mut longest = 0;
+    for term in &terms {
+        for n in (1..term.len()).filter(|&n| term.is_char_boundary(n)) {
+            if text.ends_with(&term[..n]) && !cuts(text.len() - n) {
+                longest = longest.max(n);
+            }
+        }
+    }
+    longest
 }
 
 /// A [`Reply`] filter that runs every text through a [`Rewrite`], holding
 /// back what may start a match. Text is held per block: text of another
 /// block, other content, a finish or the end releases it. A reply left
 /// showing nothing waits, whole, until one that shows something, so nothing
-/// is sent while the start is held. Other content passes unread; refuse it
-/// with [`Readable::read_all`] if it must be seen.
+/// is sent while the start is held. Other content, such as a tool call, is
+/// rewritten as [`Readable`] reads it, nothing held: a match split across a
+/// streamed tool call's fragments is not seen whole.
 #[derive(Debug)]
 pub struct Holdback<R> {
     rewrite: R,
@@ -155,10 +208,10 @@ impl<R: Rewrite> Holdback<R> {
     }
 
     fn rewritten(&mut self, text: &str) -> Result<String, Fault> {
-        match text.is_empty() {
-            true => Ok(String::new()),
-            false => self.rewrite.rewrite(text),
+        if text.is_empty() {
+            return Ok(String::new());
         }
+        self.rewrite.rewrite(text)
     }
 
     /// The held text's block and the text, rewritten, if any.
@@ -192,8 +245,12 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         for (i, piece) in pieces.into_iter().enumerate() {
             let (block, text) = match piece {
                 Piece::Text { block, text, .. } => (block, text),
-                other => {
+                mut other => {
                     self.release_into(&mut reply)?;
+                    edit_piece(&mut other, &mut |text| {
+                        *text = self.rewritten(text)?;
+                        Ok(())
+                    })?;
                     reply.content.push(other);
                     continue;
                 }
@@ -203,9 +260,10 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
             }
             let mut text = self.held.take().map(|(_, t)| t).unwrap_or_default() + &text;
             // Only the reply's last text can continue in the next reply.
-            let keep = match open && i + 1 == last {
-                true => self.rewrite.pending(&text),
-                false => 0,
+            let keep = if open && i + 1 == last {
+                self.rewrite.pending(&text)
+            } else {
+                0
             };
             let mut at = text.len().saturating_sub(keep);
             while !text.is_char_boundary(at) {
@@ -219,12 +277,11 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         if !open {
             self.release_into(&mut reply)?;
         }
-        match shows(&reply) {
-            true => {
-                out.append(&mut self.waiting);
-                out.push(reply);
-            }
-            false => self.waiting.push(reply),
+        if shows(&reply) {
+            out.append(&mut self.waiting);
+            out.push(reply);
+        } else {
+            self.waiting.push(reply);
         }
         Ok(())
     }
