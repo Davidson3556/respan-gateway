@@ -205,6 +205,8 @@ impl Ledger for MemoryLedger {
                 a.held = a.held.saturating_add(amount);
             }
         }
+        // A century stands for "never": `Duration::MAX` would overflow.
+        let ttl = ttl.min(Duration::from_secs(100 * 365 * 24 * 3600));
         let expires = Instant::now() + ttl;
         let hold = Hold {
             chain,

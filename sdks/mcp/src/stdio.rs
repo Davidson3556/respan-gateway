@@ -20,6 +20,9 @@ use tokio::process::Command;
 use crate::session::Session;
 use crate::{SESSION, error, lock, read};
 
+
+/// Stands for "never": `Duration::MAX` would overflow a deadline.
+const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
 /// Sessions by id and a keyed hash of their owner; `None` while starting.
 type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 type Reply = http::Response<Body>;
@@ -94,14 +97,14 @@ impl StdioTransport {
     /// Ends a session with no `POST` waiting and no request for `idle`
     /// (default 10 minutes).
     pub fn idle(mut self, idle: Duration) -> Self {
-        self.idle = idle;
+        self.idle = idle.min(CENTURY);
         self
     }
 
     /// Ends a `POST` whose requests are not all answered within `timeout`
     /// (default 5 minutes).
     pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeout = timeout.min(CENTURY);
         self
     }
 

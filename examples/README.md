@@ -46,5 +46,6 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
   fallback in another format.
 - Use case 8: durable holds and jobs that survive a restart (`jobs` keeps
   results in memory; its header shows a durable store).
-- The text SDK reads Anthropic tool blocks (`tool_use`, `tool_result`) as
-  content with no text form, so it refuses them.
+- In a request, the text SDK reads Anthropic tool blocks (`tool_use`,
+  `tool_result`) as content with no text form, so it refuses them. In a
+  reply they are read and edited.

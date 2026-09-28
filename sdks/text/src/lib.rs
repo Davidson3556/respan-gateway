@@ -85,11 +85,12 @@ fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault>
     }
 }
 
-/// Runs `edit` on content a format kept as it came, as [`edit_json`] does,
-/// numbers of a tool call's input included. A tool call's streamed
-/// arguments (OpenAI `delta` `arguments`, Anthropic `partial_json`) are
-/// pieces of JSON text: see [`edit_json_text`]. `parent` is the name of
-/// the object `v` is in; `delta` whether it is in a stream's delta.
+/// Runs `edit` on content a format kept as it came. In a stream's delta
+/// (OpenAI's `delta`, an Anthropic `*_delta` event), a tool call's
+/// arguments (`function.arguments`, `function_call.arguments`,
+/// `partial_json`) are pieces of JSON text, see [`edit_json_text`], and
+/// every other string is plain text. Outside a delta, content is whole:
+/// read as [`edit_json`] reads it, a tool call's `input` numbers included.
 fn edit_raw(v: &mut Value, parent: &str, delta: bool, edit: &mut Edit) -> Result<(), Fault> {
     match v {
         Value::Array(a) => a
@@ -97,12 +98,12 @@ fn edit_raw(v: &mut Value, parent: &str, delta: bool, edit: &mut Edit) -> Result
             .try_for_each(|v| edit_raw(v, parent, delta, edit)),
         Value::Object(o) => {
             for (mut name, mut value) in std::mem::take(o) {
-                let arguments = ["function", "function_call"].contains(&parent);
-                let json_text = (delta && arguments && name == "arguments")
-                    || (parent.is_empty() && name == "partial_json");
+                let arguments = name == "partial_json"
+                    || (name == "arguments" && ["function", "function_call"].contains(&parent));
                 match &mut value {
-                    Value::String(s) if json_text => edit_json_text(s, edit)?,
-                    _ if name == "input" => edit_json(&mut value, true, edit)?,
+                    Value::String(s) if delta && arguments => edit_json_text(s, edit)?,
+                    Value::String(s) if delta => edit(s)?,
+                    _ if name == "input" && !delta => edit_json(&mut value, true, edit)?,
                     _ => edit_raw(&mut value, &name, delta || name == "delta", edit)?,
                 }
                 edit(&mut name)?;
@@ -110,6 +111,7 @@ fn edit_raw(v: &mut Value, parent: &str, delta: bool, edit: &mut Edit) -> Result
             }
             Ok(())
         }
+        _ if delta => Ok(()),
         _ => edit_json(v, false, edit),
     }
 }
@@ -215,7 +217,11 @@ impl Readable for Reply {
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
-        Piece::Other { raw, .. } => edit_raw(Arc::make_mut(raw), "", false, edit),
+        Piece::Other { raw, .. } => {
+            let event = raw.get("type").and_then(Value::as_str);
+            let delta = event.is_some_and(|t| t.ends_with("_delta"));
+            edit_raw(Arc::make_mut(raw), "", delta, edit)
+        }
         _ => Ok(()),
     }
 }
