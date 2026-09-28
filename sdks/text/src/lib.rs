@@ -56,10 +56,11 @@ pub trait Readable: Clone {
 }
 
 /// Runs `edit` on every string and name in `v`, and on every number if
-/// `numbers`.
-fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault> {
+/// `numbers`. `streamed` strings may be pieces of JSON text, such as a
+/// streamed tool call's arguments.
+fn edit_json(v: &mut Value, numbers: bool, streamed: bool, edit: &mut Edit) -> Result<(), Fault> {
     match v {
-        Value::String(s) => edit_string(s, edit),
+        Value::String(s) => edit_string(s, streamed, edit),
         Value::Number(n) if numbers => {
             let mut text = n.to_string();
             edit(&mut text)?;
@@ -68,11 +69,13 @@ fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault>
             }
             Ok(())
         }
-        Value::Array(a) => a.iter_mut().try_for_each(|v| edit_json(v, numbers, edit)),
+        Value::Array(a) => a
+            .iter_mut()
+            .try_for_each(|v| edit_json(v, numbers, streamed, edit)),
         Value::Object(o) => {
             for (mut name, mut value) in std::mem::take(o) {
                 edit(&mut name)?;
-                edit_json(&mut value, numbers, edit)?;
+                edit_json(&mut value, numbers, streamed, edit)?;
                 o.insert(name, value);
             }
             Ok(())
@@ -85,69 +88,54 @@ fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault>
 fn edit_fields(fields: &mut Map<String, Value>, edit: &mut Edit) -> Result<(), Fault> {
     fields
         .values_mut()
-        .try_for_each(|v| edit_json(v, false, edit))
+        .try_for_each(|v| edit_json(v, false, false, edit))
 }
 
 /// Runs `edit` on `text`, or inside it, numbers included, if it holds a
-/// JSON object or array, written back only if changed.
-fn edit_string(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
+/// JSON object or array, written back only if changed. A `streamed` text
+/// that is not may be a piece of JSON text: see [`edit_json_text`].
+fn edit_string(text: &mut String, streamed: bool, edit: &mut Edit) -> Result<(), Fault> {
     match serde_json::from_str::<Value>(text) {
         Ok(mut json @ (Value::Object(_) | Value::Array(_))) => {
             let before = json.clone();
-            edit_json(&mut json, true, edit)?;
+            edit_json(&mut json, true, false, edit)?;
             if json != before {
                 *text = json.to_string();
             }
             Ok(())
         }
-        _ if text.contains(['{', '}', '[', ']', '"']) => edit_fragment(text, edit),
+        _ if streamed => edit_json_text(text, edit),
         _ => edit(text),
     }
 }
 
-/// Runs `edit` on a piece of JSON too short to parse, such as a streamed
-/// tool call's arguments, escaping what it writes so the JSON stays whole.
-/// An edit in more than one place is refused: what lies between would be
-/// escaped too.
-fn edit_fragment(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
-    let mut edited = text.clone();
-    edit(&mut edited)?;
-    if edited == *text {
-        return Ok(());
+/// Runs `edit` on a piece of JSON text between its quotes and escapes,
+/// escaping what it writes, so the JSON stays whole however it is split.
+/// Escaping text that needs none leaves it as it is.
+fn edit_json_text(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while !rest.is_empty() {
+        let plain = rest.find(['"', '\\']).unwrap_or(rest.len());
+        let mut part = rest[..plain].to_owned();
+        edit(&mut part)?;
+        if part == rest[..plain] {
+            out.push_str(&part);
+        } else {
+            let quoted = Value::String(part).to_string();
+            out.push_str(&quoted[1..quoted.len() - 1]);
+        }
+        rest = &rest[plain..];
+        // A quote, or an escape and the character it escapes, as it is.
+        let mark = match rest.strip_prefix('\\').and_then(|r| r.chars().next()) {
+            Some(c) => 1 + c.len_utf8(),
+            None => rest.chars().next().map_or(0, char::len_utf8),
+        };
+        out.push_str(&rest[..mark]);
+        rest = &rest[mark..];
     }
-    let head = common_prefix(text, &edited);
-    let tail = common_prefix_rev(&text[head..], &edited[head..]);
-    let (old, new) = (
-        &text[head..text.len() - tail],
-        &edited[head..edited.len() - tail],
-    );
-    if old.contains(['"', '\\']) {
-        return Err(unreadable(
-            "an edit in several places of a streamed JSON piece",
-        ));
-    }
-    let quoted = Value::String(new.to_owned()).to_string();
-    let escaped = &quoted[1..quoted.len() - 1];
-    *text = format!("{}{escaped}{}", &text[..head], &text[text.len() - tail..]);
+    *text = out;
     Ok(())
-}
-
-/// The length of the longest common prefix of `a` and `b`, at a char boundary.
-fn common_prefix(a: &str, b: &str) -> usize {
-    a.char_indices()
-        .zip(b.chars())
-        .find(|((_, x), y)| x != y)
-        .map_or(a.len().min(b.len()), |((i, _), _)| i)
-}
-
-/// The length of the longest common suffix of `a` and `b`, at a char boundary.
-fn common_prefix_rev(a: &str, b: &str) -> usize {
-    a.chars()
-        .rev()
-        .zip(b.chars().rev())
-        .take_while(|(x, y)| x == y)
-        .map(|(x, _)| x.len_utf8())
-        .sum()
 }
 
 /// Every text part of every message, the system prompt included, the
@@ -199,7 +187,7 @@ impl Readable for Reply {
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
-        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), false, edit),
+        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), false, true, edit),
         _ => Ok(()),
     }
 }

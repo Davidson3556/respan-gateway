@@ -139,3 +139,31 @@ async fn several_streamed_choices_are_refused() -> Result<(), Fault> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_tool_description_with_quoted_emails_is_redacted() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(OPENAI, deltas(&["ok"]));
+    let tools = json!({ "tools": [{ "type": "function", "function": {
+        "name": "mail", "description": "Mail \"ops@x.io\" or \"help@x.io\"",
+        "parameters": { "type": "object" } } }] });
+    let (status, text, sent) = ask(&mock, chat("hi".into(), tools)).await?;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    assert!(!sent.contains("ops@x.io"), "{sent}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_earlier_tool_call_with_quoted_emails_is_redacted() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(OPENAI, deltas(&["ok"]));
+    let args = json!({ "body": "Cc \"ops@x.io\" and \"help@x.io\"" }).to_string();
+    let body = json!({ "model": "gpt", "stream": true, "messages": [
+        { "role": "user", "content": "send it" },
+        { "role": "assistant", "content": null, "tool_calls": [{ "id": "c1", "type": "function",
+            "function": { "name": "mail", "arguments": args } }] },
+        { "role": "tool", "tool_call_id": "c1", "content": "sent" } ] });
+    let (status, text, _) = ask(&mock, post("/v1/chat/completions", body.to_string())).await?;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    Ok(())
+}
