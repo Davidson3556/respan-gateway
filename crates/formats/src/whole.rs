@@ -4,113 +4,78 @@ use std::marker::PhantomData;
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::http::{self, StatusCode};
-use respan_gateway_core::{Decoder, Encoder, Event, Fault, Part};
+use respan_gateway_core::{Decoder, Encoder, Fault};
 
-/// A decoder for a body read whole. On success, `on_body` gets all the
-/// bytes at the end; the response ends `Ok` unless `on_body` pushed an end
-/// or returned `Err`. On a failure status the body passes as a Frame, then
-/// the response ends `Err` with a relayed fault of that status: the
-/// provider's code and message (else `upstream_error` and "the provider
-/// answered N"), and its error fields as details. `on_body` judges an error
-/// inside a success.
-pub fn decoder<F>(head: &http::response::Parts, mut on_body: F) -> Box<dyn Decoder>
+/// A decoder for a body of `format` read whole: a success's bytes go to
+/// `on_body` at the end; a failure ends `Err` with the provider's status,
+/// code, message and error fields, carrying its body ([`Fault::with_raw`]).
+pub fn decoder<T, F>(
+    format: &str,
+    head: &http::response::Parts,
+    mut on_body: F,
+) -> Box<dyn Decoder<T>>
 where
-    F: FnMut(Bytes, &mut Vec<Part>) -> Result<(), Fault> + Send + 'static,
+    T: 'static,
+    F: FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
-    let status = head.status;
-    Box::new(Whole::new(move |raw, out: &mut Vec<Part>| {
-        match status.is_success() {
+    let (status, format) = (head.status, format.to_owned());
+    Box::new(Whole::new(
+        move |raw: Bytes, out: &mut Vec<T>| match status.is_success() {
             false => {
-                // The provider's message, if its body has a JSON error.
                 let v = crate::sse::failure_json(&raw).unwrap_or_default();
                 let fault = crate::common::provider_error(status, &v);
-                out.push(Part::Frame(raw));
-                out.push(Part::End(Err(fault.said())));
+                Err(fault.with_raw(&format, raw))
             }
-            true => {
-                if let Err(fault) = on_body(raw, out) {
-                    out.push(Part::End(Err(fault)));
-                }
-            }
-        }
-    }))
+            true => on_body(raw, out),
+        },
+    ))
 }
 
-/// Hands a whole body to `on_body`, then ends `Ok` unless it pushed an end.
-pub(crate) struct Whole<F> {
+/// Hands a whole body to `on_body` at its end.
+struct Whole<F> {
     buf: BytesMut,
     on_body: F,
 }
 
-impl<F> std::fmt::Debug for Whole<F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Whole")
-            .field("buffered", &self.buf.len())
-            .finish_non_exhaustive()
+impl<F> Whole<F> {
+    fn new(on_body: F) -> Self {
+        let buf = BytesMut::new();
+        Self { buf, on_body }
     }
 }
 
-impl<F: FnMut(Bytes, &mut Vec<Part>) + Send + 'static> Whole<F> {
-    pub(crate) fn new(on_body: F) -> Self {
-        Self {
-            buf: BytesMut::new(),
-            on_body,
-        }
-    }
-}
-
-impl<F> Decoder for Whole<F>
+impl<T, F> Decoder<T> for Whole<F>
 where
-    F: FnMut(Bytes, &mut Vec<Part>) + Send + 'static,
+    F: FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
-    fn decode(&mut self, bytes: Bytes, _out: &mut Vec<Part>) {
+    fn decode(&mut self, bytes: Bytes, _out: &mut Vec<T>) -> Result<(), Fault> {
         self.buf.extend_from_slice(&bytes);
+        Ok(())
     }
 
-    fn finish(&mut self, out: &mut Vec<Part>) {
+    fn end(&mut self, out: &mut Vec<T>) -> Result<(), Fault> {
         let raw = self.buf.split().freeze();
-        let from = out.len();
-        (self.on_body)(raw, out);
-        if !out[from..].iter().any(|p| matches!(p, Part::End(_))) {
-            out.push(Part::End(Ok(())));
-        }
+        (self.on_body)(raw, out)
     }
 }
 
 /// The one wording of a provider's failure of `status`.
 pub(crate) fn answered(status: StatusCode) -> String {
-    format!("the provider answered {}", status.as_u16())
+    format!("the provider returned {}", status.as_u16())
 }
 
-/// Encodes a response of events of `T`.
-///
-/// Unedited items and Frames are written as the provider's bytes. Made or
-/// edited items go through `write`, which also gets an edited item's
-/// original bytes to keep their shape, and returns `Err` for what it cannot
-/// write. A failure goes through `fail`. A stream is written item by item.
-/// A whole body is written once, at its end, as one document of all its
-/// events, followed by any Frames after its first item. A failed whole body
-/// writes its Frames and the failure, not its items. `Part::Usage` is not
-/// written.
+/// Encodes outputs of `T` through `write`, which returns their bytes or
+/// `Err`, and a failure through `fail` ([`Fault::raw`]). A stream is
+/// written output by output; a whole body once, at its end.
 pub struct Relay<T, W, F, B> {
     write: W,
     fail: F,
     /// What `write` and `fail` return, such as a `String` or `Bytes`.
     bytes: PhantomData<fn() -> B>,
-    /// A whole body held until it ends; `None` for a stream.
-    whole: Option<Held<T>>,
-}
-
-struct Held<T> {
-    events: Vec<T>,
-    /// The bytes of the first item.
-    raw: Option<Bytes>,
-    /// Whether `raw` still says the whole body, unedited.
-    as_raw: bool,
-    /// Whether an item came; later Frames wait for the body.
-    seen: bool,
-    /// Frames after the first item, written after the body.
-    after: BytesMut,
+    /// A whole body's outputs, kept until it ends; `None` for a stream.
+    whole: Option<Vec<T>>,
+    /// The body's opening bytes.
+    open: Bytes,
 }
 
 impl<T, W, F, B> std::fmt::Debug for Relay<T, W, F, B> {
@@ -121,70 +86,52 @@ impl<T, W, F, B> std::fmt::Debug for Relay<T, W, F, B> {
 
 impl<T, W, F, B> Relay<T, W, F, B>
 where
-    W: FnMut(&[T], Option<&Bytes>) -> Result<B, Fault> + Send + 'static,
+    W: FnMut(&[T]) -> Result<B, Fault> + Send + 'static,
     F: FnMut(&Fault) -> B + Send + 'static,
     B: AsRef<[u8]> + 'static,
 {
     /// An encoder for a `stream`, or for a whole body if `stream` is false.
     pub fn new(write: W, fail: F, stream: bool) -> Self {
-        let held = Held {
-            events: Vec::new(),
-            raw: None,
-            as_raw: true,
-            seen: false,
-            after: BytesMut::new(),
-        };
         Self {
             write,
             fail,
             bytes: PhantomData,
-            whole: (!stream).then_some(held),
+            whole: (!stream).then(Vec::new),
+            open: Bytes::new(),
         }
+    }
+
+    /// Open the body with `bytes` ([`Encoder::open`]), such as an SSE comment.
+    pub fn with_open(mut self, bytes: impl Into<Bytes>) -> Self {
+        self.open = bytes.into();
+        self
     }
 }
 
-impl<T, W, F, B> Encoder for Relay<T, W, F, B>
+impl<T, W, F, B> Encoder<T> for Relay<T, W, F, B>
 where
-    T: Event,
-    W: FnMut(&[T], Option<&Bytes>) -> Result<B, Fault> + Send + 'static,
+    T: Clone + Send + 'static,
+    W: FnMut(&[T]) -> Result<B, Fault> + Send + 'static,
     F: FnMut(&Fault) -> B + Send + 'static,
     B: AsRef<[u8]> + 'static,
 {
-    fn encode(&mut self, part: &Part, out: &mut BytesMut) -> Result<(), Fault> {
-        match (part, &mut self.whole) {
-            (Part::Frame(raw), Some(held)) if held.seen => held.after.extend_from_slice(raw),
-            (Part::Frame(raw), _) => out.extend_from_slice(raw),
-            (Part::Item(item), Some(held)) => {
-                held.seen = true;
-                held.as_raw &= held.raw.is_none() && item.unedited().is_some();
-                held.raw = held.raw.take().or_else(|| item.raw().cloned());
-                held.events.extend_from_slice(item.events::<T>()?);
-            }
-            (Part::Item(item), None) => match (item.unedited(), item.events::<T>()?) {
-                (Some(raw), _) => out.extend_from_slice(raw),
-                // A filter emptied the item: write nothing.
-                (None, []) => {}
-                (None, events) => out.extend_from_slice((self.write)(events, item.raw())?.as_ref()),
-            },
-            // A body of Frames alone has nothing more to write.
-            (Part::End(Ok(())), Some(held)) if held.seen => {
-                match (&held.raw, held.as_raw) {
-                    (Some(raw), true) => out.extend_from_slice(raw),
-                    (raw, _) => {
-                        out.extend_from_slice((self.write)(&held.events, raw.as_ref())?.as_ref())
-                    }
-                }
-                out.extend_from_slice(&held.after);
-            }
-            (Part::End(Err(f)), held) => {
-                // Frames after the first item are written before a failure.
-                if let Some(held) = held {
-                    out.extend_from_slice(&held.after);
-                }
-                out.extend_from_slice((self.fail)(f).as_ref());
-            }
-            (Part::Usage(_) | Part::End(Ok(())), _) => {}
-            _ => return Err(crate::common::unknown_part()),
+    fn open(&mut self, out: &mut BytesMut) {
+        out.extend_from_slice(&self.open);
+    }
+
+    fn encode(&mut self, value: &T, out: &mut BytesMut) -> Result<(), Fault> {
+        match &mut self.whole {
+            Some(whole) => whole.push(value.clone()),
+            None => out.extend_from_slice((self.write)(std::slice::from_ref(value))?.as_ref()),
+        }
+        Ok(())
+    }
+
+    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        match (end, self.whole.take()) {
+            (Err(f), _) => out.extend_from_slice((self.fail)(f).as_ref()),
+            (Ok(()), Some(whole)) => out.extend_from_slice((self.write)(&whole)?.as_ref()),
+            (Ok(()), None) => {}
         }
         Ok(())
     }
@@ -193,53 +140,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_core::Item;
 
     #[test]
     fn a_whole_body_is_written_once_in_order() {
-        let write = |events: &[u32], _: Option<&Bytes>| Ok(format!("{events:?}"));
+        let write = |values: &[u32]| Ok(format!("{values:?}"));
         let mut relay = Relay::new(write, |_: &Fault| String::new(), false);
         let mut out = BytesMut::new();
-        let parts = [
-            Part::Frame(Bytes::from_static(b"<")),
-            Item::decoded([1u32], Bytes::from_static(b"one")).into(),
-            Item::new([2u32]).into(),
-            Part::Frame(Bytes::from_static(b">")),
-            Part::End(Ok(())),
-        ];
-        for part in &parts {
-            assert!(relay.encode(part, &mut out).is_ok());
+        for value in [1, 2] {
+            assert!(relay.encode(&value, &mut out).is_ok());
         }
-        assert_eq!(&out[..], b"<[1, 2]>");
+        assert!(out.is_empty());
+        assert!(relay.end(&Ok(()), &mut out).is_ok());
+        assert_eq!(&out[..], b"[1, 2]");
     }
 
     #[test]
-    fn a_whole_body_of_frames_alone_is_written_as_it_came() {
-        let write = |_: &[u32], _: Option<&Bytes>| Ok(String::from("made up"));
-        let mut relay = Relay::new(write, |_: &Fault| String::new(), false);
+    fn a_relay_opens_with_the_bytes_it_is_given() {
+        let write = |_: &[u32]| Ok(String::new());
+        let relay = Relay::new(write, |_: &Fault| String::new(), true);
+        let mut relay = relay.with_open(": open\n\n");
         let mut out = BytesMut::new();
-        for part in [
-            Part::Frame(Bytes::from_static(b"as it came")),
-            Part::End(Ok(())),
-        ] {
-            assert!(relay.encode(&part, &mut out).is_ok());
-        }
-        assert_eq!(&out[..], b"as it came");
+        relay.open(&mut out);
+        assert_eq!(&out[..], b": open\n\n");
     }
 
     #[test]
-    fn a_frame_after_an_emptied_first_item_still_follows_the_body() {
-        let write = |events: &[u32], _: Option<&Bytes>| Ok(format!("{events:?}"));
-        let mut relay = Relay::new(write, |_: &Fault| String::new(), false);
+    fn a_stream_is_written_value_by_value_and_its_failure_by_fail() {
+        let write = |values: &[u32]| Ok(format!("{values:?}"));
+        let fail = |f: &Fault| f.message().to_owned();
+        let mut relay = Relay::new(write, fail, true);
         let mut out = BytesMut::new();
-        let parts = [
-            Item::new(Vec::<u32>::new()).into(),
-            Part::Frame(Bytes::from_static(b">")),
-            Part::End(Ok(())),
-        ];
-        for part in &parts {
-            assert!(relay.encode(part, &mut out).is_ok());
-        }
-        assert_eq!(&out[..], b"[]>");
+        assert!(relay.encode(&1, &mut out).is_ok());
+        assert!(relay.end(&Err(Fault::upstream("x")), &mut out).is_ok());
+        assert_eq!(&out[..], b"[1]x");
     }
 }

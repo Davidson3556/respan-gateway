@@ -5,18 +5,16 @@ use std::sync::{Arc, Mutex};
 
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
-use respan_gateway_core::{
-    Context, Fault, Gateway, Plugin, Provider, ProviderContext, Response, codes,
-};
-use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
+use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response, codes};
+use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply, units};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_plugins::ModelRouter;
-use respan_gateway_testkit::{MockTransport, Outcomes, collect, mock, post};
+use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole};
 
 mod common;
 use common::{
-    CHAT, Call, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES, Nameless, OPENAI, Shout,
-    Silence, Unmask, call, with_plugins,
+    Adds, CHAT, Call, Calls, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES, Nameless,
+    OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
 };
 use respan_gateway_core::{Filter, Outcome};
 use serde_json::{Value, json};
@@ -76,7 +74,7 @@ struct Cross;
 
 #[async_trait]
 impl Plugin for Cross {
-    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         match cx.format() {
             "openai-chat" => cx.set_target("anthropic"),
             _ => cx.set_target("openai"),
@@ -97,19 +95,27 @@ impl Harness {
     /// Serves both formats with no target. Plugins, in order: the log,
     /// `chain`, and a router sending Claude models to Anthropic.
     fn with(chain: Vec<Arc<dyn Plugin>>) -> Self {
-        let log = Outcomes::default();
+        let (log, calls) = (Outcomes::default(), Calls::default());
         let mock = MockTransport::new();
-        let mut plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(log.clone())];
+        let mut plugins: Vec<Arc<dyn Plugin>> =
+            vec![Arc::new(log.clone()), Arc::new(calls.clone())];
         plugins.extend(chain);
-        plugins.push(Arc::new(ModelRouter::new().route("claude", "anthropic")));
-        let gw = Gateway::new([
-            Provider::new("openai", OpenAiChat, mock.at(OPENAI)),
-            Provider::new("anthropic", AnthropicMessages, mock.at(ANTHROPIC)),
+        plugins.push(Arc::new(
+            ModelRouter::new(|c: &Conversation| c.model.as_deref()).route("claude", "anthropic"),
+        ));
+        let gw = providers([
+            add_provider("openai", OpenAiChat, mock.at(OPENAI)),
+            add_provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC)),
         ])
         .and_then(|gw| gw.serve(OpenAiChat)?.serve(AnthropicMessages))
         .and_then(|gw| with_plugins(gw, plugins))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
-        Self { gw, mock, log }
+        Self {
+            gw,
+            mock,
+            log,
+            calls,
+        }
     }
 
     fn sent_json(&self, i: usize) -> Value {
@@ -132,6 +138,32 @@ fn events(body: &str) -> Vec<(Option<String>, Value)> {
             (field("event:"), data)
         })
         .collect()
+}
+
+// Only a relay carries the client's headers: a translated call says
+// Anthropic's default version, a relay the client's.
+#[tokio::test]
+async fn only_a_relay_carries_the_clients_anthropic_version() {
+    let h = Harness::new(Vec::new());
+    let version = HeaderValue::from_static("2099-01-01");
+    let messages = json!({
+        "model": "claude-x", "max_tokens": 9, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    for mut req in [
+        openai_request("claude-x", true),
+        call(MESSAGES, messages.to_string()),
+    ] {
+        h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+        req.headers_mut()
+            .insert("anthropic-version", version.clone());
+        let (status, _) = h.text(req).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let sent = h.mock.sent();
+    let said = |i: usize| sent[i].headers().get("anthropic-version").cloned();
+    assert_eq!(said(0), Some(HeaderValue::from_static("2023-06-01")));
+    assert_eq!(said(1), Some(version));
 }
 
 #[tokio::test]
@@ -179,10 +211,10 @@ async fn an_openai_client_streams_from_anthropic() {
     );
     assert_eq!(chunks[n - 1], Value::String("[DONE]".into()));
 
-    let o = h.log.only();
-    assert_eq!(o.end, Ok(()));
-    assert_eq!(o.usage.get(units::INPUT_TOKENS), 5.0);
-    assert_eq!(o.usage.get(units::OUTPUT_TOKENS), 2.0);
+    assert_eq!(h.log.only().end, Ok(()));
+    let usage = h.calls.usage();
+    assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
+    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
 }
 
 #[tokio::test]
@@ -247,9 +279,12 @@ async fn the_client_gets_the_streaming_it_asked_for_whatever_a_plugin_asks_of_th
 
     #[async_trait]
     impl Plugin for Whole {
-        async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             use respan_gateway_formats::conversation::Conversation;
-            cx.input_mut::<Conversation>()?.stream = false;
+            cx.filter(|chat: &mut Conversation| {
+                chat.stream = false;
+                Ok(())
+            })?;
             Ok(None)
         }
     }
@@ -382,13 +417,15 @@ async fn a_filter_can_turn_content_of_another_format_into_text() {
 
     #[async_trait]
     impl Plugin for Thought {
-        async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
-            cx.filter(|e: &mut Reply| {
-                if let Reply::Other { format, raw, .. } = e
-                    && &**format == "anthropic-messages"
-                    && raw["type"] == "thinking"
-                {
-                    *e = Reply::text(0, "[thought] ");
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(|r: &mut Reply| {
+                for piece in &mut r.content {
+                    if let Piece::Other { format, raw, .. } = piece
+                        && &**format == "anthropic-messages"
+                        && raw["type"] == "thinking"
+                    {
+                        *piece = Piece::text(0, "[thought] ");
+                    }
                 }
                 Ok(())
             })?;
@@ -485,14 +522,14 @@ struct Canned;
 
 #[async_trait]
 impl Plugin for Canned {
-    async fn on_client(&self, _cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let events = [
             Reply::start("cached_1", "claude-x"),
             Reply::text(0, "Hi"),
-            Reply::Finish(Finish::Stop),
+            Reply::finished(Finish::Stop),
         ];
         let events = futures::stream::iter(events.map(Ok));
-        Ok(Some(Response::stream(http::Response::new(events))))
+        Ok(Some(Response::stream(events)))
     }
 }
 
@@ -568,7 +605,7 @@ async fn a_model_nothing_answers_is_a_404_in_the_client_format() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     let v: Value = serde_json::from_str(&body).unwrap_or_default();
-    assert_eq!(v["error"]["message"], "nothing answers model 'llama-3'");
+    assert_eq!(v["error"]["message"], "nothing answers this request");
     assert!(h.mock.sent().is_empty());
 }
 
@@ -760,12 +797,13 @@ async fn a_filter_edits_events_that_share_a_chunk_while_translating() {
 
     #[async_trait]
     impl Plugin for Truncated {
-        async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
-            cx.filter(|e: &mut Reply| {
-                match e {
-                    Reply::Start { model, .. } => *model = "alias".into(),
-                    Reply::Finish(f) => *f = Finish::Length,
-                    _ => {}
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(|r: &mut Reply| {
+                if let Some(start) = &mut r.start {
+                    start.model = "alias".into();
+                }
+                if let Some(finish) = &mut r.finish {
+                    *finish = Finish::Length;
                 }
                 Ok(())
             })?;
@@ -797,9 +835,8 @@ async fn usage_counts_even_when_its_chunk_cannot_be_translated() {
 
     let _ = h.text(anthropic_request(true)).await;
 
-    let o = h.log.only();
-    assert_eq!(o.usage.get(units::INPUT_TOKENS), 9.0);
-    assert!(o.end.is_err());
+    assert_eq!(h.calls.usage().get(units::INPUT_TOKENS), Some(9.0));
+    assert!(h.log.only().end.is_err());
 }
 
 #[tokio::test]
@@ -814,7 +851,7 @@ async fn a_translated_response_keeps_the_providers_retry_after() {
         .insert("retry-after", HeaderValue::from_static("7"));
     h.mock.reply(OPENAI, limited);
 
-    let (status, headers, _) = collect(h.gw.handle(anthropic_request(false)).await).await;
+    let (status, headers, _) = read_whole(h.gw.handle(anthropic_request(false)).await.0).await;
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
@@ -829,9 +866,9 @@ async fn an_empty_plugin_made_stream_is_a_whole_anthropic_stream() {
 
     #[async_trait]
     impl Plugin for Silent {
-        async fn on_client(&self, _cx: &mut Context) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let none = futures::stream::empty::<Result<Reply, Fault>>();
-            Ok(Some(Response::stream(http::Response::new(none))))
+            Ok(Some(Response::stream(none)))
         }
     }
 
@@ -877,6 +914,32 @@ fn anthropic_texts(body: &str) -> String {
         .collect()
 }
 
+/// Asserts Anthropic's event order: the message starts first and stops
+/// last, and each block opens before it closes. Keep-alives go where they
+/// came, anywhere.
+fn assert_well_formed(names: &[String], out: &str) {
+    let names: Vec<&String> = names.iter().filter(|n| *n != "ping").collect();
+    assert_eq!(
+        names.first().map(|n| n.as_str()),
+        Some("message_start"),
+        "{out}"
+    );
+    assert_eq!(
+        names.last().map(|n| n.as_str()),
+        Some("message_stop"),
+        "{out}"
+    );
+    let mut open = 0_i32;
+    for name in names {
+        match name.as_str() {
+            "content_block_start" => open += 1,
+            "content_block_stop" => open -= 1,
+            _ => {}
+        }
+        assert!((0..=1).contains(&open), "{out}");
+    }
+}
+
 #[tokio::test]
 async fn a_filter_restores_text_across_an_anthropic_stream_and_releases_the_rest() {
     let h = Harness::new(vec![Arc::new(Unmask)]);
@@ -892,7 +955,7 @@ async fn a_filter_restores_text_across_an_anthropic_stream_and_releases_the_rest
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(anthropic_texts(&out), "Hi Alice, bye <");
-    // What was held goes into Anthropic's own block, before it closes.
+    // What was kept back goes into Anthropic's own block, before it closes.
     let names: Vec<String> = events(&out)
         .into_iter()
         .filter_map(|(name, _)| name)
@@ -995,13 +1058,13 @@ async fn a_relayed_stream_cut_after_its_last_block_keeps_every_byte() {
 struct Audit;
 
 impl Filter<Reply> for Audit {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
         out.push(event);
         Ok(())
     }
 
-    fn end(&mut self, outcome: &Outcome, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-        match outcome.end {
+    fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        match end {
             Ok(()) => Ok(()),
             _ => Err(Fault::upstream("audit: failed response")),
         }
@@ -1014,7 +1077,7 @@ async fn a_providers_error_body_is_the_whole_body_whatever_a_filter_says() {
 
     #[async_trait]
     impl Plugin for Audited {
-        async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(Audit)?;
             Ok(None)
         }
@@ -1044,7 +1107,7 @@ struct NewBlock;
 
 #[async_trait]
 impl Plugin for NewBlock {
-    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         cx.filter(Footer(1, None))?;
         Ok(None)
     }
@@ -1161,11 +1224,13 @@ async fn text_released_before_a_tool_call_stays_in_its_own_block() {
 fn a_filter_is_tested_on_its_own() {
     let mut footer = Footer(0, None);
     let mut out = Vec::new();
-    let finish = Reply::Finish(Finish::Stop);
-    let _ = footer.event(finish.clone(), &mut out);
-    assert!(out.is_empty());
-    let _ = footer.end(&Outcome::default(), &mut out);
-    assert_eq!(out, [Reply::text(0, " [footer]"), finish]);
+    let _ = footer.edit(Reply::finished(Finish::Stop), &mut out);
+    // The message is kept, saying nothing now, as its usage is still shown.
+    assert_eq!(out, [Reply::default()]);
+    let _ = footer.end(&Ok(()), &mut out);
+    let mut footed = Reply::text(0, " [footer]");
+    footed.finish = Some(Finish::Stop);
+    assert_eq!(out[1..], [footed]);
 }
 
 #[tokio::test]
@@ -1174,7 +1239,7 @@ async fn a_finish_held_to_the_end_still_ends_anthropics_stream() {
 
     #[async_trait]
     impl Plugin for Foot {
-        async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(Footer(0, None))?;
             Ok(None)
         }
@@ -1207,8 +1272,8 @@ async fn a_finish_held_to_the_end_still_ends_anthropics_stream() {
 struct Note(bool);
 
 impl Filter<Reply> for Note {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let first = matches!(event, Reply::Start { .. }) && !std::mem::replace(&mut self.0, true);
+    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let first = event.start.is_some() && !std::mem::replace(&mut self.0, true);
         out.push(event);
         if first {
             out.push(Reply::text(0, "Note: "));
@@ -1218,16 +1283,6 @@ impl Filter<Reply> for Note {
 }
 
 fn filtered<F: Filter<Reply> + Clone + Sync>(filter: F) -> Harness {
-    struct Adds<F>(F);
-
-    #[async_trait]
-    impl<F: Filter<Reply> + Clone + Sync> Plugin for Adds<F> {
-        async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
-            cx.filter(self.0.clone())?;
-            Ok(None)
-        }
-    }
-
     Harness::new(vec![Arc::new(Adds(filter))])
 }
 
@@ -1356,6 +1411,8 @@ async fn a_filter_holding_everything_of_anthropics_stream_releases_it_whole() {
         "{out}"
     );
     assert_eq!(names.last().map(String::as_str), Some("message_stop"));
+    // A buffering guard's release keeps the provider's framing in order.
+    assert_well_formed(&names, &out);
 }
 
 #[tokio::test]
@@ -1402,7 +1459,15 @@ async fn a_block_that_opens_with_text_a_filter_holds_opens_once() {
         (1, 1),
         "{out}"
     );
-    assert_eq!(anthropic_texts(&out), "Well, Hello world");
+    // Released as it came, its opening text stays in its block's start, and
+    // the stream keeps its order.
+    let opening = events(&out).into_iter().find_map(|(_, v)| {
+        let text = v.pointer("/content_block/text")?.as_str()?;
+        Some(text.to_owned())
+    });
+    assert_eq!(opening.as_deref(), Some("Well, "), "{out}");
+    assert_eq!(anthropic_texts(&out), "Hello world");
+    assert_well_formed(&names, &out);
     let start = events(&out)
         .into_iter()
         .find(|(n, _)| n.as_deref() == Some("message_start"));
@@ -1450,20 +1515,21 @@ async fn an_anthropic_stream_of_data_lines_only_is_written_once() {
     );
 }
 
-/// Holds text to the end, letting everything else through.
+/// Keeps text back to the end, letting everything else through.
 #[derive(Clone)]
 struct HoldText(Vec<Reply>);
 
 impl Filter<Reply> for HoldText {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        match event {
-            Reply::Text { .. } => self.0.push(event),
-            event => out.push(event),
+    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let text = event.texts().next().is_some();
+        match text {
+            true => self.0.push(event),
+            false => out.push(event),
         }
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
         out.append(&mut self.0);
         Ok(())
     }
@@ -1513,7 +1579,7 @@ async fn a_whole_anthropic_message_a_filter_took_the_start_of_is_sent() {
 }
 
 #[tokio::test]
-async fn a_tool_block_held_in_anthropics_stream_is_the_plugins_fault() {
+async fn a_tool_block_held_in_anthropics_stream_is_released_as_it_came() {
     let h = filtered(HoldAll(Vec::new()));
     let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     let stream = [
@@ -1539,8 +1605,12 @@ async fn a_tool_block_held_in_anthropics_stream_is_the_plugins_fault() {
 
     let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
 
-    assert!(out.contains("config_error"), "{out}");
-    assert!(!out.contains("untranslatable"), "{out}");
+    // It keeps its bytes, so it goes out as it came, where the provider put
+    // it, not as the plugin's fault.
+    assert!(!out.contains("event: error"), "{out}");
+    assert!(out.contains("\"tool_use\""), "{out}");
+    let names: Vec<String> = events(&out).into_iter().filter_map(|(n, _)| n).collect();
+    assert_well_formed(&names, &out);
 }
 
 #[tokio::test]
@@ -1564,20 +1634,21 @@ async fn azures_filter_annotation_after_the_finish_ends_a_translated_stream_clea
     );
 }
 
-/// Holds each text until the next one comes, releasing the last at the end.
+/// Keeps each text back until the next one comes, releasing the last at the end.
 #[derive(Clone)]
 struct LagByOne(Option<Reply>);
 
 impl Filter<Reply> for LagByOne {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        match event {
-            Reply::Text { .. } => out.extend(self.0.replace(event)),
-            event => out.push(event),
+    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let text = event.texts().next().is_some();
+        match text {
+            true => out.extend(self.0.replace(event)),
+            false => out.push(event),
         }
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
         out.extend(self.0.take());
         Ok(())
     }
@@ -1691,16 +1762,14 @@ async fn a_guardrail_ending_an_anthropic_stream_early_ends_it() {
     struct Cut;
 
     impl Filter<Reply> for Cut {
-        fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            match event {
-                Reply::Text { block, text, .. } if text == " world" => {
-                    out.extend([
-                        Reply::text(block, " [cut]"),
-                        Reply::Finish(Finish::Filtered),
-                    ]);
+        fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            if reply.texts().any(|t| t == " world") {
+                for text in reply.texts_mut().filter(|t| *t == " world") {
+                    *text = " [cut]".into();
                 }
-                event => out.push(event),
+                reply.finish = Some(Finish::Filtered);
             }
+            out.push(reply);
             Ok(())
         }
     }
@@ -1758,6 +1827,22 @@ impl Plugin for CallEnds {
 }
 
 #[tokio::test]
+async fn any_translated_3xx_with_a_location_is_a_bad_gateway() {
+    let h = Harness::new(Vec::new());
+    let choices = http::Response::builder()
+        .status(StatusCode::MULTIPLE_CHOICES)
+        .header("location", "http://elsewhere/")
+        .body(Vec::new())
+        .unwrap_or_default();
+    h.mock.reply(ANTHROPIC, choices);
+
+    let (status, headers, _) = h.send(openai_request("claude-x", false)).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(headers.get("location").is_none());
+}
+
+#[tokio::test]
 async fn a_translated_redirect_is_a_bad_gateway() {
     let ends = CallEnds::default();
     let h = Harness::new(vec![Arc::new(ends.clone())]);
@@ -1773,11 +1858,14 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(headers.get("location").is_none());
     let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
-    assert_eq!(body["error"]["code"], "upstream_error", "{body}");
+    assert_eq!(body["error"]["code"], "upstream", "{body}");
     // The call ends with the refusal and the provider's status.
     let ends = ends.0.lock().map(|all| all.clone()).unwrap_or_default();
     assert!(matches!(&ends[..], [o] if o.end.as_ref().is_err_and(|f| f.code() == codes::UPSTREAM)));
-    assert_eq!(ends[0].status, Some(StatusCode::FOUND));
+    assert_eq!(
+        ends[0].head.as_ref().map(|h| h.status),
+        Some(StatusCode::FOUND)
+    );
 }
 
 #[tokio::test]
@@ -1788,8 +1876,10 @@ async fn a_provider_edge_edit_is_encoded_for_its_translated_target() {
     impl Plugin for Cool {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             assert_eq!(px.format(), "anthropic-messages");
-            px.input_mut::<Conversation>()?.temperature = Some(0.0);
-            Ok(())
+            px.filter(|chat: &mut Conversation| {
+                chat.temperature = Some(0.0);
+                Ok(())
+            })
         }
     }
 
@@ -1928,4 +2018,84 @@ async fn a_translated_call_passes_none_of_the_clients_headers() {
     for name in ["user-agent", "x-app"] {
         assert!(sent[0].headers().get(name).is_none(), "{name}");
     }
+}
+
+// An Anthropic error event goes as it came to an Anthropic client, and in
+// OpenAI's words to an OpenAI one.
+#[tokio::test]
+async fn an_anthropic_error_event_goes_as_it_came_only_to_its_format() {
+    let error = "event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"busy\"}}\n\n";
+    let mut stream = ANTHROPIC_STREAM[..3].to_vec();
+    stream.push(error);
+
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(&stream));
+    let body = json!({
+        "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    assert!(out.ends_with(error), "{out}");
+
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(&stream));
+    let (_, out) = h.text(openai_request("claude-x", true)).await;
+    let last = events(&out).pop().map(|(_, d)| d).unwrap_or_default();
+    assert_eq!(last["error"]["code"], "overloaded_error", "{out}");
+    assert!(last["type"].is_null(), "{out}");
+}
+
+// An OpenAI error event goes in Anthropic's words to an Anthropic client.
+#[tokio::test]
+async fn an_openai_error_event_reaches_an_anthropic_client_in_its_words() {
+    let mut stream = OPENAI_STREAM[..2].to_vec();
+    stream
+        .push("data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"extra\":1}}\n\n");
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(&stream));
+
+    let (_, out) = h.text(anthropic_request(true)).await;
+
+    let (name, last) = events(&out).pop().unwrap_or((None, Value::Null));
+    assert_eq!(name.as_deref(), Some("error"), "{out}");
+    assert_eq!(last["type"], "error", "{out}");
+    assert_eq!(last["error"]["message"], "boom", "{out}");
+}
+
+// An error inside a 200 goes as it came to a client of its format, and in
+// the client's words to another.
+#[tokio::test]
+async fn an_error_in_a_success_goes_as_it_came_only_to_its_format() {
+    let anthropic = r#"{"type": "error", "error": {"type": "overloaded_error", "message": "busy", "retry": true}}"#;
+    let openai = r#"{"error": {"message": "boom", "type": "server_error", "extra": 1}}"#;
+    let messages = json!({
+        "model": "claude-x", "max_tokens": 10,
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+
+    // Anthropic to its own client, as it came.
+    let h = Harness::new(Vec::new());
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, anthropic));
+    let (_, out) = h.text(call(MESSAGES, messages.to_string())).await;
+    assert_eq!(out, anthropic);
+
+    // Anthropic to an OpenAI client, in OpenAI's words.
+    let h = Harness::new(Vec::new());
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, anthropic));
+    let (_, out) = h.text(openai_request("claude-x", false)).await;
+    let v: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(v["error"]["code"], "overloaded_error", "{out}");
+    assert!(v["type"].is_null(), "{out}");
+
+    // OpenAI to an Anthropic client, in Anthropic's words.
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::json(StatusCode::OK, openai));
+    let (_, out) = h.text(anthropic_request(false)).await;
+    let v: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(
+        (&v["type"], &v["error"]["message"]),
+        (&json!("error"), &json!("boom"))
+    );
 }

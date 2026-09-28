@@ -1,30 +1,28 @@
 //! What the conversation formats share: unary bodies, request decoding and
-//! patching, usage totals, and small JSON helpers.
+//! encoding, usage totals, and small JSON helpers.
 
-use respan_gateway_core::{bytes, http, serde_json};
-
-use crate::whole::Whole;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
-use http::HeaderValue;
-use http::StatusCode;
-use http::header::CONTENT_TYPE;
-use respan_gateway_core::{ClientView, Decoder, Doc, Encoder, Fault, Item, Part, Usage};
-use serde_json::{Map, Value, json};
+use respan_gateway_core::bytes::{BufMut, Bytes, BytesMut};
+use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
+use respan_gateway_core::serde_json::{self, Map, Value, json};
+use respan_gateway_core::{Decoder, Encoder, Fault, Usage};
 
-use crate::conversation::{Content, Conversation, Finish, Message, Reply, Role};
+use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
 use crate::sse::{content_type, event_data};
 
 /// What a conversation format supplies; the plumbing around it is shared.
 pub(crate) trait Wire: Send + Sync + 'static {
+    /// The format's name.
+    const NAME: &'static str;
     /// A JSON request as a conversation, noting what it has no place for.
     fn read(v: &Value) -> Conversation;
     /// A conversation as a request, refusing what this format cannot say.
     fn write(chat: &Conversation) -> Result<Value, Fault>;
     /// Write into the client's request the fields `after` changed from
-    /// `before`, its decoding. Everything else keeps its original form.
+    /// `before`, its decoding.
     fn patch(
         v: &mut Map<String, Value>,
         before: &Conversation,
@@ -33,343 +31,319 @@ pub(crate) trait Wire: Send + Sync + 'static {
 
     /// Whether a successful body is a whole response of this format.
     fn is_response(v: &Value) -> bool;
-    /// A whole response as events.
-    fn replies(v: &Value) -> Vec<Reply>;
+    /// What a whole response says, but its usage.
+    fn reply(v: &Value) -> Reply;
     /// The usage totals of a whole response.
     fn usage(v: &Value) -> Usage;
-    /// A whole response from the events of another format, or a plugin.
+    /// Usage as this format reports it.
+    fn usage_body(u: &Usage) -> Value;
+    /// A whole response from the replies of another format, or a plugin.
     fn render(so_far: &SoFar) -> Value;
-    /// Put edited events back into a whole response of this format.
-    fn put(v: &mut Value, events: &[Reply]);
-    /// `events` in the order this format reads them back, where the order
-    /// means nothing, such as a choice's one text and one other.
-    fn in_order(events: &[Reply]) -> Vec<Reply> {
-        events.to_vec()
+    /// Put an edited reply back into a whole response of this format.
+    fn put(v: &mut Value, reply: &Reply);
+    /// `content` in the order this format reads it back.
+    fn in_order(content: &[Piece]) -> Vec<Piece> {
+        content.to_vec()
     }
     /// The error body for `fault`, its details merged by [`merge_details`].
     fn error_body(fault: &Fault) -> Value;
+    /// Whether the client's request `raw` needs [`Wire::finish`].
+    fn unfinished(_raw: &[u8]) -> bool {
+        false
+    }
+    /// Add to a request what this format needs, such as asking for usage.
+    fn finish(_v: &mut Map<String, Value>) {}
 }
 
-/// A JSON request as a conversation.
-pub(crate) fn decode_request<W: Wire>(body: &Doc) -> Result<Conversation, Fault> {
-    let v = body
-        .json()
-        .filter(|v| v.is_object())
-        .ok_or_else(|| Fault::bad_request("request body is not a JSON object"))?;
-    Ok(W::read(v))
+/// Decodes each JSON request into a conversation that keeps its bytes.
+pub(crate) fn request_decoder<W: Wire>() -> Box<dyn Decoder<Conversation>> {
+    let name: Arc<str> = Arc::from(W::NAME);
+    crate::message_decoder(
+        move |raw: Bytes| match serde_json::from_slice::<Value>(&raw) {
+            Ok(v) if v.is_object() => {
+                let mut chat = W::read(&v);
+                chat.model = v["model"].as_str().map(Into::into);
+                Ok(chat.came(&name, raw))
+            }
+            _ => Err(not_an_object()),
+        },
+    )
 }
 
-/// A conversation as a body: the client's body patched, or a new body if
-/// nothing is lost.
-pub(crate) fn encode_request<W: Wire>(
-    chat: &Conversation,
-    original: Option<(&Doc, &Conversation)>,
-) -> Result<Doc, Fault> {
-    let Some((v, before)) = original.and_then(|(body, before)| Some((body.json()?, before))) else {
-        // What a plugin removed from `unsupported`, it chose to lose.
-        if let Some(key) = chat.unsupported.keys().next() {
-            return Err(untranslatable(&format!("'{key}' in the request")));
-        }
-        if !chat.messages.iter().all(Message::is_plain) {
-            return Err(untranslatable("messages other than text"));
-        }
-        return W::write(chat).map(Doc::from);
+fn not_an_object() -> Fault {
+    Fault::bad_request("request body is not a JSON object")
+}
+
+/// Make `request` a JSON `POST` to `path`, adding to a relayed body what
+/// the format needs ([`Wire::finish`]).
+pub(crate) fn post_json<W: Wire>(
+    request: &mut http::Request<Bytes>,
+    path: &str,
+) -> Box<dyn Encoder<Conversation>> {
+    *request.method_mut() = http::Method::POST;
+    crate::set_path(request, path);
+    let json = HeaderValue::from_static("application/json");
+    request.headers_mut().insert(CONTENT_TYPE, json);
+    let body = request.body_mut();
+    if W::unfinished(body)
+        && let Ok(mut v) = object(body)
+    {
+        W::finish(&mut v);
+        *body = to_bytes(&v).unwrap_or_else(|_| body.clone());
+    }
+    Box::new(RequestEncoder::<W>(PhantomData))
+}
+
+/// Writes a conversation as the client's bytes, with changes written in, or
+/// anew; then what the format adds ([`Wire::finish`]).
+struct RequestEncoder<W>(PhantomData<W>);
+
+impl<W: Wire> Encoder<Conversation> for RequestEncoder<W> {
+    fn encode(&mut self, chat: &Conversation, out: &mut BytesMut) -> Result<(), Fault> {
+        let mut v = match chat.origin(W::NAME) {
+            Some(o) if o.said == *chat && !W::unfinished(&o.bytes) => {
+                out.extend_from_slice(&o.bytes);
+                return Ok(());
+            }
+            Some(o) if o.said == *chat => object(&o.bytes)?,
+            Some(o) => patch_request::<W>(&o.bytes, &o.said, chat)?,
+            None => write_request::<W>(chat)?,
+        };
+        W::finish(&mut v);
+        out.extend_from_slice(&to_bytes(&v)?);
+        Ok(())
+    }
+
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+/// `v` as JSON bytes.
+fn to_bytes(v: &Map<String, Value>) -> Result<Bytes, Fault> {
+    let mut out = BytesMut::new().writer();
+    let written = serde_json::to_writer(&mut out, v);
+    written.map_err(|e| Fault::internal("a request could not be written").with_source(e))?;
+    Ok(out.into_inner().freeze())
+}
+
+/// The JSON object in `raw`.
+fn object(raw: &[u8]) -> Result<Map<String, Value>, Fault> {
+    match serde_json::from_slice(raw) {
+        Ok(Value::Object(v)) => Ok(v),
+        _ => Err(not_an_object()),
+    }
+}
+
+/// A conversation as a new request, if nothing is lost.
+pub(crate) fn write_request<W: Wire>(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
+    // What a plugin removed from `unsupported`, it chose to lose.
+    if let Some(key) = chat.unsupported.keys().next() {
+        return Err(untranslatable(&format!("'{key}' in the request")));
+    }
+    if !chat.messages.iter().all(Message::is_plain) {
+        return Err(untranslatable("messages other than text"));
+    }
+    let mut v = match W::write(chat)? {
+        Value::Object(v) => v,
+        _ => Map::new(),
     };
-    let mut v = v.clone();
-    let obj = v
-        .as_object_mut()
-        .ok_or_else(|| Fault::bad_request("request body is not a JSON object"))?;
+    set(&mut v, "model", chat.model.clone().map(Into::into));
+    Ok(v)
+}
+
+/// The client's request `raw`, which read `before`, with what `chat`
+/// changed written in.
+pub(crate) fn patch_request<W: Wire>(
+    raw: &Bytes,
+    before: &Conversation,
+    chat: &Conversation,
+) -> Result<Map<String, Value>, Fault> {
+    let mut v = object(raw)?;
     // `stream_options` is only valid with a stream.
     if before.stream != chat.stream {
-        obj.insert("stream".into(), chat.stream.into());
+        v.insert("stream".into(), chat.stream.into());
         if !chat.stream {
-            obj.shift_remove("stream_options");
+            v.shift_remove("stream_options");
         }
     }
-    W::patch(obj, before, chat)?;
+    if before.model != chat.model {
+        set(&mut v, "model", chat.model.clone().map(Into::into));
+    }
+    W::patch(&mut v, before, chat)?;
     // What a plugin changed among the unsupported fields.
-    patch_fields(obj, &before.unsupported, &chat.unsupported);
-    Ok(Doc::from(v))
+    patch_fields(&mut v, &before.unsupported, &chat.unsupported);
+    Ok(v)
 }
 
-/// Pass on the client's end-to-end headers, such as `user-agent`, an app's
-/// own, opted-in beta features or credentials, when the client speaks this
-/// format ([`ClientView::is_own`]); across formats none pass. A header the
-/// request already has is kept; the transport decides whose keys reach the
-/// provider. For any format's
-/// [`Format::prepare`](respan_gateway_core::Format::prepare); the kernel's
-/// header rules apply after it.
-///
-/// Never passes what changes how the provider reads the request or who
-/// sent it: `cookie`, `accept-encoding` (the gateway reads what it
-/// relays), `forwarded`, `via`, `x-real-ip`, `x-forwarded-*`, method
-/// overrides, `if-*` and `range`.
-pub fn pass_headers(req: &mut http::Request<Doc>, client: ClientView<'_>) {
-    if !client.is_own() {
-        return;
+/// What a JSON request asks of its response: a stream, and usage in it.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Asked {
+    pub(crate) stream: bool,
+    pub(crate) usage: bool,
+}
+
+/// [`Asked`] of a JSON body, reading only its two fields.
+pub(crate) fn probe(raw: &[u8]) -> Asked {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        #[serde(default)]
+        stream: Value,
+        #[serde(default)]
+        stream_options: Value,
     }
-    let set: Vec<_> = req.headers().keys().cloned().collect();
-    for (name, value) in &client.head().headers {
-        if passes(name.as_str()) && !set.contains(name) {
-            req.headers_mut().append(name.clone(), value.clone());
-        }
+    match serde_json::from_slice::<Probe>(raw) {
+        Ok(p) => Asked {
+            stream: p.stream == true,
+            usage: p.stream_options["include_usage"] == true,
+        },
+        Err(_) => Asked::default(),
     }
 }
 
-/// Whether [`pass_headers`] may pass on the client's header `name`.
-fn passes(name: &str) -> bool {
-    let denied = matches!(
-        name,
-        "cookie"
-            | "accept-encoding"
-            | "forwarded"
-            | "via"
-            | "x-real-ip"
-            | "x-http-method-override"
-            | "x-method-override"
-            | "range"
-    );
-    !denied && !name.starts_with("x-forwarded-") && !name.starts_with("if-")
-}
-
-/// A JSON `POST` to `path`, as both formats send, with the client's query
-/// when the client speaks this format.
-pub(crate) fn post_json(
-    body: Doc,
-    path: &'static str,
-    client: ClientView<'_>,
-) -> Result<http::Request<Doc>, Fault> {
-    let mut req = http::Request::new(body);
-    *req.method_mut() = http::Method::POST;
-    let query = client.head().uri.query().filter(|_| client.is_own());
-    *req.uri_mut() = match query.filter(|q| !q.is_empty()) {
-        Some(query) => format!("{path}?{query}").parse().map_err(|e| {
-            Fault::bad_request("the request's query cannot be passed on").with_source(e)
-        })?,
-        None => http::Uri::from_static(path),
-    };
-    req.headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    Ok(req)
-}
-
-/// Finish a response's head and return whether it is still relayed. A
-/// reframed one is not, and loses its content type. A head with no content
-/// type, unless a relayed failure, gets the client's framing: SSE for a
-/// successful stream, otherwise JSON.
-pub(crate) fn made_head(
-    head: &mut http::response::Parts,
-    client: ClientView<'_>,
-    relayed: bool,
-) -> bool {
-    let reframe = relayed && reframed(head, client);
+/// Finish a response's head and return whether its replies are relayed as
+/// their bytes. A success framed otherwise than the client asked is
+/// reframed; a head without a content type gets the client's framing.
+pub(crate) fn made_head(head: &mut http::response::Parts, asks_stream: bool) -> bool {
+    let reframe = head.status.is_success() && crate::sse::is_stream(head) != asks_stream;
     if reframe {
         head.headers.remove(CONTENT_TYPE);
     }
-    // A relayed failure, such as a redirect, is left as it came.
-    if content_type(head).is_none() && (!relayed || reframe || head.status.is_success()) {
-        let stream = client.body().is_some_and(streams) && head.status.is_success();
-        let content_type = match stream {
+    if content_type(head).is_none() {
+        let content_type = match asks_stream && head.status.is_success() {
             true => "text/event-stream",
             false => "application/json",
         };
         head.headers
             .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     }
-    relayed && !reframe
+    !reframe
 }
 
-/// Whether a success in the client's format is framed otherwise than the
-/// client asked, as when a plugin changed `stream`; it is then written from
-/// its events. Decoder and encoder both ask it of the provider's head, so
-/// they agree.
-fn reframed(head: &http::response::Parts, client: ClientView<'_>) -> bool {
-    let streamed = crate::sse::is_stream(head);
-    client.is_own() && head.status.is_success() && streamed != client.body().is_some_and(streams)
-}
-
-/// `decoder`, or for a reframed response, one that drops its framing and
-/// the bytes of its items.
-pub(crate) fn decoder_for(
-    head: &http::response::Parts,
-    client: ClientView<'_>,
-    decoder: Box<dyn Decoder>,
-) -> Box<dyn Decoder> {
-    match reframed(head, client) {
-        true => Box::new(Reframed(decoder)),
-        false => decoder,
-    }
-}
-
-struct Reframed(Box<dyn Decoder>);
-
-impl Reframed {
-    fn remake(from: usize, out: &mut Vec<Part>) {
-        for part in out.split_off(from) {
-            match part {
-                Part::Item(item) => out.push(match item.events::<Reply>() {
-                    Ok(events) => Item::new(events.to_vec()).into(),
-                    Err(f) => Part::End(Err(f)),
-                }),
-                Part::Frame(_) => {}
-                // Its error bytes are dropped with the framing.
-                Part::End(Err(f)) => out.push(Part::End(Err(f.unsaid()))),
-                part => out.push(part),
-            }
+/// One JSON message, decoded whole: one reply on success, else the
+/// provider's error.
+pub(crate) fn unary_decoder<W: Wire>(head: &http::response::Parts) -> Box<dyn Decoder<Reply>> {
+    let (name, status): (Arc<str>, _) = (Arc::from(W::NAME), head.status);
+    crate::whole::decoder(W::NAME, head, move |raw, out| {
+        let v = serde_json::from_slice::<Value>(&raw).ok();
+        if let Some(v) = v.as_ref().filter(|v| W::is_response(v)) {
+            let mut reply = W::reply(v);
+            reply.usage = W::usage(v);
+            out.push(reply.came(&name, raw));
+            return Ok(());
         }
-    }
+        // An error in a success goes as it came to a client of this format.
+        Err(match crate::sse::failure_json(&raw).filter(says_error) {
+            Some(v) => provider_error(status, &v).with_raw(W::NAME, raw),
+            None => Fault::upstream("the provider's success is not a response of its format"),
+        })
+    })
 }
 
-impl Decoder for Reframed {
-    fn decode(&mut self, bytes: Bytes, out: &mut Vec<Part>) {
-        let from = out.len();
-        self.0.decode(bytes, out);
-        Self::remake(from, out);
-    }
-
-    fn finish(&mut self, out: &mut Vec<Part>) {
-        let from = out.len();
-        self.0.finish(out);
-        Self::remake(from, out);
-    }
-}
-
-/// One JSON message, decoded once whole: its events on success, otherwise
-/// the provider's error relayed as it is.
-pub(crate) fn unary_decoder<W: Wire>(status: StatusCode) -> Box<dyn Decoder> {
-    Box::new(Whole::new(move |raw: Bytes, out: &mut Vec<Part>| {
-        let end = if status.is_success() {
-            let v = serde_json::from_slice::<Value>(&raw).ok();
-            if let Some(v) = v.as_ref().filter(|v| W::is_response(v)) {
-                // Usage first, so a body written in another format has it.
-                let usage = W::usage(v);
-                if !usage.is_empty() {
-                    out.push(usage.into());
-                }
-                out.push(Item::decoded(W::replies(v), raw).into());
-                return out.push(Part::End(Ok(())));
-            }
-            // An error in a success, even one framed as events, or a
-            // success that is not a response.
-            match crate::sse::failure_json(&raw).filter(says_error) {
-                Some(v) => provider_error(status, &v),
-                None => Fault::upstream("the provider's success is not a response of its format"),
-            }
-        } else {
-            // A failure is read whole, even one framed as events.
-            let v = crate::sse::failure_json(&raw).unwrap_or_default();
-            provider_error(status, &v)
-        };
-        // Relayed as it is.
-        out.push(Part::Frame(raw));
-        out.push(Part::End(Err(end.said())));
-    }))
-}
-
-/// Writes one message: the provider's own with any edits put back, a body
-/// made from events, or the error.
+/// Writes one message at its end: the provider's with edits put back, one
+/// made from replies, or the error. Unless `relayed`, it writes from values.
 pub(crate) struct UnaryEncoder<W> {
     ok: bool,
-    /// The provider's message, held to the end for what a filter adds.
-    own: Option<Relayed>,
-    /// The events of another format, or a plugin.
-    so_far: SoFar,
+    relayed: bool,
+    replies: Vec<Reply>,
     wire: PhantomData<W>,
 }
 
-/// The provider's own message in a unary response.
-struct Relayed {
-    raw: Bytes,
-    events: Vec<Reply>,
-    edited: bool,
-    /// Events a filter released after it.
-    added: Vec<Reply>,
-}
-
 impl<W: Wire> UnaryEncoder<W> {
-    pub(crate) fn new(head: &http::response::Parts) -> Self {
+    pub(crate) fn new(head: &http::response::Parts, relayed: bool) -> Self {
+        let (ok, replies, wire) = (head.status.is_success(), Vec::new(), PhantomData);
         Self {
-            ok: head.status.is_success(),
-            own: None,
-            so_far: SoFar::default(),
-            wire: PhantomData,
+            ok,
+            relayed,
+            replies,
+            wire,
         }
     }
 }
 
-impl<W: Wire> Encoder for UnaryEncoder<W> {
-    fn encode(&mut self, part: &Part, out: &mut BytesMut) -> Result<(), Fault> {
-        match part {
-            Part::Frame(b) => out.extend_from_slice(b),
-            Part::Usage(u) => self.so_far.usage += u,
-            Part::Item(item) => match (item.raw(), &mut self.own) {
-                (Some(raw), _) => {
-                    self.own = Some(Relayed {
-                        raw: raw.clone(),
-                        events: item.events()?.to_vec(),
-                        edited: item.unedited().is_none(),
-                        added: Vec::new(),
-                    });
-                }
-                (None, Some(own)) => own.added.extend_from_slice(item.events()?),
-                (None, None) => {
-                    for event in item.events::<Reply>()? {
-                        self.so_far.add(event)?;
-                    }
-                }
-            },
-            Part::End(Ok(())) => {
-                let body = match self.own.take() {
-                    Some(own) if !own.edited && own.added.is_empty() => own.raw,
-                    Some(own) => {
-                        let events = own.events.into_iter().chain(own.added).collect();
-                        rebuild_whole::<W>(&own.raw, &join(events))?
-                    }
-                    None => W::render(&self.so_far).to_string().into(),
-                };
-                out.extend_from_slice(&body);
+impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
+    fn encode(&mut self, reply: &Reply, _out: &mut BytesMut) -> Result<(), Fault> {
+        self.replies.push(reply.clone());
+        Ok(())
+    }
+
+    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        if let Err(f) = end {
+            match f.raw(W::NAME) {
+                Some(body) => out.extend_from_slice(body),
+                None if self.ok => return Err(f.clone()),
+                None => out.extend_from_slice(W::error_body(f).to_string().as_bytes()),
             }
-            Part::End(Err(f)) if self.ok => return Err(f.clone()),
-            Part::End(Err(f)) => {
-                let body = W::error_body(f).to_string();
-                out.extend_from_slice(body.as_bytes());
-            }
-            _ => return Err(unknown_part()),
+            return Ok(());
         }
+        let replies = std::mem::take(&mut self.replies);
+        let own = replies.iter().find_map(|r| r.origin(W::NAME));
+        let body = match own.filter(|_| self.relayed) {
+            Some(o) if replies.len() == 1 && o.said == replies[0] => o.bytes.clone(),
+            Some(o) => rebuild_whole::<W>(&o.bytes, &o.said, &merged(&replies))?,
+            None => {
+                let mut so_far = SoFar::default();
+                for reply in &replies {
+                    so_far.add(reply)?;
+                }
+                W::render(&so_far).to_string().into()
+            }
+        };
+        out.extend_from_slice(&body);
         Ok(())
     }
 }
 
-/// A whole response with its edited events put back.
-pub(crate) fn rebuild_whole<W: Wire>(raw: &Bytes, events: &[Reply]) -> Result<Bytes, Fault> {
+/// Replies as one message says them: the first start, all content in
+/// order, texts of one block joined, the last finish, all usage.
+pub(crate) fn merged(replies: &[Reply]) -> Reply {
+    let mut all = Reply::default();
+    for reply in replies {
+        if all.start.is_none() {
+            all.start = reply.start.clone();
+        }
+        all.content.extend(reply.content.iter().cloned());
+        if reply.finish.is_some() {
+            all.finish = reply.finish.clone();
+        }
+        all.usage += &reply.usage;
+    }
+    all.content = join(std::mem::take(&mut all.content));
+    all
+}
+
+/// A whole response `raw`, which said `said`, with `reply` put back.
+pub(crate) fn rebuild_whole<W: Wire>(
+    raw: &Bytes,
+    said: &Reply,
+    reply: &Reply,
+) -> Result<Bytes, Fault> {
     let mut v: Value = serde_json::from_slice(raw).unwrap_or_default();
-    W::put(&mut v, events);
-    // Blocks are numbered by position, which a dropped block changes.
-    let again = unless_taken(events, W::replies(&v));
-    reads_back(
-        &by_position(&W::in_order(events)),
-        &by_position(&W::in_order(&again)),
-    )?;
+    W::put(&mut v, reply);
+    if reply.usage != said.usage && v["usage"].is_object() {
+        v["usage"] = W::usage_body(&reply.usage);
+    }
+    reads_back::<W>(reply, &W::reply(&v))?;
     Ok(v.to_string().into())
 }
 
-/// `again`, events a message read back as, without their starts if a filter
-/// took `events`' start: the message still names itself.
-pub(crate) fn unless_taken(events: &[Reply], again: Vec<Reply>) -> Vec<Reply> {
-    let is_start = |e: &Reply| matches!(e, Reply::Start { .. });
-    match events.iter().any(is_start) {
-        true => again,
-        false => again.into_iter().filter(|e| !is_start(e)).collect(),
+/// Checks that a message rebuilt with `reply` reads back as it, so an edit
+/// it has no place for fails. A start a filter took is not checked.
+pub(crate) fn reads_back<W: Wire>(reply: &Reply, again: &Reply) -> Result<(), Fault> {
+    let start = reply.start.is_none() || reply.start == again.start;
+    let content = |r: &Reply| by_position(&W::in_order(&join(r.content.clone())));
+    if start && reply.finish == again.finish && content(reply) == content(again) {
+        return Ok(());
     }
+    Err(unpatchable("the provider's message has no place for it"))
 }
 
-/// `events` with their texts numbered in order, as a message's positions
-/// number them.
-fn by_position(events: &[Reply]) -> Vec<Reply> {
+/// `content` with its texts' blocks numbered by position.
+fn by_position(content: &[Piece]) -> Vec<Piece> {
     let mut blocks: Vec<u32> = Vec::new();
-    let mut numbered = events.to_vec();
-    for e in &mut numbered {
-        if let Reply::Text { block, .. } = e {
+    let mut numbered = content.to_vec();
+    for p in &mut numbered {
+        if let Piece::Text { block, .. } = p {
             let at = blocks.iter().position(|b| b == block).unwrap_or_else(|| {
                 blocks.push(*block);
                 blocks.len() - 1
@@ -380,52 +354,31 @@ fn by_position(events: &[Reply]) -> Vec<Reply> {
     numbered
 }
 
-/// Checks that a message rebuilt with edited events reads back as them. An
-/// edit the message has no place for, such as a tool call turned into text,
-/// fails the response.
-pub(crate) fn reads_back(events: &[Reply], again: &[Reply]) -> Result<(), Fault> {
-    if events == again {
-        return Ok(());
+/// `content` with texts of one block joined across whatever came between.
+pub(crate) fn join(content: Vec<Piece>) -> Vec<Piece> {
+    let mut joined: Vec<Piece> = Vec::with_capacity(content.len());
+    for piece in content {
+        if let Piece::Text { block, text } = &piece {
+            let same = joined.iter_mut().rev().find_map(|had| match had {
+                Piece::Text { block: b, text } if b == block => Some(text),
+                _ => None,
+            });
+            if let Some(had) = same {
+                had.push_str(text);
+                continue;
+            }
+        }
+        joined.push(piece);
     }
-    Err(unpatchable("the provider's message has no place for it"))
+    joined
 }
 
-/// A Part variant this format does not know.
-pub(crate) fn unknown_part() -> Fault {
-    Fault::internal("a part this format does not know")
-}
-
-/// What a stream format writes itself; [`StreamEncoder`] routes the Parts.
-pub(crate) trait StreamWriter: Default + Send + 'static {
-    /// A provider's event rebuilt with its edited events, or `None` if it
-    /// has nothing left to say.
-    fn rebuild(raw: &Bytes, events: &[Reply]) -> Result<Option<Bytes>, Fault>;
-    /// Relay the provider's event `raw`. Its end, such as finish and usage,
-    /// is held back so events a filter releases at the end go before it.
-    fn relay(&mut self, raw: &Bytes, out: &mut BytesMut);
-    /// Whether the provider's event `raw` can hold `event`, such as text in
-    /// a text event.
-    fn holds(raw: &Bytes, event: &Reply) -> bool;
-    /// Write text or a finish the provider did not send, in a new stream or
-    /// among the provider's events (`so_far.relayed`). Else an `Err`.
-    fn write(&mut self, e: &Reply, so_far: &SoFar, out: &mut BytesMut) -> Result<(), Fault>;
-    /// Write the end, after what is held. A new stream that succeeded is
-    /// opened and closed even if it said nothing; a failure is written in
-    /// this format's framing.
-    fn end(
-        &mut self,
-        end: &Result<(), Fault>,
-        so_far: &SoFar,
-        out: &mut BytesMut,
-    ) -> Result<(), Fault>;
-}
-
-/// What a response written from events has said so far.
+/// What a response written from replies has written so far.
 #[derive(Debug, Default)]
 pub(crate) struct SoFar {
-    /// Whether the events are the provider's own, relayed as its bytes.
+    /// Whether the replies are the provider's own, relayed as their bytes.
     pub(crate) relayed: bool,
-    /// The response's id and model, from its first start event.
+    /// The response's id and model, from its first start.
     pub(crate) start: Option<(String, String)>,
     /// Text by content block, in block order, for a whole response.
     pub(crate) text: BTreeMap<u32, String>,
@@ -434,158 +387,159 @@ pub(crate) struct SoFar {
 }
 
 impl SoFar {
-    /// Note the first start and the finish. Stream chunks repeat the
-    /// start, some without the model, so only the first counts.
-    pub(crate) fn note(&mut self, event: &Reply) {
-        match event {
-            Reply::Start { id, model } => {
-                self.start
-                    .get_or_insert_with(|| (id.clone(), model.clone()));
-            }
-            Reply::Finish(f) => self.finish = Some(f.clone()),
-            _ => {}
+    /// Note the first start, the last finish and the usage.
+    pub(crate) fn note(&mut self, reply: &Reply) {
+        if let Some(start) = &reply.start {
+            self.start
+                .get_or_insert_with(|| (start.id.clone(), start.model.clone()));
         }
+        if let Some(finish) = &reply.finish {
+            self.finish = Some(finish.clone());
+        }
+        self.usage += &reply.usage;
     }
 
-    /// Add an event to a whole response. Content it cannot write, such as
-    /// a tool call, is an `Err`.
-    pub(crate) fn add(&mut self, event: &Reply) -> Result<(), Fault> {
-        self.note(event);
-        match event {
-            _ if skips(event) => {}
-            Reply::Text { block, text } => self.text.entry(*block).or_default().push_str(text),
-            Reply::Finish(_) => {}
-            _ => return Err(unwritable_content()),
+    /// Add a reply to a whole response; other content is an `Err`.
+    pub(crate) fn add(&mut self, reply: &Reply) -> Result<(), Fault> {
+        self.note(reply);
+        for piece in &reply.content {
+            match piece {
+                // Some providers refuse an empty text block.
+                Piece::Text { text, .. } if text.is_empty() => {}
+                Piece::Text { block, text } => self.text.entry(*block).or_default().push_str(text),
+                Piece::Other { .. } => return Err(unwritable_content()),
+            }
         }
         Ok(())
     }
 }
 
-/// Whether writers leave `event` out: a start, which they place
-/// themselves, or an empty text, which some providers refuse as a block.
-fn skips(event: &Reply) -> bool {
-    match event {
-        Reply::Start { .. } => true,
-        Reply::Text { text, .. } => text.is_empty(),
-        _ => false,
-    }
+/// Whether `reply` has a finish or content other than empty text.
+pub(crate) fn shows(reply: &Reply) -> bool {
+    let empty = |p: &Piece| matches!(p, Piece::Text { text, .. } if text.is_empty());
+    reply.finish.is_some() || reply.content.iter().any(|p| !empty(p))
 }
 
-/// Writes a stream: the provider's events as they are, or events written
-/// from conversation events.
-#[derive(Debug, Default)]
-pub(crate) struct StreamEncoder<S> {
-    so_far: SoFar,
-    stream: S,
+/// Wraps a stream's decoder to hold replies before the first content, such
+/// as the start, until it comes. A failure first drops them but for their
+/// usage, pushed as one reply that says nothing, so it can be refused.
+pub(crate) fn holding_start(decoder: impl Decoder<Reply>) -> Box<dyn Decoder<Reply>> {
+    Box::new(HoldStart {
+        decoder,
+        held: Vec::new(),
+        through: false,
+    })
 }
 
-impl<S> StreamEncoder<S> {
-    pub(crate) fn new(relayed: bool, stream: S) -> Self {
-        let so_far = SoFar {
-            relayed,
-            ..SoFar::default()
-        };
-        Self { so_far, stream }
-    }
+struct HoldStart<D> {
+    decoder: D,
+    held: Vec<Reply>,
+    /// Whether content came: later replies pass through.
+    through: bool,
 }
 
-impl<S: StreamWriter> Encoder for StreamEncoder<S> {
-    fn encode(&mut self, part: &Part, out: &mut BytesMut) -> Result<(), Fault> {
-        match part {
-            Part::Frame(b) => self.stream.relay(b, out),
-            Part::Item(item) => {
-                let events = item.events::<Reply>()?;
-                let (made, bytes, after) = match (item.unedited(), item.raw()) {
-                    (Some(raw), _) => (Vec::new(), Some(raw.clone()), Vec::new()),
-                    (None, Some(raw)) => rebuild_after::<S>(raw, events)?,
-                    (None, None) => (events.to_vec(), None, Vec::new()),
-                };
-                for e in events {
-                    self.so_far.note(e);
+impl<D> HoldStart<D> {
+    /// Keep back what `out` got from `from` on until the first content.
+    fn hold(&mut self, out: &mut Vec<Reply>, from: usize, failed: bool) {
+        for reply in out.split_off(from) {
+            match reply {
+                _ if self.through => out.push(reply),
+                // Framing passes, unless behind what is held.
+                ref r if !r.says() && self.held.is_empty() => out.push(reply),
+                ref r if !r.says() || !shows(r) => self.held.push(reply),
+                _ => {
+                    out.append(&mut self.held);
+                    out.push(reply);
+                    self.through = true;
                 }
-                // Buffered, so an item failing partway writes nothing.
-                let mut all = BytesMut::new();
-                for e in made.iter().filter(|e| !skips(e)) {
-                    self.stream.write(e, &self.so_far, &mut all)?;
-                }
-                out.extend_from_slice(&all);
-                if let Some(bytes) = bytes {
-                    self.stream.relay(&bytes, out);
-                }
-                let mut all = BytesMut::new();
-                for e in after.iter().filter(|e| !skips(e)) {
-                    self.stream.write(e, &self.so_far, &mut all)?;
-                }
-                out.extend_from_slice(&all);
             }
-            Part::Usage(u) => self.so_far.usage += u,
-            Part::End(end) => self.stream.end(end, &self.so_far, out)?,
-            _ => return Err(unknown_part()),
         }
-        Ok(())
-    }
-}
-
-/// Split edited `events` around the provider's event `raw`. The run `raw`
-/// can hold, texts of one block joined, rebuilds it. Events before that run,
-/// such as text released before a finish, and after it, such as a finish
-/// added after text, are written anew. Starts stay with `raw`, which names
-/// the response.
-fn rebuild_after<S: StreamWriter>(raw: &Bytes, events: &[Reply]) -> Result<Rebuilt, Fault> {
-    let mut events = join(events.to_vec());
-    let starts = events
-        .iter()
-        .take_while(|e| matches!(e, Reply::Start { .. }))
-        .count();
-    let before = events[starts..]
-        .iter()
-        .take_while(|e| !S::holds(raw, e))
-        .count();
-    let held = events[starts + before..]
-        .iter()
-        .take_while(|e| S::holds(raw, e))
-        .count();
-    let after: Vec<Reply> = events.split_off(starts + before + held);
-    let before: Vec<Reply> = events.drain(starts..starts + before).collect();
-    Ok((before, S::rebuild(raw, &events)?, after))
-}
-
-/// Events written before a rebuilt provider event, the event, and events
-/// written after it.
-type Rebuilt = (Vec<Reply>, Option<Bytes>, Vec<Reply>);
-
-/// `events` as a message holds them: starts first, texts of one block
-/// joined across whatever came between, and the finish last.
-fn join(events: Vec<Reply>) -> Vec<Reply> {
-    let (starts, events): (Vec<Reply>, Vec<Reply>) = events
-        .into_iter()
-        .partition(|e| matches!(e, Reply::Start { .. }));
-    let mut joined: Vec<Reply> = starts;
-    for e in events {
-        let block = |had: &Reply| match had {
-            Reply::Text { block, .. } => Some(*block),
-            _ => None,
-        };
-        let same =
-            block(&e).and_then(|b| joined.iter_mut().rev().find(|had| block(had) == Some(b)));
-        match (same, e) {
-            (Some(Reply::Text { text, .. }), Reply::Text { text: more, .. }) => {
-                text.push_str(&more);
+        if failed && !self.through {
+            let mut usage = Reply::default();
+            for held in self.held.drain(..) {
+                usage.usage += &held.usage;
             }
-            (_, e) => {
-                let finish = joined
-                    .iter()
-                    .position(|had| matches!(had, Reply::Finish(_)));
-                joined.insert(finish.unwrap_or(joined.len()), e);
+            if !usage.usage.is_empty() {
+                out.push(usage);
             }
         }
     }
-    joined
 }
 
-/// A conversation's messages in the client's format. A client message
-/// (by shared source) is kept as it was if unchanged and patched in its
-/// form if changed; any other is written anew.
+impl<D: Decoder<Reply>> Decoder<Reply> for HoldStart<D> {
+    fn decode(&mut self, bytes: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let from = out.len();
+        let decoded = self.decoder.decode(bytes, out);
+        self.hold(out, from, decoded.is_err());
+        decoded
+    }
+
+    fn end(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let from = out.len();
+        let ended = self.decoder.end(out);
+        self.hold(out, from, ended.is_err());
+        out.append(&mut self.held);
+        ended
+    }
+}
+
+/// An edited reply split around its message: the content before what the
+/// message `holds`, the reply that rebuilds it with the start, and the
+/// content after. The finish stays inside if `holds_finish` and nothing follows.
+pub(crate) fn split_around(
+    reply: &Reply,
+    holds: impl Fn(&Piece) -> bool,
+    holds_finish: bool,
+) -> (Reply, Reply, Reply) {
+    let mut content = join(reply.content.clone());
+    let before = content.iter().take_while(|p| !holds(p)).count();
+    let held = before + content[before..].iter().take_while(|p| holds(p)).count();
+    let piece = |content: Vec<Piece>| Reply {
+        content,
+        ..Reply::default()
+    };
+    let mut after = piece(content.split_off(held));
+    let mut inside = Reply {
+        content: content.split_off(before),
+        ..reply.clone()
+    };
+    if !holds_finish || !after.content.is_empty() {
+        after.finish = inside.finish.take();
+    }
+    (piece(content), inside, after)
+}
+
+/// A stream reader of format `W`'s events, each one reply that keeps its
+/// bytes, up to its end, after which nothing is read.
+pub(crate) struct Reading<W> {
+    pub(crate) name: Arc<str>,
+    pub(crate) totals: Totals,
+    pub(crate) done: bool,
+    wire: PhantomData<W>,
+}
+
+impl<W: Wire> Reading<W> {
+    pub(crate) fn new() -> Self {
+        let (name, wire) = (Arc::from(W::NAME), PhantomData);
+        Self {
+            name,
+            totals: Totals::default(),
+            done: false,
+            wire,
+        }
+    }
+
+    /// Truncated unless its end came.
+    pub(crate) fn ended(&self) -> Result<(), Fault> {
+        match self.done {
+            true => Ok(()),
+            false => Err(Fault::truncated()),
+        }
+    }
+}
+
+/// A conversation's messages in the client's format: a client message (by
+/// shared source) as it was, or edited in its form; any other anew.
 pub(crate) fn patch_messages(
     old: &[Message],
     new: &[Message],
@@ -649,8 +603,8 @@ pub(crate) fn write_content(content: &[Content]) -> Value {
     }
 }
 
-/// Content `old`, which said `was`, changed to say `now`. Parts keep their
-/// JSON, such as a cache marker, where they can.
+/// Content `old`, which read `was`, changed to read `now`, parts keeping
+/// their JSON, such as a cache marker, where they can.
 pub(crate) fn patch_content(
     old: Option<&Value>,
     was: &[Content],
@@ -662,7 +616,7 @@ pub(crate) fn patch_content(
         return Ok(write_content(now));
     };
     // Parts in the longest common subsequence keep their JSON. A gap
-    // between them with as many parts as before is patched part by part;
+    // between them with as many parts as before is edited part by part;
     // otherwise which became which is unknown, so it is written anew.
     let (n, m) = (was.len(), now.len());
     let mut kept = vec![vec![0_usize; m + 1]; n + 1];
@@ -729,18 +683,16 @@ fn part_update(value: &Value, was: &Content, now: &Content) -> Value {
     }
 }
 
-/// Turns a provider's running usage totals into the increments the kernel
-/// adds.
+/// Turns a provider's running usage totals into increments.
 #[derive(Debug, Default)]
 pub(crate) struct Totals(Usage);
 
 impl Totals {
-    /// What `total` adds to the totals seen so far. A total lower than one
-    /// seen before adds nothing, so usage only grows.
+    /// What `total` adds to the totals seen so far; usage only grows.
     pub(crate) fn increment(&mut self, total: &Usage) -> Usage {
         let mut step = Usage::default();
         for (unit, n) in total.iter() {
-            let seen = self.0.get(&unit);
+            let seen = self.0.get(&unit).unwrap_or_default();
             if n > seen {
                 step.add(unit.clone(), n - seen);
                 self.0.add(unit, n - seen);
@@ -750,39 +702,7 @@ impl Totals {
     }
 }
 
-/// A JSON body's `model`, for any JSON format's
-/// [`Format::model`](respan_gateway_core::Format::model).
-pub fn json_model(body: &Doc) -> Option<String> {
-    body.json()?["model"].as_str().map(Into::into)
-}
-
-/// Whether a JSON body asks for a stream.
-pub(crate) fn streams(body: &Doc) -> bool {
-    body.json().and_then(|v| v["stream"].as_bool()) == Some(true)
-}
-
-/// Set a JSON body's `model`, or remove it for `None`, for any JSON
-/// format's `prepare`. A body whose `model` is already that keeps its
-/// bytes. `Err` with `bad_request` if the body must change and is not a
-/// JSON object.
-pub fn write_model(body: &mut Doc, model: Option<&str>) -> Result<(), Fault> {
-    if body.json().and_then(|v| v["model"].as_str()) != model {
-        edit(body, |v| set(v, "model", model.map(Into::into)))?;
-    }
-    Ok(())
-}
-
-/// A JSON body with its fields changed by `f`, in place.
-pub(crate) fn edit(body: &mut Doc, f: impl FnOnce(&mut Map<String, Value>)) -> Result<(), Fault> {
-    let Some(Value::Object(fields)) = body.json_mut() else {
-        return Err(Fault::bad_request("request body is not a JSON object"));
-    };
-    f(fields);
-    Ok(())
-}
-
-/// A message as a conversation holds it, with what the kind has no form for
-/// kept in place.
+/// A message as a conversation keeps it.
 pub(crate) fn read_message(m: &Value, roles: &Names<Role>) -> Message {
     let name = m["role"].as_str().unwrap_or_default();
     let role = roles
@@ -797,8 +717,7 @@ pub(crate) fn read_message(m: &Value, roles: &Names<Role>) -> Message {
     message
 }
 
-/// A text part, or other content. A cache marker is only a hint, so a text
-/// part with one is still text.
+/// A text part, even with a cache marker, or other content.
 fn read_part(p: &Value) -> Content {
     let known = |k: &str| k == "type" || k == "text" || k == "cache_control";
     let fields = p.as_object().into_iter().flatten();
@@ -826,9 +745,8 @@ pub(crate) fn says_error(v: &Value) -> bool {
     says(error) && *error != false && *error != "" && error.as_f64() != Some(0.0)
 }
 
-/// The fault for a provider's error body in a response of `status`. A
-/// failure keeps its status; an error in a success is a 502. The error
-/// object becomes the fault's details, so the client gets all its fields.
+/// The fault for a provider's error body in a response of `status`, a 502
+/// for a success, with the error's fields as details.
 pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
     // `{"error": {..}}` (OpenAI, Anthropic), the first of a list under
     // `error` or `errors` (Gemini, Cloudflare), or fields at the top.
@@ -872,10 +790,9 @@ pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
     fault.with_details(details)
 }
 
-/// Merge the fault's details into the format's error fields. `message` and
-/// `type` stay the fault's. Any other field is added if missing, and
-/// replaces the format's if it is a string or null, as OpenAI's `code` and
-/// `param` may be.
+/// Merge the fault's details into the format's error fields: each is added
+/// if missing, and a string or null replaces the format's but for
+/// `message` and `type`.
 pub(crate) fn merge_details(mut error: Value, fault: &Fault) -> Value {
     let (Some(merged), Some(Value::Object(details))) = (error.as_object_mut(), fault.details())
     else {
@@ -890,9 +807,8 @@ pub(crate) fn merge_details(mut error: Value, fault: &Fault) -> Value {
     error
 }
 
-/// A format's names for the values of a conversation type, such as its
-/// roles or finish reasons. Several names may mean one value; the first is
-/// the one written.
+/// A format's names for a conversation type's values; the first of several
+/// is written.
 pub(crate) struct Names<T: 'static>(pub &'static [(&'static str, T)]);
 
 impl<T: PartialEq + Clone> Names<T> {
@@ -917,16 +833,13 @@ impl Names<Finish> {
             .unwrap_or_else(|| Finish::Other(reason.to_owned()))
     }
 
-    /// A [`Finish`] as the provider's reason. A reason from another format
-    /// that this one lacks is written as a plain stop.
+    /// A [`Finish`] as the provider's reason, else a plain stop.
     pub(crate) fn reason(&self, finish: &Finish) -> &'static str {
         let stop = || self.name(&Finish::Stop);
         self.name(finish).or_else(stop).unwrap_or("stop")
     }
 
-    /// Write `finish` at `pointer` if it is there and says otherwise.
-    /// Reasons that mean the same, such as a stop sequence and a natural
-    /// end, are left as the provider wrote them.
+    /// Write `finish` at `pointer` if it is there and means otherwise.
     pub(crate) fn rewrite(&self, v: &mut Value, pointer: &str, finish: &Finish) {
         let now = v.pointer(pointer).and_then(Value::as_str);
         if now.is_some_and(|r| self.finish(r) != *finish) {
@@ -940,14 +853,12 @@ pub(crate) fn unpatchable(what: &str) -> Fault {
     Fault::config(format!("a plugin's change cannot be made: {what}"))
 }
 
-/// A request holding what cannot be sent in another format.
+/// A request carrying what cannot be sent in another format.
 pub(crate) fn untranslatable(what: &str) -> Fault {
     Fault::bad_request(format!("{what} cannot be translated to another format yet"))
 }
 
-/// A translated or reframed response holding what the client's format
-/// cannot write anew, such as a tool call; a 502, as the client is not at
-/// fault.
+/// A 502 for content the client's format cannot write anew, such as a tool call.
 pub(crate) fn unwritable_content() -> Fault {
     Fault::new(
         StatusCode::BAD_GATEWAY,
@@ -957,17 +868,15 @@ pub(crate) fn unwritable_content() -> Fault {
 }
 
 /// A stream event that is not its format's JSON, as other content, so
-/// filters see it rather than it passing unseen. One with no data, such as
-/// a comment, is a Frame.
-pub(crate) fn unreadable_event(format: &str, raw: Bytes) -> Part {
+/// filters see it; one with no data, such as a comment, says nothing.
+pub(crate) fn unreadable_event(name: &Arc<str>, raw: Bytes) -> Reply {
     match event_data(&raw) {
-        Some(data) => Item::decoded([Reply::other(format, data)], raw).into(),
-        None => Part::Frame(raw),
+        Some(data) => Reply::other(name.clone(), data).came(name, raw),
+        None => Reply::default().came(name, raw),
     }
 }
 
-/// Whether a JSON value says anything: null, an empty array and an empty
-/// object do not.
+/// Whether a JSON value says anything: not null or empty.
 pub(crate) fn says(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -983,8 +892,8 @@ pub(crate) fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// The fields of `v` not in `known`, except those that say nothing or sit
-/// at their `inert` value.
+/// The fields of `v` not in `known` that say something other than their
+/// `inert` value.
 pub(crate) fn unsupported_fields(
     v: &Value,
     known: &[&str],
@@ -1011,8 +920,8 @@ pub(crate) fn replace(v: &mut Value, pointer: &str, value: impl Into<Value>) {
     }
 }
 
-/// Write the sampling fields `after` changed from `before`. Both formats
-/// spell them alike except the stop sequences, whose key is `stop`.
+/// Write the sampling fields `after` changed from `before`, stop sequences
+/// under `stop`.
 pub(crate) fn patch_sampling(
     v: &mut Map<String, Value>,
     before: &Conversation,
@@ -1062,7 +971,7 @@ mod tests {
 
     #[test]
     fn real_provider_errors_keep_their_code_and_words() {
-        let answered = "the provider answered 400";
+        let answered = "the provider returned 400";
         for (body, code, message) in [
             (
                 json!({"error": {"type": "invalid_request_error", "message": "m"}}),
@@ -1076,7 +985,7 @@ mod tests {
             ),
             (
                 json!({"error": "model not found"}),
-                "upstream_error",
+                "upstream",
                 "model not found",
             ),
             (
@@ -1094,14 +1003,10 @@ mod tests {
                 "rate_limited",
                 "slow",
             ),
-            (
-                json!({"detail": "Not found"}),
-                "upstream_error",
-                "Not found",
-            ),
+            (json!({"detail": "Not found"}), "upstream", "Not found"),
             (
                 json!({"detail": [{"msg": "field required"}]}),
-                "upstream_error",
+                "upstream",
                 "field required",
             ),
             (
@@ -1111,7 +1016,7 @@ mod tests {
             ),
             (
                 json!({"jsonrpc": "2.0", "error": {"code": -32600, "message": "invalid"}}),
-                "upstream_error",
+                "upstream",
                 "invalid",
             ),
             (
@@ -1121,21 +1026,17 @@ mod tests {
             ),
             (
                 json!({"type": "https://example.com/probs/nope", "title": "Nope"}),
-                "upstream_error",
+                "upstream",
                 "Nope",
             ),
-            (json!("Unauthorized"), "upstream_error", "Unauthorized"),
-            (
-                json!({"error": {}, "message": "top"}),
-                "upstream_error",
-                "top",
-            ),
+            (json!("Unauthorized"), "upstream", "Unauthorized"),
+            (json!({"error": {}, "message": "top"}), "upstream", "top"),
             (
                 json!({"error": {"code": "x"}, "message": "top"}),
                 "x",
                 "top",
             ),
-            (Value::Null, "upstream_error", answered),
+            (Value::Null, "upstream", answered),
         ] {
             let fault = provider_error(StatusCode::BAD_REQUEST, &body);
             assert_eq!((fault.code(), fault.message()), (code, message), "{body}");
@@ -1213,7 +1114,7 @@ mod tests {
         let code = |v: Value| provider_error(StatusCode::OK, &v).code().to_owned();
         assert_eq!(
             code(json!({"type": "error", "error": "Overloaded"})),
-            "upstream_error"
+            "upstream"
         );
         assert_eq!(
             code(json!({"error": {"type": "overloaded_error"}})),
@@ -1234,7 +1135,7 @@ mod tests {
         );
         assert_eq!((listed.code(), listed.message()), ("t", "m"));
         let message = provider_error(StatusCode::OK, &json!({"error": {"message": ""}}));
-        assert_eq!(message.message(), "the provider answered 200");
+        assert_eq!(message.message(), "the provider returned 200");
     }
 
     #[test]
@@ -1245,8 +1146,8 @@ mod tests {
             u.add("out", n);
             u
         };
-        assert_eq!(totals.increment(&total(1.0)).get("out"), 1.0);
-        assert_eq!(totals.increment(&total(3.0)).get("out"), 2.0);
+        assert_eq!(totals.increment(&total(1.0)).get("out"), Some(1.0));
+        assert_eq!(totals.increment(&total(3.0)).get("out"), Some(2.0));
         assert!(totals.increment(&total(3.0)).is_empty());
         assert!(totals.increment(&total(2.0)).is_empty(), "never negative");
     }

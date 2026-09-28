@@ -1,17 +1,20 @@
 #![warn(missing_docs)]
-//! Test kit for plugin authors: a scripted provider, a recorder of
-//! outcomes, and response helpers.
+//! Test kit for plugin authors: a scripted provider, recorders of outcomes
+//! on both edges, and request and response helpers.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
+use futures::channel::mpsc::UnboundedSender;
 use futures::{StreamExt, stream};
 use http::StatusCode;
 use http::header::CONTENT_TYPE;
 use http_body::Frame;
-use http_body_util::{BodyExt, StreamBody};
-use respan_gateway_core::{Body, Context, Fault, Outcome, Plugin, Transport};
+use http_body_util::{BodyExt, Full, StreamBody};
+use respan_gateway_core::{
+    Body, ClientContext, Fault, Outcome, Plugin, ProviderContext, Transport, Usage,
+};
 use respan_gateway_core::{async_trait, bytes, futures, http, http_body, http_body_util};
 
 /// Scripted provider responses: the body arrives chunk by chunk, and an
@@ -57,10 +60,9 @@ pub mod mock {
 /// Responses queued for one base URL.
 type Script = (String, VecDeque<mock::Reply>);
 
-/// Scripted providers, one [`Transport`] per base URL from [`at`](Self::at).
-/// Each queued reply answers one request to its base URL; a request with
-/// none queued gets an `upstream_error` (502). Every request is recorded
-/// with its full URL.
+/// Scripted providers, one [`Transport`] per base URL from [`at`](Self::at):
+/// each queued reply answers one request, and one with none queued gets a
+/// 502 `upstream`. Every request is recorded with its full URL.
 #[derive(Debug, Clone, Default)]
 pub struct MockTransport {
     scripts: Arc<Mutex<Vec<Script>>>,
@@ -104,11 +106,11 @@ impl MockTransport {
     }
 }
 
-/// One provider's transport, from [`MockTransport::at`]. Like
-/// `HttpTransport`, it joins its base URL with the request's path and adds
-/// its own headers and the call's
-/// [`CallHeaders`](respan_gateway_server::CallHeaders)
-/// ([`add_own_headers`](respan_gateway_server::add_own_headers)).
+/// One provider's transport, from [`MockTransport::at`]: it handles headers
+/// as `HttpTransport` does
+/// ([`add_own_headers`](respan_gateway_server::add_own_headers),
+/// [`strip_origin_headers`](respan_gateway_server::strip_origin_headers)),
+/// and reads the call's body whole before it replies.
 #[derive(Debug, Clone)]
 pub struct MockAt {
     mock: MockTransport,
@@ -117,9 +119,8 @@ pub struct MockAt {
 }
 
 impl MockAt {
-    /// Sends `headers` with every request, replacing same-named ones, all
-    /// values of a repeated name included. With any, clients' credentials
-    /// are not passed on.
+    /// Sends `headers` with every request, replacing same-named ones; with
+    /// any, clients' credentials are not passed on.
     pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
         self.headers = headers;
         self
@@ -128,9 +129,9 @@ impl MockAt {
 
 #[async_trait]
 impl Transport for MockAt {
-    async fn send(&self, req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
         // Keep alike with `HttpTransport::send` in the server crate.
-        let (mut head, body) = req.into_parts();
+        let (mut head, body) = call.into_parts();
         respan_gateway_server::add_own_headers(&mut head, &self.headers)?;
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
@@ -153,7 +154,8 @@ impl Transport for MockAt {
         };
         let script =
             script.ok_or_else(|| Fault::upstream(format!("no mock response for {url}")))?;
-        let (head, chunks) = script.into_parts();
+        let (mut head, chunks) = script.into_parts();
+        respan_gateway_server::strip_origin_headers(&mut head.headers);
         let body = stream::iter(chunks).map(|c| c.map(Frame::data));
         Ok(http::Response::from_parts(
             head,
@@ -165,15 +167,26 @@ impl Transport for MockAt {
 /// A `POST` of `body` to `path`, for
 /// [`Gateway::handle`](respan_gateway_core::Gateway::handle).
 pub fn post(path: &str, body: impl Into<Bytes>) -> http::Request<Body> {
-    let mut req = http::Request::new(respan_gateway_core::body(body));
+    let body = Full::new(body.into()).map_err(Fault::from).boxed_unsync();
+    let mut req = http::Request::new(body);
     *req.method_mut() = http::Method::POST;
     *req.uri_mut() = path.parse().unwrap_or_else(|e| panic!("path {path}: {e}"));
     req
 }
 
+/// A `GET` of `path` whose body is fed through the returned sender, one data
+/// frame per send, ending when the sender is dropped.
+pub fn streamed(path: &str) -> (UnboundedSender<Bytes>, http::Request<Body>) {
+    let (send, frames) = futures::channel::mpsc::unbounded::<Bytes>();
+    let body = StreamBody::new(frames.map(|f| Ok::<_, Fault>(Frame::data(f))));
+    let mut req = http::Request::new(body.boxed_unsync());
+    *req.uri_mut() = path.parse().unwrap_or_else(|e| panic!("path {path}: {e}"));
+    (send, req)
+}
+
 /// Reads a whole response: status, headers, and body or the fault that
 /// broke it off.
-pub async fn collect(
+pub async fn read_whole(
     resp: http::Response<Body>,
 ) -> (StatusCode, http::HeaderMap, Result<Bytes, Fault>) {
     let (parts, body) = resp.into_parts();
@@ -181,9 +194,8 @@ pub async fn collect(
     (parts.status, parts.headers, body)
 }
 
-/// A plugin that records each request's client-edge outcome. Register it
-/// first to see every request whose plugins ran; a request refused before
-/// them, such as one whose body broke off, runs no hooks.
+/// A plugin that records each request's client-edge outcome; register it
+/// first to see every request whose plugins ran.
 #[derive(Debug, Clone, Default)]
 pub struct Outcomes(Arc<Mutex<Vec<Outcome>>>);
 
@@ -206,7 +218,39 @@ impl Outcomes {
 
 #[async_trait]
 impl Plugin for Outcomes {
-    async fn on_client_end(&self, _cx: &Context, outcome: &Outcome) {
+    async fn on_client_end(&self, _cx: &ClientContext, outcome: &Outcome) {
+        let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        all.push(outcome.clone());
+    }
+}
+
+/// A plugin that records each call's provider-edge outcome, where a call's
+/// usage counts; register it first to see every call.
+#[derive(Debug, Clone, Default)]
+pub struct Calls(Arc<Mutex<Vec<Outcome>>>);
+
+impl Calls {
+    /// Every outcome recorded so far, in the order their end hooks ran.
+    pub fn all(&self) -> Vec<Outcome> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The usage of every call, added up.
+    pub fn usage(&self) -> Usage {
+        let mut usage = Usage::default();
+        for outcome in self.all() {
+            usage += outcome.usage;
+        }
+        usage
+    }
+}
+
+#[async_trait]
+impl Plugin for Calls {
+    async fn on_provider_end(&self, _px: &ProviderContext, outcome: &Outcome) {
         let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         all.push(outcome.clone());
     }

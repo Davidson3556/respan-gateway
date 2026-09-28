@@ -45,6 +45,47 @@ ones include the version, such as `https://api.openai.com/v1`,
 `https://generativelanguage.googleapis.com/v1beta/openai`; Anthropic's does
 not: `https://api.anthropic.com`.
 
+## Glossary
+
+In plain words: a client sends a request, plugins look at it, the gateway
+sends it on to a provider, and the response streams back through the
+plugins. A request carries inputs and its response carries outputs. A
+request that asks to switch protocols (`Upgrade`), such as a WebSocket,
+is upgrading: its inputs stream after its head. Any other request is
+whole: its body, even empty, is its one input.
+
+- **Call**: what the gateway sends a provider on a request's behalf
+  (`cx.call`): the request's inputs, or its own (`with_input`). The
+  target is the provider called when every plugin passes: the one
+  `set_target` names, else the first of the gateway's defaults
+  (`Gateway::target`) the request can use.
+- **Edge**: where hooks run. The client edge runs once per request
+  (`on_client`), the provider edge once per call (`on_provider`). Each
+  edge's end hook (`on_client_end`, `on_provider_end`) runs once after
+  its request or call ends. `on_client` passes (`Ok(None)`), or returns
+  a response and skips the plugins after it, or refuses.
+- **Filter**: code that edits a request's inputs or a response's
+  outputs as they stream; its type says which. Messages that say nothing,
+  such as keep-alives, pass no filter.
+- **Format**: one protocol's codec, such as OpenAI Chat: it recognises
+  its requests, and reads and writes its requests and responses.
+- **Kind**: a format's two types, `Input` and `Output`. Formats of one
+  kind translate into each other; traffic the gateway does not read is a
+  kind of one format (`formats::opaque`).
+- **Message**: one message of a body, such as an SSE event, a WebSocket
+  frame or a whole body, decoded into one value of the kind: every one,
+  even one the kind cannot read, keeps the bytes it came in. Usage is what
+  a provider's messages report, counted as decoded, in `Outcome.usage`. A
+  cost cap reserves before the call and settles from it; the kernel had a
+  meter once, but providers report output usage at a stream's end.
+- **Refusal**: a failure before the response head goes out, sent in the
+  client's format with the fault's status.
+- **Relay**: a format's promise to write each message as the bytes it
+  came in while it says the same, an edit written into them: the client's
+  inputs to a provider of that format, and the provider's response (or a
+  plugin's own, `cx.relay`) back. The kernel sends a whole request no
+  plugin changed as the client's bytes, unread.
+
 ## Roadmap
 
 Goal for 0.1: all 14 [use cases](docs/use-cases.md) pass as integration
@@ -54,12 +95,12 @@ test when its milestone lands. The kernel API is frozen after M2.
 | Milestone | Delivers |
 |---|---|
 | M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic with correct usage, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
-| M2 Plugin API | More of the provider edge (waiting, signing, calls from it), async stream filters, reading provider responses, the shared store; API fixes before the freeze |
+| M2 Plugin API | Calls of their own `http::Request`, async stream filters, unread bodies; API fixes before the freeze |
 | M3 Formats | Gemini, Responses, embeddings |
 | M4 Plugins | Fallback, hedge, limits, memo, ledger |
 | M5 Translation | Tool calls, images and reasoning across formats |
-| M6 Hard cases | Sessions and Realtime, jobs, required coverage, PII rewriting, admission |
-| M7 0.1 release | Docs, examples, benchmarks, Redis store |
+| M6 Hard cases | Realtime relay and bridges, jobs, PII rewriting, admission |
+| M7 0.1 release | Docs, examples, benchmarks |
 | M8 MCP gateway | `mcp` kind, relay, aggregation, per-key access |
 | M9 Agent loop | Gateway-run MCP tools inside chat and Responses requests |
 

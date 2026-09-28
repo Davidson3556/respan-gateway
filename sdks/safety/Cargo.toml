@@ -1,0 +1,28 @@
+[package]
+name = "respan-safety"
+description = "An adversarial safety SDK built outside the respan-gateway core: PII redaction and restore, guardrails, a user kind, and a no-retention policy."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone: not a member of the root workspace.
+[workspace]
+
+[dependencies]
+respan-gateway-core = { path = "../../crates/core" }
+respan-gateway-formats = { path = "../../crates/formats" }
+
+[dev-dependencies]
+respan-gateway-server = { path = "../../crates/server" }
+respan-gateway-testkit = { path = "../../crates/testkit" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"

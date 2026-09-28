@@ -2,7 +2,7 @@
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::serde_json::{self, Value};
-use respan_gateway_core::{Decoder, Fault, Part, http};
+use respan_gateway_core::{Decoder, Fault, http};
 
 /// A response's content type, if it is readable.
 pub(crate) fn content_type(head: &http::response::Parts) -> Option<&str> {
@@ -11,43 +11,42 @@ pub(crate) fn content_type(head: &http::response::Parts) -> Option<&str> {
 }
 
 /// Whether a response is a stream: a success labelled `text/event-stream`.
-/// Anything else, failures included, is read whole.
 pub fn is_stream(head: &http::response::Parts) -> bool {
     let essence = content_type(head).and_then(|c| c.split(';').next());
     let sse = essence.is_some_and(|e| e.trim().eq_ignore_ascii_case("text/event-stream"));
     sse && head.status.is_success()
 }
 
-/// Splits a body into events for `on_event`. At the end of the body, a last
-/// event of whole lines is kept without its blank line; one cut mid-line is
-/// dropped, as SSE clients drop it.
-pub(crate) struct SseDecoder<F> {
+/// What a stream's events mean, for an [`SseDecoder`].
+pub(crate) trait Events<T>: Send + 'static {
+    /// The values of one event, as it came.
+    fn event(&mut self, raw: Bytes, out: &mut Vec<T>) -> Result<(), Fault>;
+
+    /// The stream ended: whether it was complete.
+    fn end(&mut self, out: &mut Vec<T>) -> Result<(), Fault>;
+}
+
+/// Splits a body into events. At the end, a last event of whole lines is
+/// kept without its blank line; one cut mid-line is dropped, as clients do.
+pub(crate) struct SseDecoder<E> {
     buf: BytesMut,
     /// Where to resume searching `buf` for the end of an event.
     scanned: usize,
-    on_event: F,
+    events: E,
 }
 
-impl<F> std::fmt::Debug for SseDecoder<F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SseDecoder")
-            .field("buffered", &self.buf.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl<F: FnMut(Bytes, &mut Vec<Part>)> SseDecoder<F> {
-    /// A decoder handing each event's bytes to `on_event`.
-    pub(crate) fn new(on_event: F) -> Self {
+impl<E> SseDecoder<E> {
+    pub(crate) fn new(events: E) -> Self {
+        let (buf, scanned) = (BytesMut::new(), 0);
         Self {
-            buf: BytesMut::new(),
-            scanned: 0,
-            on_event,
+            buf,
+            scanned,
+            events,
         }
     }
 
-    /// Split off the first event ended by a blank line. At the end of the
-    /// body, a last `\r` ends its line.
+    /// Split off the first event ended by a blank line; at the end, a last
+    /// `\r` ends its line.
     fn next_event(&mut self, at_end: bool) -> Option<Bytes> {
         let mut i = self.scanned;
         while let Some(first) = line_end(&self.buf[i..], at_end) {
@@ -68,10 +67,20 @@ impl<F: FnMut(Bytes, &mut Vec<Part>)> SseDecoder<F> {
         None
     }
 
-    fn events(&mut self, at_end: bool, out: &mut Vec<Part>) {
+    /// The events of `bytes`, then, `at_end`, the last one left.
+    fn split(&mut self, bytes: &[u8], at_end: bool) -> Vec<Bytes> {
+        self.buf.extend_from_slice(bytes);
+        let mut events = Vec::new();
         while let Some(event) = self.next_event(at_end) {
-            (self.on_event)(event, out);
+            events.push(event);
         }
+        if at_end {
+            if self.buf.ends_with(b"\n") || self.buf.ends_with(b"\r") {
+                events.push(self.buf.split().freeze());
+            }
+            self.buf.clear();
+        }
+        events
     }
 }
 
@@ -87,78 +96,59 @@ fn line_end(b: &[u8], at_end: bool) -> Option<usize> {
     }
 }
 
-impl<F> Decoder for SseDecoder<F>
-where
-    F: FnMut(Bytes, &mut Vec<Part>) + Send + 'static,
-{
-    fn decode(&mut self, bytes: Bytes, out: &mut Vec<Part>) {
-        self.buf.extend_from_slice(&bytes);
-        self.events(false, out);
+impl<T: 'static, E: Events<T>> Decoder<T> for SseDecoder<E> {
+    fn decode(&mut self, bytes: Bytes, out: &mut Vec<T>) -> Result<(), Fault> {
+        for event in self.split(&bytes, false) {
+            self.events.event(event, out)?;
+        }
+        Ok(())
     }
 
-    fn finish(&mut self, out: &mut Vec<Part>) {
-        self.events(true, out);
-        if self.buf.ends_with(b"\n") || self.buf.ends_with(b"\r") {
-            (self.on_event)(self.buf.split().freeze(), out);
+    fn end(&mut self, out: &mut Vec<T>) -> Result<(), Fault> {
+        for event in self.split(&[], true) {
+            self.events.event(event, out)?;
         }
-        self.buf.clear();
+        self.events.end(out)
     }
 }
 
-/// A decoder for a stream or a whole body, as [`is_stream`] reads the head.
-///
-/// In a stream, `on_message` gets each event that carries data; one without,
-/// such as a keep-alive comment, passes on as a Frame. `on_message` pushes
-/// `Part::End` at the event that ends the exchange, or the decoder is
-/// wrapped in [`at_eof`]; later events are dropped. An `Err` from
-/// `on_message` ends the response with that fault. `on_message` decides
-/// whether an error inside a success is a failure, as for a chat format, or
-/// content, as a JSON-RPC error reply is. A whole body goes to
-/// [`whole::decoder`](crate::whole::decoder).
-pub fn or_whole<F>(head: &http::response::Parts, mut on_message: F) -> Box<dyn Decoder>
+/// Each event to a closure; the stream ends with its body.
+impl<T, F> Events<T> for F
 where
-    F: FnMut(Bytes, &mut Vec<Part>) -> Result<(), Fault> + Send + 'static,
+    F: FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
+{
+    fn event(&mut self, raw: Bytes, out: &mut Vec<T>) -> Result<(), Fault> {
+        self(raw, out)
+    }
+
+    fn end(&mut self, _out: &mut Vec<T>) -> Result<(), Fault> {
+        Ok(())
+    }
+}
+
+/// A decoder for a stream, as [`is_stream`] reads the head, or a whole body
+/// ([`whole::decoder`](crate::whole::decoder)). `on_message` gets each
+/// event as it came, a comment's too, and pushes its value; its `Err` ends
+/// the response. The stream ends `Ok` with its body.
+pub fn or_whole<T, F>(
+    format: &str,
+    head: &http::response::Parts,
+    on_message: F,
+) -> Box<dyn Decoder<T>>
+where
+    T: 'static,
+    F: FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
     match is_stream(head) {
-        true => {
-            let mut ended = false;
-            Box::new(SseDecoder::new(move |raw, out: &mut Vec<Part>| {
-                if ended {
-                    return;
-                }
-                if event_data(&raw).is_none() {
-                    return out.push(Part::Frame(raw));
-                }
-                let from = out.len();
-                if let Err(fault) = on_message(raw, out) {
-                    out.push(Part::End(Err(fault)));
-                }
-                ended = out[from..].iter().any(|p| matches!(p, Part::End(_)));
-            }))
-        }
-        false => crate::whole::decoder(head, on_message),
+        true => Box::new(SseDecoder::new(on_message)),
+        false => crate::whole::decoder(format, head, on_message),
     }
 }
 
-/// Wraps `decoder` for a stream that ends with its body rather than with an
-/// event, such as a server's own event stream. It ends `Ok` unless `decoder`
-/// ended it first.
-pub fn at_eof(decoder: Box<dyn Decoder>) -> Box<dyn Decoder> {
-    Box::new(AtEof(decoder))
-}
-
-struct AtEof(Box<dyn Decoder>);
-
-impl Decoder for AtEof {
-    fn decode(&mut self, bytes: Bytes, out: &mut Vec<Part>) {
-        self.0.decode(bytes, out);
-    }
-
-    fn finish(&mut self, out: &mut Vec<Part>) {
-        self.0.finish(out);
-        // Parts after the first end are ignored.
-        out.push(Part::End(Ok(())));
-    }
+/// A comment of one line, which clients skip, such as a quiet stream's
+/// opening bytes ([`Encoder::open`](respan_gateway_core::Encoder::open)).
+pub fn comment(text: &str) -> String {
+    format!(": {text}\n\n")
 }
 
 /// An event of `data`, one `data:` line per line, named `name` if given.
@@ -174,9 +164,8 @@ pub fn event(name: Option<&str>, data: impl std::fmt::Display) -> String {
     out
 }
 
-/// `data` as an event in the shape of `like`, an event the provider sent:
-/// its fields other than `data`, such as `event` and `id`, are kept.
-/// Without `like`, an event named `name`.
+/// `data` as an event with the fields of `like` but its `data`, such as
+/// `event` and `id`; without `like`, an event named `name`.
 pub fn event_as(like: Option<&Bytes>, name: Option<&str>, data: impl std::fmt::Display) -> String {
     let Some(like) = like else {
         return event(name, data);
@@ -196,9 +185,8 @@ pub(crate) fn event_json(raw: &[u8]) -> Option<Value> {
     serde_json::from_str(&event_data(raw)?).ok()
 }
 
-/// A failed body as JSON. A JSON body is taken whole, a one-element array
-/// unwrapped (Gemini sends one). Otherwise, the first event that says an
-/// error, past any ping; `None` if none does.
+/// A failed body as JSON: a JSON body, a one-element array unwrapped
+/// (Gemini), or the first event that says an error.
 pub(crate) fn failure_json(raw: &Bytes) -> Option<Value> {
     if let Ok(v) = serde_json::from_slice::<Value>(raw) {
         return Some(match v {
@@ -206,15 +194,12 @@ pub(crate) fn failure_json(raw: &Bytes) -> Option<Value> {
             v => v,
         });
     }
-    let mut split = SseDecoder::new(|event, out: &mut Vec<Part>| out.push(Part::Frame(event)));
-    let mut events = Vec::new();
     // The body is whole: its last event ends with it.
-    split.decode(raw.clone(), &mut events);
-    split.decode(Bytes::from_static(b"\n\n"), &mut events);
-    events.iter().find_map(|part| match part {
-        Part::Frame(event) => event_json(event).filter(crate::common::says_error),
-        _ => None,
-    })
+    let mut split = SseDecoder::new(());
+    let mut events = split.split(raw, false);
+    events.extend(split.split(b"\n\n", false));
+    let json = events.iter().filter_map(|event| event_json(event));
+    json.into_iter().find(crate::common::says_error)
 }
 
 /// The `data:` of an event, lines joined, if it has any.
@@ -232,16 +217,30 @@ pub(crate) fn event_data(raw: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
-    type Events = SseDecoder<fn(Bytes, &mut Vec<Part>)>;
+    type Splitter = SseDecoder<()>;
 
-    fn frames() -> Events {
-        SseDecoder::new(|raw, out| out.push(Part::Frame(raw)))
+    fn frames() -> Splitter {
+        SseDecoder::new(())
     }
 
-    fn splitter(stream: &[u8]) -> Events {
+    fn splitter(stream: &[u8]) -> Splitter {
         let mut d = frames();
         d.buf.extend_from_slice(stream);
         d
+    }
+
+    /// Each event as bytes, and the stream ends with the body.
+    struct Each;
+
+    impl Events<Bytes> for Each {
+        fn event(&mut self, raw: Bytes, out: &mut Vec<Bytes>) -> Result<(), Fault> {
+            out.push(raw);
+            Ok(())
+        }
+
+        fn end(&mut self, _out: &mut Vec<Bytes>) -> Result<(), Fault> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -260,12 +259,12 @@ mod tests {
 
     #[test]
     fn a_last_bare_cr_ends_its_event_when_the_body_ends() {
-        let mut d = frames();
+        let mut d = SseDecoder::new(Each);
         let mut out = Vec::new();
-        d.decode(Bytes::from_static(b"data: a\r\rdata: b\r\r"), &mut out);
+        let _ = d.decode(Bytes::from_static(b"data: a\r\rdata: b\r\r"), &mut out);
         assert_eq!(out.len(), 1);
-        d.finish(&mut out);
-        assert!(matches!(&out[1], Part::Frame(b) if &b[..] == b"data: b\r\r"));
+        let _ = d.end(&mut out);
+        assert_eq!(&out[1][..], b"data: b\r\r");
     }
 
     #[test]
@@ -274,15 +273,11 @@ mod tests {
             (&b"data: [DONE]\n"[..], Some(&b"data: [DONE]\n"[..])),
             (b"data: [DO", None),
         ] {
-            let mut d = frames();
+            let mut d = SseDecoder::new(Each);
             let mut out = Vec::new();
-            d.decode(Bytes::from_static(body), &mut out);
-            d.finish(&mut out);
-            let got = out.first().map(|p| match p {
-                Part::Frame(b) => &b[..],
-                _ => b"",
-            });
-            assert_eq!(got, kept);
+            let _ = d.decode(Bytes::from_static(body), &mut out);
+            let _ = d.end(&mut out);
+            assert_eq!(out.first().map(|b| &b[..]), kept);
         }
     }
 
@@ -302,26 +297,31 @@ mod tests {
         assert_eq!(crate::json(b"{\"b\":3}"), Some(serde_json::json!({"b": 3})));
     }
 
+    fn head(content_type: &'static str) -> http::response::Parts {
+        let mut head = http::Response::new(()).into_parts().0;
+        let value = http::HeaderValue::from_static(content_type);
+        head.headers.insert(http::header::CONTENT_TYPE, value);
+        head
+    }
+
     #[test]
     fn a_decoder_for_a_stream_or_a_whole_body_follows_the_head() {
-        let head = |content_type: &'static str| {
-            let mut head = http::Response::new(()).into_parts().0;
-            let value = http::HeaderValue::from_static(content_type);
-            head.headers.insert(http::header::CONTENT_TYPE, value);
-            head
-        };
-        for (content_type, body, parts) in [
-            ("text/event-stream", &b"data: 1\n\ndata: 2\n\n"[..], 2),
-            ("application/json", b"{\"a\":1}", 2),
+        for (content_type, body, values) in [
+            (
+                "text/event-stream",
+                &b"data: 1\n\n: ping\n\ndata: 2\n\n"[..],
+                3,
+            ),
+            ("application/json", b"{\"a\":1}", 1),
         ] {
-            let mut d = or_whole(&head(content_type), |raw, out| {
-                out.push(Part::Frame(raw));
+            let mut d = or_whole("f", &head(content_type), |raw, out: &mut Vec<Bytes>| {
+                out.push(raw);
                 Ok(())
             });
             let mut out = Vec::new();
-            d.decode(Bytes::from_static(body), &mut out);
-            d.finish(&mut out);
-            assert_eq!(out.len(), parts, "{content_type}");
+            let _ = d.decode(Bytes::from_static(body), &mut out);
+            assert!(d.end(&mut out).is_ok());
+            assert_eq!(out.len(), values, "{content_type}");
         }
     }
 
@@ -368,40 +368,28 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_frames_comments_and_stops_at_its_end() {
-        let mut head = http::Response::new(()).into_parts().0;
-        let value = http::HeaderValue::from_static("text/event-stream");
-        head.headers.insert(http::header::CONTENT_TYPE, value);
+    fn a_stream_stops_at_its_first_failure() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = calls.clone();
-        let mut d = or_whole(&head, move |_, _| {
-            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(Fault::upstream("unreadable"))
-        });
+        let mut d = or_whole(
+            "f",
+            &head("text/event-stream"),
+            move |raw, out: &mut Vec<Bytes>| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if event_data(&raw).is_some() {
+                    return Err(Fault::upstream("unreadable"));
+                }
+                out.push(raw);
+                Ok(())
+            },
+        );
         let mut out = Vec::new();
-        d.decode(
+        let decoded = d.decode(
             Bytes::from_static(b": ping\n\ndata: x\n\ndata: y\n\n"),
             &mut out,
         );
-        assert!(matches!(&out[..], [Part::Frame(_), Part::End(Err(_))]));
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn an_error_in_a_success_is_the_formats_to_judge() {
-        // A JSON-RPC error reply is content, not the provider failing.
-        let reply = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601}}\n\n";
-        let mut head = http::Response::new(()).into_parts().0;
-        let value = http::HeaderValue::from_static("text/event-stream");
-        head.headers.insert(http::header::CONTENT_TYPE, value);
-        let mut d = or_whole(&head, |raw, out| {
-            out.push(Part::Frame(raw));
-            out.push(Part::End(Ok(())));
-            Ok(())
-        });
-        let mut out = Vec::new();
-        d.decode(Bytes::from_static(reply.as_bytes()), &mut out);
-        assert!(matches!(&out[..], [Part::Frame(_), Part::End(Ok(()))]));
+        assert!(decoded.is_err() && out.len() == 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -416,15 +404,6 @@ mod tests {
         assert!(is_stream(&head(200, "Text/Event-Stream; charset=utf-8")));
         assert!(!is_stream(&head(200, "text/event-streamx")));
         assert!(!is_stream(&head(503, "text/event-stream")));
-    }
-
-    #[test]
-    fn a_stream_that_ends_with_its_body_ends_ok() {
-        let mut d = at_eof(Box::new(frames()));
-        let mut out = Vec::new();
-        d.decode(Bytes::from_static(b"data: 1\n\n"), &mut out);
-        d.finish(&mut out);
-        assert!(matches!(&out[..], [Part::Frame(_), Part::End(Ok(()))]));
     }
 
     #[test]
@@ -461,16 +440,11 @@ mod tests {
     fn a_stream_split_at_any_byte_decodes_every_event_once() {
         let stream = b"data: {\"a\":1}\n\nevent: x\r\ndata: {\"b\":2}\r\n\r\ndata: [DONE]\n\n";
         for cut in 0..=stream.len() {
-            let mut d = frames();
+            let mut d = SseDecoder::new(Each);
             let mut out = Vec::new();
-            d.decode(Bytes::copy_from_slice(&stream[..cut]), &mut out);
-            d.decode(Bytes::copy_from_slice(&stream[cut..]), &mut out);
-            let mut decoded = Vec::new();
-            for part in &out {
-                if let Part::Frame(b) = part {
-                    decoded.extend_from_slice(b);
-                }
-            }
+            let _ = d.decode(Bytes::copy_from_slice(&stream[..cut]), &mut out);
+            let _ = d.decode(Bytes::copy_from_slice(&stream[cut..]), &mut out);
+            let decoded: Vec<u8> = out.iter().flat_map(|b| b.to_vec()).collect();
             assert_eq!((out.len(), &decoded[..]), (3, &stream[..]), "cut at {cut}");
         }
     }

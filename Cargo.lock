@@ -969,6 +969,7 @@ name = "respan-gateway-formats"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
+ "serde",
 ]
 
 [[package]]

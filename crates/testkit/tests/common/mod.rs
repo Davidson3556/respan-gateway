@@ -5,11 +5,13 @@
 
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::http::{self, HeaderMap, StatusCode};
+
 use respan_gateway_core::{
-    Body, Context, Fault, Filter, Gateway, Outcome, Plugin, Response, async_trait,
+    Body, ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait,
 };
-use respan_gateway_formats::conversation::{Conversation, Reply};
-use respan_gateway_testkit::{MockTransport, Outcomes, collect, post};
+use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply};
+pub use respan_gateway_testkit::Calls;
+use respan_gateway_testkit::{MockTransport, Outcomes, post, read_whole};
 
 pub const OPENAI: &str = "http://openai.test/v1";
 
@@ -26,6 +28,24 @@ pub fn call(path: &str, body: impl Into<Bytes>) -> Call {
     post(path, body)
 }
 
+/// A provider to add to a gateway, as tests list them.
+pub type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
+
+/// Provider `name`, speaking `format` over `transport`.
+pub fn add_provider(
+    name: &str,
+    format: impl respan_gateway_core::Format,
+    transport: impl respan_gateway_core::Transport,
+) -> AddProvider {
+    let name = name.to_owned();
+    Box::new(move |g| g.provider(name, format, transport))
+}
+
+/// A gateway with `list`, in order.
+pub fn providers(list: impl IntoIterator<Item = AddProvider>) -> Result<Gateway, Fault> {
+    list.into_iter().try_fold(Gateway::new(), |g, add| add(g))
+}
+
 /// `gateway` with `plugins` registered in order, named by position.
 pub fn with_plugins(
     gateway: Gateway,
@@ -40,12 +60,13 @@ pub struct Harness {
     pub gw: Gateway,
     pub mock: MockTransport,
     pub log: Outcomes,
+    pub calls: Calls,
 }
 
 impl Harness {
     /// Send, read the whole response, and wait for the end hooks.
     pub async fn send(&self, req: Call) -> (StatusCode, HeaderMap, Result<Bytes, Fault>) {
-        let out = collect(self.gw.handle(req).await).await;
+        let out = read_whole(self.gw.handle(req).await.0).await;
         self.gw.idle().await;
         out
     }
@@ -63,14 +84,27 @@ impl Harness {
     }
 }
 
+/// Adds its filter of replies on the client edge.
+pub struct Adds<F>(pub F);
+
+#[async_trait]
+impl<F: Filter<Reply> + Clone + Sync> Plugin for Adds<F> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.filter(self.0.clone())?;
+        Ok(None)
+    }
+}
+
 /// Flips whether the provider is asked to stream.
 pub struct Flip;
 
 #[async_trait]
 impl Plugin for Flip {
-    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
-        let chat = cx.input_mut::<Conversation>()?;
-        chat.stream = !chat.stream;
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.filter(|chat: &mut Conversation| {
+            chat.stream = !chat.stream;
+            Ok(())
+        })?;
         Ok(None)
     }
 }
@@ -81,14 +115,14 @@ pub struct Shout;
 
 #[async_trait]
 impl Plugin for Shout {
-    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         cx.filter(shout)?;
         Ok(None)
     }
 }
 
-fn shout(event: &mut Reply) -> Result<(), Fault> {
-    if let Reply::Text { text, .. } = event {
+fn shout(reply: &mut Reply) -> Result<(), Fault> {
+    for text in reply.texts_mut() {
         *text = text.to_uppercase();
     }
     Ok(())
@@ -100,7 +134,7 @@ pub struct Unmask;
 
 #[async_trait]
 impl Plugin for Unmask {
-    async fn on_client(&self, cx: &mut Context) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         cx.filter(Restore::default())?;
         Ok(None)
     }
@@ -114,27 +148,32 @@ struct Restore {
 }
 
 impl Filter<Reply> for Restore {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let Reply::Text { block, text, .. } = event else {
-            // Held text goes out before any other content.
-            if !matches!(event, Reply::Start { .. }) {
-                self.release(out);
+    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        // Nothing follows a finish, and text kept back goes before any
+        // other content: hold nothing past them.
+        let other = |p: &Piece| matches!(p, Piece::Other { .. });
+        let last = reply.finish.is_some() || reply.content.iter().any(other);
+        for piece in &mut reply.content {
+            let Piece::Text { block, text, .. } = piece else {
+                continue;
+            };
+            let mut t = std::mem::take(&mut self.held) + text.as_str();
+            if let Some(i) = t.rfind('<').filter(|&i| !last && !t[i..].contains('>')) {
+                self.held = t.split_off(i);
             }
-            out.push(event);
-            return Ok(());
-        };
-        let mut text = std::mem::take(&mut self.held) + &text;
-        if let Some(i) = text.rfind('<').filter(|&i| !text[i..].contains('>')) {
-            self.held = text.split_off(i);
+            (self.block, *text) = (*block, t.replace("<P1>", "Alice"));
         }
-        self.block = block;
-        if !text.is_empty() {
-            out.push(Reply::text(block, text.replace("<P1>", "Alice")));
+        reply
+            .content
+            .retain(|p| !matches!(p, Piece::Text { text, .. } if text.is_empty()));
+        if last {
+            self.release(out);
         }
+        out.push(reply);
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
         self.release(out);
         Ok(())
     }
@@ -148,17 +187,17 @@ impl Restore {
     }
 }
 
-/// Holds back every event and releases them all at the end.
+/// Keeps back every reply and releases them all at the end.
 #[derive(Clone)]
 pub struct HoldAll(pub Vec<Reply>);
 
 impl Filter<Reply> for HoldAll {
-    fn event(&mut self, event: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-        self.0.push(event);
+    fn edit(&mut self, reply: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.0.push(reply);
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
         out.append(&mut self.0);
         Ok(())
     }
@@ -169,11 +208,11 @@ impl Filter<Reply> for HoldAll {
 pub struct Disclaimer;
 
 impl Filter<Reply> for Disclaimer {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if matches!(event, Reply::Start { .. }) {
+    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if reply.start.is_some() {
             out.push(Reply::text(0, "NOTE: "));
         }
-        out.push(event);
+        out.push(reply);
         Ok(())
     }
 }
@@ -183,10 +222,9 @@ impl Filter<Reply> for Disclaimer {
 pub struct Nameless;
 
 impl Filter<Reply> for Nameless {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if !matches!(event, Reply::Start { .. }) {
-            out.push(event);
-        }
+    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        reply.start = None;
+        out.push(reply);
         Ok(())
     }
 }
@@ -196,30 +234,30 @@ impl Filter<Reply> for Nameless {
 pub struct Silence;
 
 impl Filter<Reply> for Silence {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if !matches!(event, Reply::Text { .. }) {
-            out.push(event);
-        }
+    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        reply.content.retain(|p| !matches!(p, Piece::Text { .. }));
+        out.push(reply);
         Ok(())
     }
 }
 
-/// Appends a footer to block `.0`, holding the finish until the end.
+/// Appends a footer to block `.0`, keeping the finish back until the end.
 #[derive(Clone)]
-pub struct Footer(pub u32, pub Option<Reply>);
+pub struct Footer(pub u32, pub Option<Finish>);
 
 impl Filter<Reply> for Footer {
-    fn event(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        match event {
-            Reply::Finish(_) => self.1 = Some(event),
-            event => out.push(event),
+    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if let Some(finish) = reply.finish.take() {
+            self.1 = Some(finish);
         }
+        out.push(reply);
         Ok(())
     }
 
-    fn end(&mut self, _outcome: &Outcome, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        out.push(Reply::text(self.0, " [footer]"));
-        out.extend(self.1.take());
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let mut footer = Reply::text(self.0, " [footer]");
+        footer.finish = self.1.take();
+        out.push(footer);
         Ok(())
     }
 }

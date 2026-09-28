@@ -7,7 +7,8 @@ use respan_gateway_core::http::HeaderMap;
 use respan_gateway_core::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use std::sync::Arc;
 
-use respan_gateway_core::{Fault, Format, Gateway, Provider, Transport};
+use respan_gateway_core::{Fault, Format, Gateway, Transport};
+use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_plugins::ModelRouter;
 use serde::Deserialize;
 
@@ -62,11 +63,12 @@ pub struct ModelRoute {
     pub provider: String,
 }
 
-/// A format compiled into the binary: its name, and how to build a
+/// A format compiled into the binary: its name, and how to add a
 /// provider that speaks it or serve its clients.
 pub struct KnownFormat {
     pub name: String,
-    pub provider: fn(name: String, transport: Arc<dyn Transport>) -> Provider,
+    pub provider:
+        fn(Gateway, name: String, transport: Arc<dyn Transport>) -> Result<Gateway, Fault>,
     pub serve: fn(Gateway) -> Result<Gateway, Fault>,
 }
 
@@ -74,7 +76,7 @@ impl KnownFormat {
     pub fn of<F: Format + Default>() -> Self {
         Self {
             name: F::default().name().to_owned(),
-            provider: |name, transport| Provider::new(name, F::default(), transport),
+            provider: |gateway, name, transport| gateway.provider(name, F::default(), transport),
             serve: |gateway| gateway.serve(F::default()),
         }
     }
@@ -101,15 +103,14 @@ impl Config {
                 ))
             })
         };
-        let mut providers = Vec::new();
+        let mut gateway = Gateway::new();
         for (name, p) in &self.providers {
             let format = format(&p.format, &format!("provider '{name}'"))?;
             let auth = auth_headers(name, p.auth.as_ref())?;
             let reach = transport(&p.base_url, auth)
                 .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
-            providers.push((format.provider)(name.clone(), Arc::new(reach)));
+            gateway = (format.provider)(gateway, name.clone(), Arc::new(reach))?;
         }
-        let mut gateway = Gateway::new(providers)?;
         for name in &self.serve {
             gateway = (format(name, "serve")?.serve)(gateway)?;
         }
@@ -120,11 +121,16 @@ impl Config {
                     "no plugin given; compiled-in plugins: [models]",
                 )));
             };
-            // An unreachable model route fails here, not per request.
-            for m in models {
-                gateway.check_target(m.provider.as_str()).map_err(bad)?;
+            // An unknown provider in a route fails here, not per request.
+            if let Some(m) = models
+                .iter()
+                .find(|m| !self.providers.contains_key(&m.provider))
+            {
+                let unknown = format!("unknown provider '{}'", m.provider);
+                return Err(bad(Fault::config(unknown)));
             }
-            let router = models.iter().fold(ModelRouter::new(), |router, m| {
+            let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
+            let router = models.iter().fold(router, |router, m| {
                 router.route(m.prefix.clone(), m.provider.clone())
             });
             gateway = gateway.plugin(p.name.clone(), router)?;
@@ -173,7 +179,7 @@ fn auth_headers(provider: &str, auth: Option<&Auth>) -> Result<HeaderMap, Fault>
 #[cfg(test)]
 mod tests {
     use respan_gateway_core::http::StatusCode;
-    use respan_gateway_testkit::{MockTransport, collect, mock, post};
+    use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
     use super::*;
 
@@ -274,9 +280,9 @@ plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
         let anthropic_client =
             r#"{"model":"gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
         let to_claude = gateway.handle(post("/v1/chat/completions", openai_client));
-        let (_, _, to_claude) = collect(to_claude.await).await;
+        let (_, _, to_claude) = read_whole(to_claude.await.0).await;
         let to_gpt = gateway.handle(post("/v1/messages", anthropic_client));
-        let (_, _, to_gpt) = collect(to_gpt.await).await;
+        let (_, _, to_gpt) = read_whole(to_gpt.await.0).await;
 
         let urls: Vec<String> = mock.sent().iter().map(|s| s.uri().to_string()).collect();
         assert_eq!(

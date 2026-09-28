@@ -1,0 +1,32 @@
+[package]
+name = "respan-gateway-mcp"
+description = "An adversarial MCP SDK for respan-gateway, built only on the public API of its crates."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Not a member of the root workspace: this crate uses the kernel from the
+# outside, as a user would. Build with
+# CARGO_TARGET_DIR=../../target/sdks cargo test
+[workspace]
+
+[dependencies]
+respan-gateway-core = { path = "../../crates/core" }
+respan-gateway-formats = { path = "../../crates/formats" }
+respan-gateway-server = { path = "../../crates/server" }
+tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "macros", "time"] }
+
+[dev-dependencies]
+respan-gateway-testkit = { path = "../../crates/testkit" }
+respan-gateway-plugins = { path = "../../crates/plugins" }
+tokio = { version = "1", features = ["process", "io-util", "sync", "rt", "rt-multi-thread", "macros", "time"] }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"

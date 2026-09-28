@@ -1,45 +1,33 @@
+use std::any::{Any, TypeId};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 use futures::StreamExt;
-use futures::stream::{AbortHandle, Abortable, BoxStream, Stream};
-use http_body_util::{BodyExt, BodyStream, StreamBody};
-use std::any::TypeId;
-
+use futures::stream::{self, BoxStream, Stream};
 use http::StatusCode;
+use http_body_util::{BodyExt, BodyStream, StreamBody};
 
-use crate::context::Sent;
-use crate::part::head;
-use crate::provider::{CallEdge, SharedCall, lock};
-use crate::{Body, Decoder, Event, Fault, Item, Part, Usage};
+use crate::call::{CallEdge, SharedCall};
+use crate::fault::PANICKED;
+use crate::format::{AnyDecoder, AnyFormat, Request, Values};
+use crate::input::locked;
+use crate::{Body, Fault, Usage};
 
 /// A response for the client, streaming from a provider or made by a
-/// plugin. Dropping it unsent cancels it.
-#[must_use = "a response does nothing unless sent or collected"]
+/// plugin. Dropped before it is sent or read to its end, its call ends
+/// abandoned.
+#[must_use = "a response does nothing unless sent or read"]
 pub struct Response {
     pub(crate) head: http::response::Parts,
     pub(crate) body: Source,
-    /// Usage a plugin added, reported before the body's own.
+    /// What [`Response::ready`] read, to be read again first.
+    pub(crate) ahead: VecDeque<Batch>,
+    /// Usage a plugin added, counted where it is sent or read.
     pub(crate) usage: Usage,
-    /// Its items' output type, if known.
-    pub(crate) event: Option<TypeId>,
-}
-
-/// A plugin's response in the client's format, such as a cached one with
-/// content its kind cannot hold. The client's format decodes it like a
-/// provider's and sends it as is unless edited. It cannot be read with
-/// [`Response::collect`].
-impl<B> From<http::Response<B>> for Response
-where
-    B: http_body::Body<Data = bytes::Bytes> + Send + 'static,
-    B::Error: Into<Fault>,
-{
-    fn from(response: http::Response<B>) -> Self {
-        let (head, body) = response.into_parts();
-        Self {
-            head,
-            body: Source::Raw(body.map_err(Into::into).boxed_unsync()),
-            usage: Usage::default(),
-            event: None,
-        }
-    }
+    /// Its outputs' type; `None` for a refusal, which has none.
+    pub(crate) output: Option<TypeId>,
+    /// Where usage no call reported counts when a plugin reads it.
+    pub(crate) unreported: Option<Arc<Mutex<Usage>>>,
 }
 
 impl std::fmt::Debug for Response {
@@ -50,132 +38,222 @@ impl std::fmt::Debug for Response {
     }
 }
 
-impl Response {
-    /// A response made of events of the client's kind, streamed by the
-    /// body of `response` (`stream::iter(events.map(Ok))` for a whole one);
-    /// the first `Err` fails it. The client's format sets the content type
-    /// if the head has none. Events of another type fail it with
-    /// [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) when sent.
-    pub fn stream<T, S>(response: http::Response<S>) -> Self
-    where
-        T: Event,
-        S: Stream<Item = Result<T, Fault>> + Send + 'static,
-    {
-        let (head, events) = response.into_parts();
-        let parts = events.map(|event| match event {
-            Ok(event) => Item::new([event]).into(),
-            Err(fault) => Part::End(Err(fault)),
-        });
-        let done = futures::stream::once(async { Part::End(Ok(())) });
+tokio::task_local! {
+    /// The client's format while its request's plugins answer, which judges
+    /// what they make as delivery does.
+    pub(crate) static CLIENT_FORMAT: Arc<dyn AnyFormat>;
+}
+
+/// Outputs decoded or made, the end if it came, and usage no call counted.
+#[derive(Default)]
+pub(crate) struct Batch {
+    pub(crate) values: Option<Values>,
+    pub(crate) end: Option<Result<(), Fault>>,
+    pub(crate) usage: Usage,
+}
+
+impl Batch {
+    /// Just an end.
+    pub(crate) fn end(end: Result<(), Fault>) -> Self {
         Self {
-            head,
-            body: Source::Parts(parts.chain(done).boxed()),
-            usage: Usage::default(),
-            event: Some(TypeId::of::<T>()),
+            end: Some(end),
+            ..Self::default()
         }
     }
 
-    /// Add `usage` no call produced, such as a cached answer's, reported
-    /// before the body's. [`Response::collect`] refuses such a response, so
-    /// the usage is never lost.
+    fn is_empty(&self) -> bool {
+        self.values.is_none() && self.end.is_none() && self.usage.is_empty()
+    }
+}
+
+impl Response {
+    fn new(head: http::response::Parts, body: Source, output: Option<TypeId>) -> Self {
+        Self {
+            head,
+            body,
+            ahead: VecDeque::new(),
+            usage: Usage::default(),
+            output,
+            unreported: None,
+        }
+    }
+
+    /// A 200 of outputs of the client's kind, streamed by `stream`, such as
+    /// `stream::iter(outputs.map(Ok))` or a merge of calls'
+    /// [`outputs`](Response::outputs); the first `Err` fails it. Its head
+    /// goes out with its first byte, so a failure before any is refused, or
+    /// at once if the client's format opens it
+    /// ([`Encoder::open`](crate::Encoder::open)). Outputs of another type
+    /// fail it with [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
+    /// The usage its outputs report is shown, never counted
+    /// ([`Response::with_usage`]). A plugin's error is a [`Fault`], not
+    /// outputs under an error status.
+    pub fn stream<T, S>(stream: S) -> Self
+    where
+        T: Any + Send + Sync,
+        S: Stream<Item = Result<T, Fault>> + Send + 'static,
+    {
+        let batches = stream.map(|output| match output {
+            Ok(output) => Batch {
+                values: Some(Box::new(vec![output])),
+                ..Batch::default()
+            },
+            Err(fault) => Batch::end(Err(fault)),
+        });
+        let done = stream::once(async { Batch::end(Ok(())) });
+        let format = CLIENT_FORMAT.try_with(Arc::clone).ok();
+        let format = format.filter(|f| f.kind().1 == TypeId::of::<T>());
+        let body = Source::Made(batches.chain(done).boxed(), format);
+        Self::new(head(StatusCode::OK), body, Some(TypeId::of::<T>()))
+    }
+
+    /// Count `usage` no call reported, such as a cached response's; it is
+    /// not written, so put it in the outputs to show it. It counts on the
+    /// client edge of the request it is sent to, or, read through
+    /// [`Response::outputs`], of the one it came from, if any.
     pub fn with_usage(mut self, usage: Usage) -> Self {
         self.usage += &usage;
         self
     }
 
-    /// Read it whole rather than send it, such as a judge's verdict: its
-    /// events of `T`, the kind's output type. `Err` with its own fault if
-    /// it fails, with [`codes::WRONG_KIND`](crate::codes::WRONG_KIND) for
-    /// another kind, with [`codes::CONFIG`](crate::codes::CONFIG) for a
-    /// plugin's bytes or a response given usage, and with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) once its request's
-    /// plugins have answered. Its call ends as it does; its usage counts on
-    /// the provider edge only.
-    pub async fn collect<T: Event>(mut self) -> Result<Vec<T>, Fault> {
-        if matches!(self.body, Source::Raw(_)) {
-            return Err(plugin_bytes());
-        }
-        if !self.usage.is_empty() {
-            return Err(Fault::config(
-                "a response given usage can be sent, not read",
-            ));
-        }
-        // Of another kind, or none, it holds no `T`s even with no items.
-        if self.event != Some(TypeId::of::<T>()) {
-            return Err(Fault::wrong_kind::<T>());
-        }
-        if self.body.answered() {
-            return Err(Fault::internal(
-                "a response to another request's call was read",
-            ));
-        }
-        let read = self.read().await;
-        self.body
-            .end(read.as_ref().map(|_| ()).map_err(Clone::clone));
-        read
+    /// Send it with `status`, which the client's format writes for.
+    pub fn with_status(mut self, status: StatusCode) -> Self {
+        self.head.status = status;
+        self
     }
 
-    /// Its events of `T`, to the end.
-    async fn read<T: Event>(&mut self) -> Result<Vec<T>, Fault> {
-        let (mut events, mut parts) = (Vec::new(), Vec::new());
+    /// Read it to its first content or its end, keeping what was read for
+    /// whoever reads or sends it next, such as to fall back or race. Content
+    /// is an output that says something
+    /// ([`Format::says`](crate::Format::says)): a provider's to its format,
+    /// before any filter; one a plugin made in `on_client` to the client's,
+    /// as delivery judges it. A bodiless response, a 101 or one already ready is ready
+    /// at once. `Err` with its fault if a success fails first; an error
+    /// status is the provider's answer, to send as it came.
+    pub async fn ready(mut self) -> Result<Response, Fault> {
+        // What is ahead was judged by an earlier `ready`.
+        let switched = self.head.status == StatusCode::SWITCHING_PROTOCOLS;
+        let mut content = switched || !self.ahead.is_empty();
         loop {
-            self.body.next(&mut parts).await;
-            for part in parts.drain(..) {
-                match part {
-                    Part::Item(item) => events.extend_from_slice(item.events::<T>()?),
-                    Part::End(Ok(())) => return Ok(events),
-                    Part::End(Err(fault)) => return Err(fault),
-                    _ => {}
+            let end = self.ahead.iter().find_map(|batch| batch.end.as_ref());
+            match end {
+                Some(Err(fault)) if !content && self.head.status.is_success() => {
+                    return Err(fault.clone());
+                }
+                Some(_) => return Ok(self),
+                None if content => return Ok(self),
+                None => {
+                    let (batch, read) = self.body.next().await;
+                    content = read;
+                    if !batch.is_empty() {
+                        self.ahead.push_back(batch);
+                    }
                 }
             }
         }
     }
 
-    /// A kernel-made response from Parts, such as a refusal.
-    pub(crate) fn made(
-        status: StatusCode,
-        parts: impl Stream<Item = Part> + Send + 'static,
-    ) -> Self {
-        Self {
-            head: head(status),
-            body: Source::Parts(parts.boxed()),
-            usage: Usage::default(),
-            event: None,
+    /// Read it rather than send it, such as a judge's verdict: its outputs
+    /// of `T`, the kind's output type, that say something, as the provider
+    /// edge's filters left them, ending with an `Err` if it fails; at once
+    /// with [`codes::INTERNAL`](crate::codes::INTERNAL) for another type.
+    /// Its call ends with the stream, or abandoned if dropped first.
+    pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T, Fault>> {
+        if self.output != Some(TypeId::of::<T>()) {
+            let fault = Fault::wrong_kind::<T>();
+            self.body.end(Err(fault.clone()));
+            return stream::once(async { Err(fault) }).boxed();
+        }
+        let read = (self, VecDeque::new(), false);
+        stream::unfold(read, |(mut resp, mut outputs, mut ended)| async move {
+            loop {
+                if let Some(output) = outputs.pop_front() {
+                    return Some((output, (resp, outputs, ended)));
+                }
+                if ended {
+                    return None;
+                }
+                let given = std::mem::take(&mut resp.usage);
+                resp.unreported(&given);
+                let batch = match resp.ahead.pop_front() {
+                    Some(batch) => batch,
+                    None => resp.body.next().await.0,
+                };
+                resp.unreported(&batch.usage);
+                if let Some(values) = batch.values {
+                    let read = values.downcast::<Vec<T>>().map(|v| *v);
+                    let read = read.unwrap_or_default().into_iter();
+                    let says = |v: &T| resp.body.says(v);
+                    outputs.extend(read.filter(says).map(Ok));
+                }
+                if let Some(end) = batch.end {
+                    resp.body.end(end.clone());
+                    outputs.extend(end.err().map(Err));
+                    ended = true;
+                }
+            }
+        })
+        .boxed()
+    }
+
+    /// Count `usage` no call reported on the client edge it came from.
+    fn unreported(&self, usage: &Usage) {
+        if let Some(to) = self.unreported.as_ref().filter(|_| !usage.is_empty()) {
+            *locked(to) += usage;
         }
     }
 
-    /// A provider's response to a call, `relayed` if in the client's
-    /// format, with the call's provider edge if it has one.
-    pub(crate) fn provider(
-        (head, body, decoder): Sent,
+    /// A kernel-made response that just ends, such as a refusal.
+    pub(crate) fn made(status: StatusCode, end: Result<(), Fault>) -> Self {
+        let body = Source::Made(stream::iter([Batch::end(end)]).boxed(), None);
+        Self::new(head(status), body, None)
+    }
+
+    /// A response of bytes in `format` to `request`, `relayed` if in the
+    /// client's format. One with no body is at its end already.
+    pub(crate) fn decoded(
+        format: &Arc<dyn AnyFormat>,
+        request: &Request,
+        response: http::Response<Body>,
         relayed: bool,
-        event: Option<TypeId>,
-        call: Option<CallEdge>,
     ) -> Self {
-        // A call's body is cut off at its end, such as when its request
-        // closes, so a waiting reader wakes and reads it abandoned.
-        let (body, call) = match call {
-            Some(call) => {
-                let (abort, cut) = AbortHandle::new_pair();
-                let body = Abortable::new(BodyStream::new(body), cut);
-                (
-                    StreamBody::new(body).boxed_unsync(),
-                    Some(call.share(abort)),
-                )
-            }
-            None => (body, None),
+        let (head, body) = response.into_parts();
+        let decoder = format.response_decoder(&head, request);
+        let output = Some(format.kind().1);
+        let to_head = request.method() == http::Method::HEAD;
+        let bodiless = bodiless(head.status, to_head);
+        let body = Source::Bytes {
+            body,
+            decoder,
+            format: format.clone(),
+            relayed,
+            call: None,
         };
         Self {
-            head,
-            body: Source::Bytes {
-                body,
-                decoder,
-                relayed,
-                call,
-            },
-            usage: Usage::default(),
-            event,
+            ahead: bodiless.then(|| Batch::end(Ok(()))).into_iter().collect(),
+            ..Self::new(head, body, output)
         }
+    }
+
+    /// The same, read through `call`'s provider edge; its body is cut off at
+    /// the call's end, so a waiting reader wakes.
+    pub(crate) fn of_call(mut self, mut call: CallEdge) -> Self {
+        if let Source::Bytes {
+            body, call: slot, ..
+        } = &mut self.body
+        {
+            let cut = call.cx().cut.idle();
+            let taken = std::mem::take(body);
+            *body = StreamBody::new(BodyStream::new(taken).take_until(cut)).boxed_unsync();
+            self.unreported = Some(call.cx().client.unreported.clone());
+            let call = call.share();
+            // A bodiless response's end is decoded already.
+            for batch in &mut self.ahead {
+                locked(&call).events(batch);
+            }
+            *slot = Some(call);
+        }
+        self
     }
 
     /// Its status and headers, such as a provider's error status.
@@ -184,82 +262,110 @@ impl Response {
     }
 }
 
-pub(crate) type PartStream = BoxStream<'static, Part>;
-
-/// A response's body: a plugin's raw bytes, decoded only when sent; a
-/// provider's bytes with their decoder and call; or Parts.
+/// A response's body: bytes with their decoder and call, or outputs made.
 pub(crate) enum Source {
-    Raw(Body),
     Bytes {
         body: Body,
-        decoder: Box<dyn Decoder>,
+        decoder: Box<dyn AnyDecoder>,
+        format: Arc<dyn AnyFormat>,
         relayed: bool,
         call: Option<SharedCall>,
     },
-    Parts(PartStream),
+    /// Outputs a plugin made, and the client's format, which judges them.
+    Made(BoxStream<'static, Batch>, Option<Arc<dyn AnyFormat>>),
 }
 
 impl Source {
-    /// Whether its Parts carry the client format's own bytes. Asked once a
-    /// plugin's raw bytes have their decoder, as relayed ones.
+    /// Whether it is in the client's format, so its head is relayed.
     pub(crate) fn relayed(&self) -> bool {
         matches!(self, Source::Bytes { relayed: true, .. })
     }
 
-    /// Push the next Parts to `parts`, eventually a `Part::End`; the caller
-    /// must not read past it.
-    pub(crate) async fn next(&mut self, parts: &mut Vec<Part>) {
-        let (body, decoder, call) = match self {
+    /// Its call, if any.
+    pub(crate) fn call(&self) -> Option<&SharedCall> {
+        match self {
+            Source::Bytes { call, .. } => call.as_ref(),
+            Source::Made(..) => None,
+        }
+    }
+
+    /// Whether `output` says something: every output a plugin made does.
+    fn says(&self, output: &dyn Any) -> bool {
+        match self {
+            Source::Bytes { format, .. } => format.says(output),
+            Source::Made(..) => true,
+        }
+    }
+
+    /// The next batch, eventually one with the end, not to be read past,
+    /// and whether it held content before any filter. A call's usage counts
+    /// on its provider edge; other usage comes back in the batch. A panic
+    /// ends the call internal.
+    pub(crate) async fn next(&mut self) -> (Batch, bool) {
+        let (body, decoder, format, call) = match self {
             Source::Bytes {
                 body,
                 decoder,
+                format,
                 call,
                 ..
-            } => (body, decoder, call),
-            // Unreachable: `commit` gives them a decoder, `collect` refuses.
-            Source::Raw(_) => return parts.push(Part::End(Err(plugin_bytes()))),
-            Source::Parts(made) => {
-                let truncated = || Part::End(Err(Fault::truncated()));
-                return parts.push(made.next().await.unwrap_or_else(truncated));
+            } => (body, decoder, format, call),
+            Source::Made(made, format) => {
+                let truncated = || Batch::end(Err(Fault::truncated()));
+                let batch = made.next().await.unwrap_or_else(truncated);
+                let says = |v: &Values| format.as_ref().is_none_or(|f| f.read(v).1);
+                let content = batch.values.as_ref().is_some_and(says);
+                return (batch, content);
             }
         };
-        // Decoded apart, so the call sees only these Parts.
-        let mut decoded = Vec::new();
-        match body.frame().await {
-            // Trailers are not decoded.
-            Some(Ok(frame)) => {
-                if let Ok(bytes) = frame.into_data() {
-                    decoder.decode(bytes, &mut decoded);
-                }
+        let frame = body.frame().await;
+        let mut batch = Batch::default();
+        let mut content = false;
+        let decode = std::panic::AssertUnwindSafe(|| {
+            let (values, end) = match frame {
+                // Trailers are not decoded.
+                Some(Ok(frame)) => match frame.into_data() {
+                    Ok(bytes) => decoder.decode(Some(bytes)),
+                    Err(_) => (None, None),
+                },
+                Some(Err(f)) => (None, Some(Err(f))),
+                None => decoder.decode(None),
+            };
+            if let Some(values) = &values {
+                (batch.usage, content) = format.read(values);
             }
-            // Only a decoder's own end is said already.
-            Some(Err(f)) => decoded.push(Part::End(Err(f.unsaid()))),
-            None => {
-                decoder.finish(&mut decoded);
-                // Ignored after the decoder's own `Part::End`.
-                decoded.push(Part::End(Err(Fault::truncated())));
+            batch.values = values;
+            batch.end = end;
+            if let Some(call) = call {
+                locked(call).events(&mut batch);
             }
+        });
+        if let Err(panic) = std::panic::catch_unwind(decode) {
+            if let Some(call) = call {
+                locked(call).finish(Err(Fault::internal(PANICKED)));
+            }
+            std::panic::resume_unwind(panic);
         }
-        if let Some(call) = call {
-            lock(call).parts(&mut decoded);
-        }
-        parts.append(&mut decoded);
+        (batch, content)
     }
 
-    /// Its reader is done, ending `end`; the call it answers ends so.
+    /// Its reader stopped with `end`; its call ends so.
     pub(crate) fn end(&mut self, end: Result<(), Fault>) {
-        if let Source::Bytes { call: Some(c), .. } = self {
-            lock(c).finish(end);
+        if let Some(call) = self.call() {
+            locked(call).finish(end);
         }
-    }
-
-    /// Whether it answers a call of a request whose plugins have answered.
-    fn answered(&self) -> bool {
-        matches!(self, Source::Bytes { call: Some(c), .. } if lock(c).answered())
     }
 }
 
-/// The fault for reading a plugin's raw bytes.
-fn plugin_bytes() -> Fault {
-    Fault::config("a plugin's own bytes can be sent, not read")
+/// Whether a response with `status`, to a `HEAD` if `to_head`, has no body
+/// (RFC 9110 9.3.2, 15.3.5, 15.3.6, 15.4.5).
+pub(crate) fn bodiless(status: StatusCode, to_head: bool) -> bool {
+    to_head || matches!(status.as_u16(), 204 | 205 | 304)
+}
+
+/// A response head with `status` and nothing else.
+pub(crate) fn head(status: StatusCode) -> http::response::Parts {
+    let (mut head, ()) = http::Response::new(()).into_parts();
+    head.status = status;
+    head
 }

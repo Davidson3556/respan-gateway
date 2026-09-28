@@ -1,26 +1,24 @@
 # Architecture
 
-The kernel relays requests, translates them between formats of one kind,
-runs every plugin in one order, and closes each request exactly once.
-The tests state what it promises: in `crates/testkit/tests/`, `relay.rs`
-covers the kernel and OpenAI relay, `translate.rs` OpenAI and Anthropic
-both ways, and `custom.rs` a kind the kernel has never seen.
-`crates/server/tests/http.rs` covers HTTP.
+The kernel (`crates/core`) relays requests, translates them between
+formats of one kind, runs every plugin in one order, and ends each request
+and call once. Tests state its promises; the
+[README](../README.md#glossary) defines its terms.
 
 ## Decisions
 
 | # | Rule |
 |---|---|
-| [0001](decisions/0001-neutral-core.md) | The core is feature-neutral: every feature is a plugin on one public API |
-| [0002](decisions/0002-no-dynamic-plugin-loading.md) | Plugins are compiled in; nothing is loaded at runtime |
-| [0003](decisions/0003-kernel-contracts.md) | A minimal kernel, typed by kind, whose contracts grow without breaking; what is promised |
-| [0004](decisions/0004-two-edges-neutral-events.md) | Two edges on a kind's input and output; a typed `Format`; a provider is a name, a format and a transport |
-| [0005](decisions/0005-no-routes-global-plugins.md) | Formats recognise their requests; one plugin registry ordered by `after`; a default target |
+| [0001](decisions/0001-neutral-core.md) | Every feature is a plugin on one API |
+| [0002](decisions/0002-no-dynamic-plugin-loading.md) | Plugins are compiled in |
+| [0003](decisions/0003-kernel-contracts.md) | A minimal kernel typed by kind, grown without breaking |
+| [0004](decisions/0004-two-edges-typed-formats.md) | Two edges; typed formats; providers are name, format, transport |
+| [0005](decisions/0005-no-routes-global-plugins.md) | Formats recognise requests; one plugin order; default targets |
+| [0006](decisions/0006-streams-both-ways.md) | Inputs and outputs may both stream |
+| [0007](decisions/0007-format-is-a-codec.md) | A format is one protocol's codec |
+| [0008](decisions/0008-events-carry-their-bytes.md) | Each message is one value that keeps its bytes; usage counts as decoded |
 
 ## Two edges
-
-A request goes to the first format served that accepts it. Its plugins
-run on two edges, in the gateway's one order:
 
 ```
  client ⇄ client edge ⇄ gateway ⇄ provider edge ⇄ provider
@@ -30,107 +28,155 @@ run on two edges, in the gateway's one order:
           once per request        once per call
 ```
 
-- `on_client` runs once per request. The first plugin to answer or
-  refuse ends it; otherwise the target answers.
-- `on_provider` runs before every call the request makes: the target's,
-  a fallback's, a judge's.
-- Each hook that started gets its end hook once. A request's calls
-  finish theirs before its `on_client_end` starts.
+`on_provider` runs before every call, so a check there covers them all.
+Each hook that started gets its end hook once, a request's calls first.
+Order is explicit (`after`); a plugin that answers skips those after it.
+Only `on_client` may `call` or `take_inputs`
+([0004](decisions/0004-two-edges-typed-formats.md#two-edges)).
 
-Guardrails, PII and routing belong to the client edge; billing, limits
-and signing to the provider edge.
+## The request path
+
+```
+ http::Request ─▶ handle ─▶ first format that accepts (none: plain 404)
+   Upgrade? no:  whole: body read in full, its one input
+            yes: upgrading: no input with the head; one per data frame after
+                  ▼
+ on_client, each plugin ─Some─▶ own response ─────┐
+                  │ all pass  └─Err─▶ refusal ────┤
+ cx.call(target) ─▶ on_provider ─Err─▶ refusal ───┤
+                  ▼                               │
+ input filters ─▶ fill call ─▶ request encoder   │
+   ─▶ edit_call ─▶ Transport::send(Request<Body>) │
+                  ▼                               │
+ response decoder ─▶ outputs ─▶ provider filters  │
+                  ▼                               │
+ client-edge filters ◀────────────────────────────┘
+                  ▼
+ response encoder: open ─▶ head with the first byte, or at
+          once for upgrading, HEAD, 204, 205, 304
+                  ▼ at the end
+ on_provider_end, each call ─▶ on_client_end;  the Outcome future resolves
+```
+
+Four flows:
+
+```
+ chat POST    1 input, maybe empty ─▶ call(target) ─▶ SSE
+ quiet GET    Response::stream; Encoder::open (sse::comment,
+              whole::Relay::with_open) ─▶ head at once
+ WS→WS relay  call(target): its head sets Upgrade ─▶ 101 at once;
+              client frames ─▶ input filters ─▶ that call's encoder
+ WS→SSE       on_client keeps call = cx.call(p), returns
+ bridge       Response::stream, which the encoder makes a 101;
+              take_inputs() ─▶ per message call.clone()
+              .with_input(chat) ─▶ outputs() ─▶ one frame per output
+```
 
 ## Formats and kinds
 
-A format is one wire protocol. Its kind is its pair of types, `Input`
-and `Output`, such as `Conversation` and `conversation::Reply`; a format
-of no kind declares `()` for both. Formats of one name relay to each
-other; formats of one kind translate through `decode` and `encode`.
-`accepts` recognises a request from its head, `model` reads the model,
-`prepare` builds a call's request, and `decoder` and `encoder` turn
-response bytes into Parts and back.
+A format is one protocol's codec: a decoder and an encoder per body,
+either way, each keeping its stream's state
+([0007](decisions/0007-format-is-a-codec.md)). A body is a stream of
+messages, each decoded into one value of the kind, even one the kind
+cannot read; each value keeps the bytes it came in, so the format writes
+it as them while it says the same, an edit written into them
+([0008](decisions/0008-events-carry-their-bytes.md)). Formats of one name
+relay; formats of one kind translate through their values; traffic the
+gateway does not read is a kind of one (`formats::opaque`).
 
-A call's body is the client's, patched by `encode` if the input
-changed, or the input encoded anew for another format of the kind
-([0003](decisions/0003-kernel-contracts.md)). Within one format the
-client's end-to-end headers pass on, credentials included; the transport
-decides whose credentials reach the provider.
+The kernel keeps no bytes. It relays only heads (a translated head keeps
+its status and `Retry-After`) and fills a relay's call with the client's
+headers and query as a proxy does. A whole body is decoded only when
+read, so a plain relay's call carries the client's bytes, which its
+request encoder may edit; an upgrading request's frames are decoded as
+they pass. `Upgrade` (RFC 9110 7.8), not the format, says whether inputs
+stream. The model belongs to the kind (`Conversation.model`); its place on
+the wire is the format's, whose request encoder reads it from the first
+input ([0003](decisions/0003-kernel-contracts.md#kinds)).
 
 ## Core types
 
-22 public types, plus the `Body` alias, the `body` function, the `codes`
-module and re-exports of the crates its contracts use.
+14 public types, plus `Body`, `codes` and re-exports; `handle` needs a
+tokio runtime, which runs end hooks detached.
 
-- `Gateway`: providers, formats served, plugins and a default target,
-  each setting checked as given; `handle`, `check_target`, `idle`.
-- `Closed`: a future of a request's `Outcome`, from any response.
-- `Provider`, `Target`, `Transport`: a name, a format and a transport;
-  the name of the provider that answers; how one provider is reached.
-- `Plugin`, `Context`, `ProviderContext`, `Call`: the four hooks; one
-  request on the client edge; one call on the provider edge; a call a
-  plugin makes with `cx.call`.
-- `Filter<T>`, `Outcome`: edits output events as they stream; what an
-  end hook learns (status, end, usage).
-- `Format`, `Event`, `ClientView`, `Decoder`, `Encoder`: a wire protocol;
-  the bound on a kind's types; the client's request as a format sees it;
-  bytes to Parts and back.
-- `Part`, `Item`, `Doc`, `Usage`: what a response decodes into (`Item`,
-  `Frame`, `Usage`, `End`); one message's events and bytes; a whole body;
-  an additive map of units to amounts.
-- `Response`: a provider's, from a call, or a plugin's answer.
-- `Fault`: the one error type.
+- `Gateway`, `Transport`; `Plugin`, whose hooks get a `ClientContext` (a
+  request) or `ProviderContext` (a call); `Call`, a `'static`, `Clone`,
+  `Sync` future, sent when awaited.
+- `Filter<T>` edits inputs (the only way) or outputs; `Outcome` says how
+  an edge ended; `Response` is a call's, `cx.relay`'s or
+  `Response::stream`'s, read with `ready` or `outputs`; `Fault` is the one
+  error type.
+- `Format`, `Decoder<T>`, `Encoder<T>`, `Usage`: a protocol's codec, bytes
+  to values of its kind and back; amounts.
 
 ## The response pipeline
 
-1. **Head.** A relayed response keeps the provider's head, minus
-   hop-by-hop headers, those its `Connection` names, and its origin's
-   (`set-cookie`, `alt-svc`, `strict-transport-security`). Any other
-   keeps only its status and `Retry-After`, and is refused as a 502 if
-   it is a redirect with a `Location`. Trailers are not passed on.
-2. **Hold.** The head waits for the first bytes. A success that fails
-   before any, or a panic, is sent as a refusal. A 204, a 304 or an
-   answer to `HEAD` is read to its end and sent with no body.
-3. **Decode.** Every byte of content belongs to an item or a Frame.
-4. **Edit.** Filters change, hold, drop and insert events: the provider
-   edge's first, then the client edge's, each the last added first, as
-   are head edits (`map_head`). An unedited item is written as its
-   bytes.
-5. **End.** Each body has one end. A stream cut short ends
-   `Err(truncated)` in the client's framing.
-6. **Close.** End hooks run once, detached from the response:
-   `on_client_end` as the last bytes are handed out, or when the client
-   leaves or a panic ends the response; a call's `on_provider_end` when
-   it fails, or when its response is sent, collected or dropped. A
-   call's response still open when its request closes ends abandoned.
+1. **Head.** Relayed, the provider's minus connection headers;
+   translated, its status and `Retry-After`, plus what the client's
+   encoder sets. A provider's unasked 101, or a redirect to translate,
+   fails the call `UPSTREAM`.
+2. **First byte.** A head waits for its body's first byte, so a success
+   failing before any is refused; `Encoder::open` opens a quiet stream at
+   once. An upgrading request's head goes at once, so the encoder makes a
+   plugin's success a 101. A 204, 205, 304 or response to a `HEAD` goes at
+   once with no body; a call's body is still read to its end, unwritten,
+   as its usage counts.
+3. **Decode.** Each message is one value. Its usage counts as decoded, on
+   the edge that decoded it: a call's on its provider edge, whoever reads
+   it; a plugin's own bytes and `with_usage` on the client edge; what a
+   plugin makes, never. A cost cap is a reservation in `on_provider`,
+   settled from `Outcome.usage`, plus a provider-edge filter that
+   estimates from text to cut a stream; a meter once saw each increment,
+   but providers report output usage at a stream's end.
+4. **Edit.** Output filters run provider edge first, the last added
+   first; input filters the first added first: a plugin sees inputs after
+   earlier plugins, outputs before. A value that says nothing, such as a
+   keep-alive, passes no filter and is written where it came. An `Err`
+   stops writing, never counting, and a failed filter
+   releases nothing.
+5. **End.** A body ends at the end of its bytes; one cut short ends
+   `Err(truncated)`. Every filter gets one end, even after a failure,
+   drop or panic elsewhere, so what it keeps back is released. A panic is
+   an internal fault, written in the client's format even after bytes are
+   out.
+6. **Close.** At close the end is known, so open filters cannot change
+   it. A request closes when its last bytes are out or the client leaves;
+   a call when it fails, its body ends, or its reader stops. The request
+   ends its open calls `abandoned` first.
 
 ## Routing
 
-A router sets the target and passes, as `ModelRouter` does, so the
-plugins after it still run. A fallback answers by calling providers:
+A router sets the target and passes. A fallback answers with the first
+ready success, else the last answer, so a client sees the last 429 and its
+`Retry-After`. `ready` reads to the first content (an output that says
+something) as the provider sent it, before filters; it is `Err` for a
+success that fails first, and passes an error status:
 
 ```rust
-let mut last = Err(Fault::upstream("no providers"));
+let mut last = Err(Fault::upstream("no provider to try"));
 for name in &self.0 {
-    last = cx.call(*name).await;
-    if last.as_ref().is_ok_and(|r| r.head().status.is_success()) {
-        break;
-    }
+    last = match cx.call(name).await {
+        Ok(resp) => resp.ready().await,
+        Err(fault) => Err(fault),
+    };
+    if last.as_ref().is_ok_and(|r| r.head().status.is_success()) { break }
 }
 last.map(Some)
 ```
 
-Answering skips the plugins after it, so such a plugin goes last. A
-judge's call carries its own input and is read, not sent:
-`cx.call(p).input(prompt).await?.collect::<Reply>().await?`. Every call
-runs the provider edge, so billing and limits see each one.
+A judge's call brings its own input and is read:
+`cx.call(p).with_input(prompt).await?.outputs::<Reply>()`. Routing by
+model reads the input, so upgrading requests route by their head, and
+opaque traffic by its body
+([0003](decisions/0003-kernel-contracts.md#kinds)).
 
 ## Crates
 
 | Crate | What it is |
 |---|---|
-| `core` | The kernel: no HTTP client or server, no config, no kinds. |
-| `formats` | The `conversation` kind with `OpenAiChat` and `AnthropicMessages`, and helpers for any format: `sse`, `whole`, `posts_to`, `pass_headers`, `json_model`, `write_model`, `frames_decoder` and `frames_encoder`. |
-| `plugins` | First-party plugins: `ModelRouter`. |
-| `server` | `router`, an axum router sending every path to the gateway, bodies bounded at 32 MiB; `HttpTransport`, a base URL and headers, with the `CallHeaders` extension. |
-| `testkit` | `MockTransport`, `mock` replies, `post`, `collect`, `Outcomes`, and the kernel's tests. |
-| `respan-gateway` | The binary: YAML config, formats by name, routing by model, and `check`. |
+| `core` | The kernel: no HTTP, config or kinds. |
+| `formats` | The `conversation` kind, `OpenAiChat`, `AnthropicMessages`, `relayed`, `opaque`, helpers. |
+| `plugins` | `ModelRouter<I>`, given an accessor for the kind's model. |
+| `server` | `router` (bodies up to 32 MiB, no upgrades), `HttpTransport`, `CallHeaders`. |
+| `testkit` | `MockTransport` and the kernel's tests. |
+| `respan-gateway` | The binary: YAML config, routing by model, `check`. |

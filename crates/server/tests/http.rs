@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use respan_gateway_core::http;
 use respan_gateway_core::{
-    Context, Fault, Gateway, Outcome, Plugin, Provider, Response, async_trait,
+    ClientContext, Fault, Format, Gateway, Outcome, Plugin, Response, Transport, async_trait,
 };
 use respan_gateway_formats::conversation::Reply;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
@@ -19,9 +19,11 @@ fn http(base: impl Into<String>) -> HttpTransport {
     HttpTransport::new(base).unwrap_or_else(|e| panic!("{e}"))
 }
 
-/// A gateway serving OpenAI clients, sent to `provider`, its target.
-fn gateway_to(provider: Provider) -> Gateway {
-    Gateway::new([provider])
+/// A gateway serving OpenAI clients, sent to the provider speaking
+/// `format` over `transport`, its target.
+fn gateway_to(format: impl Format, transport: impl Transport) -> Gateway {
+    Gateway::new()
+        .provider("local", format, transport)
         .and_then(|g| g.serve(OpenAiChat))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"))
@@ -29,7 +31,7 @@ fn gateway_to(provider: Provider) -> Gateway {
 
 /// A gateway serving OpenAI clients, sent to the provider at `base`.
 fn openai_gateway(base: impl Into<String>) -> Gateway {
-    gateway_to(Provider::new("local", OpenAiChat, http(base)))
+    gateway_to(OpenAiChat, http(base))
 }
 
 async fn spawn(app: Router) -> String {
@@ -91,7 +93,7 @@ async fn translates_an_openai_client_to_anthropic_over_real_http() {
         }),
     ))
     .await;
-    let gateway = gateway_to(Provider::new("local", AnthropicMessages, http(provider)));
+    let gateway = gateway_to(AnthropicMessages, http(provider));
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::new()
@@ -153,6 +155,56 @@ async fn a_body_over_the_cap_is_too_large() {
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.contains("too_large"), "{body}");
+}
+
+#[tokio::test]
+async fn an_upgrade_the_server_does_not_switch_is_ignored() {
+    /// Notes each call's head and body, and answers a unary reply.
+    #[derive(Clone, Default)]
+    struct Note(Arc<Mutex<Vec<(http::HeaderMap, bytes::Bytes)>>>);
+
+    #[async_trait]
+    impl Transport for Note {
+        async fn send(
+            &self,
+            call: http::Request<respan_gateway_core::Body>,
+        ) -> Result<http::Response<respan_gateway_core::Body>, Fault> {
+            use respan_gateway_core::http_body_util::{self, BodyExt};
+            let (head, body) = call.into_parts();
+            let body = body.collect().await?.to_bytes();
+            self.0.lock().map(|mut n| n.push((head.headers, body))).ok();
+            let unary = r#"{"id":"c","choices":[{"message":{"content":"hi"}}]}"#;
+            let body = http_body_util::Full::new(bytes::Bytes::from_static(unary.as_bytes()));
+            let mut resp = http::Response::new(body.map_err(Into::into).boxed_unsync());
+            let json = http::HeaderValue::from_static("application/json");
+            resp.headers_mut().insert("content-type", json);
+            Ok(resp)
+        }
+    }
+
+    let note = Note::default();
+    let app = router(gateway_to(OpenAiChat, note.clone()));
+    let chat = r#"{"model":"m","messages":[]}"#;
+    let req = http::Request::post("/v1/chat/completions")
+        .header("upgrade", "h2c")
+        .header("connection", "Upgrade, HTTP2-Settings")
+        .header("http2-settings", "AAMAAABkAAQAAP__")
+        .body(axum::body::Body::from(chat))
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let resp = tower::ServiceExt::oneshot(app, req)
+        .await
+        .unwrap_or_else(|e| match e {});
+
+    assert_eq!(resp.status(), 200);
+    let noted = note.0.lock().map(|n| n.clone()).unwrap_or_default();
+    let [(headers, body)] = &noted[..] else {
+        panic!("{} calls", noted.len());
+    };
+    assert_eq!(&body[..], chat.as_bytes());
+    for name in ["upgrade", "connection", "http2-settings"] {
+        assert!(!headers.contains_key(name), "{name}");
+    }
 }
 
 #[tokio::test]
@@ -242,7 +294,7 @@ async fn it_joins_its_base_with_the_path_and_sends_its_headers() {
     headers.append("x-team", value("b"));
     let transport = http(format!("{provider}/v1beta/openai/")).with_headers(headers);
     let transport = transport.unwrap_or_else(|e| panic!("{e}"));
-    let gateway = gateway_to(Provider::new("local", OpenAiChat, transport));
+    let gateway = gateway_to(OpenAiChat, transport);
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::new()
@@ -268,7 +320,7 @@ fn a_base_url_needs_http_or_https_and_a_host() {
     ] {
         assert!(HttpTransport::new(url).is_ok(), "{url}");
     }
-    // A base URL may hold a key, so the error does not echo it.
+    // A base URL may contain a key, so the error does not echo it.
     let expected = "bad base URL: an http or https one with a host, and no query, fragment or credentials (those go in its headers)";
     for url in [
         "api.openai.com",
@@ -424,27 +476,30 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
 
     #[async_trait]
     impl Plugin for Log {
-        async fn on_client_end(&self, _cx: &Context, outcome: &Outcome) {
+        async fn on_client_end(&self, _cx: &ClientContext, outcome: &Outcome) {
             self.0.lock().map(|mut l| l.push(outcome.clone())).ok();
         }
     }
 
-    /// Answers 204, from events its format writes as a body.
+    /// Answers 204, from outputs its format writes as a body.
     struct NoContent;
 
     #[async_trait]
     impl Plugin for NoContent {
-        async fn on_client(&self, _cx: &mut Context) -> Result<Option<Response>, Fault> {
-            let resp = http::Response::builder()
-                .status(http::StatusCode::NO_CONTENT)
-                .body(futures::stream::iter([Ok(Reply::text(0, "hi"))]))?;
-            Ok(Some(Response::stream(resp)))
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.edit_response_head(|head| {
+                head.status = http::StatusCode::NO_CONTENT;
+                Ok(())
+            });
+            let outputs = [Ok(Reply::text(0, "hi"))];
+            Ok(Some(Response::stream(futures::stream::iter(outputs))))
         }
     }
 
     let log = Log::default();
-    let gateway = Gateway::new([])
-        .and_then(|g| g.serve(OpenAiChat)?.plugin("log", log.clone()))
+    let gateway = Gateway::new()
+        .serve(OpenAiChat)
+        .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("no-content", NoContent))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     let base = spawn(router(gateway.clone())).await;
@@ -462,4 +517,80 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     let all = log.0.lock().map(|l| l.clone()).unwrap_or_default();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].end, Ok(()));
+}
+
+#[tokio::test]
+async fn it_strips_the_provider_origins_own_headers() {
+    let provider = spawn(Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let headers = [
+                ("content-type", "text/event-stream"),
+                ("set-cookie", "__cf_bm=x; Domain=.openai.com"),
+                ("alt-svc", "h3=\":443\""),
+                ("strict-transport-security", "max-age=31536000"),
+                ("x-request-id", "req_1"),
+            ];
+            (headers, SSE).into_response()
+        }),
+    ))
+    .await;
+    let gateway = openai_gateway(format!("{provider}/v1"));
+    let base = spawn(router(gateway)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .body(r#"{"model":"m","stream":true,"messages":[]}"#)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("send: {e}"));
+
+    for origin in ["set-cookie", "alt-svc", "strict-transport-security"] {
+        assert!(resp.headers().get(origin).is_none(), "{origin}");
+    }
+    assert_eq!(resp.headers()["x-request-id"], "req_1");
+}
+
+#[tokio::test]
+async fn it_sends_a_whole_body_with_its_length_and_streams_one_of_unknown_size() {
+    use respan_gateway_core::http_body_util::{BodyExt, Full, StreamBody};
+    use respan_gateway_core::{Body, Transport, bytes::Bytes, futures, http_body::Frame};
+
+    // Echoes the body, prefixed by its `content-length`, or `-` if none.
+    let provider = spawn(Router::new().route(
+        "/echo",
+        post(|headers: http::HeaderMap, body: String| async move {
+            let length = headers.get("content-length").and_then(|v| v.to_str().ok());
+            format!("{} {body}", length.unwrap_or("-"))
+        }),
+    ))
+    .await;
+    let transport = http(&provider);
+    let call = |body: Body| {
+        let mut call = http::Request::new(body);
+        *call.method_mut() = http::Method::POST;
+        *call.uri_mut() = http::Uri::from_static("/echo");
+        call
+    };
+    let read = |resp: http::Response<Body>| async move {
+        let body = resp.into_body().collect().await.map(|b| b.to_bytes());
+        String::from_utf8_lossy(&body.unwrap_or_default()).into_owned()
+    };
+
+    let whole = transport
+        .send(call(
+            Full::new(Bytes::from("ab"))
+                .map_err(Into::into)
+                .boxed_unsync(),
+        ))
+        .await;
+    let frames = ["a", "b"].map(|f| Ok::<_, Fault>(Frame::data(Bytes::from(f))));
+    let streamed = StreamBody::new(futures::stream::iter(frames)).boxed_unsync();
+    let streamed = transport.send(call(streamed)).await;
+
+    assert_eq!(read(whole.unwrap_or_else(|e| panic!("{e}"))).await, "2 ab");
+    assert_eq!(
+        read(streamed.unwrap_or_else(|e| panic!("{e}"))).await,
+        "- ab"
+    );
 }
