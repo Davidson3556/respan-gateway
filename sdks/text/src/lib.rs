@@ -100,8 +100,54 @@ fn edit_string(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
             }
             Ok(())
         }
+        _ if text.contains(['{', '}', '[', ']', '"']) => edit_fragment(text, edit),
         _ => edit(text),
     }
+}
+
+/// Runs `edit` on a piece of JSON too short to parse, such as a streamed
+/// tool call's arguments, escaping what it writes so the JSON stays whole.
+/// An edit in more than one place is refused: what lies between would be
+/// escaped too.
+fn edit_fragment(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
+    let mut edited = text.clone();
+    edit(&mut edited)?;
+    if edited == *text {
+        return Ok(());
+    }
+    let head = common_prefix(text, &edited);
+    let tail = common_prefix_rev(&text[head..], &edited[head..]);
+    let (old, new) = (
+        &text[head..text.len() - tail],
+        &edited[head..edited.len() - tail],
+    );
+    if old.contains(['"', '\\']) {
+        return Err(unreadable(
+            "an edit in several places of a streamed JSON piece",
+        ));
+    }
+    let quoted = Value::String(new.to_owned()).to_string();
+    let escaped = &quoted[1..quoted.len() - 1];
+    *text = format!("{}{escaped}{}", &text[..head], &text[text.len() - tail..]);
+    Ok(())
+}
+
+/// The length of the longest common prefix of `a` and `b`, at a char boundary.
+fn common_prefix(a: &str, b: &str) -> usize {
+    a.char_indices()
+        .zip(b.chars())
+        .find(|((_, x), y)| x != y)
+        .map_or(a.len().min(b.len()), |((i, _), _)| i)
+}
+
+/// The length of the longest common suffix of `a` and `b`, at a char boundary.
+fn common_prefix_rev(a: &str, b: &str) -> usize {
+    a.chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum()
 }
 
 /// Every text part of every message, the system prompt included, the

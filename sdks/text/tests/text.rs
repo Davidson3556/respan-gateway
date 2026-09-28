@@ -528,3 +528,31 @@ async fn a_stream_cut_while_text_is_held_sends_it_then_the_error() -> Result<(),
     assert!(body.contains("error"), "{body}");
     Ok(())
 }
+
+#[test]
+fn a_value_restored_into_a_streamed_tool_fragment_is_escaped() {
+    let vault = Placeholders::default();
+    let ph = vault.hide("NAME", "Robert \"Bob\" Smith");
+    let call = |arguments: &str| {
+        let raw =
+            json!([{ "index": 0, "tool_calls": [{ "function": { "arguments": arguments } }] }]);
+        Reply::other("openai", raw)
+    };
+    let frags = [format!("{{\"to\":\"{ph}"), "\"}".to_owned()];
+    let out = run(
+        &mut Holdback::new(vault),
+        frags.iter().map(|f| call(f)).collect(),
+    )
+    .unwrap_or_default();
+    let joined: String = out
+        .iter()
+        .filter_map(|r| match &r.content[..] {
+            [Piece::Other { raw, .. }] => raw[0]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    let parsed: serde_json::Value = serde_json::from_str(&joined).unwrap_or_default();
+    assert_eq!(parsed["to"], "Robert \"Bob\" Smith", "{joined}");
+}

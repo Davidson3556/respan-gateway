@@ -46,7 +46,7 @@ const BACKLOG: usize = 64;
 struct Routes {
     posts: Vec<(Vec<Value>, Sender<Value>)>,
     listener: Option<Sender<Value>>,
-    /// The last request, or the last `POST` answered.
+    /// The start, the last request, or the last `POST` answered.
     touched: Option<Instant>,
 }
 
@@ -76,7 +76,13 @@ impl Session {
                 }
             }
         });
-        let routes = Arc::new(Mutex::new(Routes::default()));
+        // Started counts as touched, so a server that never answers
+        // `initialize` still idles out and frees its slot.
+        let routes = Routes {
+            touched: Some(Instant::now()),
+            ..Routes::default()
+        };
+        let routes = Arc::new(Mutex::new(routes));
         let (alive, mut gone) = oneshot::channel();
         let reader = routes.clone();
         tokio::spawn(async move {

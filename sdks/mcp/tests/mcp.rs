@@ -619,3 +619,24 @@ async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
     }
     panic!("the session of a timed-out POST is still held");
 }
+
+#[tokio::test]
+async fn a_session_whose_initialize_is_never_answered_idles_out() {
+    // Never answers, never exits.
+    let transport = StdioTransport::new("sh", ["-c", "exec sleep 100"])
+        .timeout(Duration::from_millis(100))
+        .idle(Duration::from_millis(200))
+        .max_total(1);
+    let gw = gateway(transport, None);
+    let (first, ..) = send(&gw, request(Method::POST, INIT, &[])).await;
+    assert_eq!(first, StatusCode::GATEWAY_TIMEOUT);
+    // Its slot frees once it idles out, for any owner.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let other = [("authorization", "Bearer someone-else")];
+    let (second, _, body, _) = send(&gw, request(Method::POST, INIT, &other)).await;
+    assert_ne!(
+        second,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "never reaped: {body}"
+    );
+}
