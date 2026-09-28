@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "sdks/*", "examples"]
 resolver = "3"
 
 [workspace.package]
@@ -16,6 +16,10 @@ respan-gateway-formats = { path = "crates/formats" }
 respan-gateway-plugins = { path = "crates/plugins" }
 respan-gateway-server = { path = "crates/server" }
 respan-gateway-testkit = { path = "crates/testkit" }
+respan-gateway-routing = { path = "sdks/routing" }
+respan-gateway-text = { path = "sdks/text" }
+respan-gateway-ledger = { path = "sdks/ledger" }
+respan-gateway-mcp = { path = "sdks/mcp" }
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"

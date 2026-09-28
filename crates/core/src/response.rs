@@ -50,6 +50,23 @@ pub(crate) struct Batch {
     pub(crate) values: Option<Values>,
     pub(crate) end: Option<Result<(), Fault>>,
     pub(crate) usage: Usage,
+    /// The call whose end this holds, ended once it is read.
+    pub(crate) unread: Unread,
+}
+
+/// A call's end decoded and not yet read; dropped unread, the call ends so.
+#[derive(Default)]
+pub(crate) struct Unread(Option<(SharedCall, Result<(), Fault>)>);
+
+impl Drop for Unread {
+    fn drop(&mut self) {
+        if let Some((call, end)) = self.0.take() {
+            let mut batch = Batch::end(end);
+            let settle = std::panic::AssertUnwindSafe(|| locked(&call).settle(&mut batch));
+            let _ = std::panic::catch_unwind(settle);
+            locked(&call).finish(Err(Fault::internal(PANICKED)));
+        }
+    }
 }
 
 impl Batch {
@@ -63,6 +80,31 @@ impl Batch {
 
     fn is_empty(&self) -> bool {
         self.values.is_none() && self.end.is_none() && self.usage.is_empty()
+    }
+
+    /// Read by whoever reads or sends the response: the end of its call, if
+    /// it holds it, goes through the call's filters and ends the call. A
+    /// panic ends the call internal.
+    pub(crate) fn read(&mut self) {
+        let Some((call, _)) = self.unread.0.take() else {
+            return;
+        };
+        let settle = std::panic::AssertUnwindSafe(|| locked(&call).settle(self));
+        if let Err(panic) = std::panic::catch_unwind(settle) {
+            locked(&call).finish(Err(Fault::internal(PANICKED)));
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// Decoded from `call`'s response: counted and filtered; its end, if
+    /// any, waits to be read.
+    fn of(mut self, call: &SharedCall) -> Self {
+        if locked(call).events(&mut self)
+            && let Some(end) = &self.end
+        {
+            self.unread = Unread(Some((call.clone(), end.clone())));
+        }
+        self
     }
 }
 
@@ -175,10 +217,11 @@ impl Response {
                 }
                 let given = std::mem::take(&mut resp.usage);
                 resp.unreported(&given);
-                let batch = match resp.ahead.pop_front() {
+                let mut batch = match resp.ahead.pop_front() {
                     Some(batch) => batch,
                     None => resp.body.next().await.0,
                 };
+                batch.read();
                 resp.unreported(&batch.usage);
                 if let Some(values) = batch.values {
                     let read = values.downcast::<Vec<T>>().map(|v| *v);
@@ -248,9 +291,8 @@ impl Response {
             self.unreported = Some(call.cx().client.unreported.clone());
             let call = call.share();
             // A bodiless response's end is decoded already.
-            for batch in &mut self.ahead {
-                locked(&call).events(batch);
-            }
+            let ahead = std::mem::take(&mut self.ahead).into_iter();
+            self.ahead = ahead.map(|batch| batch.of(&call)).collect();
             *slot = Some(call);
         }
         self
@@ -299,8 +341,9 @@ impl Source {
 
     /// The next batch, eventually one with the end, not to be read past,
     /// and whether it held content before any filter. A call's usage counts
-    /// on its provider edge; other usage comes back in the batch. A panic
-    /// ends the call internal.
+    /// on its provider edge; other usage comes back in the batch. The call
+    /// ends when the batch with its end is read ([`Batch::read`]) or
+    /// dropped. A panic ends the call internal.
     pub(crate) async fn next(&mut self) -> (Batch, bool) {
         let (body, decoder, format, call) = match self {
             Source::Bytes {
@@ -337,7 +380,7 @@ impl Source {
             batch.values = values;
             batch.end = end;
             if let Some(call) = call {
-                locked(call).events(&mut batch);
+                batch = std::mem::take(&mut batch).of(call);
             }
         });
         if let Err(panic) = std::panic::catch_unwind(decode) {

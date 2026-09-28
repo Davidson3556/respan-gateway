@@ -89,7 +89,8 @@ impl Format for OpenAiChat {
     }
 }
 
-/// Keys a conversation has a place for, or that change no output.
+/// Keys a conversation has a place for, or that change no output; `user`
+/// too, when it is a string.
 const KNOWN: &[&str] = &[
     "model",
     "messages",
@@ -100,7 +101,6 @@ const KNOWN: &[&str] = &[
     "temperature",
     "top_p",
     "stop",
-    "user",
 ];
 
 /// Keys that change nothing at these values, as SDKs send by default.
@@ -137,9 +137,13 @@ impl Wire for OpenAiChat {
                     .collect(),
                 _ => Vec::new(),
             },
+            user: v["user"].as_str().map(Into::into),
             unsupported: unsupported_fields(v, KNOWN, INERT),
             ..Conversation::default()
         };
+        if chat.user.is_some() {
+            chat.unsupported.shift_remove("user");
+        }
         for m in v["messages"].as_array().into_iter().flatten() {
             chat.messages.push(read_message(m, &ROLES));
         }
@@ -160,6 +164,7 @@ impl Wire for OpenAiChat {
         set(&mut v, "temperature", chat.temperature.map(Into::into));
         set(&mut v, "top_p", chat.top_p.map(Into::into));
         set(&mut v, "stop", stop_json(&chat.stop));
+        set(&mut v, "user", chat.user.clone().map(Into::into));
         Ok(v.into())
     }
 
@@ -181,6 +186,9 @@ impl Wire for OpenAiChat {
             }
         }
         patch_sampling(v, before, after, "stop");
+        if before.user != after.user {
+            set(v, "user", after.user.clone().map(Into::into));
+        }
         if before.messages != after.messages {
             let messages = patch_messages(&before.messages, &after.messages, &ROLES)?;
             v.insert("messages".into(), messages.into());
@@ -1204,6 +1212,40 @@ mod tests {
         chat.unsupported.clear();
         chat.messages = vec![Message::new(Role::User, "hi")];
         assert!(write_request::<OpenAiChat>(&chat).is_ok());
+    }
+
+    #[test]
+    fn the_user_field_is_read_redacted_and_translated() {
+        use crate::anthropic::AnthropicMessages;
+        let body = json!({ "model": "m", "user": "bob@x.io",
+            "messages": [{ "role": "user", "content": "hi" }] });
+        let chat = OpenAiChat::read(&body);
+        assert_eq!(chat.user.as_deref(), Some("bob@x.io"));
+        assert!(chat.unsupported.is_empty());
+        // Kept as it came, or changed or removed by a plugin.
+        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
+        let redacted = patched(body.clone(), |c| c.user = Some("[x]".into()));
+        assert_eq!(redacted.ok().map(|v| v["user"].clone()), Some(json!("[x]")));
+        let removed = patched(body.clone(), |c| c.user = None);
+        assert_eq!(
+            removed.ok(),
+            Some(json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] }))
+        );
+        // To Anthropic it is the metadata's user id, and back.
+        let sent = write_request::<AnthropicMessages>(&chat).map(Value::from);
+        let sent = sent.unwrap_or_default();
+        assert_eq!(sent["metadata"], json!({ "user_id": "bob@x.io" }));
+        let back = write_request::<OpenAiChat>(&AnthropicMessages::read(&sent));
+        assert_eq!(
+            back.ok().map(|v| v["user"].clone()),
+            Some(json!("bob@x.io"))
+        );
+        // A user that is not a string is not the kind's: it stays unsupported.
+        let odd = OpenAiChat::read(&json!({ "user": 7, "messages": [] }));
+        assert_eq!(
+            (odd.user, odd.unsupported.get("user")),
+            (None, Some(&json!(7)))
+        );
     }
 
     #[test]

@@ -1,269 +1,154 @@
 //! An MCP server over stdio as a [`Transport`]: one child process per
-//! session, speaking JSON-RPC one message per line. It answers the
-//! streamable-HTTP requests [`StreamableHttp`](crate::StreamableHttp)
-//! prepares, so the kernel sees an ordinary HTTP MCP server.
+//! session, one JSON-RPC message per line. It answers the requests
+//! [`StreamableHttp`](crate::StreamableHttp) sends, as an HTTP MCP server
+//! would.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::http::header::CONTENT_TYPE;
-use respan_gateway_core::http::{self, Method, StatusCode};
-use respan_gateway_core::http_body::Frame;
-use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
-use respan_gateway_core::serde_json::{self, Value};
-use respan_gateway_core::{Body, Doc, Fault, Transport, async_trait};
-use respan_gateway_formats::sse;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::mpsc;
+use respan_gateway_core::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use respan_gateway_core::http::{self, HeaderValue, Method, StatusCode};
+use respan_gateway_core::http_body_util::{BodyExt, Full};
+use respan_gateway_core::serde_json::Value;
+use respan_gateway_core::{Body, Fault, Transport, async_trait};
+use tokio::process::Command;
 
-use crate::format::SESSION;
-use crate::kind::{Message, rpc};
+use crate::session::Session;
+use crate::{SESSION, error, lock, read};
 
-/// Starts `program` for each new session (an `initialize` without a
-/// session id) and routes its lines back to the requests waiting for them.
-#[derive(Debug, Clone)]
+/// Sessions by id and a keyed hash of the `Authorization` that started them.
+type Sessions = Mutex<HashMap<(String, u64), Arc<Session>>>;
+type Reply = http::Response<Body>;
+
+const NO_SESSION: &str = "no such session";
+
+/// Runs `program` for each new session (an `initialize` without a session
+/// id), and sends each line it writes to the request waiting for it.
+///
+/// A session belongs to the `Authorization` header that started it: a
+/// request with another one gets 404, as if the session did not exist. A
+/// second `GET` while the session's stream is open gets 409. A session
+/// ends when its child exits, on `DELETE`, or when idle; its child is then
+/// killed and reaped.
+#[derive(Debug)]
 pub struct StdioTransport {
     program: PathBuf,
     args: Vec<String>,
-    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
-    minted: Arc<AtomicU64>,
-}
-
-#[derive(Debug)]
-struct Session {
-    stdin: tokio::sync::Mutex<ChildStdin>,
-    child: Mutex<Option<Child>>,
-    routes: Arc<Mutex<Routes>>,
-}
-
-/// Where the child's messages go: a response to the `POST` that asked; a
-/// request or notification to the oldest open `POST`, else the `GET`
-/// stream, else nowhere.
-#[derive(Debug, Default)]
-struct Routes {
-    posts: Vec<Post>,
-    listener: Option<mpsc::UnboundedSender<Value>>,
-}
-
-#[derive(Debug)]
-struct Post {
-    /// The requests still unanswered; the stream ends when none is left.
-    ids: Vec<Value>,
-    tx: mpsc::UnboundedSender<Value>,
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
+    max_sessions: usize,
+    idle: Duration,
+    sessions: Arc<Sessions>,
+    minted: AtomicU64,
+    /// Secret keys, so a session id cannot be guessed.
+    keys: RandomState,
 }
 
 impl StdioTransport {
     /// Run `program` with `args` per session.
-    pub fn new(program: impl Into<PathBuf>, args: impl IntoIterator<Item = String>) -> Self {
+    pub fn new(program: impl Into<PathBuf>, args: impl IntoIterator<Item: Into<String>>) -> Self {
         Self {
             program: program.into(),
-            args: args.into_iter().collect(),
+            args: args.into_iter().map(Into::into).collect(),
+            max_sessions: 64,
+            idle: Duration::from_secs(600),
             sessions: Arc::default(),
-            minted: Arc::default(),
+            minted: AtomicU64::new(0),
+            keys: RandomState::new(),
         }
     }
 
-    /// How many sessions have a running child.
-    pub fn sessions(&self) -> usize {
-        lock(&self.sessions).len()
+    /// At most `n` sessions at once (default 64); a new one past it gets 503.
+    pub fn max_sessions(mut self, n: usize) -> Self {
+        self.max_sessions = n;
+        self
     }
 
-    fn spawn(&self) -> Result<(String, Arc<Session>), Fault> {
-        let mut child = Command::new(&self.program)
-            .args(&self.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| Fault::upstream("the MCP server could not be started").with_source(e))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err(Fault::upstream("the MCP server has no stdio"));
+    /// Ends a session with no `POST` waiting and no request for `idle`
+    /// (default 10 minutes).
+    pub fn idle(mut self, idle: Duration) -> Self {
+        self.idle = idle;
+        self
+    }
+
+    /// Starts a session for `owner` with the `initialize` in `body`.
+    async fn start(&self, owner: u64, body: &[u8]) -> Result<Reply, Fault> {
+        let messages = read(body).map(|(m, _)| m).unwrap_or_default();
+        if !messages.iter().any(|m| m["method"] == "initialize") {
+            return Ok(reply(StatusCode::NOT_FOUND, Some(NO_SESSION)));
+        }
+        let n = self.minted.fetch_add(1, Ordering::Relaxed);
+        let id = [0, 1].map(|i| format!("{:016x}", self.keys.hash_one((n, i))));
+        let key = (id.concat(), owner);
+        let session = {
+            let mut sessions = lock(&self.sessions);
+            if sessions.len() >= self.max_sessions {
+                return Ok(reply(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some("too many sessions"),
+                ));
+            }
+            let (all, forget) = (Arc::downgrade(&self.sessions), key.clone());
+            let ended = move || drop(all.upgrade().map(|all| lock(&all).remove(&forget)));
+            let mut command = Command::new(&self.program);
+            let session = Session::start(command.args(&self.args), self.idle, ended)?;
+            let session = Arc::new(session);
+            sessions.insert(key.clone(), session.clone());
+            session
         };
-        let routes = Arc::new(Mutex::new(Routes::default()));
-        let reader = routes.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                route(&mut lock(&reader), v);
-            }
-            // The child is gone: every open stream ends, unanswered.
-            *lock(&reader) = Routes::default();
-        });
-        let id = format!("stdio-{}", self.minted.fetch_add(1, Ordering::Relaxed) + 1);
-        let session = Arc::new(Session {
-            stdin: tokio::sync::Mutex::new(stdin),
-            child: Mutex::new(Some(child)),
-            routes,
-        });
-        lock(&self.sessions).insert(id.clone(), session.clone());
-        Ok((id, session))
+        let mut resp = session.post(messages).await?;
+        let id = HeaderValue::from_str(&key.0).map_err(|e| Fault::internal("an id").with_source(e));
+        resp.headers_mut().insert(SESSION, id?);
+        Ok(resp)
     }
 }
 
-fn route(routes: &mut Routes, v: Value) {
-    let m = Message::new(v.clone());
-    if m.is_response() {
-        let id = m.id();
-        if let Some(i) = routes
-            .posts
-            .iter()
-            .position(|p| p.ids.iter().any(|x| Some(x) == id))
-        {
-            let post = &mut routes.posts[i];
-            let _ = post.tx.send(v);
-            post.ids.retain(|x| Some(x) != id);
-            if post.ids.is_empty() {
-                routes.posts.remove(i);
-            }
-        }
-    } else if let Some(post) = routes.posts.first() {
-        let _ = post.tx.send(v);
-    } else if let Some(listener) = &routes.listener {
-        let _ = listener.send(v);
+/// A response of `status`, with a JSON-RPC error of `message` if any.
+pub(crate) fn reply(status: StatusCode, message: Option<&str>) -> Reply {
+    let error = message.map(|m| error(Value::Null, -32600, m).to_string());
+    let body = Full::from(error.clone().unwrap_or_default());
+    let mut resp = http::Response::new(body.map_err(Fault::from).boxed_unsync());
+    *resp.status_mut() = status;
+    if error.is_some() {
+        let json = HeaderValue::from_static("application/json");
+        resp.headers_mut().insert(CONTENT_TYPE, json);
     }
-}
-
-/// A response of `status` with a JSON body.
-fn json(status: StatusCode, v: &Value) -> http::Response<Body> {
-    let mut resp = http::Response::new(Body::from(Doc::from(v.clone())));
-    *resp.status_mut() = status;
-    let ct = http::HeaderValue::from_static("application/json");
-    resp.headers_mut().insert(CONTENT_TYPE, ct);
     resp
-}
-
-fn empty(status: StatusCode) -> http::Response<Body> {
-    let mut resp = http::Response::new(Body::from(Doc::default()));
-    *resp.status_mut() = status;
-    resp
-}
-
-/// An event stream of what `rx` receives, until it closes.
-fn events(rx: mpsc::UnboundedReceiver<Value>) -> http::Response<Body> {
-    let events = stream::unfold(rx, |mut rx| async move {
-        let v = rx.recv().await?;
-        let frame = Frame::data(Bytes::from(sse::event(None, v)));
-        Some((Ok::<_, Fault>(frame), rx))
-    });
-    let mut resp = http::Response::new(StreamBody::new(events.boxed()).boxed_unsync());
-    let ct = http::HeaderValue::from_static("text/event-stream");
-    resp.headers_mut().insert(CONTENT_TYPE, ct);
-    resp
-}
-
-fn error(status: StatusCode, code: i64, text: &str) -> http::Response<Body> {
-    json(status, Message::error(Value::Null, code, text, None).json())
 }
 
 #[async_trait]
 impl Transport for StdioTransport {
-    async fn send(&self, req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let (head, body) = req.into_parts();
-        let id = head.headers.get(SESSION).and_then(|v| v.to_str().ok());
-        let known = id.and_then(|id| lock(&self.sessions).get(id).cloned());
+    async fn send(&self, call: http::Request<Body>) -> Result<Reply, Fault> {
+        let (head, body) = call.into_parts();
+        let credential = head.headers.get(AUTHORIZATION).map(HeaderValue::as_bytes);
+        let owner = self.keys.hash_one(credential);
+        let body = body.collect().await?.to_bytes();
+        let Some(id) = head.headers.get(SESSION) else {
+            return match head.method {
+                Method::POST => self.start(owner, &body).await,
+                _ => Ok(reply(StatusCode::BAD_REQUEST, Some("no session"))),
+            };
+        };
+        let key = (id.to_str().unwrap_or_default().to_owned(), owner);
+        let Some(session) = lock(&self.sessions).get(&key).cloned() else {
+            return Ok(reply(StatusCode::NOT_FOUND, Some(NO_SESSION)));
+        };
+        session.touch();
         match head.method {
-            Method::GET => {
-                let Some(session) = known else {
-                    return Ok(error(
-                        StatusCode::NOT_FOUND,
-                        rpc::INVALID_REQUEST,
-                        "no session",
-                    ));
-                };
-                let (tx, rx) = mpsc::unbounded_channel();
-                lock(&session.routes).listener = Some(tx);
-                Ok(events(rx))
-            }
+            Method::POST => match read(&body) {
+                Some((messages, _)) => session.post(messages).await,
+                None => Ok(reply(StatusCode::BAD_REQUEST, Some("not JSON-RPC"))),
+            },
+            Method::GET => Ok(session.listen().unwrap_or_else(|| {
+                reply(StatusCode::CONFLICT, Some("the stream is already open"))
+            })),
             Method::DELETE => {
-                let Some(id) = id.filter(|_| known.is_some()) else {
-                    return Ok(empty(StatusCode::NOT_FOUND));
-                };
-                if let Some(session) = lock(&self.sessions).remove(id) {
-                    drop(lock(&session.child).take());
-                }
-                Ok(empty(StatusCode::OK))
+                lock(&self.sessions).remove(&key);
+                Ok(reply(StatusCode::NO_CONTENT, None))
             }
-            Method::POST => {
-                // The body now streams, so it is collected and parsed again
-                // (FINDINGS R2).
-                let body = body.collect().await?.to_bytes();
-                let Some(v) = Doc::from(body).json().cloned() else {
-                    return Ok(error(StatusCode::BAD_REQUEST, rpc::PARSE_ERROR, "not JSON"));
-                };
-                let messages = match v {
-                    Value::Array(all) => all,
-                    one => vec![one],
-                };
-                let messages: Vec<Message> = messages.into_iter().map(Message::new).collect();
-                let init = messages.iter().any(|m| m.method() == Some("initialize"));
-                let (session, minted) = match (known, id, init) {
-                    (Some(s), _, _) => (s, None),
-                    (None, None, true) => {
-                        let (id, s) = self.spawn()?;
-                        (s, Some(id))
-                    }
-                    (None, Some(_), _) => {
-                        return Ok(error(
-                            StatusCode::NOT_FOUND,
-                            rpc::INVALID_REQUEST,
-                            "no such session",
-                        ));
-                    }
-                    (None, None, false) => {
-                        return Ok(error(
-                            StatusCode::BAD_REQUEST,
-                            rpc::INVALID_REQUEST,
-                            "no session",
-                        ));
-                    }
-                };
-                let ids: Vec<Value> = messages
-                    .iter()
-                    .filter(|m| m.is_request())
-                    .filter_map(|m| m.id().cloned())
-                    .collect();
-                // Registered before writing, so no response is missed.
-                let rx = (!ids.is_empty()).then(|| {
-                    let (tx, rx) = mpsc::unbounded_channel();
-                    lock(&session.routes).posts.push(Post { ids, tx });
-                    rx
-                });
-                let mut stdin = session.stdin.lock().await;
-                for m in &messages {
-                    let line = format!("{}\n", m.json());
-                    stdin
-                        .write_all(line.as_bytes())
-                        .await
-                        .map_err(|e| Fault::upstream("the MCP server stopped").with_source(e))?;
-                }
-                let _ = stdin.flush().await;
-                drop(stdin);
-                let mut resp = match rx {
-                    Some(rx) => events(rx),
-                    None => empty(StatusCode::ACCEPTED),
-                };
-                if let Some(id) = minted {
-                    let id = http::HeaderValue::try_from(id)
-                        .map_err(|e| Fault::internal("bad session id").with_source(e))?;
-                    resp.headers_mut().insert(SESSION, id);
-                }
-                Ok(resp)
-            }
-            _ => Ok(empty(StatusCode::METHOD_NOT_ALLOWED)),
+            _ => Ok(reply(StatusCode::METHOD_NOT_ALLOWED, None)),
         }
     }
 }

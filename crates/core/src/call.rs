@@ -485,14 +485,14 @@ impl CallEdge {
         Ok(())
     }
 
-    /// Turn `batch` of this call's response into what its reader gets: its
-    /// usage counted, its outputs filtered, and at the end or
-    /// first failure what filters kept back, ending the call. Once the call
-    /// ended, just an abandoned end.
-    pub(crate) fn events(&mut self, batch: &mut Batch) {
+    /// Turn `batch` of this call's response into what its reader gets, as
+    /// decoded: its usage counted and its outputs filtered. Whether it holds
+    /// an end, a failed filter's too, for [`CallEdge::settle`] once read.
+    /// Once the call ended, just an abandoned end.
+    pub(crate) fn events(&mut self, batch: &mut Batch) -> bool {
         if self.is_finished() {
             *batch = Batch::end(Err(Fault::abandoned()));
-            return;
+            return false;
         }
         // Counted as decoded, even if a filter fails.
         self.usage += &std::mem::take(&mut batch.usage);
@@ -505,14 +505,25 @@ impl CallEdge {
         {
             batch.end = Some(Err(f));
         }
-        let end = batch.end.take().map(|end| {
-            let end = outputs.end(end, &mut batch.values, &says);
-            batch.end = Some(end.clone());
-            end
-        });
-        if let Some(end) = end {
-            self.finish(end);
+        batch.end.is_some()
+    }
+
+    /// At the end in `batch`, as it is read: what filters kept back, and the
+    /// call's end. Once the call ended, just an abandoned end.
+    pub(crate) fn settle(&mut self, batch: &mut Batch) {
+        if self.is_finished() {
+            *batch = Batch::end(Err(Fault::abandoned()));
+            return;
         }
+        let Some(end) = batch.end.take() else {
+            return;
+        };
+        let px = self.cx();
+        let format = px.format.clone();
+        let says = |v: &dyn std::any::Any| format.says(v);
+        let end = unlocked(&mut px.outputs).end(end, &mut batch.values, &says);
+        batch.end = Some(end.clone());
+        self.finish(end);
     }
 }
 

@@ -140,6 +140,9 @@ impl Transport for MockAt {
             .map_err(|e| Fault::config(format!("bad mock URL {url}")).with_source(e))?;
         let body = body.collect().await?.to_bytes();
         let mock = &self.mock;
+        // Keep what went on the wire, not the request's extensions: holding
+        // them would keep plugins' request-scoped values alive.
+        head.extensions = http::Extensions::new();
         let sent = http::Request::from_parts(head, body);
         mock.sent
             .lock()

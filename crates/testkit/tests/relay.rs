@@ -5156,6 +5156,57 @@ async fn a_fallback_reads_a_call_to_its_first_content() {
 }
 
 #[tokio::test]
+async fn a_whole_body_call_ends_only_once_its_ready_response_is_read() {
+    /// Returns `openai`'s ready answer; its provider-edge filter notes its end.
+    #[derive(Clone, Default)]
+    struct Ready(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Ready {
+        fn note(&self, what: &'static str) {
+            self.0.lock().map(|mut v| v.push(what)).ok();
+        }
+    }
+
+    impl Filter<Reply> for Ready {
+        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            out.push(reply);
+            Ok(())
+        }
+
+        fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+            self.note("call ended");
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Plugin for Ready {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            let resp = cx.call("openai").await?.ready().await?;
+            self.note("returned");
+            Ok(Some(resp))
+        }
+
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+            px.filter(self.clone())
+        }
+    }
+
+    let (ends, ready) = (Ends::default(), Ready::default());
+    let h = Harness::new(vec![Arc::new(ends.clone()), Arc::new(ready.clone())], None);
+    // A whole body: its content and its end come in one batch.
+    h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
+
+    let (status, body) = h.text(unary_chat()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, UNARY);
+    let order = ready.0.lock().map(|v| v.clone()).unwrap_or_default();
+    assert_eq!(order, ["returned", "call ended"]);
+    assert_eq!(ends.all(), ["openai ok", "client"]);
+}
+
+#[tokio::test]
 async fn a_plugin_answers_with_its_calls_events_read_as_they_are_sent() {
     /// Answers with one call's outputs, then another's.
     struct Merge;

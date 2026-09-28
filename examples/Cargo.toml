@@ -1,0 +1,120 @@
+[package]
+name = "respan-gateway-examples"
+description = "Runnable examples: how to build the use cases on the core and the SDKs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+respan-gateway-core.workspace = true
+respan-gateway-formats.workspace = true
+respan-gateway-plugins.workspace = true
+respan-gateway-server.workspace = true
+respan-gateway-testkit.workspace = true
+respan-gateway-routing.workspace = true
+respan-gateway-text.workspace = true
+respan-gateway-ledger.workspace = true
+respan-gateway-mcp.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+[[example]]
+name = "billing"
+path = "billing.rs"
+test = true
+
+[[example]]
+name = "logging"
+path = "logging.rs"
+test = true
+
+[[example]]
+name = "guardrail"
+path = "guardrail.rs"
+test = true
+
+[[example]]
+name = "pii"
+path = "pii.rs"
+test = true
+
+[[example]]
+name = "fallback"
+path = "fallback.rs"
+test = true
+
+[[example]]
+name = "cost_cap"
+path = "cost_cap.rs"
+test = true
+
+[[example]]
+name = "wallet"
+path = "wallet.rs"
+test = true
+
+[[example]]
+name = "mcp_proxy"
+path = "mcp_proxy.rs"
+test = true
+
+[[example]]
+name = "custom_format"
+path = "custom_format.rs"
+test = true
+
+[[example]]
+name = "custom_transport"
+path = "custom_transport.rs"
+test = true
+
+[[example]]
+name = "judge"
+path = "judge.rs"
+test = true
+
+[[example]]
+name = "attachments"
+path = "attachments.rs"
+test = true
+
+[[example]]
+name = "admission"
+path = "admission.rs"
+test = true
+
+[[example]]
+name = "tenants"
+path = "tenants.rs"
+test = true
+
+[[example]]
+name = "embedded"
+path = "embedded.rs"
+test = true
+
+[[example]]
+name = "local_proxy"
+path = "local_proxy.rs"
+test = true
+
+[[example]]
+name = "jobs"
+path = "jobs.rs"
+test = true

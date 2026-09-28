@@ -84,7 +84,10 @@ impl<E: Edge> EndHooks<E> {
             let _ = to.send(outcome.clone());
         }
         let (ran, live, after) = (self.ran, self.live.take(), self.after.take());
+        // The context goes before `live`, so `Gateway::idle` finds the
+        // request's values, the gateway's own included, dropped.
         if ran == 0 {
+            drop(cx);
             return;
         }
         let runtime = cx.client().runtime.clone();
@@ -98,6 +101,7 @@ impl<E: Edge> EndHooks<E> {
                 let hook = AssertUnwindSafe(cx.hook(&**plugin, &outcome));
                 let _ = hook.catch_unwind().await;
             }
+            drop(cx);
             drop(live);
         }));
     }

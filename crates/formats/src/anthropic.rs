@@ -175,6 +175,23 @@ fn patch_system(
     Ok(Value::Array(parts))
 }
 
+/// Set the metadata's user id, or remove it and the metadata if left empty.
+fn patch_user(v: &mut Map<String, Value>, user: Option<&str>) {
+    let metadata = v.entry("metadata").or_insert(Value::Null);
+    if !metadata.is_object() {
+        *metadata = json!({});
+    }
+    if let Some(fields) = metadata.as_object_mut() {
+        match user {
+            Some(user) => _ = fields.insert("user_id".into(), user.into()),
+            None => _ = fields.shift_remove("user_id"),
+        }
+        if fields.is_empty() {
+            v.shift_remove("metadata");
+        }
+    }
+}
+
 impl Wire for AnthropicMessages {
     const NAME: &'static str = ANTHROPIC;
 
@@ -191,6 +208,7 @@ impl Wire for AnthropicMessages {
                 .flatten()
                 .filter_map(|s| s.as_str().map(Into::into))
                 .collect(),
+            user: v["metadata"]["user_id"].as_str().map(Into::into),
             unsupported: unsupported_fields(v, KNOWN, &[]),
             ..Conversation::default()
         };
@@ -222,6 +240,8 @@ impl Wire for AnthropicMessages {
         set(&mut v, "temperature", chat.temperature.map(Into::into));
         set(&mut v, "top_p", chat.top_p.map(Into::into));
         set(&mut v, "stop_sequences", stop_json(&chat.stop));
+        let user = chat.user.as_ref().map(|u| json!({ "user_id": u }));
+        set(&mut v, "metadata", user);
         Ok(v.into())
     }
 
@@ -242,6 +262,9 @@ impl Wire for AnthropicMessages {
             v.insert("max_tokens".into(), max_tokens.into());
         }
         patch_sampling(v, before, after, "stop_sequences");
+        if before.user != after.user {
+            patch_user(v, after.user.as_deref());
+        }
         if before.messages != after.messages {
             let messages = patch_messages(&before.messages, rest, &ROLES)?;
             v.insert("messages".into(), messages.into());
@@ -841,6 +864,21 @@ mod tests {
                 "stop_sequences": ["x"],
             }))
         );
+    }
+
+    #[test]
+    fn the_metadata_user_id_is_the_user() {
+        let body = json!({ "model": "c", "max_tokens": 5,
+            "metadata": { "user_id": "bob@x.io" },
+            "messages": [{ "role": "user", "content": "hi" }] });
+        let chat = AnthropicMessages::read(&body);
+        assert_eq!(chat.user.as_deref(), Some("bob@x.io"));
+        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
+        let redacted = patched(body.clone(), |c| c.user = Some("[x]".into()));
+        let metadata = redacted.ok().map(|v| v["metadata"].clone());
+        assert_eq!(metadata, Some(json!({ "user_id": "[x]" })));
+        let removed = patched(body, |c| c.user = None);
+        assert_eq!(removed.ok().map(|v| v.get("metadata").cloned()), Some(None));
     }
 
     #[test]

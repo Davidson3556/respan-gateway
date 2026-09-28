@@ -1,0 +1,387 @@
+//! The routing SDK's promises, against a mock provider.
+
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use respan_gateway_core::bytes::Bytes;
+use respan_gateway_core::futures::stream;
+use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
+use respan_gateway_core::http_body::Frame;
+use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
+use respan_gateway_core::{
+    Body, ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Transport,
+    async_trait, codes,
+};
+use respan_gateway_formats::OpenAiChat;
+use respan_gateway_routing::{Attempt, Backoff, Role, Watchdog, first_success, race};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
+use tokio::time::Instant;
+
+const A: &str = "http://a.test/v1";
+const B: &str = "http://b.test/v1";
+const REQUEST: &str = r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+const ROLE: &str = "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n";
+const HELLO: &str = "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n";
+const STOP: &str = "data: {\"id\":\"c\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
+const DONE: &str = "data: [DONE]\n\n";
+
+fn ok() -> mock::Reply {
+    mock::sse(&[ROLE, HELLO, STOP, DONE])
+}
+
+/// A stream cut off by the provider after `chunks`.
+fn cut(chunks: &[&str]) -> mock::Reply {
+    let mut reply = mock::sse(chunks);
+    reply
+        .body_mut()
+        .push(Err(Fault::upstream("connection reset")));
+    reply
+}
+
+fn too_many(seconds: &'static str) -> mock::Reply {
+    let mut reply = mock::json(
+        StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"message":"slow down"}}"#,
+    );
+    reply
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static(seconds));
+    reply
+}
+
+/// How the plugin under test answers.
+enum Plan {
+    First(Vec<&'static str>, Backoff),
+    Race(Vec<&'static str>, Duration),
+}
+
+#[async_trait]
+impl Plugin for Plan {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        match self {
+            Plan::First(to, backoff) => {
+                let calls: Vec<_> = to.iter().map(|p| cx.call(*p)).collect();
+                first_success(calls, backoff).await.map(Some)
+            }
+            Plan::Race(to, stagger) => {
+                let calls: Vec<_> = to.iter().map(|p| cx.call(*p)).collect();
+                race(calls, *stagger).await.map(Some)
+            }
+        }
+    }
+}
+
+/// Each call's provider, attempt and end code, as its end hooks saw them.
+#[derive(Clone, Default)]
+struct Record(Arc<Mutex<Vec<Entry>>>);
+
+type Entry = (String, u32, Role, String);
+
+impl Record {
+    fn all(&self) -> Vec<Entry> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Plugin for Record {
+    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
+        let Some(a) = px.extensions().get::<Attempt>() else {
+            return;
+        };
+        let end = outcome
+            .end
+            .as_ref()
+            .err()
+            .map_or("ok", |f| f.code())
+            .to_owned();
+        let entry = (px.provider().to_owned(), a.index(), a.role(), end);
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(entry);
+    }
+}
+
+/// Answers only after `.1`.
+struct Slow<T>(T, Duration);
+
+#[async_trait]
+impl<T: Transport> Transport for Slow<T> {
+    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        tokio::time::sleep(self.1).await;
+        self.0.send(call).await
+    }
+}
+
+/// A 200 stream that sends one empty chunk, then nothing.
+struct Stall;
+
+#[async_trait]
+impl Transport for Stall {
+    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        let first = stream::iter([Ok(Frame::data(Bytes::from(ROLE)))]);
+        let body = StreamBody::new(stream::StreamExt::chain(first, stream::pending()));
+        let mut resp = http::Response::new(body.boxed_unsync());
+        let sse = HeaderValue::from_static("text/event-stream");
+        resp.headers_mut().insert(http::header::CONTENT_TYPE, sse);
+        Ok(resp)
+    }
+}
+
+/// Never sends a head.
+struct Silent;
+
+#[async_trait]
+impl Transport for Silent {
+    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        std::future::pending().await
+    }
+}
+
+struct Harness {
+    gw: Gateway,
+    mock: MockTransport,
+    record: Record,
+}
+
+fn harness(plan: Plan) -> Harness {
+    let (mock, record) = (MockTransport::new(), Record::default());
+    let gw = Gateway::new()
+        .serve(OpenAiChat)
+        .and_then(|g| g.provider("a", OpenAiChat, mock.at(A)))
+        .and_then(|g| g.provider("b", OpenAiChat, mock.at(B)))
+        .and_then(|g| g.provider("slow", OpenAiChat, Slow(mock.at(A), secs(5))))
+        .and_then(|g| g.provider("stalled", OpenAiChat, Watchdog::new(Stall, secs(1))))
+        .and_then(|g| g.provider("silent", OpenAiChat, Watchdog::new(Silent, secs(1))))
+        .and_then(|g| g.plugin("record", record.clone()))
+        .and_then(|g| g.plugin("plan", plan))
+        .unwrap_or_else(|f| panic!("{f}"));
+    Harness { gw, mock, record }
+}
+
+impl Harness {
+    async fn send(&self) -> (StatusCode, http::HeaderMap, String, Outcome) {
+        self.post(REQUEST).await
+    }
+
+    async fn post(&self, request: &'static str) -> (StatusCode, http::HeaderMap, String, Outcome) {
+        let (resp, outcome) = self.gw.handle(post("/v1/chat/completions", request)).await;
+        let (status, headers, body) = read_whole(resp).await;
+        let body = body.map_or_else(
+            |f| format!("aborted: {f}"),
+            |b| String::from_utf8_lossy(&b).into(),
+        );
+        let outcome = outcome.await;
+        self.gw.idle().await;
+        (status, headers, body, outcome)
+    }
+
+    fn sent_to(&self) -> Vec<String> {
+        let sent = self.mock.sent().into_iter();
+        sent.map(|r| r.uri().host().unwrap_or_default().to_owned())
+            .collect()
+    }
+}
+
+fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
+
+fn retries(tries: u32) -> Backoff {
+    Backoff::new(tries, Duration::from_millis(100), secs(10))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_failing_after_its_first_content_is_never_retried() {
+    let h = harness(Plan::First(vec!["a", "b"], retries(3)));
+    h.mock.reply(A, cut(&[ROLE, HELLO]));
+    h.mock.reply(B, ok());
+
+    let (status, _, body, outcome) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Hello") && body.contains("error"), "{body}");
+    assert_eq!(h.sent_to(), ["a.test"]);
+    assert!(outcome.end.is_err());
+    let record = h.record.all();
+    assert_eq!(record.len(), 1);
+    assert_eq!(record[0].2, Role::Winner);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_success_failing_before_content_moves_on() {
+    let h = harness(Plan::First(vec!["a", "b"], Backoff::once()));
+    h.mock.reply(A, cut(&[ROLE]));
+    h.mock.reply(B, ok());
+
+    let (status, _, body, outcome) = h.send().await;
+
+    assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+    assert!(body.contains("Hello") && !body.contains("error"), "{body}");
+    assert_eq!(h.sent_to(), ["a.test", "b.test"]);
+    let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
+    assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_after_is_honoured() {
+    let h = harness(Plan::First(vec!["a"], retries(2)));
+    h.mock.reply(A, too_many("3"));
+    h.mock.reply(A, ok());
+
+    let start = Instant::now();
+    let (status, ..) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.sent_to(), ["a.test", "a.test"]);
+    assert!(start.elapsed() >= secs(3), "{:?}", start.elapsed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_after_beyond_the_max_moves_on_at_once() {
+    let h = harness(Plan::First(vec!["a", "b"], retries(3)));
+    h.mock.reply(A, too_many("60"));
+    h.mock.reply(B, ok());
+
+    let start = Instant::now();
+    let (status, ..) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.sent_to(), ["a.test", "b.test"]);
+    assert!(start.elapsed() < secs(1));
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_no_success_the_client_gets_the_last_429_and_its_retry_after() {
+    let h = harness(Plan::First(vec!["a", "b"], Backoff::once()));
+    h.mock
+        .reply(A, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+    h.mock.reply(B, too_many("7"));
+
+    let (status, headers, ..) = h.send().await;
+
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        headers.get(RETRY_AFTER).map(|v| v.as_bytes()),
+        Some(&b"7"[..])
+    );
+    let roles: Vec<_> = h.record.all().into_iter().map(|r| r.2).collect();
+    assert_eq!(roles, [Role::Loser, Role::Winner]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_config_error_on_one_target_moves_on_to_the_next() {
+    let h = harness(Plan::First(vec!["missing", "b"], retries(3)));
+    h.mock.reply(B, ok());
+
+    let (status, _, body, _) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Hello"), "{body}");
+    assert_eq!(h.sent_to(), ["b.test"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_race_drops_its_losers_which_end_abandoned() {
+    let h = harness(Plan::Race(vec!["slow", "b"], Duration::ZERO));
+    h.mock.reply(A, ok());
+    h.mock.reply(B, ok());
+
+    let (status, _, body, _) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Hello"), "{body}");
+    let mut record = h.record.all();
+    record.sort_by_key(|r| r.1);
+    let b = ("b".to_owned(), 1, Role::Winner, "ok".to_owned());
+    let slow = (
+        "slow".to_owned(),
+        0,
+        Role::Loser,
+        codes::ABANDONED.to_owned(),
+    );
+    assert_eq!(record, [slow, b]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_race_starts_the_next_call_only_after_its_stagger() {
+    let h = harness(Plan::Race(vec!["a", "b"], secs(2)));
+    h.mock.reply(A, ok());
+
+    let (status, ..) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.sent_to(), ["a.test"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_race_starts_the_next_call_at_once_when_the_others_failed() {
+    let h = harness(Plan::Race(vec!["a", "b"], secs(10)));
+    h.mock
+        .reply(A, mock::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
+    h.mock.reply(B, ok());
+
+    let start = Instant::now();
+    let (status, ..) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(start.elapsed() < secs(10));
+    assert_eq!(h.sent_to(), ["a.test", "b.test"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_watchdog_fails_a_stalled_body_and_first_success_moves_on() {
+    let h = harness(Plan::First(vec!["stalled", "b"], Backoff::once()));
+    h.mock.reply(B, ok());
+
+    let (status, _, body, _) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Hello"), "{body}");
+    let record = h.record.all();
+    assert_eq!(record[0].0, "stalled");
+    assert_eq!(record[0].3, codes::UPSTREAM);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_watchdog_bounds_the_wait_for_the_head_too() {
+    let h = harness(Plan::First(vec!["silent", "b"], Backoff::once()));
+    h.mock.reply(B, ok());
+
+    let start = Instant::now();
+    let answer = tokio::time::timeout(secs(60), h.send()).await;
+
+    let (status, _, body, _) = answer.expect("still waiting for the head after 60 s");
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Hello"), "{body}");
+    assert!(start.elapsed() < secs(2), "{:?}", start.elapsed());
+    let record = h.record.all();
+    assert_eq!(
+        (record[0].0.as_str(), record[0].3.as_str()),
+        ("silent", codes::UPSTREAM)
+    );
+}
+
+/// A whole body ends as it is read, after the helper set its role, so
+/// its end hook never sees it pending, on any runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_whole_body_attempt_ends_with_its_role_set() {
+    const WHOLE: &str = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+    const REPLY: &str = r#"{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
+    for _ in 0..100 {
+        let h = harness(Plan::First(vec!["a", "b"], Backoff::once()));
+        h.mock.reply(A, too_many("1"));
+        h.mock.reply(B, mock::json(StatusCode::OK, REPLY));
+
+        let (status, ..) = h.post(WHOLE).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let mut roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
+        roles.sort_by_key(|(index, _)| *index);
+        assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);
+    }
+}

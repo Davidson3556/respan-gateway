@@ -50,6 +50,8 @@ pub struct Conversation {
     pub top_p: Option<f64>,
     /// Sequences that stop the answer.
     pub stop: Vec<String>,
+    /// The end user's id, as the client names them to the provider.
+    pub user: Option<String>,
     /// The request's fields the kind has no place for, such as its tools.
     pub unsupported: Map<String, Value>,
     /// The client's body it was decoded from.

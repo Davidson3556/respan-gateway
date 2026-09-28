@@ -250,15 +250,13 @@ impl Pipe {
     /// Write the next batch, and at the end what filters kept back and the
     /// end. Returns whether bytes came before the end.
     async fn write(&mut self) -> bool {
-        let batch = match self.ahead.pop_front() {
+        let mut batch = match self.ahead.pop_front() {
             Some(batch) => batch,
             None => self.source.next().await.0,
         };
-        let Batch {
-            mut values,
-            mut end,
-            usage,
-        } = batch;
+        batch.read();
+        let mut end = batch.end.take();
+        let (mut values, usage) = (batch.values.take(), std::mem::take(&mut batch.usage));
         // Usage no call counted counts here.
         self.hooks.usage += &usage;
         if let Some(values) = &mut values {
