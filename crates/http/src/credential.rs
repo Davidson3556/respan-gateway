@@ -1,8 +1,8 @@
 //! The client's credentials, lifted out of its head by the adapter.
 
+use crate::http;
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, HeaderName, HeaderValue};
-use respan_gateway_core::http;
 
 /// The credentials a client sent, which the adapter lifts out of its head
 /// ([`handle`](crate::handle)) so no plugin, format or relay passes them

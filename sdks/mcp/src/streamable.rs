@@ -12,12 +12,12 @@
 use std::sync::{Arc, Mutex};
 
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::http::header::{ACCEPT, CONTENT_TYPE};
-use respan_gateway_core::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Decoder, Encoder, Fault, Format, codes};
 use respan_gateway_formats::{self as formats, relayed::Relayed, sse, whole::Relay};
-use respan_gateway_http::bodiless;
+use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
+use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
+use respan_gateway_http::{Answer, Ask, bodiless};
 
 use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, requests};
 
@@ -49,13 +49,15 @@ impl Default for StreamableHttp {
     }
 }
 
-/// The ids of the requests `request` posts, and whether it is a batch.
-fn posted(request: &http::Request<Bytes>) -> (Vec<Value>, bool) {
-    let (messages, batch) = read(request.body()).unwrap_or_default();
+/// The ids of the requests a body posts, and whether it is a batch.
+fn posted(body: &Bytes) -> (Vec<Value>, bool) {
+    let (messages, batch) = read(body).unwrap_or_default();
     (requests(&messages).cloned().collect(), batch)
 }
 
 impl Format for StreamableHttp {
+    type Ask = Ask;
+    type Answer = Answer;
     type Input = ToServer;
     type Output = ToClient;
 
@@ -63,13 +65,13 @@ impl Format for StreamableHttp {
         NAME
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &Ask) -> bool {
         let mcp = [Method::POST, Method::GET, Method::DELETE].contains(&head.method);
         head.uri.path() == self.path && mcp
     }
 
-    fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<ToServer>> {
-        let (method, name) = (request.method().clone(), Arc::from(NAME));
+    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<ToServer>> {
+        let (method, name) = (head.method.clone(), Arc::from(NAME));
         formats::message_decoder(move |raw| {
             let mut input = ToServer::new(method.clone(), Vec::new());
             if method == Method::POST {
@@ -84,29 +86,34 @@ impl Format for StreamableHttp {
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&ToServer>,
+        client: Option<&Ask>,
+        _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<ToServer>> {
+    ) -> Box<dyn Encoder<ToServer, Ask>> {
+        let mut head = formats::call_head(client);
         if streams {
-            return formats::whole::unstreamable(NAME);
+            return formats::with_head(head, formats::whole::unstreamable(NAME));
         }
-        if first.is_some() {
-            formats::body_changed(request);
-        }
-        formats::set_path(request, self.path);
-        if let Some(first) = first {
-            *request.method_mut() = first.method.clone();
-        }
-        let post = request.method() == Method::POST;
-        let headers = request.headers_mut();
-        let accept = HeaderValue::from_static("application/json, text/event-stream");
-        headers.entry(ACCEPT).or_insert(accept);
-        if post {
-            headers
-                .entry(CONTENT_TYPE)
-                .or_insert(HeaderValue::from_static(JSON));
-        }
+        let path = self.path;
+        let head = move |first: Option<&ToServer>| {
+            if first.is_some() {
+                formats::body_changed(&mut head);
+            }
+            formats::set_path(&mut head, path);
+            if let Some(first) = first {
+                head.method = first.method.clone();
+            }
+            let post = head.method == Method::POST;
+            let headers = &mut head.headers;
+            let accept = HeaderValue::from_static("application/json, text/event-stream");
+            headers.entry(ACCEPT).or_insert(accept);
+            if post {
+                headers
+                    .entry(CONTENT_TYPE)
+                    .or_insert(HeaderValue::from_static(JSON));
+            }
+            head
+        };
         // A POST's messages, as the client's bytes while they say the same.
         let write = move |inputs: &[ToServer]| {
             let posts = inputs.iter().filter(|i| i.method == Method::POST);
@@ -116,15 +123,17 @@ impl Format for StreamableHttp {
             });
             Ok::<_, Fault>(bytes.next_back().unwrap_or_default())
         };
-        Box::new(Relay::new(write, |_: &Fault| Bytes::new(), false))
+        let relay = Relay::new(write, |_: &Fault| Bytes::new(), false);
+        formats::headed(head, Box::new(relay))
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        request: &http::Request<Bytes>,
+        head: &Answer,
+        call: &Ask,
+        sent: &Bytes,
     ) -> Box<dyn Decoder<ToClient>> {
-        if head.status.is_success() && bodiless(request.method(), head.status) {
+        if head.status.is_success() && bodiless(&call.method, head.status) {
             return formats::whole::nothing();
         }
         let name = Arc::from(NAME);
@@ -138,7 +147,7 @@ impl Format for StreamableHttp {
             Ok(())
         };
         let inner = sse::or_whole(NAME, head, on_message);
-        let pending = posted(request).0;
+        let pending = posted(sent).0;
         Box::new(Answered { inner, pending })
     }
 
@@ -149,23 +158,43 @@ impl Format for StreamableHttp {
     /// `HEAD` have no body.
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: Option<&Answer>,
+        ask: &Ask,
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<ToClient>> {
+    ) -> Box<dyn Encoder<ToClient, Answer>> {
+        let mut head = formats::answer_head(answer);
+        let body = response_body(&mut head, ask, body, refusal);
+        formats::with_head(head, body)
+    }
+
+    fn is_content(&self, output: &ToClient) -> bool {
+        !output.messages.is_empty()
+    }
+}
+
+/// The body of a response with `head` to the client's request `ask` with
+/// `body` ([`StreamableHttp::response_encoder`]).
+fn response_body(
+    head: &mut Answer,
+    ask: &Ask,
+    request: &Bytes,
+    refusal: Option<&Fault>,
+) -> Box<dyn Encoder<ToClient, ()>> {
+    {
         if let Some(fault) = refusal {
             let body = respan_gateway_http::answered(NAME, fault, head).unwrap_or_else(|| {
                 formats::default_content_type(head, JSON);
                 let (pending, batch) = posted(request);
                 failure(fault, &pending, false, batch).into()
             });
-            let bodiless = bodiless(request.method(), head.status);
+            let bodiless = bodiless(&ask.method, head.status);
             return formats::whole::written(if bodiless { Bytes::new() } else { body });
         }
-        if bodiless(request.method(), head.status) || head.status == StatusCode::ACCEPTED {
+        if bodiless(&ask.method, head.status) || head.status == StatusCode::ACCEPTED {
             return formats::whole::no_body();
         }
-        let listen = request.method() == Method::GET;
+        let listen = ask.method == Method::GET;
         if !matches!(head.status, StatusCode::ACCEPTED | StatusCode::NO_CONTENT) {
             let stream = listen && head.status.is_success();
             formats::default_content_type(head, if stream { SSE } else { JSON });
@@ -191,10 +220,6 @@ impl Format for StreamableHttp {
         // A quiet stream opens with a comment, so its head goes at once.
         let open = (stream && listen).then(|| sse::comment("stream"));
         Box::new(relay.with_open(open.unwrap_or_default()))
-    }
-
-    fn is_content(&self, output: &ToClient) -> bool {
-        !output.messages.is_empty()
     }
 }
 

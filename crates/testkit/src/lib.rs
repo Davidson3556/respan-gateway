@@ -14,9 +14,10 @@ use http::header::CONTENT_TYPE;
 use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Outcome, Plugin, ProviderContext, Transport,
+    ClientContext, Exchange, Fault, Outcome, Plugin, ProviderContext, Transport,
 };
-use respan_gateway_core::{async_trait, bytes, futures, http, http_body, http_body_util};
+use respan_gateway_core::{async_trait, bytes, futures};
+use respan_gateway_http::{Answer, Ask, Body, http, http_body, http_body_util};
 use respan_gateway_http::{
     credentials, proxy_call, strip_client_origin_headers, strip_origin_headers,
 };
@@ -134,12 +135,16 @@ impl MockAt {
 
 #[async_trait]
 impl Transport for MockAt {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         // Keep alike with `HttpTransport::send` in the server crate.
+        let (call, extensions) = respan_gateway_http::call(call);
         let (mut head, body) = call.into_parts();
         proxy_call(&mut head);
         strip_client_origin_headers(&mut head.headers);
-        credentials(&mut head, &self.headers);
+        credentials(&mut head, &extensions, &self.headers);
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
         head.uri = url
@@ -166,11 +171,7 @@ impl Transport for MockAt {
             script.ok_or_else(|| Fault::upstream(format!("no mock response for {url}")))?;
         let (mut head, chunks) = script.into_parts();
         strip_origin_headers(&mut head.headers);
-        let body = stream::iter(chunks).map(|c| c.map(Frame::data));
-        Ok(http::Response::from_parts(
-            head,
-            StreamBody::new(body).boxed_unsync(),
-        ))
+        Ok(Exchange::new(head, stream::iter(chunks).boxed()))
     }
 }
 

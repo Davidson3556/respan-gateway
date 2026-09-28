@@ -53,8 +53,10 @@ plugins. A request carries inputs and its response carries outputs. A
 streaming request, as the HTTP adapter makes one that asks to switch
 protocols (`Upgrade`), such as a WebSocket, has its inputs stream after
 its head. Any other request is whole: its body, even empty, is its one
-input. The kernel reads no HTTP: the adapter, transports and formats own
-its rules ([0012](docs/decisions/0012-http-out-of-the-kernel.md)).
+input. The kernel reads no HTTP and has no `http` types: the adapter,
+transports and formats own its rules and its heads
+([0012](docs/decisions/0012-http-out-of-the-kernel.md),
+[0013](docs/decisions/0013-no-http-in-core.md)).
 
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, or its own (`with_input`). The
@@ -105,7 +107,7 @@ test when its milestone lands. The kernel API is frozen after M2.
 | Milestone | Delivers |
 |---|---|
 | M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic with correct usage, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
-| M2 Plugin API | Calls of their own `http::Request`, async stream filters, unread bodies; API fixes before the freeze |
+| M2 Plugin API | Calls of their own input, async stream filters, unread bodies; API fixes before the freeze |
 | M3 Formats | Gemini, Responses, embeddings |
 | M4 Plugins | Fallback, hedge, limits, memo, ledger |
 | M5 Translation | Tool calls, images and reasoning across formats |
@@ -118,8 +120,8 @@ test when its milestone lands. The kernel API is frozen after M2.
 
 | Path | What it is |
 |---|---|
-| `crates/core` | The kernel: plugins, calls, filters; no HTTP rules, config or kinds. |
-| `crates/http` | HTTP's rules at the edges: the adapter, credentials, what a transport strips. |
+| `crates/core` | The kernel: plugins, calls, filters; no HTTP, config or kinds. |
+| `crates/http` | HTTP at the edges: its head types, the adapter, credentials, what a transport strips. |
 | `crates/formats` | The chat kind, OpenAI Chat and Anthropic Messages. |
 | `crates/plugins` | First-party plugins, such as the model router. |
 | `crates/server` | The axum router and the HTTP transport. |

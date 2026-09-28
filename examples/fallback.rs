@@ -11,14 +11,15 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Transport,
+    ClientContext, Exchange, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Transport,
     async_trait,
 };
 use respan_gateway_formats::conversation::{Conversation, set_model};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::Asked;
+use respan_gateway_http::Body;
+use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_routing::{Attempt, Backoff, Until, Watchdog, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -85,7 +86,10 @@ struct Slow<T>(T, Duration);
 
 #[async_trait]
 impl<T: Transport> Transport for Slow<T> {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = T::Ask;
+    type Answer = T::Answer;
+
+    async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
     }

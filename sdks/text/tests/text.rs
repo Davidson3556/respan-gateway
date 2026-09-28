@@ -1,11 +1,11 @@
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::http::{self, StatusCode};
 use respan_gateway_core::serde_json::{self, json};
 use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role,
 };
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
 
@@ -348,12 +348,12 @@ fn gateway(mock: &MockTransport, target: &str, plugin: impl Plugin) -> Result<Ga
         .target(target)
 }
 
-fn openai_request(content: serde_json::Value) -> http::Request<respan_gateway_core::Body> {
+fn openai_request(content: serde_json::Value) -> http::Request<respan_gateway_http::Body> {
     let body = json!({ "model": "m", "stream": true, "messages": [{ "role": "user", "content": content }] });
     post("/v1/chat/completions", body.to_string())
 }
 
-fn anthropic_request() -> http::Request<respan_gateway_core::Body> {
+fn anthropic_request() -> http::Request<respan_gateway_http::Body> {
     let body = json!({ "model": "c", "max_tokens": 9, "stream": true,
         "messages": [{ "role": "user", "content": "hi" }] });
     post("/v1/messages", body.to_string())

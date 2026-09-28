@@ -1,12 +1,12 @@
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use futures::FutureExt;
+use bytes::BytesMut;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use http_body_util::BodyExt;
+use futures::{FutureExt, StreamExt};
 
 use crate::deliver::{Handed, deliver, refuse};
 use crate::fault::PANICKED;
@@ -14,7 +14,8 @@ use crate::format::AnyFormat;
 use crate::input::Later;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
-use crate::{Body, ClientContext, Fault, Format, Outcome, Plugin, Response, Transport};
+use crate::transport::{Head, Typed};
+use crate::{ClientContext, Exchange, Fault, Format, Outcome, Plugin, Response, Transport};
 
 /// A registered plugin and the plugins it runs after, by index.
 #[derive(Clone)]
@@ -66,31 +67,36 @@ impl Gateway {
         Gateway::default()
     }
 
-    /// Add provider `name`, speaking `format` over `transport`. `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken, or the
-    /// format breaks [`Gateway::serve`]'s rules.
-    pub fn provider(
+    /// Add provider `name`, speaking `format` over `transport`, which must
+    /// share its wire: a transport of other heads does not build. `Err`
+    /// with [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken,
+    /// or the format breaks [`Gateway::serve`]'s rules.
+    pub fn provider<F, T>(
         mut self,
         name: impl Into<String>,
-        format: impl Format,
-        transport: impl Transport,
-    ) -> Result<Gateway, Fault> {
+        format: F,
+        transport: T,
+    ) -> Result<Gateway, Fault>
+    where
+        F: Format,
+        T: Transport<Ask = F::Ask, Answer = F::Answer>,
+    {
         let name = name.into();
         self.check_format(&format)?;
         if self.inner.providers.contains_key(&name) {
             return Err(Fault::config(format!("provider '{name}' is defined twice")));
         }
         let format = Arc::new(format);
-        let transport = Arc::new(transport);
+        let transport = Arc::new(Typed(transport));
         let provider = Provider { format, transport };
         self.inner_mut().providers.insert(name, provider);
         Ok(self)
     }
 
     /// Serve clients of `format`: a request goes to the first format served
-    /// that [`accepts`](Format::accepts) it. `Err` with
+    /// on its wire that [`accepts`](Format::accepts) it. `Err` with
     /// [`codes::CONFIG`](crate::codes::CONFIG) if its input and output types
-    /// are one, or a format of its name is of another kind.
+    /// are one, or a format of its name is of another kind or wire.
     pub fn serve(mut self, format: impl Format) -> Result<Gateway, Fault> {
         self.check_format(&format)?;
         self.inner_mut().formats.push(Arc::new(format));
@@ -176,65 +182,97 @@ impl Gateway {
         self.inner.in_flight.idle().await;
     }
 
-    /// Run `req` in the first format served that accepts it. The adapter
-    /// owns the transport's rules: it takes out what no plugin or format
-    /// should see or pass on, such as the gateway's own credentials, before
-    /// this, and what a hop must not carry from the response after.
+    /// Run `req`, a request on the wire of heads `Ask` and `Answer`, in the
+    /// first format served on that wire that accepts it. The adapter owns
+    /// the wire's rules: it takes out what no plugin or format should see
+    /// or pass on, such as the gateway's own credentials, before this, and
+    /// what a hop must not carry from the response after. The request's
+    /// extensions are the request's ([`ClientContext::extensions`]).
     ///
     /// If `streaming`, the request's inputs stream: its body's data frames,
     /// split by the adapter, are inputs as they arrive, and its response's
     /// head goes out at once, as its client waits for it; for a WebSocket,
     /// the adapter picks each message's type from the subprotocol and turns
     /// a body's `Err` into a close code. Else its body is read in full, so
-    /// the caller bounds it; one that fails while read is refused. The
-    /// response body is `Send`, not `Sync`.
+    /// the caller bounds it; one that fails while read is refused.
     ///
     /// `Err` for what no format can write, for the adapter to write in
     /// plain form: [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no
-    /// format accepts the request, or
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if a format panicked or
-    /// could not write a refusal. All else is in the client's format.
+    /// format on the wire accepts the request, or
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if the one that does
+    /// answers with another head than `Answer`, a format panicked or could
+    /// not write a refusal. All else is in the client's format.
     ///
     /// It comes with a future of the request's [`Outcome`], which resolves
     /// once the response ends, before end hooks finish: await it after
     /// reading the body. Call it on a tokio runtime, which runs the end
     /// hooks; it panics outside one.
-    pub async fn handle<B>(
+    pub async fn handle<Ask, Answer>(
         &self,
-        req: http::Request<B>,
+        req: Exchange<Ask>,
         streaming: bool,
-    ) -> (
-        Result<http::Response<Body>, Fault>,
-        BoxFuture<'static, Outcome>,
-    )
+    ) -> (Result<Exchange<Answer>, Fault>, BoxFuture<'static, Outcome>)
     where
-        B: http_body::Body<Data = Bytes> + Send + 'static,
-        B::Error: Into<Fault>,
+        Ask: Send + Sync + 'static,
+        Answer: Send + 'static,
     {
+        let answer = TypeId::of::<Answer>();
+        let (resp, outcome) = self.handle_any(req, answer, streaming).await;
+        let resp = resp.and_then(|resp| {
+            let Exchange { head, body, .. } = resp;
+            match head.downcast::<Answer>() {
+                Ok(head) => Ok(Exchange::new(*head, body)),
+                Err(_) => Err(Fault::internal("a response of another wire than asked")),
+            }
+        });
+        (resp, outcome)
+    }
+
+    async fn handle_any<Ask: Send + Sync + 'static>(
+        &self,
+        req: Exchange<Ask>,
+        answer: TypeId,
+        streaming: bool,
+    ) -> (Result<Exchange<Head>, Fault>, BoxFuture<'static, Outcome>) {
         let runtime = tokio::runtime::Handle::current();
-        let (head, body) = req.into_parts();
+        let Exchange {
+            head,
+            body,
+            extensions,
+        } = req;
+        let head: Arc<dyn Any + Send + Sync> = Arc::new(head);
         // A format that panics in `accepts` is the adapter's to write.
         let formats = &self.inner.formats;
-        let accepts = || formats.iter().find(|f| f.accepts(&head)).cloned();
+        let accepts = || formats.iter().find(|f| f.accepts(&*head)).cloned();
         let format = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
             Ok(Some(format)) => format,
             Ok(None) => {
-                let (method, path) = (&head.method, head.uri.path());
-                let text = format!("no format served accepts {method} {path}");
+                let text = "no format served accepts this request";
                 return unwritten(Fault::not_found(text));
             }
             Err(_) => return unwritten(Fault::internal(PANICKED)),
         };
-        let body = body.map_err(Into::into);
+        if format.wire().1 != answer {
+            let other = "the format that accepts this request answers with other heads";
+            return unwritten(Fault::internal(other));
+        }
         let (body, later, broken) = match streaming {
-            true => (None, Some(Later::new(body.boxed_unsync())), None),
-            false => match body.collect().await {
-                Ok(collected) => (Some(collected.to_bytes()), None, None),
-                Err(fault) => (Some(Bytes::new()), None, Some(fault)),
+            true => (None, Some(Later::new(body)), None),
+            false => match read_whole(body).await {
+                Ok(bytes) => (Some(bytes), None, None),
+                Err((bytes, fault)) => (Some(bytes), None, Some(fault)),
             },
         };
         let inner = self.inner.clone();
-        let cx = ClientContext::new(format.clone(), head, body, later, runtime, inner);
+        let cx = ClientContext::new(
+            format.clone(),
+            head,
+            extensions,
+            body,
+            later,
+            runtime,
+            inner,
+        );
         let format = &format;
         let (outcome, ended) = oneshot::channel();
         let settling = cx.settling.clone();
@@ -277,7 +315,8 @@ impl Gateway {
             .ok_or_else(|| Fault::config(format!("unknown plugin '{name}'")))
     }
 
-    /// `Ok` if `format`'s two types differ and formats of its name share its kind.
+    /// `Ok` if `format`'s two types differ and formats of its name share its
+    /// kind and wire.
     fn check_format(&self, format: &dyn AnyFormat) -> Result<(), Fault> {
         let kind = format.kind();
         let name = format.name();
@@ -292,6 +331,13 @@ impl Gateway {
         if known.any(|f| f.name() == name && f.kind() != kind) {
             return Err(Fault::config(format!(
                 "two formats named {name} are of different kinds"
+            )));
+        }
+        let known = inner.formats.iter().map(|f| &**f);
+        let mut known = known.chain(inner.providers.values().map(|p| &*p.format));
+        if known.any(|f| f.name() == name && f.wire() != format.wire()) {
+            return Err(Fault::config(format!(
+                "two formats named {name} are on different wires"
             )));
         }
         Ok(())
@@ -354,9 +400,21 @@ async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Res
     }
 }
 
+/// A whole body's bytes, or those read and the failure that broke it off.
+async fn read_whole(mut body: crate::Body) -> Result<bytes::Bytes, (bytes::Bytes, Fault)> {
+    let mut all = BytesMut::new();
+    while let Some(frame) = body.next().await {
+        match frame {
+            Ok(bytes) => all.extend_from_slice(&bytes),
+            Err(fault) => return Err((bytes::Bytes::new(), fault)),
+        }
+    }
+    Ok(all.freeze())
+}
+
 /// Servers spawn `handle`, so it must be `Send`.
 #[cfg(test)]
-fn _handle_is_send(g: &Gateway, req: http::Request<Body>) {
+fn _handle_is_send(g: &Gateway, req: Exchange<()>) {
     fn send<T: Send>(_: T) {}
-    send(g.handle(req, false));
+    send(g.handle::<(), ()>(req, false));
 }

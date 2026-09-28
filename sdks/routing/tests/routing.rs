@@ -3,16 +3,17 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use respan_gateway_core::Exchange;
 use respan_gateway_core::bytes::Bytes;
+use respan_gateway_core::futures::StreamExt;
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_core::http_body::Frame;
-use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Transport,
+    ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Transport,
     async_trait, codes,
 };
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
+use respan_gateway_http::{Answer, Ask};
 use respan_gateway_routing::{Attempt, Backoff, Role, Until, Watchdog, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;
@@ -111,7 +112,10 @@ struct Slow<T>(T, Duration);
 
 #[async_trait]
 impl<T: Transport> Transport for Slow<T> {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = T::Ask;
+    type Answer = T::Answer;
+
+    async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
     }
@@ -122,13 +126,16 @@ struct Stall;
 
 #[async_trait]
 impl Transport for Stall {
-    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let first = stream::iter([Ok(Frame::data(Bytes::from(ROLE)))]);
-        let body = StreamBody::new(stream::StreamExt::chain(first, stream::pending()));
-        let mut resp = http::Response::new(body.boxed_unsync());
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        let first = stream::iter([Ok(Bytes::from(ROLE))]);
+        let body = first.chain(stream::pending()).boxed();
+        let mut head = respan_gateway_http::fresh_answer();
         let sse = HeaderValue::from_static("text/event-stream");
-        resp.headers_mut().insert(http::header::CONTENT_TYPE, sse);
-        Ok(resp)
+        head.headers.insert(http::header::CONTENT_TYPE, sse);
+        Ok(Exchange::new(head, body))
     }
 }
 
@@ -137,18 +144,21 @@ struct Dribble;
 
 #[async_trait]
 impl Transport for Dribble {
-    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let frame = |s: &'static str| Ok(Frame::data(Bytes::from(s)));
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        let frame = |s: &'static str| Ok(Bytes::from(s));
         let first = stream::iter([frame(ROLE), frame(HELLO)]);
         let rest = stream::once(async move {
             tokio::time::sleep(secs(5)).await;
             stream::iter([frame(STOP), frame(DONE)])
         });
         let body = stream::StreamExt::chain(first, stream::StreamExt::flatten(rest));
-        let mut resp = http::Response::new(StreamBody::new(body).boxed_unsync());
+        let mut head = respan_gateway_http::fresh_answer();
         let sse = HeaderValue::from_static("text/event-stream");
-        resp.headers_mut().insert(http::header::CONTENT_TYPE, sse);
-        Ok(resp)
+        head.headers.insert(http::header::CONTENT_TYPE, sse);
+        Ok(Exchange::new(head, body.boxed()))
     }
 }
 
@@ -157,7 +167,10 @@ struct Silent;
 
 #[async_trait]
 impl Transport for Silent {
-    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         std::future::pending().await
     }
 }
@@ -167,7 +180,10 @@ struct Refused;
 
 #[async_trait]
 impl Transport for Refused {
-    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         Err(Fault::upstream("connection refused"))
     }
 }

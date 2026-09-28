@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream::{self, BoxStream, Stream};
-use http_body_util::{BodyExt, BodyStream, StreamBody};
 
 use crate::call::{CallEdge, SharedCall};
 use crate::fault::PANICKED;
-use crate::format::{AnyDecoder, AnyFormat, Request, Values};
+use crate::format::{AnyDecoder, AnyFormat, Values};
 use crate::input::locked;
-use crate::{Body, Fault};
+use crate::transport::Head;
+use crate::{Body, Exchange, Fault};
 
 /// A response for the client, streaming from a provider or made by a
 /// plugin. Dropped before it is sent or read to its end, its call ends
@@ -18,8 +18,8 @@ use crate::{Body, Fault};
 #[must_use = "a response does nothing unless sent or read"]
 pub struct Response {
     /// The provider's head, handed to the client's format only if the
-    /// response is in it ([`Source::relayed`]).
-    pub(crate) head: http::response::Parts,
+    /// response is in it ([`Source::relayed`]); none for one made.
+    pub(crate) head: Option<Head>,
     pub(crate) body: Source,
     /// Whether its call streams the request's inputs, so its body flows
     /// only once it is sent.
@@ -103,7 +103,7 @@ impl Batch {
 }
 
 impl Response {
-    fn new(head: http::response::Parts, body: Source, output: Option<TypeId>) -> Self {
+    fn new(head: Option<Head>, body: Source, output: Option<TypeId>) -> Self {
         Self {
             head,
             body,
@@ -136,7 +136,7 @@ impl Response {
         });
         let done = stream::once(async { Batch::end(Ok(())) });
         let body = Source::Made(batches.chain(done).boxed());
-        Self::new(fresh(), body, Some(TypeId::of::<T>()))
+        Self::new(None, body, Some(TypeId::of::<T>()))
     }
 
     /// Read it until its first content, a failure, or its end, and hold
@@ -231,20 +231,21 @@ impl Response {
     /// A kernel-made response that just ends, such as a refusal.
     pub(crate) fn made(end: Result<(), Fault>) -> Self {
         let body = Source::Made(stream::iter([Batch::end(end)]).boxed());
-        Self::new(fresh(), body, None)
+        Self::new(None, body, None)
     }
 
-    /// A response of bytes in `format` to `request`, `relayed` if in the
-    /// client's format, whose body flows only once sent if `streams`.
+    /// A response of bytes in `format` to the call with head `call` and
+    /// first bytes `sent`, `relayed` if in the client's format, whose body
+    /// flows only once sent if `streams`.
     pub(crate) fn decoded(
         format: &Arc<dyn AnyFormat>,
-        request: &Request,
-        response: http::Response<Body>,
+        (call, sent): (&(dyn Any + Send + Sync), &bytes::Bytes),
+        response: Exchange<Head>,
         relayed: bool,
         streams: bool,
     ) -> Self {
-        let (head, body) = response.into_parts();
-        let decoder = format.response_decoder(&head, request);
+        let Exchange { head, body, .. } = response;
+        let decoder = format.response_decoder(&*head, call, sent);
         let output = Some(format.kind().1);
         let body = Source::Bytes {
             body,
@@ -255,7 +256,7 @@ impl Response {
         };
         Self {
             streams,
-            ..Self::new(head, body, output)
+            ..Self::new(Some(head), body, output)
         }
     }
 
@@ -267,8 +268,8 @@ impl Response {
         } = &mut self.body
         {
             let cut = call.cx().cut.idle();
-            let taken = std::mem::take(body);
-            *body = StreamBody::new(BodyStream::new(taken).take_until(cut)).boxed_unsync();
+            let taken = std::mem::replace(body, stream::empty().boxed());
+            *body = taken.take_until(cut).boxed();
             *slot = Some(call.share());
         }
         self
@@ -322,16 +323,12 @@ impl Source {
                 return (batch, content);
             }
         };
-        let frame = body.frame().await;
+        let frame = body.next().await;
         let mut batch = Batch::default();
         let mut content = false;
         let decode = std::panic::AssertUnwindSafe(|| {
             let (values, end) = match frame {
-                // Trailers are not decoded.
-                Some(Ok(frame)) => match frame.into_data() {
-                    Ok(bytes) => decoder.decode(Some(bytes)),
-                    Err(_) => (None, None),
-                },
+                Some(Ok(bytes)) => decoder.decode(Some(bytes)),
                 Some(Err(f)) => (None, Some(Err(f))),
                 None => decoder.decode(None),
             };
@@ -385,9 +382,4 @@ impl Source {
             locked(call).finish(end);
         }
     }
-}
-
-/// An empty response head, for a format to fill.
-pub(crate) fn fresh() -> http::response::Parts {
-    http::Response::new(()).into_parts().0
 }

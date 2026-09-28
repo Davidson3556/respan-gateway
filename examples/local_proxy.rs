@@ -8,16 +8,17 @@
 //! against a mock; add `-- --serve 127.0.0.1:8080` to listen for real, then
 //! `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude`.
 
-use respan_gateway_core::http::{self, HeaderValue};
 use respan_gateway_core::{Fault, Gateway, Transport};
 use respan_gateway_formats::AnthropicMessages;
+use respan_gateway_http::http::{self, HeaderValue};
+use respan_gateway_http::{Answer, Ask};
 use respan_gateway_server::{HttpTransport, router};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 const ANTHROPIC: &str = "https://api.anthropic.com";
 
 /// The whole setup, in code: serve Anthropic Messages, relay to Anthropic.
-fn gateway(transport: impl Transport) -> Result<Gateway, Fault> {
+fn gateway(transport: impl Transport<Ask = Ask, Answer = Answer>) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("anthropic", AnthropicMessages, transport)?
         .serve(AnthropicMessages)?
@@ -58,7 +59,7 @@ const REQUEST: &str = r#"{"model":"claude-sonnet-4-5", "max_tokens":1024,"stream
  "messages":[{"role":"user","content":"hi"}],
  "thinking":{"type":"enabled","budget_tokens":2048}, "future_field":[1, 2.50]}"#;
 
-fn request() -> http::Request<respan_gateway_core::Body> {
+fn request() -> http::Request<respan_gateway_http::Body> {
     let mut req = post("/v1/messages", REQUEST);
     let headers = req.headers_mut();
     for (name, value) in [

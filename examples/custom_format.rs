@@ -10,7 +10,6 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_core::serde_json::{self, Value, json};
 use respan_gateway_core::{
     ClientContext, Decoder, Encoder, Fault, Format, Gateway, Plugin, ProviderContext, Response,
@@ -18,6 +17,8 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::conversation::units::INPUT_TOKENS;
 use respan_gateway_formats::{self as formats, Usage, relayed::Relayed, whole::Relay};
+use respan_gateway_http::http::{HeaderValue, StatusCode, header::CONTENT_TYPE};
+use respan_gateway_http::{Answer, Ask};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// The kind's input: texts to embed.
@@ -42,6 +43,8 @@ const NAME: &str = "openai-embeddings";
 struct OpenAiEmbeddings;
 
 impl Format for OpenAiEmbeddings {
+    type Ask = Ask;
+    type Answer = Answer;
     type Input = EmbedRequest;
     type Output = Embeddings;
 
@@ -49,11 +52,11 @@ impl Format for OpenAiEmbeddings {
         NAME
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &Ask) -> bool {
         formats::posts_to(head, "/embeddings")
     }
 
-    fn request_decoder(&self, _request: &http::Request<Bytes>) -> Box<dyn Decoder<EmbedRequest>> {
+    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<EmbedRequest>> {
         let name: Arc<str> = Arc::from(NAME);
         formats::message_decoder(move |raw| {
             let v: Value =
@@ -74,26 +77,32 @@ impl Format for OpenAiEmbeddings {
     /// path and content type are this format's.
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&EmbedRequest>,
+        client: Option<&Ask>,
+        _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<EmbedRequest>> {
+    ) -> Box<dyn Encoder<EmbedRequest, Ask>> {
+        let mut head = formats::call_head(client);
         if streams {
-            return formats::whole::unstreamable(NAME);
+            return formats::with_head(head, formats::whole::unstreamable(NAME));
         }
-        if first.is_some() {
-            formats::body_changed(request);
-        }
-        formats::set_path(request, "/embeddings");
-        let json = HeaderValue::from_static("application/json");
-        request.headers_mut().insert(CONTENT_TYPE, json);
-        Box::new(Relay::new(write_request, |_: &Fault| Bytes::new(), false))
+        let head = move |first: Option<&EmbedRequest>| {
+            if first.is_some() {
+                formats::body_changed(&mut head);
+            }
+            formats::set_path(&mut head, "/embeddings");
+            let json = HeaderValue::from_static("application/json");
+            head.headers.insert(CONTENT_TYPE, json);
+            head
+        };
+        let body = Relay::new(write_request, |_: &Fault| Bytes::new(), false);
+        formats::headed(head, Box::new(body))
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        head: &Answer,
+        _call: &Ask,
+        _: &Bytes,
     ) -> Box<dyn Decoder<Embeddings>> {
         let name: Arc<str> = Arc::from(NAME);
         // A failure is decoded for us: its fault carries the provider's answer.
@@ -117,20 +126,23 @@ impl Format for OpenAiEmbeddings {
     /// this protocol's error under its status and `Retry-After`.
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        _request: &http::Request<Bytes>,
+        answer: Option<&Answer>,
+        _ask: &Ask,
+        _body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Embeddings>> {
+    ) -> Box<dyn Encoder<Embeddings, Answer>> {
+        let mut head = formats::answer_head(answer);
         let error =
             |f: &Fault| Bytes::from(json!({ "error": { "message": f.message() } }).to_string());
         if let Some(fault) = refusal {
-            let body =
-                respan_gateway_http::answered(NAME, fault, head).unwrap_or_else(|| error(fault));
-            formats::default_content_type(head, "application/json");
-            return formats::whole::written(body);
+            let body = respan_gateway_http::answered(NAME, fault, &mut head)
+                .unwrap_or_else(|| error(fault));
+            formats::default_content_type(&mut head, "application/json");
+            return formats::with_head(head, formats::whole::written(body));
         }
-        formats::default_content_type(head, "application/json");
-        Box::new(Relay::new(write_embeddings, error, false))
+        formats::default_content_type(&mut head, "application/json");
+        let body = Relay::new(write_embeddings, error, false);
+        formats::with_head(head, Box::new(body))
     }
 }
 

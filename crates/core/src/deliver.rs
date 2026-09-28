@@ -4,21 +4,19 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
-use futures::stream::{self, TryStreamExt};
-use http_body::Frame;
-use http_body_util::{BodyExt, StreamBody};
+use futures::stream::{self, StreamExt};
 
 use crate::fault::{PANICKED, guarded};
 use crate::format::{AnyEncoder, AnyFormat, Values};
 use crate::lifecycle::EndHooks;
 use crate::plugin::failed;
-use crate::response::{Batch, Source, fresh};
-use crate::transport::one_frame;
-use crate::{Body, ClientContext, Fault, Response};
+use crate::response::{Batch, Source};
+use crate::transport::{Head, one_frame};
+use crate::{ClientContext, Exchange, Fault, Response};
 
 /// What `Gateway::handle` hands the adapter: the response, or a failure
 /// no format can write.
-pub(crate) type Handed = Result<http::Response<Body>, Fault>;
+pub(crate) type Handed = Result<Exchange<Head>, Fault>;
 
 /// A refusal: a response that is `fault` alone, which the client's format
 /// writes.
@@ -64,30 +62,34 @@ async fn send(
         let fault = Fault::another_kind("a response of another kind was sent".into());
         return Box::pin(refuse(format, fault, hooks)).await;
     }
-    let request = cx.request();
+    let (ask, body) = (cx.head.clone(), cx.body().clone());
     let streaming = cx.later.is_some();
     let Response {
-        head,
-        mut body,
+        head: answer,
+        body: mut source,
         ahead,
         ..
     } = resp;
     // A head goes only to a format of the name it came in.
-    let mut head = if body.relayed() { head } else { fresh() };
+    let answer = answer.filter(|_| source.relayed());
     let build = || {
-        let mut encoder = format.response_encoder(&mut head, &request, refusal.as_ref());
+        let answer = answer.as_deref();
+        let encoder = format.response_encoder(answer, &*ask, &body, refusal.as_ref());
+        let mut encoder = encoder.ok_or_else(|| Fault::internal("a request of another wire"))?;
+        let head = encoder.head(None);
         let mut opening = BytesMut::new();
         let opened = match refusal {
             Some(_) => Ok(()),
             None => encoder.open(&mut opening),
         };
-        opened.map(|()| (encoder, opening))
+        opened.map(|()| (encoder, head, opening))
     };
     // A format that panics building its encoder cannot write a refusal.
-    let (encoder, opening) = match std::panic::catch_unwind(AssertUnwindSafe(build)) {
+    let (encoder, mut head, opening) = match std::panic::catch_unwind(AssertUnwindSafe(build)) {
         Ok(Ok(built)) => built,
+        Ok(Err(fault)) if refusal.is_some() => return unwritable(hooks, fault),
         Ok(Err(fault)) => {
-            body.end(Err(fault.clone()));
+            source.end(Err(fault.clone()));
             return Box::pin(refuse(format, fault, hooks)).await;
         }
         Err(_) => return unwritable(hooks, Fault::internal(PANICKED)),
@@ -96,7 +98,7 @@ async fn send(
     // A body done before it began reads nothing, and its head goes at once.
     let done = !refused && encoder.done();
     let mut pipe = Pipe {
-        source: body,
+        source,
         refusal: refused,
         ahead,
         encoder,
@@ -136,15 +138,14 @@ async fn send(
         pipe.ahead.clear();
         pipe.source.close_unread();
         pipe.hooks.finish(Ok(()));
-        return Ok(http::Response::from_parts(head, one_frame(Bytes::new())));
+        return Ok(Exchange::new(head, one_frame(Bytes::new())));
     }
     // With no bytes, it ends as its head goes out.
     if pipe.out.is_empty() {
         pipe.tell_end();
     }
     let body = stream::unfold(pipe, |mut p| async move { p.next().await.map(|b| (b, p)) });
-    let body = StreamBody::new(body.map_ok(Frame::data)).boxed_unsync();
-    Ok(http::Response::from_parts(head, body))
+    Ok(Exchange::new(head, body.boxed()))
 }
 
 /// Turns the response sent to the client into its body.

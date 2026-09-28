@@ -10,18 +10,20 @@ use respan_gateway_core::serde_json;
 use respan_gateway_core::{
     ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, Response, codes,
 };
-use respan_gateway_core::{bytes, futures, http};
+use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::whole::Relay;
 use respan_gateway_formats::{self as formats, default_content_type, sse};
 use respan_gateway_http::Asked;
+use respan_gateway_http::http;
+use respan_gateway_http::{Answer as Head, Ask};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// A `POST` of `body` to `/{format}`, where that format's clients send.
-fn to(format: &str, body: impl Into<Bytes>) -> http::Request<respan_gateway_core::Body> {
+fn to(format: &str, body: impl Into<Bytes>) -> http::Request<respan_gateway_http::Body> {
     post(&format!("/{format}"), body)
 }
 
@@ -111,6 +113,8 @@ const V2: JevFormat = JevFormat {
 };
 
 impl Format for JevFormat {
+    type Ask = Ask;
+    type Answer = Head;
     type Input = Jev;
     type Output = Answer;
 
@@ -118,32 +122,34 @@ impl Format for JevFormat {
         self.name
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &Ask) -> bool {
         formats::posts_to(head, &format!("/{}", Format::name(self)))
     }
 
-    fn request_decoder(&self, _request: &http::Request<Bytes>) -> Box<dyn Decoder<Jev>> {
+    fn request_decoder(&self, _request: &Ask) -> Box<dyn Decoder<Jev>> {
         let (jev, name) = (*self, Arc::from(self.name));
         formats::message_decoder(move |raw: Bytes| Ok(jev.read(&raw)?.came(&name, raw)))
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        _first: Option<&Jev>,
+        client: Option<&Ask>,
+        _body: &mut Bytes,
         _streams: bool,
-    ) -> Box<dyn Encoder<Jev>> {
-        *request.method_mut() = http::Method::POST;
-        formats::set_path(request, "/complete");
+    ) -> Box<dyn Encoder<Jev, Ask>> {
+        let mut head = formats::call_head(client);
+        head.method = http::Method::POST;
+        formats::set_path(&mut head, "/complete");
         let json = HeaderValue::from_static("application/json");
-        request.headers_mut().insert(CONTENT_TYPE, json);
-        Box::new(Prompts(*self))
+        head.headers.insert(CONTENT_TYPE, json);
+        formats::with_head(head, Box::new(Prompts(*self)))
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        head: &Head,
+        _call: &Ask,
+        _sent: &Bytes,
     ) -> Box<dyn Decoder<Answer>> {
         // A jev answer is whole, or a stream of one-answer SSE events.
         let (answer, name): (_, Arc<str>) = (self.answer, Arc::from(self.name));
@@ -167,10 +173,27 @@ impl Format for JevFormat {
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        _request: &http::Request<Bytes>,
+        answer: Option<&Head>,
+        _ask: &Ask,
+        _body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Answer>> {
+    ) -> Box<dyn Encoder<Answer, Head>> {
+        let mut head = formats::answer_head(answer);
+        let body = self.response_body(&mut head, refusal);
+        formats::with_head(head, body)
+    }
+
+    fn is_content(&self, answer: &Answer) -> bool {
+        answer.text.is_some()
+    }
+}
+
+impl JevFormat {
+    fn response_body(
+        &self,
+        head: &mut Head,
+        refusal: Option<&Fault>,
+    ) -> Box<dyn Encoder<Answer, ()>> {
         // A refusal is the provider's answer as it came, else jev's error
         // under the fault's status.
         if let Some(fault) = refusal
@@ -210,12 +233,6 @@ impl Format for JevFormat {
         Box::new(Relay::new(write, fail, stream))
     }
 
-    fn is_content(&self, answer: &Answer) -> bool {
-        answer.text.is_some()
-    }
-}
-
-impl JevFormat {
     /// A body with no prompt is not jev at all; other fields are noted.
     fn read(&self, raw: &[u8]) -> Result<Jev, Fault> {
         let v: Option<Value> = serde_json::from_slice(raw).ok();
@@ -268,7 +285,9 @@ impl JevFormat {
 /// written into them, or a new body.
 struct Prompts(JevFormat);
 
-impl Encoder<Jev> for Prompts {
+impl Encoder<Jev, ()> for Prompts {
+    fn head(&mut self, _first: Option<&Jev>) {}
+
     fn encode(&mut self, jev: &Jev, out: &mut BytesMut) -> Result<(), Fault> {
         let origin = jev.origin.origin(self.0.name);
         if let Some(bytes) = jev.origin.bytes(self.0.name, jev) {
@@ -282,6 +301,33 @@ impl Encoder<Jev> for Prompts {
 
     fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
+    }
+}
+
+/// An encoder whose head `.1` edits after `.0` wrote it.
+struct EditedHead<T, F>(Box<dyn Encoder<T, Head>>, F);
+
+impl<T: 'static, F: Fn(&mut Head) + Send + 'static> Encoder<T, Head> for EditedHead<T, F> {
+    fn head(&mut self, first: Option<&T>) -> Head {
+        let mut head = self.0.head(first);
+        (self.1)(&mut head);
+        head
+    }
+
+    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+        self.0.open(out)
+    }
+
+    fn encode(&mut self, value: &T, out: &mut BytesMut) -> Result<(), Fault> {
+        self.0.encode(value, out)
+    }
+
+    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        self.0.end(end, out)
+    }
+
+    fn done(&self) -> bool {
+        self.0.done()
     }
 }
 
@@ -640,6 +686,8 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
     struct OneWay;
 
     impl Format for OneWay {
+        type Ask = Ask;
+        type Answer = Head;
         type Input = Jev;
         type Output = Jev;
 
@@ -647,38 +695,41 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
             "jev-one-way"
         }
 
-        fn accepts(&self, head: &http::request::Parts) -> bool {
+        fn accepts(&self, head: &Ask) -> bool {
             formats::posts_to(head, &format!("/{}", Format::name(self)))
         }
 
-        fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Jev>> {
+        fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
             V1.request_decoder(request)
         }
 
         fn request_encoder(
             &self,
-            request: &mut http::Request<Bytes>,
-            first: Option<&Jev>,
+            client: Option<&Ask>,
+            body: &mut Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Jev>> {
-            V1.request_encoder(request, first, streams)
+        ) -> Box<dyn Encoder<Jev, Ask>> {
+            V1.request_encoder(client, body, streams)
         }
 
         fn response_decoder(
             &self,
-            _head: &http::response::Parts,
-            request: &http::Request<Bytes>,
+            _head: &Head,
+            call: &Ask,
+            _sent: &Bytes,
         ) -> Box<dyn Decoder<Jev>> {
-            V1.request_decoder(request)
+            V1.request_decoder(call)
         }
 
         fn response_encoder(
             &self,
-            _head: &mut http::response::Parts,
-            _request: &http::Request<Bytes>,
+            _answer: Option<&Head>,
+            _ask: &Ask,
+            _body: &Bytes,
             _refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Jev>> {
-            V1.request_encoder(&mut http::Request::new(Bytes::new()), None, false)
+        ) -> Box<dyn Encoder<Jev, Head>> {
+            let head = respan_gateway_http::fresh_answer();
+            formats::with_head(head, Box::new(Prompts(V1)))
         }
     }
 
@@ -702,6 +753,8 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     struct Opaque;
 
     impl Format for Opaque {
+        type Ask = Ask;
+        type Answer = Head;
         type Input = Sent<Opaque>;
         type Output = Got<Opaque>;
 
@@ -709,43 +762,43 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
             "opaque"
         }
 
-        fn accepts(&self, head: &http::request::Parts) -> bool {
+        fn accepts(&self, head: &Ask) -> bool {
             formats::posts_to(head, &format!("/{}", Format::name(self)))
         }
 
-        fn request_decoder(
-            &self,
-            _request: &http::Request<Bytes>,
-        ) -> Box<dyn Decoder<Self::Input>> {
+        fn request_decoder(&self, _request: &Ask) -> Box<dyn Decoder<Self::Input>> {
             opaque::request_decoder()
         }
 
         fn request_encoder(
             &self,
-            request: &mut http::Request<Bytes>,
-            first: Option<&Self::Input>,
+            client: Option<&Ask>,
+            _body: &mut Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Self::Input>> {
-            *request.method_mut() = http::Method::POST;
-            formats::set_path(request, "/");
-            opaque::request_encoder(request, first, streams)
+        ) -> Box<dyn Encoder<Self::Input, Ask>> {
+            let mut head = formats::call_head(client);
+            head.method = http::Method::POST;
+            formats::set_path(&mut head, "/");
+            opaque::request_encoder(Some(&head), streams)
         }
 
         fn response_decoder(
             &self,
-            head: &http::response::Parts,
-            request: &http::Request<Bytes>,
+            head: &Head,
+            call: &Ask,
+            _sent: &Bytes,
         ) -> Box<dyn Decoder<Self::Output>> {
-            opaque::response_decoder("opaque", head, request)
+            opaque::response_decoder("opaque", head, call)
         }
 
         fn response_encoder(
             &self,
-            head: &mut http::response::Parts,
-            request: &http::Request<Bytes>,
+            answer: Option<&Head>,
+            ask: &Ask,
+            _body: &Bytes,
             refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Self::Output>> {
-            opaque::response_encoder("opaque", head, request, refusal)
+        ) -> Box<dyn Encoder<Self::Output, Head>> {
+            opaque::response_encoder("opaque", answer, ask, refusal)
         }
     }
 
@@ -845,7 +898,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(&b"busy"[..]));
     let end = ended.await.end.map_err(|f| f.status());
-    assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE.as_u16()));
 
     // A body cut short upstream is cut short for the client.
     let (status, _, body) = read_whole(serve(&open, to("opaque", "ping")).await.0).await;
@@ -870,6 +923,8 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
     struct InBand;
 
     impl Format for InBand {
+        type Ask = Ask;
+        type Answer = Head;
         type Input = Jev;
         type Output = Answer;
 
@@ -877,42 +932,45 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
             V2.name()
         }
 
-        fn accepts(&self, head: &http::request::Parts) -> bool {
+        fn accepts(&self, head: &Ask) -> bool {
             formats::posts_to(head, &format!("/{}", Format::name(self)))
         }
 
-        fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Jev>> {
+        fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
             V2.request_decoder(request)
         }
 
         fn request_encoder(
             &self,
-            request: &mut http::Request<Bytes>,
-            first: Option<&Jev>,
+            client: Option<&Ask>,
+            body: &mut Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Jev>> {
-            V2.request_encoder(request, first, streams)
+        ) -> Box<dyn Encoder<Jev, Ask>> {
+            V2.request_encoder(client, body, streams)
         }
 
         fn response_decoder(
             &self,
-            head: &http::response::Parts,
-            request: &http::Request<Bytes>,
+            head: &Head,
+            call: &Ask,
+            sent: &Bytes,
         ) -> Box<dyn Decoder<Answer>> {
-            V2.response_decoder(head, request)
+            V2.response_decoder(head, call, sent)
         }
 
         fn response_encoder(
             &self,
-            head: &mut http::response::Parts,
-            request: &http::Request<Bytes>,
+            answer: Option<&Head>,
+            ask: &Ask,
+            body: &Bytes,
             refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Answer>> {
+        ) -> Box<dyn Encoder<Answer, Head>> {
             // Changed: a format writes a refusal's status, so this one
             // overrides it after.
-            let encoder = V2.response_encoder(head, request, refusal);
-            head.status = StatusCode::OK;
-            encoder
+            let encoder = V2.response_encoder(answer, ask, body, refusal);
+            Box::new(EditedHead(encoder, |head: &mut Head| {
+                head.status = StatusCode::OK;
+            }))
         }
     }
 
@@ -936,6 +994,8 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
     struct Broken;
 
     impl Format for Broken {
+        type Ask = Ask;
+        type Answer = Head;
         type Input = Jev;
         type Output = Answer;
 
@@ -943,38 +1003,40 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
             V2.name()
         }
 
-        fn accepts(&self, head: &http::request::Parts) -> bool {
+        fn accepts(&self, head: &Ask) -> bool {
             formats::posts_to(head, &format!("/{}", Format::name(self)))
         }
 
-        fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Jev>> {
+        fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
             V2.request_decoder(request)
         }
 
         fn request_encoder(
             &self,
-            request: &mut http::Request<Bytes>,
-            first: Option<&Jev>,
+            client: Option<&Ask>,
+            body: &mut Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Jev>> {
-            V2.request_encoder(request, first, streams)
+        ) -> Box<dyn Encoder<Jev, Ask>> {
+            V2.request_encoder(client, body, streams)
         }
 
         fn response_decoder(
             &self,
-            head: &http::response::Parts,
-            request: &http::Request<Bytes>,
+            head: &Head,
+            call: &Ask,
+            sent: &Bytes,
         ) -> Box<dyn Decoder<Answer>> {
-            V2.response_decoder(head, request)
+            V2.response_decoder(head, call, sent)
         }
 
         fn response_encoder(
             &self,
-            head: &mut http::response::Parts,
-            request: &http::Request<Bytes>,
+            answer: Option<&Head>,
+            ask: &Ask,
+            body: &Bytes,
             _refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Answer>> {
-            let _ = (head, request);
+        ) -> Box<dyn Encoder<Answer, Head>> {
+            let _ = (answer, ask, body);
             panic!("a buggy format")
         }
     }
@@ -1144,7 +1206,7 @@ async fn a_redirect_is_passed_on_as_it_came_not_read_as_an_answer() {
     let end = ended.await.end.err();
     assert_eq!(
         end.as_ref().map(Fault::status),
-        Some(StatusCode::BAD_GATEWAY)
+        Some(StatusCode::BAD_GATEWAY.as_u16())
     );
     let answer = end
         .as_ref()
@@ -1252,6 +1314,8 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
     struct Headed;
 
     impl Format for Headed {
+        type Ask = Ask;
+        type Answer = Head;
         type Input = Jev;
         type Output = Answer;
 
@@ -1259,13 +1323,13 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
             "jev-headed"
         }
 
-        fn accepts(&self, head: &http::request::Parts) -> bool {
+        fn accepts(&self, head: &Ask) -> bool {
             formats::posts_to(head, &format!("/{}", Format::name(self)))
         }
 
-        fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Jev>> {
+        fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
             let prompt = request
-                .headers()
+                .headers
                 .get("x-prompt")
                 .and_then(|p| p.to_str().ok());
             let prompt = prompt.map(String::from);
@@ -1286,28 +1350,30 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 
         fn request_encoder(
             &self,
-            request: &mut http::Request<Bytes>,
-            first: Option<&Jev>,
+            client: Option<&Ask>,
+            body: &mut Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Jev>> {
-            V2.request_encoder(request, first, streams)
+        ) -> Box<dyn Encoder<Jev, Ask>> {
+            V2.request_encoder(client, body, streams)
         }
 
         fn response_decoder(
             &self,
-            head: &http::response::Parts,
-            request: &http::Request<Bytes>,
+            head: &Head,
+            call: &Ask,
+            sent: &Bytes,
         ) -> Box<dyn Decoder<Answer>> {
-            V2.response_decoder(head, request)
+            V2.response_decoder(head, call, sent)
         }
 
         fn response_encoder(
             &self,
-            head: &mut http::response::Parts,
-            request: &http::Request<Bytes>,
+            answer: Option<&Head>,
+            ask: &Ask,
+            body: &Bytes,
             refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Answer>> {
-            V2.response_encoder(head, request, refusal)
+        ) -> Box<dyn Encoder<Answer, Head>> {
+            V2.response_encoder(answer, ask, body, refusal)
         }
     }
 
@@ -1328,9 +1394,9 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
             &self,
             px: &mut respan_gateway_core::ProviderContext,
         ) -> Result<(), Fault> {
-            px.edit_call(|call| {
+            px.edit_call(|call: &mut Ask, _: &mut Bytes| {
                 let edited = HeaderValue::from_static("edited");
-                call.headers_mut().insert("x-prompt", edited);
+                call.headers.insert("x-prompt", edited);
                 Ok(())
             });
             Ok(())
@@ -1368,6 +1434,8 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 struct Anywhere;
 
 impl Format for Anywhere {
+    type Ask = Ask;
+    type Answer = Head;
     type Input = Sent<Anywhere>;
     type Output = Got<Anywhere>;
 
@@ -1375,40 +1443,45 @@ impl Format for Anywhere {
         "anywhere"
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &Ask) -> bool {
         head.method == http::Method::POST
     }
 
-    fn request_decoder(&self, _request: &http::Request<Bytes>) -> Box<dyn Decoder<Self::Input>> {
+    fn request_decoder(&self, _request: &Ask) -> Box<dyn Decoder<Self::Input>> {
         opaque::request_decoder()
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&Self::Input>,
+        client: Option<&Ask>,
+        body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Self::Input>> {
-        *request.method_mut() = http::Method::POST;
-        formats::set_path(request, "/");
-        opaque::request_encoder(request, first, streams)
+    ) -> Box<dyn Encoder<Self::Input, Ask>> {
+        let _ = body;
+        let mut head = formats::call_head(client);
+        head.method = http::Method::POST;
+        formats::set_path(&mut head, "/");
+        opaque::request_encoder(Some(&head), streams)
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        request: &http::Request<Bytes>,
+        head: &Head,
+        call: &Ask,
+        _sent: &Bytes,
     ) -> Box<dyn Decoder<Self::Output>> {
-        opaque::response_decoder("anywhere", head, request)
+        opaque::response_decoder("anywhere", head, call)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: Option<&Head>,
+        ask: &Ask,
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Self::Output>> {
-        opaque::response_encoder("anywhere", head, request, refusal)
+    ) -> Box<dyn Encoder<Self::Output, Head>> {
+        let _ = body;
+        opaque::response_encoder("anywhere", answer, ask, refusal)
     }
 }
 
@@ -1719,15 +1792,18 @@ struct Open;
 
 #[async_trait]
 impl respan_gateway_core::Transport for Open {
+    type Ask = Ask;
+    type Answer = Head;
+
     async fn send(
         &self,
-        _call: http::Request<respan_gateway_core::Body>,
-    ) -> Result<http::Response<respan_gateway_core::Body>, Fault> {
+        _call: respan_gateway_core::Exchange<Ask>,
+    ) -> Result<respan_gateway_core::Exchange<Head>, Fault> {
         use futures::StreamExt;
-        use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
-        let first = respan_gateway_core::http_body::Frame::data(Bytes::from("data: hello\n\n"));
+        let first = Bytes::from("data: hello\n\n");
         let body = futures::stream::iter([Ok(first)]).chain(futures::stream::pending());
-        Ok(http::Response::new(StreamBody::new(body).boxed_unsync()))
+        let head = respan_gateway_http::fresh_answer();
+        Ok(respan_gateway_core::Exchange::new(head, body.boxed()))
     }
 }
 
@@ -1780,6 +1856,8 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
     struct Noting(Arc<std::sync::Mutex<Option<http::HeaderMap>>>);
 
     impl Format for Noting {
+        type Ask = Ask;
+        type Answer = Head;
         type Input = Jev;
         type Output = Answer;
 
@@ -1787,42 +1865,44 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
             V1.name
         }
 
-        fn accepts(&self, head: &http::request::Parts) -> bool {
+        fn accepts(&self, head: &Ask) -> bool {
             V1.accepts(head)
         }
 
-        fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Jev>> {
+        fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
             V1.request_decoder(request)
         }
 
         fn request_encoder(
             &self,
-            request: &mut http::Request<Bytes>,
-            first: Option<&Jev>,
+            client: Option<&Ask>,
+            body: &mut Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Jev>> {
-            V1.request_encoder(request, first, streams)
+        ) -> Box<dyn Encoder<Jev, Ask>> {
+            V1.request_encoder(client, body, streams)
         }
 
         fn response_decoder(
             &self,
-            head: &http::response::Parts,
-            request: &http::Request<Bytes>,
+            head: &Head,
+            call: &Ask,
+            sent: &Bytes,
         ) -> Box<dyn Decoder<Answer>> {
-            V1.response_decoder(head, request)
+            V1.response_decoder(head, call, sent)
         }
 
         fn response_encoder(
             &self,
-            head: &mut http::response::Parts,
-            request: &http::Request<Bytes>,
+            answer: Option<&Head>,
+            ask: &Ask,
+            body: &Bytes,
             refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Answer>> {
+        ) -> Box<dyn Encoder<Answer, Head>> {
             self.0
                 .lock()
-                .map(|mut h| *h = Some(head.headers.clone()))
+                .map(|mut h| *h = Some(formats::answer_head(answer).headers))
                 .ok();
-            V1.response_encoder(head, request, refusal)
+            V1.response_encoder(answer, ask, body, refusal)
         }
     }
 

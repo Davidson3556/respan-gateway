@@ -12,8 +12,9 @@ use axum::response::Response;
 use http::header;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Limited};
-use respan_gateway_core::{Body, Fault, Gateway, Transport};
-use respan_gateway_core::{async_trait, http, http_body, http_body_util};
+use respan_gateway_core::futures::TryStreamExt;
+use respan_gateway_core::{Exchange, Fault, Gateway, Transport, async_trait};
+use respan_gateway_http::{Answer, Ask, http, http_body_util};
 use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
@@ -183,19 +184,31 @@ impl HttpTransport {
 
 #[async_trait]
 impl Transport for HttpTransport {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let (mut parts, body) = call.into_parts();
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        let Exchange {
+            head: mut parts,
+            body,
+            extensions,
+            ..
+        } = call;
         proxy_call(&mut parts);
         strip_client_origin_headers(&mut parts.headers);
-        credentials(&mut parts, &self.headers);
+        credentials(&mut parts, &extensions, &self.headers);
         let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
         parts.uri = url
             .parse()
             .map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
-        let body = match http_body::Body::size_hint(&body).exact() {
-            Some(_) => reqwest::Body::from(body.collect().await?.to_bytes()),
-            None => reqwest::Body::wrap_stream(body.into_data_stream()),
+        // A whole call is one frame, or none if empty, and goes with its length.
+        let body = match body.size_hint() {
+            (_, Some(0 | 1)) => {
+                let frames: Vec<_> = body.try_collect().await?;
+                reqwest::Body::from(frames.concat())
+            }
+            _ => reqwest::Body::wrap_stream(body),
         };
         let req = reqwest::Request::try_from(http::Request::from_parts(parts, body))
             .map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
@@ -209,8 +222,9 @@ impl Transport for HttpTransport {
                 false => Fault::upstream("the provider could not be reached").with_source(e),
             })?;
         let broke = |e| Fault::upstream("the provider's body broke off").with_source(e);
-        let mut resp = http::Response::from(resp).map(|body| body.map_err(broke).boxed_unsync());
-        strip_origin_headers(resp.headers_mut());
+        let resp = http::Response::from(resp).map(|body| body.map_err(broke));
+        let mut resp = respan_gateway_http::answer(resp);
+        strip_origin_headers(&mut resp.head.headers);
         Ok(resp)
     }
 }

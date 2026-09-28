@@ -28,9 +28,7 @@ async fn nested_accounts_reserve_all_or_nothing() {
     let refused = ledger
         .reserve(&HoldId::new(), &names(&["key-1"]), 400, TTL)
         .await;
-    let fault = refused
-        .err()
-        .map(|f| (f.status().as_u16(), f.code().to_owned()));
+    let fault = refused.err().map(|f| (f.status(), f.code().to_owned()));
     assert_eq!(fault, Some((402, INSUFFICIENT_FUNDS.to_owned())));
     for (account, left) in [("key-1", 500), ("team", 300), ("acme", 1000)] {
         assert_eq!(ledger.available(account), left, "{account}");
@@ -67,7 +65,7 @@ async fn an_unknown_account_is_refused() {
     let refused = ledger()
         .reserve(&HoldId::new(), &names(&["nobody"]), 1, TTL)
         .await;
-    assert_eq!(refused.err().map(|f| f.status().as_u16()), Some(401));
+    assert_eq!(refused.err().map(|f| f.status()), Some(401));
 }
 
 #[tokio::test(start_paused = true)]

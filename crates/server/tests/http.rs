@@ -3,12 +3,12 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_core::http;
 use respan_gateway_core::{
     ClientContext, Fault, Format, Gateway, Outcome, Plugin, Response, Transport, async_trait,
 };
 use respan_gateway_formats::conversation::Reply;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_http::http;
 use respan_gateway_http::{CallHeaders, Credential, credentials};
 use respan_gateway_server::{HttpTransport, router};
 use tokio::net::TcpListener;
@@ -22,7 +22,11 @@ fn http(base: impl Into<String>) -> HttpTransport {
 
 /// A gateway serving OpenAI clients, sent to the provider speaking
 /// `format` over `transport`, its target.
-fn gateway_to(format: impl Format, transport: impl Transport) -> Gateway {
+fn gateway_to<F, T>(format: F, transport: T) -> Gateway
+where
+    F: Format,
+    T: Transport<Ask = F::Ask, Answer = F::Answer>,
+{
     Gateway::new()
         .provider("local", format, transport)
         .and_then(|g| g.serve(OpenAiChat))
@@ -166,20 +170,24 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
 
     #[async_trait]
     impl Transport for Note {
+        type Ask = respan_gateway_http::Ask;
+        type Answer = respan_gateway_http::Answer;
+
         async fn send(
             &self,
-            call: http::Request<respan_gateway_core::Body>,
-        ) -> Result<http::Response<respan_gateway_core::Body>, Fault> {
-            use respan_gateway_core::http_body_util::{self, BodyExt};
+            call: respan_gateway_core::Exchange<Self::Ask>,
+        ) -> Result<respan_gateway_core::Exchange<Self::Answer>, Fault> {
+            use respan_gateway_http::http_body_util::{self, BodyExt};
+            let (call, _) = respan_gateway_http::call(call);
             let (head, body) = call.into_parts();
             let body = body.collect().await?.to_bytes();
             self.0.lock().map(|mut n| n.push((head.headers, body))).ok();
             let unary = r#"{"id":"c","choices":[{"message":{"content":"hi"}}]}"#;
             let body = http_body_util::Full::new(bytes::Bytes::from_static(unary.as_bytes()));
-            let mut resp = http::Response::new(body.map_err(Into::into).boxed_unsync());
+            let mut resp = http::Response::new(body.map_err(Fault::from).boxed_unsync());
             let json = http::HeaderValue::from_static("application/json");
             resp.headers_mut().insert("content-type", json);
-            Ok(resp)
+            Ok(respan_gateway_http::answer(resp))
         }
     }
 
@@ -402,12 +410,13 @@ const CLIENT: [(&str, &str); 7] = [
 #[test]
 fn without_headers_of_its_own_the_clients_credentials_pass_through() {
     let mut head = call_head("/v1/chat?key=k&beta=1", &CLIENT);
+    let mut ext = respan_gateway_core::Extensions::new();
     let before = head.headers.clone();
     let lifted = Credential::lift(&mut head).unwrap_or_else(|| panic!("no credentials"));
-    head.extensions.insert(lifted);
-    head.extensions.insert(respan_gateway_core::Relayed);
+    ext.insert(lifted);
+    ext.insert(respan_gateway_core::Relayed);
 
-    credentials(&mut head, &http::HeaderMap::new());
+    credentials(&mut head, &ext, &http::HeaderMap::new());
 
     assert_eq!(head.headers, before);
     assert_eq!(head.uri, "/v1/chat?beta=1&key=k");
@@ -417,9 +426,10 @@ fn without_headers_of_its_own_the_clients_credentials_pass_through() {
 fn headers_of_its_own_take_the_clients_credentials_off() {
     let query = "/v1/chat?key=a&api_key=b&access_token=c&api-version=1";
     let mut head = call_head(query, &CLIENT);
+    let ext = respan_gateway_core::Extensions::new();
 
     let own = headers(&[("x-team", "t")]);
-    credentials(&mut head, &own);
+    credentials(&mut head, &ext, &own);
 
     let got = |name| head.headers.get(name).and_then(|v| v.to_str().ok());
     for gone in ["authorization", "x-api-key", "x-auth-token"] {
@@ -436,11 +446,12 @@ fn headers_of_its_own_take_the_clients_credentials_off() {
 fn a_calls_own_headers_are_the_transports_for_that_call() {
     // With transport headers, the call's replace those of the same name.
     let mut head = call_head("/v1/chat?key=a", &CLIENT);
+    let mut ext = respan_gateway_core::Extensions::new();
     let call = headers(&[("authorization", "Bearer tenant"), ("host", "evil")]);
-    head.extensions.insert(CallHeaders(call));
+    ext.insert(CallHeaders(call));
     let own = headers(&[("authorization", "Bearer operator"), ("x-team", "t")]);
 
-    credentials(&mut head, &own);
+    credentials(&mut head, &ext, &own);
 
     let all = |name| {
         head.headers
@@ -458,10 +469,11 @@ fn a_calls_own_headers_are_the_transports_for_that_call() {
     // Without transport headers, the call's still remove the client's
     // credentials.
     let mut head = call_head("/v1/chat", &CLIENT);
+    let mut ext = respan_gateway_core::Extensions::new();
     let call = headers(&[("x-api-key", "tenant")]);
-    head.extensions.insert(CallHeaders(call));
+    ext.insert(CallHeaders(call));
 
-    credentials(&mut head, &http::HeaderMap::new());
+    credentials(&mut head, &ext, &http::HeaderMap::new());
 
     let all = |name| {
         head.headers
@@ -493,7 +505,7 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     #[async_trait]
     impl Plugin for NoContent {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head| {
+            cx.edit_response_head(|head: &mut respan_gateway_http::Answer| {
                 head.status = http::StatusCode::NO_CONTENT;
                 Ok(())
             });
@@ -598,8 +610,9 @@ async fn it_strips_the_clients_cookies_and_forwarding_headers() {
 
 #[tokio::test]
 async fn it_sends_a_whole_body_with_its_length_and_streams_one_of_unknown_size() {
-    use respan_gateway_core::http_body_util::{BodyExt, Full, StreamBody};
-    use respan_gateway_core::{Body, Transport, bytes::Bytes, futures, http_body::Frame};
+    use futures::StreamExt;
+    use respan_gateway_core::{Body, Exchange, Transport, bytes::Bytes, futures};
+    use respan_gateway_http::http_body_util::BodyExt;
 
     // Echoes the body, prefixed by its `content-length`, or `-` if none.
     let provider = spawn(Router::new().route(
@@ -611,26 +624,28 @@ async fn it_sends_a_whole_body_with_its_length_and_streams_one_of_unknown_size()
     ))
     .await;
     let transport = http(&provider);
+    // Changed: a whole call is one frame of the kernel's body, a streamed
+    // one of unknown size several.
     let call = |body: Body| {
-        let mut call = http::Request::new(body);
-        *call.method_mut() = http::Method::POST;
-        *call.uri_mut() = http::Uri::from_static("/echo");
-        call
+        let mut head = respan_gateway_http::fresh_ask();
+        head.method = http::Method::POST;
+        head.uri = http::Uri::from_static("/echo");
+        Exchange::new(head, body)
     };
-    let read = |resp: http::Response<Body>| async move {
-        let body = resp.into_body().collect().await.map(|b| b.to_bytes());
+    let read = |resp: Exchange<respan_gateway_http::Answer>| async move {
+        let body = respan_gateway_http::into_http_body(resp.body);
+        let body = body.collect().await.map(|b| b.to_bytes());
         String::from_utf8_lossy(&body.unwrap_or_default()).into_owned()
     };
 
-    let whole = transport
-        .send(call(
-            Full::new(Bytes::from("ab"))
-                .map_err(Into::into)
-                .boxed_unsync(),
-        ))
-        .await;
-    let frames = ["a", "b"].map(|f| Ok::<_, Fault>(Frame::data(Bytes::from(f))));
-    let streamed = StreamBody::new(futures::stream::iter(frames)).boxed_unsync();
+    let whole = futures::stream::iter([Ok::<_, Fault>(Bytes::from("ab"))]).boxed();
+    let whole = transport.send(call(whole)).await;
+    let frames = ["a", "b"].map(|f| Ok::<_, Fault>(Bytes::from(f)));
+    // Of unknown size, as a streaming request's inputs are.
+    let streamed = futures::stream::unfold(frames.into_iter(), |mut f| async move {
+        f.next().map(|x| (x, f))
+    })
+    .boxed();
     let streamed = transport.send(call(streamed)).await;
 
     assert_eq!(read(whole.unwrap_or_else(|e| panic!("{e}"))).await, "2 ab");

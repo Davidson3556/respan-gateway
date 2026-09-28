@@ -2,7 +2,7 @@
 
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue};
-use respan_gateway_core::{Relayed, http};
+use respan_gateway_core::{Extensions, Relayed};
 
 use crate::credential::{Credential, is_credential, take_query};
 use crate::{is_hop_by_hop, strip_named};
@@ -98,12 +98,12 @@ impl std::fmt::Debug for CallHeaders {
 /// connection's headers), else the transport's own `headers`, each
 /// replacing any of the same name, with any credential header or query
 /// parameter the call has removed first ([`Credential`] says which); else,
-/// with neither, the client's [`Credential`] from the call's extensions,
+/// with neither, the client's [`Credential`] from the call's `extensions`,
 /// passed through if the call relays the client's own message
 /// ([`Relayed`]), as a key is for its own protocol's provider alone.
-pub fn credentials(head: &mut http::request::Parts, headers: &HeaderMap) {
+pub fn credentials(head: &mut http::request::Parts, extensions: &Extensions, headers: &HeaderMap) {
     let mut own = headers.clone();
-    if let Some(CallHeaders(call)) = head.extensions.get::<CallHeaders>() {
+    if let Some(CallHeaders(call)) = extensions.get::<CallHeaders>() {
         let sent = |n: &&HeaderName| !is_connection_header(n);
         for name in call.keys().filter(sent) {
             own.remove(name);
@@ -113,8 +113,8 @@ pub fn credentials(head: &mut http::request::Parts, headers: &HeaderMap) {
         }
     }
     if own.is_empty() {
-        let relayed = head.extensions.get::<Relayed>().is_some();
-        let client = head.extensions.get::<Credential>().filter(|_| relayed);
+        let relayed = extensions.get::<Relayed>().is_some();
+        let client = extensions.get::<Credential>().filter(|_| relayed);
         if let Some(client) = client.cloned() {
             client.restore(head);
         }
@@ -168,19 +168,21 @@ mod tests {
     #[test]
     fn with_no_keys_of_its_own_the_clients_pass_through() {
         let mut parts = head(&[]);
+        let mut ext = Extensions::new();
         let mut client = HeaderMap::new();
         client.insert("x-api-key", HeaderValue::from_static("k"));
-        parts.extensions.insert(Credential::of(client));
-        parts.extensions.insert(Relayed);
-        credentials(&mut parts, &HeaderMap::new());
+        ext.insert(Credential::of(client));
+        ext.insert(Relayed);
+        credentials(&mut parts, &ext, &HeaderMap::new());
         assert_eq!(parts.headers["x-api-key"], "k");
         let mut own = HeaderMap::new();
         own.insert("authorization", HeaderValue::from_static("Bearer own"));
         let mut parts = head(&[]);
+        let mut ext = Extensions::new();
         let mut client = HeaderMap::new();
         client.insert("x-api-key", HeaderValue::from_static("k"));
-        parts.extensions.insert(Credential::of(client));
-        credentials(&mut parts, &own);
+        ext.insert(Credential::of(client));
+        credentials(&mut parts, &ext, &own);
         assert!(parts.headers.get("x-api-key").is_none());
         assert_eq!(parts.headers["authorization"], "Bearer own");
     }
@@ -193,20 +195,23 @@ mod tests {
         client.insert("authorization", HeaderValue::from_static("Bearer sk-c"));
         client.insert("x-api-key", HeaderValue::from_static("k"));
         let mut parts = head(&[]);
-        parts.extensions.insert(Credential::of(client.clone()));
-        credentials(&mut parts, &HeaderMap::new());
+        let mut ext = Extensions::new();
+        ext.insert(Credential::of(client.clone()));
+        credentials(&mut parts, &ext, &HeaderMap::new());
         assert!(parts.headers.is_empty());
 
         // A relay whose Credential a plugin removed carries none either.
         let mut parts = head(&[]);
-        parts.extensions.insert(Relayed);
-        credentials(&mut parts, &HeaderMap::new());
+        let mut ext = Extensions::new();
+        ext.insert(Relayed);
+        credentials(&mut parts, &ext, &HeaderMap::new());
         assert!(parts.headers.is_empty());
 
         let mut parts = head(&[]);
-        parts.extensions.insert(Credential::of(client));
-        parts.extensions.insert(Relayed);
-        credentials(&mut parts, &HeaderMap::new());
+        let mut ext = Extensions::new();
+        ext.insert(Credential::of(client));
+        ext.insert(Relayed);
+        credentials(&mut parts, &ext, &HeaderMap::new());
         assert_eq!(parts.headers["authorization"], "Bearer sk-c");
         assert_eq!(parts.headers["x-api-key"], "k");
     }

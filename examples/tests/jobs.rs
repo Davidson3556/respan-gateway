@@ -1,5 +1,5 @@
 use super::*;
-use respan_gateway_core::http_body_util::BodyExt;
+use respan_gateway_http::http_body_util::BodyExt;
 
 /// Whether an SSE body holds the whole answer. A replay is written from
 /// the stored replies, so its bytes are the gateway's, not the provider's.
@@ -75,7 +75,9 @@ async fn a_zero_retention_request_stores_nothing() -> Result<(), Fault> {
     let gw = gateway(&mock, &store)?;
     for _ in 0..2 {
         let mut req = keyed(ACME, "op-1", BODY);
-        req.extensions_mut().insert(NoContent);
+        let mut values = respan_gateway_core::Extensions::new();
+        values.insert(NoContent);
+        req.extensions_mut().insert(values);
         assert!(whole(&send(&gw, req).await?));
     }
     assert!(locked(&store.0).is_empty(), "nothing stored");

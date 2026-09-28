@@ -1,8 +1,9 @@
 //! Use case 14, the gateway as a library: another Rust service runs the
 //! pipeline in-process, with no server and no second hop. It builds a
-//! [`Gateway`], hands [`Gateway::handle`] an `http::Request`, whole, reads
-//! the response and awaits the request's [`Outcome`]. With no HTTP hop,
-//! it needs no adapter; `Err` is what no format could write.
+//! [`Gateway`], hands [`Gateway::handle`] an exchange on the HTTP wire (an
+//! `http` request head and its body), whole, reads the response and awaits
+//! the request's [`Outcome`]. With no HTTP hop, it needs no adapter; `Err`
+//! is what no format could write.
 //!
 //! The request's `Outcome` says how it ended. The kernel counts no usage:
 //! the embedder tallies it with a plugin that sums what each call's
@@ -11,10 +12,11 @@
 //! `cargo run -p respan-gateway-examples --example embedded`
 
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::http_body_util::{BodyExt, Full};
-use respan_gateway_core::{Fault, Gateway, Outcome, http, serde_json};
+use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
+use respan_gateway_core::{Exchange, Fault, Gateway, Outcome, serde_json};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::{Answer, Ask, http};
 use respan_gateway_testkit::{MockTransport, mock};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -36,14 +38,19 @@ async fn ask(gw: &Gateway, prompt: &str) -> Result<(http::StatusCode, Bytes, Out
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
     });
-    let req = http::Request::post("/v1/chat/completions")
+    let (head, ()) = http::Request::post("/v1/chat/completions")
         .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))?;
-    let (resp, outcome) = gw.handle(req, false).await;
-    let (head, body) = resp?.into_parts();
+        .body(())
+        .map_err(respan_gateway_http::built_wrong)?
+        .into_parts();
+    let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
+    let (resp, outcome) = gw
+        .handle::<Ask, Answer>(Exchange::new(head, body), false)
+        .await;
+    let resp = resp?;
     // Read the body first: the outcome resolves once the response ends.
-    let body = body.collect().await?.to_bytes();
-    Ok((head.status, body, outcome.await))
+    let body: Vec<Bytes> = resp.body.try_collect().await?;
+    Ok((resp.head.status, body.concat().into(), outcome.await))
 }
 
 #[tokio::main]

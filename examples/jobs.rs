@@ -26,12 +26,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::http::{self, HeaderValue, header::AUTHORIZATION};
-use respan_gateway_core::{
-    Body, ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait,
-};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
+use respan_gateway_http::Body;
+use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Asked, Credential};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::sync::watch;

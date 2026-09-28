@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
 respan-gateway-formats.workspace = true
 
 [dev-dependencies]

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 
 use crate::Fault;
+use crate::transport::Head;
 
 /// One protocol's codec: reads and writes its requests and responses, on
 /// whichever side the kernel puts it. Stateless and shared: each body,
@@ -18,15 +19,15 @@ use crate::Fault;
 /// nothing only if the format writes a value as the bytes it came in while
 /// it says the same.
 ///
-/// Heads are an envelope the kernel carries and never reads: `http` types
-/// whose meaning, status and headers alike, is the format's. The kernel
-/// hands a head, like its bytes, only to a format of the name it came in,
-/// so a format relays a head as it relays a body. A request streams its
-/// inputs, one per data frame after its head, if the adapter says so
-/// ([`Gateway::handle`](crate::Gateway::handle)); else its body is its one
-/// input, even empty. A codec sees the request of the exchange as
-/// `http::Request<Bytes>`, its body empty for a streaming request. The
-/// factories never fail: a failure travels in the stream.
+/// Its wire is its pair of head types, [`Format::Ask`] and
+/// [`Format::Answer`], such as HTTP's request and response heads, whose
+/// meaning is the format's: the kernel never reads a head. It hands one,
+/// like its bytes, only to a format of the name it came in, so a format
+/// relays a head as it relays a body; formats of one name share a wire. A
+/// request streams its inputs, one per data frame after its head, if the
+/// adapter says so ([`Gateway::handle`](crate::Gateway::handle)); else its
+/// body is its one input, even empty. The factories never fail: a failure
+/// travels in the stream.
 ///
 /// Its kind is its pair of types; formats of one kind translate into each
 /// other through them. The two types must differ, as the type names the
@@ -35,6 +36,12 @@ use crate::Fault;
 /// kind alone: a shared type such as `serde_json::Value` lets a plugin for
 /// one kind read another's traffic.
 pub trait Format: Send + Sync + 'static {
+    /// The head of a request on this format's wire.
+    type Ask: Clone + Send + Sync + 'static;
+
+    /// The head of a response on this format's wire.
+    type Answer: Send + Sync + 'static;
+
     /// What a request carries, one or a stream.
     type Input: Clone + PartialEq + Send + Sync + 'static;
 
@@ -42,33 +49,32 @@ pub trait Format: Send + Sync + 'static {
     type Output: Clone + PartialEq + Send + Sync + 'static;
 
     /// The protocol's identity. Formats of one name relay to each other
-    /// rather than translate, and must share a kind.
+    /// rather than translate, and must share a kind and a wire.
     fn name(&self) -> &str;
 
     /// Whether a request with `head` is in this protocol. The kernel asks
-    /// the formats given to [`Gateway::serve`](crate::Gateway::serve) in
-    /// order, and the first that accepts takes the request.
-    fn accepts(&self, head: &http::request::Parts) -> bool;
+    /// the formats given to [`Gateway::serve`](crate::Gateway::serve) on
+    /// the request's wire in order, and the first that accepts takes it.
+    fn accepts(&self, head: &Self::Ask) -> bool;
 
-    /// Decodes the client's `request`: its body once when first read, or a
-    /// streaming request's data frames as they pass. `Err` with
+    /// Decodes the client's request with `head`: its body once when first
+    /// read, or a streaming request's data frames as they pass. `Err` with
     /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) for bytes not in
     /// this protocol; note in the input what it has no place for, as a
     /// relay keeps it.
-    fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Self::Input>>;
+    fn request_decoder(&self, head: &Self::Ask) -> Box<dyn Decoder<Self::Input>>;
 
-    /// Encodes a call, having edited `request`, the call's head and first
-    /// bytes. For the client's own message in this format, `request` is
-    /// the client's as the adapter handed it over, head and all, its body
-    /// the client's bytes when unread; else it is empty. Its extensions are
-    /// the call's either way. Edit it as the protocol needs, such as to ask
-    /// a stream for usage; what a proxy must not pass on is the
-    /// transport's to strip. `first` is the first input when it is written
-    /// from its value (changed, translated or a call's own); the encoder
-    /// then gets it and any later inputs. `streams`: later inputs follow,
-    /// one per data frame, from a streaming request; a protocol that cannot
-    /// carry them fails [`Encoder::open`] with
-    /// [`codes::CONFIG`](crate::codes::CONFIG).
+    /// Encodes a call. `client` is the client's head as the adapter handed
+    /// it over, if the call relays the client's own message in this format;
+    /// `body` is the call's first bytes, the client's when relayed unread,
+    /// else empty, for the format to edit as its protocol needs. The
+    /// encoder writes the call's head ([`Encoder::head`]), from the
+    /// client's or anew, then any inputs written from their values
+    /// (changed, translated or a call's own). `streams`: later inputs
+    /// follow, one per data frame, from a streaming request; a protocol
+    /// that cannot carry them fails [`Encoder::open`] with
+    /// [`codes::CONFIG`](crate::codes::CONFIG). What a proxy must not pass
+    /// on is the transport's to strip.
     ///
     /// What this protocol cannot say is an `Err` of the first encode it
     /// concerns, never dropped. The kernel makes it
@@ -77,14 +83,14 @@ pub trait Format: Send + Sync + 'static {
     /// [`codes::CONFIG`](crate::codes::CONFIG).
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&Self::Input>,
+        client: Option<&Self::Ask>,
+        body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Self::Input>>;
+    ) -> Box<dyn Encoder<Self::Input, Self::Ask>>;
 
-    /// Decodes a response with head `response` to `request`, the call as
-    /// sent, whatever its head says. A provider's error answer ends `Err`
-    /// with its status, [`Fault::with_retry_after`] and
+    /// Decodes a response with head `answer` to the call with head `call`
+    /// and first bytes `sent`, as sent, whatever its head says. A provider's error answer ends
+    /// `Err` with its status, [`Fault::with_retry_after`] and
     /// [`Fault::with_answer`], so a client of this format gets it as it
     /// came; a success not in this protocol ends `Err` with
     /// [`codes::UPSTREAM`](crate::codes::UPSTREAM), one cut short
@@ -94,16 +100,18 @@ pub trait Format: Send + Sync + 'static {
     /// ([`Response::until_content`](crate::Response::until_content)).
     fn response_decoder(
         &self,
-        response: &http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: &Self::Answer,
+        call: &Self::Ask,
+        sent: &Bytes,
     ) -> Box<dyn Decoder<Self::Output>>;
 
-    /// Encodes a response to the client's `request`, having edited
-    /// `response`, the head to send: the provider's for a response in this
-    /// format, else an empty one. A `refusal` is the response's one
-    /// failure, before any byte: write its answer as it came if this
-    /// format read it ([`Fault::answer`]), else the fault in this
-    /// protocol's words, with its status and retry. Set the content type,
+    /// Encodes a response to the client's request with head `ask` and body
+    /// `body` (empty for a streaming request). `answer` is the provider's
+    /// head for a response in this format, for the encoder's head
+    /// ([`Encoder::head`]) to start from; else none. A `refusal` is the
+    /// response's one failure, before any byte: write its answer as it came
+    /// if this format read it ([`Fault::answer`]), else the fault in this
+    /// protocol's words, with its status and retry. Say the content type,
     /// and what a streaming request's success needs, each of whose outputs
     /// is its own data frame.
     ///
@@ -113,10 +121,11 @@ pub trait Format: Send + Sync + 'static {
     /// failure in this protocol's framing.
     fn response_encoder(
         &self,
-        response: &mut http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: Option<&Self::Answer>,
+        ask: &Self::Ask,
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Self::Output>>;
+    ) -> Box<dyn Encoder<Self::Output, Self::Answer>>;
 
     /// Whether `output` is content: what
     /// [`Response::until_content`](crate::Response::until_content) commits on. A keep-alive,
@@ -128,7 +137,7 @@ pub trait Format: Send + Sync + 'static {
 }
 
 /// Bytes to values of `T` for one body, either way: the state of one
-/// stream, such as an SSE buffer. Trailers are not decoded.
+/// stream, such as an SSE buffer.
 pub trait Decoder<T>: Send + 'static {
     /// Decode what is complete into `out`, one value per message, and keep
     /// the rest. `Err` ends the body after what `out` got.
@@ -139,8 +148,16 @@ pub trait Decoder<T>: Send + 'static {
     fn end(&mut self, out: &mut Vec<T>) -> Result<(), Fault>;
 }
 
-/// Values of `T` to bytes for one body, either way.
-pub trait Encoder<T>: Send + 'static {
+/// Values of `T` to a head of type `H` and bytes, for one body, either way.
+pub trait Encoder<T, H>: Send + 'static {
+    /// The head, asked once, before any bytes. `first` is a call's first
+    /// input when it is written from its value; none for a call relaying
+    /// the client's bytes unread, and for a response, whose head is written
+    /// before its outputs are known. A response's head goes out with its
+    /// first bytes, or at once for a streaming request; until then a
+    /// refusal replaces it.
+    fn head(&mut self, first: Option<&T>) -> H;
+
     /// Write the body's opening bytes, such as an SSE comment for a stream
     /// that may be quiet; a response's head goes out with them. Not called
     /// for a refusal. `Err` if this body cannot be written at all: a call
@@ -161,18 +178,17 @@ pub trait Encoder<T>: Send + 'static {
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault>;
 
     /// Whether a response's body is done before it began: it has no bytes,
-    /// as the protocol gives a response none. Its head then goes at once
-    /// and nothing more is read: the response ends `Ok`; its call, its
-    /// decoder told the body ended, `Ok` if that decoder says it is
-    /// complete, else abandoned. Asked once, after [`Encoder::open`]. By
-    /// default, false.
+    /// as its head says. Its head then goes at once and nothing more is
+    /// read: the response ends `Ok`; its call, its decoder told the body
+    /// ended, `Ok` if that decoder says it is complete, else abandoned.
+    /// Asked once, after [`Encoder::open`]. By default, false.
     fn done(&self) -> bool {
         false
     }
 }
 
-/// A request as the codecs see it.
-pub(crate) type Request = http::Request<Bytes>;
+/// A head shared, such as the client's.
+pub(crate) type SharedHead = Arc<dyn Any + Send + Sync>;
 
 /// An input, erased and shared: copied when changed while shared.
 pub(crate) type AnyInput = Arc<dyn Any + Send + Sync>;
@@ -187,8 +203,10 @@ pub(crate) trait AnyDecoder: Send {
     fn decode(&mut self, bytes: Option<Bytes>) -> (Option<Values>, Option<Result<(), Fault>>);
 }
 
-/// An [`Encoder`] with its values erased.
+/// An [`Encoder`] with its values and head erased.
 pub(crate) trait AnyEncoder: Send {
+    /// The head, with the first input if it is written from its value.
+    fn head(&mut self, first: Option<&AnyInput>) -> Head;
     fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault>;
     /// Write each of `values` apart, handing each one's bytes to `each`,
     /// until the first failure.
@@ -212,7 +230,12 @@ impl<T: Send + 'static> AnyDecoder for Erased<Box<dyn Decoder<T>>, T> {
     }
 }
 
-impl<T: Send + 'static> AnyEncoder for Erased<Box<dyn Encoder<T>>, T> {
+impl<T: Send + 'static, H: Send + Sync + 'static> AnyEncoder for Erased<Box<dyn Encoder<T, H>>, T> {
+    fn head(&mut self, first: Option<&AnyInput>) -> Head {
+        let first = first.and_then(|i| i.downcast_ref::<T>());
+        Box::new(self.0.head(first))
+    }
+
     fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
         self.0.open(out)
     }
@@ -245,26 +268,49 @@ impl<T: Send + 'static> AnyEncoder for Erased<Box<dyn Encoder<T>>, T> {
     }
 }
 
+/// A codec for a head of another wire than its format's: it fails.
+struct OtherWire;
+
+fn other_wire() -> Fault {
+    Fault::internal("a head of another wire than its format's")
+}
+
+impl AnyDecoder for OtherWire {
+    fn decode(&mut self, _: Option<Bytes>) -> (Option<Values>, Option<Result<(), Fault>>) {
+        (None, Some(Err(other_wire())))
+    }
+}
+
 /// A [`Format`] with its types erased, as the gateway keeps it.
 pub(crate) trait AnyFormat: Send + Sync + 'static {
     fn name(&self) -> &str;
-    fn accepts(&self, head: &http::request::Parts) -> bool;
-    fn request_decoder(&self, request: &Request) -> Box<dyn AnyDecoder>;
+    fn accepts(&self, head: &(dyn Any + Send + Sync)) -> bool;
+    fn request_decoder(&self, head: &(dyn Any + Send + Sync)) -> Box<dyn AnyDecoder>;
     fn request_encoder(
         &self,
-        request: &mut Request,
-        first: Option<&AnyInput>,
+        client: Option<&(dyn Any + Send + Sync)>,
+        body: &mut Bytes,
         streams: bool,
     ) -> Box<dyn AnyEncoder>;
-    fn response_decoder(&self, head: &http::response::Parts, to: &Request) -> Box<dyn AnyDecoder>;
+    fn response_decoder(
+        &self,
+        answer: &(dyn Any + Send + Sync),
+        call: &(dyn Any + Send + Sync),
+        sent: &Bytes,
+    ) -> Box<dyn AnyDecoder>;
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        to: &Request,
+        answer: Option<&(dyn Any + Send + Sync)>,
+        ask: &(dyn Any + Send + Sync),
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn AnyEncoder>;
+    ) -> Option<Box<dyn AnyEncoder>>;
+    /// A copy of `head`, one of its asks.
+    fn copy_ask(&self, head: &(dyn Any + Send + Sync)) -> Option<Head>;
     /// Its input and output types.
     fn kind(&self) -> (TypeId, TypeId);
+    /// Its ask and answer types.
+    fn wire(&self) -> (TypeId, TypeId);
     /// Whether any of `outputs` is content.
     fn any_content(&self, outputs: &Values) -> bool;
     /// Whether two inputs are equal.
@@ -280,48 +326,69 @@ impl<F: Format> AnyFormat for F {
         Format::name(self)
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
-        Format::accepts(self, head)
+    fn accepts(&self, head: &(dyn Any + Send + Sync)) -> bool {
+        head.downcast_ref()
+            .is_some_and(|head| Format::accepts(self, head))
     }
 
-    fn request_decoder(&self, request: &Request) -> Box<dyn AnyDecoder> {
-        Box::new(Erased(Format::request_decoder(self, request), PhantomData))
+    fn request_decoder(&self, head: &(dyn Any + Send + Sync)) -> Box<dyn AnyDecoder> {
+        match head.downcast_ref() {
+            Some(head) => Box::new(Erased(Format::request_decoder(self, head), PhantomData)),
+            None => Box::new(OtherWire),
+        }
     }
 
     fn request_encoder(
         &self,
-        request: &mut Request,
-        first: Option<&AnyInput>,
+        client: Option<&(dyn Any + Send + Sync)>,
+        body: &mut Bytes,
         streams: bool,
     ) -> Box<dyn AnyEncoder> {
-        let first = first.and_then(|i| i.downcast_ref::<F::Input>());
+        let client = client.and_then(|c| c.downcast_ref::<F::Ask>());
         Box::new(Erased(
-            Format::request_encoder(self, request, first, streams),
+            Format::request_encoder(self, client, body, streams),
             PhantomData,
         ))
     }
 
-    fn response_decoder(&self, head: &http::response::Parts, to: &Request) -> Box<dyn AnyDecoder> {
-        Box::new(Erased(
-            Format::response_decoder(self, head, to),
-            PhantomData,
-        ))
+    fn response_decoder(
+        &self,
+        answer: &(dyn Any + Send + Sync),
+        call: &(dyn Any + Send + Sync),
+        sent: &Bytes,
+    ) -> Box<dyn AnyDecoder> {
+        match (answer.downcast_ref(), call.downcast_ref()) {
+            (Some(answer), Some(call)) => Box::new(Erased(
+                Format::response_decoder(self, answer, call, sent),
+                PhantomData,
+            )),
+            _ => Box::new(OtherWire),
+        }
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        to: &Request,
+        answer: Option<&(dyn Any + Send + Sync)>,
+        ask: &(dyn Any + Send + Sync),
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn AnyEncoder> {
-        Box::new(Erased(
-            Format::response_encoder(self, head, to, refusal),
-            PhantomData,
-        ))
+    ) -> Option<Box<dyn AnyEncoder>> {
+        let answer = answer.and_then(|a| a.downcast_ref::<F::Answer>());
+        let encoder = Format::response_encoder(self, answer, ask.downcast_ref()?, body, refusal);
+        Some(Box::new(Erased(encoder, PhantomData)))
+    }
+
+    fn copy_ask(&self, head: &(dyn Any + Send + Sync)) -> Option<Head> {
+        let head = head.downcast_ref::<F::Ask>()?;
+        Some(Box::new(head.clone()))
     }
 
     fn kind(&self) -> (TypeId, TypeId) {
         (TypeId::of::<F::Input>(), TypeId::of::<F::Output>())
+    }
+
+    fn wire(&self) -> (TypeId, TypeId) {
+        (TypeId::of::<F::Ask>(), TypeId::of::<F::Answer>())
     }
 
     fn any_content(&self, outputs: &Values) -> bool {

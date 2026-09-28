@@ -2,9 +2,11 @@
 //! conversation kind.
 
 use bytes::{Bytes, BytesMut};
-use http::{HeaderValue, Request, StatusCode};
+use http::{HeaderValue, StatusCode};
 use respan_gateway_core::{Decoder, Encoder, Fault, Format};
-use respan_gateway_core::{bytes, http, serde_json};
+use respan_gateway_core::{bytes, serde_json};
+use respan_gateway_http::http;
+use respan_gateway_http::{Answer, Ask};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
@@ -45,6 +47,8 @@ const ANTHROPIC: &str = "anthropic-messages";
 pub struct AnthropicMessages;
 
 impl Format for AnthropicMessages {
+    type Ask = Ask;
+    type Answer = Answer;
     type Input = Conversation;
     type Output = Reply;
 
@@ -52,48 +56,49 @@ impl Format for AnthropicMessages {
         ANTHROPIC
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &Ask) -> bool {
         crate::posts_to(head, "/v1/messages")
     }
 
-    fn request_decoder(&self, _request: &Request<Bytes>) -> Box<dyn Decoder<Conversation>> {
+    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<Conversation>> {
         request_decoder::<Self>()
     }
 
     /// The `anthropic-version` a relay passed, or the default.
     fn request_encoder(
         &self,
-        request: &mut Request<Bytes>,
-        first: Option<&Conversation>,
+        client: Option<&Ask>,
+        body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation>> {
-        let encoder = post_json::<Self>(request, "/v1/messages", first, streams);
-        let version = request.headers_mut().entry(VERSION_HEADER);
+    ) -> Box<dyn Encoder<Conversation, Ask>> {
+        let mut head = crate::call_head(client);
+        let version = head.headers.entry(VERSION_HEADER);
         version.or_insert(HeaderValue::from_static(VERSION));
-        encoder
+        post_json::<Self>(head, body, "/v1/messages", streams)
     }
 
-    fn response_decoder(
-        &self,
-        head: &http::response::Parts,
-        request: &Request<Bytes>,
-    ) -> Box<dyn Decoder<Reply>> {
+    fn response_decoder(&self, head: &Answer, call: &Ask, _: &Bytes) -> Box<dyn Decoder<Reply>> {
         let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
-        response_decoder::<Self>(head, request, stream)
+        response_decoder::<Self>(head, call, stream)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &Request<Bytes>,
+        answer: Option<&Answer>,
+        ask: &Ask,
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply>> {
-        response_encoder::<Self>(head, request, refusal, |head, relayed, _| {
-            match is_stream(head) {
+    ) -> Box<dyn Encoder<Reply, Answer>> {
+        response_encoder::<Self>(
+            answer,
+            ask,
+            body,
+            refusal,
+            |head, relayed, _| match is_stream(head) {
                 true => Box::new(EventStream::new(relayed)),
                 false => Box::new(UnaryEncoder::<Self>::new(relayed)),
-            }
-        })
+            },
+        )
     }
 
     fn is_content(&self, reply: &Reply) -> bool {
@@ -746,7 +751,9 @@ fn rebuild(raw: &Bytes, said: &Reply, reply: &Reply) -> Result<Option<Bytes>, Fa
     Ok(Some(event(Some(&name), &v).into()))
 }
 
-impl Encoder<Reply> for EventStream {
+impl Encoder<Reply, ()> for EventStream {
+    fn head(&mut self, _first: Option<&Reply>) {}
+
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
         self.so_far.note(reply);
         let own = reply.origin(ANTHROPIC).filter(|_| self.so_far.relayed);

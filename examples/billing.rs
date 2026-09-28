@@ -18,13 +18,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::http::{HeaderValue, StatusCode};
 use respan_gateway_core::{Fault, Gateway, Outcome, Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::Asked;
+use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// One billed call.

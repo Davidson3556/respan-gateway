@@ -21,13 +21,14 @@
 //!
 //! `cargo run -p respan-gateway-examples --example pii`
 
-use respan_gateway_core::http::{self, StatusCode};
 use respan_gateway_core::serde_json::{self, json};
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_http::Body;
+use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable};
 

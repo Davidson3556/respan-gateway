@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::futures::future::join_all;
-use respan_gateway_core::http::StatusCode;
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, Transport, async_trait,
-    bytes::Bytes, http,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, Transport, async_trait,
+    bytes::Bytes,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
+use respan_gateway_http::http::StatusCode;
 use respan_gateway_ledger::{Accounting, Amount, HoldId, Ledger, MemoryLedger, Quote, Tally};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -295,7 +295,13 @@ struct NoHead;
 
 #[async_trait]
 impl Transport for NoHead {
-    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
+
+    async fn send(
+        &self,
+        _call: respan_gateway_core::Exchange<Self::Ask>,
+    ) -> Result<respan_gateway_core::Exchange<Self::Answer>, Fault> {
         tokio::time::sleep(Duration::from_secs(1)).await;
         Err(Fault::upstream("no head within 1s"))
     }

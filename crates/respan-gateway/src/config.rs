@@ -3,11 +3,15 @@
 
 use std::collections::BTreeMap;
 
-use respan_gateway_core::http::HeaderMap;
-use respan_gateway_core::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
+use respan_gateway_http::http::HeaderMap;
+use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use std::sync::Arc;
 
 use respan_gateway_core::{Fault, Format, Gateway, Transport};
+use respan_gateway_http::{Answer, Ask};
+
+/// A transport of HTTP calls, as every provider the binary knows speaks.
+pub type HttpWire = dyn Transport<Ask = Ask, Answer = Answer>;
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_plugins::ModelRouter;
 use serde::Deserialize;
@@ -67,13 +71,12 @@ pub struct ModelRoute {
 /// provider that speaks it or serve its clients.
 pub struct KnownFormat {
     pub name: String,
-    pub provider:
-        fn(Gateway, name: String, transport: Arc<dyn Transport>) -> Result<Gateway, Fault>,
+    pub provider: fn(Gateway, name: String, transport: Arc<HttpWire>) -> Result<Gateway, Fault>,
     pub serve: fn(Gateway) -> Result<Gateway, Fault>,
 }
 
 impl KnownFormat {
-    pub fn of<F: Format + Default>() -> Self {
+    pub fn of<F: Format<Ask = Ask, Answer = Answer> + Default>() -> Self {
         Self {
             name: F::default().name().to_owned(),
             provider: |gateway, name, transport| gateway.provider(name, F::default(), transport),
@@ -89,7 +92,7 @@ impl Config {
 
     /// Builds the gateway: each provider's transport comes from `transport`,
     /// given its base URL and auth headers; formats are found in `formats`.
-    pub fn build<T: Transport>(
+    pub fn build<T: Transport<Ask = Ask, Answer = Answer>>(
         &self,
         transport: impl Fn(&str, HeaderMap) -> Result<T, Fault>,
         formats: &[KnownFormat],
@@ -178,7 +181,7 @@ fn auth_headers(provider: &str, auth: Option<&Auth>) -> Result<HeaderMap, Fault>
 
 #[cfg(test)]
 mod tests {
-    use respan_gateway_core::http::StatusCode;
+    use respan_gateway_http::http::StatusCode;
     use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
     use super::*;

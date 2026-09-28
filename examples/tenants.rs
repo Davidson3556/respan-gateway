@@ -15,12 +15,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use respan_gateway_core::http::header::AUTHORIZATION;
-use respan_gateway_core::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::http::header::AUTHORIZATION;
+use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -100,7 +100,8 @@ fn gateway(mock: &MockTransport, tenants: Tenants) -> Result<Gateway, Fault> {
 }
 
 fn bearer(key: &str) -> Result<HeaderValue, Fault> {
-    Ok(HeaderValue::from_str(&format!("Bearer {key}")).map_err(http::Error::from)?)
+    HeaderValue::from_str(&format!("Bearer {key}"))
+        .map_err(|e| respan_gateway_http::built_wrong(e.into()))
 }
 
 fn tenant(version: u64, target: &str, key: &str) -> Result<Tenant, Fault> {

@@ -6,10 +6,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use respan_gateway_core::bytes::{BufMut, Bytes, BytesMut};
-use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_core::serde_json::{self, Map, Value, json};
 use respan_gateway_core::{Decoder, Encoder, Fault};
-use respan_gateway_http::bodiless;
+use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
+use respan_gateway_http::{Answer, Ask, bodiless};
 
 use crate::Usage;
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
@@ -76,22 +76,21 @@ fn not_an_object() -> Fault {
     Fault::bad_request("request body is not a JSON object")
 }
 
-/// Make `request` a JSON `POST` to `path`, adding to a relayed body what
+/// Make `head` a JSON `POST` to `path`, adding to a relayed `body` what
 /// the format needs ([`Wire::finish`]). Its `Content-Encoding` goes unless
 /// it carries the client's bytes unread; a call whose inputs stream cannot
 /// be one.
 pub(crate) fn post_json<W: Wire>(
-    request: &mut http::Request<Bytes>,
+    mut head: Ask,
+    body: &mut Bytes,
     path: &str,
-    first: Option<&Conversation>,
     streams: bool,
-) -> Box<dyn Encoder<Conversation>> {
-    *request.method_mut() = http::Method::POST;
-    crate::set_path(request, path);
+) -> Box<dyn Encoder<Conversation, Ask>> {
+    head.method = http::Method::POST;
+    crate::set_path(&mut head, path);
     let json = HeaderValue::from_static("application/json");
-    request.headers_mut().insert(CONTENT_TYPE, json);
-    let body = request.body_mut();
-    let mut changed = first.is_some() || streams;
+    head.headers.insert(CONTENT_TYPE, json);
+    let mut changed = streams;
     if W::unfinished(body)
         && let Ok(mut v) = object(body)
     {
@@ -99,20 +98,26 @@ pub(crate) fn post_json<W: Wire>(
         *body = to_bytes(&v).unwrap_or_else(|_| body.clone());
         changed = true;
     }
-    if changed {
-        crate::body_changed(request);
-    }
-    match streams {
+    let head = move |first: Option<&Conversation>| {
+        if changed || first.is_some() {
+            crate::body_changed(&mut head);
+        }
+        head
+    };
+    let encoder = match streams {
         true => crate::whole::unstreamable(W::NAME),
         false => Box::new(RequestEncoder::<W>(PhantomData)),
-    }
+    };
+    crate::headed(head, encoder)
 }
 
 /// Writes a conversation as the client's bytes, with changes written in, or
 /// anew; then what the format adds ([`Wire::finish`]).
 struct RequestEncoder<W>(PhantomData<W>);
 
-impl<W: Wire> Encoder<Conversation> for RequestEncoder<W> {
+impl<W: Wire> Encoder<Conversation, ()> for RequestEncoder<W> {
+    fn head(&mut self, _first: Option<&Conversation>) {}
+
     fn encode(&mut self, chat: &Conversation, out: &mut BytesMut) -> Result<(), Fault> {
         let mut v = match chat.origin(W::NAME) {
             Some(o) if o.said == *chat && !W::unfinished(&o.bytes) => {
@@ -218,7 +223,7 @@ pub(crate) fn probe(raw: &[u8]) -> Asked {
 /// Finish a success's head and return whether its replies are relayed as
 /// their bytes. One framed otherwise than the client asked is reframed; a
 /// head without a content type gets the client's framing.
-fn made_head(head: &mut http::response::Parts, asks_stream: bool) -> bool {
+fn made_head(head: &mut Answer, asks_stream: bool) -> bool {
     let reframe = crate::sse::is_stream(head) != asks_stream;
     if reframe {
         head.headers.remove(CONTENT_TYPE);
@@ -234,14 +239,14 @@ fn made_head(head: &mut http::response::Parts, asks_stream: bool) -> bool {
     !reframe
 }
 
-/// A response of format `W` to `request`: nothing if it has no body, else
-/// SSE events decoded by `stream` for a stream, else one JSON message.
+/// A response of format `W` to the call `call`: nothing if it has no body,
+/// else SSE events decoded by `stream` for a stream, else one JSON message.
 pub(crate) fn response_decoder<W: Wire>(
-    head: &http::response::Parts,
-    request: &http::Request<Bytes>,
+    head: &Answer,
+    call: &Ask,
     stream: impl FnOnce() -> Box<dyn Decoder<Reply>>,
 ) -> Box<dyn Decoder<Reply>> {
-    if head.status.is_success() && bodiless(request.method(), head.status) {
+    if head.status.is_success() && bodiless(&call.method, head.status) {
         return crate::whole::nothing();
     }
     match crate::sse::is_stream(head) {
@@ -250,25 +255,29 @@ pub(crate) fn response_decoder<W: Wire>(
     }
 }
 
-/// A response of format `W` to the client's `request`, with `head`: a
-/// refusal ([`refused`]), nothing for a bodiless one, else `encoder` of
-/// the head, whether it relays the provider's replies as their bytes, and
-/// the client's request's [`Asked`].
+/// A response of format `W` to the client's request `ask` with `body`,
+/// from the provider's head `answer` if relayed: a refusal ([`refused`]),
+/// nothing for a bodiless one, else `encoder` of the head, whether it
+/// relays the provider's replies as their bytes, and the client's
+/// request's [`Asked`].
 pub(crate) fn response_encoder<W: Wire>(
-    head: &mut http::response::Parts,
-    request: &http::Request<Bytes>,
+    answer: Option<&Answer>,
+    ask: &Ask,
+    body: &Bytes,
     refusal: Option<&Fault>,
-    encoder: impl FnOnce(&http::response::Parts, bool, Asked) -> Box<dyn Encoder<Reply>>,
-) -> Box<dyn Encoder<Reply>> {
-    if let Some(fault) = refusal {
-        return refused::<W>(head, request, fault);
-    }
-    if bodiless(request.method(), head.status) {
-        return crate::whole::no_body();
-    }
-    let asked = probe(request.body());
-    let relayed = made_head(head, asked.stream);
-    encoder(head, relayed, asked)
+    encoder: impl FnOnce(&Answer, bool, Asked) -> Box<dyn Encoder<Reply, ()>>,
+) -> Box<dyn Encoder<Reply, Answer>> {
+    let mut head = crate::answer_head(answer);
+    let body = match refusal {
+        Some(fault) => refused::<W>(&mut head, ask, fault),
+        None if bodiless(&ask.method, head.status) => crate::whole::no_body(),
+        None => {
+            let asked = probe(body);
+            let relayed = made_head(&mut head, asked.stream);
+            encoder(&head, relayed, asked)
+        }
+    };
+    crate::with_head(head, body)
 }
 
 /// A refusal in format `W`: the provider's answer as it came, else its
@@ -277,10 +286,10 @@ pub(crate) fn response_encoder<W: Wire>(
 /// where HTTP has none. A fault whose status is no error's cannot be
 /// written.
 pub(crate) fn refused<W: Wire>(
-    head: &mut http::response::Parts,
-    request: &http::Request<Bytes>,
+    head: &mut Answer,
+    ask: &Ask,
     fault: &Fault,
-) -> Box<dyn Encoder<Reply>> {
+) -> Box<dyn Encoder<Reply, ()>> {
     let json = HeaderValue::from_static("application/json");
     let body = match respan_gateway_http::answered(W::NAME, fault, head) {
         Some(body) => {
@@ -296,7 +305,7 @@ pub(crate) fn refused<W: Wire>(
             }
         }
     };
-    match bodiless(request.method(), head.status) {
+    match bodiless(&ask.method, head.status) {
         true => crate::whole::written(Bytes::new()),
         false => crate::whole::written(body),
     }
@@ -304,7 +313,7 @@ pub(crate) fn refused<W: Wire>(
 
 /// One JSON message, decoded whole: one reply on success, else the
 /// provider's error.
-pub(crate) fn unary_decoder<W: Wire>(head: &http::response::Parts) -> Box<dyn Decoder<Reply>> {
+pub(crate) fn unary_decoder<W: Wire>(head: &Answer) -> Box<dyn Decoder<Reply>> {
     let (name, status): (Arc<str>, _) = (Arc::from(W::NAME), head.status);
     crate::whole::decoder(W::NAME, head, move |raw, out| {
         let v = serde_json::from_slice::<Value>(&raw).ok();
@@ -342,7 +351,9 @@ impl<W: Wire> UnaryEncoder<W> {
     }
 }
 
-impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
+impl<W: Wire> Encoder<Reply, ()> for UnaryEncoder<W> {
+    fn head(&mut self, _first: Option<&Reply>) {}
+
     fn encode(&mut self, reply: &Reply, _out: &mut BytesMut) -> Result<(), Fault> {
         self.replies.push(reply.clone());
         Ok(())

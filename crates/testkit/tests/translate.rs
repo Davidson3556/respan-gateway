@@ -1,12 +1,13 @@
 //! A client in one format reaching a provider in another.
 
-use respan_gateway_core::{bytes, futures, http, serde_json};
+use respan_gateway_core::{bytes, futures, serde_json};
+use respan_gateway_http::http;
 use std::sync::{Arc, Mutex};
 
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Plugin, ProviderContext, Relayed, Response, Transport, codes,
+    ClientContext, Exchange, Fault, Plugin, ProviderContext, Relayed, Response, Transport, codes,
 };
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply, units};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
@@ -193,8 +194,11 @@ struct Marks<T>(T, Arc<Mutex<Vec<bool>>>);
 
 #[async_trait]
 impl<T: Transport> Transport for Marks<T> {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let relayed = call.extensions().get::<Relayed>().is_some();
+    type Ask = T::Ask;
+    type Answer = T::Answer;
+
+    async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
+        let relayed = call.extensions.get::<Relayed>().is_some();
         self.1
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2017,7 +2021,7 @@ async fn a_translated_failure_labelled_as_a_stream_is_still_a_failure() {
     let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["type"], "error", "{body}");
     let end = h.log.only().end.map_err(|f| f.status());
-    assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(end, Err(503));
 }
 
 #[tokio::test]

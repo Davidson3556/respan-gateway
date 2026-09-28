@@ -93,7 +93,9 @@ async fn a_zero_retention_pdf_is_converted_but_never_remembered() -> Result<(), 
         let mut req = post("/v1/chat/completions", REQUEST.to_owned());
         req.headers_mut()
             .insert("x-tenant", HeaderValue::from_static("acme"));
-        req.extensions_mut().insert(NoContent);
+        let mut values = respan_gateway_core::Extensions::new();
+        values.insert(NoContent);
+        req.extensions_mut().insert(values);
         assert_eq!(read_whole(serve(&gw, req).await.0).await.0, StatusCode::OK);
     }
     assert_eq!(

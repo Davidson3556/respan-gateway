@@ -24,11 +24,11 @@ pub use gateway::Gateway;
 pub use plugin::{Filter, Outcome, Plugin};
 pub use provider::ProviderContext;
 pub use response::Response;
-pub use transport::{Body, Transport};
+pub use transport::{Body, Exchange, Extensions, Transport};
 
 /// The crates whose types the kernel's contracts use, so a format or plugin
 /// builds against the same versions.
-pub use {async_trait::async_trait, bytes, futures, http, http_body, http_body_util, serde_json};
+pub use {async_trait::async_trait, bytes, futures, serde_json};
 
 /// Calling and reading inputs take `&mut ClientContext`, which `on_client`
 /// alone gets: end hooks and a call's hooks see the request by `&`.

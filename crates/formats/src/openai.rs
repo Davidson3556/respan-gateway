@@ -2,9 +2,11 @@
 //! conversation kind.
 
 use bytes::{Bytes, BytesMut};
-use http::{Request, StatusCode};
+use http::StatusCode;
 use respan_gateway_core::{Decoder, Encoder, Fault, Format};
-use respan_gateway_core::{bytes, http, serde_json};
+use respan_gateway_core::{bytes, serde_json};
+use respan_gateway_http::http;
+use respan_gateway_http::{Answer, Ask};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
@@ -34,6 +36,8 @@ const FINISH: Names<Finish> = Names(&[
 ]);
 
 impl Format for OpenAiChat {
+    type Ask = Ask;
+    type Answer = Answer;
     type Input = Conversation;
     type Output = Reply;
 
@@ -41,41 +45,39 @@ impl Format for OpenAiChat {
         OPENAI
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &Ask) -> bool {
         crate::posts_to(head, "/chat/completions")
     }
 
-    fn request_decoder(&self, _request: &Request<Bytes>) -> Box<dyn Decoder<Conversation>> {
+    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<Conversation>> {
         request_decoder::<Self>()
     }
 
     fn request_encoder(
         &self,
-        request: &mut Request<Bytes>,
-        first: Option<&Conversation>,
+        client: Option<&Ask>,
+        body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation>> {
-        post_json::<Self>(request, "/chat/completions", first, streams)
+    ) -> Box<dyn Encoder<Conversation, Ask>> {
+        post_json::<Self>(crate::call_head(client), body, "/chat/completions", streams)
     }
 
-    fn response_decoder(
-        &self,
-        head: &http::response::Parts,
-        request: &Request<Bytes>,
-    ) -> Box<dyn Decoder<Reply>> {
+    fn response_decoder(&self, head: &Answer, call: &Ask, _: &Bytes) -> Box<dyn Decoder<Reply>> {
         let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
-        response_decoder::<Self>(head, request, stream)
+        response_decoder::<Self>(head, call, stream)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &Request<Bytes>,
+        answer: Option<&Answer>,
+        ask: &Ask,
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply>> {
+    ) -> Box<dyn Encoder<Reply, Answer>> {
         response_encoder::<Self>(
-            head,
-            request,
+            answer,
+            ask,
+            body,
             refusal,
             |head, relayed, asked| match is_stream(head) {
                 false => Box::new(UnaryEncoder::<Self>::new(relayed)),
@@ -674,7 +676,9 @@ impl Chunks {
     }
 }
 
-impl Encoder<Reply> for Chunks {
+impl Encoder<Reply, ()> for Chunks {
+    fn head(&mut self, _first: Option<&Reply>) {}
+
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
         self.so_far.note(reply);
         let own = reply.origin(OPENAI).filter(|_| self.so_far.relayed);
@@ -767,13 +771,14 @@ mod tests {
 
     #[test]
     fn a_start_is_pushed_only_with_the_first_content_and_dropped_at_a_failure() {
-        let call = http::Request::new(Bytes::new());
+        let call = respan_gateway_http::fresh_ask();
         let role = "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":2}}\n\n";
         let text =
             "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";
         let error = "data: {\"error\":{\"message\":\"Overloaded\"}}\n\n";
         let batches = |events: &[&str]| {
-            let mut d = OpenAiChat.response_decoder(&head("text/event-stream"), &call);
+            let mut d =
+                OpenAiChat.response_decoder(&head("text/event-stream"), &call, &Bytes::new());
             let batches: Vec<(Vec<Reply>, bool)> = events
                 .iter()
                 .map(|e| {
@@ -1112,9 +1117,9 @@ mod tests {
 
     /// `body`, relayed unread, as it goes to a provider.
     fn with_usage(body: &'static str) -> Bytes {
-        let mut request = http::Request::new(Bytes::from_static(body.as_bytes()));
-        let _ = OpenAiChat.request_encoder(&mut request, None, false);
-        request.into_body()
+        let mut body = Bytes::from_static(body.as_bytes());
+        let _ = OpenAiChat.request_encoder(None, &mut body, false);
+        body
     }
 
     #[test]
@@ -1206,7 +1211,7 @@ mod tests {
         );
         // To another format it is refused; to OpenAI it is kept.
         let err = write_request::<OpenAiChat>(&chat).err();
-        assert_eq!(err.map(|e| e.status()), Some(http::StatusCode::BAD_REQUEST));
+        assert_eq!(err.map(|e| e.status()), Some(400));
         assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body));
         // With the unsupported cleared and only plain messages, it is
         // sent.

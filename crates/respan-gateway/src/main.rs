@@ -3,8 +3,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use respan_gateway_core::Fault;
-use respan_gateway_core::http::HeaderMap;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_http::http::HeaderMap;
 use respan_gateway_server::{HttpTransport, router};
 
 mod config;

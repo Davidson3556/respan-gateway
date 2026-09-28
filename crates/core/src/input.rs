@@ -5,11 +5,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
-use http::StatusCode;
-use http_body_util::BodyExt;
 
 use crate::fault::guarded;
-use crate::format::{AnyDecoder, AnyFormat, AnyInput, Request, Values};
+use crate::format::{AnyDecoder, AnyFormat, AnyInput, SharedHead, Values};
 use crate::lifecycle::InFlight;
 use crate::plugin::Filters;
 use crate::{Body, Fault, codes};
@@ -18,7 +16,7 @@ use crate::{Body, Fault, codes};
 struct Base {
     format: Arc<dyn AnyFormat>,
     /// The client's head as it arrived, which decoding reads.
-    head: Arc<http::request::Parts>,
+    head: SharedHead,
     raw: Bytes,
     /// Whether `raw` is a message, as a streaming request's head is not.
     message: bool,
@@ -54,10 +52,8 @@ impl Whose {
     /// `fault`, of content that cannot be written, as whose it is.
     pub(crate) fn fault(self, fault: Fault) -> Fault {
         match self {
-            Whose::Client => fault.recoded(StatusCode::BAD_REQUEST, codes::BAD_REQUEST),
-            Whose::Edited | Whose::Plugin => {
-                fault.recoded(StatusCode::INTERNAL_SERVER_ERROR, codes::CONFIG)
-            }
+            Whose::Client => fault.recoded(400, codes::BAD_REQUEST),
+            Whose::Edited | Whose::Plugin => fault.recoded(500, codes::CONFIG),
             Whose::Format => fault,
         }
     }
@@ -69,11 +65,7 @@ pub(crate) type Sent = (Bytes, Option<AnyInput>);
 
 impl Input {
     /// The input in `raw`; `None` for a streaming request's head.
-    pub(crate) fn new(
-        format: Arc<dyn AnyFormat>,
-        head: Arc<http::request::Parts>,
-        raw: Option<Bytes>,
-    ) -> Self {
+    pub(crate) fn new(format: Arc<dyn AnyFormat>, head: SharedHead, raw: Option<Bytes>) -> Self {
         let input = OnceLock::new();
         if raw.is_none() {
             let later =
@@ -186,15 +178,10 @@ impl Input {
         })
     }
 
-    /// The client's request as it arrived, with `body`.
-    fn request(&self, body: Bytes) -> Request {
-        http::Request::from_parts((*self.base.head).clone(), body)
-    }
-
     /// The one input of a whole request's body.
     fn decode(&self) -> Result<AnyInput, Fault> {
         let base = &self.base;
-        let mut decoder = base.format.request_decoder(&self.request(base.raw.clone()));
+        let mut decoder = base.format.request_decoder(&*base.head);
         let mut inputs = Vec::new();
         for bytes in [Some(base.raw.clone()), None] {
             let (values, end) = decoder.decode(bytes);
@@ -315,16 +302,8 @@ impl Reading {
                     }
                 },
             };
-            let bytes = match body.frame().await {
-                Some(Ok(frame)) => match frame.into_data() {
-                    // Every data frame is a message, even an empty one.
-                    Ok(bytes) => Ok(Some(bytes)),
-                    // Trailers carry no input.
-                    Err(_) => continue,
-                },
-                Some(Err(fault)) => Err(fault),
-                None => Ok(None),
-            };
+            // Every data frame is a message, even an empty one.
+            let bytes = body.next().await.transpose();
             self.read |= matches!(bytes, Ok(Some(_)));
             // A failure ends the inputs, and every filter with it.
             let read = guarded(|| self.frames(bytes?)).or_else(|f| guarded(|| self.end(Err(f))));
@@ -342,8 +321,8 @@ impl Reading {
     /// filters, then at the end what they kept back.
     fn frames(&mut self, bytes: Option<Bytes>) -> Result<Vec<Frame>, Fault> {
         let (format, like) = (&self.format, &self.like);
-        let decoder = (self.decoder)
-            .get_or_insert_with(|| format.request_decoder(&like.request(Bytes::new())));
+        let decoder =
+            (self.decoder).get_or_insert_with(|| format.request_decoder(&*like.base.head));
         let (values, end) = decoder.decode(bytes);
         let mut frames = match values {
             Some(values) => self.filter(values)?,

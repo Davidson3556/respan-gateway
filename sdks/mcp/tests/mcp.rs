@@ -2,12 +2,13 @@
 
 use std::time::Duration;
 
-use respan_gateway_core::http::{self, HeaderMap, Method, StatusCode};
-use respan_gateway_core::http_body_util::{self, BodyExt, Full};
 use respan_gateway_core::serde_json::{Value, json};
-use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Outcome, Plugin, Response};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response};
 use respan_gateway_core::{Transport, async_trait, codes};
+use respan_gateway_http::Body;
 use respan_gateway_http::Credential;
+use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
+use respan_gateway_http::http_body_util::{self, BodyExt, Full};
 use respan_gateway_mcp::{
     Owner, SESSION, StdioTransport, StreamableHttp, TIMED_OUT, ToClient, ToServer,
 };
@@ -21,7 +22,10 @@ const ECHO: &str = r#"while IFS= read -r line; do
   [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
 done"#;
 
-fn gateway(transport: impl Transport, plugin: Option<Touch>) -> Gateway {
+fn gateway(
+    transport: impl Transport<Ask = respan_gateway_http::Ask, Answer = respan_gateway_http::Answer>,
+    plugin: Option<Touch>,
+) -> Gateway {
     let gw = Gateway::new().provider("mcp", StreamableHttp::default(), transport);
     let gw = gw.and_then(|g| g.serve(StreamableHttp::default()));
     let gw = match plugin {
@@ -268,12 +272,20 @@ struct Quiet;
 
 #[async_trait]
 impl Transport for Quiet {
-    async fn send(&self, _call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
+
+    async fn send(
+        &self,
+        _call: respan_gateway_core::Exchange<Self::Ask>,
+    ) -> Result<respan_gateway_core::Exchange<Self::Answer>, Fault> {
         let never = respan_gateway_core::futures::stream::pending();
         let body = http_body_util::StreamBody::new(never).boxed_unsync();
         let resp = http::Response::builder().header("content-type", "text/event-stream");
-        resp.body(body)
-            .map_err(|e| Fault::internal("a head").with_source(e))
+        let resp = resp
+            .body::<Body>(body)
+            .map_err(respan_gateway_http::built_wrong)?;
+        Ok(respan_gateway_http::answer(resp))
     }
 }
 

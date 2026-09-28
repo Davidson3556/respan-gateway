@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use respan_gateway_core::http::header::AUTHORIZATION;
-use respan_gateway_core::http::{self, HeaderValue, Method, StatusCode};
-use respan_gateway_core::http_body_util::{BodyExt, Full};
-use respan_gateway_core::{Body, Fault, Transport, async_trait};
-use respan_gateway_http::Credential;
+use respan_gateway_core::{Exchange, Extensions, Fault, Transport, async_trait};
+use respan_gateway_http::http::header::AUTHORIZATION;
+use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
+use respan_gateway_http::http_body_util::{BodyExt, Full};
+use respan_gateway_http::{Answer, Ask, Body, Credential};
 use tokio::process::Command;
 
 use crate::session::Session;
@@ -178,12 +178,27 @@ fn no_session() -> Fault {
 
 #[async_trait]
 impl Transport for StdioTransport {
-    async fn send(&self, call: http::Request<Body>) -> Result<Reply, Fault> {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        let (call, extensions) = respan_gateway_http::call(call);
+        let resp = self.send_http(call, &extensions).await?;
+        Ok(respan_gateway_http::answer(resp))
+    }
+}
+
+impl StdioTransport {
+    async fn send_http(
+        &self,
+        call: http::Request<Body>,
+        extensions: &Extensions,
+    ) -> Result<Reply, Fault> {
         let (head, body) = call.into_parts();
-        let owner = match head.extensions.get::<Owner>() {
+        let owner = match extensions.get::<Owner>() {
             Some(Owner(owner)) => self.keys.hash_one((true, Some(owner.as_bytes()))),
             None => {
-                let credential = head.extensions.get::<Credential>();
+                let credential = extensions.get::<Credential>();
                 let authorization = credential.and_then(|c| c.get(AUTHORIZATION.as_str()));
                 self.keys
                     .hash_one((false, authorization.map(HeaderValue::as_bytes)))

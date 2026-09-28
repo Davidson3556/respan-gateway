@@ -12,11 +12,12 @@
 use std::sync::Arc;
 
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::http::{HeaderValue, StatusCode};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, Response, Transport, async_trait,
 };
+use respan_gateway_http::http::{HeaderValue, StatusCode};
+use respan_gateway_http::{Answer, Ask};
 use respan_gateway_mcp::{
     self as mcp, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer,
 };
@@ -64,7 +65,7 @@ impl Plugin for ToolAllowList {
     }
 }
 
-fn gateway(server: impl Transport) -> Result<Gateway, Fault> {
+fn gateway(server: impl Transport<Ask = Ask, Answer = Answer>) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("tools", StreamableHttp::default(), server)?
         .serve(StreamableHttp::default())?

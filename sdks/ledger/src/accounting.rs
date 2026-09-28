@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
-use respan_gateway_core::http::StatusCode;
 use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, async_trait};
+use respan_gateway_http::http::StatusCode;
 
 use crate::{Amount, HoldId, Ledger, NO_ACCOUNT};
 
@@ -154,7 +154,7 @@ impl<L: Ledger> Plugin for Accounting<L> {
         // `on_provider_end` still runs and settles what was held.
         px.extensions_mut().insert(hold.clone());
         let sent = hold.clone();
-        px.edit_call(move |_| {
+        px.edit_call(move |_: &mut respan_gateway_http::Ask, _: &mut _| {
             sent.sent.store(true, Ordering::Relaxed);
             Ok(())
         });

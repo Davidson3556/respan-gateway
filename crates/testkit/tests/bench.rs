@@ -4,10 +4,12 @@
 use std::time::Instant;
 
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::http::{self, StatusCode};
-use respan_gateway_core::http_body_util::{BodyExt, Full};
-use respan_gateway_core::{Body, Fault, Gateway, Transport, async_trait, serde_json};
+use respan_gateway_core::futures::TryStreamExt;
+use respan_gateway_core::{Exchange, Fault, Gateway, Transport, async_trait, serde_json};
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::http::{self, StatusCode};
+use respan_gateway_http::http_body_util::Full;
+use respan_gateway_http::{Answer, Ask};
 use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Reads each call's body and answers with `.0`, as JSON or SSE.
@@ -15,15 +17,15 @@ struct Canned(Bytes, &'static str);
 
 #[async_trait]
 impl Transport for Canned {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let _ = call.into_body().collect().await?;
-        let body = Full::new(self.0.clone())
-            .map_err(Fault::from)
-            .boxed_unsync();
-        let mut resp = http::Response::new(body);
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        let _: Vec<Bytes> = call.body.try_collect().await?;
+        let mut resp = http::Response::new(Full::new(self.0.clone()));
         let value = http::HeaderValue::from_static(self.1);
         resp.headers_mut().insert(http::header::CONTENT_TYPE, value);
-        Ok(resp)
+        Ok(respan_gateway_http::answer(resp))
     }
 }
 

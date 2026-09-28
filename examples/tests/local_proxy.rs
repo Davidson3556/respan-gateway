@@ -35,7 +35,8 @@ async fn a_provider_error_reaches_the_client_as_the_provider_wrote_it() -> Resul
     mock.reply(
         ANTHROPIC,
         mock::json(
-            http::StatusCode::from_u16(529).map_err(http::Error::from)?,
+            http::StatusCode::from_u16(529)
+                .map_err(|e| respan_gateway_http::built_wrong(e.into()))?,
             error,
         ),
     );

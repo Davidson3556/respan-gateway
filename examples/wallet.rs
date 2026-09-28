@@ -8,13 +8,13 @@
 
 use std::collections::HashMap;
 
-use respan_gateway_core::http::{HeaderValue, StatusCode};
-use respan_gateway_core::{Fault, Gateway, ProviderContext, futures, http};
+use respan_gateway_core::{Fault, Gateway, ProviderContext, futures};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
 use respan_gateway_http::Credential;
+use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -96,7 +96,8 @@ fn answer() -> mock::Reply {
 /// `key` sends `body`.
 async fn send(gw: &Gateway, key: &str, body: &'static str) -> Result<StatusCode, Fault> {
     let mut req = post("/v1/chat/completions", body);
-    let auth = HeaderValue::from_str(&format!("Bearer {key}")).map_err(http::Error::from)?;
+    let auth = HeaderValue::from_str(&format!("Bearer {key}"))
+        .map_err(|e| respan_gateway_http::built_wrong(e.into()))?;
     req.headers_mut().insert("authorization", auth);
     let (status, _, _) = read_whole(serve(gw, req).await.0).await;
     gw.idle().await;

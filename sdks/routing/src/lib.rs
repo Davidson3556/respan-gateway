@@ -23,9 +23,7 @@ use std::time::Duration;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::{self, FuturesUnordered};
 use respan_gateway_core::futures::{FutureExt, StreamExt};
-use respan_gateway_core::http::{self, StatusCode};
-use respan_gateway_core::http_body_util::{BodyExt, BodyStream, StreamBody};
-use respan_gateway_core::{Body, Call, Fault, Response, Transport, async_trait, codes};
+use respan_gateway_core::{Call, Exchange, Fault, Response, Transport, async_trait, codes};
 
 /// How often to try one call, and how long to wait between tries.
 #[derive(Debug, Clone, Copy)]
@@ -71,8 +69,8 @@ impl Backoff {
 
 /// Whether another try may be answered otherwise; other client errors would
 /// not. 529, "overloaded" from some providers, is as safe to retry as a 503.
-fn retryable(status: StatusCode) -> bool {
-    [408, 425, 429, 500, 502, 503, 504, 529].contains(&status.as_u16())
+fn retryable(status: u16) -> bool {
+    [408, 425, 429, 500, 502, 503, 504, 529].contains(&status)
 }
 
 /// Put on every call [`first_success`] and [`race`] send
@@ -281,11 +279,14 @@ impl<T: Transport> Watchdog<T> {
 
 #[async_trait]
 impl<T: Transport> Transport for Watchdog<T> {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = T::Ask;
+    type Answer = T::Answer;
+
+    async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
         let stalled = |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
         let resp = tokio::time::timeout(self.head, self.inner.send(call)).await;
-        let (head, body) = resp.map_err(|_| stalled(self.head))??.into_parts();
-        let (frames, idle) = (Some(BodyStream::new(body)), self.idle);
+        let resp = resp.map_err(|_| stalled(self.head))??;
+        let (frames, idle) = (Some(resp.body), self.idle);
         let bounded = stream::unfold(frames, move |frames| async move {
             let mut frames = frames?;
             match tokio::time::timeout(idle, frames.next()).await {
@@ -293,8 +294,8 @@ impl<T: Transport> Transport for Watchdog<T> {
                 Err(_) => Some((Err(stalled(idle)), None)),
             }
         });
-        let body = StreamBody::new(bounded).boxed_unsync();
-        Ok(http::Response::from_parts(head, body))
+        let bounded = Exchange::new(resp.head, bounded.boxed());
+        Ok(bounded.with_extensions(resp.extensions))
     }
 }
 
@@ -303,7 +304,7 @@ mod tests {
     use std::time::Duration;
 
     use respan_gateway_core::Fault;
-    use respan_gateway_core::http::StatusCode;
+    use respan_gateway_http::http::StatusCode;
 
     use super::Backoff;
 

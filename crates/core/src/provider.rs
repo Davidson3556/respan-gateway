@@ -4,23 +4,23 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use http::Extensions;
 
 use crate::context::unlocked;
 use crate::format::{AnyFormat, is_input};
 use crate::input::{Input, InputFilters, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
-use crate::{ClientContext, Fault, Filter, Outcome, Plugin, Transport};
+use crate::transport::{AnyTransport, Head};
+use crate::{ClientContext, Extensions, Fault, Filter, Outcome, Plugin};
 
 /// A provider the gateway can call: a format and a transport.
 #[derive(Clone)]
 pub(crate) struct Provider {
     pub(crate) format: Arc<dyn AnyFormat>,
-    pub(crate) transport: Arc<dyn Transport>,
+    pub(crate) transport: Arc<dyn AnyTransport>,
 }
 
-pub(crate) type CallEdit = Box<dyn FnOnce(&mut http::Request<Bytes>) -> Result<(), Fault> + Send>;
+pub(crate) type CallEdit = Box<dyn FnOnce(&mut Head, &mut Bytes) -> Result<(), Fault> + Send>;
 
 /// One call to a provider, as the provider edge's hooks see it: its
 /// request, provider, format and first input, and edits and filters of the
@@ -37,7 +37,7 @@ pub struct ProviderContext {
     pub(crate) outputs: Mutex<Filters>,
     /// Filters of the later inputs it sends, shared with their reader.
     pub(crate) inputs: InputFilters,
-    /// Edits of the call's `http::Request`, in the order added.
+    /// Edits of the call's head and first frame, in the order added.
     pub(crate) call_edits: Mutex<Vec<CallEdit>>,
     /// Idle once it ends: its response's body and its inputs' reader stop,
     /// so a reader still waiting wakes.
@@ -136,17 +136,25 @@ impl ProviderContext {
         &mut self.client.extensions
     }
 
-    /// Edit this call's `http::Request`, with its first frame, after its
+    /// Edit this call's head, of type `H`, the provider's format's
+    /// [`Ask`](crate::Format::Ask), and its first frame, after its
     /// [`request_encoder`](crate::Format::request_encoder) and before the
     /// transport, in the order added; the decoder gets it as edited. `Err`
-    /// fails the call. The kernel reads nothing of it. Put credentials in
-    /// an extension the transport reads ([`ProviderContext::extensions_mut`]),
-    /// as a transport may strip them.
-    pub fn edit_call(
+    /// fails the call, as a head of another type does with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL). The kernel reads
+    /// nothing of it. Put credentials in an extension the transport reads
+    /// ([`ProviderContext::extensions_mut`]), as a transport may strip them.
+    pub fn edit_call<H: Any>(
         &mut self,
-        f: impl FnOnce(&mut http::Request<Bytes>) -> Result<(), Fault> + Send + 'static,
+        f: impl FnOnce(&mut H, &mut Bytes) -> Result<(), Fault> + Send + 'static,
     ) {
-        unlocked(&mut self.call_edits).push(Box::new(f));
+        let edit = move |head: &mut Head, first: &mut Bytes| match head.downcast_mut() {
+            Some(head) => f(head, first),
+            None => Err(Fault::internal(
+                "a call edit of another wire than the provider's",
+            )),
+        };
+        unlocked(&mut self.call_edits).push(Box::new(edit));
     }
 }
 

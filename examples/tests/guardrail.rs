@@ -1,16 +1,16 @@
 use super::*;
-use respan_gateway_core::http::{self, response::Parts};
 use respan_gateway_core::{Decoder, Encoder, Format};
 use respan_gateway_formats::conversation::{Message, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::posts_to;
+use respan_gateway_http::{Answer, Ask};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 struct Responses;
 
-type Req = Request<Bytes>;
-
 impl Format for Responses {
+    type Ask = Ask;
+    type Answer = Answer;
     type Input = Sent<Responses>;
     type Output = Got<Responses>;
 
@@ -18,34 +18,40 @@ impl Format for Responses {
         "responses"
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &Ask) -> bool {
         posts_to(head, "/responses")
     }
 
-    fn request_decoder(&self, _: &Req) -> Box<dyn Decoder<Sent<Self>>> {
+    fn request_decoder(&self, _: &Ask) -> Box<dyn Decoder<Sent<Self>>> {
         opaque::request_decoder()
     }
 
     fn request_encoder(
         &self,
-        call: &mut Req,
-        first: Option<&Sent<Self>>,
+        client: Option<&Ask>,
+        _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Sent<Self>>> {
-        opaque::request_encoder(call, first, streams)
+    ) -> Box<dyn Encoder<Sent<Self>, Ask>> {
+        opaque::request_encoder(client, streams)
     }
 
-    fn response_decoder(&self, head: &Parts, call: &Req) -> Box<dyn Decoder<Got<Self>>> {
+    fn response_decoder(
+        &self,
+        head: &Answer,
+        call: &Ask,
+        _: &Bytes,
+    ) -> Box<dyn Decoder<Got<Self>>> {
         opaque::response_decoder("responses", head, call)
     }
 
     fn response_encoder(
         &self,
-        head: &mut Parts,
-        request: &Req,
+        answer: Option<&Answer>,
+        ask: &Ask,
+        _body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Got<Self>>> {
-        opaque::response_encoder("responses", head, request, refusal)
+    ) -> Box<dyn Encoder<Got<Self>, Answer>> {
+        opaque::response_encoder("responses", answer, ask, refusal)
     }
 }
 

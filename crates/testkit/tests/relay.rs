@@ -1,15 +1,17 @@
 //! The kernel's promises, driven through the OpenAI format.
 
 use futures::TryStreamExt;
-use respan_gateway_core::{bytes, futures, http, http_body, http_body_util, serde_json};
+use respan_gateway_core::{bytes, futures, serde_json};
+use respan_gateway_http::{http, http_body, http_body_util};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_core::Exchange;
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
-    Body, ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
+    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
     ProviderContext, Response, Transport, codes,
 };
 use respan_gateway_formats::conversation::{
@@ -17,6 +19,7 @@ use respan_gateway_formats::conversation::{
 };
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
 use respan_gateway_http::Asked;
+use respan_gateway_http::{Answer, Ask, Body};
 use respan_gateway_testkit::{MockAt, MockTransport, Outcomes, mock, post, read_whole, serve};
 
 mod common;
@@ -73,7 +76,7 @@ struct Stamp;
 #[async_trait]
 impl Plugin for Stamp {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.edit_response_head(|h| {
+        cx.edit_response_head(|h: &mut Answer| {
             h.headers
                 .insert("x-served-by", HeaderValue::from_static("respan"));
             Ok(())
@@ -396,7 +399,7 @@ async fn a_head_edit_keeps_the_relay() {
     #[async_trait]
     impl Plugin for Mask {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|h| {
+            cx.edit_response_head(|h: &mut Answer| {
                 h.status = StatusCode::OK;
                 Ok(())
             });
@@ -923,7 +926,11 @@ async fn caller_values_reach_plugins_by_type() {
 
     let (anonymous, _, _) = h.send(unary_chat()).await;
     let mut req = post(CHAT, UNARY_REQ);
-    req.extensions_mut().insert(Tenant("acme"));
+    // Changed (0013): the kernel's extensions travel in the HTTP request
+    // as one value of their own.
+    let mut values = respan_gateway_core::Extensions::new();
+    values.insert(Tenant("acme"));
+    req.extensions_mut().insert(values);
     let (acme, _, _) = h.send(req).await;
 
     assert_eq!((anonymous, acme), (StatusCode::FORBIDDEN, StatusCode::OK));
@@ -961,7 +968,7 @@ async fn a_head_edit_that_panics_is_refused_as_internal() {
     #[async_trait]
     impl Plugin for Explode {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|_| panic!("a buggy head edit"));
+            cx.edit_response_head(|_: &mut Answer| panic!("a buggy head edit"));
             Ok(None)
         }
     }
@@ -1226,7 +1233,9 @@ async fn cached_whole_bytes_answer_a_streaming_client_as_a_stream() {
     #[async_trait]
     impl Plugin for Stored {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Ok(Some(cx.relay(http::Response::new(UNARY.to_owned()))))
+            Ok(Some(cx.relay(respan_gateway_http::answer(
+                http::Response::new(UNARY.to_owned()),
+            ))))
         }
     }
 
@@ -1308,17 +1317,17 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
 
     #[async_trait]
     impl respan_gateway_core::Transport for Silent {
-        async fn send(
-            &self,
-            _req: http::Request<Body>,
-        ) -> Result<http::Response<respan_gateway_core::Body>, Fault> {
+        type Ask = Ask;
+        type Answer = Answer;
+
+        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let never = http_body_util::StreamBody::new(futures::stream::pending());
-            let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(never));
+            let mut resp = http::Response::new(Body::new(never));
             resp.headers_mut().insert(
                 "content-type",
                 HeaderValue::from_static("text/event-stream"),
             );
-            Ok(resp)
+            Ok(respan_gateway_http::answer(resp))
         }
     }
 
@@ -1611,7 +1620,7 @@ async fn usage_in_a_plugins_own_bytes_reaches_no_meter() {
     impl Plugin for Replay {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let bytes = http::Response::new(http_body_util::Full::new(bytes::Bytes::from(UNARY)));
-            Ok(Some(cx.relay(bytes)))
+            Ok(Some(cx.relay(respan_gateway_http::answer(bytes))))
         }
     }
 
@@ -2481,7 +2490,7 @@ async fn a_relayed_redirect_passes_as_it_came_and_is_no_answer() {
     // carries the provider's answer.
     let end = h.log.only().end.err();
     assert_eq!(
-        end.as_ref().map(Fault::status),
+        end.as_ref().map(respan_gateway_http::status),
         Some(StatusCode::BAD_GATEWAY)
     );
     let answer = end
@@ -2506,7 +2515,7 @@ async fn a_judge_reads_a_redirect_as_a_failure() {
             // Changed: a 502 fault carrying the provider's 302.
             let fault = verdict.err();
             assert_eq!(
-                fault.as_ref().map(Fault::status),
+                fault.as_ref().map(respan_gateway_http::status),
                 Some(StatusCode::BAD_GATEWAY)
             );
             let answer = fault
@@ -2538,7 +2547,7 @@ async fn a_plugins_own_answer_made_of_outputs_takes_its_status_from_a_head_edit(
     #[async_trait]
     impl Plugin for Busy {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head| {
+            cx.edit_response_head(|head: &mut Answer| {
                 head.status = StatusCode::TOO_MANY_REQUESTS;
                 Ok(())
             });
@@ -2581,7 +2590,11 @@ async fn a_failure_labelled_as_a_stream_is_still_a_failure() {
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(STREAM.concat().as_bytes()));
-    let end = h.log.only().end.map_err(|f| f.status());
+    let end = h
+        .log
+        .only()
+        .end
+        .map_err(|f| respan_gateway_http::status(&f));
     assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE));
 }
 
@@ -2647,7 +2660,7 @@ async fn a_failure_of_several_events_keeps_the_providers_words() {
             let fault = answer.err();
             assert_eq!(fault.as_ref().map(Fault::message), Some("busy"));
             assert_eq!(fault.as_ref().map(Fault::code), Some("overloaded_error"));
-            assert_eq!(fault.map(|f| f.status().as_u16()), Some(529));
+            assert_eq!(fault.map(|f| f.status()), Some(529));
             Ok(None)
         }
     }
@@ -2710,8 +2723,9 @@ async fn a_plugins_own_redirect_goes_out_as_it_made_it() {
             let moved = http::Response::builder()
                 .status(StatusCode::FOUND)
                 .header("location", "http://elsewhere/")
-                .body(String::new())?;
-            Ok(Some(cx.relay(moved)))
+                .body(String::new())
+                .map_err(respan_gateway_http::built_wrong)?;
+            Ok(Some(cx.relay(respan_gateway_http::answer(moved))))
         }
     }
 
@@ -2744,8 +2758,13 @@ async fn an_error_in_a_success_says_what_the_provider_answered() {
         .all()
         .into_iter()
         .map(|o| {
-            o.end
-                .map_err(|f| (f.status(), f.code().to_owned(), f.message().to_owned()))
+            o.end.map_err(|f| {
+                (
+                    respan_gateway_http::status(&f),
+                    f.code().to_owned(),
+                    f.message().to_owned(),
+                )
+            })
         })
         .collect();
     assert_eq!(
@@ -2786,10 +2805,10 @@ async fn a_providers_trailers_are_not_passed_on() {
 
     #[async_trait]
     impl respan_gateway_core::Transport for Trailed {
-        async fn send(
-            &self,
-            _req: http::Request<Body>,
-        ) -> Result<http::Response<respan_gateway_core::Body>, Fault> {
+        type Ask = Ask;
+        type Answer = Answer;
+
+        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let mut trailers = http::HeaderMap::new();
             trailers.insert("x-trailer", HeaderValue::from_static("1"));
             let frames = [
@@ -2799,10 +2818,10 @@ async fn a_providers_trailers_are_not_passed_on() {
                 Ok(http_body::Frame::trailers(trailers)),
             ];
             let body = http_body_util::StreamBody::new(futures::stream::iter(frames));
-            let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(body));
+            let mut resp = http::Response::new(Body::new(body));
             resp.headers_mut()
                 .insert("content-type", HeaderValue::from_static("application/json"));
-            Ok(resp)
+            Ok(respan_gateway_http::answer(resp))
         }
     }
 
@@ -2833,7 +2852,9 @@ async fn a_plugins_own_bytes_are_read_as_a_providers() {
     #[async_trait]
     impl Plugin for Reader {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let own = cx.relay(http::Response::new(UNARY.to_owned()));
+            let own = cx.relay(respan_gateway_http::answer(http::Response::new(
+                UNARY.to_owned(),
+            )));
             let read = own.until_content().await?.outputs::<Reply>();
             let read = read.try_collect::<Vec<_>>().await?;
             assert!(read.iter().any(|r| r.texts().eq(["hi"])), "{read:?}");
@@ -2964,21 +2985,21 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
 
     #[async_trait]
     impl respan_gateway_core::Transport for Endless {
-        async fn send(
-            &self,
-            _req: http::Request<Body>,
-        ) -> Result<http::Response<respan_gateway_core::Body>, Fault> {
+        type Ask = Ask;
+        type Answer = Answer;
+
+        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let guard = Dropped(self.0.clone());
             let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
                 let _ = &guard;
             });
             let body = http_body_util::StreamBody::new(never);
-            let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(body));
+            let mut resp = http::Response::new(Body::new(body));
             resp.headers_mut().insert(
                 "content-type",
                 HeaderValue::from_static("text/event-stream"),
             );
-            Ok(resp)
+            Ok(respan_gateway_http::answer(resp))
         }
     }
 
@@ -3277,7 +3298,7 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
     let failed = failed.end.as_ref().err();
     assert!(failed.is_some_and(|f| f.is_answer()));
     assert_eq!(
-        failed.map(Fault::status),
+        failed.map(respan_gateway_http::status),
         Some(StatusCode::SERVICE_UNAVAILABLE)
     );
     assert_eq!(answered.end, Ok(()));
@@ -3549,14 +3570,18 @@ async fn reading_an_undecodable_input_does_not_stop_its_relay() {
     assert_eq!(h.mock.sent()[0].body(), request.as_bytes());
 }
 
-/// OpenAI, sending the key a provider-edge plugin left in the extensions,
-/// as a per-tenant key or a signature would be.
+/// OpenAI under another type, whose codecs delegate. Changed (0013): a
+/// format's request encoder no longer sees the call's extensions; a
+/// provider-edge plugin writes such a key into the call's head with
+/// `edit_call`, or leaves it for the transport (below).
 struct Keyed;
 
 #[derive(Clone)]
 struct TenantKey(&'static str);
 
 impl Format for Keyed {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
     type Input = Conversation;
     type Output = Reply;
 
@@ -3564,52 +3589,54 @@ impl Format for Keyed {
         OpenAiChat.name()
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
         OpenAiChat.accepts(head)
     }
 
-    fn request_decoder(
-        &self,
-        request: &http::Request<bytes::Bytes>,
-    ) -> Box<dyn Decoder<Conversation>> {
-        OpenAiChat.request_decoder(request)
+    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Conversation>> {
+        OpenAiChat.request_decoder(head)
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<bytes::Bytes>,
-        first: Option<&Conversation>,
+        client: Option<&Ask>,
+        body: &mut bytes::Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation>> {
-        if let Some(key) = request.extensions().get::<TenantKey>() {
-            let key = HeaderValue::from_static(key.0);
-            request.headers_mut().insert("x-tenant-key", key);
-        }
-        OpenAiChat.request_encoder(request, first, streams)
+    ) -> Box<dyn Encoder<Conversation, Ask>> {
+        OpenAiChat.request_encoder(client, body, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        request: &http::Request<bytes::Bytes>,
+        head: &Answer,
+        call: &Ask,
+        sent: &bytes::Bytes,
     ) -> Box<dyn Decoder<Reply>> {
-        OpenAiChat.response_decoder(head, request)
+        OpenAiChat.response_decoder(head, call, sent)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<bytes::Bytes>,
+        answer: Option<&Answer>,
+        ask: &Ask,
+        body: &bytes::Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply>> {
-        OpenAiChat.response_encoder(head, request, refusal)
+    ) -> Box<dyn Encoder<Reply, Answer>> {
+        OpenAiChat.response_encoder(answer, ask, body, refusal)
     }
 }
 
 #[tokio::test]
-async fn extensions_set_in_on_provider_reach_the_formats_request_encoder() {
+async fn extensions_set_in_on_provider_reach_a_call_edit_of_its_head() {
     let key = OnProvider(|px| {
         px.extensions_mut().insert(TenantKey("k1"));
+        let key = px.extensions().get::<TenantKey>().map(|k| k.0);
+        let key = key.unwrap_or_default();
+        px.edit_call(move |head: &mut Ask, _: &mut bytes::Bytes| {
+            let key = HeaderValue::from_static(key);
+            head.headers.insert("x-tenant-key", key);
+            Ok(())
+        });
         Ok(())
     });
     let mock = MockTransport::new();
@@ -3631,10 +3658,13 @@ struct TenantTransport(MockAt);
 
 #[async_trait]
 impl Transport for TenantTransport {
-    async fn send(&self, mut req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        if let Some(key) = req.extensions().get::<TenantKey>().cloned() {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, mut req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        if let Some(key) = req.extensions.get::<TenantKey>().cloned() {
             let key = HeaderValue::from_static(key.0);
-            req.headers_mut().insert("x-tenant-key", key);
+            req.head.headers.insert("x-tenant-key", key);
         }
         self.0.send(req).await
     }
@@ -3969,16 +3999,19 @@ struct Endless(Arc<AtomicBool>);
 
 #[async_trait]
 impl Transport for Endless {
-    async fn send(&self, _req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let guard = Dropped(self.0.clone());
         let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
             let _ = &guard;
         });
         let body = http_body_util::StreamBody::new(never);
-        let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(body));
+        let mut resp = http::Response::new(Body::new(body));
         let sse = HeaderValue::from_static("text/event-stream");
         resp.headers_mut().insert("content-type", sse);
-        Ok(resp)
+        Ok(respan_gateway_http::answer(resp))
     }
 }
 
@@ -4172,6 +4205,8 @@ fn text_chunk(text: &str) -> String {
 struct Fragile;
 
 impl Format for Fragile {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
     type Input = Conversation;
     type Output = Reply;
 
@@ -4179,49 +4214,52 @@ impl Format for Fragile {
         OpenAiChat.name()
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
         OpenAiChat.accepts(head)
     }
 
-    fn request_decoder(
-        &self,
-        request: &http::Request<bytes::Bytes>,
-    ) -> Box<dyn Decoder<Conversation>> {
-        OpenAiChat.request_decoder(request)
+    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Conversation>> {
+        OpenAiChat.request_decoder(head)
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<bytes::Bytes>,
-        first: Option<&Conversation>,
+        client: Option<&Ask>,
+        body: &mut bytes::Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation>> {
-        OpenAiChat.request_encoder(request, first, streams)
+    ) -> Box<dyn Encoder<Conversation, Ask>> {
+        OpenAiChat.request_encoder(client, body, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        request: &http::Request<bytes::Bytes>,
+        head: &Answer,
+        call: &Ask,
+        sent: &bytes::Bytes,
     ) -> Box<dyn Decoder<Reply>> {
-        OpenAiChat.response_decoder(head, request)
+        OpenAiChat.response_decoder(head, call, sent)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<bytes::Bytes>,
+        answer: Option<&Answer>,
+        ask: &Ask,
+        body: &bytes::Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply>> {
+    ) -> Box<dyn Encoder<Reply, Answer>> {
         Box::new(Garbling(
-            OpenAiChat.response_encoder(head, request, refusal),
+            OpenAiChat.response_encoder(answer, ask, body, refusal),
         ))
     }
 }
 
-struct Garbling(Box<dyn Encoder<Reply>>);
+struct Garbling(Box<dyn Encoder<Reply, Answer>>);
 
-impl Encoder<Reply> for Garbling {
+impl Encoder<Reply, Answer> for Garbling {
+    fn head(&mut self, first: Option<&Reply>) -> Answer {
+        self.0.head(first)
+    }
+
     fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
         if reply.texts().any(|text| text == "bad") {
             out.extend_from_slice(b"GARBAGE");
@@ -4270,7 +4308,7 @@ struct PanicEdit;
 #[async_trait]
 impl Plugin for PanicEdit {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.edit_response_head(|_| panic!("a buggy head edit"));
+        cx.edit_response_head(|_: &mut Answer| panic!("a buggy head edit"));
         Ok(None)
     }
 }
@@ -4303,7 +4341,7 @@ async fn a_head_edit_sets_a_refusals_status_whatever_it_is() {
     impl Plugin for EditThenFail {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let status = self.0;
-            cx.edit_response_head(move |h| {
+            cx.edit_response_head(move |h: &mut Answer| {
                 h.status = status;
                 Ok(())
             });
@@ -4580,7 +4618,10 @@ async fn a_panicking_call_leaves_its_sibling_abandoned() {
 
     #[async_trait]
     impl Transport for Never {
-        async fn send(&self, _req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        type Ask = Ask;
+        type Answer = Answer;
+
+        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             std::future::pending().await
         }
     }
@@ -4590,7 +4631,10 @@ async fn a_panicking_call_leaves_its_sibling_abandoned() {
 
     #[async_trait]
     impl Transport for Boom {
-        async fn send(&self, _req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        type Ask = Ask;
+        type Answer = Answer;
+
+        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             panic!("a buggy transport")
         }
     }
@@ -4816,15 +4860,14 @@ async fn a_plugin_answers_with_its_calls_events_read_as_they_are_sent() {
 #[tokio::test]
 async fn a_calls_request_can_be_edited_once_made() {
     let sign = OnProvider(|px| {
-        px.edit_call(|req| {
-            let length = req.body().len();
-            req.headers_mut()
-                .insert("x-signed", HeaderValue::from(length));
+        px.edit_call(|head: &mut Ask, first: &mut bytes::Bytes| {
+            let length = first.len();
+            head.headers.insert("x-signed", HeaderValue::from(length));
             Ok(())
         });
-        px.edit_call(|req| {
-            let signed = req.headers().get("x-signed").cloned();
-            req.headers_mut()
+        px.edit_call(|head: &mut Ask, _: &mut bytes::Bytes| {
+            let signed = head.headers.get("x-signed").cloned();
+            head.headers
                 .extend(signed.map(|v| (http::header::HeaderName::from_static("x-again"), v)));
             Ok(())
         });
@@ -4960,7 +5003,9 @@ async fn until_content_again_returns_at_once_without_judging_after_filters() {
 #[tokio::test]
 async fn a_call_edit_that_fails_refuses_the_call() {
     let unsigned = OnProvider(|px| {
-        px.edit_call(|_| Err(Fault::new(StatusCode::FORBIDDEN, "unsigned", "no key")));
+        px.edit_call(|_: &mut Ask, _: &mut bytes::Bytes| {
+            Err(Fault::new(StatusCode::FORBIDDEN, "unsigned", "no key"))
+        });
         Ok(())
     });
     let h = Harness::new(vec![Arc::new(unsigned)], Some("openai"));
@@ -5033,7 +5078,7 @@ async fn a_205_is_sent_with_no_body() {
     #[async_trait]
     impl Plugin for Reset {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head| {
+            cx.edit_response_head(|head: &mut Answer| {
                 head.status = StatusCode::RESET_CONTENT;
                 Ok(())
             });
@@ -5533,7 +5578,9 @@ async fn usage_a_plugin_reads_in_its_own_bytes_reaches_no_meter() {
     #[async_trait]
     impl Plugin for ReadOwn {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let own = cx.relay(http::Response::new(UNARY.to_owned()));
+            let own = cx.relay(respan_gateway_http::answer(http::Response::new(
+                UNARY.to_owned(),
+            )));
             let read = own.outputs::<Reply>().try_collect::<Vec<_>>().await?;
             Ok(Some(Response::stream(futures::stream::iter(
                 read.into_iter().map(Ok),
@@ -5555,6 +5602,8 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
     struct Tally(Arc<Mutex<Usage>>);
 
     impl Format for Tally {
+        type Ask = respan_gateway_http::Ask;
+        type Answer = respan_gateway_http::Answer;
         type Input = Conversation;
         type Output = Reply;
 
@@ -5562,50 +5611,53 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
             OpenAiChat.name()
         }
 
-        fn accepts(&self, head: &http::request::Parts) -> bool {
+        fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
             OpenAiChat.accepts(head)
         }
 
-        fn request_decoder(
-            &self,
-            request: &http::Request<bytes::Bytes>,
-        ) -> Box<dyn Decoder<Conversation>> {
-            OpenAiChat.request_decoder(request)
+        fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Conversation>> {
+            OpenAiChat.request_decoder(head)
         }
 
         fn request_encoder(
             &self,
-            request: &mut http::Request<bytes::Bytes>,
-            first: Option<&Conversation>,
+            client: Option<&Ask>,
+            body: &mut bytes::Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Conversation>> {
-            OpenAiChat.request_encoder(request, first, streams)
+        ) -> Box<dyn Encoder<Conversation, Ask>> {
+            OpenAiChat.request_encoder(client, body, streams)
         }
 
         fn response_decoder(
             &self,
-            head: &http::response::Parts,
-            request: &http::Request<bytes::Bytes>,
+            head: &Answer,
+            call: &Ask,
+            sent: &bytes::Bytes,
         ) -> Box<dyn Decoder<Reply>> {
-            OpenAiChat.response_decoder(head, request)
+            OpenAiChat.response_decoder(head, call, sent)
         }
 
         fn response_encoder(
             &self,
-            head: &mut http::response::Parts,
-            request: &http::Request<bytes::Bytes>,
+            answer: Option<&Answer>,
+            ask: &Ask,
+            body: &bytes::Bytes,
             refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Reply>> {
+        ) -> Box<dyn Encoder<Reply, Answer>> {
             Box::new(Tallying(
                 self.0.clone(),
-                OpenAiChat.response_encoder(head, request, refusal),
+                OpenAiChat.response_encoder(answer, ask, body, refusal),
             ))
         }
     }
 
-    struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Reply>>);
+    struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Reply, Answer>>);
 
-    impl Encoder<Reply> for Tallying {
+    impl Encoder<Reply, Answer> for Tallying {
+        fn head(&mut self, first: Option<&Reply>) -> Answer {
+            self.1.head(first)
+        }
+
         fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
             self.0.lock().map(|mut t| *t += &reply.usage).ok();
             self.1.encode(reply, out)
@@ -5654,10 +5706,10 @@ fn limited() -> mock::Reply {
 }
 
 /// Answers with the call's response, `until_content()` first if `.0`.
-struct Answer(bool);
+struct Answers(bool);
 
 #[async_trait]
-impl Plugin for Answer {
+impl Plugin for Answers {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let resp = cx.call("openai").await?;
         match self.0 {
@@ -5671,11 +5723,11 @@ impl Plugin for Answer {
 // body, whether sent directly or through `until_content`.
 #[tokio::test]
 async fn r11_1_until_content_on_an_error_status_changes_what_the_client_gets() {
-    let sent = Harness::new(vec![Arc::new(Answer(false))], None);
+    let sent = Harness::new(vec![Arc::new(Answers(false))], None);
     sent.mock.reply(OPENAI, limited());
     let (s1, h1, b1) = sent.send(unary_chat()).await;
 
-    let readied = Harness::new(vec![Arc::new(Answer(true))], None);
+    let readied = Harness::new(vec![Arc::new(Answers(true))], None);
     readied.mock.reply(OPENAI, limited());
     let (s2, h2, b2) = readied.send(unary_chat()).await;
 
@@ -6266,20 +6318,22 @@ struct Paced(MockAt, Duration, Duration);
 
 #[async_trait]
 impl Transport for Paced {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         tokio::time::sleep(self.1).await;
         use futures::StreamExt;
-        use http_body_util::{BodyExt, BodyStream, StreamBody};
-        let (head, body) = self.0.send(call).await?.into_parts();
-        let mut frames: Vec<_> = StreamExt::collect(BodyStream::new(body)).await;
+        let resp = self.0.send(call).await?;
+        let mut frames: Vec<_> = resp.body.collect().await;
         let (last, end) = (frames.pop(), self.2);
         let last = futures::stream::once(async move {
             tokio::time::sleep(end).await;
             last
         })
         .filter_map(|last| async move { last });
-        let body = StreamBody::new(futures::stream::iter(frames).chain(last));
-        Ok(http::Response::from_parts(head, body.boxed_unsync()))
+        let body = futures::stream::iter(frames).chain(last);
+        Ok(Exchange::new(resp.head, body.boxed()))
     }
 }
 

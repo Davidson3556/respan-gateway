@@ -4,16 +4,16 @@
 #![allow(dead_code)]
 
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::http::{self, HeaderMap, StatusCode};
+use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Filter, Gateway, Outcome, Plugin, ProviderContext, Response,
-    async_trait,
+    ClientContext, Fault, Filter, Gateway, Outcome, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply};
+use respan_gateway_http::Body;
 pub use respan_gateway_testkit::Calls;
 use respan_gateway_testkit::{MockTransport, Outcomes, post, read_whole, serve};
 
@@ -36,11 +36,11 @@ pub fn call(path: &str, body: impl Into<Bytes>) -> Call {
 pub type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 
 /// Provider `name`, speaking `format` over `transport`.
-pub fn add_provider(
-    name: &str,
-    format: impl respan_gateway_core::Format,
-    transport: impl respan_gateway_core::Transport,
-) -> AddProvider {
+pub fn add_provider<F, T>(name: &str, format: F, transport: T) -> AddProvider
+where
+    F: respan_gateway_core::Format,
+    T: respan_gateway_core::Transport<Ask = F::Ask, Answer = F::Answer>,
+{
     let name = name.to_owned();
     Box::new(move |g| g.provider(name, format, transport))
 }

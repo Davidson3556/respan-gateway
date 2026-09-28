@@ -9,9 +9,6 @@ use bytes::{Bytes, BytesMut};
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, Stream};
 use futures::{FutureExt, StreamExt, stream};
-use http::Extensions;
-use http_body::Frame;
-use http_body_util::{BodyExt, StreamBody};
 
 use crate::context::unlocked;
 use crate::fault::PANICKED;
@@ -20,11 +17,11 @@ use crate::input::{Frame as InputFrame, Input, locked, stream as inputs};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::{Provider, provider_for};
 use crate::response::Batch;
-use crate::transport::one_frame;
-use crate::{ClientContext, Fault, ProviderContext, Response};
+use crate::transport::{Head, one_frame};
+use crate::{ClientContext, Exchange, Extensions, Fault, ProviderContext, Response};
 
 /// The mark the kernel puts in a call's extensions, as its transport gets
-/// them, when the call relays the client's own message: its inputs, not a
+/// them ([`Exchange::extensions`]), when the call relays the client's own message: its inputs, not a
 /// call's own, to a provider of the client's format's name, the call
 /// starting from the client's head. It is on no other call, whatever
 /// [`Call::with_extension`] or a plugin set before; a transport may pass
@@ -208,60 +205,57 @@ async fn send_call(
     // A streaming request's later inputs follow, unless the call has its own.
     let later = cx.later.as_ref().filter(|_| px.input.own_format.is_none());
     let client = relay.then(|| &*px.client.head);
-    let extensions = px.client.extensions.clone();
-    let (mut call, encoder) = first_frame(&px.input, p, client, extensions, later.is_some())?;
+    let (mut head, mut first, encoder) = first_frame(&px.input, p, client, later.is_some())?;
     for edit in std::mem::take(unlocked(&mut px.call_edits)) {
-        edit(&mut call)?;
+        edit(&mut head, &mut first)?;
     }
-    let (head, first) = call.into_parts();
-    let sent = head.clone();
+    let mut extensions = px.client.extensions.clone();
+    extensions.remove::<Relayed>();
+    if relay {
+        extensions.insert(Relayed);
+    }
+    // The decoder reads the provider's head as it came, for the call as sent.
+    let sent = p
+        .format
+        .copy_ask(&*head)
+        .ok_or_else(|| Fault::internal("a call's head of another wire than its format's"))?;
+    let sent_first = first.clone();
     let body = match later {
-        None => one_frame(first.clone()),
+        None => one_frame(first),
         Some(later) => {
             let (input, filters) = (px.input.clone(), px.inputs.clone());
             let frames = inputs(later.clone(), input, filters, &px.cut);
-            let first = (!first.is_empty()).then(|| Ok(first.clone()));
-            let frames = stream::iter(first).chain(later_frames(frames, encoder));
-            StreamBody::new(frames.map(|bytes| bytes.map(Frame::data))).boxed_unsync()
+            let first = (!first.is_empty()).then(|| Ok(first));
+            stream::iter(first)
+                .chain(later_frames(frames, encoder))
+                .boxed()
         }
     };
-    let call = http::Request::from_parts(head, body);
+    let call = Exchange::new(head, body).with_extensions(extensions);
     let resp = p.transport.send(call).await?;
-    // The decoder reads the provider's head as it came, for the call as sent.
-    let sent = http::Request::from_parts(sent, first);
     Ok(Response::decoded(
         &p.format,
-        &sent,
+        (&*sent, &sent_first),
         resp,
         relay,
         later.is_some(),
     ))
 }
 
-/// The call as its format writes it, from the `client`'s head if it relays
-/// the client's message, with the call's `extensions`, marked [`Relayed`]
-/// if it does and never otherwise, and its first frame
-/// as its body (the client's bytes if relayed unread, else the encoder's
-/// opening bytes, the input, and the end unless it `streams`), and the
-/// encoder. Content that cannot be written is whose it is (`Whose`).
+/// The call's head as its format writes it, from the `client`'s head if it
+/// relays the client's message, its first frame (the client's bytes if
+/// relayed unread, else the encoder's opening bytes, the input, and the end
+/// unless it `streams`), and the encoder. Content that cannot be written is
+/// whose it is (`Whose`).
 fn first_frame(
     input: &Input,
     p: &Provider,
-    client: Option<&http::request::Parts>,
-    extensions: Extensions,
+    client: Option<&(dyn Any + Send + Sync)>,
     streams: bool,
-) -> Result<(http::Request<Bytes>, Box<dyn AnyEncoder>), Fault> {
-    let ((body, first), whose) = input.sent(client.is_some())?;
-    let mut call = match client {
-        Some(head) => http::Request::from_parts(head.clone(), body),
-        None => http::Request::new(body),
-    };
-    *call.extensions_mut() = extensions;
-    call.extensions_mut().remove::<Relayed>();
-    if client.is_some() {
-        call.extensions_mut().insert(Relayed);
-    }
-    let mut encoder = p.format.request_encoder(&mut call, first.as_ref(), streams);
+) -> Result<(Head, Bytes, Box<dyn AnyEncoder>), Fault> {
+    let ((mut body, first), whose) = input.sent(client.is_some())?;
+    let mut encoder = p.format.request_encoder(client, &mut body, streams);
+    let head = encoder.head(first.as_ref());
     // What cannot be opened is the format's to say, whoever's input it is.
     let mut more = BytesMut::new();
     encoder.open(&mut more)?;
@@ -276,12 +270,11 @@ fn first_frame(
     };
     write().map_err(|fault| whose.fault(fault))?;
     if !more.is_empty() {
-        let body = call.body_mut();
         let mut all = BytesMut::from(&body[..]);
         all.unsplit(more);
-        *body = all.freeze();
+        body = all.freeze();
     }
-    Ok((call, encoder))
+    Ok((head, body, encoder))
 }
 
 /// A streamed call's frames after its first: each of `frames` written by

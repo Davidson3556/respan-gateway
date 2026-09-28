@@ -5,7 +5,6 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use http::StatusCode;
 use serde_json::Value;
 
 pub(crate) const PANICKED: &str = "a plugin or format panicked";
@@ -51,7 +50,7 @@ pub struct Fault(Box<Inner>);
 
 #[derive(Clone)]
 struct Inner {
-    status: StatusCode,
+    status: u16,
     code: Cow<'static, str>,
     message: String,
     details: Option<Value>,
@@ -67,12 +66,12 @@ impl Fault {
     /// A fault with this status, code and message; a refusal goes out with
     /// this status.
     pub fn new(
-        status: StatusCode,
+        status: impl Into<u16>,
         code: impl Into<Cow<'static, str>>,
         message: impl Into<String>,
     ) -> Self {
         Self(Box::new(Inner {
-            status,
+            status: status.into(),
             code: code.into(),
             message: message.into(),
             details: None,
@@ -163,15 +162,16 @@ impl Fault {
     }
 
     /// The same fault under `code`, with `status`.
-    pub(crate) fn recoded(mut self, status: StatusCode, code: &'static str) -> Self {
+    pub(crate) fn recoded(mut self, status: u16, code: &'static str) -> Self {
         self.0.status = status;
         self.0.code = code.into();
         self
     }
 
-    /// The status it was made with ([`Fault::new`]), in HTTP's numbering,
-    /// which a format of another protocol maps to its own.
-    pub fn status(&self) -> StatusCode {
+    /// The status it was made with ([`Fault::new`]), in HTTP's numbering
+    /// as the lingua franca, which a format of another protocol maps to its
+    /// own.
+    pub fn status(&self) -> u16 {
         self.0.status
     }
 
@@ -192,42 +192,37 @@ impl Fault {
 
     /// The client's mistake: a 400.
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, codes::BAD_REQUEST, message)
+        Self::new(400u16, codes::BAD_REQUEST, message)
     }
 
     /// Nothing takes the request: a 404.
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_FOUND, codes::NOT_FOUND, message)
+        Self::new(404u16, codes::NOT_FOUND, message)
     }
 
     /// A provider's failure: a 502.
     pub fn upstream(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM, message)
+        Self::new(502u16, codes::UPSTREAM, message)
     }
 
     /// A stream that ended unfinished: a 502 [`codes::TRUNCATED`].
     pub fn truncated() -> Self {
-        Self::new(
-            StatusCode::BAD_GATEWAY,
-            codes::TRUNCATED,
-            "stream ended before completion",
-        )
+        Self::new(502u16, codes::TRUNCATED, "stream ended before completion")
     }
 
     /// Its status is never written: no one waits for it.
     pub(crate) fn abandoned() -> Self {
-        let status = StatusCode::from_u16(499).expect("499 is a status code");
-        Self::new(status, codes::ABANDONED, "abandoned")
+        Self::new(499u16, codes::ABANDONED, "abandoned")
     }
 
     /// A setup that cannot work: a 500.
     pub fn config(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, codes::CONFIG, message)
+        Self::new(500u16, codes::CONFIG, message)
     }
 
     /// A bug: a 500.
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, codes::INTERNAL, message)
+        Self::new(500u16, codes::INTERNAL, message)
     }
 
     /// Something asked for `T`, not of the client's kind: a bug.
@@ -267,13 +262,6 @@ impl fmt::Display for Fault {
 impl From<std::convert::Infallible> for Fault {
     fn from(never: std::convert::Infallible) -> Self {
         match never {}
-    }
-}
-
-/// A message a plugin or format built wrong: a bug, a 500.
-impl From<http::Error> for Fault {
-    fn from(e: http::Error) -> Self {
-        Fault::internal("an HTTP request or response was built wrong").with_source(e)
     }
 }
 
@@ -319,7 +307,7 @@ mod tests {
 
     impl From<PluginError> for Fault {
         fn from(e: PluginError) -> Self {
-            Fault::new(StatusCode::TOO_MANY_REQUESTS, "over_limit", e.to_string())
+            Fault::new(429u16, "over_limit", e.to_string())
                 .with_details(serde_json::json!({ "limit": e.limit }))
                 .with_source(e)
         }

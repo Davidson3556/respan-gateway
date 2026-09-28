@@ -12,12 +12,11 @@
 //! `cargo run -p respan-gateway-examples --example custom_transport`
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
-use respan_gateway_core::futures::stream;
-use respan_gateway_core::http_body::Frame;
-use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
-use respan_gateway_core::{Body, Fault, Format, Gateway, Transport, async_trait, http};
+use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
+use respan_gateway_core::{Exchange, Fault, Format, Gateway, Transport, async_trait};
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
+use respan_gateway_http::{Answer, Ask, http};
 use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Your model: a conversation in, its answer out.
@@ -44,13 +43,16 @@ struct Local<F, M> {
 #[async_trait]
 impl<F, M> Transport for Local<F, M>
 where
-    F: Format<Input = Conversation, Output = Reply>,
+    F: Format<Ask = Ask, Answer = Answer, Input = Conversation, Output = Reply>,
     M: LocalModel,
 {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+    type Ask = Ask;
+    type Answer = Answer;
+
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         // A whole call's body is its one input.
-        let (head, body) = call.into_parts();
-        let call = http::Request::from_parts(head, body.collect().await?.to_bytes());
+        let frames: Vec<Bytes> = call.body.try_collect().await?;
+        let call = http::Request::from_parts(call.head, Bytes::from(frames.concat()));
         let chat = read_chat(&self.format, &call)?;
         let answer = self.model.answer(&chat)?;
 
@@ -74,11 +76,12 @@ where
 }
 
 /// The call's conversation, read with the format's request decoder.
-fn read_chat<F: Format<Input = Conversation>>(
+fn read_chat<F: Format<Ask = Ask, Input = Conversation>>(
     format: &F,
     call: &http::Request<Bytes>,
 ) -> Result<Conversation, Fault> {
-    let mut decoder = format.request_decoder(call);
+    let head = call.clone().into_parts().0;
+    let mut decoder = format.request_decoder(&head);
     let mut chats = Vec::new();
     decoder.decode(call.body().clone(), &mut chats)?;
     decoder.end(&mut chats)?;
@@ -89,13 +92,14 @@ fn read_chat<F: Format<Input = Conversation>>(
 
 /// The replies as a response, written with the format's response encoder,
 /// which also sets the content type: SSE if the call asked to stream.
-fn write_replies<F: Format<Output = Reply>>(
+fn write_replies<F: Format<Ask = Ask, Answer = Answer, Output = Reply>>(
     format: &F,
     call: &http::Request<Bytes>,
     replies: &[Reply],
-) -> Result<http::Response<Body>, Fault> {
-    let (mut head, ()) = http::Response::new(()).into_parts();
-    let mut encoder = format.response_encoder(&mut head, call, None);
+) -> Result<Exchange<Answer>, Fault> {
+    let ask = call.clone().into_parts().0;
+    let mut encoder = format.response_encoder(None, &ask, call.body(), None);
+    let head = encoder.head(None);
     let mut frames = Vec::new();
     let mut out = BytesMut::new();
     encoder.open(&mut out)?;
@@ -106,11 +110,8 @@ fn write_replies<F: Format<Output = Reply>>(
     encoder.end(&Ok(()), &mut out)?;
     frames.push(out.freeze());
     let frames = frames.into_iter().filter(|f| !f.is_empty());
-    let body = stream::iter(frames.map(|f| Ok(Frame::data(f))));
-    Ok(http::Response::from_parts(
-        head,
-        StreamBody::new(body).boxed_unsync(),
-    ))
+    let body = stream::iter(frames.map(Ok)).boxed();
+    Ok(Exchange::new(head, body))
 }
 
 fn gateway() -> Result<Gateway, Fault> {

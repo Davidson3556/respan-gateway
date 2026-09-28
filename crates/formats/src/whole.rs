@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
-use respan_gateway_core::http::{self, StatusCode};
 use respan_gateway_core::{Decoder, Encoder, Fault};
+use respan_gateway_http::http::{self, StatusCode};
 
 /// A decoder for a body of `format` read whole: a success's bytes go to
 /// `on_body` at the end; any other answer ends `Err` ([`answer`]).
@@ -67,13 +67,15 @@ impl<T> Decoder<T> for Nothing {
 /// A request encoder for a protocol whose calls carry one body, not
 /// streamed inputs: it fails to open ([`Encoder::open`]) with
 /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG).
-pub fn unstreamable<T: 'static>(format: &str) -> Box<dyn Encoder<T>> {
+pub fn unstreamable<T: 'static>(format: &str) -> Box<dyn Encoder<T, ()>> {
     Box::new(Unstreamable(format.to_owned()))
 }
 
 struct Unstreamable(String);
 
-impl<T> Encoder<T> for Unstreamable {
+impl<T> Encoder<T, ()> for Unstreamable {
+    fn head(&mut self, _first: Option<&T>) {}
+
     fn open(&mut self, _out: &mut BytesMut) -> Result<(), Fault> {
         let format = &self.0;
         let message = format!("a call in {format} carries one body, not streamed inputs");
@@ -92,13 +94,15 @@ impl<T> Encoder<T> for Unstreamable {
 /// An encoder of a response with no body at all
 /// ([`bodiless`](respan_gateway_http::bodiless)): its head goes at once and
 /// nothing more is read ([`Encoder::done`]).
-pub fn no_body<T: 'static>() -> Box<dyn Encoder<T>> {
+pub fn no_body<T: 'static>() -> Box<dyn Encoder<T, ()>> {
     Box::new(NoBody)
 }
 
 struct NoBody;
 
-impl<T> Encoder<T> for NoBody {
+impl<T> Encoder<T, ()> for NoBody {
+    fn head(&mut self, _first: Option<&T>) {}
+
     fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
     }
@@ -115,13 +119,15 @@ impl<T> Encoder<T> for NoBody {
 /// An encoder of a refusal a protocol cannot write, such as a fault whose
 /// status is no error's: it writes nothing and fails at the end, so the
 /// adapter writes it ([`Gateway::handle`](respan_gateway_core::Gateway::handle)).
-pub fn unwritable<T: 'static>() -> Box<dyn Encoder<T>> {
+pub fn unwritable<T: 'static>() -> Box<dyn Encoder<T, ()>> {
     Box::new(Unwritable)
 }
 
 struct Unwritable;
 
-impl<T> Encoder<T> for Unwritable {
+impl<T> Encoder<T, ()> for Unwritable {
+    fn head(&mut self, _first: Option<&T>) {}
+
     fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
     }
@@ -132,19 +138,21 @@ impl<T> Encoder<T> for Unwritable {
 }
 
 /// Whether `status` says an error, as a refusal's must to be written.
-pub(crate) fn is_error(status: StatusCode) -> bool {
-    status.is_client_error() || status.is_server_error()
+pub(crate) fn is_error(status: u16) -> bool {
+    (400..600).contains(&status)
 }
 
 /// An encoder that writes `body` at the end, however it ends, and no
 /// value: a refusal's.
-pub fn written<T: 'static>(body: Bytes) -> Box<dyn Encoder<T>> {
+pub fn written<T: 'static>(body: Bytes) -> Box<dyn Encoder<T, ()>> {
     Box::new(Written(body))
 }
 
 struct Written(Bytes);
 
-impl<T> Encoder<T> for Written {
+impl<T> Encoder<T, ()> for Written {
+    fn head(&mut self, _first: Option<&T>) {}
+
     fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
     }
@@ -232,13 +240,15 @@ where
     }
 }
 
-impl<T, W, F, B> Encoder<T> for Relay<T, W, F, B>
+impl<T, W, F, B> Encoder<T, ()> for Relay<T, W, F, B>
 where
     T: Clone + Send + 'static,
     W: FnMut(&[T]) -> Result<B, Fault> + Send + 'static,
     F: FnMut(&Fault) -> B + Send + 'static,
     B: AsRef<[u8]> + 'static,
 {
+    fn head(&mut self, _first: Option<&T>) {}
+
     fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(&self.open);
         Ok(())

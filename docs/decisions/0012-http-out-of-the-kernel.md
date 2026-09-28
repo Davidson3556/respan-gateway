@@ -1,6 +1,6 @@
 # 0012. HTTP out of the kernel
 
-- Status: accepted
+- Status: accepted, amended by [0013](0013-no-http-in-core.md)
 - Date: 2026-09-28
 
 ## Context

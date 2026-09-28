@@ -12,10 +12,11 @@ use respan_gateway_core::{
     ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
     ProviderContext, Response, async_trait,
 };
-use respan_gateway_core::{bytes, futures, http};
+use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
+use respan_gateway_http::http;
 use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -25,6 +26,8 @@ const ANTHROPIC: &str = "http://anthropic.test";
 struct Raw;
 
 impl Format for Raw {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
     type Input = Sent<Raw>;
     type Output = Got<Raw>;
 
@@ -32,45 +35,47 @@ impl Format for Raw {
         "raw"
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
         head.uri.path().starts_with("/raw")
     }
 
-    fn request_decoder(&self, _request: &http::Request<Bytes>) -> Box<dyn Decoder<Sent<Raw>>> {
+    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<Sent<Raw>>> {
         opaque::request_decoder()
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&Sent<Raw>>,
+        client: Option<&respan_gateway_http::Ask>,
+        _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Sent<Raw>>> {
-        opaque::request_encoder(request, first, streams)
+    ) -> Box<dyn Encoder<Sent<Raw>, respan_gateway_http::Ask>> {
+        opaque::request_encoder(client, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        request: &http::Request<Bytes>,
+        head: &respan_gateway_http::Answer,
+        request: &respan_gateway_http::Ask,
+        _sent: &Bytes,
     ) -> Box<dyn Decoder<Got<Raw>>> {
         opaque::response_decoder("raw", head, request)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: Option<&respan_gateway_http::Answer>,
+        request: &respan_gateway_http::Ask,
+        _body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Got<Raw>>> {
-        opaque::response_encoder("raw", head, request, refusal)
+    ) -> Box<dyn Encoder<Got<Raw>, respan_gateway_http::Answer>> {
+        opaque::response_encoder("raw", answer, request, refusal)
     }
 }
 
 /// A gateway serving `format`, calling `provider` of `format` over `mock`
 /// at `base`, with `plugins`, recording outcomes on both edges.
 fn gateway(
-    format: impl Format + Clone,
+    format: impl Format<Ask = respan_gateway_http::Ask, Answer = respan_gateway_http::Answer> + Clone,
     mock: &MockTransport,
     base: &str,
     plugins: Vec<Arc<dyn Plugin>>,
@@ -215,6 +220,8 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
 struct Counted(Arc<AtomicUsize>);
 
 impl Format for Counted {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
     type Input = Conversation;
     type Output = Reply;
 
@@ -222,39 +229,44 @@ impl Format for Counted {
         OpenAiChat.name()
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
         OpenAiChat.accepts(head)
     }
 
-    fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Conversation>> {
+    fn request_decoder(
+        &self,
+        request: &respan_gateway_http::Ask,
+    ) -> Box<dyn Decoder<Conversation>> {
         self.0.fetch_add(1, Ordering::Relaxed);
         OpenAiChat.request_decoder(request)
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&Conversation>,
+        client: Option<&respan_gateway_http::Ask>,
+        body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation>> {
-        OpenAiChat.request_encoder(request, first, streams)
+    ) -> Box<dyn Encoder<Conversation, respan_gateway_http::Ask>> {
+        OpenAiChat.request_encoder(client, body, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        request: &http::Request<Bytes>,
+        head: &respan_gateway_http::Answer,
+        request: &respan_gateway_http::Ask,
+        sent: &Bytes,
     ) -> Box<dyn Decoder<Reply>> {
-        OpenAiChat.response_decoder(head, request)
+        OpenAiChat.response_decoder(head, request, sent)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: Option<&respan_gateway_http::Answer>,
+        request: &respan_gateway_http::Ask,
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply>> {
-        OpenAiChat.response_encoder(head, request, refusal)
+    ) -> Box<dyn Encoder<Reply, respan_gateway_http::Answer>> {
+        OpenAiChat.response_encoder(answer, request, body, refusal)
     }
 }
 

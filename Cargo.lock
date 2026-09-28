@@ -1088,6 +1088,7 @@ dependencies = [
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "respan-gateway-plugins",
  "respan-gateway-server",
  "respan-gateway-testkit",
@@ -1105,9 +1106,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
- "http",
- "http-body",
- "http-body-util",
  "serde_json",
  "tokio",
 ]
@@ -1150,6 +1148,11 @@ dependencies = [
 name = "respan-gateway-http"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-testkit",
@@ -1162,6 +1165,7 @@ version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "respan-gateway-testkit",
  "tokio",
 ]
@@ -1190,6 +1194,7 @@ version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "respan-gateway-testkit",
  "tokio",
 ]
@@ -1226,6 +1231,7 @@ version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-http",
  "respan-gateway-testkit",
  "tokio",
 ]

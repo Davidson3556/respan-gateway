@@ -15,10 +15,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::Asked;
+use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
@@ -145,7 +145,7 @@ fn gateway(mock: &MockTransport, slots: &Slots, free: Duration) -> Result<Gatewa
         .target("openai")
 }
 
-fn request(model: &str, tier: &'static str) -> http::Request<respan_gateway_core::Body> {
+fn request(model: &str, tier: &'static str) -> http::Request<respan_gateway_http::Body> {
     let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#);
     let mut req = post("/v1/chat/completions", body);
     req.headers_mut()

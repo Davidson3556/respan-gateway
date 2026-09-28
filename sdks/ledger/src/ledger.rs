@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::http::StatusCode;
 use respan_gateway_core::serde_json::json;
 use respan_gateway_core::{Fault, async_trait};
+use respan_gateway_http::http::StatusCode;
 use tokio::time::Instant;
 
 use crate::{INSUFFICIENT_FUNDS, UNKNOWN_ACCOUNT};

@@ -21,6 +21,7 @@ and call once. Tests state its promises; the
 | [0010](decisions/0010-usage-out-of-core.md) | The kernel counts no usage; filters see every message; `is_content` |
 | [0011](decisions/0011-read-until-content-or-end.md) | Read a response `until_content` or `until_end`, held unsent |
 | [0012](decisions/0012-http-out-of-the-kernel.md) | HTTP's rules live in the adapter, transports and formats; heads are an envelope |
+| [0013](decisions/0013-no-http-in-core.md) | No `http` types in the core: a wire is a format's and transport's pair of head types; `Exchange` |
 
 ## Two edges
 
@@ -44,9 +45,10 @@ Only `on_client` may `call` or `take_inputs`
 
 ```
  adapter (crates/http): strip connection headers, lift the Credential,
-   add Asked; Upgrade? says streaming
+   add Asked; Upgrade? says streaming; http::Request ─▶ Exchange<Ask>
                   ▼
- handle(req, streaming) ─▶ first format that accepts (none: Err, plain 404)
+ handle::<Ask, Answer>(req, streaming) ─▶ first format on that wire that
+   accepts (none: Err, plain 404)
    streaming? no:  whole: body read in full, its one input
               yes: no input with the head; one per data frame after
                   ▼
@@ -54,8 +56,9 @@ Only `on_client` may `call` or `take_inputs`
                   │ all pass  └─Err─▶ refusal ────┤
  cx.call(target) ─▶ on_provider ─Err─▶ refusal ───┤
                   ▼                               │
- input filters ─▶ request encoder (a relay: the  │
-   client's head) ─▶ edit_call ─▶ Transport::send │
+ input filters ─▶ request encoder, its head (a   │
+   relay: from the client's) ─▶ edit_call ─▶      │
+   Transport::send (Exchange<Ask>)                │
    (strips what a proxy must, sends the keys)     │
                   ▼                               │
  response decoder (an error answer: a Fault) ─▶   │
@@ -64,7 +67,7 @@ Only `on_client` may `call` or `take_inputs`
  client-edge filters ◀────────────────────────────┘
                   ▼
  response encoder (a refusal: its answer or its words):
-   open ─▶ head with the first byte, or at once for a
+   head, open ─▶ head goes with the first byte, or at once for a
    streaming request or a body done before it began
                   ▼ adapter: strip hop-by-hop headers
                   ▼ at the end
@@ -98,11 +101,15 @@ it as them while it says the same, an edit written into them
 relay; formats of one kind translate through their values; traffic the
 gateway does not read is a kind of one (`formats::opaque`).
 
-The kernel keeps no bytes and reads no head: `http` heads are an envelope
-it hands, like bytes, only to a format of the name they came in, and
-only for a relay ([0012](decisions/0012-http-out-of-the-kernel.md)). So
-a relay's call starts from the client's head, and a relayed response's
-head is the provider's; a translated one starts empty. A whole body is
+The kernel keeps no bytes and reads no head. A wire is a pair of head
+types, `Format::Ask` and `Format::Answer`, that a format and its
+transport share (HTTP's live in `crates/http`); the kernel hands a head,
+like bytes, only to a format of the name it came in, and only for a
+relay ([0012](decisions/0012-http-out-of-the-kernel.md),
+[0013](decisions/0013-no-http-in-core.md)). So a relay's call starts
+from the client's head, and a relayed response's head is the provider's;
+a translated one starts anew. The encoder writes the head
+(`Encoder::head`), once, before any bytes. A whole body is
 decoded only when read, so a plain relay's call carries the client's
 bytes, which its request encoder may edit; a streaming request's frames
 are decoded as they pass. The adapter, not the format, says whether
@@ -115,10 +122,14 @@ whose request encoder reads it from the first input
 
 ## Core types
 
-14 public types, plus `Body`, `codes` and re-exports; `handle` needs a
-tokio runtime, which runs end hooks detached.
+16 public types, plus `Body`, `codes` and re-exports; `handle` needs a
+tokio runtime, which runs end hooks detached. The core depends on no
+`http` crate ([0013](decisions/0013-no-http-in-core.md)).
 
-- `Gateway`, `Transport`; `Plugin`, whose hooks get a `ClientContext` (a
+- `Gateway`, `Transport`; `Exchange<H>`, a head, a body and `Extensions`,
+  which `handle` and `Transport::send` take and give; `Relayed`, the mark
+  on a call that relays the client's message.
+- `Plugin`, whose hooks get a `ClientContext` (a
   request) or `ProviderContext` (a call); `Call`, a `'static`, `Clone`,
   `Sync` future, sent when awaited.
 - `Filter<T>` edits inputs (the only way) or outputs; `Outcome` says how
@@ -126,8 +137,8 @@ tokio runtime, which runs end hooks detached.
   `Response::stream`'s, held with `until_content` or `until_end`, or read
   with `outputs`; `Fault` is the one error type, with a status, a retry
   and a provider's answer (`is_answer`).
-- `Format`, `Decoder<T>`, `Encoder<T>`: a protocol's codec, bytes to
-  values of its kind and back.
+- `Format`, `Decoder<T>`, `Encoder<T, H>`: a protocol's codec, bytes to
+  values of its kind and back, and its heads.
 
 ## The response pipeline
 
@@ -214,8 +225,8 @@ of their head (`http::Asked`), and opaque traffic by its body
 
 | Crate | What it is |
 |---|---|
-| `core` | The kernel: no HTTP rules, config or kinds; `http` types only as an envelope. |
-| `http` | HTTP at the edges: the adapter (`serve`, `handle`), `Credential`, `Asked`, the transport's rules (`proxy_call`, `credentials`, `CallHeaders`), helpers for HTTP formats (`error_head`, `answered`, `bodiless`). |
+| `core` | The kernel: no HTTP, config or kinds; heads of any wire, unread. |
+| `http` | HTTP at the edges: its heads (`Ask`, `Answer`), the adapter (`serve`, `handle`), `Credential`, `Asked`, the transport's rules (`proxy_call`, `credentials`, `CallHeaders`), conversions (`ask`, `answer`, `call`), helpers for HTTP formats (`error_head`, `answered`, `bodiless`). |
 | `formats` | The `conversation` kind, `Usage`, `OpenAiChat`, `AnthropicMessages`, `relayed`, `opaque`, helpers. |
 | `plugins` | `ModelRouter<I>`, given an accessor for the kind's model. |
 | `server` | `router` (the HTTP adapter; bodies up to 32 MiB, no upgrades), `HttpTransport` (a proxy's stripping, cookies and forwarding headers; its own keys, else the client's `Credential`). |

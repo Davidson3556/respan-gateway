@@ -7,16 +7,16 @@ use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt};
 use http::header::{HOST, UPGRADE};
 use http::{HeaderValue, StatusCode};
-use http_body::Frame;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::BodyExt;
 use respan_gateway_core::{
-    Body, ClientContext, Decoder, Encoder, Fault, Format, Gateway, Plugin, Response, Transport,
-    async_trait, codes,
+    ClientContext, Decoder, Encoder, Exchange, Fault, Format, Gateway, Plugin, ProviderContext,
+    Response, Transport, async_trait, codes,
 };
-use respan_gateway_core::{bytes, futures, http, http_body, http_body_util, serde_json};
+use respan_gateway_core::{bytes, futures, serde_json};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_http::{http, http_body_util};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve, streamed};
 
 /// A message in: its number in its stream, its text, and the bytes it came
@@ -37,15 +37,13 @@ struct Out(String);
 /// A protocol of text messages at `/msg`, one per body or data frame once
 /// upgraded. Its request decoder numbers the messages; its request encoder
 /// numbers the frames it writes (`n|text`), puts a changed text in the path,
-/// names the host a call's [`Host`] extension says, and cannot say "no". The
+/// and cannot say "no". The
 /// message `bad` is not `msg`, and `two` decodes to two inputs.
 struct Msg;
 
-/// The host a msg call names.
-#[derive(Clone)]
-struct Host(&'static str);
-
 impl Format for Msg {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
     type Input = In;
     type Output = Out;
 
@@ -53,44 +51,44 @@ impl Format for Msg {
         "msg"
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
         head.uri.path().starts_with("/msg")
     }
 
-    fn request_decoder(&self, _request: &http::Request<Bytes>) -> Box<dyn Decoder<In>> {
+    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<In>> {
         Box::new(Numbering(0, Arc::from("msg")))
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&In>,
+        client: Option<&respan_gateway_http::Ask>,
+        body: &mut Bytes,
         _streams: bool,
-    ) -> Box<dyn Encoder<In>> {
+    ) -> Box<dyn Encoder<In, respan_gateway_http::Ask>> {
+        let mut head = respan_gateway_formats::call_head(client);
         // The path names the input's text once changed; the client's path
         // says it for the client's own.
-        if let Some(input) = first.filter(|i| i.2.bytes("msg", i).is_none()) {
-            respan_gateway_formats::set_path(request, &format!("/msg/{}", input.1));
-        }
-        if let Some(Host(host)) = request.extensions().get::<Host>().cloned() {
-            request
-                .headers_mut()
-                .insert(HOST, HeaderValue::from_static(host));
-        }
+        let head = move |first: Option<&In>| {
+            if let Some(input) = first.filter(|i| i.2.bytes("msg", i).is_none()) {
+                respan_gateway_formats::set_path(&mut head, &format!("/msg/{}", input.1));
+            }
+            head
+        };
         // The client's bytes, relayed unread, are the first frame.
         let mut numbered = Numbered(0);
-        if !request.body().is_empty() {
-            let text = String::from_utf8_lossy(request.body()).into_owned();
+        if !body.is_empty() {
+            let text = String::from_utf8_lossy(body).into_owned();
             numbered.0 += 1;
-            *request.body_mut() = Bytes::from(format!("1|{text}"));
+            *body = Bytes::from(format!("1|{text}"));
         }
-        Box::new(numbered)
+        respan_gateway_formats::headed(head, Box::new(numbered))
     }
 
     fn response_decoder(
         &self,
-        _head: &http::response::Parts,
-        _request: &http::Request<Bytes>,
+        _head: &respan_gateway_http::Answer,
+        _request: &respan_gateway_http::Ask,
+        _sent: &Bytes,
     ) -> Box<dyn Decoder<Out>> {
         respan_gateway_formats::message_decoder(|raw: Bytes| {
             Ok(Out(String::from_utf8_lossy(&raw).into_owned()))
@@ -99,19 +97,24 @@ impl Format for Msg {
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: Option<&respan_gateway_http::Answer>,
+        request: &respan_gateway_http::Ask,
+        _body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Out>> {
+    ) -> Box<dyn Encoder<Out, respan_gateway_http::Answer>> {
+        let mut head = respan_gateway_formats::answer_head(answer);
         if let Some(fault) = refusal {
-            respan_gateway_http::error_head(head, fault);
-        } else if respan_gateway_http::bodiless(request.method(), head.status) {
-            return respan_gateway_formats::whole::no_body();
+            respan_gateway_http::error_head(&mut head, fault);
+        } else if respan_gateway_http::bodiless(&request.method, head.status) {
+            return respan_gateway_formats::with_head(
+                head,
+                respan_gateway_formats::whole::no_body(),
+            );
         }
-        if request.headers().contains_key(UPGRADE) && head.status == StatusCode::OK {
+        if request.headers.contains_key(UPGRADE) && head.status == StatusCode::OK {
             head.status = StatusCode::SWITCHING_PROTOCOLS;
         }
-        Box::new(Answers)
+        respan_gateway_formats::with_head(head, Box::new(Answers))
     }
 }
 
@@ -144,7 +147,9 @@ impl Decoder<In> for Numbering {
 /// Numbers the frames it writes, each as it came or as its text.
 struct Numbered(usize);
 
-impl Encoder<In> for Numbered {
+impl Encoder<In, ()> for Numbered {
+    fn head(&mut self, _first: Option<&In>) {}
+
     fn encode(&mut self, input: &In, out: &mut BytesMut) -> Result<(), Fault> {
         let text = match input.2.bytes("msg", input) {
             Some(raw) => String::from_utf8_lossy(raw).into_owned(),
@@ -166,7 +171,9 @@ impl Encoder<In> for Numbered {
 /// Writes each answer as its text.
 struct Answers;
 
-impl Encoder<Out> for Answers {
+impl Encoder<Out, ()> for Answers {
+    fn head(&mut self, _first: Option<&Out>) {}
+
     fn encode(&mut self, answer: &Out, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(answer.0.as_bytes());
         Ok(())
@@ -191,26 +198,29 @@ impl Echo {
 
 #[async_trait]
 impl Transport for Echo {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        let (head, body) = call.into_parts();
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
+
+    async fn send(&self, call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+        let (head, body) = (call.head, call.body);
         let seen = self.0.clone();
         seen.lock().map(|mut s| s.push(head.uri.path().into())).ok();
         if let Some(host) = head.headers.get(HOST).and_then(|h| h.to_str().ok()) {
             seen.lock().map(|mut s| s.push(format!("host={host}"))).ok();
         }
-        let echoed = body.into_data_stream().map(move |frame| {
+        let echoed = body.map(move |frame| {
             let noted = match &frame {
                 Ok(bytes) => String::from_utf8_lossy(bytes).into_owned(),
                 Err(fault) => format!("Err({})", fault.code()),
             };
             seen.lock().map(|mut s| s.push(noted)).ok();
-            frame.map(Frame::data)
+            frame
         });
-        let mut resp = http::Response::new(StreamBody::new(echoed).boxed_unsync());
+        let mut resp = respan_gateway_http::fresh_answer();
         if head.headers.contains_key(UPGRADE) {
-            *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            resp.status = StatusCode::SWITCHING_PROTOCOLS;
         }
-        Ok(resp)
+        Ok(Exchange::new(resp, echoed.boxed()))
     }
 }
 
@@ -374,7 +384,7 @@ const UNARY: &str = r#"{"id":"c","choices":[{"message":{"content":"hi"}}]}"#;
 
 /// A client request to `path` with `body`, and headers a proxy passes on or
 /// keeps, and a query.
-fn with_headers(path: &str, body: &'static str) -> http::Request<Body> {
+fn with_headers(path: &str, body: &'static str) -> http::Request<respan_gateway_http::Body> {
     let mut req = post(&format!("{path}?api-version=2"), body);
     for (name, value) in [
         ("x-trace", "7"),
@@ -459,15 +469,17 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
 
     #[async_trait]
     impl Transport for Keeps {
-        async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-            let (mut head, _) = call.into_parts();
+        type Ask = respan_gateway_http::Ask;
+        type Answer = respan_gateway_http::Answer;
+
+        async fn send(&self, call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+            let mut head = call.head;
             respan_gateway_http::proxy_call(&mut head);
             *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(head.headers);
-            let body = http_body_util::Full::new(Bytes::from(UNARY)).map_err(Fault::from);
-            let mut resp = http::Response::new(body.boxed_unsync());
+            let mut resp = http::Response::new(http_body_util::Full::new(Bytes::from(UNARY)));
             let json = HeaderValue::from_static("application/json");
             resp.headers_mut().insert("content-type", json);
-            Ok(resp)
+            Ok(respan_gateway_http::answer(resp))
         }
     }
 
@@ -545,6 +557,8 @@ async fn r9_a_calls_own_input_is_written_from_its_value_alone() {
 struct Noted(Arc<Mutex<Vec<&'static str>>>);
 
 impl Format for Noted {
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
     type Input = Conversation;
     type Output = Reply;
 
@@ -552,39 +566,45 @@ impl Format for Noted {
         AnthropicMessages.name()
     }
 
-    fn accepts(&self, head: &http::request::Parts) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
         AnthropicMessages.accepts(head)
     }
 
-    fn request_decoder(&self, request: &http::Request<Bytes>) -> Box<dyn Decoder<Conversation>> {
+    fn request_decoder(
+        &self,
+        request: &respan_gateway_http::Ask,
+    ) -> Box<dyn Decoder<Conversation>> {
         AnthropicMessages.request_decoder(request)
     }
 
     fn request_encoder(
         &self,
-        request: &mut http::Request<Bytes>,
-        first: Option<&Conversation>,
+        client: Option<&respan_gateway_http::Ask>,
+        body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation>> {
-        AnthropicMessages.request_encoder(request, first, streams)
+    ) -> Box<dyn Encoder<Conversation, respan_gateway_http::Ask>> {
+        AnthropicMessages.request_encoder(client, body, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &http::response::Parts,
-        request: &http::Request<Bytes>,
+        head: &respan_gateway_http::Answer,
+        request: &respan_gateway_http::Ask,
+        sent: &Bytes,
     ) -> Box<dyn Decoder<Reply>> {
-        AnthropicMessages.response_decoder(head, request)
+        AnthropicMessages.response_decoder(head, request, sent)
     }
 
     fn response_encoder(
         &self,
-        head: &mut http::response::Parts,
-        request: &http::Request<Bytes>,
+        answer: Option<&respan_gateway_http::Answer>,
+        request: &respan_gateway_http::Ask,
+        body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply>> {
-        let encoder = AnthropicMessages.response_encoder(head, request, refusal);
-        Box::new(Noting(self.0.clone(), encoder))
+    ) -> Box<dyn Encoder<Reply, respan_gateway_http::Answer>> {
+        let mut encoder = AnthropicMessages.response_encoder(answer, request, body, refusal);
+        let head = encoder.head(None);
+        respan_gateway_formats::with_head(head, Box::new(Noting(self.0.clone(), encoder)))
     }
 
     fn is_content(&self, reply: &Reply) -> bool {
@@ -592,9 +612,14 @@ impl Format for Noted {
     }
 }
 
-struct Noting(Arc<Mutex<Vec<&'static str>>>, Box<dyn Encoder<Reply>>);
+struct Noting(
+    Arc<Mutex<Vec<&'static str>>>,
+    Box<dyn Encoder<Reply, respan_gateway_http::Answer>>,
+);
 
-impl Encoder<Reply> for Noting {
+impl Encoder<Reply, ()> for Noting {
+    fn head(&mut self, _first: Option<&Reply>) {}
+
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
         let noted = match (
             reply.origin(AnthropicMessages.name()),
@@ -715,11 +740,14 @@ async fn r13_the_format_sets_what_the_kernel_never_passes() {
 
     #[async_trait]
     impl Plugin for Named {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             if let Some(host) = self.0 {
-                cx.extensions_mut().insert(Host(host));
+                px.edit_call(move |head: &mut respan_gateway_http::Ask, _: &mut Bytes| {
+                    head.headers.insert(HOST, HeaderValue::from_static(host));
+                    Ok(())
+                });
             }
-            Ok(None)
+            Ok(())
         }
     }
 

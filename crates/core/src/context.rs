@@ -6,19 +6,18 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
-use http::Extensions;
-use http_body_util::BodyExt;
 use tokio::runtime::Handle;
 
 use crate::call::OpenCalls;
-use crate::format::{AnyFormat, Request, is_input};
+use crate::format::{AnyFormat, SharedHead, is_input};
 use crate::gateway::Inner;
 use crate::input::{Input, Later, locked, stream};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
-use crate::{Call, Fault, Filter, Outcome, Plugin, Response};
+use crate::transport::Head;
+use crate::{Call, Exchange, Extensions, Fault, Filter, Outcome, Plugin, Response};
 
-pub(crate) type HeadEdit = Box<dyn FnOnce(&mut http::response::Parts) -> Result<(), Fault> + Send>;
+pub(crate) type HeadEdit = Box<dyn FnOnce(&mut Head) -> Result<(), Fault> + Send>;
 
 /// The client edge's response edits. The `Mutex` is always reached through
 /// `&mut`, so it never locks; it makes the holder `Sync` for end hooks.
@@ -40,9 +39,8 @@ pub(crate) fn unlocked<T>(edits: &mut Mutex<T>) -> &mut T {
 pub struct ClientContext {
     /// The first format served that accepted the request.
     pub(crate) format: Arc<dyn AnyFormat>,
-    /// The head as the adapter handed it over, without its extensions: the
-    /// formats' alone to read.
-    pub(crate) head: Arc<http::request::Parts>,
+    /// The head as the adapter handed it over: the formats' alone to read.
+    pub(crate) head: SharedHead,
     pub(crate) extensions: Extensions,
     /// The provider called if every plugin passes.
     pub(crate) target: Option<String>,
@@ -97,15 +95,14 @@ impl Edge for ClientContext {
 impl ClientContext {
     pub(crate) fn new(
         format: Arc<dyn AnyFormat>,
-        mut head: http::request::Parts,
+        head: SharedHead,
+        extensions: Extensions,
         body: Option<Bytes>,
         later: Option<Later>,
         runtime: Handle,
         gateway: Arc<Inner>,
     ) -> Self {
         let target = gateway.target.clone();
-        let extensions = std::mem::take(&mut head.extensions);
-        let head = Arc::new(head);
         let cut = Arc::default();
         Self {
             input: Input::new(format.clone(), head.clone(), body),
@@ -224,24 +221,29 @@ impl ClientContext {
         }
     }
 
-    /// The client's request, head and body as they arrived.
-    pub(crate) fn request(&self) -> Request {
-        http::Request::from_parts((*self.head).clone(), self.body().clone())
-    }
-
     pub(crate) fn edits(&mut self) -> &mut Edits {
         unlocked(&mut self.edits)
     }
 
     /// Edit the head sent to the client, refusals included, after the
-    /// client's format wrote it. Edits apply the last added first, as
-    /// output filters do. An edit's `Err` or panic refuses the request with
-    /// no edits. The adapter removes what a hop must not carry afterwards.
-    pub fn edit_response_head(
+    /// client's format wrote it: `H` is the client's format's
+    /// [`Answer`](crate::Format::Answer), or the edit fails with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL). Edits apply the last
+    /// added first, as output filters do. An edit's `Err` or panic refuses
+    /// the request with no edits. The adapter removes what a hop must not
+    /// carry afterwards.
+    pub fn edit_response_head<H: Any>(
         &mut self,
-        f: impl FnOnce(&mut http::response::Parts) -> Result<(), Fault> + Send + 'static,
+        f: impl FnOnce(&mut H) -> Result<(), Fault> + Send + 'static,
     ) {
-        self.edits().head.push(Box::new(f));
+        self.edits()
+            .head
+            .push(Box::new(move |head: &mut Head| match head.downcast_mut() {
+                Some(head) => f(head),
+                None => Err(Fault::internal(
+                    "a head edit of another wire than the client's",
+                )),
+            }));
     }
 
     /// Run `filter`, a closure editing each value in place or a
@@ -302,13 +304,13 @@ impl ClientContext {
     /// it as it came until edited. It is read on no provider edge, so a
     /// plugin that meters calls there never sees it: to bill it, carry
     /// what it cost in an extension.
-    pub fn relay<B>(&self, response: http::Response<B>) -> Response
-    where
-        B: http_body::Body<Data = Bytes> + Send + 'static,
-        B::Error: Into<Fault>,
-    {
-        let response = response.map(|body| body.map_err(Into::into).boxed_unsync());
+    /// `H` is the client's format's [`Answer`](crate::Format::Answer), else
+    /// the response fails with [`codes::INTERNAL`](crate::codes::INTERNAL).
+    pub fn relay<H: Any + Send + Sync>(&self, response: Exchange<H>) -> Response {
+        let Exchange { head, body, .. } = response;
+        let response = Exchange::new(Box::new(head) as Head, body);
         let streams = self.later.is_some();
-        Response::decoded(&self.format, &self.request(), response, true, streams)
+        let request = (&*self.head, self.body());
+        Response::decoded(&self.format, request, response, true, streams)
     }
 }

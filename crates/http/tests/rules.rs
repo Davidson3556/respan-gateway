@@ -6,13 +6,15 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Format, Gateway, Plugin, ProviderContext, Response, Transport,
-    async_trait, bytes, futures, http_body_util,
+    ClientContext, Fault, Format, Gateway, Plugin, ProviderContext, Response, Transport,
+    async_trait, bytes, futures,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
+use respan_gateway_http::Body;
+use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_http::http_body_util;
 use respan_gateway_http::{Asked, CallHeaders, Credential};
 use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
 
@@ -44,7 +46,11 @@ fn unary_chat() -> Call {
 /// A provider to add to a gateway.
 type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 
-fn add_provider(name: &str, format: impl Format, transport: impl Transport) -> AddProvider {
+fn add_provider<F, T>(name: &str, format: F, transport: T) -> AddProvider
+where
+    F: Format,
+    T: Transport<Ask = F::Ask, Answer = F::Answer>,
+{
     let name = name.to_owned();
     Box::new(move |g| g.provider(name, format, transport))
 }
@@ -505,7 +511,7 @@ async fn a_bodiless_response_ends_as_its_head_goes_out() {
     #[async_trait]
     impl Plugin for NoContent {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head| {
+            cx.edit_response_head(|head: &mut respan_gateway_http::Answer| {
                 head.status = StatusCode::NO_CONTENT;
                 Ok(())
             });
@@ -548,15 +554,21 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
 
     #[async_trait]
     impl Transport for Cookie {
-        async fn send(&self, _req: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        type Ask = respan_gateway_http::Ask;
+        type Answer = respan_gateway_http::Answer;
+
+        async fn send(
+            &self,
+            _req: respan_gateway_core::Exchange<Self::Ask>,
+        ) -> Result<respan_gateway_core::Exchange<Self::Answer>, Fault> {
             let body = http_body_util::Full::new(bytes::Bytes::from(UNARY));
             let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(
-                http_body_util::BodyExt::map_err(body, Into::into),
+                http_body_util::BodyExt::map_err(body, Fault::from),
             ));
             let headers = resp.headers_mut();
             headers.insert("content-type", HeaderValue::from_static("application/json"));
             headers.insert("set-cookie", HeaderValue::from_static("a=1"));
-            Ok(resp)
+            Ok(respan_gateway_http::answer(resp))
         }
     }
 

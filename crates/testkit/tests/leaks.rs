@@ -4,12 +4,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{StreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use http::StatusCode;
-use http_body_util::{BodyExt, StreamBody};
-use respan_gateway_core::{Body, ClientContext, Fault, Gateway, Plugin, Response, Transport};
-use respan_gateway_core::{async_trait, bytes::Bytes, futures, http, http_body, http_body_util};
+use respan_gateway_core::{
+    Body, ClientContext, Exchange, Fault, Gateway, Plugin, Response, Transport,
+};
+use respan_gateway_core::{async_trait, bytes::Bytes, futures};
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::http;
 use respan_gateway_testkit::{mock, post, read_whole, serve};
 
 const CHAT: &str = "/v1/chat/completions";
@@ -82,9 +84,7 @@ impl Plugin for Probing {
             }
             Answer::Relay => {
                 let (head, chunks) = reply(self.whole).into_parts();
-                Ok(Some(
-                    cx.relay(http::Response::from_parts(head, body(chunks))),
-                ))
+                Ok(Some(cx.relay(Exchange::new(head, body(chunks)))))
             }
         }
     }
@@ -92,8 +92,7 @@ impl Plugin for Probing {
 
 /// Scripted chunks as a body.
 fn body(chunks: Vec<Result<Bytes, Fault>>) -> Body {
-    let frames = stream::iter(chunks).map(|c| c.map(http_body::Frame::data));
-    StreamBody::new(frames).boxed_unsync()
+    stream::iter(chunks).boxed()
 }
 
 /// A provider's answer, whole or streamed.
@@ -113,10 +112,13 @@ struct Scripted {
 
 #[async_trait]
 impl Transport for Scripted {
-    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
-        drop(call.into_body().collect().await?);
+    type Ask = respan_gateway_http::Ask;
+    type Answer = respan_gateway_http::Answer;
+
+    async fn send(&self, call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+        let _: Vec<Bytes> = call.body.try_collect().await?;
         let (head, chunks) = reply(self.whole).into_parts();
-        Ok(http::Response::from_parts(head, body(chunks)))
+        Ok(Exchange::new(head, body(chunks)))
     }
 }
 

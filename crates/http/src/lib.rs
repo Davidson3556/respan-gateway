@@ -1,7 +1,8 @@
 #![warn(missing_docs)]
-//! HTTP at the gateway's edges. The kernel carries `http` heads as an
-//! envelope it never reads; the rules of HTTP live here, at the three
-//! places that own them:
+//! HTTP at the gateway's edges. The kernel knows no HTTP: HTTP is a wire,
+//! a pair of head types ([`Ask`], [`Answer`]) that HTTP formats and
+//! transports share and the kernel carries without reading. The rules of
+//! HTTP live here, at the three places that own them:
 //!
 //! - **The adapter** ([`serve`], [`handle`]) strips the connection's
 //!   headers from a request, lifts the client's credentials into a
@@ -25,22 +26,121 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::FutureExt;
 use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt, TryStreamExt};
 use http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
     RETRY_AFTER, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
-use http_body_util::{BodyExt, Full};
-use respan_gateway_core::{Body, Fault, Gateway, Outcome};
-use respan_gateway_core::{bytes, futures, http, http_body, http_body_util};
+use http_body::Frame;
+use http_body_util::{BodyExt, Full, StreamBody};
+use respan_gateway_core::{Exchange, Extensions, Fault, Gateway, Outcome, codes};
+use respan_gateway_core::{bytes, futures};
+
+/// The crates whose types HTTP formats and transports use, so they build
+/// against the same versions.
+pub use {http, http_body, http_body_util};
 
 pub use credential::Credential;
 pub use transport::{
     CallHeaders, credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
 };
+
+/// The head of an HTTP request: the HTTP formats' and transports'
+/// [`Format::Ask`](respan_gateway_core::Format::Ask).
+pub type Ask = http::request::Parts;
+
+/// The head of an HTTP response: the HTTP formats' and transports'
+/// [`Format::Answer`](respan_gateway_core::Format::Answer).
+pub type Answer = http::response::Parts;
+
+/// An HTTP body of bytes whose error is a [`Fault`], as the adapter hands
+/// out and takes.
+pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, Fault>;
+
+/// A request head with nothing set: a `GET /`, for a format to fill.
+pub fn fresh_ask() -> Ask {
+    http::Request::new(()).into_parts().0
+}
+
+/// A response head with nothing set: a `200`, for a format to fill.
+pub fn fresh_answer() -> Answer {
+    http::Response::new(()).into_parts().0
+}
+
+/// The kernel's body of an HTTP `body`: its data frames; trailers are
+/// dropped.
+pub fn body_of<B>(body: B) -> respan_gateway_core::Body
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Fault>,
+{
+    let frames = http_body_util::BodyStream::new(body.map_err(Into::into));
+    let data = frames.try_filter_map(|frame| futures::future::ready(Ok(frame.into_data().ok())));
+    data.boxed()
+}
+
+/// An HTTP [`Body`] of the kernel's `body`, one data frame per item.
+pub fn into_http_body(body: respan_gateway_core::Body) -> Body {
+    StreamBody::new(body.map_ok(Frame::data)).boxed_unsync()
+}
+
+/// A [`Body`] of `bytes`, in one frame.
+pub fn full(bytes: impl Into<Bytes>) -> Body {
+    Full::new(bytes.into()).map_err(Fault::from).boxed_unsync()
+}
+
+/// An HTTP request as an exchange: its head without its extensions, its
+/// body's data frames, and the kernel's [`Extensions`] it carries as an
+/// extension of its own, if any. For an embedder or a test that hands
+/// values to plugins: `req.extensions_mut().insert(extensions)`.
+pub fn ask<B>(req: http::Request<B>) -> Exchange<Ask>
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Fault>,
+{
+    let (mut head, body) = req.into_parts();
+    let extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
+    head.extensions = http::Extensions::new();
+    Exchange::new(head, body_of(body)).with_extensions(extensions)
+}
+
+/// An HTTP response as an exchange, such as a transport's or a plugin's
+/// own to relay ([`ClientContext::relay`](respan_gateway_core::ClientContext::relay)).
+pub fn answer<B>(resp: http::Response<B>) -> Exchange<Answer>
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Fault>,
+{
+    let (head, body) = resp.into_parts();
+    Exchange::new(head, body_of(body))
+}
+
+/// A call as an HTTP request, its extensions apart, as a transport sends it.
+pub fn call(call: Exchange<Ask>) -> (http::Request<Body>, Extensions) {
+    let Exchange {
+        head,
+        body,
+        extensions,
+        ..
+    } = call;
+    (
+        http::Request::from_parts(head, into_http_body(body)),
+        extensions,
+    )
+}
+
+/// A message a plugin or format built wrong: a bug, a 500.
+pub fn built_wrong(e: http::Error) -> Fault {
+    Fault::internal("an HTTP request or response was built wrong").with_source(e)
+}
+
+/// The status of `fault` as HTTP's, a 500 for a number that is none.
+pub fn status(fault: &Fault) -> StatusCode {
+    StatusCode::from_u16(fault.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
 
 /// The client's request head as the adapter handed it over, without its
 /// credentials ([`Credential`]) or extensions: a read-only view for
@@ -90,29 +190,37 @@ where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
-    let (mut head, body) = req.into_parts();
+    let Exchange {
+        mut head,
+        body,
+        mut extensions,
+        ..
+    } = ask(req);
     let method = head.method.clone();
+    let path = head.uri.path().to_owned();
     strip_named(&mut head.headers);
     for name in HOP_BY_HOP.iter().filter(|&n| n != UPGRADE) {
         head.headers.remove(name);
     }
     if let Some(credential) = Credential::lift(&mut head) {
-        head.extensions.insert(credential);
+        extensions.insert(credential);
     }
-    let mut view = head.clone();
-    view.extensions = http::Extensions::new();
-    head.extensions.insert(Asked(Arc::new(view)));
-    let req = http::Request::from_parts(head, body);
-    let (resp, outcome) = gateway.handle(req, streaming).await;
+    extensions.insert(Asked(Arc::new(head.clone())));
+    let req = Exchange::new(head, body).with_extensions(extensions);
+    let (resp, outcome) = gateway.handle::<Ask, Answer>(req, streaming).await;
     let resp = match resp {
+        Err(fault) if fault.code() == codes::NOT_FOUND => {
+            let text = format!("no format served accepts {method} {path}");
+            plain(&Fault::not_found(text))
+        }
         Err(fault) => plain(&fault),
-        Ok(resp) if resp.status() == StatusCode::SWITCHING_PROTOCOLS && !streaming => {
+        Ok(resp) if resp.head.status == StatusCode::SWITCHING_PROTOCOLS && !streaming => {
             // RFC 9110 15.2.2: a 101 only to a request that asked.
             let asked = "a 101 to a request that did not ask to switch protocols";
             plain(&Fault::internal(asked))
         }
         Ok(resp) => {
-            let (mut head, mut body) = resp.into_parts();
+            let (mut head, mut body) = (resp.head, into_http_body(resp.body));
             outgoing(&mut head);
             if bodiless(&method, head.status) {
                 tokio::spawn(async move { while body.frame().await.is_some() {} });
@@ -181,7 +289,7 @@ pub fn outgoing(head: &mut http::response::Parts) {
 pub fn plain(fault: &Fault) -> http::Response<Body> {
     let body = Full::new(Bytes::from(fault.message().to_owned()));
     let mut resp = http::Response::new(body.map_err(Fault::from).boxed_unsync());
-    *resp.status_mut() = fault.status();
+    *resp.status_mut() = status(fault);
     let text = HeaderValue::from_static("text/plain; charset=utf-8");
     resp.headers_mut().insert(CONTENT_TYPE, text);
     resp
@@ -190,7 +298,7 @@ pub fn plain(fault: &Fault) -> http::Response<Body> {
 /// Write `fault`'s status and its [`retry`](Fault::retry_after), as
 /// `Retry-After` in whole seconds, into `head`: a format's refusal.
 pub fn error_head(head: &mut http::response::Parts, fault: &Fault) {
-    head.status = fault.status();
+    head.status = status(fault);
     if let Some(wait) = fault.retry_after() {
         let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
         head.headers.insert(RETRY_AFTER, HeaderValue::from(secs));

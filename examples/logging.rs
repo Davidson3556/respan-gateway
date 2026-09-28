@@ -22,7 +22,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::http::{Extensions, HeaderValue};
+use respan_gateway_core::Extensions;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, async_trait,
 };
@@ -30,6 +30,7 @@ use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply};
 use respan_gateway_formats::{OpenAiChat, Usage};
 use respan_gateway_http::Asked;
+use respan_gateway_http::http::HeaderValue;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// One record: a request, or one of its calls (`call` names the provider).
@@ -91,7 +92,7 @@ impl Record {
         Self {
             request: ext.get::<RequestId>().map_or(0, |id| id.0),
             call: call.map(Into::into),
-            status: outcome.end.as_ref().err().map(|f| f.status().as_u16()),
+            status: outcome.end.as_ref().err().map(|f| f.status()),
             end: outcome
                 .end
                 .as_ref()
