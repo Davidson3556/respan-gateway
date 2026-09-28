@@ -23,10 +23,12 @@ impl Price {
         Self { input, output }
     }
 
-    /// What `input` and `output` tokens cost, rounded up.
+    /// What `input` and `output` tokens cost, rounded up. Saturates rather
+    /// than wraps, so a client's absurd count prices high, never low.
     pub fn cost(&self, input: u64, output: u64) -> i64 {
-        let per_million = input as i64 * self.input + output as i64 * self.output;
-        (per_million + 999_999) / 1_000_000
+        let part = |n: u64, per: i64| i64::try_from(n).unwrap_or(i64::MAX).saturating_mul(per);
+        let per_million = part(input, self.input).saturating_add(part(output, self.output));
+        per_million.saturating_add(999_999) / 1_000_000
     }
 
     /// What `usage`'s input and output tokens cost; a missing count is 0.

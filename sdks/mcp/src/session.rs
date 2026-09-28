@@ -144,12 +144,17 @@ impl Session {
             lock(&self.routes).posts.push((ids, tx));
         }
         let lines: String = messages.iter().map(|m| format!("{m}\n")).collect();
-        let sent = self.stdin.send(lines.into()).await;
-        sent.map_err(|_| Fault::upstream("the MCP server stopped"))?;
+        // The deadline covers the write too: a child that stops reading
+        // stdin fills the queue, and a POST waiting for room must still end.
+        let until = Instant::now() + self.timeout;
+        match timeout_at(until, self.stdin.send(lines.into())).await {
+            Ok(sent) => sent.map_err(|_| Fault::upstream("the MCP server stopped"))?,
+            Err(_) => return Err(late()),
+        }
         if !asks {
             return Ok(reply(StatusCode::ACCEPTED, None));
         }
-        Ok(events(rx, Some(Instant::now() + self.timeout)))
+        Ok(events(rx, Some(until)))
     }
 }
 
@@ -189,6 +194,12 @@ fn route(routes: &mut Routes, v: Value) {
     }
 }
 
+/// The fault of a POST the child did not take or answer in time.
+fn late() -> Fault {
+    let msg = "the MCP server did not answer in time";
+    Fault::new(StatusCode::GATEWAY_TIMEOUT, TIMED_OUT, msg)
+}
+
 /// An event stream of what `rx` receives, until it closes, or failing at
 /// `until` if any.
 fn events(rx: mpsc::Receiver<Value>, until: Option<Instant>) -> http::Response<Body> {
@@ -199,9 +210,7 @@ fn events(rx: mpsc::Receiver<Value>, until: Option<Instant>) -> http::Response<B
             None => Ok(rx.recv().await),
         };
         let Ok(next) = next else {
-            let late = "the MCP server did not answer in time";
-            let fault = Fault::new(StatusCode::GATEWAY_TIMEOUT, TIMED_OUT, late);
-            return Some((Err(fault), None));
+            return Some((Err(late()), None));
         };
         let event = Bytes::from(sse::event(None, next?));
         Some((Ok(Frame::data(event)), Some(rx)))

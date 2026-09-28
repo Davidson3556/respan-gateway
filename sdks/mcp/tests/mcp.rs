@@ -545,7 +545,7 @@ sed -u -n -e '/"jsonrpc".*"jsonrpc"/{s/.*/{"jsonrpc":"2.0","id":null,"error":{"c
     let session = init(&gw, &[]).await;
     let with = [(SESSION, &session[..])];
     // Far past a pipe's buffer, so writing it waits on the busy server.
-    let big = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+    let big = json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":"echo","arguments":{"text":"x".repeat(1 << 20)}}});
     let posted = gw.handle(request(Method::POST, &big.to_string(), &with));
     let gave_up = tokio::time::timeout(Duration::from_millis(200), posted).await;
@@ -559,6 +559,30 @@ sed -u -n -e '/"jsonrpc".*"jsonrpc"/{s/.*/{"jsonrpc":"2.0","id":null,"error":{"c
         .unwrap_or_else(|_| panic!("the POST is still waiting"));
     let ok = json!({"jsonrpc":"2.0","id":2,"result":{"ok":true}});
     assert_eq!(messages(&body), [ok], "{body}");
+}
+
+#[tokio::test]
+async fn a_post_behind_a_child_that_stopped_reading_still_times_out() {
+    // Answers `initialize`, then never reads stdin again.
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exec sleep 100"#;
+    let transport = StdioTransport::new("sh", ["-c", script]);
+    let gw = gateway(transport.timeout(Duration::from_millis(100)), None);
+    let session = init(&gw, &[]).await;
+    // Fill the pipe and the queue, each POST left once its time is up.
+    let big = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"echo","arguments":{"text":"x".repeat(1 << 20)}}});
+    let with = [(SESSION, &session[..])];
+    let posted = send(&gw, request(Method::POST, &big.to_string(), &with));
+    let _ = tokio::time::timeout(Duration::from_secs(3), posted).await;
+    // More than the write queue holds.
+    for id in 3..75 {
+        let ask = json!({"jsonrpc":"2.0","id":id,"method":"tools/list"}).to_string();
+        let posted = send(&gw, request(Method::POST, &ask, &with));
+        let (status, ..) = tokio::time::timeout(Duration::from_secs(3), posted)
+            .await
+            .unwrap_or_else(|_| panic!("POST {id} waited past its timeout"));
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "POST {id}");
+    }
 }
 
 #[tokio::test]

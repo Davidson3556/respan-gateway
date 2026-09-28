@@ -37,7 +37,10 @@ fn quote(px: &ProviderContext, prices: &HashMap<String, Price>) -> Result<Quote,
     let max_output = chat
         .max_tokens
         .ok_or_else(|| Fault::bad_request("set max_tokens"))?;
-    let reserve = price.cost(input_bound(chat)?, max_output * answers(chat)?);
+    let reserve = price.cost(
+        input_bound(chat)?,
+        max_output.saturating_mul(answers(chat)?),
+    );
     // The ledger holds the key's team and customer with it.
     Ok(Quote::new([key], reserve, move |u: &Usage| price.of(u)))
 }

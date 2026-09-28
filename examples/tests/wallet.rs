@@ -91,3 +91,23 @@ async fn two_spellings_of_max_tokens_cannot_overspend() -> Result<(), Fault> {
     assert_eq!(ledger.spent("team-a"), 0);
     Ok(())
 }
+
+/// A client's absurd `max_tokens` prices high, never wraps to a free hold.
+#[tokio::test]
+async fn a_huge_max_tokens_is_priced_high_not_wrapped() -> Result<(), Fault> {
+    let (mock, ledger) = (MockTransport::new(), wallets());
+    let gw = gateway(&mock, ledger.clone())?;
+    let huge = [
+        r#"{"model":"gpt-x","max_tokens":9223372036854775808,"messages":[{"role":"user","content":"hi"}]}"#,
+        r#"{"model":"gpt-x","max_tokens":2305843009213693952,"n":8,"messages":[{"role":"user","content":"hi"}]}"#,
+    ];
+    for body in huge {
+        assert_eq!(
+            send(&gw, "sk-a1", body).await?,
+            StatusCode::PAYMENT_REQUIRED
+        );
+    }
+    assert!(mock.sent().is_empty());
+    assert_eq!(ledger.spent("team-a"), 0);
+    Ok(())
+}

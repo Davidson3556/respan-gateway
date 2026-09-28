@@ -57,15 +57,13 @@ impl Plugin for Cap {
         if !px.is_kind::<Conversation>() {
             return Ok(()); // no quote: Accounting refuses it
         }
+        let chat = px.input::<Conversation>()?;
+        let limit = chat.max_tokens.map_or(CAP, |n| n.min(CAP));
         let seen = Seen {
-            cap: CAP * answers(px.input::<Conversation>()?)?,
+            cap: CAP.saturating_mul(answers(chat)?),
             ..Seen::default()
         };
         px.extensions_mut().insert(seen.clone());
-        let limit = px
-            .input::<Conversation>()?
-            .max_tokens
-            .map_or(CAP, |n| n.min(CAP));
         px.filter(move |chat: &mut Conversation| {
             chat.max_tokens = Some(limit);
             Ok(())

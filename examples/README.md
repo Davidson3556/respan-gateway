@@ -40,5 +40,11 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 - Use case 8: signed job ids.
 - Use case 2: restoring a placeholder split across streamed tool-argument
   fragments.
+- Use case 2: streamed calls with several choices (`n > 1`) are refused by
+  `pii`, not restored.
+- Use case 1: `file_id` references, and a converted attachment reaching a
+  fallback in another format.
+- Use case 8: durable holds and jobs that survive a restart (`jobs` keeps
+  results in memory; its header shows a durable store).
 - The text SDK reads Anthropic tool blocks (`tool_use`, `tool_result`) as
   content with no text form, so it refuses them.
