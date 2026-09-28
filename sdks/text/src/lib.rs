@@ -63,7 +63,7 @@ pub trait Readable: Clone {
 /// `numbers`.
 fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault> {
     match v {
-        Value::String(s) => edit_string(s, false, edit),
+        Value::String(s) => edit_string(s, edit),
         Value::Number(n) if numbers => {
             let mut text = n.to_string();
             edit(&mut text)?;
@@ -86,19 +86,24 @@ fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault>
 }
 
 /// Runs `edit` on content a format kept as it came, as [`edit_json`] does,
-/// but a tool call's streamed arguments (OpenAI `function.arguments`,
-/// Anthropic `partial_json`) are JSON text: see [`edit_string`]. `parent`
-/// is the name of the object `v` is in.
-fn edit_raw(v: &mut Value, parent: &str, edit: &mut Edit) -> Result<(), Fault> {
+/// numbers of a tool call's input included. A tool call's streamed
+/// arguments (OpenAI `delta` `arguments`, Anthropic `partial_json`) are
+/// pieces of JSON text: see [`edit_json_text`]. `parent` is the name of
+/// the object `v` is in; `delta` whether it is in a stream's delta.
+fn edit_raw(v: &mut Value, parent: &str, delta: bool, edit: &mut Edit) -> Result<(), Fault> {
     match v {
-        Value::Array(a) => a.iter_mut().try_for_each(|v| edit_raw(v, parent, edit)),
+        Value::Array(a) => a
+            .iter_mut()
+            .try_for_each(|v| edit_raw(v, parent, delta, edit)),
         Value::Object(o) => {
             for (mut name, mut value) in std::mem::take(o) {
-                let json_text = (parent == "function" && name == "arguments")
+                let arguments = ["function", "function_call"].contains(&parent);
+                let json_text = (delta && arguments && name == "arguments")
                     || (parent.is_empty() && name == "partial_json");
                 match &mut value {
-                    Value::String(s) if json_text => edit_string(s, true, edit)?,
-                    _ => edit_raw(&mut value, &name, edit)?,
+                    Value::String(s) if json_text => edit_json_text(s, edit)?,
+                    _ if name == "input" => edit_json(&mut value, true, edit)?,
+                    _ => edit_raw(&mut value, &name, delta || name == "delta", edit)?,
                 }
                 edit(&mut name)?;
                 o.insert(name, value);
@@ -117,9 +122,8 @@ fn edit_fields(fields: &mut Map<String, Value>, edit: &mut Edit) -> Result<(), F
 }
 
 /// Runs `edit` on `text`, or inside it, numbers included, if it holds a
-/// JSON object or array, written back only if changed. A `json_text` that
-/// is not is a piece of JSON text: see [`edit_json_text`].
-fn edit_string(text: &mut String, json_text: bool, edit: &mut Edit) -> Result<(), Fault> {
+/// JSON object or array, written back only if changed.
+fn edit_string(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
     match serde_json::from_str::<Value>(text) {
         Ok(mut json @ (Value::Object(_) | Value::Array(_))) => {
             let before = json.clone();
@@ -129,7 +133,6 @@ fn edit_string(text: &mut String, json_text: bool, edit: &mut Edit) -> Result<()
             }
             Ok(())
         }
-        _ if json_text => edit_json_text(text, edit),
         _ => edit(text),
     }
 }
@@ -212,7 +215,7 @@ impl Readable for Reply {
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
-        Piece::Other { raw, .. } => edit_raw(Arc::make_mut(raw), "", edit),
+        Piece::Other { raw, .. } => edit_raw(Arc::make_mut(raw), "", false, edit),
         _ => Ok(()),
     }
 }

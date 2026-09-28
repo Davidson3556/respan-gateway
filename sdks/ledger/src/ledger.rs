@@ -114,7 +114,9 @@ impl MemoryLedger {
     pub fn available(&self, account: &str) -> Amount {
         let books = self.books();
         let a = books.accounts.get(account);
-        a.map_or(0, |a| a.limit - a.spent - a.held)
+        a.map_or(0, |a| {
+            a.limit.saturating_sub(a.spent).saturating_sub(a.held)
+        })
     }
 
     /// What `account` has been charged; 0 if unknown.
@@ -132,7 +134,7 @@ impl MemoryLedger {
         for hold in holds.values_mut().filter(|h| h.expires <= now) {
             for name in &hold.chain {
                 if let Some(a) = accounts.get_mut(name) {
-                    a.held -= hold.amount;
+                    a.held = a.held.saturating_sub(hold.amount);
                 }
             }
             hold.amount = 0;
@@ -166,8 +168,8 @@ impl Books {
         };
         for name in &hold.chain {
             if let Some(a) = self.accounts.get_mut(name) {
-                a.held -= hold.amount;
-                a.spent += spent;
+                a.held = a.held.saturating_sub(hold.amount);
+                a.spent = a.spent.saturating_add(spent);
             }
         }
     }
@@ -190,7 +192,7 @@ impl Ledger for MemoryLedger {
         let amount = amount.max(0);
         for name in &chain {
             let a = &books.accounts[name];
-            let available = a.limit - a.spent - a.held;
+            let available = a.limit.saturating_sub(a.spent).saturating_sub(a.held);
             if available < amount {
                 let msg = format!("account '{name}' cannot cover this call");
                 let details = json!({ "account": name, "available": available });
@@ -200,7 +202,7 @@ impl Ledger for MemoryLedger {
         }
         for name in &chain {
             if let Some(a) = books.accounts.get_mut(name) {
-                a.held += amount;
+                a.held = a.held.saturating_add(amount);
             }
         }
         let expires = Instant::now() + ttl;

@@ -16,14 +16,14 @@ fn run(filter: &mut impl Filter<Reply>, replies: Vec<Reply>) -> Result<Vec<Reply
 fn call(arguments: &str) -> Reply {
     Reply::other(
         "openai",
-        json!([{ "index": 0, "tool_calls": [{ "function": { "arguments": arguments } }] }]),
+        json!([{ "index": 0, "delta": { "tool_calls": [{ "function": { "arguments": arguments } }] } }]),
     )
 }
 fn args(out: &[Reply]) -> String {
     out.iter()
         .flat_map(|r| &r.content)
         .filter_map(|p| match p {
-            Piece::Other { raw, .. } => raw[0]["tool_calls"][0]["function"]["arguments"]
+            Piece::Other { raw, .. } => raw[0]["delta"]["tool_calls"][0]["function"]["arguments"]
                 .as_str()
                 .map(str::to_owned),
             _ => None,
@@ -169,4 +169,67 @@ fn text_after_a_backslash_in_a_tool_call_is_read() {
     });
     assert!(read.is_ok());
     assert!(seen.iter().any(|t| t.contains("bob@x.io")), "{seen:?}");
+}
+
+/// OpenAI's older `functions` stream: `delta.function_call.arguments`.
+#[test]
+fn a_legacy_function_call_fragment_is_escaped() {
+    let vault = Placeholders::default();
+    let path = vault.hide("PATH", "C:\\Users\\bob");
+    let frags = ["{\"dir\":\"".to_owned(), path, "\"}".to_owned()];
+    let delta =
+        |f: &String| json!([{ "index": 0, "delta": { "function_call": { "arguments": f } } }]);
+    let out = run(
+        &mut Holdback::new(vault),
+        frags
+            .iter()
+            .map(|f| Reply::other("openai", delta(f)))
+            .collect(),
+    )
+    .unwrap_or_default();
+    let joined: String = out
+        .iter()
+        .flat_map(|r| &r.content)
+        .filter_map(|p| match p {
+            Piece::Other { raw, .. } => raw[0]["delta"]["function_call"]["arguments"]
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    let parsed: Value = serde_json::from_str(&joined).unwrap_or_default();
+    assert_eq!(parsed["dir"], "C:\\Users\\bob", "{joined}");
+}
+
+/// A streamed piece that happens to parse is still a piece, not a value.
+#[test]
+fn a_streamed_piece_that_parses_is_edited_as_text() {
+    let mut joined = String::new();
+    for f in ["{\"note\":\"ids ", "[4111111111111111]", "\"}"] {
+        let raw = json!([{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": f } }] } }]);
+        let mut reply = Reply::other("openai", raw);
+        let edited = reply.edit_all(|t| {
+            *t = t.replace("4111111111111111", "[card]");
+            Ok(())
+        });
+        assert!(edited.is_ok());
+        if let Some(Piece::Other { raw, .. }) = reply.content.first() {
+            let piece = raw[0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str();
+            joined.push_str(piece.unwrap_or_default());
+        }
+    }
+    let parsed: Value = serde_json::from_str(&joined).unwrap_or_default();
+    assert_eq!(parsed["note"], "ids [[card]]", "{joined}");
+}
+
+/// A reply's tool call is read alike in both formats, numbers included.
+#[test]
+fn a_tool_calls_numbers_are_read_in_both_formats() {
+    let anthropic = json!({ "type": "tool_use", "id": "t", "name": "pay", "input": { "card": 4111111111111111u64 } });
+    let openai = json!([{ "index": 0, "message": { "tool_calls": [{ "function": {
+        "name": "pay", "arguments": "{\"card\":4111111111111111}" } }] } }]);
+    for (format, raw) in [("anthropic", anthropic), ("openai", openai)] {
+        let all = Reply::other(format, raw).read_all().unwrap_or_default();
+        assert!(all.contains("4111111111111111"), "{format}: {all:?}");
+    }
 }

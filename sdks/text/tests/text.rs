@@ -278,12 +278,13 @@ fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault>
 #[test]
 fn a_whole_tool_call_is_restored_but_not_one_split_across_fragments() {
     let call = |arguments: &str| {
-        let raw =
-            json!([{ "index": 0, "tool_calls": [{ "function": { "arguments": arguments } }] }]);
+        let raw = json!([{ "index": 0, "delta": { "tool_calls": [{ "function": { "arguments": arguments } }] } }]);
         Reply::other("openai", raw)
     };
     let arguments = |reply: &Reply| match &reply.content[..] {
-        [Piece::Other { raw, .. }] => raw[0]["tool_calls"][0]["function"]["arguments"].clone(),
+        [Piece::Other { raw, .. }] => {
+            raw[0]["delta"]["tool_calls"][0]["function"]["arguments"].clone()
+        }
         other => panic!("{other:?}"),
     };
     let whole = run(
@@ -534,8 +535,7 @@ fn a_value_restored_into_a_streamed_tool_fragment_is_escaped() {
     let vault = Placeholders::default();
     let ph = vault.hide("NAME", "Robert \"Bob\" Smith");
     let call = |arguments: &str| {
-        let raw =
-            json!([{ "index": 0, "tool_calls": [{ "function": { "arguments": arguments } }] }]);
+        let raw = json!([{ "index": 0, "delta": { "tool_calls": [{ "function": { "arguments": arguments } }] } }]);
         Reply::other("openai", raw)
     };
     let frags = [format!("{{\"to\":\"{ph}"), "\"}".to_owned()];
@@ -547,7 +547,7 @@ fn a_value_restored_into_a_streamed_tool_fragment_is_escaped() {
     let joined: String = out
         .iter()
         .filter_map(|r| match &r.content[..] {
-            [Piece::Other { raw, .. }] => raw[0]["tool_calls"][0]["function"]["arguments"]
+            [Piece::Other { raw, .. }] => raw[0]["delta"]["tool_calls"][0]["function"]["arguments"]
                 .as_str()
                 .map(str::to_owned),
             _ => None,

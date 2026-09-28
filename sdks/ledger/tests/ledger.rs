@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use respan_gateway_core::Fault;
 use respan_gateway_ledger::{HoldId, INSUFFICIENT_FUNDS, Ledger, MemoryLedger};
 
 const TTL: Duration = Duration::from_secs(60);
@@ -122,4 +123,22 @@ async fn a_hold_never_settled_is_forgotten_after_a_grace_period() {
     tokio::time::advance(Duration::from_millis(2001)).await;
     assert!(ledger.settle(&id, 250).await.is_ok());
     assert_eq!((ledger.spent("acme"), ledger.available("acme")), (0, 1000));
+}
+
+#[tokio::test]
+async fn settling_huge_amounts_saturates_never_wraps() -> Result<(), Fault> {
+    let ledger = MemoryLedger::new();
+    ledger.open("a", None, 100);
+    let accounts = ["a".to_owned()];
+    let (first, second) = (HoldId::new(), HoldId::new());
+    ledger
+        .reserve(&first, &accounts, 1, Duration::from_secs(60))
+        .await?;
+    ledger
+        .reserve(&second, &accounts, 1, Duration::from_secs(60))
+        .await?;
+    ledger.settle(&first, i64::MAX).await?;
+    ledger.settle(&second, i64::MAX).await?;
+    assert!(ledger.available("a") <= 0, "{}", ledger.available("a"));
+    Ok(())
 }
