@@ -20,7 +20,8 @@ use crate::{Body, Fault};
 pub struct Response {
     pub(crate) head: http::response::Parts,
     pub(crate) body: Source,
-    /// What [`Response::ready`] read, to be read again first.
+    /// What [`Response::until_content`] or [`Response::until_end`] read,
+    /// to be read again first.
     pub(crate) ahead: VecDeque<Batch>,
     /// Its outputs' type; `None` for a refusal, which has none.
     pub(crate) output: Option<TypeId>,
@@ -140,16 +141,34 @@ impl Response {
         self
     }
 
-    /// Read it to its first content or its end, keeping what was read for
-    /// whoever reads or sends it next, such as to fall back or race. Content
-    /// is a provider's output its format calls content
-    /// ([`Format::is_content`](crate::Format::is_content)), before any
-    /// filter, or any output a plugin made. A bodiless response, a 101 or one already
-    /// ready is ready at once. `Err` with its fault if a success fails first; an error
-    /// status is the provider's answer, to send as it came.
-    pub async fn ready(mut self) -> Result<Response, Fault> {
-        // What is ahead was judged by an earlier `ready`.
+    /// Read it until its first content, a failure, or its end, and hold
+    /// what was read, so it is still unsent and a plugin can decide on it
+    /// or fall back. Content is a provider's output its format calls
+    /// content ([`Format::is_content`](crate::Format::is_content)), before
+    /// any filter, or any output a plugin made. A bodiless response, a 101
+    /// or one read this far already returns at once. `Err` with its fault
+    /// if a success fails first; an error status is the provider's answer,
+    /// to send as it came.
+    pub async fn until_content(self) -> Result<Response, Fault> {
+        self.read_until(false).await
+    }
+
+    /// Read it to its end and hold all of it: its head as it came, every
+    /// output, and its end, `Ok` or a failure, such as to race calls for
+    /// completion. Sent, it is delivered as it would have been unread,
+    /// byte for byte when relayed unedited. Its call ends as the batch
+    /// holding its end is sent, read or dropped. A 101, whose body streams
+    /// only once sent, returns at once. `Err` as for
+    /// [`until_content`](Response::until_content): a success failing
+    /// before any content; a later failure is held.
+    pub async fn until_end(self) -> Result<Response, Fault> {
+        self.read_until(true).await
+    }
+
+    /// Read until its first content, or its end if `to_end`, into `ahead`.
+    async fn read_until(mut self, to_end: bool) -> Result<Response, Fault> {
         let switched = self.head.status == StatusCode::SWITCHING_PROTOCOLS;
+        // What is ahead was judged by an earlier read.
         let mut content = switched || !self.ahead.is_empty();
         loop {
             let end = self.ahead.iter().find_map(|batch| batch.end.as_ref());
@@ -158,10 +177,10 @@ impl Response {
                     return Err(fault.clone());
                 }
                 Some(_) => return Ok(self),
-                None if content => return Ok(self),
+                None if switched || (content && !to_end) => return Ok(self),
                 None => {
                     let (batch, read) = self.body.next().await;
-                    content = read;
+                    content |= read;
                     if !batch.is_empty() {
                         self.ahead.push_back(batch);
                     }

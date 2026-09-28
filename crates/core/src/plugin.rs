@@ -53,10 +53,12 @@ impl Default for Outcome {
 /// })?;
 /// ```
 ///
-/// To race calls, answer with the first ready ([`Response::ready`]) and drop
-/// the others, which end [`codes::ABANDONED`](crate::codes::ABANDONED). To
-/// tell the winner in `on_provider_end`, give each call a flag
-/// ([`Call::with_extension`](crate::Call::with_extension)) set once ready:
+/// To race calls, answer with the first read to its content
+/// ([`Response::until_content`]), or to its end ([`Response::until_end`]),
+/// and drop the others, which end
+/// [`codes::ABANDONED`](crate::codes::ABANDONED). To tell the winner in
+/// `on_provider_end`, give each call a flag
+/// ([`Call::with_extension`](crate::Call::with_extension)) set once read:
 ///
 /// ```ignore
 /// #[derive(Clone, Default)]
@@ -66,7 +68,7 @@ impl Default for Outcome {
 ///     let won = Won::default();
 ///     let call = cx.call(provider).with_extension(won.clone());
 ///     Box::pin(async move {
-///         let resp = call.await?.ready().await?;
+///         let resp = call.await?.until_content().await?;
 ///         won.0.store(true, Ordering::Relaxed);
 ///         Ok::<_, Fault>(resp)
 ///     })
@@ -82,8 +84,9 @@ pub trait Plugin: Send + Sync + 'static {
     /// pass, the target is called ([`ClientContext::set_target`]); with none,
     /// the request is refused 404 [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
     ///
-    /// To fall back, answer with the first call whose ready response
-    /// ([`Response::ready`]) is a success, else the last one's.
+    /// To fall back, answer with the first call whose response, read to its
+    /// content ([`Response::until_content`]), is a success, else the last
+    /// one's.
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         Ok(None)
     }

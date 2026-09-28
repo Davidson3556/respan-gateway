@@ -1,6 +1,6 @@
 # 0006. Streams both ways
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0011](0011-read-until-content-or-end.md)
 - Date: 2026-09-27
 
 ## Context

@@ -907,24 +907,24 @@ async fn inputs_are_taken_only_by_a_reader_that_is_polled() {
 }
 
 #[tokio::test]
-async fn a_101_is_ready_at_once() {
-    /// Answers with the target's response once it is ready.
-    struct Ready;
+async fn a_101_is_read_until_content_at_once() {
+    /// Answers with the target's response once read to its content.
+    struct UntilContent;
 
     #[async_trait]
-    impl Plugin for Ready {
+    impl Plugin for UntilContent {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Ok(Some(cx.call("echo").await?.ready().await?))
+            Ok(Some(cx.call("echo").await?.until_content().await?))
         }
     }
 
     let (echo, mock) = (Echo::default(), MockTransport::new());
-    let (gw, _) = talk(&echo, &mock, vec![Arc::new(Ready)]);
+    let (gw, _) = talk(&echo, &mock, vec![Arc::new(UntilContent)]);
     let (send, req) = upgrade();
 
     // The echo says nothing until the client does, which waits for the 101.
     let handled = tokio::time::timeout(Duration::from_secs(5), gw.handle(req)).await;
-    let (resp, _) = handled.unwrap_or_else(|_| panic!("ready waited for a 101's content"));
+    let (resp, _) = handled.unwrap_or_else(|_| panic!("until_content waited for a 101's content"));
     say(&send, r#"{"say":"a"}"#);
     drop(send);
 

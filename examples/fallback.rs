@@ -18,7 +18,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::conversation::{Conversation, set_model};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
-use respan_gateway_routing::{Attempt, Backoff, Watchdog, first_success, race};
+use respan_gateway_routing::{Attempt, Backoff, Until, Watchdog, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
 /// Falls back from the target to Anthropic, or hedges it with `openai-eu`.
@@ -31,12 +31,16 @@ impl Plugin for Resilient {
         let Some(target) = target.filter(|_| cx.is_kind::<Conversation>()) else {
             return Ok(None);
         };
+        // Each answer is judged at its first content; `Until::End` would
+        // hold each whole and race for the first to finish.
         if cx.head().headers.contains_key("x-hedge") {
             let calls = [cx.call(target), cx.call("openai-eu")];
-            return race(calls, Duration::from_millis(200)).await.map(Some);
+            let stagger = Duration::from_millis(200);
+            return race(calls, stagger, Until::Content).await.map(Some);
         }
         let backoff = Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5));
-        first_success([cx.call(target), cx.call("anthropic")], &backoff)
+        let calls = [cx.call(target), cx.call("anthropic")];
+        first_success(calls, &backoff, Until::Content)
             .await
             .map(Some)
     }

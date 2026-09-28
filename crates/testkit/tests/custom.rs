@@ -1706,14 +1706,14 @@ impl respan_gateway_core::Transport for Open {
 }
 
 #[tokio::test]
-async fn a_response_of_no_kind_is_ready_at_its_first_bytes_or_its_failure() {
-    /// Sends the call's answer once ready, or refuses with its failure.
+async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_failure() {
+    /// Sends the call's answer read to its content, or refuses with its failure.
     struct Race;
 
     #[async_trait]
     impl Plugin for Race {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Ok(Some(cx.call("any").await?.ready().await?))
+            Ok(Some(cx.call("any").await?.until_content().await?))
         }
     }
 
@@ -1726,7 +1726,7 @@ async fn a_response_of_no_kind_is_ready_at_its_first_bytes_or_its_failure() {
     );
     assert!(
         started.await.is_ok(),
-        "ready waits for an open stream's end"
+        "until_content waits for an open stream's end"
     );
 
     let mock = MockTransport::new();

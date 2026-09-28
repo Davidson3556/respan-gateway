@@ -339,7 +339,7 @@ impl Reply {
         })
     }
 
-    /// Whether it is content, what `ready` commits on: a start, content or
+    /// Whether it is content, what `until_content` commits on: a start, content or
     /// a finish. A keep-alive or usage alone is not.
     pub fn is_content(&self) -> bool {
         self.start.is_some() || !self.content.is_empty() || self.finish.is_some()

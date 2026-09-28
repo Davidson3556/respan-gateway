@@ -1,6 +1,6 @@
 # 0009. Core cleanups
 
-- Status: accepted, amended by [0010](0010-usage-out-of-core.md)
+- Status: accepted, amended by [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md)
 - Date: 2026-09-28
 
 ## Context

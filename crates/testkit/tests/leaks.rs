@@ -47,7 +47,7 @@ impl Drop for Probe {
 enum Answer {
     /// Passes, so the gateway calls its target.
     Target,
-    /// Calls `openai`, drops its ready response, and falls back to `backup`.
+    /// Calls `openai`, drops its response read to its content, and falls back to `backup`.
     Fallback,
     /// Relays its own response.
     Relay,
@@ -76,9 +76,9 @@ impl Plugin for Probing {
         match self.answer {
             Answer::Target => Ok(None),
             Answer::Fallback => {
-                let first = cx.call("openai").await?.ready().await?;
+                let first = cx.call("openai").await?.until_content().await?;
                 drop(first);
-                Ok(Some(cx.call("backup").await?.ready().await?))
+                Ok(Some(cx.call("backup").await?.until_content().await?))
             }
             Answer::Relay => {
                 let (head, chunks) = reply(self.whole).into_parts();

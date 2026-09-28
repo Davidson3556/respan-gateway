@@ -4,15 +4,16 @@
 //! bound on a provider's head and body ([`Watchdog`]), and each attempt's [`Role`]
 //! ([`Attempt`]).
 //!
-//! [`Response::ready`] is the commit point: both helpers return a success
-//! only once its first content arrived, and never retry after that, so a
-//! stream that fails later reaches the client cut short, not replayed.
-//! A fallback or hedge is a few lines of `on_client`:
+//! Both helpers read each answer [`Until`] a stopping point, by default its
+//! first content ([`Response::until_content`]): they return a success only
+//! once it got there, and never retry after that, so a stream that fails
+//! later reaches the client cut short, not replayed. A fallback or hedge is
+//! a few lines of `on_client`:
 //!
 //! ```ignore
 //! let calls = ["openai", "anthropic"].map(|p| cx.call(p));
 //! let backoff = Backoff::new(3, Duration::from_millis(200), Duration::from_secs(10));
-//! first_success(calls, &backoff).await.map(Some)
+//! first_success(calls, &backoff, Until::Content).await.map(Some)
 //! ```
 
 use std::sync::Arc;
@@ -123,13 +124,35 @@ impl Attempt {
     }
 }
 
-/// An attempt and its answer, read to its first content.
+/// How far [`first_success`] and [`race`] read an answer before they judge
+/// it: a success that fails before that point is retried, or loses the
+/// race; one that fails after it is committed.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Until {
+    /// Its head: the first success status wins, however its body goes.
+    Head,
+    /// Its first content ([`Response::until_content`]): what a client
+    /// streaming it would see first.
+    #[default]
+    Content,
+    /// Its end ([`Response::until_end`]), held whole until sent: the first
+    /// to finish wins. A success failing after its first content counts as
+    /// finished, as the response does not say how it ended.
+    End,
+}
+
+/// An attempt and its answer, read [`Until`] a point.
 type Answer = (Attempt, Result<Response, Fault>);
 
-/// Send `call` as `attempt` and read it to its first content.
-async fn send(call: Call, attempt: Attempt) -> Answer {
+/// Send `call` as `attempt` and read it `until` a point.
+async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
     let answer = match call.with_extension(attempt.clone()).await {
-        Ok(resp) => resp.ready().await,
+        Ok(resp) => match until {
+            Until::Head => Ok(resp),
+            Until::Content => resp.until_content().await,
+            Until::End => resp.until_end().await,
+        },
         Err(fault) => Err(fault),
     };
     (attempt, answer)
@@ -154,18 +177,19 @@ fn last(answer: Option<Answer>) -> Result<Response, Fault> {
 }
 
 /// Each call in turn, retried as `backoff` says, until one's response is a
-/// success with content ([`Response::ready`]); else the last answer, so the
+/// success read `until` its stopping point; else the last answer, so the
 /// client sees the last 429 and its `Retry-After`. A call that is refused
 /// or cannot be made, such as with a `config` fault, moves on at once; an
-/// unreachable provider or a success failing before content is retried.
+/// unreachable provider or a success failing before the point is retried.
 pub async fn first_success(
     calls: impl IntoIterator<Item = Call>,
     backoff: &Backoff,
+    until: Until,
 ) -> Result<Response, Fault> {
     let (mut previous, mut index) = (None, 0);
     for call in calls {
         for tries in 1.. {
-            let (attempt, answer) = send(call.clone(), Attempt::new(index)).await;
+            let (attempt, answer) = send(call.clone(), Attempt::new(index), until).await;
             index += 1;
             if is_success(&answer) {
                 return win((attempt, answer));
@@ -188,11 +212,13 @@ pub async fn first_success(
 }
 
 /// Start each call `stagger` after the one before, or at once when every
-/// call started has failed. The first success with content wins; the
-/// others are dropped, so they end `abandoned`. With none, the last answer.
+/// call started has failed. The first success read `until` its stopping
+/// point wins; the others are dropped, so they end `abandoned`. With none,
+/// the last answer.
 pub async fn race(
     calls: impl IntoIterator<Item = Call>,
     stagger: Duration,
+    until: Until,
 ) -> Result<Response, Fault> {
     // A century stands for "never hedge": `Duration::MAX` would overflow.
     let stagger = stagger.min(Duration::from_secs(100 * 365 * 24 * 3600));
@@ -214,7 +240,7 @@ pub async fn race(
             }
             () = &mut next, if waiting.peek().is_some() => {
                 if let Some((call, index)) = waiting.next() {
-                    running.push(send(call, Attempt::new(index)).boxed());
+                    running.push(send(call, Attempt::new(index), until).boxed());
                 }
                 next.as_mut().reset(tokio::time::Instant::now() + stagger);
             }

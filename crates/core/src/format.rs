@@ -84,7 +84,7 @@ pub trait Format: Send + Sync + 'static {
     /// [`Fault::truncated`]. Hold an output that shows nothing yet, such as a
     /// start, until the next that does, and drop it if the response fails
     /// first, so that failure can still be refused
-    /// ([`Response::ready`](crate::Response::ready)).
+    /// ([`Response::until_content`](crate::Response::until_content)).
     fn response_decoder(
         &self,
         response: &http::response::Parts,
@@ -109,7 +109,7 @@ pub trait Format: Send + Sync + 'static {
     ) -> Box<dyn Encoder<Self::Output>>;
 
     /// Whether `output` is content: what
-    /// [`Response::ready`](crate::Response::ready) commits on. A keep-alive,
+    /// [`Response::until_content`](crate::Response::until_content) commits on. A keep-alive,
     /// framing, or a message carrying only usage is not. Every output,
     /// content or not, reaches filters. By default, true.
     fn is_content(&self, _output: &Self::Output) -> bool {

@@ -19,6 +19,7 @@ and call once. Tests state its promises; the
 | [0008](decisions/0008-events-carry-their-bytes.md) | Each message is one value that keeps its bytes (usage amended by 0010) |
 | [0009](decisions/0009-core-cleanups.md) | One default target; less policy in the kernel (usage amended by 0010) |
 | [0010](decisions/0010-usage-out-of-core.md) | The kernel counts no usage; filters see every message; `is_content` |
+| [0011](decisions/0011-read-until-content-or-end.md) | Read a response `until_content` or `until_end`, held unsent |
 
 ## Two edges
 
@@ -108,8 +109,8 @@ tokio runtime, which runs end hooks detached.
   `Sync` future, sent when awaited.
 - `Filter<T>` edits inputs (the only way) or outputs; `Outcome` says how
   an edge ended; `Response` is a call's, `cx.relay`'s or
-  `Response::stream`'s, read with `ready` or `outputs`; `Fault` is the one
-  error type.
+  `Response::stream`'s, held with `until_content` or `until_end`, or read
+  with `outputs`; `Fault` is the one error type.
 - `Format`, `Decoder<T>`, `Encoder<T>`: a protocol's codec, bytes to
   values of its kind and back.
 
@@ -158,23 +159,32 @@ tokio runtime, which runs end hooks detached.
 ## Routing
 
 A router sets the target and passes. A fallback answers with the first
-ready success, else the last answer, so a client sees the last 429 and its
-`Retry-After`. `ready` reads to the first content (a provider's output
-its format calls content, `Format::is_content`, as sent, before filters,
-so neither a keep-alive nor usage alone; or any output a plugin made);
-it is `Err` for a success that fails first, and passes an error status:
+success read to its content, else the last answer, so a client sees the
+last 429 and its `Retry-After`. `until_content` reads until the first
+content (a provider's output its format calls content,
+`Format::is_content`, as sent, before filters, so neither a keep-alive
+nor usage alone; or any output a plugin made), a failure or the end, and
+holds what it read, unsent; it is `Err` for a success that fails first,
+and passes an error status:
 
 ```rust
 let mut last = Err(Fault::upstream("no provider to try"));
 for name in &self.0 {
     last = match cx.call(name).await {
-        Ok(resp) => resp.ready().await,
+        Ok(resp) => resp.until_content().await,
         Err(fault) => Err(fault),
     };
     if last.as_ref().is_ok_and(|r| r.head().status.is_success()) { break }
 }
 last.map(Some)
 ```
+
+`until_end` reads to the end and holds it all, head, outputs and end,
+`Ok` or a failure, so a plugin can race calls for completion; sent, it
+goes out as it would have unread, byte for byte for an unedited relay.
+Either way the call ends when the batch holding its end is sent, read or
+dropped ([0011](decisions/0011-read-until-content-or-end.md)).
+`sdks/routing` takes the stopping point as `Until { Head, Content, End }`.
 
 A judge's call brings its own input and is read:
 `cx.call(p).with_input(prompt).await?.outputs::<Reply>()`. A change for

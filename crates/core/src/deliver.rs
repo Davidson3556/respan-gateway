@@ -157,7 +157,8 @@ struct Pipe {
     source: Source,
     /// A refusal carries its fault alone; filters end with the request.
     refusal: bool,
-    /// Batches to write before the source's: what [`Response::ready`] read.
+    /// Batches to write before the source's: what
+    /// [`Response::until_content`] or [`Response::until_end`] read.
     ahead: VecDeque<Batch>,
     encoder: Box<dyn AnyEncoder>,
     hooks: EndHooks<ClientContext>,

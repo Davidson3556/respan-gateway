@@ -34,7 +34,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Content, Conversation};
-use respan_gateway_routing::{Backoff, first_success};
+use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 use tokio::time::Instant;
 
@@ -191,7 +191,9 @@ struct Fallback;
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let calls = ["text-only", "reads-pdf"].map(|p| cx.call(p));
-        first_success(calls, &Backoff::once()).await.map(Some)
+        first_success(calls, &Backoff::once(), Until::Content)
+            .await
+            .map(Some)
     }
 }
 

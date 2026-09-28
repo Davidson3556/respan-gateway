@@ -650,7 +650,7 @@ async fn a_broken_unary_success_is_refused_as_the_providers_failure() {
     let cut = r#"{"id":"#;
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, cut));
 
-    // It failed before any content, as `ready` would find.
+    // It failed before any content, as `until_content` would find.
     let (status, body) = h.text(unary_chat()).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
@@ -2991,7 +2991,7 @@ async fn a_plugins_own_bytes_are_read_as_a_providers() {
     impl Plugin for Reader {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let own = cx.relay(http::Response::new(UNARY.to_owned()));
-            let read = own.ready().await?.outputs::<Reply>();
+            let read = own.until_content().await?.outputs::<Reply>();
             let read = read.try_collect::<Vec<_>>().await?;
             assert!(read.iter().any(|r| r.texts().eq(["hi"])), "{read:?}");
             Ok(None)
@@ -5095,10 +5095,10 @@ async fn a_fallback_reads_a_call_to_its_first_content() {
     #[async_trait]
     impl Plugin for Fallback {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            if let Ok(first) = cx.call("openai").await?.ready().await {
+            if let Ok(first) = cx.call("openai").await?.until_content().await {
                 return Ok(Some(first));
             }
-            Ok(Some(cx.call("backup").await?.ready().await?))
+            Ok(Some(cx.call("backup").await?.until_content().await?))
         }
     }
 
@@ -5112,24 +5112,24 @@ async fn a_fallback_reads_a_call_to_its_first_content() {
 
     let body = h.body(chat()).await;
 
-    // What `ready` read is sent as it came.
+    // What `until_content` read is sent as it came.
     assert_eq!(body, STREAM.concat());
     assert_eq!(ends.all(), ["openai overloaded", "backup ok", "client"]);
 }
 
 #[tokio::test]
-async fn a_whole_body_call_ends_only_once_its_ready_response_is_read() {
-    /// Returns `openai`'s ready answer; its provider-edge filter notes its end.
+async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
+    /// Returns `openai`'s answer read to its content; its provider-edge filter notes its end.
     #[derive(Clone, Default)]
-    struct Ready(Arc<Mutex<Vec<&'static str>>>);
+    struct Returns(Arc<Mutex<Vec<&'static str>>>);
 
-    impl Ready {
+    impl Returns {
         fn note(&self, what: &'static str) {
             self.0.lock().map(|mut v| v.push(what)).ok();
         }
     }
 
-    impl Filter<Reply> for Ready {
+    impl Filter<Reply> for Returns {
         fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
             out.push(reply);
             Ok(())
@@ -5142,9 +5142,9 @@ async fn a_whole_body_call_ends_only_once_its_ready_response_is_read() {
     }
 
     #[async_trait]
-    impl Plugin for Ready {
+    impl Plugin for Returns {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let resp = cx.call("openai").await?.ready().await?;
+            let resp = cx.call("openai").await?.until_content().await?;
             self.note("returned");
             Ok(Some(resp))
         }
@@ -5154,8 +5154,11 @@ async fn a_whole_body_call_ends_only_once_its_ready_response_is_read() {
         }
     }
 
-    let (ends, ready) = (Ends::default(), Ready::default());
-    let h = Harness::new(vec![Arc::new(ends.clone()), Arc::new(ready.clone())], None);
+    let (ends, returns) = (Ends::default(), Returns::default());
+    let h = Harness::new(
+        vec![Arc::new(ends.clone()), Arc::new(returns.clone())],
+        None,
+    );
     // A whole body: its content and its end come in one batch.
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
 
@@ -5163,7 +5166,7 @@ async fn a_whole_body_call_ends_only_once_its_ready_response_is_read() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, UNARY);
-    let order = ready.0.lock().map(|v| v.clone()).unwrap_or_default();
+    let order = returns.0.lock().map(|v| v.clone()).unwrap_or_default();
     assert_eq!(order, ["returned", "call ended"]);
     assert_eq!(ends.all(), ["openai ok", "client"]);
 }
@@ -5232,7 +5235,7 @@ struct FirstContent;
 #[async_trait]
 impl Plugin for FirstContent {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if let Ok(first) = cx.call("openai").await?.ready().await {
+        if let Ok(first) = cx.call("openai").await?.until_content().await {
             return Ok(Some(first));
         }
         Ok(Some(cx.call("backup").await?))
@@ -5256,7 +5259,7 @@ async fn a_fallback_skips_a_success_that_fails_after_only_its_start() {
 }
 
 #[tokio::test]
-async fn ready_judges_a_providers_content_before_filters() {
+async fn until_content_judges_a_providers_content_before_filters() {
     /// Takes every output of `openai`'s response.
     struct Mute;
 
@@ -5292,7 +5295,7 @@ async fn ready_judges_a_providers_content_before_filters() {
 }
 
 #[tokio::test]
-async fn ready_again_returns_at_once_without_judging_after_filters() {
+async fn until_content_again_returns_at_once_without_judging_after_filters() {
     /// Takes every output of `openai`'s response.
     struct Mute;
 
@@ -5303,13 +5306,13 @@ async fn ready_again_returns_at_once_without_judging_after_filters() {
     }
 
     /// Readies `openai`'s response twice, falling back if the second fails.
-    struct ReadyTwice;
+    struct UntilContentTwice;
 
     #[async_trait]
-    impl Plugin for ReadyTwice {
+    impl Plugin for UntilContentTwice {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let first = cx.call("openai").await?.ready().await?;
-            match first.ready().await {
+            let first = cx.call("openai").await?.until_content().await?;
+            match first.until_content().await {
                 Ok(again) => Ok(Some(again)),
                 Err(_) => Ok(Some(cx.call("backup").await?)),
             }
@@ -5321,8 +5324,11 @@ async fn ready_again_returns_at_once_without_judging_after_filters() {
         _ => Ok(()),
     });
     let ends = Ends::default();
-    let chain: Vec<Arc<dyn Plugin>> =
-        vec![Arc::new(ends.clone()), Arc::new(mute), Arc::new(ReadyTwice)];
+    let chain: Vec<Arc<dyn Plugin>> = vec![
+        Arc::new(ends.clone()),
+        Arc::new(mute),
+        Arc::new(UntilContentTwice),
+    ];
     let h = Harness::new(chain, None);
     let overloaded = "data: {\"error\":{\"message\":\"Overloaded\",\"code\":\"overloaded\"}}\n\n";
     h.mock
@@ -5331,7 +5337,7 @@ async fn ready_again_returns_at_once_without_judging_after_filters() {
 
     let (status, _) = h.text(chat()).await;
 
-    // The second `ready` kept what the first judged ready, read no further
+    // The second `until_content` kept what the first judged, read no further
     // and so did not see the failure.
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(ends.all(), ["openai overloaded", "client"]);
@@ -5389,7 +5395,7 @@ async fn a_dropped_response_runs_its_provider_filters_end() {
     #[async_trait]
     impl Plugin for Hedge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("openai").await?.ready().await?);
+            drop(cx.call("openai").await?.until_content().await?);
             Ok(Some(cx.call("backup").await?))
         }
     }
@@ -5726,18 +5732,18 @@ async fn with_status_101_on_a_calls_response_is_the_plugins_fault() {
 
 #[tokio::test]
 async fn a_calls_response_read_to_its_end_then_dropped_ends_ok() {
-    /// Reads a call's whole response with `ready`, then drops it.
-    struct ReadyThenDrop;
+    /// Reads a call's whole response with `until_content`, then drops it.
+    struct ContentThenDrop;
 
     #[async_trait]
-    impl Plugin for ReadyThenDrop {
+    impl Plugin for ContentThenDrop {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("openai").await?.ready().await?);
+            drop(cx.call("openai").await?.until_content().await?);
             Err(Fault::not_found("done"))
         }
     }
 
-    let h = Harness::new(vec![Arc::new(ReadyThenDrop)], None);
+    let h = Harness::new(vec![Arc::new(ContentThenDrop)], None);
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
     let _ = h.send(unary_chat()).await;
 
@@ -6104,7 +6110,7 @@ fn limited() -> mock::Reply {
     r
 }
 
-/// Answers with the call's response, `ready()` first if `.0`.
+/// Answers with the call's response, `until_content()` first if `.0`.
 struct Answer(bool);
 
 #[async_trait]
@@ -6112,16 +6118,16 @@ impl Plugin for Answer {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let resp = cx.call("openai").await?;
         match self.0 {
-            true => Ok(Some(resp.ready().await?)),
+            true => Ok(Some(resp.until_content().await?)),
             false => Ok(Some(resp)),
         }
     }
 }
 
 // A provider's 429 reaches the client as it came, status, `Retry-After` and
-// body, whether sent directly or through `ready`.
+// body, whether sent directly or through `until_content`.
 #[tokio::test]
-async fn r11_1_ready_on_an_error_status_changes_what_the_client_gets() {
+async fn r11_1_until_content_on_an_error_status_changes_what_the_client_gets() {
     let sent = Harness::new(vec![Arc::new(Answer(false))], None);
     sent.mock.reply(OPENAI, limited());
     let (s1, h1, b1) = sent.send(unary_chat()).await;
@@ -6144,7 +6150,7 @@ impl Plugin for ArchFallback {
         let mut last = Err(Fault::upstream("no provider to try"));
         for name in &self.0 {
             last = match cx.call(*name).await {
-                Ok(resp) => resp.ready().await,
+                Ok(resp) => resp.until_content().await,
                 Err(fault) => Err(fault),
             };
             if last.as_ref().is_ok_and(|r| r.head().status.is_success()) {
@@ -6289,7 +6295,7 @@ async fn r11_plugin_pii_redacts_every_call_and_restores_split_placeholders() {
     assert!(!body.contains("PII"), "{body}");
 }
 
-// --- Plugin 2: fallback with ready() ---------------------------------------
+// --- Plugin 2: fallback with until_content() ---------------------------------------
 
 /// Tries each provider; answers with the first success that has content,
 /// else the last provider's own error response, else the last failure.
@@ -6311,7 +6317,7 @@ impl Plugin for Fallback11 {
                 last = Ok(resp);
                 continue;
             }
-            match resp.ready().await {
+            match resp.until_content().await {
                 Ok(resp) => return Ok(Some(resp)),
                 Err(fault) => last = Err(fault),
             }
@@ -6407,12 +6413,12 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_hidden_from_a_later_meter
     assert_eq!((&relayed, &translated), (&json!(99), &json!(99)));
 }
 
-// Every output a plugin makes is content for `ready` (changed in 0009, which
+// Every output a plugin makes is content for `until_content` (changed in 0009, which
 // removed the hidden client format that judged them): a plugin filters what
 // is no content with the kind's own check, so a quiet reply, then a failure,
-// is not ready, and a fallback moves on.
+// is not read to any content, and a fallback moves on.
 #[tokio::test]
-async fn ready_takes_every_output_a_plugin_makes_as_content() {
+async fn until_content_takes_every_output_a_plugin_makes_as_content() {
     struct FallsBack;
 
     #[async_trait]
@@ -6420,14 +6426,16 @@ async fn ready_takes_every_output_a_plugin_makes_as_content() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut quiet = Reply::default();
             quiet.usage.add(units::INPUT_TOKENS, 1.0);
-            // Unfiltered, the quiet reply is content, so ready at once.
+            // Unfiltered, the quiet reply is content, so returned at once.
             let made = [Ok(quiet.clone()), Err(Fault::upstream("gone"))];
-            let unfiltered = Response::stream(futures::stream::iter(made)).ready().await;
+            let unfiltered = Response::stream(futures::stream::iter(made))
+                .until_content()
+                .await;
             assert!(unfiltered.is_ok());
             let made = [Ok(quiet), Err(Fault::upstream("gone"))];
             let content = |r: &Reply| std::future::ready(r.is_content());
             let made = futures::stream::iter(made).try_filter(content);
-            match Response::stream(made).ready().await {
+            match Response::stream(made).until_content().await {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(cx.call("openai").await?)),
             }
@@ -6482,24 +6490,24 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     assert!(noted.contains(&(true, Some(5.0))), "{noted:?}");
 }
 
-// Filters see every value (0010), yet `ready` commits on neither a keep-alive
-// nor usage alone: a stream that sends both, then fails, is not ready, and a
+// Filters see every value (0010), yet `until_content` commits on neither a keep-alive
+// nor usage alone: a stream that sends both, then fails, is not read to any content, and a
 // fallback moves on. The meter still saw the failed call's usage.
 #[tokio::test]
-async fn ready_commits_on_neither_a_keep_alive_nor_usage_alone() {
-    struct ReadyOrBackup;
+async fn until_content_commits_on_neither_a_keep_alive_nor_usage_alone() {
+    struct ContentOrBackup;
 
     #[async_trait]
-    impl Plugin for ReadyOrBackup {
+    impl Plugin for ContentOrBackup {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            match cx.call("openai").await?.ready().await {
+            match cx.call("openai").await?.until_content().await {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(cx.call("backup").await?)),
             }
         }
     }
 
-    let h = Harness::new(vec![Arc::new(ReadyOrBackup)], None);
+    let h = Harness::new(vec![Arc::new(ContentOrBackup)], None);
     let quiet = [
         ": keep-alive\n\n",
         "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":7}}\n\n",
@@ -6513,4 +6521,245 @@ async fn ready_commits_on_neither_a_keep_alive_nor_usage_alone() {
     let calls = metered(&h);
     let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
     assert_eq!(calls, [("backup/gpt-x", 5.0), ("openai/gpt-x", 7.0)]);
+}
+
+// --- until_end ---------------------------------------------------------------
+
+/// Answers with `openai`'s response read to its end, or refuses with the
+/// fault `until_end` returned.
+struct ToEnd;
+
+#[async_trait]
+impl Plugin for ToEnd {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.call("openai").await?.until_end().await.map(Some)
+    }
+}
+
+/// What the client got for `reply` to `call`, relayed, then through
+/// `until_end`, with each run's end hooks.
+async fn relayed_and_read_to_its_end(
+    reply: impl Fn() -> mock::Reply,
+    call: impl Fn() -> Call,
+) -> [(StatusCode, HeaderMap, String, Vec<String>); 2] {
+    let mut got = Vec::new();
+    for chain in [Vec::new(), vec![Arc::new(ToEnd) as Arc<dyn Plugin>]] {
+        let ends = Ends::default();
+        let mut plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(ends.clone())];
+        plugins.extend(chain);
+        let h = Harness::new(plugins, Some("openai"));
+        h.mock.reply(OPENAI, reply());
+        let (status, headers, body) = h.send(call()).await;
+        let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+        got.push((status, headers, body, ends.all()));
+    }
+    let [relayed, read]: [_; 2] = got.try_into().unwrap_or_else(|_| unreachable!());
+    [relayed, read]
+}
+
+#[tokio::test]
+async fn until_end_replays_a_stream_and_a_whole_body_byte_for_byte() {
+    let stream = relayed_and_read_to_its_end(|| mock::sse(STREAM), chat).await;
+    let whole = relayed_and_read_to_its_end(|| mock::json(StatusCode::OK, UNARY), unary_chat).await;
+
+    for [relayed, read] in [stream.clone(), whole.clone()] {
+        assert_eq!(read, relayed);
+        assert_eq!(read.0, StatusCode::OK);
+        assert_eq!(read.3, ["openai ok", "client"]);
+    }
+    assert_eq!(stream[1].2, STREAM.concat());
+    assert_eq!(whole[1].2, UNARY);
+}
+
+#[tokio::test]
+async fn until_end_holds_a_failure_and_it_is_delivered_as_it_would_have_been() {
+    // Mid-stream, after content: held and sent after what came before it.
+    let broken = || {
+        let mut broken = mock::sse(STREAM);
+        broken.body_mut().truncate(2);
+        broken
+            .body_mut()
+            .push(Err(Fault::upstream("connection reset")));
+        broken
+    };
+    let [relayed, read] = relayed_and_read_to_its_end(broken, chat).await;
+    assert_eq!(read, relayed);
+    assert!(read.2.starts_with(&STREAM[..2].concat()), "{}", read.2);
+    assert!(
+        read.2.ends_with("\"code\":\"upstream\"}}\n\n"),
+        "{}",
+        read.2
+    );
+    assert_eq!(read.3, ["openai upstream", "client"]);
+
+    // Before any content: `Err`, refused as a relay refuses it.
+    let [relayed, read] = relayed_and_read_to_its_end(|| mock::sse(&STREAM[..1]), chat).await;
+    assert_eq!((read.0, &read.2), (relayed.0, &relayed.2));
+    assert_eq!(read.0, StatusCode::BAD_GATEWAY);
+    assert_eq!(read.3, ["openai truncated", "client"]);
+}
+
+#[tokio::test]
+async fn a_response_dropped_after_until_end_ends_its_call_as_it_ended() {
+    /// Reads `openai` to its end, drops it, and answers with `backup`.
+    struct ReadAndDrop;
+
+    #[async_trait]
+    impl Plugin for ReadAndDrop {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            drop(cx.call("openai").await?.until_end().await?);
+            Ok(Some(cx.call("backup").await?))
+        }
+    }
+
+    let broken = || {
+        let mut broken = mock::sse(STREAM);
+        broken.body_mut().truncate(2);
+        broken.body_mut().push(Err(Fault::upstream("reset")));
+        broken
+    };
+    let cases: [(mock::Reply, &str); 3] = [
+        (mock::sse(STREAM), "openai ok"),
+        (mock::json(StatusCode::OK, UNARY), "openai ok"),
+        (broken(), "openai upstream"),
+    ];
+    for (reply, openai) in cases {
+        let ends = Ends::default();
+        let h = Harness::new(vec![Arc::new(ends.clone()), Arc::new(ReadAndDrop)], None);
+        h.mock.reply(OPENAI, reply).reply(BACKUP, mock::sse(STREAM));
+
+        assert_eq!(h.body(chat()).await, STREAM.concat());
+        // Its end was held: dropped, the call ends so, before `backup` starts.
+        assert_eq!(ends.all(), [openai, "backup ok", "client"]);
+    }
+}
+
+#[tokio::test]
+async fn a_response_read_to_its_end_and_kept_past_its_request_ends_abandoned() {
+    /// Reads `backup` to its end and keeps it, unsent, in the request.
+    struct Stash;
+
+    #[async_trait]
+    impl Plugin for Stash {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            let read = cx.call("backup").await?.until_end().await?;
+            cx.head_mut()
+                .extensions
+                .insert(Kept(Arc::new(Mutex::new(Some(read)))));
+            Ok(None)
+        }
+    }
+
+    let ends = Ends::default();
+    let h = Harness::new(
+        vec![Arc::new(ends.clone()), Arc::new(Stash)],
+        Some("openai"),
+    );
+    h.mock
+        .reply(BACKUP, mock::sse(STREAM))
+        .reply(OPENAI, mock::json(StatusCode::OK, UNARY));
+
+    assert_eq!(closes(&h, unary_chat()).await, StatusCode::OK);
+    let mut ends = ends.all();
+    assert_eq!(ends.pop().as_deref(), Some("client"));
+    ends.sort();
+    // Never read, so never settled: the request's close abandons it.
+    assert_eq!(ends, ["backup abandoned", "openai ok"]);
+}
+
+/// A mock answer whose head waits `head`, and whose last frame waits `end`
+/// more.
+struct Paced(MockAt, Duration, Duration);
+
+#[async_trait]
+impl Transport for Paced {
+    async fn send(&self, call: http::Request<Body>) -> Result<http::Response<Body>, Fault> {
+        tokio::time::sleep(self.1).await;
+        use futures::StreamExt;
+        use http_body_util::{BodyExt, BodyStream, StreamBody};
+        let (head, body) = self.0.send(call).await?.into_parts();
+        let mut frames: Vec<_> = StreamExt::collect(BodyStream::new(body)).await;
+        let (last, end) = (frames.pop(), self.2);
+        let last = futures::stream::once(async move {
+            tokio::time::sleep(end).await;
+            last
+        })
+        .filter_map(|last| async move { last });
+        let body = StreamBody::new(futures::stream::iter(frames).chain(last));
+        Ok(http::Response::from_parts(head, body.boxed_unsync()))
+    }
+}
+
+#[tokio::test]
+async fn a_race_by_completion_picks_the_provider_that_finishes_first() {
+    /// Races both providers, each read to its content or its end, and
+    /// answers with the first.
+    struct Race(bool);
+
+    #[async_trait]
+    impl Plugin for Race {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            let to_end = self.0;
+            let race = ["openai", "backup"].map(|p| {
+                let call = cx.call(p);
+                Box::pin(async move {
+                    let resp = call.await?;
+                    match to_end {
+                        true => resp.until_end().await,
+                        false => resp.until_content().await,
+                    }
+                })
+            });
+            let (resp, _) = futures::future::select_ok(race).await?;
+            Ok(Some(resp))
+        }
+    }
+
+    const SLOW_REPLY: &[&str] = &[
+        "data: {\"id\":\"slow\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    const FAST_REPLY: &[&str] = &[
+        "data: {\"id\":\"fast\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    for (to_end, winner) in [(false, "openai"), (true, "backup")] {
+        let (ends, mock) = (Ends::default(), MockTransport::new());
+        // `openai` streams content at once but ends late; `backup` starts
+        // later and ends first.
+        let ms = Duration::from_millis;
+        let slow = Paced(mock.at(OPENAI), Duration::ZERO, ms(600));
+        let fast = Paced(mock.at(BACKUP), ms(100), Duration::ZERO);
+        let list = [
+            add_provider("openai", OpenAiChat, slow),
+            add_provider("backup", OpenAiChat, fast),
+        ];
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(ends.clone()), Arc::new(Race(to_end))];
+        let gw = gateway(list, plugins, None).unwrap_or_else(|e| panic!("{e}"));
+        mock.reply(OPENAI, mock::sse(SLOW_REPLY))
+            .reply(BACKUP, mock::sse(FAST_REPLY));
+
+        let req = post(CHAT, STREAM_REQ);
+        let (_, _, body) = read_whole(gw.handle(req).await.0).await;
+        gw.idle().await;
+
+        let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+        let expected = if winner == "openai" {
+            SLOW_REPLY
+        } else {
+            FAST_REPLY
+        };
+        assert_eq!(body, expected.concat(), "to its end: {to_end}");
+        let mut ends = ends.all();
+        assert_eq!(ends.pop().as_deref(), Some("client"));
+        ends.sort();
+        let loser = if winner == "openai" {
+            "backup"
+        } else {
+            "openai"
+        };
+        let mut expected = vec![format!("{winner} ok"), format!("{loser} abandoned")];
+        expected.sort();
+        assert_eq!(ends, expected, "to its end: {to_end}");
+    }
 }

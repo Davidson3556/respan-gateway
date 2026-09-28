@@ -1,6 +1,6 @@
 # 0003. Kernel contracts: minimal, typed by kind, grown without breaking
 
-- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md)
+- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0011](0011-read-until-content-or-end.md)
 - Date: 2026-09-25
 
 ## Context

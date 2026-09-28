@@ -294,7 +294,7 @@ impl ClientContext {
 
     /// Relay a plugin's own response in the client's format, such as a
     /// cached one. The client's format decodes it as a provider's, so it
-    /// can be read ([`Response::ready`], [`Response::outputs`]), and writes
+    /// can be read ([`Response::until_content`], [`Response::outputs`]), and writes
     /// it as it came until edited. It is read on no provider edge, so a
     /// plugin that meters calls there never sees it: to bill it, carry
     /// what it cost in an extension.

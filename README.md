@@ -67,7 +67,7 @@ whole: its body, even empty, is its one input.
   outputs as they stream; its type says which. Filters see every
   message, keep-alives and usage alone included, and pass on at once what
   they have no reason to hold. `Format::is_content` says only what
-  `ready` commits on.
+  `until_content` commits on.
 - **Format**: one protocol's codec, such as OpenAI Chat: it recognises
   its requests, and reads and writes its requests and responses.
 - **Kind**: a format's two types, `Input` and `Output`. Formats of one

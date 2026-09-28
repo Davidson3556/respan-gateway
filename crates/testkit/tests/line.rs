@@ -362,20 +362,20 @@ fn t(usage: &Usage) -> Option<f64> {
     usage.get("t")
 }
 
-// Usage read by `ready`, then dropped, reaches the call's meter: provider-edge
+// Usage read by `until_content`, then dropped, reaches the call's meter: provider-edge
 // filters run as a response is decoded, whoever reads it.
 
 #[tokio::test]
-async fn f1_usage_read_by_ready_is_metered_even_if_the_response_is_dropped() {
+async fn f1_usage_read_until_content_is_metered_even_if_the_response_is_dropped() {
     struct Peek;
 
     #[async_trait]
     impl Plugin for Peek {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let call: Call = cx.call("p");
-            // Ready at its first content; the plugin answers on its own.
-            let ready = call.await?.ready().await?;
-            drop(ready);
+            // Read to its first content; the plugin answers on its own.
+            let read = call.await?.until_content().await?;
+            drop(read);
             let own = futures::stream::iter([Ok(out("own"))]);
             Ok(Some(Response::stream(own)))
         }
@@ -488,16 +488,16 @@ async fn f4_a_filter_whose_edit_failed_still_gets_its_end() {
     assert_eq!(log.notes(), ["end false"]);
 }
 
-// A call settles at the end of its body, so `ready` then drop abandons it
+// A call settles at the end of its body, so `until_content` then drop abandons it
 // however the frames fell.
 
-async fn ready_then_drop(frames: Vec<&'static str>) -> Result<(), Fault> {
+async fn until_content_then_drop(frames: Vec<&'static str>) -> Result<(), Fault> {
     struct Peek;
 
     #[async_trait]
     impl Plugin for Peek {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("p").await?.ready().await?);
+            drop(cx.call("p").await?.until_content().await?);
             let own = futures::stream::iter([Ok(out("own"))]);
             Ok(Some(Response::stream(own)))
         }
@@ -510,9 +510,9 @@ async fn ready_then_drop(frames: Vec<&'static str>) -> Result<(), Fault> {
 
 /// Abandoned whether or not `e` shared a frame with the content.
 #[tokio::test]
-async fn f5_ready_then_drop_ends_the_call_at_the_bodys_end_only() {
+async fn f5_until_content_then_drop_ends_the_call_at_the_bodys_end_only() {
     for frames in [vec!["i:hi\ne\n"], vec!["i:hi\n", "e\n"]] {
-        let end = ready_then_drop(frames).await;
+        let end = until_content_then_drop(frames).await;
         assert_eq!(
             end.err().map(|f| f.code().to_owned()).as_deref(),
             Some("abandoned")
@@ -826,13 +826,13 @@ async fn r8_an_input_filter_whose_edit_panics_still_gets_its_end() {
     assert_eq!(log.notes(), ["end"]);
 }
 
-/// Falls back from a call that is not ready to the next provider.
+/// Falls back from a call with no content to the next provider.
 struct Fallback;
 
 #[async_trait]
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        match cx.call("p").await?.ready().await {
+        match cx.call("p").await?.until_content().await {
             Ok(resp) => Ok(Some(resp)),
             Err(_) => cx.call("p").await.map(Some),
         }
@@ -841,7 +841,7 @@ impl Plugin for Fallback {
 
 // A 204 behind a fallback is the answer, not a failure to fall back from.
 #[tokio::test]
-async fn r8_a_204_is_ready_at_once() {
+async fn r8_until_content_returns_a_204_at_once() {
     let log = Log::default();
     let script = Script::default()
         .then(StatusCode::NO_CONTENT, vec![])
@@ -854,7 +854,7 @@ async fn r8_a_204_is_ready_at_once() {
 
 /// And so is a response to `HEAD`.
 #[tokio::test]
-async fn r8_a_response_to_head_is_ready_at_once() {
+async fn r8_until_content_returns_a_response_to_head_at_once() {
     let log = Log::default();
     let script = Script::default()
         .then(StatusCode::OK, vec![])
@@ -889,7 +889,7 @@ impl<T: Send + 'static> Filter<T> for Noting<T> {
     }
 }
 
-// A 204 read through `outputs` ends `Ok`, as sent or read by `ready`.
+// A 204 read through `outputs` ends `Ok`, as sent or read by `until_content`.
 #[tokio::test]
 async fn r9_1_a_204_read_through_outputs_ends_ok() {
     struct Read(Log);
@@ -1028,7 +1028,7 @@ async fn r9_4b_an_abandoned_call_stays_abandoned() {
             px.filter(Fails)
         }
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("p").await?.ready().await?);
+            drop(cx.call("p").await?.until_content().await?);
             Ok(Some(Response::stream(futures::stream::iter([Ok(out(
                 "x",
             ))]))))
@@ -1436,15 +1436,15 @@ async fn r10_1_a_late_input_filter_gets_the_inputs_real_end() {
     assert_eq!(log.notes(), ["read 2", "late end false", "added false"]);
 }
 
-// A 204 dropped after `ready` ends `Ok`, as its end is decoded.
+// A 204 dropped after `until_content` ends `Ok`, as its end is decoded.
 #[tokio::test]
-async fn r10_2_a_204_dropped_after_ready_ends_ok() {
+async fn r10_2_a_204_dropped_after_until_content_ends_ok() {
     struct DropIt;
 
     #[async_trait]
     impl Plugin for DropIt {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("p").await?.ready().await?);
+            drop(cx.call("p").await?.until_content().await?);
             Ok(Some(own()))
         }
     }
@@ -1456,7 +1456,7 @@ async fn r10_2_a_204_dropped_after_ready_ends_ok() {
     let gw = gateway(script, &log, DropIt);
     let _ = run(&gw, req(http::Method::POST)).await;
     let _ = run(&gw, req(http::Method::POST)).await;
-    // The 200's end is its body's, which `ready` did not reach; the 204's
+    // The 200's end is its body's, which `until_content` did not reach; the 204's
     // comes with its head.
     let ends: Vec<_> = log.calls().iter().map(|o| o.end.clone()).collect();
     let code = |e: &Result<(), Fault>| e.as_ref().err().map(|f| f.code().to_owned());
@@ -1523,17 +1523,17 @@ impl Format for Posted {
     }
 }
 
-// `ready` judges the response as its provider sent it, the call's method,
+// `until_content` judges the response as its provider sent it, the call's method,
 // not the client's `HEAD`.
 #[tokio::test]
-async fn r10_4_ready_judges_a_head_as_the_provider_sent_it() {
+async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
     struct Fallback(Log);
 
     #[async_trait]
     impl Plugin for Fallback {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let ready = cx.call("posted").await?.ready().await;
-            self.0.note(format!("ready {}", ready.is_ok()));
+            let read = cx.call("posted").await?.until_content().await;
+            self.0.note(format!("content {}", read.is_ok()));
             Ok(Some(own()))
         }
     }
@@ -1547,7 +1547,7 @@ async fn r10_4_ready_judges_a_head_as_the_provider_sent_it() {
         .and_then(|g| g.plugin("x", Fallback(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = run(&gw, req(http::Method::HEAD)).await;
-    assert_eq!(log.notes(), ["ready false"]);
+    assert_eq!(log.notes(), ["content false"]);
 }
 
 /// Line under its own name, so calls to it relay, noting whether its

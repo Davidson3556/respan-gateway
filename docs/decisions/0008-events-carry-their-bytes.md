@@ -1,6 +1,6 @@
 # 0008. Events carry their bytes
 
-- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md)
+- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md)
 - Date: 2026-09-28
 
 ## Context
@@ -91,3 +91,5 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
   `outputs` stopped hiding values that say nothing.
 - 0010: usage left the kernel; `Format::says` became `Format::is_content`,
   and filters see every value.
+- 0011: `ready` became `until_content`, and `until_end` holds a whole
+  response.

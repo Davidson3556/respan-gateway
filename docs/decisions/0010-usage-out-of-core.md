@@ -1,6 +1,6 @@
 # 0010. Usage out of the core
 
-- Status: accepted
+- Status: accepted, amended by [0011](0011-read-until-content-or-end.md)
 - Date: 2026-09-28
 
 ## Context
@@ -30,7 +30,7 @@ so counting it was a feature in the core (0001). This amends 0008 and
 3. **`Format::says` is renamed `Format::is_content`** (and `Reply::says`
    `Reply::is_content`), same signature and default. It decides only what
    `Response::ready` commits on; neither a keep-alive nor usage alone is
-   content.
+   content. *Amended by 0011:* `ready` is now `until_content`.
 4. **Metering is a plugin's.** A plugin meters a call with a provider-edge
    filter of its kind and reads the sum in `on_provider_end`, after the
    call's filters ended. Output filters run the last added first, so it is
