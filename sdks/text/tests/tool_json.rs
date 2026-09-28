@@ -90,3 +90,41 @@ fn a_whole_tool_call_with_two_quoted_placeholders_is_restored() {
     let out = run(&mut Holdback::new(vault), vec![call(&whole)]);
     assert!(out.is_ok(), "{:?}", out.err());
 }
+
+fn restored(raw_json: Value, vault: Placeholders) -> Value {
+    let out = run(
+        &mut Holdback::new(vault),
+        vec![Reply::other("openai", raw_json)],
+    )
+    .unwrap_or_default();
+    match out.iter().flat_map(|r| &r.content).next() {
+        Some(Piece::Other { raw, .. }) => (**raw).clone(),
+        _ => Value::Null,
+    }
+}
+
+#[test]
+fn prose_in_other_content_is_restored_unescaped() {
+    let vault = Placeholders::default();
+    let name = vault.hide("NAME", "Robert \"Bob\" Smith");
+    let refusal =
+        json!([{ "index": 0, "message": { "refusal": format!("I won't write to {name}.") } }]);
+    let v = restored(refusal, vault.clone());
+    assert_eq!(
+        v[0]["message"]["refusal"],
+        "I won't write to Robert \"Bob\" Smith."
+    );
+    let path = vault.hide("PATH", "C:\\Users\\bob");
+    let second = json!([{ "index": 1, "message": { "role": "assistant", "content": format!("See {path}") } }]);
+    let v = restored(second, vault);
+    assert_eq!(v[0]["message"]["content"], "See C:\\Users\\bob");
+}
+
+#[test]
+fn an_anthropic_partial_json_piece_is_escaped() {
+    let vault = Placeholders::default();
+    let name = vault.hide("NAME", "Robert \"Bob\" Smith");
+    let delta = json!({ "type": "input_json_delta", "partial_json": name });
+    let v = restored(delta, vault);
+    assert_eq!(v["partial_json"], "Robert \\\"Bob\\\" Smith");
+}

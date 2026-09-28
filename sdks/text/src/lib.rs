@@ -55,12 +55,15 @@ pub trait Readable: Clone {
     }
 }
 
+/// Fields whose string is JSON text, streamed in pieces: a tool call's
+/// arguments (OpenAI `arguments`, Anthropic `partial_json`).
+const JSON_TEXT: [&str; 2] = ["arguments", "partial_json"];
+
 /// Runs `edit` on every string and name in `v`, and on every number if
-/// `numbers`. `streamed` strings may be pieces of JSON text, such as a
-/// streamed tool call's arguments.
-fn edit_json(v: &mut Value, numbers: bool, streamed: bool, edit: &mut Edit) -> Result<(), Fault> {
+/// `numbers`.
+fn edit_json(v: &mut Value, numbers: bool, edit: &mut Edit) -> Result<(), Fault> {
     match v {
-        Value::String(s) => edit_string(s, streamed, edit),
+        Value::String(s) => edit_string(s, false, edit),
         Value::Number(n) if numbers => {
             let mut text = n.to_string();
             edit(&mut text)?;
@@ -69,13 +72,16 @@ fn edit_json(v: &mut Value, numbers: bool, streamed: bool, edit: &mut Edit) -> R
             }
             Ok(())
         }
-        Value::Array(a) => a
-            .iter_mut()
-            .try_for_each(|v| edit_json(v, numbers, streamed, edit)),
+        Value::Array(a) => a.iter_mut().try_for_each(|v| edit_json(v, numbers, edit)),
         Value::Object(o) => {
             for (mut name, mut value) in std::mem::take(o) {
+                match &mut value {
+                    Value::String(s) if JSON_TEXT.contains(&name.as_str()) => {
+                        edit_string(s, true, edit)?;
+                    }
+                    _ => edit_json(&mut value, numbers, edit)?,
+                }
                 edit(&mut name)?;
-                edit_json(&mut value, numbers, streamed, edit)?;
                 o.insert(name, value);
             }
             Ok(())
@@ -88,23 +94,23 @@ fn edit_json(v: &mut Value, numbers: bool, streamed: bool, edit: &mut Edit) -> R
 fn edit_fields(fields: &mut Map<String, Value>, edit: &mut Edit) -> Result<(), Fault> {
     fields
         .values_mut()
-        .try_for_each(|v| edit_json(v, false, false, edit))
+        .try_for_each(|v| edit_json(v, false, edit))
 }
 
 /// Runs `edit` on `text`, or inside it, numbers included, if it holds a
-/// JSON object or array, written back only if changed. A `streamed` text
-/// that is not may be a piece of JSON text: see [`edit_json_text`].
-fn edit_string(text: &mut String, streamed: bool, edit: &mut Edit) -> Result<(), Fault> {
+/// JSON object or array, written back only if changed. A `json_text` that
+/// is not is a piece of JSON text: see [`edit_json_text`].
+fn edit_string(text: &mut String, json_text: bool, edit: &mut Edit) -> Result<(), Fault> {
     match serde_json::from_str::<Value>(text) {
         Ok(mut json @ (Value::Object(_) | Value::Array(_))) => {
             let before = json.clone();
-            edit_json(&mut json, true, false, edit)?;
+            edit_json(&mut json, true, edit)?;
             if json != before {
                 *text = json.to_string();
             }
             Ok(())
         }
-        _ if streamed => edit_json_text(text, edit),
+        _ if json_text => edit_json_text(text, edit),
         _ => edit(text),
     }
 }
@@ -187,7 +193,7 @@ impl Readable for Reply {
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
-        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), false, true, edit),
+        Piece::Other { raw, .. } => edit_json(Arc::make_mut(raw), false, edit),
         _ => Ok(()),
     }
 }
