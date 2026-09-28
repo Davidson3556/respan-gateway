@@ -56,6 +56,6 @@ be HTTP. This is "Stage B" of `target/review/DESIGN-heads.md`, trimmed: no
 - Body-only encoders are `Encoder<T, ()>`, given a head by
   `formats::with_head` or `formats::headed`.
 - A wire-neutral plugin cannot edit heads; `edit_call` of HTTP's head on
-  another wire fails the call. The ledger's "was it sent" edit is typed
-  as HTTP.
+  another wire fails the call. Whether a call was handed to its transport
+  is a neutral fact, `ProviderContext::is_sent`, which the ledger reads.
 - Trailers never reach the kernel.

@@ -138,8 +138,11 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 `crates/respan-gateway/tests/e2e.rs` starts the built binary on a free
 port with a temp config, and talks real HTTP to it and to fake providers
-on localhost (wiremock, and a small axum server for streams). They run
-with the rest, in about a second:
+on localhost from [mockllm](https://github.com/lihe07/mockllm), which
+check each call by the real provider's rules and answer in its exact
+framing, streams and breaks included. They run with the rest, in about a
+second. The ignored ones are known calls the gateway makes that the
+provider refuses:
 
 ```bash
 cargo test -p respan-gateway --test e2e

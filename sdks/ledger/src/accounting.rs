@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, async_trait};
-use respan_gateway_http::http::StatusCode;
 
 use crate::{Amount, HoldId, Ledger, NO_ACCOUNT};
 
@@ -107,13 +106,13 @@ impl<L: Ledger> Accounting<L> {
     }
 
     /// What a call cost, as far as the gateway can tell.
-    fn charge(&self, hold: &Hold, outcome: &Outcome) -> Amount {
+    fn charge(&self, hold: &Hold, sent: bool, outcome: &Outcome) -> Amount {
         let spent = hold.tally.spent();
         match &outcome.end {
             // The provider answered with an error in place of a response.
             Err(fault) if fault.is_answer() => 0,
             // It never left the gateway.
-            _ if !hold.sent.load(Ordering::Relaxed) => 0,
+            _ if !sent => 0,
             Ok(()) if hold.tally.is_reported() => spent,
             // Cut off, never reported, or sent and given up, such as timed
             // out waiting for its head: it may have reached the provider,
@@ -130,8 +129,6 @@ struct Hold {
     tally: Tally,
     /// Taken by the one settlement.
     settled: AtomicBool,
-    /// Handed to the transport.
-    sent: AtomicBool,
 }
 
 #[async_trait]
@@ -141,23 +138,17 @@ impl<L: Ledger> Plugin for Accounting<L> {
         let Quote { accounts, reserve } = (self.quote)(px, tally.clone())?;
         if accounts.is_empty() {
             let msg = "no account to charge";
-            return Err(Fault::new(StatusCode::UNAUTHORIZED, NO_ACCOUNT, msg));
+            return Err(Fault::new(401u16, NO_ACCOUNT, msg));
         }
         let hold = Arc::new(Hold {
             id: HoldId::new(),
             reserve,
             tally,
             settled: AtomicBool::new(false),
-            sent: AtomicBool::new(false),
         });
         // Stored before the first await: this hook may stop at any, and
         // `on_provider_end` still runs and settles what was held.
         px.extensions_mut().insert(hold.clone());
-        let sent = hold.clone();
-        px.edit_call(move |_: &mut respan_gateway_http::Ask, _: &mut _| {
-            sent.sent.store(true, Ordering::Relaxed);
-            Ok(())
-        });
         let ttl = self.ttl;
         self.ledger.reserve(&hold.id, &accounts, reserve, ttl).await
     }
@@ -169,7 +160,7 @@ impl<L: Ledger> Plugin for Accounting<L> {
         if hold.settled.swap(true, Ordering::Relaxed) {
             return;
         }
-        let spent = self.charge(&hold, outcome);
+        let spent = self.charge(&hold, px.is_sent(), outcome);
         // A failure is the ledger's to retry; the hold's TTL is the backstop.
         let _ = self.ledger.settle(&hold.id, spent).await;
     }

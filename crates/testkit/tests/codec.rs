@@ -764,3 +764,58 @@ async fn r13_the_format_sets_what_the_kernel_never_passes() {
         assert_eq!(host.as_deref(), seen);
     }
 }
+
+/// Whether a call was handed to its transport is the kernel's to say, on
+/// any wire: not yet in `on_provider`; at its end, yes once handed over,
+/// answered or not, and no for a call that failed before, as by an edit.
+#[tokio::test]
+async fn a_call_says_whether_it_was_handed_to_its_transport() {
+    #[derive(Clone, Default)]
+    struct Sent(Arc<Mutex<Vec<(bool, bool)>>>, bool);
+
+    #[async_trait]
+    impl Plugin for Sent {
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+            let before = px.is_sent();
+            self.0.lock().map(|mut s| s.push((before, false))).ok();
+            if self.1 {
+                px.edit_call(|_: &mut respan_gateway_http::Ask, _: &mut Bytes| {
+                    Err(Fault::bad_request("refused by an edit"))
+                });
+            }
+            Ok(())
+        }
+
+        async fn on_provider_end(
+            &self,
+            px: &ProviderContext,
+            _outcome: &respan_gateway_core::Outcome,
+        ) {
+            let sent = px.is_sent();
+            self.0
+                .lock()
+                .map(|mut s| s.last_mut().map(|last| last.1 = sent))
+                .ok();
+        }
+    }
+
+    // (case, the provider answers, an edit fails the call, sent)
+    let cases = [
+        ("answered", true, false, true),
+        ("transport failed", false, false, true),
+        ("an edit failed", true, true, false),
+    ];
+    for (case, answers, edit_fails, sent) in cases {
+        let mock = MockTransport::new();
+        if answers {
+            mock.reply("http://openai.test/v1", mock::json(StatusCode::OK, UNARY));
+        }
+        let plugin = Sent(Arc::default(), edit_fails);
+        let gw = chat(&mock, vec![Arc::new(plugin.clone())]);
+        let _ = read_whole(serve(&gw, post("/v1/chat/completions", CHAT)).await.0).await;
+        gw.idle().await;
+        let seen = plugin.0.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen, [(false, sent)], "{case}");
+        assert_eq!(mock.sent().len(), usize::from(sent), "{case}");
+    }
+}

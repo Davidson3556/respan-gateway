@@ -1,21 +1,13 @@
-//! Shared helpers for the end-to-end tests: start the shipped binary on a
-//! free port with a temp config, and a small axum provider that streams.
-//!
-//! wiremock serves whole bodies; [`Streamer`] serves chunks over time, a
-//! body cut mid-way and a slow first byte, which wiremock cannot.
+//! The harness of the end-to-end tests: start the shipped binary on a free
+//! port with a temp config, and read what it answers. The providers it
+//! reaches are `mockllm`'s.
 
 #![allow(dead_code, clippy::unwrap_used)]
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::Router;
-use axum::body::{Body, Bytes};
-use axum::extract::Request;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
 use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
@@ -92,106 +84,6 @@ pub async fn closed_port() -> String {
     let addr = listener.local_addr().unwrap();
     drop(listener);
     format!("http://{addr}")
-}
-
-/// One step of a scripted streaming body.
-#[derive(Clone, Debug)]
-pub enum Step {
-    /// Send these bytes.
-    Send(&'static str),
-    /// Wait this long.
-    Wait(Duration),
-    /// Break the body off: the connection closes without its end. Put a
-    /// `Wait` before it: hyper drops bytes not yet flushed when the body
-    /// fails in the same poll, head included.
-    Cut,
-}
-
-/// A request a [`Streamer`] received.
-#[derive(Clone, Debug)]
-pub struct Seen {
-    pub path: String,
-    pub headers: HeaderMap,
-    pub body: Bytes,
-}
-
-/// A provider that answers every request with one scripted event stream,
-/// and records what it was sent.
-#[derive(Clone)]
-pub struct Streamer {
-    pub base: String,
-    seen: Arc<Mutex<Vec<Seen>>>,
-}
-
-impl Streamer {
-    /// Serves `steps` as a 200 `text/event-stream` to every request.
-    pub async fn start(steps: Vec<Step>) -> Self {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let record = seen.clone();
-        let app = Router::new().fallback(move |req: Request| {
-            let steps = steps.clone();
-            let record = record.clone();
-            async move {
-                let (parts, body) = req.into_parts();
-                let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
-                record.lock().unwrap().push(Seen {
-                    path: parts.uri.path().to_owned(),
-                    headers: parts.headers,
-                    body,
-                });
-                stream_response(steps).await
-            }
-        });
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await });
-        Self {
-            base: format!("http://{addr}"),
-            seen,
-        }
-    }
-
-    pub fn seen(&self) -> Vec<Seen> {
-        self.seen.lock().unwrap().clone()
-    }
-}
-
-/// Waits out leading `Wait`s before the head, so a slow first byte is
-/// slow to the head too, then streams the rest.
-async fn stream_response(steps: Vec<Step>) -> Response {
-    let mut steps = steps.into_iter().peekable();
-    while let Some(Step::Wait(d)) = steps.peek() {
-        tokio::time::sleep(*d).await;
-        steps.next();
-    }
-    let body = futures::stream::iter(steps)
-        .then(|step| async move {
-            match step {
-                Step::Send(s) => Some(Ok::<_, std::io::Error>(Bytes::from_static(s.as_bytes()))),
-                Step::Wait(d) => {
-                    tokio::time::sleep(d).await;
-                    None
-                }
-                Step::Cut => Some(Err(std::io::Error::other("cut"))),
-            }
-        })
-        .filter_map(|x| async move { x });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "text/event-stream")
-        .body(Body::from_stream(body))
-        .unwrap()
-}
-
-/// All of `steps`' bytes, as a client should receive them.
-pub fn sent(steps: &[Step]) -> String {
-    steps
-        .iter()
-        .filter_map(|s| match s {
-            Step::Send(s) => Some(*s),
-            _ => None,
-        })
-        .collect()
 }
 
 /// Reads `resp`'s body chunk by chunk, bounded, keeping what arrived

@@ -45,6 +45,8 @@ pub struct ProviderContext {
     /// In `cut` until it ends, then in its request's `settling` until its
     /// end hooks finish, as its request's end hooks wait for them.
     pub(crate) running: InFlightGuard,
+    /// Set once the call is handed to its transport.
+    pub(crate) sent: bool,
 }
 
 impl std::fmt::Debug for ProviderContext {
@@ -120,6 +122,14 @@ impl ProviderContext {
             }
             true => self.input.filter(Filters::of(filter)),
         }
+    }
+
+    /// Whether the call was handed to its transport, so it may have reached
+    /// the provider: `false` in `on_provider`, and in `on_provider_end` for
+    /// a call refused or failed before it was sent, such as by a hook, an
+    /// edit, or an input that could not be written.
+    pub fn is_sent(&self) -> bool {
+        self.sent
     }
 
     /// This call's extensions, [`ProviderContext::client`]'s: the

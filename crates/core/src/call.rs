@@ -173,6 +173,7 @@ async fn send(
         call_edits: Mutex::default(),
         running: InFlight::enter(&cut),
         cut,
+        sent: false,
     };
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
     let sent = async {
@@ -232,6 +233,7 @@ async fn send_call(
         }
     };
     let call = Exchange::new(head, body).with_extensions(extensions);
+    px.sent = true;
     let resp = p.transport.send(call).await?;
     Ok(Response::decoded(
         &p.format,
