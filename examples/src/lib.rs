@@ -3,8 +3,82 @@
 //! `cargo run -p respan-gateway-examples --example <name>`. Each has tests that
 //! `cargo test` runs; see `examples/README.md` for the list.
 
-use respan_gateway_core::Usage;
-use respan_gateway_formats::conversation::units;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, async_trait};
+use respan_gateway_formats::Usage;
+use respan_gateway_formats::conversation::{Conversation, Reply, units};
+
+/// A chat call's usage: every [`Reply::usage`] increment its provider
+/// reported, summed by the filter [`meter`] adds. Clones share it.
+#[derive(Debug, Clone, Default)]
+pub struct CallUsage(Arc<Mutex<Usage>>);
+
+impl CallUsage {
+    /// The usage summed so far.
+    pub fn get(&self) -> Usage {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The usage of the call `px`, if [`meter`] ran for it; read it in
+    /// `on_provider_end`, once the call's filters have ended.
+    pub fn of(px: &ProviderContext) -> Option<Usage> {
+        px.extensions().get::<CallUsage>().map(CallUsage::get)
+    }
+}
+
+/// In `on_provider`: sum the usage of this chat call's replies into a
+/// [`CallUsage`] in its extensions, the one already there if another
+/// plugin metered the call. A call of another kind is not metered.
+///
+/// The kernel counts no usage: this filter sees a reply only if no filter
+/// before it failed on it or held it back. Output filters run the last
+/// added first, so meter from the plugin that runs last (register it last,
+/// or `Gateway::after` every plugin that filters outputs).
+pub fn meter(px: &mut ProviderContext) -> Result<(), Fault> {
+    if !px.is_kind::<Conversation>() || px.extensions().get::<CallUsage>().is_some() {
+        return Ok(());
+    }
+    let usage = CallUsage::default();
+    px.extensions_mut().insert(usage.clone());
+    px.filter(move |reply: &mut Reply| {
+        if !reply.usage.is_empty() {
+            *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &reply.usage;
+        }
+        Ok(())
+    })
+}
+
+/// A plugin that meters every chat call ([`meter`]) and adds up their
+/// usage, such as an embedder's tally. Register it last. Clones share it.
+#[derive(Debug, Clone, Default)]
+pub struct Meter(Arc<Mutex<Usage>>);
+
+impl Meter {
+    /// The usage of every call that ended, added up.
+    pub fn usage(&self) -> Usage {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Plugin for Meter {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        meter(px)
+    }
+
+    async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
+        if let Some(usage) = CallUsage::of(px) {
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner) += &usage;
+        }
+    }
+}
 
 /// A model's price per million tokens, in micro-dollars. Add fields for
 /// what else you price, such as cached input. Used by `billing.rs`,

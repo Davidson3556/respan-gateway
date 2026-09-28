@@ -6,9 +6,13 @@
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::http::{self, HeaderMap, StatusCode};
 
+use std::sync::{Arc, Mutex, PoisonError};
+
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait,
+    Body, ClientContext, Fault, Filter, Gateway, Outcome, Plugin, ProviderContext, Response,
+    async_trait,
 };
+use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply};
 pub use respan_gateway_testkit::Calls;
 use respan_gateway_testkit::{MockTransport, Outcomes, post, read_whole};
@@ -55,12 +59,79 @@ pub fn with_plugins(
     named.try_fold(gateway, |gw, (i, p)| gw.plugin(format!("p{i}"), p))
 }
 
-/// A gateway on a mock transport, recording every outcome.
+/// A gateway on a mock transport, recording every outcome and metering
+/// every chat call.
 pub struct Harness {
     pub gw: Gateway,
     pub mock: MockTransport,
     pub log: Outcomes,
     pub calls: Calls,
+    pub usage: Metered,
+}
+
+/// One chat call's usage, summed by [`Metered`]'s filter.
+#[derive(Clone, Default)]
+struct CallUsage(Arc<Mutex<Usage>>);
+
+/// Meters every chat call: a provider-edge filter sums the usage of each
+/// reply its provider reports. Register it last, so its filter sees each
+/// reply first.
+#[derive(Clone, Default)]
+pub struct Metered(Arc<Mutex<Vec<(String, Usage)>>>);
+
+impl Metered {
+    /// Each metered call's usage, in the order their end hooks ran.
+    pub fn all(&self) -> Vec<Usage> {
+        self.by_call().into_iter().map(|(_, u)| u).collect()
+    }
+
+    /// Each metered call's `provider/model` and usage, in the order their
+    /// end hooks ran.
+    pub fn by_call(&self) -> Vec<(String, Usage)> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Every metered call's usage, added up.
+    pub fn total(&self) -> Usage {
+        let mut total = Usage::default();
+        for usage in self.all() {
+            total += usage;
+        }
+        total
+    }
+}
+
+#[async_trait]
+impl Plugin for Metered {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        if !px.is_kind::<Conversation>() {
+            return Ok(());
+        }
+        let usage = CallUsage::default();
+        px.extensions_mut().insert(usage.clone());
+        px.filter(move |reply: &mut Reply| {
+            *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &reply.usage;
+            Ok(())
+        })
+    }
+
+    async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
+        if let Some(CallUsage(usage)) = px.extensions().get::<CallUsage>() {
+            let usage = usage.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let model = px
+                .input::<Conversation>()
+                .ok()
+                .and_then(|c| c.model.clone());
+            let call = format!("{}/{}", px.provider(), model.unwrap_or_default());
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((call, usage));
+        }
+    }
 }
 
 impl Harness {

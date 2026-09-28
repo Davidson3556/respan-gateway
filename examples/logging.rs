@@ -5,9 +5,12 @@
 //! (`on_client_end`) to a [`Sink`]. Core has no request id, so it makes its
 //! own and keeps it in an extension, which every call copies. Content
 //! reaches it only through what it asks for: the completion through an
-//! output filter, the prompt through the input. For a tenant marked
-//! `NoContent` it installs no filter and stores no text, while usage and
-//! status, for billing and audit, still flow.
+//! output filter, the prompt through the input. Usage reaches it through a
+//! provider-edge filter that sums what each call's provider reports
+//! (`meter`), so a call's record has its usage and a request's has none.
+//! For a tenant marked `NoContent` it installs no content filter and
+//! stores no text, while usage and status, for billing and audit, still
+//! flow.
 //!
 //! **Partial:** any plugin can remove an extension, the marker included.
 //! Register the plugin that sets it first, as here, and keep the type
@@ -21,10 +24,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::http::{Extensions, HeaderValue};
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Usage, async_trait,
+    ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::OpenAiChat;
+use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply};
+use respan_gateway_formats::{OpenAiChat, Usage};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
 /// One record: a request, or one of its calls (`call` names the provider).
@@ -35,6 +39,7 @@ struct Record {
     status: Option<u16>,
     /// `ok`, or the code of the fault that ended it.
     end: String,
+    /// What the call's provider reported; none for a request.
     usage: Usage,
     prompt: Option<String>,
     completion: Option<String>,
@@ -79,7 +84,7 @@ struct Log<S> {
 }
 
 impl Record {
-    /// A record without content, from what every hook sees.
+    /// A record without content or usage, from what every hook sees.
     fn new(ext: &Extensions, call: Option<&str>, outcome: &Outcome) -> Self {
         Self {
             request: ext.get::<RequestId>().map_or(0, |id| id.0),
@@ -89,7 +94,7 @@ impl Record {
                 .end
                 .as_ref()
                 .map_or_else(|f| f.code().into(), |()| "ok".into()),
-            usage: outcome.usage.clone(),
+            usage: Usage::default(),
             prompt: None,
             completion: None,
         }
@@ -116,8 +121,13 @@ impl<S: Sink> Plugin for Log<S> {
         Ok(None)
     }
 
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        meter(px)
+    }
+
     async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let record = Record::new(px.extensions(), Some(px.provider()), outcome);
+        let mut record = Record::new(px.extensions(), Some(px.provider()), outcome);
+        record.usage = CallUsage::of(px).unwrap_or_default();
         self.sink.write(record).await;
     }
 

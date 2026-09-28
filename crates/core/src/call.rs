@@ -23,7 +23,7 @@ use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::{Provider, provider_for};
 use crate::response::Batch;
 use crate::transport::one_frame;
-use crate::{ClientContext, Fault, ProviderContext, Response, Usage};
+use crate::{ClientContext, Fault, ProviderContext, Response};
 
 /// A call from [`ClientContext::call`]: a copy of the request as it was
 /// then, sent when first awaited, which may outlive the hook. A clone is an
@@ -444,23 +444,17 @@ impl CallEdge {
     }
 
     /// Turn `batch` of this call's response into what its reader gets, as
-    /// decoded: the `usage` it reports counted and its outputs filtered.
-    /// Whether it holds an end, a failed filter's too, for
-    /// [`CallEdge::settle`] once read. Once the call ended, just an
-    /// abandoned end.
-    pub(crate) fn events(&mut self, batch: &mut Batch, usage: &Usage) -> bool {
+    /// decoded: its outputs filtered. Whether it holds an end, a failed
+    /// filter's too, for [`CallEdge::settle`] once read. Once the call
+    /// ended, just an abandoned end.
+    pub(crate) fn events(&mut self, batch: &mut Batch) -> bool {
         if self.is_finished() {
             *batch = Batch::end(Err(Fault::abandoned()));
             return false;
         }
-        // Counted as decoded, even if a filter fails.
-        self.usage += usage;
-        let px = self.cx();
-        let format = px.format.clone();
-        let says = |v: &dyn std::any::Any| format.says(v);
-        let outputs = unlocked(&mut px.outputs);
+        let outputs = unlocked(&mut self.cx().outputs);
         if let Some(values) = &mut batch.values
-            && let Err(f) = outputs.run(values, &says)
+            && let Err(f) = outputs.run(values)
         {
             batch.end = Some(Err(f));
         }
@@ -477,10 +471,7 @@ impl CallEdge {
         let Some(end) = batch.end.take() else {
             return;
         };
-        let px = self.cx();
-        let format = px.format.clone();
-        let says = |v: &dyn std::any::Any| format.says(v);
-        let end = unlocked(&mut px.outputs).end(end, &mut batch.values, &says);
+        let end = unlocked(&mut self.cx().outputs).end(end, &mut batch.values);
         batch.end = Some(end.clone());
         self.finish(end);
     }

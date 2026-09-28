@@ -13,8 +13,8 @@ use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole};
 
 mod common;
 use common::{
-    Adds, CHAT, Call, Calls, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES, Nameless,
-    OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
+    Adds, CHAT, Call, Calls, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES, Metered,
+    Nameless, OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
 };
 use respan_gateway_core::{Filter, Outcome};
 use serde_json::{Value, json};
@@ -103,6 +103,8 @@ impl Harness {
         plugins.push(Arc::new(
             ModelRouter::new(|c: &Conversation| c.model.as_deref()).route("claude", "anthropic"),
         ));
+        let usage = Metered::default();
+        plugins.push(Arc::new(usage.clone()));
         let gw = providers([
             add_provider("openai", OpenAiChat, mock.at(OPENAI)),
             add_provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC)),
@@ -115,6 +117,7 @@ impl Harness {
             mock,
             log,
             calls,
+            usage,
         }
     }
 
@@ -212,7 +215,7 @@ async fn an_openai_client_streams_from_anthropic() {
     assert_eq!(chunks[n - 1], Value::String("[DONE]".into()));
 
     assert_eq!(h.log.only().end, Ok(()));
-    let usage = h.calls.usage();
+    let usage = h.usage.total();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
 }
@@ -835,7 +838,7 @@ async fn usage_counts_even_when_its_chunk_cannot_be_translated() {
 
     let _ = h.text(anthropic_request(true)).await;
 
-    assert_eq!(h.calls.usage().get(units::INPUT_TOKENS), Some(9.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(9.0));
     assert!(h.log.only().end.is_err());
 }
 

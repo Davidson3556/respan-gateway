@@ -1,58 +1,74 @@
 //! The plugin: reserve before every call, settle once when it ends.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use respan_gateway_core::http::StatusCode;
-use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, Usage, async_trait};
+use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, async_trait};
 
 use crate::{Amount, HoldId, Ledger, NO_ACCOUNT};
 
-type Price = Box<dyn FnOnce(&Usage) -> Amount + Send>;
-type QuoteFn = dyn Fn(&ProviderContext) -> Result<Quote, Fault> + Send + Sync;
+type QuoteFn = dyn Fn(&mut ProviderContext, Tally) -> Result<Quote, Fault> + Send + Sync;
 
 /// What one call may cost, and who pays: from [`Accounting::new`]'s quote.
+#[derive(Debug)]
 pub struct Quote {
     accounts: Vec<String>,
     reserve: Amount,
-    price: Price,
 }
 
 impl Quote {
-    /// Hold `reserve`, the most the call can cost, on `accounts`; at its
-    /// end, charge `price` of its usage.
-    pub fn new(
-        accounts: impl IntoIterator<Item = impl Into<String>>,
-        reserve: Amount,
-        price: impl FnOnce(&Usage) -> Amount + Send + 'static,
-    ) -> Self {
+    /// Hold `reserve`, the most the call can cost, on `accounts`.
+    pub fn new(accounts: impl IntoIterator<Item = impl Into<String>>, reserve: Amount) -> Self {
         let accounts = accounts.into_iter().map(Into::into).collect();
-        let price = Box::new(price);
-        Self {
-            accounts,
-            reserve,
-            price,
-        }
+        Self { accounts, reserve }
     }
 }
 
-impl std::fmt::Debug for Quote {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Quote")
-            .field("accounts", &self.accounts)
-            .field("reserve", &self.reserve)
-            .finish_non_exhaustive()
+/// One call's cost as your code prices it, reported while the call runs,
+/// such as by a filter of the call's outputs that prices each usage
+/// increment its provider reports. [`Accounting`] settles the call from it.
+/// Clones share it.
+#[derive(Debug, Clone, Default)]
+pub struct Tally(Arc<Counted>);
+
+#[derive(Debug, Default)]
+struct Counted {
+    spent: AtomicI64,
+    reported: AtomicBool,
+}
+
+impl Tally {
+    /// Add `amount` to what the call cost, saturating; the call's cost now
+    /// counts as reported, even if `amount` is 0.
+    pub fn add(&self, amount: Amount) {
+        let spent = &self.0.spent;
+        let add = |now: Amount| Some(now.saturating_add(amount));
+        let _ = spent.fetch_update(Ordering::Relaxed, Ordering::Relaxed, add);
+        self.0.reported.store(true, Ordering::Relaxed);
+    }
+
+    /// What was added so far.
+    pub fn spent(&self) -> Amount {
+        self.0.spent.load(Ordering::Relaxed)
+    }
+
+    /// Whether anything was added.
+    pub fn is_reported(&self) -> bool {
+        self.0.reported.load(Ordering::Relaxed)
     }
 }
 
 /// Holds each call's quote on a [`Ledger`] before it is sent, and settles
-/// it exactly once when it ends, from its [`Outcome::usage`]. A call with
-/// no quote (its `Err`) is refused before anything is sent. A call the
-/// provider may have billed without reporting its usage in full (a stream
-/// cut off, or a call sent that failed before its head) is charged at least
-/// its reserve. It uses the provider edge alone: register it last, so it
-/// prices the call as every other plugin left it, and once per gateway.
+/// it exactly once when it ends, from its [`Tally`]. A call with no quote
+/// (its `Err`) is refused before anything is sent. A call the provider may
+/// have billed without its cost reported in full (a tally never added to,
+/// a stream cut off, or a call sent that failed before its head) is
+/// charged at least its reserve. It uses the provider edge alone: register
+/// it last, so it prices the call as every other plugin left it, and once
+/// per gateway. A filter the quote adds is then the call's last, so it
+/// sees each output first, before another plugin's filter can fail on it.
 pub struct Accounting<L> {
     ledger: L,
     quote: Box<QuoteFn>,
@@ -68,10 +84,12 @@ impl<L> std::fmt::Debug for Accounting<L> {
 }
 
 impl<L: Ledger> Accounting<L> {
-    /// Quote each call on `ledger`. Holds last 15 minutes unless settled.
+    /// Quote each call on `ledger`, with the call's [`Tally`] to report
+    /// its cost into, such as from a filter the quote adds to the call.
+    /// Holds last 15 minutes unless settled.
     pub fn new(
         ledger: L,
-        quote: impl Fn(&ProviderContext) -> Result<Quote, Fault> + Send + Sync + 'static,
+        quote: impl Fn(&mut ProviderContext, Tally) -> Result<Quote, Fault> + Send + Sync + 'static,
     ) -> Self {
         Self {
             ledger,
@@ -88,8 +106,8 @@ impl<L: Ledger> Accounting<L> {
     }
 
     /// What a call cost, as far as the gateway can tell.
-    fn charge(&self, hold: &Hold, price: Price, outcome: &Outcome) -> Amount {
-        let usage = &outcome.usage;
+    fn charge(&self, hold: &Hold, outcome: &Outcome) -> Amount {
+        let spent = hold.tally.spent();
         let Some(head) = &outcome.head else {
             // No answer. Sent, it may have reached the provider, such as a
             // call given up or timed out waiting for its head; else it never
@@ -97,16 +115,16 @@ impl<L: Ledger> Accounting<L> {
             if !hold.sent.load(Ordering::Relaxed) {
                 return 0;
             }
-            return price(usage).max(hold.reserve);
+            return spent.max(hold.reserve);
         };
         if !head.status.is_success() {
             return 0; // the provider refused it
         }
-        if outcome.end.is_ok() && !usage.is_empty() {
-            return price(usage);
+        if outcome.end.is_ok() && hold.tally.is_reported() {
+            return spent;
         }
-        // Cut off: its usage may be partial.
-        price(usage).max(hold.reserve)
+        // Cut off, or never reported: its cost may be partial.
+        spent.max(hold.reserve)
     }
 }
 
@@ -114,8 +132,9 @@ impl<L: Ledger> Accounting<L> {
 struct Hold {
     id: HoldId,
     reserve: Amount,
+    tally: Tally,
     /// Taken by the one settlement.
-    price: Mutex<Option<Price>>,
+    settled: AtomicBool,
     /// Handed to the transport.
     sent: AtomicBool,
 }
@@ -123,11 +142,8 @@ struct Hold {
 #[async_trait]
 impl<L: Ledger> Plugin for Accounting<L> {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        let Quote {
-            accounts,
-            reserve,
-            price,
-        } = (self.quote)(px)?;
+        let tally = Tally::default();
+        let Quote { accounts, reserve } = (self.quote)(px, tally.clone())?;
         if accounts.is_empty() {
             let msg = "no account to charge";
             return Err(Fault::new(StatusCode::UNAUTHORIZED, NO_ACCOUNT, msg));
@@ -135,7 +151,8 @@ impl<L: Ledger> Plugin for Accounting<L> {
         let hold = Arc::new(Hold {
             id: HoldId::new(),
             reserve,
-            price: Mutex::new(Some(price)),
+            tally,
+            settled: AtomicBool::new(false),
             sent: AtomicBool::new(false),
         });
         // Stored before the first await: this hook may stop at any, and
@@ -154,13 +171,10 @@ impl<L: Ledger> Plugin for Accounting<L> {
         let Some(hold) = px.extensions().get::<Arc<Hold>>().cloned() else {
             return;
         };
-        let price = hold
-            .price
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        let Some(price) = price else { return };
-        let spent = self.charge(&hold, price, outcome);
+        if hold.settled.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let spent = self.charge(&hold, outcome);
         // A failure is the ledger's to retry; the hold's TTL is the backstop.
         let _ = self.ledger.settle(&hold.id, spent).await;
     }

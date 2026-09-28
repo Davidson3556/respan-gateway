@@ -1,5 +1,7 @@
-//! The kernel's promises on ends, usage and filters, probed with a scripted
-//! line format whose decoder turns each line into one value.
+//! The kernel's promises on ends and filters, probed with a scripted line
+//! format whose decoder turns each line into one value. The kernel counts
+//! no usage: [`Meter`], registered last, sums what lines report through a
+//! provider-edge filter, so these tests show what such a filter sees.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -13,15 +15,16 @@ use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{
     Body, Call, ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
-    ProviderContext, Response, Transport, Usage, async_trait,
+    ProviderContext, Response, Transport, async_trait,
 };
 use respan_gateway_core::{bytes, futures, http, http_body, http_body_util};
+use respan_gateway_formats::Usage;
 
 /// What a client sends: one message, which keeps the bytes it came in.
 #[derive(Debug, Clone, PartialEq)]
 struct LIn(String, Relayed<LIn>);
 
-/// What a line says: text, usage, or nothing a reader sees, with its bytes.
+/// What a line says: text, usage, or no content, with its bytes.
 #[derive(Debug, Clone, PartialEq)]
 struct LOut(String, Usage, Relayed<LOut>);
 
@@ -33,7 +36,7 @@ fn out(text: impl Into<String>) -> LOut {
 const LINE: &str = "line";
 
 /// Lines: `i:X` text, `u:N` usage of N `t`, `e` the end, `x:M` a failure;
-/// any other line says nothing. Each line is one value; a body ends at its
+/// any other line is no content. Each line is one value; a body ends at its
 /// end, complete only after `e`.
 struct Line;
 
@@ -83,11 +86,7 @@ impl Format for Line {
         Box::new(LineEncoder(request.method() == http::Method::GET, None))
     }
 
-    fn usage<'a>(&self, output: &'a LOut) -> Option<&'a Usage> {
-        (!output.1.is_empty()).then_some(&output.1)
-    }
-
-    fn says(&self, output: &LOut) -> bool {
+    fn is_content(&self, output: &LOut) -> bool {
         !output.0.is_empty()
     }
 }
@@ -118,12 +117,8 @@ macro_rules! as_line {
             Line.response_encoder(head, request)
         }
 
-        fn usage<'a>(&self, output: &'a LOut) -> Option<&'a Usage> {
-            Line.usage(output)
-        }
-
-        fn says(&self, output: &LOut) -> bool {
-            Line.says(output)
+        fn is_content(&self, output: &LOut) -> bool {
+            Line.is_content(output)
         }
     };
 }
@@ -257,9 +252,15 @@ impl Transport for Script {
     }
 }
 
-/// Records every provider-edge outcome and every client-edge outcome.
+/// Records every provider-edge outcome and every client-edge outcome, and
+/// what [`Meter`] metered.
 #[derive(Clone, Default)]
-struct Log(Shared<String>, Shared<Outcome>, Shared<Outcome>);
+struct Log(
+    Shared<String>,
+    Shared<Outcome>,
+    Shared<Outcome>,
+    Shared<Usage>,
+);
 
 type Shared<T> = Arc<Mutex<Vec<T>>>;
 
@@ -280,6 +281,40 @@ impl Log {
     fn clients(&self) -> Vec<Outcome> {
         lock(&self.2).clone()
     }
+    fn metered(&self) -> Vec<Usage> {
+        lock(&self.3).clone()
+    }
+}
+
+/// One call's usage, summed by [`Meter`]'s filter.
+#[derive(Clone, Default)]
+struct LineUsage(Arc<Mutex<Usage>>);
+
+/// Meters each call of this kind into the log: a provider-edge filter sums
+/// the usage of the lines it sees. Registered last, so its filter sees each
+/// line first.
+struct Meter(Log);
+
+#[async_trait]
+impl Plugin for Meter {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        if !px.is_kind::<LOut>() {
+            return Ok(());
+        }
+        let usage = LineUsage::default();
+        px.extensions_mut().insert(usage.clone());
+        px.filter(move |o: &mut LOut| {
+            *lock(&usage.0) += &o.1;
+            Ok(())
+        })
+    }
+
+    async fn on_provider_end(&self, px: &ProviderContext, _o: &Outcome) {
+        if let Some(LineUsage(usage)) = px.extensions().get::<LineUsage>() {
+            let usage = lock(usage).clone();
+            lock(&self.0.3).push(usage);
+        }
+    }
 }
 
 #[async_trait]
@@ -299,6 +334,7 @@ fn gateway(script: Script, log: &Log, plugin: impl Plugin) -> Gateway {
         .and_then(|g| g.target("p"))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("x", plugin))
+        .and_then(|g| g.plugin("meter", Meter(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -321,14 +357,16 @@ async fn run(gw: &Gateway, r: http::Request<Body>) -> (StatusCode, Result<Bytes,
     (status, body)
 }
 
-fn t(o: &Outcome) -> Option<f64> {
-    o.usage.get("t")
+/// The `t` a call's lines reported, as [`Meter`] saw them.
+fn t(usage: &Usage) -> Option<f64> {
+    usage.get("t")
 }
 
-// Usage read by `ready`, then dropped, counts on the call.
+// Usage read by `ready`, then dropped, reaches the call's meter: provider-edge
+// filters run as a response is decoded, whoever reads it.
 
 #[tokio::test]
-async fn f1_usage_read_by_ready_counts_even_if_the_response_is_dropped() {
+async fn f1_usage_read_by_ready_is_metered_even_if_the_response_is_dropped() {
     struct Peek;
 
     #[async_trait]
@@ -348,17 +386,16 @@ async fn f1_usage_read_by_ready_counts_even_if_the_response_is_dropped() {
     let gw = gateway(script, &log, Peek);
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::OK);
-    // The provider billed 5, which its edge counts.
-    let calls = log.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(t(&calls[0]), Some(5.0), "{:?}", calls[0]);
+    // The provider billed 5, which its edge's meter saw.
+    assert_eq!(log.calls().len(), 1);
+    assert_eq!(log.metered().iter().map(t).collect::<Vec<_>>(), [Some(5.0)]);
 }
 
 // A client-edge filter failing on a value that shares a frame with usage
-// leaves that usage counted on the provider edge.
+// leaves that usage metered on the provider edge, whose filters ran first.
 
 #[tokio::test]
-async fn f2_usage_counts_on_the_call_though_the_client_edge_failed_first() {
+async fn f2_usage_is_metered_on_the_call_though_the_client_edge_failed_first() {
     struct Guard;
 
     #[async_trait]
@@ -377,8 +414,7 @@ async fn f2_usage_counts_on_the_call_though_the_client_edge_failed_first() {
     let gw = gateway(script, &log, Guard);
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let calls = log.calls();
-    assert_eq!(t(&calls[0]), Some(7.0), "{:?}", calls[0]);
+    assert_eq!(t(&log.metered()[0]), Some(7.0));
 }
 
 // A `HEAD` whose provider sends no body passes its head.
@@ -508,10 +544,11 @@ async fn f6_a_refused_head_request_ends_with_its_fault() {
     );
 }
 
-// Usage decoded after a call's filter failed, in the same frame, counts.
+// Usage decoded after a call's filter failed, in the same frame, reaches no
+// filter, so no meter (changed in 0010: the kernel no longer counts it).
 
 #[tokio::test]
-async fn f7_usage_decoded_after_a_calls_filter_failed_still_counts() {
+async fn f7_usage_decoded_after_a_calls_filter_failed_reaches_no_meter() {
     struct Guard;
 
     #[async_trait]
@@ -528,8 +565,8 @@ async fn f7_usage_decoded_after_a_calls_filter_failed_still_counts() {
     let script = Script::default().then(StatusCode::OK, vec!["i:ok\n", "i:bad\nu:7\ne\n"]);
     let gw = gateway(script, &log, Guard);
     let _ = run(&gw, req(http::Method::POST)).await;
-    let calls = log.calls();
-    assert_eq!(t(&calls[0]), Some(7.0), "{:?}", calls[0]);
+    assert!(log.calls()[0].end.is_err());
+    assert_eq!(t(&log.metered()[0]), None);
 }
 
 // A client-edge filter panicking ends the call internal.
@@ -914,9 +951,9 @@ async fn r9_2_a_call_filter_before_a_failing_one_gets_its_end() {
     assert_eq!(notes, ["failed true", "first end false"]);
 }
 
-// Usage in the frame a failing filter fails on counts once.
+// Usage before the value a filter fails on, in its frame, is metered once.
 #[tokio::test]
-async fn r9_3_usage_in_the_frame_a_filter_fails_on_counts_once() {
+async fn r9_3_usage_before_the_value_a_filter_fails_on_is_metered_once() {
     struct P;
 
     #[async_trait]
@@ -930,7 +967,7 @@ async fn r9_3_usage_in_the_frame_a_filter_fails_on_counts_once() {
     let script = Script::default().then(StatusCode::OK, vec!["u:5\ni:hi\n", "e\n"]);
     let gw = gateway(script, &log, P);
     let _ = run(&gw, req(http::Method::POST)).await;
-    assert_eq!(t(&log.calls()[0]), Some(5.0));
+    assert_eq!(log.metered().iter().map(t).collect::<Vec<_>>(), [Some(5.0)]);
     assert!(log.calls()[0].end.is_err());
 }
 
@@ -1149,9 +1186,10 @@ fn over_budget(o: &mut LOut) -> Result<(), Fault> {
     }
 }
 
-// Usage in the frame a call's filter fails on counts on the call, unwritten.
+// A call filter's failure is written, and what follows it in its frame is
+// not, nor does it reach any filter (the usage count went in 0010).
 #[tokio::test]
-async fn k9_7_usage_a_call_filter_fails_on_counts_unwritten() {
+async fn k9_7_what_follows_a_call_filters_failure_is_unwritten() {
     struct P;
 
     #[async_trait]
@@ -1167,11 +1205,11 @@ async fn k9_7_usage_a_call_filter_fails_on_counts_unwritten() {
     let gw = gateway(script, &log, P);
     let (_, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(&body.unwrap_or_default()[..], b"i:ok\nx:over budget\n");
-    assert_eq!(t(&log.calls()[0]), Some(5.0));
+    assert_eq!(t(&log.metered()[0]), None);
 }
 
-// A client filter's failure stops a plugin's own bytes; their usage counts
-// nowhere (changed in 0009: only a provider's response counts).
+// A client filter's failure stops a plugin's own bytes; they pass no
+// provider edge, so no meter (0009).
 #[tokio::test]
 async fn k9_7_a_client_filter_fails_a_plugins_own_bytes_which_count_nothing() {
     struct P;
@@ -1190,7 +1228,7 @@ async fn k9_7_a_client_filter_fails_a_plugins_own_bytes_which_count_nothing() {
     let gw = gateway(Script::default(), &log, P);
     let (_, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(&body.unwrap_or_default()[..], b"i:ok\nx:over budget\n");
-    assert_eq!(t(&log.clients()[0]), None);
+    assert!(log.metered().is_empty());
 }
 
 // An `edit_response_head` `Err` refuses the request with that fault.
@@ -1630,13 +1668,14 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
         .and_then(|g| g.serve(Line))
         .and_then(|g| g.target("posted"))
         .and_then(|g| g.plugin("log", log.clone()))
+        .and_then(|g| g.plugin("meter", Meter(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
     let call = &log.calls()[0];
     let end = call.end.clone().map_err(|f| f.code().to_owned());
     assert_eq!(
-        (t(call), end),
+        (t(&log.metered()[0]), end),
         (None, Err(respan_gateway_core::codes::ABANDONED.to_owned()))
     );
 }
@@ -1721,7 +1760,7 @@ async fn r11_first_is_a_changed_input_even_with_the_clients_bytes() {
     assert_eq!(lock(&seen).clone(), [(true, Bytes::from_static(b"hi"))]);
 }
 
-/// Adds a provider filter that panics on every output that says something.
+/// Adds a provider filter that panics on every output.
 struct PanicsOnOutput;
 
 #[async_trait]
@@ -1731,15 +1770,15 @@ impl Plugin for PanicsOnOutput {
     }
 }
 
-// A filter that panics fails the call internal, and the usage in its frame
-// counts.
+// A filter that panics fails the call internal, and the usage after the
+// value it panics on, in its frame, reaches no filter (changed in 0010).
 #[tokio::test]
-async fn r11_usage_in_the_frame_a_filter_panics_on_still_counts() {
+async fn r11_a_filter_that_panics_fails_the_call_internal() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec!["i:hi\nu:5\ne\n"]);
     let gw = gateway(script, &log, PanicsOnOutput);
     let _ = run(&gw, req(http::Method::POST)).await;
     let call = &log.calls()[0];
     let internal = call.end.as_ref().is_err_and(|f| f.code() == "internal");
-    assert_eq!((t(call), internal), (Some(5.0), true));
+    assert_eq!((t(&log.metered()[0]), internal), (None, true));
 }

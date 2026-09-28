@@ -8,7 +8,7 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use tokio::sync::Notify;
 
-use crate::{ClientContext, Fault, Outcome, Plugin, Usage};
+use crate::{ClientContext, Fault, Outcome, Plugin};
 
 /// The context an edge's hooks get: [`ClientContext`] on the client edge,
 /// [`ProviderContext`](crate::ProviderContext) on the provider edge.
@@ -19,8 +19,8 @@ pub(crate) trait Edge: Send + Sync + 'static {
     /// `plugin`'s end hook on this edge.
     fn hook<'a>(&'a self, plugin: &'a dyn Plugin, outcome: &'a Outcome) -> BoxFuture<'a, ()>;
 
-    /// The edge ends `end`, just before its end hooks; it may add to `usage`.
-    fn close(&mut self, end: &Result<(), Fault>, usage: &mut Usage);
+    /// The edge ends `end`, just before its end hooks.
+    fn close(&mut self, end: &Result<(), Fault>);
 }
 
 /// Runs one edge's end hooks exactly once, for every plugin whose start
@@ -33,7 +33,6 @@ pub(crate) struct EndHooks<E: Edge> {
     /// Taken when the hooks start.
     cx: Option<E>,
     pub(crate) head: Option<http::response::Parts>,
-    pub(crate) usage: Usage,
     /// End hooks that must finish before these start.
     pub(crate) after: Option<Arc<InFlight>>,
     /// Also receives the `Outcome`, for `Gateway::handle`'s future.
@@ -51,7 +50,6 @@ impl<E: Edge> EndHooks<E> {
             ran: 0,
             cx: Some(cx),
             head: None,
-            usage: Usage::default(),
             after: None,
             report,
         }
@@ -73,12 +71,10 @@ impl<E: Edge> EndHooks<E> {
             return;
         };
         // The end is known, so a panic neither changes it nor stops the hooks.
-        let usage = &mut self.usage;
-        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| cx.close(&end, usage)));
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| cx.close(&end)));
         let outcome = Outcome {
             head: self.head.clone(),
             end,
-            usage: self.usage.clone(),
         };
         if let Some(to) = self.report.take() {
             let _ = to.send(outcome.clone());

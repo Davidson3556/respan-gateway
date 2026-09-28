@@ -11,8 +11,8 @@ use respan_gateway_core::{
     bytes::Bytes, http,
 };
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_formats::conversation::{Conversation, units};
-use respan_gateway_ledger::{Accounting, Amount, HoldId, Ledger, MemoryLedger, Quote};
+use respan_gateway_formats::conversation::{Conversation, Reply, units};
+use respan_gateway_ledger::{Accounting, Amount, HoldId, Ledger, MemoryLedger, Quote, Tally};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
 const P: &str = "http://p.test/v1";
@@ -39,15 +39,20 @@ fn answer(output: u32) -> mock::Reply {
 const DELTA: &str = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n";
 
 /// Output tokens at 10 each, bounded by `max_tokens`; none set is no bound.
-fn quote(px: &ProviderContext) -> Result<Quote, Fault> {
+/// Each usage increment the provider reports is priced into the tally.
+fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
     let chat = px.input::<Conversation>()?;
     let max = chat
         .max_tokens
         .ok_or_else(|| Fault::bad_request("no cost bound: set max_tokens"))?;
-    let price = |u: &respan_gateway_core::Usage| {
-        u.get(units::OUTPUT_TOKENS).unwrap_or(0.0).ceil() as Amount * 10
-    };
-    Ok(Quote::new(["key"], max as Amount * 10, price))
+    px.filter(move |reply: &mut Reply| {
+        if !reply.usage.is_empty() {
+            let output = reply.usage.get(units::OUTPUT_TOKENS).unwrap_or(0.0);
+            tally.add(output.ceil() as Amount * 10);
+        }
+        Ok(())
+    })?;
+    Ok(Quote::new(["key"], max as Amount * 10))
 }
 
 fn wallet(limit: Amount) -> MemoryLedger {
@@ -136,11 +141,13 @@ async fn every_call_settles_exactly_once() {
     let cut = vec![Ok(Bytes::from(DELTA)), Err(Fault::upstream("cut"))];
     let mut cut_stream = mock::sse(&[]);
     *cut_stream.body_mut() = cut;
-    let usage_later = mock::sse(&[
-        DELTA,
-        "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\n",
-        "data: [DONE]\n\n",
-    ]);
+    let usage_later = || {
+        mock::sse(&[
+            DELTA,
+            "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"completion_tokens\":2}}\n\n",
+            "data: [DONE]\n\n",
+        ])
+    };
     let refused = mock::json(
         StatusCode::INTERNAL_SERVER_ERROR,
         r#"{"error":{"message":"x"}}"#,
@@ -157,7 +164,9 @@ async fn every_call_settles_exactly_once() {
             true,
             RESERVE,
         ),
-        ("client left", Some(usage_later), true, false, RESERVE),
+        // Usage alone, in the stream's last chunk, reaches the tally.
+        ("streamed", Some(usage_later()), true, true, 20),
+        ("client left", Some(usage_later()), true, false, RESERVE),
     ];
     for (case, reply, stream, read, charged) in cases {
         let (mock, ledger) = (MockTransport::new(), Noted::default());

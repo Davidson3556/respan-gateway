@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::fault::guarded;
 use crate::format::Values;
-use crate::{ClientContext, Fault, ProviderContext, Response, Usage};
+use crate::{ClientContext, Fault, ProviderContext, Response};
 
 /// How a request ([`Plugin::on_client_end`]) or one of its calls
 /// ([`Plugin::on_provider_end`]) ended.
@@ -22,21 +22,14 @@ pub struct Outcome {
     /// [`codes::ABANDONED`](crate::codes::ABANDONED) if it was dropped or cut
     /// off first. A fault's message may carry a provider's words.
     pub end: Result<(), Fault>,
-    /// The usage a provider reported: on the provider edge the call's, as
-    /// its response was decoded, even after a failure; on the client edge
-    /// the sum of the request's calls', so bill on one edge only. What a
-    /// plugin makes or relays ([`ClientContext::relay`]) never counts; a
-    /// cached answer's usage travels in an extension.
-    pub usage: Usage,
 }
 
-/// Ended `Ok`, with no head or usage.
+/// Ended `Ok`, with no head.
 impl Default for Outcome {
     fn default() -> Self {
         Self {
             head: None,
             end: Ok(()),
-            usage: Usage::default(),
         }
     }
 }
@@ -146,9 +139,11 @@ impl<P: Plugin + ?Sized> Plugin for Arc<P> {
 /// Edits a request's inputs or a response's outputs as they stream
 /// ([`ClientContext::filter`], [`ProviderContext::filter`]): change, drop,
 /// keep back or insert values of `T`, the format's input or output type.
-/// An output that says nothing ([`Format::says`](crate::Format::says))
-/// never reaches it. What the other side's format cannot write fails the
-/// call or response. A panic is an internal fault. Filters are synchronous:
+/// Every value reaches it, content or not
+/// ([`Format::is_content`](crate::Format::is_content)), such as a keep-alive
+/// or a message of usage alone: pass on at once what it has no reason to
+/// hold, or it waits too. What the other side's format cannot write fails
+/// the call or response. A panic is an internal fault. Filters are synchronous:
 /// compute what must be awaited in a hook, and apply it here.
 pub trait Filter<T>: Send + 'static {
     /// Take `value` and push what replaces it, if anything, to `out`. `Err`
@@ -172,25 +167,12 @@ impl<T, F: FnMut(&mut T) -> Result<(), Fault> + Send + 'static> Filter<T> for F 
     }
 }
 
-/// Whether a value says anything, so filters see it.
-pub(crate) type Says<'a> = &'a dyn Fn(&dyn Any) -> bool;
-
-/// Every value says something: inputs do.
-pub(crate) fn all(_: &dyn Any) -> bool {
-    true
-}
-
 /// One edge's filters of one direction, their values' type erased.
 trait AnyList: Send {
     fn as_any(&mut self) -> &mut dyn Any;
     fn is_empty(&self) -> bool;
-    fn run(&mut self, values: &mut Values, says: Says<'_>) -> Result<(), Fault>;
-    fn end(
-        &mut self,
-        end: &Result<(), Fault>,
-        values: &mut Option<Values>,
-        says: Says<'_>,
-    ) -> Option<Fault>;
+    fn run(&mut self, values: &mut Values) -> Result<(), Fault>;
+    fn end(&mut self, end: &Result<(), Fault>, values: &mut Option<Values>) -> Option<Fault>;
 }
 
 /// Filters of `T`, in reverse order of application, each with whether it
@@ -206,9 +188,9 @@ impl<T: Send + 'static> AnyList for List<T> {
         self.0.is_empty()
     }
 
-    /// Each value in turn through every filter, values that say nothing in
-    /// place, so what one fails on leaves those before it written.
-    fn run(&mut self, values: &mut Values, says: Says<'_>) -> Result<(), Fault> {
+    /// Each value in turn through every filter, so what one fails on leaves
+    /// those before it written.
+    fn run(&mut self, values: &mut Values) -> Result<(), Fault> {
         let values = values
             .downcast_mut::<Vec<T>>()
             .ok_or_else(Fault::wrong_kind::<T>)?;
@@ -217,9 +199,7 @@ impl<T: Send + 'static> AnyList for List<T> {
             for (filter, failed) in self.0.iter_mut().rev() {
                 let mut out = Vec::with_capacity(each.len());
                 for value in each {
-                    if !says(&value) {
-                        out.push(value);
-                    } else if let Err(f) = guarded(|| filter.edit(value, &mut out)) {
+                    if let Err(f) = guarded(|| filter.edit(value, &mut out)) {
                         *failed = true;
                         return Err(f);
                     }
@@ -233,22 +213,13 @@ impl<T: Send + 'static> AnyList for List<T> {
 
     /// Each filter's end, once: what earlier ones kept back goes through
     /// it, unless it failed, then what it keeps back joins them.
-    fn end(
-        &mut self,
-        end: &Result<(), Fault>,
-        values: &mut Option<Values>,
-        says: Says<'_>,
-    ) -> Option<Fault> {
+    fn end(&mut self, end: &Result<(), Fault>, values: &mut Option<Values>) -> Option<Fault> {
         let (mut tail, mut fault) = (Vec::new(), None);
         for (filter, failed) in self.0.iter_mut().rev() {
             let was = *failed;
             let mut passed = Vec::new();
             let mut edited = Ok(());
             for value in std::mem::take(&mut tail).into_iter().filter(|_| !was) {
-                if !says(&value) {
-                    passed.push(value);
-                    continue;
-                }
                 edited = guarded(|| filter.edit(value, &mut passed));
                 if edited.is_err() {
                     break;
@@ -295,7 +266,7 @@ impl Filters {
         input: bool,
     ) -> Result<(), Fault> {
         if let Some(end) = self.1.clone() {
-            return Self::of(filter).end(end, &mut None, &all);
+            return Self::of(filter).end(end, &mut None);
         }
         let list = self
             .0
@@ -329,9 +300,9 @@ impl Filters {
 
     /// Run `values` through the filters until the first failure; `values`
     /// keeps what passed before it.
-    pub(crate) fn run(&mut self, values: &mut Values, says: Says<'_>) -> Result<(), Fault> {
+    pub(crate) fn run(&mut self, values: &mut Values) -> Result<(), Fault> {
         match &mut self.0 {
-            Some(list) => guarded(|| list.run(values, says)),
+            Some(list) => guarded(|| list.run(values)),
             None => Ok(()),
         }
     }
@@ -343,16 +314,11 @@ impl Filters {
         &mut self,
         end: Result<(), Fault>,
         values: &mut Option<Values>,
-        says: Says<'_>,
     ) -> Result<(), Fault> {
         if let Some(ended) = &self.1 {
             return ended.clone();
         }
-        let end = match self
-            .0
-            .take()
-            .and_then(|mut list| list.end(&end, values, says))
-        {
+        let end = match self.0.take().and_then(|mut list| list.end(&end, values)) {
             None => end,
             Some(f) => failed(f, &end),
         };
@@ -420,8 +386,8 @@ mod tests {
     fn a_filter_whose_edit_failed_still_gets_its_end() {
         let noted = Arc::new(Mutex::new(Vec::new()));
         let mut filters = filters(&noted, &[("bad", false), ("worse", false)]);
-        assert!(filters.run(&mut one("bad"), &all).is_err());
-        let _ = filters.end(Ok(()), &mut None, &all);
+        assert!(filters.run(&mut one("bad")).is_err());
+        let _ = filters.end(Ok(()), &mut None);
         assert_eq!(
             noted.lock().map(|n| n.clone()).ok(),
             Some(vec!["worse", "bad"])
@@ -434,12 +400,12 @@ mod tests {
         // Applied the last added first.
         let each = [("third", true), ("second", true), ("first", false)];
         let mut filters = filters(&noted, &each);
-        let end = filters.end(Ok(()), &mut None, &all);
+        let end = filters.end(Ok(()), &mut None);
         assert_eq!(
             end.err().map(|f| f.message().to_owned()).as_deref(),
             Some("second")
         );
-        let _ = filters.end(Ok(()), &mut None, &all);
+        let _ = filters.end(Ok(()), &mut None);
         let noted = noted.lock().map(|n| n.clone()).ok();
         assert_eq!(noted, Some(vec!["first", "second", "third"]));
     }
@@ -469,8 +435,8 @@ mod tests {
         // Applied the last added first: Keep, then "bad".
         let mut filters = filters(&noted, &[("bad", false)]);
         let _ = filters.add(Keep::<String>(Vec::new(), false), false);
-        assert!(filters.run(&mut one("bad"), &all).is_ok());
-        assert!(filters.end(Ok(()), &mut None, &all).is_err());
+        assert!(filters.run(&mut one("bad")).is_ok());
+        assert!(filters.end(Ok(()), &mut None).is_err());
         assert_eq!(noted.lock().map(|n| n.clone()).ok(), Some(vec!["bad"]));
     }
 
@@ -491,7 +457,7 @@ mod tests {
         let noted = Arc::new(Mutex::new(Vec::new()));
         let mut filters = filters(&noted, &[("after", false)]);
         let _ = filters.add(Panics, false);
-        let end = filters.end(Ok(()), &mut None, &all);
+        let end = filters.end(Ok(()), &mut None);
         assert_eq!(
             end.err().map(|f| f.code().to_owned()).as_deref(),
             Some("internal")
@@ -503,25 +469,10 @@ mod tests {
     fn a_failed_filter_releases_nothing() {
         let mut outputs = Filters::default();
         let _ = outputs.add(Keep::<String>(Vec::new(), true), false);
-        assert!(outputs.run(&mut one("kept"), &all).is_err());
+        assert!(outputs.run(&mut one("kept")).is_err());
         let mut tail = None;
-        assert!(outputs.end(Ok(()), &mut tail, &all).is_ok());
+        assert!(outputs.end(Ok(()), &mut tail).is_ok());
         assert!(tail.is_none());
-    }
-
-    // A value that says nothing passes every filter in place, even one that
-    // keeps everything back.
-    #[test]
-    fn a_value_that_says_nothing_passes_filters_in_place() {
-        let mut filters = Filters::default();
-        let _ = filters.add(Keep::<String>(Vec::new(), false), false);
-        let says = |v: &dyn Any| v.downcast_ref::<String>().is_some_and(|s| !s.is_empty());
-        let mut values: Values = Box::new(vec!["a".to_owned(), String::new(), "b".to_owned()]);
-        assert!(filters.run(&mut values, &says).is_ok());
-        assert_eq!(strings(Some(values)), [""]);
-        let mut tail = None;
-        assert!(filters.end(Ok(()), &mut tail, &says).is_ok());
-        assert_eq!(strings(tail), ["a", "b"]);
     }
 
     // What a filter fails on leaves the values before it to be written.
@@ -530,7 +481,7 @@ mod tests {
         let noted = Arc::new(Mutex::new(Vec::new()));
         let mut filters = filters(&noted, &[("bad", false)]);
         let mut values: Values = Box::new(vec!["a".to_owned(), "bad".to_owned(), "c".to_owned()]);
-        assert!(filters.run(&mut values, &all).is_err());
+        assert!(filters.run(&mut values).is_err());
         assert_eq!(strings(Some(values)), ["a"]);
     }
 }

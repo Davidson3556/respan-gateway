@@ -146,7 +146,7 @@ impl Format for JevFormat {
         // A jev answer is whole, or a stream of one-answer SSE events.
         let (answer, name): (_, Arc<str>) = (self.answer, Arc::from(self.name));
         sse::or_whole(self.name, head, move |raw: Bytes, out: &mut Vec<Answer>| {
-            // A keep-alive comment says nothing.
+            // A keep-alive comment is no content.
             if raw.starts_with(b":") {
                 out.push(Answer::default().came(&name, raw));
                 return Ok(());
@@ -186,7 +186,7 @@ impl Format for JevFormat {
             }
             let texts: Vec<&str> = answers.iter().filter_map(|a| a.text.as_deref()).collect();
             if texts.is_empty() && answers.iter().all(|a| a.text.is_none()) {
-                // What says nothing, from another format, writes nothing.
+                // What is no content, from another format, writes nothing.
                 return Ok(Bytes::new());
             }
             let like = answers.iter().find_map(|a| a.origin.origin(name));
@@ -200,7 +200,7 @@ impl Format for JevFormat {
         Box::new(Relay::new(write, fail, stream))
     }
 
-    fn says(&self, answer: &Answer) -> bool {
+    fn is_content(&self, answer: &Answer) -> bool {
         answer.text.is_some()
     }
 }
@@ -1515,7 +1515,8 @@ fn jev_relay(plugin: impl Plugin, mock: &MockTransport) -> Gateway {
 
 #[tokio::test]
 async fn what_filters_kept_back_goes_before_a_relayed_providers_error() {
-    /// Keeps every answer back until the end.
+    /// Keeps every answer back until the end; passes a keep-alive at once,
+    /// as every value reaches a filter.
     struct Late;
 
     #[async_trait]
@@ -1529,8 +1530,11 @@ async fn what_filters_kept_back_goes_before_a_relayed_providers_error() {
     struct KeepAll(Vec<Answer>);
 
     impl Filter<Answer> for KeepAll {
-        fn edit(&mut self, event: Answer, _out: &mut Vec<Answer>) -> Result<(), Fault> {
-            self.0.push(event);
+        fn edit(&mut self, event: Answer, out: &mut Vec<Answer>) -> Result<(), Fault> {
+            match event.text {
+                None => out.push(event),
+                Some(_) => self.0.push(event),
+            }
             Ok(())
         }
 
@@ -1820,26 +1824,31 @@ async fn a_translating_encoder_gets_of_the_providers_head_what_any_protocol_carr
     assert!(headers.get("x-jev-trace").is_none());
 }
 
-// A message that says nothing, such as an SSE comment, passes no filter and
-// goes out where it came.
+// A message that is no content, such as an SSE comment, reaches filters, and
+// goes out where it came when they pass it on.
 #[tokio::test]
-async fn a_keep_alive_passes_no_filter_and_goes_where_it_came() {
-    /// Refuses anything it is shown that says nothing.
-    struct Strict;
+async fn a_keep_alive_reaches_filters_and_goes_where_it_came() {
+    /// Counts the keep-alives it is shown, passing everything on.
+    #[derive(Clone, Default)]
+    struct Counts(Arc<std::sync::atomic::AtomicUsize>);
 
     #[async_trait]
-    impl Plugin for Strict {
+    impl Plugin for Counts {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|a: &mut Answer| match a.text {
-                Some(_) => Ok(()),
-                None => Err(Fault::internal("a keep-alive reached a filter")),
+            let seen = self.0.clone();
+            cx.filter(move |a: &mut Answer| {
+                if a.text.is_none() {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(())
             })?;
             Ok(None)
         }
     }
 
     let mock = MockTransport::new();
-    let gw = jev_relay(Strict, &mock);
+    let counts = Counts::default();
+    let gw = jev_relay(counts.clone(), &mock);
     let stream = [
         "data: {\"text\":\"a\"}\n\n",
         ": keep-alive\n\n",
@@ -1852,4 +1861,5 @@ async fn a_keep_alive_passes_no_filter_and_goes_where_it_came() {
 
     assert_eq!(body.ok().as_deref(), Some(stream.concat().as_bytes()));
     assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(counts.0.load(std::sync::atomic::Ordering::Relaxed), 1);
 }

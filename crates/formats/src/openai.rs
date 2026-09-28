@@ -3,10 +3,11 @@
 
 use bytes::{Bytes, BytesMut};
 use http::{Request, StatusCode};
-use respan_gateway_core::{Decoder, Encoder, Fault, Format, Usage};
+use respan_gateway_core::{Decoder, Encoder, Fault, Format};
 use respan_gateway_core::{bytes, http, serde_json};
 use serde_json::{Map, Value, json};
 
+use crate::Usage;
 use crate::common::{
     Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, made_head, merge_details,
     patch_messages, patch_sampling, post_json, probe, provider_error, read_message, reads_back,
@@ -80,12 +81,8 @@ impl Format for OpenAiChat {
         Box::new(Chunks::new(relayed, asked.usage))
     }
 
-    fn usage<'a>(&self, reply: &'a Reply) -> Option<&'a Usage> {
-        (!reply.usage.is_empty()).then_some(&reply.usage)
-    }
-
-    fn says(&self, reply: &Reply) -> bool {
-        reply.says()
+    fn is_content(&self, reply: &Reply) -> bool {
+        reply.is_content()
     }
 }
 
@@ -787,7 +784,7 @@ mod tests {
         let content = batches(&[role, ": ping\n\n", text]);
         assert!(content[0].0.is_empty() && content[1].0.is_empty());
         // The start, the ping held behind it, and the text, each as it came.
-        let kinds: Vec<bool> = content[2].0.iter().map(Reply::says).collect();
+        let kinds: Vec<bool> = content[2].0.iter().map(Reply::is_content).collect();
         assert_eq!(kinds, [true, false, true]);
         assert!(content[2].0.iter().all(|r| r.origin(OPENAI).is_some()));
         // A failure first leaves only the usage held, saying nothing.
@@ -795,7 +792,7 @@ mod tests {
         assert!(failed[1].1);
         assert_eq!(failed[1].0.len(), 1);
         let usage = &failed[1].0[0];
-        assert!(!usage.says() && usage.usage.get(units::INPUT_TOKENS) == Some(2.0));
+        assert!(!usage.is_content() && usage.usage.get(units::INPUT_TOKENS) == Some(2.0));
     }
 
     #[test]
@@ -813,10 +810,10 @@ mod tests {
         assert_eq!(out[1].finish, Some(Finish::Stop));
         assert_eq!(out[1].usage.get(units::OUTPUT_TOKENS), Some(1.0));
         // Totals repeated in a later chunk add only what changed; usage
-        // alone says nothing.
+        // alone is no content.
         assert_eq!(out[2].usage.get(units::OUTPUT_TOKENS), Some(1.0));
         assert_eq!(out[2].usage.get(units::INPUT_TOKENS), None);
-        assert!(!out[2].says());
+        assert!(!out[2].is_content());
     }
 
     /// Chunks as OpenAI sends them, with the fields it sets to null.

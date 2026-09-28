@@ -7,17 +7,18 @@
 //! `cargo run -p respan-gateway-examples --example custom_format` runs it
 //! against a mock provider.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_core::serde_json::{self, Value, json};
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Format, Gateway, Plugin, Response, Usage, async_trait,
+    ClientContext, Decoder, Encoder, Fault, Format, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
 };
 use respan_gateway_formats::conversation::units::INPUT_TOKENS;
-use respan_gateway_formats::{self as formats, relayed::Relayed, whole::Relay};
-use respan_gateway_testkit::{Calls, MockTransport, mock, post, read_whole};
+use respan_gateway_formats::{self as formats, Usage, relayed::Relayed, whole::Relay};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
 /// The kind's input: texts to embed.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -115,11 +116,6 @@ impl Format for OpenAiEmbeddings {
         };
         Box::new(Relay::new(write_embeddings, fail, false))
     }
-
-    /// What `Outcome.usage` counts, as decoded.
-    fn usage<'a>(&self, output: &'a Embeddings) -> Option<&'a Usage> {
-        (!output.usage.is_empty()).then_some(&output.usage)
-    }
 }
 
 /// The JSON a value came in, to write its changes into.
@@ -177,26 +173,47 @@ impl Plugin for PinModel {
     }
 }
 
+/// Adds up the usage the provider reports, with a filter of its kind on
+/// each call.
+#[derive(Clone, Default)]
+struct Metered(Arc<Mutex<Usage>>);
+
+#[async_trait]
+impl Plugin for Metered {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        let total = self.0.clone();
+        px.filter(move |e: &mut Embeddings| {
+            *total.lock().unwrap_or_else(PoisonError::into_inner) += &e.usage;
+            Ok(())
+        })
+    }
+}
+
 const AT: &str = "https://api.openai.com/v1";
 const ASKED: &str = r#"{"model": "large", "input": ["hi"], "dimensions": 2}"#;
 const ANSWER: &str = r#"{"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [0.5, -0.5]}],
  "model": "small", "usage": {"prompt_tokens": 1, "total_tokens": 1}}"#;
 
 /// Posts `body` through a gateway on a mock OpenAI: what was sent, the
-/// status and body answered, and the usage counted.
+/// status and body answered, and the usage the provider reported.
 async fn embed(body: &'static str) -> Result<(Bytes, StatusCode, Bytes, Usage), Fault> {
-    let (mock, calls) = (MockTransport::new(), Calls::default());
+    let (mock, metered) = (MockTransport::new(), Metered::default());
     mock.reply(AT, mock::json(StatusCode::OK, ANSWER));
     let gw = Gateway::new()
-        .plugin("calls", calls.clone())?
         .plugin("pin", PinModel("small"))?
+        .plugin("metered", metered.clone())?
         .provider("openai", OpenAiEmbeddings, mock.at(AT))?
         .serve(OpenAiEmbeddings)?
         .target("openai")?;
     let (status, _, answered) = read_whole(gw.handle(post("/v1/embeddings", body)).await.0).await;
     gw.idle().await;
     let sent = mock.sent()[0].body().clone();
-    Ok((sent, status, answered?, calls.usage()))
+    let usage = metered
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    Ok((sent, status, answered?, usage))
 }
 
 #[tokio::main]

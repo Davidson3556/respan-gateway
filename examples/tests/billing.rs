@@ -30,3 +30,39 @@ async fn a_failed_call_with_no_usage_writes_no_row() -> Result<(), Fault> {
     assert!(store.rows().is_empty());
     Ok(())
 }
+
+/// Refuses every answer on the provider edge.
+struct Refuses;
+
+#[async_trait]
+impl Plugin for Refuses {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        px.filter(|_: &mut respan_gateway_formats::conversation::Reply| {
+            Err(Fault::bad_request("refused"))
+        })
+    }
+}
+
+// Registered last, billing's filter sees each reply before an earlier
+// plugin's filter fails on it, so the usage in it is still billed.
+#[tokio::test]
+async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<(), Fault> {
+    let (mock, store) = (MockTransport::new(), Memory::default());
+    let prices = HashMap::from([("small", Price::new(150_000, 600_000))]);
+    let gw = Gateway::new()
+        .provider("openai", OpenAiChat, mock.at(OPENAI))?
+        .serve(OpenAiChat)?
+        .plugin("refuses", Refuses)?
+        .plugin(
+            "billing",
+            Billing {
+                prices,
+                store: store.clone(),
+            },
+        )?
+        .target("openai")?;
+    ask(&gw, &mock, "acme", "small", Some((1_000, 500))).await;
+    let billed: Vec<_> = store.rows().iter().map(|r| r.micros).collect();
+    assert_eq!(billed, [Some(450)]);
+    Ok(())
+}

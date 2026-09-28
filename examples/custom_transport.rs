@@ -15,9 +15,9 @@ use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::http_body::Frame;
 use respan_gateway_core::http_body_util::{BodyExt, StreamBody};
-use respan_gateway_core::{Body, Fault, Format, Gateway, Transport, Usage, async_trait, http};
-use respan_gateway_formats::OpenAiChat;
+use respan_gateway_core::{Body, Fault, Format, Gateway, Transport, async_trait, http};
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
+use respan_gateway_formats::{OpenAiChat, Usage};
 use respan_gateway_testkit::{post, read_whole};
 
 /// Your model: a conversation in, its answer out.

@@ -3,10 +3,11 @@
 
 use bytes::{Bytes, BytesMut};
 use http::{HeaderValue, Request, StatusCode};
-use respan_gateway_core::{Decoder, Encoder, Fault, Format, Usage};
+use respan_gateway_core::{Decoder, Encoder, Fault, Format};
 use respan_gateway_core::{bytes, http, serde_json};
 use serde_json::{Map, Value, json};
 
+use crate::Usage;
 use crate::common::{
     Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, made_head, merge_details,
     patch_content, patch_messages, patch_sampling, post_json, probe, provider_error, read_content,
@@ -95,12 +96,8 @@ impl Format for AnthropicMessages {
         }
     }
 
-    fn usage<'a>(&self, reply: &'a Reply) -> Option<&'a Usage> {
-        (!reply.usage.is_empty()).then_some(&reply.usage)
-    }
-
-    fn says(&self, reply: &Reply) -> bool {
-        reply.says()
+    fn is_content(&self, reply: &Reply) -> bool {
+        reply.is_content()
     }
 }
 
@@ -617,7 +614,7 @@ impl EventStream {
         if let Some(held) = &mut self.held {
             return held.extend_from_slice(raw);
         }
-        // What says nothing goes where it came.
+        // What is no content goes where it came.
         let quiet = matches!(name, None | Some("ping"));
         if !self.started && !quiet {
             return self.later.push(raw.clone());
@@ -629,13 +626,13 @@ impl EventStream {
         {
             return out.extend_from_slice(raw);
         }
-        let says_nothing = quiet
+        let no_content = quiet
             || (name == Some("content_block_start")
                 && v["content_block"]["type"] == "text"
                 && v["content_block"]["text"]
                     .as_str()
                     .is_none_or(str::is_empty));
-        if says_nothing && matches!(self.provider_open, Some((_, Some(_)))) {
+        if no_content && matches!(self.provider_open, Some((_, Some(_)))) {
             return self.later.push(raw.clone());
         }
         self.close_provider_block(out);
@@ -920,11 +917,11 @@ mod tests {
         ]);
         let other = |r: &Reply| matches!(&r.content[..], [Piece::Other { .. }]);
         assert!(other(&out[0]) && other(&out[1]));
-        // What says nothing is still a reply, which keeps its bytes (N4).
+        // What is no content is still a reply, which keeps its bytes (N4).
         assert!(
             out[2..]
                 .iter()
-                .all(|r| !r.says() && r.origin(ANTHROPIC).is_some())
+                .all(|r| !r.is_content() && r.origin(ANTHROPIC).is_some())
         );
     }
 

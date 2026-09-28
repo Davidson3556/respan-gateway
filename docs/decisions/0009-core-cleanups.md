@@ -1,6 +1,6 @@
 # 0009. Core cleanups
 
-- Status: accepted
+- Status: accepted, amended by [0010](0010-usage-out-of-core.md)
 - Date: 2026-09-28
 
 ## Context
@@ -24,7 +24,9 @@ plugins, extensions or transports already do. This amends 0003, 0004,
    *Back:* a cache stores each call's `Outcome.usage` from
    `on_provider_end` with its entry. On a hit it sets
    `cx.head_mut().extensions.insert(CachedUsage(u))`, which billing reads
-   in `on_client_end`.
+   in `on_client_end`. *Amended by 0010:* the kernel counts no usage at
+   all, so `Outcome.usage` is gone on both edges; a cache reads usage
+   with a filter of its kind.
 2. **`on_provider` waits for no earlier call's end hooks.** The wait held
    only within one request, did nothing for hedges, delayed a fallback's
    next attempt on logging hooks, and made waiting on what `on_client`
@@ -38,7 +40,8 @@ plugins, extensions or transports already do. This amends 0003, 0004,
    are delivered (0003's promise), which brings `TE` back with them.
 4. **`Response::outputs` yields every value**, keep-alives and usage
    alone included, so a bridge or merge can show usage. *Back:* a reader
-   filters with the kind's own check (`Reply::says`).
+   filters with the kind's own check (`Reply::says`, `Reply::is_content`
+   since 0010).
 5. **`Call::with_filter` is gone.** It duplicated `on_provider` and
    `px.filter`. *Back:* `cx.call(p).with_extension(Mark)`, then in
    `on_provider`: `if px.extensions().get::<Mark>().is_some() {

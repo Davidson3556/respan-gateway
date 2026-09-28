@@ -1,7 +1,7 @@
 use super::*;
 use respan_gateway_core::{Plugin, ProviderContext, serde_json};
+use respan_gateway_examples::Meter;
 use respan_gateway_formats::AnthropicMessages;
-use respan_gateway_testkit::Calls;
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
     let (status, headers, body) =
@@ -67,11 +67,11 @@ impl Plugin for Closed {
 
 #[tokio::test]
 async fn the_provider_edge_sees_and_bills_its_calls() -> Result<(), Fault> {
-    let calls = Calls::default();
-    let gw = gateway()?.plugin("calls", calls.clone())?;
+    let meter = Meter::default();
+    let gw = gateway()?.plugin("meter", meter.clone())?;
     ask(&gw, STREAM).await?;
     gw.idle().await;
-    let usage = calls.usage();
+    let usage = meter.usage();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(2.0));
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(4.0));
 

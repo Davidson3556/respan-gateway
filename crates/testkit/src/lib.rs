@@ -13,7 +13,7 @@ use http::header::CONTENT_TYPE;
 use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
 use respan_gateway_core::{
-    Body, ClientContext, Fault, Outcome, Plugin, ProviderContext, Transport, Usage,
+    Body, ClientContext, Fault, Outcome, Plugin, ProviderContext, Transport,
 };
 use respan_gateway_core::{async_trait, bytes, futures, http, http_body, http_body_util};
 
@@ -229,8 +229,8 @@ impl Plugin for Outcomes {
     }
 }
 
-/// A plugin that records each call's provider-edge outcome, where a call's
-/// usage counts; register it first to see every call.
+/// A plugin that records each call's provider-edge outcome; register it
+/// first to see every call.
 #[derive(Debug, Clone, Default)]
 pub struct Calls(Arc<Mutex<Vec<Outcome>>>);
 
@@ -241,15 +241,6 @@ impl Calls {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-    }
-
-    /// The usage of every call, added up.
-    pub fn usage(&self) -> Usage {
-        let mut usage = Usage::default();
-        for outcome in self.all() {
-            usage += outcome.usage;
-        }
-        usage
     }
 }
 

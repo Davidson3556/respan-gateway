@@ -8,8 +8,9 @@ use std::sync::Arc;
 use respan_gateway_core::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_core::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_core::serde_json::{self, Map, Value, json};
-use respan_gateway_core::{Decoder, Encoder, Fault, Usage};
+use respan_gateway_core::{Decoder, Encoder, Fault};
 
+use crate::Usage;
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
 use crate::sse::{content_type, event_data};
 
@@ -422,7 +423,7 @@ pub(crate) fn shows(reply: &Reply) -> bool {
 
 /// Wraps a stream's decoder to hold replies before the first content, such
 /// as the start, until it comes. A failure first drops them but for their
-/// usage, pushed as one reply that says nothing, so it can be refused.
+/// usage, pushed as one reply that is no content, so it can be refused.
 pub(crate) fn holding_start(decoder: impl Decoder<Reply>) -> Box<dyn Decoder<Reply>> {
     Box::new(HoldStart {
         decoder,
@@ -445,8 +446,8 @@ impl<D> HoldStart<D> {
             match reply {
                 _ if self.through => out.push(reply),
                 // Framing passes, unless behind what is held.
-                ref r if !r.says() && self.held.is_empty() => out.push(reply),
-                ref r if !r.says() || !shows(r) => self.held.push(reply),
+                ref r if !r.is_content() && self.held.is_empty() => out.push(reply),
+                ref r if !r.is_content() || !shows(r) => self.held.push(reply),
                 _ => {
                     out.append(&mut self.held);
                     out.push(reply);
@@ -868,7 +869,7 @@ pub(crate) fn unwritable_content() -> Fault {
 }
 
 /// A stream event that is not its format's JSON, as other content, so
-/// filters see it; one with no data, such as a comment, says nothing.
+/// filters read it; one with no data, such as a comment, is no content.
 pub(crate) fn unreadable_event(name: &Arc<str>, raw: Bytes) -> Reply {
     match event_data(&raw) {
         Some(data) => Reply::other(name.clone(), data).came(name, raw),

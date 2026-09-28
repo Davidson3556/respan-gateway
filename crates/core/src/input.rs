@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use crate::fault::guarded;
 use crate::format::{AnyDecoder, AnyFormat, AnyInput, Request, Values};
 use crate::lifecycle::InFlight;
-use crate::plugin::{Filters, all};
+use crate::plugin::Filters;
 use crate::{Body, Fault, codes};
 
 /// Bytes a client sent as one message, decoded when first read.
@@ -150,10 +150,10 @@ impl Input {
             let filtered = guarded(|| {
                 let mut values = Some(format.values(vec![input]));
                 let edited = match &mut values {
-                    Some(values) => filters.run(values, &all),
+                    Some(values) => filters.run(values),
                     None => Ok(()),
                 };
-                filters.end(edited, &mut values, &all)?;
+                filters.end(edited, &mut values)?;
                 let inputs = values.map(|v| format.inputs(v)).unwrap_or_default();
                 // Dropping a whole body's one input is refusing, `Err`'s job.
                 match <[AnyInput; 1]>::try_from(inputs) {
@@ -167,7 +167,7 @@ impl Input {
             filtered
         });
         // Filters that a bad body or a panic kept from their end get it here.
-        let _ = filters.end(filtered.clone().map(drop), &mut None, &all);
+        let _ = filters.end(filtered.clone().map(drop), &mut None);
         filtered.map(drop)
     }
 
@@ -235,7 +235,7 @@ impl Later {
         // The body goes too, so nothing that outlives the request keeps the
         // client's connection.
         locked(&self.body).take();
-        let _ = locked(&self.filters).end(end, &mut None, &all);
+        let _ = locked(&self.filters).end(end, &mut None);
     }
 }
 
@@ -379,8 +379,8 @@ impl Reading {
                 continue;
             }
             let mut values = format.values(vec![input.clone()]);
-            client.run(&mut values, &all)?;
-            call.run(&mut values, &all)?;
+            client.run(&mut values)?;
+            call.run(&mut values)?;
             // A frame the filters left equal to its decoding is the client's.
             for changed in format.inputs(values) {
                 let same = format.same(&input, &changed);
@@ -400,16 +400,16 @@ impl Reading {
         self.ended = true;
         let mut tail = None;
         // A list that ended already keeps its end.
-        let end = locked(&self.later.filters).end(end, &mut tail, &all);
+        let end = locked(&self.later.filters).end(end, &mut tail);
         let mut call = locked(&self.call);
         let (mut tail, end) = match tail {
-            Some(mut values) => match guarded(|| call.run(&mut values, &all)) {
+            Some(mut values) => match guarded(|| call.run(&mut values)) {
                 Ok(()) => (Some(values), end),
                 Err(fault) => (None, Err(fault)),
             },
             None => (None, end),
         };
-        call.end(end, &mut tail, &all)?;
+        call.end(end, &mut tail)?;
         let inputs = tail.map(|v| self.format.inputs(v)).unwrap_or_default();
         let made = inputs.into_iter().map(|input| Frame {
             input,

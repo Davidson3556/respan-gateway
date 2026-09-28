@@ -98,7 +98,6 @@ pub(crate) async fn deliver(
         source: body,
         refusal,
         ahead,
-        format: format.clone(),
         encoder,
         hooks,
         out: Out {
@@ -160,8 +159,6 @@ struct Pipe {
     refusal: bool,
     /// Batches to write before the source's: what [`Response::ready`] read.
     ahead: VecDeque<Batch>,
-    /// The client's format.
-    format: Arc<dyn AnyFormat>,
     encoder: Box<dyn AnyEncoder>,
     hooks: EndHooks<ClientContext>,
     /// Bytes written and not yet handed out.
@@ -249,9 +246,7 @@ impl Pipe {
         let mut end = batch.end.take();
         let mut values = batch.values.take();
         if let Some(values) = &mut values {
-            let format = self.format.clone();
-            let says = |v: &dyn std::any::Any| format.says(v);
-            let filtered = self.hooks.cx().edits().outputs.run(values, &says);
+            let filtered = self.hooks.cx().edits().outputs.run(values);
             if let Err(f) = filtered.and(self.encode(values)) {
                 end = Some(Err(f));
             }
@@ -278,10 +273,8 @@ impl Pipe {
         if self.refusal {
             return end;
         }
-        let format = self.format.clone();
-        let says = |v: &dyn std::any::Any| format.says(v);
         let mut tail = None;
-        let end = self.hooks.cx().edits().outputs.end(end, &mut tail, &says);
+        let end = self.hooks.cx().edits().outputs.end(end, &mut tail);
         match tail.map(|values| self.encode(&values)) {
             Some(Err(f)) => failed(f, &end),
             _ => end,

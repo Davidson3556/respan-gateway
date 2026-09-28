@@ -1,14 +1,17 @@
 # respan-gateway-ledger
 
-Reserve before a call and settle once from its usage, against a store and
-prices you supply. Amounts are whatever unit you count.
+Reserve before a call and settle once from what it cost, against a store
+and prices you supply. Amounts are whatever unit you count; the ledger
+knows no usage format.
 
 - `Accounting::new(ledger, quote)`: a plugin that holds each call's worst
   case before it is sent (402 if it does not fit) and settles it from the
-  call's usage, or at least the hold when its usage may be partial.
-  `.ttl(..)` bounds a hold.
-- `Quote::new(accounts, reserve, price)`: who pays, the most the call can
-  cost, and its price from usage.
+  call's `Tally`, or at least the hold when its cost may be partial (never
+  reported, or cut off). `.ttl(..)` bounds a hold.
+- `Quote::new(accounts, reserve)`: who pays and the most the call can cost.
+  The quote gets the call (`&mut ProviderContext`) and its `Tally`, so it
+  can add a filter of its kind that prices each usage increment into it.
+- `Tally`: a call's priced cost, `add(amount)`.
 - `Ledger`: the store trait to implement; `MemoryLedger` is an in-memory one
   with nested accounts (`open`, `available`, `spent`).
 - Error codes: `INSUFFICIENT_FUNDS`, `UNKNOWN_ACCOUNT`, `NO_ACCOUNT`.

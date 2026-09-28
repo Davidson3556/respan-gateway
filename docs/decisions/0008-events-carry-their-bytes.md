@@ -1,6 +1,6 @@
 # 0008. Events carry their bytes
 
-- Status: accepted, amended by [0009](0009-core-cleanups.md)
+- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md)
 - Date: 2026-09-28
 
 ## Context
@@ -30,12 +30,16 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
 - `Format::says`: a value a reader sees nothing in, such as a keep-alive,
   framing or usage alone, passes no filter, is no content for `ready`, and
   is written where it came; `outputs` still yields it
-  ([0009](0009-core-cleanups.md)).
+  ([0009](0009-core-cleanups.md)). *Amended by 0010:* renamed
+  `Format::is_content`, it decides only what `ready` commits on; filters
+  see every value.
 - Usage is what a provider's messages report (`Format::usage`), counted as
   decoded, on the call's provider edge, before any filter: a failure stops
   writing, never counting. It is written as the value says after filters,
   and read in `Outcome.usage`. What a plugin makes or relays is shown,
-  never counted ([0009](0009-core-cleanups.md)).
+  never counted ([0009](0009-core-cleanups.md)). *Amended by 0010:* the
+  kernel counts no usage; `Format::usage`, `Outcome.usage` and core's
+  `Usage` are gone.
 - An input, first or later, that cannot be written is the client's fault
   (`BAD_REQUEST`) if filters left it equal to its decoding, else `CONFIG`;
   the first is not retried on a fresh encoder.
@@ -85,3 +89,5 @@ time. This amends 0003, 0004, 0005, 0006 and 0007.
 
 - 0009: `Response::with_usage` and counting a plugin's own bytes went, and
   `outputs` stopped hiding values that say nothing.
+- 0010: usage left the kernel; `Format::says` became `Format::is_content`,
+  and filters see every value.

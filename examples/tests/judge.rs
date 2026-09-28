@@ -1,6 +1,6 @@
 use super::*;
+use respan_gateway_examples::Meter;
 use respan_gateway_formats::conversation::units;
-use respan_gateway_testkit::Calls;
 
 #[tokio::test]
 async fn the_verdict_picks_the_target_and_the_provider_edge_covers_the_judge() -> Result<(), Fault>
@@ -9,8 +9,8 @@ async fn the_verdict_picks_the_target_and_the_provider_edge_covers_the_judge() -
     mock.reply(JUDGE, answer("HARD"))
         .reply(STRONG, answer("ok"));
     let egress = Egress::default();
-    let calls = Calls::default();
-    let gw = gateway(&mock, egress.clone())?.plugin("calls", calls.clone())?;
+    let meter = Meter::default();
+    let gw = gateway(&mock, egress.clone())?.plugin("meter", meter.clone())?;
     let (status, _, _) = read_whole(gw.handle(post("/v1/chat/completions", REQUEST)).await.0).await;
     assert_eq!(status, http::StatusCode::OK);
     let sent: Vec<String> = mock.sent().iter().map(|r| r.uri().to_string()).collect();
@@ -29,7 +29,7 @@ async fn the_verdict_picks_the_target_and_the_provider_edge_covers_the_judge() -
     assert_eq!(*egress.seen(), ["judge", "strong"]);
     gw.idle().await;
     // The judge's tokens are billed like the answer's.
-    assert_eq!(calls.usage().get(units::INPUT_TOKENS), Some(18.0));
+    assert_eq!(meter.usage().get(units::INPUT_TOKENS), Some(18.0));
     Ok(())
 }
 

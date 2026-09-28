@@ -10,11 +10,12 @@
 //! answer.
 
 use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::{Fault, Usage, serde_json};
+use respan_gateway_core::{Fault, serde_json};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
+use crate::Usage;
 use crate::relayed::{Origin, Relayed};
 
 /// Usage units every conversation format reports alike.
@@ -215,8 +216,9 @@ impl From<String> for Content {
 }
 
 /// The kind's output: one message of a response, such as an OpenAI chunk,
-/// an Anthropic event or a whole body. One that says nothing
-/// ([`Reply::says`]) passes no filter.
+/// an Anthropic event or a whole body. Filters see every reply, those that
+/// are no content ([`Reply::is_content`]) included, such as a keep-alive or
+/// usage alone.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct Reply {
@@ -226,7 +228,9 @@ pub struct Reply {
     pub content: Vec<Piece>,
     /// Why the model stopped, if it says.
     pub finish: Option<Finish>,
-    /// The usage the provider reports in it, as an increment.
+    /// The usage the provider reports in it, as an increment. A plugin
+    /// that meters a call sums it in a provider-edge filter, which sees
+    /// every reply, usage alone included.
     pub usage: Usage,
     /// The provider's message it was decoded from.
     pub(crate) origin: Relayed<Reply>,
@@ -335,8 +339,9 @@ impl Reply {
         })
     }
 
-    /// Whether a reader sees anything in it: a start, content or a finish.
-    pub fn says(&self) -> bool {
+    /// Whether it is content, what `ready` commits on: a start, content or
+    /// a finish. A keep-alive or usage alone is not.
+    pub fn is_content(&self) -> bool {
         self.start.is_some() || !self.content.is_empty() || self.finish.is_some()
     }
 

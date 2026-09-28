@@ -10,8 +10,8 @@ use crate::context::unlocked;
 use crate::format::{AnyFormat, is_input};
 use crate::input::{Input, InputFilters, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
-use crate::plugin::{Filters, all};
-use crate::{ClientContext, Fault, Filter, Outcome, Plugin, Transport, Usage};
+use crate::plugin::Filters;
+use crate::{ClientContext, Fault, Filter, Outcome, Plugin, Transport};
 
 /// A provider the gateway can call: a format and a transport.
 #[derive(Clone)]
@@ -65,13 +65,12 @@ impl Edge for ProviderContext {
     }
 
     /// Its response and inputs are cut off, and filters still open end,
-    /// dropping what they keep back. Its end hooks settle for its request
-    /// from here, and its `usage` adds to its request's.
-    fn close(&mut self, end: &Result<(), Fault>, usage: &mut Usage) {
+    /// dropping what they keep back, before its end hooks run. Its end
+    /// hooks settle for its request from here.
+    fn close(&mut self, end: &Result<(), Fault>) {
         self.running = InFlight::enter(&self.client.settling);
-        *locked(&self.client.spent) += &*usage;
-        let _ = locked(&self.inputs).end(end.clone(), &mut None, &all);
-        let _ = unlocked(&mut self.outputs).end(end.clone(), &mut None, &all);
+        let _ = locked(&self.inputs).end(end.clone(), &mut None);
+        let _ = unlocked(&mut self.outputs).end(end.clone(), &mut None);
     }
 }
 

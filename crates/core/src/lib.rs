@@ -15,7 +15,6 @@ mod plugin;
 mod provider;
 mod response;
 mod transport;
-mod usage;
 
 pub use call::Call;
 pub use context::ClientContext;
@@ -26,7 +25,6 @@ pub use plugin::{Filter, Outcome, Plugin};
 pub use provider::ProviderContext;
 pub use response::Response;
 pub use transport::{Body, Transport};
-pub use usage::Usage;
 
 /// The crates whose types the kernel's contracts use, so a format or plugin
 /// builds against the same versions.

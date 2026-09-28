@@ -3,47 +3,24 @@
 //! [`Gateway`], hands [`Gateway::handle`] an `http::Request`, reads the
 //! response and awaits the request's [`Outcome`].
 //!
-//! The request's `Outcome` says how it ended; each call's usage counts on
-//! the provider edge (`on_provider_end`), so the embedder tallies it with a
-//! plugin, as billing would.
+//! The request's `Outcome` says how it ended. The kernel counts no usage:
+//! the embedder tallies it with a plugin that sums what each call's
+//! provider reports (`Meter`), as billing would.
 //!
 //! `cargo run -p respan-gateway-examples --example embedded`
 
-use std::sync::{Arc, Mutex, PoisonError};
-
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::http_body_util::{BodyExt, Full};
-use respan_gateway_core::{
-    Fault, Gateway, Outcome, Plugin, ProviderContext, Usage, async_trait, http, serde_json,
-};
+use respan_gateway_core::{Fault, Gateway, Outcome, http, serde_json};
+use respan_gateway_examples::Meter;
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock};
 
 const OPENAI: &str = "http://openai.test/v1";
 
-/// Adds up the usage of every call, on the provider edge where it counts.
-#[derive(Clone, Default)]
-struct Tally(Arc<Mutex<Usage>>);
-
-#[async_trait]
-impl Plugin for Tally {
-    async fn on_provider_end(&self, _px: &ProviderContext, outcome: &Outcome) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) += &outcome.usage;
-    }
-}
-
-impl Tally {
-    fn usage(&self) -> Usage {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-}
-
 /// The gateway, with no server. For real use, the transport is
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
-fn gateway(mock: &MockTransport, tally: Tally) -> Result<Gateway, Fault> {
+fn gateway(mock: &MockTransport, tally: Meter) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .serve(OpenAiChat)?
@@ -71,7 +48,7 @@ async fn ask(gw: &Gateway, prompt: &str) -> Result<(Bytes, Outcome), Fault> {
 async fn main() -> Result<(), Fault> {
     let mock = MockTransport::new();
     mock.reply(OPENAI, mock::json(http::StatusCode::OK, ANSWER));
-    let tally = Tally::default();
+    let tally = Meter::default();
     let gw = gateway(&mock, tally.clone())?;
     let (body, outcome) = ask(&gw, "Say hi").await?;
     // End hooks run detached; wait for them before reading the tally.

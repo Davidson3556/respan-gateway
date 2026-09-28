@@ -11,7 +11,7 @@ use crate::call::{CallEdge, SharedCall};
 use crate::fault::PANICKED;
 use crate::format::{AnyDecoder, AnyFormat, Request, Values};
 use crate::input::locked;
-use crate::{Body, Fault, Usage};
+use crate::{Body, Fault};
 
 /// A response for the client, streaming from a provider or made by a
 /// plugin. Dropped before it is sent or read to its end, its call ends
@@ -85,10 +85,10 @@ impl Batch {
         }
     }
 
-    /// Decoded from `call`'s response, reporting `usage`: counted and
-    /// filtered; its end, if any, waits to be read.
-    fn of(mut self, call: &SharedCall, usage: &Usage) -> Self {
-        if locked(call).events(&mut self, usage)
+    /// Decoded from `call`'s response: filtered; its end, if any, waits to
+    /// be read.
+    fn of(mut self, call: &SharedCall) -> Self {
+        if locked(call).events(&mut self)
             && let Some(end) = &self.end
         {
             self.unread = Unread(Some((call.clone(), end.clone())));
@@ -114,9 +114,9 @@ impl Response {
     /// at once if the client's format opens it
     /// ([`Encoder::open`](crate::Encoder::open)). Outputs of another type
     /// fail it with [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
-    /// The usage its outputs report is shown, never counted: to bill it,
-    /// such as a cached answer's, carry it in an extension. A plugin's
-    /// error is a [`Fault`], not outputs under an error status.
+    /// It passes no provider edge: to bill a cached answer, carry what it
+    /// cost in an extension. A plugin's error is a [`Fault`], not outputs
+    /// under an error status.
     pub fn stream<T, S>(stream: S) -> Self
     where
         T: Any + Send + Sync,
@@ -142,9 +142,9 @@ impl Response {
 
     /// Read it to its first content or its end, keeping what was read for
     /// whoever reads or sends it next, such as to fall back or race. Content
-    /// is a provider's output that says something to its format
-    /// ([`Format::says`](crate::Format::says)), before any filter, or any
-    /// output a plugin made. A bodiless response, a 101 or one already
+    /// is a provider's output its format calls content
+    /// ([`Format::is_content`](crate::Format::is_content)), before any
+    /// filter, or any output a plugin made. A bodiless response, a 101 or one already
     /// ready is ready at once. `Err` with its fault if a success fails first; an error
     /// status is the provider's answer, to send as it came.
     pub async fn ready(mut self) -> Result<Response, Fault> {
@@ -172,8 +172,7 @@ impl Response {
 
     /// Read it rather than send it, such as a judge's verdict: its outputs
     /// of `T`, the kind's output type, as the provider edge's filters left
-    /// them, keep-alives and usage alone included (filter with the kind's
-    /// own check), ending with an `Err` if it fails; at once
+    /// them, content or not (filter with the kind's own check), ending with an `Err` if it fails; at once
     /// with [`codes::INTERNAL`](crate::codes::INTERNAL) for another type.
     /// Its call ends with the stream, or abandoned if dropped first.
     pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T, Fault>> {
@@ -255,8 +254,7 @@ impl Response {
             let call = call.share();
             // A bodiless response's end is decoded already.
             let ahead = std::mem::take(&mut self.ahead).into_iter();
-            let none = Usage::default();
-            self.ahead = ahead.map(|batch| batch.of(&call, &none)).collect();
+            self.ahead = ahead.map(|batch| batch.of(&call)).collect();
             *slot = Some(call);
         }
         self
@@ -277,7 +275,7 @@ pub(crate) enum Source {
         relayed: bool,
         call: Option<SharedCall>,
     },
-    /// Outputs a plugin made, each of which says something.
+    /// Outputs a plugin made, each of which is content.
     Made(BoxStream<'static, Batch>),
 }
 
@@ -296,9 +294,8 @@ impl Source {
     }
 
     /// The next batch, eventually one with the end, not to be read past,
-    /// and whether it held content before any filter. A call's usage counts
-    /// on its provider edge; other usage counts nowhere. The call
-    /// ends when the batch with its end is read ([`Batch::read`]) or
+    /// and whether it held content before any filter, filtered on its
+    /// call's provider edge if it has one. The call ends when the batch with its end is read ([`Batch::read`]) or
     /// dropped. A panic ends the call internal.
     pub(crate) async fn next(&mut self) -> (Batch, bool) {
         let (body, decoder, format, call) = match self {
@@ -329,14 +326,11 @@ impl Source {
                 Some(Err(f)) => (None, Some(Err(f))),
                 None => decoder.decode(None),
             };
-            let mut usage = Usage::default();
-            if let Some(values) = &values {
-                (usage, content) = format.read(values);
-            }
+            content = values.as_ref().is_some_and(|v| format.any_content(v));
             batch.values = values;
             batch.end = end;
             if let Some(call) = call {
-                batch = std::mem::take(&mut batch).of(call, &usage);
+                batch = std::mem::take(&mut batch).of(call);
             }
         });
         if let Err(panic) = std::panic::catch_unwind(decode) {

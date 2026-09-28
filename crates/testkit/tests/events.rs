@@ -1,18 +1,21 @@
 //! Events carry their bytes (decision 0008): what formats hold for a relay.
 
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use common::Metered;
 use http::StatusCode;
 use respan_gateway_core::{
     ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
-    ProviderContext, Response, Usage, async_trait,
+    ProviderContext, Response, async_trait,
 };
 use respan_gateway_core::{bytes, futures, http};
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_formats::opaque::{self, Got, Sent};
-use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
 use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -132,9 +135,10 @@ async fn a_passthrough_of_no_kind_relays_a_whole_body_and_a_failure_as_they_came
 struct Seen(Arc<Mutex<Vec<Reply>>>);
 
 impl Seen {
+    /// How many were no content.
     fn silent(&self) -> usize {
         let seen = self.0.lock().map(|s| s.clone()).unwrap_or_default();
-        seen.iter().filter(|r| !r.says()).count()
+        seen.iter().filter(|r| !r.is_content()).count()
     }
 
     fn all(&self) -> usize {
@@ -154,9 +158,10 @@ impl Plugin for Seen {
     }
 }
 
-// Keep-alives reach a client of the provider's format in place, and no filter.
+// Keep-alives and other messages that are no content reach every filter,
+// and a client of the provider's format in place.
 #[tokio::test]
-async fn keep_alives_reach_a_same_format_client_in_place_and_no_filter() {
+async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
     let openai = [
         ": keep-alive\n\n",
         "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
@@ -174,7 +179,7 @@ async fn keep_alives_reach_a_same_format_client_in_place_and_no_filter() {
     let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
 
     assert_eq!(body.ok(), Some(Bytes::from(openai.concat())));
-    assert_eq!((seen.silent(), seen.all()), (0, 2));
+    assert_eq!((seen.silent(), seen.all()), (2, 4));
 
     let anthropic = [
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"c\",\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
@@ -200,7 +205,7 @@ async fn keep_alives_reach_a_same_format_client_in_place_and_no_filter() {
     let (_, _, body) = read_whole(gw.handle(post("/v1/messages", chat)).await.0).await;
 
     assert_eq!(body.ok(), Some(Bytes::from(anthropic.concat())));
-    assert_eq!((seen.silent(), seen.all()), (0, 3));
+    assert_eq!((seen.silent(), seen.all()), (4, 7));
 }
 
 /// OpenAI Chat, counting the request decoders it builds.
@@ -305,10 +310,11 @@ impl Plugin for Cap {
     }
 }
 
-// A filter that cuts a stream leaves every increment counted, the one it
-// failed on too.
+// The kernel counts no usage. A meter registered after a filter that cuts
+// a stream runs first, so it sees every increment decoded, the one the cut
+// failed on too; one registered before it misses that one.
 #[tokio::test]
-async fn a_filter_that_cuts_a_stream_leaves_every_increment_counted() {
+async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
     let chunk = |text: &str, out: u32| {
         format!(
             "data: {{\"id\":\"c1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{text}\"}}}}],\"usage\":{{\"completion_tokens\":{out}}}}}\n\n"
@@ -316,26 +322,39 @@ async fn a_filter_that_cuts_a_stream_leaves_every_increment_counted() {
     };
     let stream = [chunk("a", 10), chunk("b", 20), chunk("c", 30)];
     let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
-    let mock = MockTransport::new();
-    let (gw, _, calls) = gateway(OpenAiChat, &mock, OPENAI, vec![Arc::new(Cap(15.0))]);
-    mock.reply(OPENAI, mock::sse(&chunks));
-    let chat = r#"{"model":"m","stream":true,"messages":[]}"#;
+    for (after, metered) in [(true, 20.0), (false, 10.0)] {
+        let mock = MockTransport::new();
+        let meter = Metered::default();
+        let mut plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(meter.clone())];
+        match after {
+            true => plugins.insert(0, Arc::new(Cap(15.0))),
+            false => plugins.push(Arc::new(Cap(15.0))),
+        }
+        let (gw, _, calls) = gateway(OpenAiChat, &mock, OPENAI, plugins);
+        mock.reply(OPENAI, mock::sse(&chunks));
+        let chat = r#"{"model":"m","stream":true,"messages":[]}"#;
 
-    let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
-    gw.idle().await;
+        let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
+        gw.idle().await;
 
-    let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
-    assert!(body.contains("\"a\"") && !body.contains("\"b\""), "{body}");
-    let call = &calls.all()[0];
-    assert!(matches!(&call.end, Err(f) if f.code() == "cap"));
-    assert_eq!(call.usage.get(units::OUTPUT_TOKENS), Some(20.0));
+        let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+        assert!(body.contains("\"a\"") && !body.contains("\"b\""), "{body}");
+        let call = &calls.all()[0];
+        assert!(matches!(&call.end, Err(f) if f.code() == "cap"));
+        let usage = meter.total();
+        assert_eq!(
+            usage.get(units::OUTPUT_TOKENS),
+            Some(metered),
+            "after: {after}"
+        );
+    }
 }
 
-// Usage in values a plugin makes is shown, never counted: only a provider's
-// response counts (0009, which removed `with_usage`). A cached answer's usage
+// Usage in values a plugin makes is shown, and reaches no provider edge, so
+// no meter there (0009, which removed `with_usage`). A cached answer's usage
 // reaches billing in an extension.
 #[tokio::test]
-async fn usage_a_plugin_makes_is_shown_not_counted_and_an_extension_bills_it() {
+async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     #[derive(Clone)]
     struct CachedUsage(Usage);
 
@@ -360,19 +379,21 @@ async fn usage_a_plugin_makes_is_shown_not_counted_and_an_extension_bills_it() {
 
     #[async_trait]
     impl Plugin for Bills {
-        async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
-            let mut billed = outcome.usage.clone();
+        async fn on_client_end(&self, cx: &ClientContext, _outcome: &Outcome) {
             if let Some(CachedUsage(cached)) = cx.head().extensions.get() {
-                billed += cached;
+                *self.0.lock().unwrap_or_else(|e| e.into_inner()) = cached.clone();
             }
-            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = billed;
         }
     }
 
     let mock = MockTransport::new();
-    let bills = Bills::default();
-    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(bills.clone()), Arc::new(Answers)];
-    let (gw, log, _) = gateway(OpenAiChat, &mock, OPENAI, plugins);
+    let (bills, meter) = (Bills::default(), Metered::default());
+    let plugins: Vec<Arc<dyn Plugin>> = vec![
+        Arc::new(bills.clone()),
+        Arc::new(meter.clone()),
+        Arc::new(Answers),
+    ];
+    let (gw, _, _) = gateway(OpenAiChat, &mock, OPENAI, plugins);
     let chat = r#"{"model":"m","messages":[]}"#;
 
     let (_, _, body) = read_whole(gw.handle(post("/v1/chat/completions", chat)).await.0).await;
@@ -381,7 +402,7 @@ async fn usage_a_plugin_makes_is_shown_not_counted_and_an_extension_bills_it() {
     let body: respan_gateway_core::serde_json::Value =
         respan_gateway_core::serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["usage"]["prompt_tokens"], 7);
-    assert!(log.only().usage.is_empty());
+    assert!(meter.total().is_empty());
     let billed = bills.0.lock().map(|u| u.get(units::INPUT_TOKENS)).ok();
     assert_eq!(billed, Some(Some(3.0)));
 }
@@ -395,10 +416,10 @@ impl Filter<Reply> for Refuses {
     }
 }
 
-// Usage counts as decoded: a provider-edge filter's failure stops the outputs,
-// not the count.
+// A meter registered after a guard sees the usage in the reply the guard
+// refuses: its filter runs first.
 #[tokio::test]
-async fn usage_counts_as_decoded_though_a_filter_refuses_the_reply_it_came_in() {
+async fn a_meter_after_a_guard_sees_the_usage_in_the_reply_it_refuses() {
     struct Guard;
 
     #[async_trait]
@@ -410,12 +431,14 @@ async fn usage_counts_as_decoded_though_a_filter_refuses_the_reply_it_came_in() 
 
     const UNARY: &str = r#"{"id":"c","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}"#;
     let mock = MockTransport::new();
-    let (gw, _, calls) = gateway(OpenAiChat, &mock, OPENAI, vec![Arc::new(Guard)]);
+    let meter = Metered::default();
+    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(Guard), Arc::new(meter.clone())];
+    let (gw, _, _) = gateway(OpenAiChat, &mock, OPENAI, plugins);
     mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
 
     let (status, _, _) = read_whole(gw.handle(post("/v1/chat/completions", "{}")).await.0).await;
     gw.idle().await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(calls.usage().get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(meter.total().get(units::INPUT_TOKENS), Some(4.0));
 }

@@ -9,12 +9,12 @@
 use std::collections::HashMap;
 
 use respan_gateway_core::http::{HeaderValue, StatusCode};
-use respan_gateway_core::{Fault, Gateway, ProviderContext, Usage, futures, http};
+use respan_gateway_core::{Fault, Gateway, ProviderContext, futures, http};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_formats::conversation::Conversation;
-use respan_gateway_ledger::{Accounting, MemoryLedger, Quote};
+use respan_gateway_formats::conversation::{Conversation, Reply};
+use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
 /// Your table; a model not in it has no cost bound.
@@ -22,10 +22,15 @@ fn prices() -> HashMap<String, Price> {
     HashMap::from([("gpt-x".to_owned(), Price::new(2_000_000, 8_000_000))])
 }
 
-/// Who pays, the most the call can cost, and its price. A call with no
+/// Who pays and the most the call can cost; a filter prices each usage
+/// increment the provider reports into the call's tally. A call with no
 /// price, no `max_tokens` or non-text input has no bound, so it is refused;
 /// `n` answers may each be `max_tokens` long, as the provider reads it.
-fn quote(px: &ProviderContext, prices: &HashMap<String, Price>) -> Result<Quote, Fault> {
+fn quote(
+    px: &mut ProviderContext,
+    tally: Tally,
+    prices: &HashMap<String, Price>,
+) -> Result<Quote, Fault> {
     let auth = px.client().head().headers.get("authorization");
     let key = auth.and_then(|v| v.to_str().ok()?.strip_prefix("Bearer "));
     let key = key.ok_or_else(|| Fault::new(StatusCode::UNAUTHORIZED, "no_key", "no key"))?;
@@ -41,8 +46,16 @@ fn quote(px: &ProviderContext, prices: &HashMap<String, Price>) -> Result<Quote,
         input_bound(chat)?,
         max_output.saturating_mul(answers(chat)?),
     );
+    let key = key.to_owned();
+    // Accounting runs last, so this filter sees each reply first.
+    px.filter(move |reply: &mut Reply| {
+        if !reply.usage.is_empty() {
+            tally.add(price.of(&reply.usage));
+        }
+        Ok(())
+    })?;
     // The ledger holds the key's team and customer with it.
-    Ok(Quote::new([key], reserve, move |u: &Usage| price.of(u)))
+    Ok(Quote::new([key], reserve))
 }
 
 /// acme ($1) has team-a ($0.30, keys sk-a1 and sk-a2) and team-b (sk-b1).
@@ -62,7 +75,7 @@ const OPENAI: &str = "http://openai.test/v1";
 
 fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault> {
     let prices = prices();
-    let accounting = Accounting::new(ledger, move |px| quote(px, &prices));
+    let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .serve(OpenAiChat)?

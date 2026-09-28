@@ -7,7 +7,8 @@ refuse what cannot be read.
   every text, tools and tool-call JSON included, or fails with `UNREADABLE`
   on content with no text form, such as an image.
 - `Holdback::new(rewrite)`: a `Reply` filter that holds back trailing text
-  that may start a match, so a `Rewrite` sees each match whole.
+  that may start a match, so a `Rewrite` sees each match whole. A
+  keep-alive or usage alone passes at once unless replies wait before it.
   `partial_match` is the helper for term lists.
 - `Placeholders`: `hide(label, value)` returns `<LABEL_n>`. It is a
   `Rewrite`, so `Holdback::new(placeholders)` restores values across deltas.

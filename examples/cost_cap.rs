@@ -9,10 +9,13 @@
 //! 3. the call settles from its reported usage, or, cut before the usage
 //!    came, from the estimate, never less than its hold: a stream cut
 //!    before any text (the model was thinking, the client left) may still
-//!    have cost it all.
+//!    have cost it all. The quote's `Settle` filter sums the usage the
+//!    provider reports and prices it into the call's tally at its end.
 //!
 //! Register `Cap` before `Accounting`: Cap stores the call's `Seen`, which
-//! Accounting's quote reads, and a call without one is refused.
+//! Accounting's quote reads, and a call without one is refused. Accounting
+//! runs last, so `Settle` is the call's last filter and sees each reply
+//! before Cap's filter can fail on it.
 //!
 //! `cargo run -p respan-gateway-examples --example cost_cap`
 
@@ -20,12 +23,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use respan_gateway_core::http::StatusCode;
-use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, Usage, async_trait};
+use respan_gateway_core::{Fault, Filter, Gateway, Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Piece, Reply, units};
-use respan_gateway_ledger::{Accounting, MemoryLedger, Quote};
+use respan_gateway_formats::{OpenAiChat, Usage};
+use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
 /// The most output tokens an answer may have.
@@ -88,24 +91,57 @@ impl Plugin for Cap {
     }
 }
 
-/// Step 3's price: reported usage, else the estimate; a cut call's usage
-/// may be partial, so never less than was seen. `Accounting` charges an
-/// unfinished call at least its reserve.
-fn quote(px: &ProviderContext) -> Result<Quote, Fault> {
+/// Step 3: sums the usage the provider reports, and at the call's end
+/// prices it into the tally: reported usage, else the estimate; a cut
+/// call's usage may be partial, so never less than was seen. A call that
+/// reported nothing and was not cut adds nothing, so `Accounting` charges
+/// it at least its reserve, as it does any unfinished call.
+struct Settle {
+    usage: Usage,
+    seen: Seen,
+    /// The input's bound, for when no usage came.
+    input: u64,
+    tally: Tally,
+}
+
+impl Filter<Reply> for Settle {
+    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.usage += &reply.usage;
+        out.push(reply);
+        Ok(())
+    }
+
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let cut = self.seen.cut.load(Ordering::Relaxed);
+        if self.usage.is_empty() && !cut {
+            return Ok(());
+        }
+        let n = |unit| self.usage.get(unit).map(|n| n.max(0.0).ceil() as u64);
+        let reported = n(units::OUTPUT_TOKENS);
+        let mut output = reported.unwrap_or(0);
+        if reported.is_none() || cut {
+            output = output.max(self.seen.tokens());
+        }
+        let input = n(units::INPUT_TOKENS).unwrap_or(self.input);
+        self.tally.add(PRICE.cost(input, output));
+        Ok(())
+    }
+}
+
+/// Who pays and the call's bound, with `Settle` to price it.
+fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
     let seen = px.extensions().get::<Seen>().cloned();
     let seen = seen.ok_or_else(|| Fault::internal("register Cap before Accounting"))?;
     let input = input_bound(px.input::<Conversation>()?)?;
     let reserve = PRICE.cost(input, seen.cap);
-    let price = move |u: &Usage| {
-        let n = |unit| u.get(unit).map(|n| n.max(0.0).ceil() as u64);
-        let reported = n(units::OUTPUT_TOKENS);
-        let mut output = reported.unwrap_or(0);
-        if reported.is_none() || seen.cut.load(Ordering::Relaxed) {
-            output = output.max(seen.tokens());
-        }
-        PRICE.cost(n(units::INPUT_TOKENS).unwrap_or(input), output)
-    };
-    Ok(Quote::new(["team"], reserve, price))
+    let usage = Usage::default();
+    px.filter(Settle {
+        usage,
+        seen,
+        input,
+        tally,
+    })?;
+    Ok(Quote::new(["team"], reserve))
 }
 
 const OPENAI: &str = "http://openai.test/v1";

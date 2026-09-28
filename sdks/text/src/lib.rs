@@ -276,7 +276,10 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
 /// across two text blocks (Anthropic's citations make many) is not seen
 /// whole; holding across would move text into a block that does not say
 /// it. A reply left showing nothing waits, whole, until one that shows
-/// something, so nothing is sent while the start is held. Other content, such as a tool call, is
+/// something, so nothing is sent while the start is held; one that is no
+/// content ([`Reply::is_content`]), such as a keep-alive or usage alone,
+/// passes at once unless replies wait before it. Other content, such as a
+/// tool call, is
 /// rewritten as [`Readable`] reads it, nothing held: a match split across a
 /// streamed tool call's fragments is not seen whole.
 #[derive(Debug)]
@@ -368,7 +371,9 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         if !open {
             self.release_into(&mut reply)?;
         }
-        if shows(&reply) {
+        // No content, such as a keep-alive or usage alone, is not delayed
+        // unless replies wait before it.
+        if shows(&reply) || (!reply.is_content() && self.waiting.is_empty()) {
             out.append(&mut self.waiting);
             out.push(reply);
         } else {

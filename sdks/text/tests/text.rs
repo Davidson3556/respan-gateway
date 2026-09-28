@@ -110,6 +110,33 @@ fn a_reply_left_showing_nothing_waits_for_one_that_does() {
     assert!(out[0].start.is_some());
 }
 
+// Every value reaches a filter (0010): a keep-alive or usage alone passes
+// at once when nothing waits, even while text is held, and is never refused.
+#[test]
+fn a_keep_alive_or_usage_alone_passes_at_once_unless_replies_wait() {
+    let mut holdback = Holdback::new(Terms);
+    let mut out = Vec::new();
+    let keep_alive = Reply::default();
+    let mut usage = Reply::default();
+    usage.usage.add("output_tokens", 3.0);
+    assert!(holdback.edit(keep_alive.clone(), &mut out).is_ok());
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0], keep_alive);
+    // "bo" may start a match, so it is held; usage alone still passes.
+    assert!(holdback.edit(Reply::text(0, "a bo"), &mut out).is_ok());
+    assert!(holdback.edit(usage.clone(), &mut out).is_ok());
+    assert_eq!(out.last(), Some(&usage));
+    // Behind a reply that waits, it waits too, in order.
+    let (mut holdback, mut out) = (Holdback::new(Terms), Vec::new());
+    let mut start = Reply::start("c1", "m");
+    start.content.push(Piece::text(1, ""));
+    assert!(holdback.edit(start, &mut out).is_ok());
+    assert!(holdback.edit(keep_alive.clone(), &mut out).is_ok());
+    assert!(out.is_empty(), "{out:?}");
+    assert!(holdback.edit(Reply::text(1, "at"), &mut out).is_ok());
+    assert!(out[0].start.is_some() && out[1] == keep_alive, "{out:?}");
+}
+
 #[test]
 fn a_match_ending_in_its_own_start_is_seen_whole() {
     let out = run(&mut Holdback::new(Terms), vec![Reply::text(0, "a bomb")]);
@@ -555,4 +582,27 @@ fn a_value_restored_into_a_streamed_tool_fragment_is_escaped() {
         .collect();
     let parsed: serde_json::Value = serde_json::from_str(&joined).unwrap_or_default();
     assert_eq!(parsed["to"], "Robert \"Bob\" Smith", "{joined}");
+}
+
+// A keep-alive and the usage chunk pass a guard's Holdback in place, so a
+// client of the provider's format gets the provider's bytes.
+#[tokio::test]
+async fn a_keep_alive_and_usage_pass_a_holdback_in_place() -> Result<(), Fault> {
+    let chunks = [
+        "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+        ": keep-alive\n\n",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    let mock = MockTransport::new();
+    mock.reply(OPENAI, mock::sse(&chunks));
+    let gw = gateway(&mock, "openai", Guard)?;
+    let body = json!({ "model": "m", "stream": true, "stream_options": { "include_usage": true },
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let req = post("/v1/chat/completions", body.to_string());
+    let (status, _, body) = read_whole(gw.handle(req).await.0).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body?, Bytes::from(chunks.concat()));
+    Ok(())
 }

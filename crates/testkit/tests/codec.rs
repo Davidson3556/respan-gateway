@@ -331,7 +331,7 @@ async fn r10_the_request_encoder_reads_the_head_from_the_first_part() {
     }
 }
 
-// A bodiless response drains a call's body, whose usage counts, never a
+// A bodiless response ends at its head: it never reads a
 // plugin's own stream, which may never end.
 #[tokio::test]
 async fn o11_1_a_head_to_an_endless_plugin_stream_ends_at_its_head() {
@@ -574,12 +574,8 @@ impl Format for Noted {
         Box::new(Noting(self.0.clone(), encoder))
     }
 
-    fn usage<'a>(&self, reply: &'a Reply) -> Option<&'a respan_gateway_core::Usage> {
-        AnthropicMessages.usage(reply)
-    }
-
-    fn says(&self, reply: &Reply) -> bool {
-        AnthropicMessages.says(reply)
+    fn is_content(&self, reply: &Reply) -> bool {
+        AnthropicMessages.is_content(reply)
     }
 }
 

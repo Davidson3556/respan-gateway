@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-ledger"
-description = "Reserve before a call and settle once from its usage, against a store and prices you supply."
+description = "Reserve before a call and settle once from what it cost, against a store and prices you supply."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

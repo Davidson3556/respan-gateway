@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-/// An open map of usage units to additive amounts. `f64` is exact for
+/// An open map of usage units to additive amounts, as a provider reports
+/// them: the conversation kind names its units in
+/// [`conversation::units`](crate::conversation::units). `f64` is exact for
 /// counts such as tokens; money belongs in a decimal type.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage(BTreeMap<Cow<'static, str>, f64>);

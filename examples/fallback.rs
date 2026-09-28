@@ -68,7 +68,7 @@ impl Plugin for Log {
         let chat = px.input::<Conversation>().ok();
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());
-        println!("  attempt {line}, usage {:?}", outcome.usage);
+        println!("  attempt {line}");
         let mut lines = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         lines.push(line);
     }

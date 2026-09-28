@@ -13,9 +13,11 @@ pub mod whole;
 mod anthropic;
 pub mod conversation;
 mod openai;
+mod usage;
 
 pub use anthropic::AnthropicMessages;
 pub use openai::OpenAiChat;
+pub use usage::Usage;
 
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::http::{self, HeaderValue, header::CONTENT_TYPE};

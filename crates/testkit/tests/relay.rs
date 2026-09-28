@@ -10,19 +10,19 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
     Body, ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
-    ProviderContext, Response, Transport, Usage, codes,
+    ProviderContext, Response, Transport, codes,
 };
 use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
 };
-use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
 use respan_gateway_server::CallHeaders;
 use respan_gateway_testkit::{MockAt, MockTransport, Outcomes, mock, post, read_whole};
 
 mod common;
 use common::{
     AddProvider, Adds, CHAT, Call, Calls, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES,
-    Nameless, OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
+    Metered, Nameless, OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
 };
 use serde_json::json;
 
@@ -177,7 +177,7 @@ impl Plugin for Cached {
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let mut cost = Usage::default();
         cost.add(units::OUTPUT_TOKENS, 1.0);
-        // Shown in its reply, never counted: no provider sent it.
+        // Shown in its reply; no provider edge, so no meter, sees it.
         let mut hi = Reply::text(0, "hi");
         hi.usage = cost;
         let answer = [Reply::start("cached", "gpt-x"), hi];
@@ -223,6 +223,8 @@ impl Harness {
         let mut plugins: Vec<Arc<dyn Plugin>> =
             vec![Arc::new(log.clone()), Arc::new(calls.clone())];
         plugins.extend(chain);
+        let usage = Metered::default();
+        plugins.push(Arc::new(usage.clone()));
         let list = [
             provider(&mock, "openai", OPENAI, Some("Bearer sk-test")),
             provider(&mock, "backup", BACKUP, None),
@@ -233,6 +235,7 @@ impl Harness {
             mock,
             log,
             calls,
+            usage,
         }
     }
 }
@@ -252,7 +255,7 @@ async fn a_stream_is_relayed_byte_for_byte_with_usage() {
         (o.head.as_ref().map(|h| h.status), &o.end),
         (Some(StatusCode::OK), &Ok(()))
     );
-    let usage = h.calls.usage();
+    let usage = h.usage.total();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
 }
@@ -264,7 +267,7 @@ async fn a_unary_response_is_relayed_byte_for_byte_with_usage() {
 
     assert_eq!(h.body(unary_chat()).await, UNARY);
     assert_eq!(h.log.only().end, Ok(()));
-    assert_eq!(h.calls.usage().get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
 
 #[tokio::test]
@@ -380,7 +383,7 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
         assert_eq!(got, status, "{verdict}");
         // Each call counts on the provider edge, the judge's too.
         if status == StatusCode::OK {
-            let usage = h.calls.usage();
+            let usage = h.usage.total();
             let billed = (
                 usage.get(units::INPUT_TOKENS),
                 usage.get(units::OUTPUT_TOKENS),
@@ -464,7 +467,7 @@ async fn a_filter_re_encodes_only_what_changed() {
         STREAM[3],
     ];
     assert_eq!(h.body(chat()).await, expected.concat());
-    assert_eq!(h.calls.usage().get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2.0));
 }
 
 #[tokio::test]
@@ -556,9 +559,10 @@ async fn a_plugin_can_respond_itself() {
     assert_eq!(body["id"], "cached");
     assert_eq!(body["choices"][0]["message"]["content"], "hi");
     assert_eq!(body["usage"]["completion_tokens"], 1);
-    // Changed in 0009: a plugin's own answer counts no usage; no call ran.
-    let o = h.log.only();
-    assert_eq!((o.end, o.usage.is_empty()), (Ok(()), true));
+    // Changed in 0009: a plugin's own answer passes no provider edge, so
+    // no meter there sees its usage; no call ran.
+    assert_eq!(h.log.only().end, Ok(()));
+    assert!(h.usage.all().is_empty());
 }
 
 #[tokio::test]
@@ -891,7 +895,7 @@ async fn a_client_that_did_not_ask_for_usage_does_not_get_the_usage_chunk() {
     let body = h.body(call(CHAT, request)).await;
 
     assert_eq!(body, [STREAM[0], STREAM[1], STREAM[3]].concat());
-    assert_eq!(h.calls.usage().get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2.0));
     let sent: serde_json::Value =
         serde_json::from_slice(h.mock.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent["stream_options"]["include_usage"], true);
@@ -1555,40 +1559,33 @@ async fn what_the_provider_sent_after_its_finish_is_kept_when_it_breaks_off() {
 async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
     type Entry = Arc<Mutex<Option<(String, f64)>>>;
 
-    /// Keeps a finished answer and what it cost, to replay later.
-    struct Fill(String, Entry);
+    /// Keeps a finished answer and what it cost, to replay later: the
+    /// filter sees every reply, the usage alone at the stream's end too.
+    struct Fill(String, f64, Entry);
 
     impl Filter<Reply> for Fill {
         fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
             event.texts().for_each(|text| self.0.push_str(text));
+            self.1 += event.usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
             out.push(event);
             Ok(())
         }
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-            if let (Ok(()), Ok(mut entry)) = (end, self.1.lock()) {
-                *entry = Some((std::mem::take(&mut self.0), 0.0));
+            if let (Ok(()), Ok(mut entry)) = (end, self.2.lock()) {
+                *entry = Some((std::mem::take(&mut self.0), self.1));
             }
             Ok(())
         }
     }
 
-    /// Fills the entry's cost from the call's usage once it ends.
     struct Cache(Entry);
 
     #[async_trait]
     impl Plugin for Cache {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(Fill(String::new(), self.0.clone()))?;
+            cx.filter(Fill(String::new(), 0.0, self.0.clone()))?;
             Ok(None)
-        }
-
-        async fn on_provider_end(&self, _px: &ProviderContext, outcome: &Outcome) {
-            if let (Ok(()), Ok(mut entry)) = (&outcome.end, self.0.lock())
-                && let Some((_, cost)) = entry.as_mut()
-            {
-                *cost = outcome.usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
-            }
         }
     }
 
@@ -1644,10 +1641,10 @@ async fn a_chunk_a_filter_splits_in_two_is_rebuilt_whole() {
     assert!(body.contains("\"content\":\" world\""), "{body}");
 }
 
-// Changed in 0009: a plugin's own bytes are relayed exactly, and their usage
-// counts nowhere, as no provider sent them.
+// Changed in 0009: a plugin's own bytes are relayed exactly, and pass no
+// provider edge, so no meter there sees their usage.
 #[tokio::test]
-async fn usage_in_a_plugins_own_bytes_is_not_counted() {
+async fn usage_in_a_plugins_own_bytes_reaches_no_meter() {
     struct Replay;
 
     #[async_trait]
@@ -1663,7 +1660,7 @@ async fn usage_in_a_plugins_own_bytes_is_not_counted() {
     let body = h.body(unary_chat()).await;
 
     assert_eq!(body, UNARY);
-    assert!(h.log.only().usage.is_empty());
+    assert!(h.usage.all().is_empty());
 }
 
 /// The chunks an OpenAI client gets from `stream` through a filter that
@@ -2289,7 +2286,7 @@ async fn groqs_usage_beside_the_response_is_counted() {
 
     let _ = h.send(unary_chat()).await;
 
-    let usage = h.calls.usage();
+    let usage = h.usage.total();
     assert_eq!(
         (
             usage.get(units::INPUT_TOKENS),
@@ -2599,7 +2596,7 @@ async fn a_reframed_stream_gets_usage_only_if_it_asked() {
 
     assert!(!body.contains("usage"), "{body}");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
-    assert_eq!(h.calls.usage().get(units::OUTPUT_TOKENS), Some(1.0));
+    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(1.0));
 }
 
 #[tokio::test]
@@ -3223,8 +3220,18 @@ impl Plugin for Bill {
     }
 }
 
-fn input_tokens(outcome: &Outcome) -> f64 {
-    outcome.usage.get(units::INPUT_TOKENS).unwrap_or_default()
+fn input_tokens(usage: &Usage) -> f64 {
+    usage.get(units::INPUT_TOKENS).unwrap_or_default()
+}
+
+/// Each metered call's input tokens, by call.
+fn metered(h: &Harness) -> Vec<(String, f64)> {
+    let mut calls: Vec<_> = h.usage.by_call();
+    calls.sort_by(|a, b| a.0.cmp(&b.0));
+    calls
+        .into_iter()
+        .map(|(c, u)| (c, input_tokens(&u)))
+        .collect()
 }
 
 #[tokio::test]
@@ -3263,16 +3270,17 @@ async fn every_call_a_smart_router_makes_is_billed_once_on_the_provider_edge() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bill.started(), ["openai/judge-1", "client", "backup/gpt-x"]);
     let ended = bill.ended();
-    let billed: Vec<_> = ended
+    let ended: Vec<_> = ended
         .iter()
-        .map(|(call, o)| (call.as_str(), o.end.is_ok(), input_tokens(o)))
+        .map(|(c, o)| (c.as_str(), o.end.is_ok()))
         .collect();
-    assert_eq!(
-        billed,
-        [("backup/gpt-x", true, 4.0), ("openai/judge-1", true, 50.0)]
-    );
-    // Changed in 0009: the client edge has the sum of its calls' usage.
-    assert_eq!(input_tokens(&h.log.only()), 54.0);
+    assert_eq!(ended, [("backup/gpt-x", true), ("openai/judge-1", true)]);
+    let billed = [
+        ("backup/gpt-x".to_owned(), 4.0),
+        ("openai/judge-1".to_owned(), 50.0),
+    ];
+    assert_eq!(metered(&h), billed);
+    assert_eq!(input_tokens(&h.usage.total()), 54.0);
 }
 
 #[tokio::test]
@@ -3429,10 +3437,11 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
         Some(StatusCode::SERVICE_UNAVAILABLE)
     );
     assert!(failed.end.is_err());
-    assert_eq!(
-        (answered.end.clone(), input_tokens(answered)),
-        (Ok(()), 5.0)
-    );
+    assert_eq!(answered.end, Ok(()));
+    let backup = metered(&h)
+        .into_iter()
+        .find(|(c, _)| c.starts_with("backup"));
+    assert_eq!(backup.map(|(_, n)| n), Some(5.0));
 }
 
 /// Runs `f` on the provider edge of every call.
@@ -3845,10 +3854,9 @@ async fn a_calls_own_extension_reaches_its_transport() {
     assert_eq!(key, Some(HeaderValue::from_static("k2")));
 }
 
-// Changed in 0009 (`with_usage` went): the request's usage is the sum of
-// its calls', each counted once on its provider edge.
+// Each call a request makes is metered once, on its provider edge.
 #[tokio::test]
-async fn the_requests_usage_is_the_sum_of_its_calls() {
+async fn each_call_a_request_makes_is_metered_once() {
     /// Reads one call through, then answers with a second.
     struct Twice;
 
@@ -3867,9 +3875,10 @@ async fn the_requests_usage_is_the_sum_of_its_calls() {
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
-    assert_eq!(input_tokens(&h.log.only()), 8.0);
-    let calls: Vec<f64> = bill.ended().iter().map(|(_, o)| input_tokens(o)).collect();
+    assert_eq!(bill.ended().len(), 2);
+    let calls: Vec<f64> = metered(&h).into_iter().map(|(_, n)| n).collect();
     assert_eq!(calls, [4.0, 4.0]);
+    assert_eq!(input_tokens(&h.usage.total()), 8.0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4099,7 +4108,7 @@ async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
         outcome.end.as_ref().err().map(|f| f.code()),
         Some("blocked")
     );
-    assert_eq!(input_tokens(outcome), 5.0);
+    assert_eq!(input_tokens(&h.usage.all()[0]), 5.0);
 }
 
 #[tokio::test]
@@ -4905,10 +4914,10 @@ async fn a_body_that_broke_off_is_refused_without_its_model_read() {
     assert_eq!(end, Err("too_large".to_owned()));
 }
 
-// Changed in 0009 (`with_usage` went): a call a plugin reads counts on its
-// own provider edge, and in its request's sum with the target's.
+// A call a plugin reads is metered on its own provider edge, as the
+// target's is.
 #[tokio::test]
-async fn a_call_read_in_on_client_counts_in_the_requests_usage() {
+async fn a_call_read_in_on_client_is_metered_like_the_targets() {
     /// Reads a call's response, then passes.
     #[derive(Clone, Default)]
     struct Read(Arc<Mutex<Option<Fault>>>);
@@ -4933,8 +4942,9 @@ async fn a_call_read_in_on_client_counts_in_the_requests_usage() {
 
     let fault = read.0.lock().ok().and_then(|mut f| f.take());
     assert_eq!(fault, None);
-    assert_eq!(h.log.only().usage.get(units::INPUT_TOKENS), Some(8.0));
-    assert_eq!(input_tokens(&h.calls.all()[0]), 4.0);
+    let calls = metered(&h);
+    let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
+    assert_eq!(calls, [("backup/gpt-x", 4.0), ("openai/gpt-x", 4.0)]);
 }
 
 #[tokio::test]
@@ -5457,17 +5467,15 @@ async fn a_205_is_sent_with_no_body() {
     assert_eq!(h.log.only().end, Ok(()));
 }
 
-// A call's usage counts on its provider edge, as decoded, and its request's
-// outcome sums it (changed in 0009: the client edge was empty here).
+// A call's usage is metered on its provider edge, as decoded.
 #[tokio::test]
-async fn a_calls_usage_counts_on_its_provider_edge_and_sums_on_the_client_edge() {
+async fn a_calls_usage_is_metered_on_its_provider_edge() {
     let h = Harness::new(Vec::new(), Some("openai"));
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
 
-    assert_eq!(h.calls.usage().get(units::INPUT_TOKENS), Some(4.0));
-    assert_eq!(input_tokens(&h.log.only()), 4.0);
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
 
 #[tokio::test]
@@ -5673,10 +5681,10 @@ impl Filter<Reply> for FailsAtEnd {
     }
 }
 
-// Usage counts as decoded, so a filter keeping all back and another failing
-// at its end change nothing of what counts.
+// A meter registered last sees each reply first, so a filter keeping all
+// back and another failing at its end hide nothing from it.
 #[tokio::test]
-async fn usage_counts_even_if_a_filter_keeps_all_back_and_another_fails_at_its_end() {
+async fn a_meter_sees_usage_though_a_filter_keeps_all_back_and_another_fails_at_its_end() {
     struct Both;
 
     #[async_trait]
@@ -5691,7 +5699,7 @@ async fn usage_counts_even_if_a_filter_keeps_all_back_and_another_fails_at_its_e
     h.mock.reply(OPENAI, mock::sse(STREAM));
     let _ = h.send(chat()).await;
     assert_eq!(code(&h.calls.all()[0].end), codes::INTERNAL);
-    assert_eq!(h.calls.usage().get(units::INPUT_TOKENS), Some(5.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(5.0));
 }
 
 #[tokio::test]
@@ -5736,19 +5744,18 @@ async fn a_calls_response_read_to_its_end_then_dropped_ends_ok() {
     let all = h.calls.all();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].end, Ok(()));
-    assert_eq!(all[0].usage.get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(h.usage.all()[0].get(units::INPUT_TOKENS), Some(4.0));
 }
 
-// Usage counts as decoded, though a filter fails on the message it came in.
-// (Its client-edge half went with `with_usage` in 0009.)
+// A meter registered last sees the usage in the message a filter fails on.
 #[tokio::test]
-async fn usage_a_filter_fails_on_still_counts() {
+async fn a_meter_sees_usage_a_filter_fails_on() {
     // The call reported 4 input tokens.
     let h = Harness::new(vec![Arc::new(ProviderCap)], Some("openai"));
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
     let _ = h.send(unary_chat()).await;
     assert_eq!(code(&h.calls.all()[0].end), "cap");
-    assert_eq!(h.calls.usage().get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
 
 fn over_the_cap(_: &mut Reply) -> Result<(), Fault> {
@@ -5759,7 +5766,7 @@ fn over_the_cap(_: &mut Reply) -> Result<(), Fault> {
     ))
 }
 
-/// Fails a call at the first reply that says something.
+/// Fails a call at its first reply.
 struct ProviderCap;
 
 #[async_trait]
@@ -5770,7 +5777,7 @@ impl Plugin for ProviderCap {
 }
 
 // A marked call's own filter, added in `on_provider`, goes with each copy
-// sent, each its own, and each copy's usage counts as decoded. (Was
+// sent, each its own, and each copy is metered. (Was
 // `Call::with_filter`, which 0009 removed.)
 #[tokio::test]
 async fn a_calls_own_filter_is_each_copys_own() {
@@ -5817,7 +5824,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
     let (first, second) = seen.split_at(seen.len() / 2);
     assert!(!first.is_empty() && first == second, "{seen:?}");
     assert_eq!(first[0], 1);
-    assert_eq!(h.calls.usage().get(units::INPUT_TOKENS), Some(10.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(10.0));
 }
 
 #[tokio::test]
@@ -5901,7 +5908,7 @@ async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
         let o = &all[0];
         (
             o.end.as_ref().err().map(|f| f.code().to_owned()),
-            o.usage.get(units::OUTPUT_TOKENS),
+            h.usage.all()[0].get(units::OUTPUT_TOKENS),
         )
     };
     let split = Harness::new(guard(), Some("openai"));
@@ -5913,8 +5920,8 @@ async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
     let _ = joined.send(chat()).await;
 
     // N5: a call settles at the end of its body, so both end as the guard
-    // refused; each counts what was decoded, joined the usage that came
-    // with the bytes refused.
+    // refused; each meter saw what was decoded, joined the usage that came
+    // with the bytes refused, as provider-edge filters run first.
     assert_eq!(outcome(&split), (Some("blocked".to_owned()), None));
     assert_eq!(outcome(&joined), (Some("blocked".to_owned()), Some(2.0)));
 }
@@ -5955,10 +5962,10 @@ async fn r6_a_guard_refuses_a_plugins_answer_whether_or_not_it_awaited_first() {
 
 // ---- r6 fix pass ----
 
-/// Usage in a plugin's own bytes read through `outputs` counts nowhere, as
-/// if they were sent (changed in 0009: only a provider's response counts).
+/// Usage in a plugin's own bytes read through `outputs` reaches no provider
+/// edge, so no meter, as if they were sent (0009).
 #[tokio::test]
-async fn usage_a_plugin_reads_in_its_own_bytes_counts_nowhere() {
+async fn usage_a_plugin_reads_in_its_own_bytes_reaches_no_meter() {
     struct ReadOwn;
 
     #[async_trait]
@@ -5974,7 +5981,7 @@ async fn usage_a_plugin_reads_in_its_own_bytes_counts_nowhere() {
 
     let h = Harness::new(vec![Arc::new(ReadOwn)], None);
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
-    assert!(h.log.only().usage.is_empty());
+    assert!(h.usage.all().is_empty());
 }
 
 /// A bodiless response ends its call `Ok` when its head goes out, even if the
@@ -5992,10 +5999,10 @@ async fn a_bodiless_response_ends_its_call_ok_though_the_provider_sent_a_body() 
     assert_eq!(h.calls.all()[0].end, Ok(()));
 }
 
-/// Usage in a message a provider-edge filter fails on counts on the call,
-/// unwritten.
+/// Usage in a message a provider-edge filter fails on reaches a meter
+/// registered after it, unwritten.
 #[tokio::test]
-async fn usage_a_filter_fails_on_is_counted_not_written() {
+async fn usage_a_filter_fails_on_is_metered_not_written() {
     /// OpenAI Chat whose encoder notes the usage it is given.
     #[derive(Clone, Default)]
     struct Tally(Arc<Mutex<Usage>>);
@@ -6061,7 +6068,12 @@ async fn usage_a_filter_fails_on_is_counted_not_written() {
     }
 
     let (mock, calls, tally) = (MockTransport::new(), Calls::default(), Tally::default());
-    let chain: Vec<Arc<dyn Plugin>> = vec![Arc::new(calls.clone()), Arc::new(ProviderCap)];
+    let meter = Metered::default();
+    let chain: Vec<Arc<dyn Plugin>> = vec![
+        Arc::new(calls.clone()),
+        Arc::new(ProviderCap),
+        Arc::new(meter.clone()),
+    ];
     let gw = providers([provider(&mock, "openai", OPENAI, None)])
         .and_then(|g| g.serve(tally.clone()))
         .and_then(|g| with_plugins(g, chain))
@@ -6073,7 +6085,7 @@ async fn usage_a_filter_fails_on_is_counted_not_written() {
     gw.idle().await;
 
     assert_eq!(code(&calls.all()[0].end), "cap");
-    assert_eq!(input_tokens(&calls.all()[0]), 4.0);
+    assert_eq!(input_tokens(&meter.total()), 4.0);
     assert!(tally.0.lock().map(|t| t.is_empty()).unwrap_or_default());
 }
 
@@ -6342,18 +6354,18 @@ impl Plugin for Markup {
     }
 }
 
-// A usage edit counts on neither path, and is written as the reply says on
-// both, relayed or translated.
+// A usage edit is written as the reply says on both paths, relayed or
+// translated; a meter registered after it sees what the provider reported.
 #[tokio::test]
-async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_counts_on_neither() {
+async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_hidden_from_a_later_meter() {
     const CLAUDE: &str = "http://anthropic.test";
     let mock = MockTransport::new();
     let list = [
         provider(&mock, "openai", OPENAI, None),
         add_provider("claude", AnthropicMessages, mock.at(CLAUDE)),
     ];
-    let calls = Calls::default();
-    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(calls.clone()), Arc::new(Markup)];
+    let meter = Metered::default();
+    let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(Markup), Arc::new(meter.clone())];
     let gw = gateway(list, plugins, None).unwrap_or_else(|e| panic!("{e}"));
     let prompt_tokens = |target: &'static str| {
         let (gw, mock) = (gw.clone(), mock.clone());
@@ -6385,11 +6397,11 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_counts_on_neither() {
     mock.reply(CLAUDE, mock::json(StatusCode::OK, anthropic));
     let relayed = prompt_tokens("openai").await;
     let translated = prompt_tokens("claude").await;
-    // Both calls count what was reported.
-    let counted: Vec<_> = calls
+    // The meter saw what both calls reported.
+    let counted: Vec<_> = meter
         .all()
         .iter()
-        .map(|o| o.usage.get(units::INPUT_TOKENS))
+        .map(|u| u.get(units::INPUT_TOKENS))
         .collect();
     assert_eq!(counted, [Some(4.0), Some(4.0)]);
     assert_eq!((&relayed, &translated), (&json!(99), &json!(99)));
@@ -6397,7 +6409,7 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_counts_on_neither() {
 
 // Every output a plugin makes is content for `ready` (changed in 0009, which
 // removed the hidden client format that judged them): a plugin filters what
-// says nothing with the kind's own check, so a quiet reply, then a failure,
+// is no content with the kind's own check, so a quiet reply, then a failure,
 // is not ready, and a fallback moves on.
 #[tokio::test]
 async fn ready_takes_every_output_a_plugin_makes_as_content() {
@@ -6413,8 +6425,8 @@ async fn ready_takes_every_output_a_plugin_makes_as_content() {
             let unfiltered = Response::stream(futures::stream::iter(made)).ready().await;
             assert!(unfiltered.is_ok());
             let made = [Ok(quiet), Err(Fault::upstream("gone"))];
-            let says = |r: &Reply| std::future::ready(r.says());
-            let made = futures::stream::iter(made).try_filter(says);
+            let content = |r: &Reply| std::future::ready(r.is_content());
+            let made = futures::stream::iter(made).try_filter(content);
             match Response::stream(made).ready().await {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(cx.call("openai").await?)),
@@ -6436,13 +6448,13 @@ async fn ready_takes_every_output_a_plugin_makes_as_content() {
 // or merge can show usage; readers filter with the kind's own check (changed
 // in 0009: it hid them).
 #[tokio::test]
-async fn outputs_yields_values_that_say_nothing_such_as_a_keep_alive() {
-    /// Reads the call, noting each output's usage and whether it says
-    /// anything, and answers with what says something.
+async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
+    /// Reads the call, noting each output's usage and whether it is
+    /// content, and answers with the content.
     #[derive(Clone, Default)]
     struct Reads(Arc<Mutex<Vec<Noted>>>);
 
-    /// Whether an output says anything, and its input tokens.
+    /// Whether an output is content, and its input tokens.
     type Noted = (bool, Option<f64>);
 
     #[async_trait]
@@ -6451,9 +6463,9 @@ async fn outputs_yields_values_that_say_nothing_such_as_a_keep_alive() {
             let read: Vec<Reply> = cx.call("openai").await?.outputs().try_collect().await?;
             let noted = read
                 .iter()
-                .map(|r| (r.says(), r.usage.get(units::INPUT_TOKENS)));
+                .map(|r| (r.is_content(), r.usage.get(units::INPUT_TOKENS)));
             self.0.lock().map(|mut n| n.extend(noted)).ok();
-            let said = read.into_iter().filter(Reply::says).map(Ok);
+            let said = read.into_iter().filter(Reply::is_content).map(Ok);
             Ok(Some(Response::stream(futures::stream::iter(said))))
         }
     }
@@ -6468,4 +6480,37 @@ async fn outputs_yields_values_that_say_nothing_such_as_a_keep_alive() {
     let noted = reads.0.lock().map(|n| n.clone()).unwrap_or_default();
     assert_eq!(noted.first(), Some(&(false, None)), "{noted:?}");
     assert!(noted.contains(&(true, Some(5.0))), "{noted:?}");
+}
+
+// Filters see every value (0010), yet `ready` commits on neither a keep-alive
+// nor usage alone: a stream that sends both, then fails, is not ready, and a
+// fallback moves on. The meter still saw the failed call's usage.
+#[tokio::test]
+async fn ready_commits_on_neither_a_keep_alive_nor_usage_alone() {
+    struct ReadyOrBackup;
+
+    #[async_trait]
+    impl Plugin for ReadyOrBackup {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            match cx.call("openai").await?.ready().await {
+                Ok(resp) => Ok(Some(resp)),
+                Err(_) => Ok(Some(cx.call("backup").await?)),
+            }
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(ReadyOrBackup)], None);
+    let quiet = [
+        ": keep-alive\n\n",
+        "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":7}}\n\n",
+        "data: {\"error\":{\"message\":\"overloaded\"}}\n\n",
+    ];
+    h.mock
+        .reply(OPENAI, mock::sse(&quiet))
+        .reply(BACKUP, mock::sse(STREAM));
+
+    assert_eq!(h.body(chat()).await, STREAM.concat());
+    let calls = metered(&h);
+    let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
+    assert_eq!(calls, [("backup/gpt-x", 5.0), ("openai/gpt-x", 7.0)]);
 }

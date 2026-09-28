@@ -169,7 +169,7 @@ impl Format for StreamableHttp {
         Box::new(relay.with_open(open.unwrap_or_default()))
     }
 
-    fn says(&self, output: &ToClient) -> bool {
+    fn is_content(&self, output: &ToClient) -> bool {
         !output.messages.is_empty()
     }
 }

@@ -1,8 +1,17 @@
 //! Billing: price each call's usage from your own price table and write it
-//! to your own store. Usage counts on the provider edge, once per call
-//! (`on_provider_end`), so a fallback's or a judge's calls are billed too,
-//! each at the model it used. No hold, no limit: to stop spending, see
+//! to your own store. The kernel counts no usage: a provider-edge `Reply`
+//! filter sums what the provider reports (`meter`), and `on_provider_end`
+//! bills it, once per call, so a fallback's or a judge's calls are billed
+//! too, each at the model it used. No hold, no limit: to stop spending, see
 //! `wallet` and `cost_cap`.
+//!
+//! **Order matters.** A filter sees a reply only if no filter before it
+//! failed on it or held it back, and a call's output filters run the last
+//! added first. So register billing after every plugin that filters
+//! outputs (last, or `Gateway::after`): its filter then sees each reply
+//! first. A failure still ends the stream, and usage the provider would
+//! have reported later is never seen: bill such a call from an estimate,
+//! or hold before it as `wallet` does.
 //!
 //! `cargo run -p respan-gateway-examples --example billing`
 
@@ -10,9 +19,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::http::{HeaderValue, StatusCode};
-use respan_gateway_core::{Fault, Gateway, Outcome, Plugin, ProviderContext, Usage, async_trait};
-use respan_gateway_examples::Price;
+use respan_gateway_core::{Fault, Gateway, Outcome, Plugin, ProviderContext, async_trait};
+use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole};
 
@@ -78,10 +88,14 @@ struct Billing<S> {
 
 #[async_trait]
 impl<S: UsageStore> Plugin for Billing<S> {
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        if outcome.usage.is_empty() {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        meter(px)
+    }
+
+    async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
+        let Some(usage) = CallUsage::of(px).filter(|u| !u.is_empty()) else {
             return;
-        }
+        };
         // Who pays: here a header an auth plugin vouched for.
         let header = px.client().head().headers.get("x-account");
         let account = header.and_then(|v| v.to_str().ok()).unwrap_or("anonymous");
@@ -91,9 +105,9 @@ impl<S: UsageStore> Plugin for Billing<S> {
         let price = self.prices.get(model.as_str());
         let row = Row {
             account: account.to_owned(),
-            micros: price.map(|p| p.of(&outcome.usage)),
+            micros: price.map(|p| p.of(&usage)),
             model,
-            usage: outcome.usage.clone(),
+            usage,
         };
         // Keep it fast or spawn: the request's `on_client_end` waits for
         // this hook. An `Err` here is yours to log or queue for retry.
@@ -111,6 +125,7 @@ fn gateway(mock: &MockTransport, store: Memory) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .serve(OpenAiChat)?
+        // Last, so its filter sees each reply first.
         .plugin("billing", Billing { prices, store })?
         .target("openai")
 }

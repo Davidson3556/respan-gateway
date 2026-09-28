@@ -64,9 +64,10 @@ whole: its body, even empty, is its one input.
   its request or call ends. `on_client` passes (`Ok(None)`), or returns
   a response and skips the plugins after it, or refuses.
 - **Filter**: code that edits a request's inputs or a response's
-  outputs as they stream; its type says which. Messages that say nothing,
-  such as keep-alives, pass no filter; a reader (`outputs`) still sees
-  them.
+  outputs as they stream; its type says which. Filters see every
+  message, keep-alives and usage alone included, and pass on at once what
+  they have no reason to hold. `Format::is_content` says only what
+  `ready` commits on.
 - **Format**: one protocol's codec, such as OpenAI Chat: it recognises
   its requests, and reads and writes its requests and responses.
 - **Kind**: a format's two types, `Input` and `Output`. Formats of one
@@ -74,13 +75,15 @@ whole: its body, even empty, is its one input.
   kind of one format (`formats::opaque`).
 - **Message**: one message of a body, such as an SSE event, a WebSocket
   frame or a whole body, decoded into one value of the kind: every one,
-  even one the kind cannot read, keeps the bytes it came in. Usage is what
-  a provider's messages report, counted as decoded on the call's provider
-  edge, in `Outcome.usage`; a request's `Outcome.usage` sums its calls'.
-  A plugin's own answer counts nothing: a cache carries its stored usage
-  in an extension. A cost cap reserves before the call and settles from
-  it; the kernel had a meter once, but providers report output usage at a
-  stream's end.
+  even one the kind cannot read, keeps the bytes it came in.
+- **Usage**: the kernel counts none, as kinds report it differently or
+  not at all ([0010](docs/decisions/0010-usage-out-of-core.md)). In the
+  chat kind it is `Reply.usage` (`formats::Usage`); a plugin meters a
+  call with a provider-edge filter registered after the filters that may
+  fail, and reads its sum in `on_provider_end`. A plugin's own answer
+  reaches no provider edge: a cache carries its stored usage in an
+  extension. A cost cap reserves before the call (`sdks/ledger`) and
+  settles from what that filter priced.
 - **Refusal**: a failure before the response head goes out, sent in the
   client's format with the fault's status.
 - **Relay**: a format's promise to write each message as the bytes it

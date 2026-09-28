@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn unedited_messages_relay_byte_exact_and_their_usage_counts() -> Result<(), Fault> {
+async fn unedited_messages_relay_byte_exact_and_a_filter_reads_their_usage() -> Result<(), Fault> {
     // Already on the pinned model, so nothing changes it.
     let pinned = r#"{"model": "small",  "input": ["hi"], "dimensions": 2}"#;
     let (sent, status, answered, usage) = embed(pinned).await?;

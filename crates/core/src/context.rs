@@ -14,8 +14,8 @@ use crate::format::{AnyFormat, Request, is_input};
 use crate::gateway::Inner;
 use crate::input::{Input, Later, locked, stream};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
-use crate::plugin::{Filters, all};
-use crate::{Call, Fault, Filter, Outcome, Plugin, Response, Usage};
+use crate::plugin::Filters;
+use crate::{Call, Fault, Filter, Outcome, Plugin, Response};
 
 pub(crate) type HeadEdit = Box<dyn FnOnce(&mut http::response::Parts) -> Result<(), Fault> + Send>;
 
@@ -56,8 +56,6 @@ pub struct ClientContext {
     pub(crate) settling: Arc<InFlight>,
     /// Its calls being sent or with an open response, ended when it ends.
     pub(crate) open: Arc<OpenCalls>,
-    /// The usage of its calls that ended, added up for its `Outcome`.
-    pub(crate) spent: Arc<Mutex<Usage>>,
     pub(crate) edits: Mutex<Edits>,
     pub(crate) gateway: Arc<Inner>,
 }
@@ -79,18 +77,16 @@ impl Edge for ClientContext {
         plugin.on_client_end(self, outcome)
     }
 
-    /// Open calls end abandoned, the inputs left are cut off, output
-    /// filters still open end as the request did, and its calls' usage,
-    /// all ended now, is added up.
-    fn close(&mut self, end: &Result<(), Fault>, usage: &mut Usage) {
+    /// Open calls end abandoned, the inputs left are cut off, and output
+    /// filters still open end as the request did.
+    fn close(&mut self, end: &Result<(), Fault>) {
         self.running = None;
         self.open.abandon();
         if let Some(later) = &self.later {
             later.end(Err(Fault::abandoned()));
         }
-        *usage += std::mem::take(&mut *locked(&self.spent));
         let edits = unlocked(&mut self.edits);
-        let _ = edits.outputs.end(end.clone(), &mut None, &all);
+        let _ = edits.outputs.end(end.clone(), &mut None);
     }
 }
 
@@ -117,7 +113,6 @@ impl ClientContext {
             runtime,
             settling: Arc::default(),
             open: Arc::default(),
-            spent: Arc::default(),
             edits: Mutex::default(),
             gateway,
         }
@@ -218,7 +213,6 @@ impl ClientContext {
             runtime: self.runtime.clone(),
             settling: self.settling.clone(),
             open: self.open.clone(),
-            spent: self.spent.clone(),
             edits: Mutex::default(),
             gateway: self.gateway.clone(),
         }
@@ -301,8 +295,9 @@ impl ClientContext {
     /// Relay a plugin's own response in the client's format, such as a
     /// cached one. The client's format decodes it as a provider's, so it
     /// can be read ([`Response::ready`], [`Response::outputs`]), and writes
-    /// it as it came until edited. Its usage counts nowhere, as no provider
-    /// sent it: to bill it, carry it in an extension.
+    /// it as it came until edited. It is read on no provider edge, so a
+    /// plugin that meters calls there never sees it: to bill it, carry
+    /// what it cost in an extension.
     pub fn relay<B>(&self, response: http::Response<B>) -> Response
     where
         B: http_body::Body<Data = Bytes> + Send + 'static,

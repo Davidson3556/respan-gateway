@@ -16,8 +16,9 @@ and call once. Tests state its promises; the
 | [0005](decisions/0005-no-routes-global-plugins.md) | Formats recognise requests; one plugin order; default targets |
 | [0006](decisions/0006-streams-both-ways.md) | Inputs and outputs may both stream |
 | [0007](decisions/0007-format-is-a-codec.md) | A format is one protocol's codec |
-| [0008](decisions/0008-events-carry-their-bytes.md) | Each message is one value that keeps its bytes; usage counts as decoded |
-| [0009](decisions/0009-core-cleanups.md) | Only providers' responses count; one default target; less policy in the kernel |
+| [0008](decisions/0008-events-carry-their-bytes.md) | Each message is one value that keeps its bytes (usage amended by 0010) |
+| [0009](decisions/0009-core-cleanups.md) | One default target; less policy in the kernel (usage amended by 0010) |
+| [0010](decisions/0010-usage-out-of-core.md) | The kernel counts no usage; filters see every message; `is_content` |
 
 ## Two edges
 
@@ -99,7 +100,7 @@ input ([0003](decisions/0003-kernel-contracts.md#kinds)).
 
 ## Core types
 
-14 public types, plus `Body`, `codes` and re-exports; `handle` needs a
+13 public types, plus `Body`, `codes` and re-exports; `handle` needs a
 tokio runtime, which runs end hooks detached.
 
 - `Gateway`, `Transport`; `Plugin`, whose hooks get a `ClientContext` (a
@@ -109,8 +110,8 @@ tokio runtime, which runs end hooks detached.
   an edge ended; `Response` is a call's, `cx.relay`'s or
   `Response::stream`'s, read with `ready` or `outputs`; `Fault` is the one
   error type.
-- `Format`, `Decoder<T>`, `Encoder<T>`, `Usage`: a protocol's codec, bytes
-  to values of its kind and back; amounts.
+- `Format`, `Decoder<T>`, `Encoder<T>`: a protocol's codec, bytes to
+  values of its kind and back.
 
 ## The response pipeline
 
@@ -125,22 +126,25 @@ tokio runtime, which runs end hooks detached.
    once with no body and nothing more is read: a call whose end was
    decoded, as a provider's bodiless response's is, ends so; one with a
    body left ends `abandoned`.
-3. **Decode.** Each message is one value. Only a provider's response
-   counts: its usage counts as decoded, on its call's provider edge,
-   whoever reads it, and a request's `Outcome.usage` sums its calls'. A
-   plugin's own bytes (`cx.relay`) or outputs count nothing; a cache
-   carries a hit's stored usage in an extension for billing to read. A
-   cost cap is a reservation in `on_provider`,
-   settled from `Outcome.usage`, plus a provider-edge filter that
-   estimates from text to cut a stream; a meter once saw each increment,
-   but providers report output usage at a stream's end.
+3. **Decode.** Each message is one value, run through its call's
+   provider-edge filters as decoded, whoever reads it. The kernel counts
+   no usage ([0010](decisions/0010-usage-out-of-core.md)): a plugin
+   meters a call with a provider-edge filter of its kind, such as one
+   summing the chat kind's `Reply.usage`, and reads the sum in
+   `on_provider_end`, after the call's filters ended. It sees a message
+   only if no filter before it failed on it or held it back, so it is
+   registered after the plugins whose filters may fail (output filters
+   run the last added first). A plugin's own bytes (`cx.relay`) or
+   outputs reach no provider edge; a cache carries a hit's stored usage
+   in an extension. A cost cap reserves in `on_provider` and settles
+   from what its filter priced (`sdks/ledger`).
 4. **Edit.** Output filters run provider edge first, the last added
    first; input filters the first added first: a plugin sees inputs after
-   earlier plugins, outputs before. A value that says nothing, such as a
-   keep-alive, passes no filter and is written where it came; `outputs`
-   still yields it, for its reader to filter with the kind's own check. An `Err`
-   stops writing, never counting, and a failed filter
-   releases nothing.
+   earlier plugins, outputs before. Filters see every value, keep-alives
+   and usage alone included, and pass on at once what they have no
+   reason to hold, so a keep-alive is written where it came; `outputs`
+   yields every value too, for its reader to filter with the kind's own
+   check. An `Err` stops writing, and a failed filter releases nothing.
 5. **End.** A body ends at the end of its bytes; one cut short ends
    `Err(truncated)`. Every filter gets one end, even after a failure,
    drop or panic elsewhere, so what it keeps back is released. A panic is
@@ -156,9 +160,9 @@ tokio runtime, which runs end hooks detached.
 A router sets the target and passes. A fallback answers with the first
 ready success, else the last answer, so a client sees the last 429 and its
 `Retry-After`. `ready` reads to the first content (a provider's output
-that says something, as sent, before filters, or any output a plugin
-made); it is `Err` for a success that fails first, and passes an error
-status:
+its format calls content, `Format::is_content`, as sent, before filters,
+so neither a keep-alive nor usage alone; or any output a plugin made);
+it is `Err` for a success that fails first, and passes an error status:
 
 ```rust
 let mut last = Err(Fault::upstream("no provider to try"));
@@ -186,14 +190,14 @@ opaque traffic by its body
 | Crate | What it is |
 |---|---|
 | `core` | The kernel: no HTTP, config or kinds. |
-| `formats` | The `conversation` kind, `OpenAiChat`, `AnthropicMessages`, `relayed`, `opaque`, helpers. |
+| `formats` | The `conversation` kind, `Usage`, `OpenAiChat`, `AnthropicMessages`, `relayed`, `opaque`, helpers. |
 | `plugins` | `ModelRouter<I>`, given an accessor for the kind's model. |
 | `server` | `router` (bodies up to 32 MiB, no upgrades), `HttpTransport` (strips the client's credentials when it has its own, cookies and forwarding headers), `CallHeaders`. |
 | `testkit` | `MockTransport` and the kernel's tests. |
 | `respan-gateway` | The binary: YAML config, routing by model, `check`. |
 | `sdks/routing` | Retry, fallback, race and a stall watchdog for plugins. |
 | `sdks/text` | Read and rewrite chat text across stream deltas; refuse what cannot be read. |
-| `sdks/ledger` | Reserve before a call, settle once from its usage. |
+| `sdks/ledger` | Reserve before a call, settle once from what your filter priced into its tally. |
 | `sdks/mcp` | The MCP kind, streamable HTTP format and stdio transport. |
 | `examples` | One runnable, tested example per use case ([list](../examples/README.md)). |
 

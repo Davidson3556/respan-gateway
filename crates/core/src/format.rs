@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 
-use crate::{Fault, Usage};
+use crate::Fault;
 
 /// One protocol's codec: reads and writes its requests and responses, on
 /// whichever side the kernel puts it. Stateless and shared: each body,
@@ -81,7 +81,7 @@ pub trait Format: Send + Sync + 'static {
     /// sent. A failed status ends `Err` with its error body
     /// ([`Fault::with_raw`]); a success not in this protocol ends `Err` with
     /// [`codes::UPSTREAM`](crate::codes::UPSTREAM), one cut short
-    /// [`Fault::truncated`]. Hold an output that says nothing yet, such as a
+    /// [`Fault::truncated`]. Hold an output that shows nothing yet, such as a
     /// start, until the next that does, and drop it if the response fails
     /// first, so that failure can still be refused
     /// ([`Response::ready`](crate::Response::ready)).
@@ -108,19 +108,11 @@ pub trait Format: Send + Sync + 'static {
         request: &http::Request<Bytes>,
     ) -> Box<dyn Encoder<Self::Output>>;
 
-    /// The usage `output` reports, as an increment. It counts as decoded,
-    /// before any filter, only in a provider's response, on its call's
-    /// provider edge. By default, none.
-    fn usage<'a>(&self, _output: &'a Self::Output) -> Option<&'a Usage> {
-        None
-    }
-
-    /// Whether a reader sees anything in `output`. One that says nothing,
-    /// such as a keep-alive, framing or usage alone, passes no filter, is no
-    /// content for [`Response::ready`](crate::Response::ready), and is
-    /// written where it came; [`Response::outputs`](crate::Response::outputs)
-    /// still yields it. By default, true.
-    fn says(&self, _output: &Self::Output) -> bool {
+    /// Whether `output` is content: what
+    /// [`Response::ready`](crate::Response::ready) commits on. A keep-alive,
+    /// framing, or a message carrying only usage is not. Every output,
+    /// content or not, reaches filters. By default, true.
+    fn is_content(&self, _output: &Self::Output) -> bool {
         true
     }
 }
@@ -242,10 +234,8 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
     ) -> Box<dyn AnyEncoder>;
     /// Its input and output types.
     fn kind(&self) -> (TypeId, TypeId);
-    /// The usage `outputs` report, added up, and whether any says something.
-    fn read(&self, outputs: &Values) -> (Usage, bool);
-    /// Whether `output` says something.
-    fn says(&self, output: &dyn Any) -> bool;
+    /// Whether any of `outputs` is content.
+    fn any_content(&self, outputs: &Values) -> bool;
     /// Whether two inputs are equal.
     fn same(&self, a: &AnyInput, b: &AnyInput) -> bool;
     /// Inputs as values, each moved if not shared.
@@ -301,24 +291,10 @@ impl<F: Format> AnyFormat for F {
         (TypeId::of::<F::Input>(), TypeId::of::<F::Output>())
     }
 
-    fn read(&self, outputs: &Values) -> (Usage, bool) {
-        let (mut usage, mut content) = (Usage::default(), false);
-        for output in outputs
-            .downcast_ref::<Vec<F::Output>>()
-            .into_iter()
-            .flatten()
-        {
-            if let Some(reported) = Format::usage(self, output) {
-                usage += reported;
-            }
-            content |= Format::says(self, output);
-        }
-        (usage, content)
-    }
-
-    fn says(&self, output: &dyn Any) -> bool {
-        let output = output.downcast_ref::<F::Output>();
-        output.is_none_or(|o| Format::says(self, o))
+    fn any_content(&self, outputs: &Values) -> bool {
+        let outputs = outputs.downcast_ref::<Vec<F::Output>>();
+        let mut outputs = outputs.into_iter().flatten();
+        outputs.any(|output| Format::is_content(self, output))
     }
 
     fn same(&self, a: &AnyInput, b: &AnyInput) -> bool {
