@@ -28,7 +28,7 @@ async fn a_request_encoder_panic_on_a_later_frame_ends_the_call_internal() {
     let (tx, req) = upload();
     send(&tx, "first");
     send(&tx, "ENCPANIC");
-    let (res, end) = gw.handle::<Ask, Ans>(req).await;
+    let (res, end) = handle(&gw, req).await;
     let got = read(res).await;
     drop(tx);
     gw.idle().await;
@@ -62,7 +62,7 @@ async fn a_decoder_panic_while_until_end_reads_refuses_the_request_internal() {
             .unwrap()
             .plugin("mode", Mode(mode))
             .unwrap();
-        let (res, end) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+        let (res, end) = handle(&gw, req(vec!["q"])).await;
         assert_eq!(
             read(res).await,
             Ok((500, "ERR internal".into())),
@@ -121,7 +121,7 @@ async fn a_call_is_sent_only_once_handed_to_its_transport() {
             .unwrap()
             .plugin("fails", Fails(mode))
             .unwrap();
-        let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+        let (res, _) = handle(&gw, req(vec!["q"])).await;
         let _ = read(res).await;
         gw.idle().await;
         let ends: Vec<bool> = rec.log().prov_end.iter().map(|(s, _)| *s).collect();

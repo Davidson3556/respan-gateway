@@ -2,7 +2,8 @@
 //! pipeline in-process, with no server and no second hop. It builds a
 //! [`Gateway`], hands [`Gateway::handle`] an exchange on the HTTP wire (an
 //! `http` request head and its body), whole, reads the response and awaits
-//! how the request ended. With no HTTP hop, it needs no adapter; `Err`
+//! how the request ended. It knows its wire, so it erases the request's head
+//! and downcasts the response's itself. With no HTTP hop, it needs no adapter; `Err`
 //! is what no format could write.
 //!
 //! The kernel counts no usage:
@@ -16,7 +17,7 @@ use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{Exchange, Fault, Gateway, serde_json};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_http::{Answer, Ask, http};
+use respan_gateway_http::{Answer, http};
 use respan_gateway_testkit::{MockTransport, mock};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -47,8 +48,8 @@ async fn ask(
         .map_err(respan_gateway_http::built_wrong)?
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
-    let (resp, outcome) = gw.handle::<Ask, Answer>(Exchange::new(head, body)).await;
-    let resp = resp?;
+    let (resp, outcome) = gw.handle(Exchange::new(head, body).erase()).await;
+    let resp = resp?.downcast::<Answer>("a response of another wire than HTTP")?;
     // Read the body first: the end resolves once the response ends.
     let body: Vec<Bytes> = resp.body.try_collect().await?;
     Ok((resp.head.status, body.concat().into(), outcome.await))

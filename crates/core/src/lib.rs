@@ -23,7 +23,7 @@ pub use gateway::Gateway;
 pub use plugin::{Filter, Plugin};
 pub use provider::ProviderContext;
 pub use response::Response;
-pub use transport::{Body, Exchange, Extensions, Transport};
+pub use transport::{Body, Exchange, Extensions, Head, Transport};
 
 /// The crates the kernel's contracts use, at the kernel's versions.
 pub use {async_trait::async_trait, bytes, futures, serde_json};

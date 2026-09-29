@@ -1,6 +1,6 @@
 # 0015. Core trims
 
-- Status: accepted
+- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped)
 - Date: 2026-09-28
 
 ## Context
@@ -27,11 +27,8 @@ missing beside its writer. Public types go from 16 to 14.
 3. **`Exchange::streams: bool` replaces `handle`'s `streaming`**
    (amends 0012). It means later frames follow the head. The adapter sets
    it on a request; the kernel sets it on a call that streams the
-   client's inputs. `Gateway::handle::<Ask, Answer>(req)` takes it from
-   the request. `HttpTransport` sends a call whole or streamed by it, not
-   by its body's size hint. `Answer` stays a type parameter, checked at
-   run time against the accepting format's `Answer`, which the kernel
-   cannot know at compile time.
+   client's inputs. `Gateway::handle(req)` takes it from the request. `HttpTransport` sends a call whole or streamed by it, not
+   by its body's size hint. (0017: `handle` takes and gives erased heads.)
 4. **`Fault` loses `in_place`, `is_answer` and `answered`** (amends 0008,
    0011, 0012, 0014). `with_answer(format, answer)` and `answer(format)`
    stay: a same-format refusal relays the provider's bytes. Whether a

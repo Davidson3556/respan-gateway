@@ -40,7 +40,7 @@ async fn an_abandoned_upload_ends_the_providers_body_with_an_err() {
     let gw = gateway_of(Toy, &seen, false, never);
     let (tx, req) = upload();
     send(&tx, "hello");
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let mut ex = res.unwrap();
     let _ = ex.body.next().await;
     seen.wait_for(1).await;
@@ -63,7 +63,7 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     send(&tx, "hello");
     tx.unbounded_send(Err(Fault::bad_request("client broke")))
         .unwrap();
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     gw.idle().await;
     assert_eq!(seen.frames(), frames(&[Ok("hello"), Err("bad_request")]));
@@ -79,7 +79,7 @@ async fn a_body_ends_at_its_first_failure() {
     for text in ["one", "ENCPANIC", "two"] {
         send(&tx, text);
     }
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     assert_eq!(seen.frames(), frames(&[Ok("one"), Err("internal")]));
 }
@@ -93,7 +93,7 @@ async fn a_complete_upload_ends_cleanly() {
     send(&tx, "one");
     send(&tx, "two");
     drop(tx);
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     assert_eq!(seen.frames(), frames(&[Ok("one"), Ok("two"), Ok("<END>")]));
 }
@@ -130,7 +130,7 @@ async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {
         .unwrap();
     let (tx, req) = upload();
     send(&tx, "one");
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     gw.idle().await;
     let task = lock(&taps).pop().unwrap();
@@ -168,7 +168,7 @@ async fn values_decoded_before_a_decoder_err_are_kept() {
     let (tx, req) = upload();
     send(&tx, "ok");
     send(&tx, "BAD");
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     gw.idle().await;
     let want = frames(&[Ok("ok"), Ok("before-bad"), Err("bad_request")]);
@@ -180,7 +180,7 @@ async fn values_decoded_before_a_decoder_err_are_kept() {
     let (tx, req) = upload();
     send(&tx, "ok");
     send(&tx, "BAD");
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     assert_eq!(
         seen.frames(),
@@ -195,7 +195,7 @@ async fn values_decoded_before_a_decoder_err_are_kept() {
 async fn a_request_encoders_opening_bytes_come_first() {
     let seen = Seen::default();
     let gw = gateway_of(Opening("<OPEN>", false), &seen, true, done);
-    let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
     let _ = read(res).await;
     // a relay's first frame is the client's bytes, unread
     assert_eq!(seen.frames(), frames(&[Ok("<OPEN>q<END>")]));
@@ -208,7 +208,7 @@ async fn a_streaming_requests_opening_bytes_are_its_first_frame() {
     let (tx, req) = upload();
     send(&tx, "x");
     drop(tx);
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     assert_eq!(seen.frames(), frames(&[Ok("<OPEN>"), Ok("x"), Ok("<END>")]));
 }
@@ -219,7 +219,7 @@ async fn a_streaming_requests_opening_bytes_are_its_first_frame() {
 async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     let seen = Seen::default();
     let gw = gateway_of(Opening("<OPEN>", true), &seen, true, done);
-    let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
     assert_eq!(read(res).await, Ok((200, "a;!".into())));
     assert_eq!(seen.frames(), frames(&[Ok("<OPEN>")]), "a whole request");
 
@@ -227,7 +227,7 @@ async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     let gw = gateway_of(Opening("<OPEN>", true), &seen, true, done);
     let (tx, req) = upload();
     send(&tx, "x");
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     assert_eq!(read(res).await, Ok((200, "a;!".into())));
     drop(tx);
     assert_eq!(
@@ -246,7 +246,7 @@ async fn an_empty_frame_is_still_a_frame() {
     send(&tx, "one");
     send(&tx, "");
     drop(tx);
-    let (res, _) = gw.handle::<Ask, Ans>(req).await;
+    let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     assert_eq!(seen.frames(), frames(&[Ok("one"), Ok(""), Ok("<END>")]));
 }

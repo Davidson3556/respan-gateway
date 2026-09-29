@@ -44,7 +44,7 @@ async fn run(
         .unwrap()
         .plugin("mode", Mode(mode))
         .unwrap();
-    let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
     let got = read(res).await;
     gw.idle().await;
     let l = rec.log();
@@ -127,7 +127,7 @@ async fn time_of(mode: u8, lead: &'static str, n: usize) -> Duration {
             .plugin("mode", Mode(mode))
             .unwrap();
         let start = Instant::now();
-        let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+        let (res, _) = handle(&gw, req(vec!["q"])).await;
         let (_, body) = read(res).await.unwrap();
         best = best.min(start.elapsed());
         assert_eq!(body.len(), n * (lead.len() + 1) + "x;!".len());
@@ -191,7 +191,7 @@ async fn until_content_holds_a_response_without_content_to_its_end() {
         .unwrap()
         .plugin("probe", Probe(reads.clone(), at_return.clone()))
         .unwrap();
-    let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
     let (_, body) = read(res).await.unwrap();
     assert_eq!(
         at_return.load(Ordering::SeqCst),

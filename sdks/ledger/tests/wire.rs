@@ -222,7 +222,7 @@ async fn accounting_settles_on_a_wire_of_its_own() {
         let gw = gw.and_then(|g| g.plugin("accounting", accounting));
         let gw = gw.unwrap_or_else(|f| panic!("{f}"));
         let body = stream::iter([Ok(Bytes::from(question))]).boxed();
-        let (resp, outcome) = gw.handle::<Ask, Answer>(Exchange::new(Ask, body)).await;
+        let (resp, outcome) = gw.handle(Exchange::new(Ask, body).erase()).await;
         if let Ok(resp) = resp {
             let _: Vec<_> = resp.body.collect().await;
         }

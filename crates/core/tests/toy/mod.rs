@@ -274,6 +274,19 @@ pub fn ok_resp(v: Vec<&'static str>) -> Exchange<Ans> {
 }
 
 /// A whole request of `body`.
+/// `Gateway::handle` on the toy wire: erase the request's head, downcast the
+/// response's.
+pub async fn handle(
+    gw: &Gateway,
+    req: Exchange<Ask>,
+) -> (
+    Result<Exchange<Ans>, Fault>,
+    BoxFuture<'static, Result<(), Fault>>,
+) {
+    let (res, end) = gw.handle(req.erase()).await;
+    (res.and_then(|r| r.downcast("the toy wire")), end)
+}
+
 pub fn req(body: Vec<&'static str>) -> Exchange<Ask> {
     Exchange::new(Ask("/".into()), chunks(body))
 }

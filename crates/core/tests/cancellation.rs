@@ -13,11 +13,7 @@ use toy::*;
 /// Drive `handle` for `h` polls, then its body for `b` polls per frame, and
 /// drop whatever is left.
 async fn drive(gw: &Gateway, streams: bool, h: usize, b: usize) -> Option<BoxedEnd> {
-    let (res, end) = limit(
-        gw.handle::<Ask, Ans>(req_of(vec!["one", "two"], streams)),
-        h,
-    )
-    .await?;
+    let (res, end) = limit(handle(gw, req_of(vec!["one", "two"], streams)), h).await?;
     if let Ok(ex) = res {
         let mut body = ex.body;
         let mut n = 0;
@@ -159,7 +155,7 @@ async fn spawned_calls_end_with_their_request() {
             .unwrap()
             .plugin("spawner", Spawner(std::sync::Arc::clone(&tasks)))
             .unwrap();
-        let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+        let (res, _) = handle(&gw, req(vec!["q"])).await;
         let _ = read(res).await;
         tokio::time::timeout(Duration::from_secs(2), gw.idle())
             .await
@@ -213,7 +209,7 @@ async fn provider_end_hooks_precede_the_clients() {
         let gw = gateway(scenario, &Rec::default())
             .plugin("ordered", Ordered(std::sync::Arc::clone(&log)))
             .unwrap();
-        let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+        let (res, _) = handle(&gw, req(vec!["q"])).await;
         let mut body = res.unwrap().body;
         let mut n = 0;
         while body.next().await.is_some() {

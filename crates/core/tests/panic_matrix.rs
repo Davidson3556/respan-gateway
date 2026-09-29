@@ -71,7 +71,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                     drop(tx);
                     let gw2 = gw.clone();
                     let driver = tokio::spawn(async move {
-                        let (res, end) = gw2.handle::<Ask, Ans>(req).await;
+                        let (res, end) = handle(&gw2, req).await;
                         let _ = read(res).await;
                         tokio::time::timeout(Duration::from_secs(2), end)
                             .await

@@ -20,9 +20,7 @@ async fn cut_requests_leave_nothing_behind() {
         tasks.push(tokio::spawn(async move {
             let cut = Duration::from_micros((i * 37) % 900);
             let work = async {
-                let (res, _) = gw
-                    .handle::<Ask, Ans>(req_of(vec!["one", "two"], i % 2 == 0))
-                    .await;
+                let (res, _) = handle(&gw, req_of(vec!["one", "two"], i % 2 == 0)).await;
                 if let Ok(ex) = res {
                     let mut body = ex.body;
                     while body.next().await.is_some() {}
@@ -70,9 +68,7 @@ async fn a_big_body_relays_whole() {
         .target("a")
         .unwrap();
     let body = respan_gateway_core::futures::stream::iter([Ok(big)]).boxed();
-    let (res, _) = gw
-        .handle::<Ask, Ans>(Exchange::new(Ask("/".into()), body))
-        .await;
+    let (res, _) = handle(&gw, Exchange::new(Ask("/".into()), body)).await;
     assert_eq!(read(res).await, Ok((200, "a;!".into())));
     // the body, and the toy's end marker
     assert_eq!(

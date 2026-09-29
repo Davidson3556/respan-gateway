@@ -57,13 +57,19 @@ impl<H> Exchange<H> {
 }
 
 /// A head of any wire, erased.
-pub(crate) type Head = Box<dyn Any + Send + Sync>;
+pub type Head = Box<dyn Any + Send + Sync>;
 
 impl<H: Any + Send + Sync> Exchange<H> {
-    /// The same, its head erased.
-    pub(crate) fn erase(self) -> Exchange<Head> {
+    /// The same, its head erased: what [`Gateway::handle`](crate::Gateway::handle)
+    /// takes. A head already erased stays as it is, not boxed twice.
+    pub fn erase(self) -> Exchange<Head> {
+        let head: Head = Box::new(self.head);
+        let head = match head.downcast::<Head>() {
+            Ok(erased) => *erased,
+            Err(head) => head,
+        };
         Exchange {
-            head: Box::new(self.head),
+            head,
             body: self.body,
             extensions: self.extensions,
             relayed: self.relayed,
@@ -73,8 +79,9 @@ impl<H: Any + Send + Sync> Exchange<H> {
 }
 
 impl Exchange<Head> {
-    /// The same with its head as `H`; `Err` with `what` for another type.
-    pub(crate) fn downcast<H: Any>(self, what: &'static str) -> Result<Exchange<H>, Fault> {
+    /// The same with its head as `H`, as an adapter types its wire's response;
+    /// `Err` [`INTERNAL`](crate::codes::INTERNAL) with `what` for another type.
+    pub fn downcast<H: Any>(self, what: &'static str) -> Result<Exchange<H>, Fault> {
         Ok(Exchange {
             head: *self.head.downcast().map_err(|_| Fault::internal(what))?,
             body: self.body,
@@ -228,5 +235,20 @@ impl<T: Transport> Transport for Erased<T> {
     async fn send(&self, call: Exchange<Head>) -> Result<Exchange<Head>, Fault> {
         let call = call.downcast("a call of another wire than its transport's")?;
         Ok(self.0.send(call).await?.erase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::*;
+
+    #[test]
+    fn erasing_twice_keeps_one_box() {
+        let once = Exchange::new(7u32, futures::stream::empty().boxed()).erase();
+        let twice = once.erase();
+        let head = twice.downcast::<u32>("not a u32");
+        assert_eq!(head.map(|e| e.head).ok(), Some(7));
     }
 }

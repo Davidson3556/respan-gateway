@@ -31,7 +31,7 @@ fn gateway_of(rec: &Rec) -> Gateway {
 async fn idle_waits_for_a_request_still_reading_its_body() {
     let gw = gateway_of(&Rec::default());
     let (_tx, req) = whole_upload();
-    let mut handling = Box::pin(gw.handle::<Ask, Ans>(req));
+    let mut handling = Box::pin(handle(&gw, req));
     assert!(futures::poll!(handling.as_mut()).is_pending());
     let idle = tokio::time::timeout(Duration::from_millis(100), gw.idle()).await;
     assert!(
@@ -55,7 +55,7 @@ async fn a_request_whose_body_fails_is_refused_before_any_plugin() {
     send(&tx, "half");
     tx.unbounded_send(Err(Fault::bad_request("the client broke")))
         .unwrap();
-    let (res, end) = gw.handle::<Ask, Ans>(req).await;
+    let (res, end) = handle(&gw, req).await;
     assert_eq!(read(res).await, Ok((400, "ERR bad_request".into())));
     gw.idle().await;
     assert_eq!(code(&end.await), "bad_request");
@@ -81,7 +81,7 @@ async fn a_rebuilt_gateway_counts_only_its_own_requests() {
         .unwrap()
         .target("a")
         .unwrap();
-    let (res, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
     let running = res.unwrap();
     let old = gw.clone();
     let rebuilt = gw.plugin("more", Rec::default()).unwrap();
@@ -119,9 +119,9 @@ async fn a_response_of_another_request_is_refused() {
     let gw = gateway_of(&rec)
         .plugin("steal", Steal(Arc::clone(&stash)))
         .unwrap();
-    let (first, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+    let (first, _) = handle(&gw, req(vec!["q"])).await;
     drop(first);
-    let (second, _) = gw.handle::<Ask, Ans>(req(vec!["q"])).await;
+    let (second, _) = handle(&gw, req(vec!["q"])).await;
     assert_eq!(read(second).await, Ok((500, "ERR internal".into())));
     gw.idle().await;
     let l = rec.log();
@@ -157,7 +157,7 @@ async fn only_a_call_that_relays_the_clients_message_is_relayed() {
         .unwrap();
     let mut request = req(vec!["q"]);
     request.relayed = true; // ignored
-    let (res, _) = gw.handle::<Ask, Ans>(request).await;
+    let (res, _) = handle(&gw, request).await;
     let _ = read(res).await;
     assert_eq!(*lock(&seen), [false, true]);
 }

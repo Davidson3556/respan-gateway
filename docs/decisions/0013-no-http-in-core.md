@@ -1,6 +1,6 @@
 # 0013. No HTTP in the core
 
-- Status: accepted
+- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped)
 - Date: 2026-09-28
 
 ## Context
@@ -17,7 +17,7 @@ HTTP.
    `type Ask; type Answer;`. `Gateway::provider` requires
    `T::Ask = F::Ask` and `T::Answer = F::Answer`, so a mismatch does not
    build. Formats of one name share a wire, checked as they are given.
-   `Gateway::handle::<Ask, Answer>` serves the formats on that wire.
+   `Gateway::handle` serves the formats, its caller typing the wire (0017).
 2. **`Exchange<H>`**: `head`, `body` and `extensions`, which
    `Gateway::handle` takes and gives and a `Transport` sends and gets
    back. `Body` is a stream of `Result<Bytes, Fault>`, one item per data

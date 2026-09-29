@@ -48,8 +48,8 @@ answers skips those after it. Only `on_client` may `call` or `take_inputs`.
  adapter (crates/http): strip connection headers, lift the Credential,
    add Asked; Upgrade? streams; http::Request ─▶ Exchange<Ask>
                   ▼
- Gateway::handle::<Ask, Answer>(req) ─▶ first format on that
-   wire that accepts (none: Err, the adapter's plain 404)
+ Gateway::handle(req.erase()) ─▶ first format that accepts
+   (none: Err, the adapter's plain 404; the adapter downcasts the answer)
    whole: body read in full, its one input; streaming: one input per frame
                   ▼
  on_client, each plugin ─Some─▶ own response ─────┐
@@ -104,7 +104,10 @@ format and its transport share; HTTP's live in `crates/http`
 It hands a head, like bytes, only to a format of the name
 it came in, and only for a relay: a relay's call starts from the client's
 head and a relayed response's head is the provider's; a translated one
-starts anew. The encoder writes the head (`Encoder::head`) once, before
+starts anew. `Gateway::handle` is untyped: the caller knows its wire,
+erases its request's head and downcasts the response's
+([0017](decisions/0017-untyped-handle.md)); `Gateway::provider` checks a
+transport's heads against its format's at compile time. The encoder writes the head (`Encoder::head`) once, before
 any bytes.
 
 A call's request body ends `Err`, never clean, if the client's body broke,
@@ -124,7 +127,7 @@ if it read it, else in its own words. The model belongs to the kind
 
 ## Core types
 
-14 public types, plus `Body`, `codes` and re-exports; `handle` needs a
+14 public types, plus `Body`, `Head` (an alias), `codes` and re-exports; `handle` needs a
 tokio runtime, which runs end hooks detached. The core depends on no
 `http` crate.
 

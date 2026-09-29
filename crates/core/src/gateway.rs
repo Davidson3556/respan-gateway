@@ -1,4 +1,4 @@
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -178,54 +178,33 @@ impl Gateway {
         self.inner.in_flight.idle().await;
     }
 
-    /// Run `req`, a request on the wire of heads `Ask` and `Answer`, in the
-    /// first format served on that wire that accepts it. The adapter owns the
-    /// wire's rules: it takes out what no plugin or format should see, such
-    /// as the gateway's own keys, before, and what a hop must not carry
-    /// after.
+    /// Run `req` in the first format served that [`accepts`](Format::accepts)
+    /// its head. The caller knows its wire and does the typing: it
+    /// [`erase`](Exchange::erase)s its request's head and
+    /// [`downcast`](Exchange::downcast)s the response's to its own, and the
+    /// kernel checks neither. The adapter owns the wire's rules: it takes
+    /// out what no plugin or format should see, such as the gateway's own
+    /// keys, before, and what a hop must not carry after.
     ///
     /// If `req.streams`, the body's data frames are inputs as they arrive and
     /// the response's head goes out at once, as the client waits for it.
     /// Else the body is read in full, so the caller bounds it; one that
     /// fails while read is refused. `req.relayed` is ignored.
     ///
-    /// `Ask` is the head type of the request, and `Answer` that of the
-    /// response, which the kernel cannot check at compile time: the format
-    /// that accepts the request is found at run time, and `Err` with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if its
-    /// [`Answer`](Format::Answer) is not `Answer`.
-    ///
     /// `Err` for what no format can write, for the adapter to write plainly:
     /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no format accepts
     /// the request; [`codes::INTERNAL`](crate::codes::INTERNAL) if the one
-    /// that does answers with other heads, panicked or could not write a
-    /// refusal.
+    /// that does panicked or could not write a refusal. A response head of
+    /// another wire than the request's shows as `INTERNAL` at the caller's
+    /// downcast.
     ///
     /// With it comes a future of how the request ended, as
     /// [`Plugin::on_client_end`] gets it, resolved once the response ends,
     /// before end hooks finish. Call it on a tokio
     /// runtime, which runs the end hooks; it panics outside one.
-    pub async fn handle<Ask, Answer>(
+    pub async fn handle(
         &self,
-        req: Exchange<Ask>,
-    ) -> (
-        Result<Exchange<Answer>, Fault>,
-        BoxFuture<'static, Result<(), Fault>>,
-    )
-    where
-        Ask: Send + Sync + 'static,
-        Answer: Send + 'static,
-    {
-        let answer = TypeId::of::<Answer>();
-        let (resp, outcome) = self.handle_any(req, answer).await;
-        let other = "a response of another wire than asked";
-        (resp.and_then(|resp| resp.downcast(other)), outcome)
-    }
-
-    async fn handle_any<Ask: Send + Sync + 'static>(
-        &self,
-        req: Exchange<Ask>,
-        answer: TypeId,
+        req: Exchange<Head>,
     ) -> (
         Result<Exchange<Head>, Fault>,
         BoxFuture<'static, Result<(), Fault>>,
@@ -238,7 +217,7 @@ impl Gateway {
             streams,
             ..
         } = req;
-        let head: Arc<dyn Any + Send + Sync> = Arc::new(head);
+        let head: Arc<dyn Any + Send + Sync> = Arc::from(head);
         // A format that panics in `accepts` is the adapter's to write.
         let formats = &self.inner.formats;
         let accepts = || formats.iter().find(|f| f.accepts(&*head)).cloned();
@@ -250,10 +229,6 @@ impl Gateway {
             }
             Err(_) => return unwritten(Fault::internal(PANICKED)),
         };
-        if format.wire().1 != answer {
-            let other = "the format that accepts this request answers with other heads";
-            return unwritten(Fault::internal(other));
-        }
         // In flight while its body is read, so `idle` waits for it.
         let reading = InFlight::enter(&self.inner.in_flight);
         let (body, later, broken) = match streams {
@@ -402,7 +377,7 @@ async fn read_whole(mut body: crate::Body) -> Result<Bytes, Fault> {
 
 /// Servers spawn `handle`, so it must be `Send`.
 #[cfg(test)]
-fn _handle_is_send(g: &Gateway, req: Exchange<()>) {
+fn _handle_is_send(g: &Gateway, req: Exchange<Head>) {
     fn send<T: Send>(_: T) {}
-    send(g.handle::<(), ()>(req));
+    send(g.handle(req));
 }

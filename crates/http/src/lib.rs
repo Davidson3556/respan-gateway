@@ -189,7 +189,7 @@ where
     let mut req = Exchange::new(head, body);
     req.extensions = extensions;
     req.streams = streaming;
-    let (resp, outcome) = gateway.handle::<Ask, Answer>(req).await;
+    let (resp, outcome) = typed(gateway, req).await;
     let resp = match resp {
         Err(fault) if fault.code() == codes::NOT_FOUND => {
             let text = format!("no format served accepts {method} {path}");
@@ -212,6 +212,20 @@ where
         }
     };
     (resp, outcome.boxed())
+}
+
+/// [`Gateway::handle`] on the HTTP wire: the request's head erased, the
+/// response's downcast, `INTERNAL` if a format answered on another wire.
+async fn typed(
+    gateway: &Gateway,
+    req: Exchange<Ask>,
+) -> (
+    Result<Exchange<Answer>, Fault>,
+    BoxFuture<'static, Result<(), Fault>>,
+) {
+    let (resp, outcome) = gateway.handle(req.erase()).await;
+    let other = "a response of another wire than asked";
+    (resp.and_then(|r| r.downcast(other)), outcome)
 }
 
 /// A hop's own headers: the connection's (RFC 9110 7.6.1), the proxy's
@@ -325,6 +339,9 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use respan_gateway_core::bytes::BytesMut;
+    use respan_gateway_core::{Encoder, Format};
+
     use super::*;
 
     fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
@@ -424,5 +441,91 @@ mod tests {
         let resp = plain(&Fault::not_found("nothing here"));
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[CONTENT_TYPE], "text/plain; charset=utf-8");
+    }
+
+    /// A format on the HTTP request wire that answers with heads of
+    /// its own.
+    struct Elsewhere;
+
+    struct Silent;
+
+    impl Encoder<u8, ()> for Silent {
+        fn head(&mut self, _first: Option<&u8>) {}
+
+        fn encode(&mut self, _value: &u8, _out: &mut BytesMut) -> Result<(), Fault> {
+            Ok(())
+        }
+
+        fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+            Ok(())
+        }
+    }
+
+    impl Format for Elsewhere {
+        type Ask = Ask;
+        type Answer = ();
+        type Input = String;
+        type Output = u8;
+
+        fn name(&self) -> &str {
+            "elsewhere"
+        }
+
+        fn accepts(&self, _head: &Ask) -> bool {
+            true
+        }
+
+        fn request_decoder(&self, _head: &Ask) -> Box<dyn respan_gateway_core::Decoder<String>> {
+            respan_gateway_formats::message_decoder(|b: Bytes| {
+                Ok(String::from_utf8_lossy(&b).into_owned())
+            })
+        }
+
+        fn request_encoder(
+            &self,
+            _client: Option<&Ask>,
+            _body: &mut Bytes,
+            _streams: bool,
+        ) -> Box<dyn Encoder<String, Ask>> {
+            unreachable!("no provider")
+        }
+
+        fn response_decoder(
+            &self,
+            _answer: &(),
+            _call: &Ask,
+            _sent: &Bytes,
+        ) -> Box<dyn respan_gateway_core::Decoder<u8>> {
+            unreachable!("no provider")
+        }
+
+        fn response_encoder(
+            &self,
+            _answer: Option<&()>,
+            _ask: &Ask,
+            _body: &Bytes,
+            _refusal: Option<&Fault>,
+        ) -> Box<dyn Encoder<u8, ()>> {
+            Box::new(Silent)
+        }
+    }
+
+    // An adapter that types its wire wrongly gets `INTERNAL` from its
+    // downcast, not a panic: the kernel does not check the wire.
+    #[tokio::test]
+    #[allow(clippy::unwrap_used)]
+    async fn an_adapter_of_the_wrong_wire_gets_internal_from_its_downcast() {
+        // No target is set, so the request is refused in the format's own
+        // heads, which are not HTTP's.
+        let gateway = Gateway::new().serve(Elsewhere).unwrap();
+        let req = || http::Request::post("/").body(Full::new(Bytes::from_static(b"hi")));
+        let (resp, _) = typed(&gateway, ask(req().unwrap())).await;
+        assert_eq!(
+            resp.err().map(|f| f.code().to_owned()).as_deref(),
+            Some(codes::INTERNAL)
+        );
+        // Through `handle` the same is a plain 500, not a panic.
+        let (resp, _) = handle(&gateway, req().unwrap(), false).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
