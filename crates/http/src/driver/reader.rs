@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
-use futures::stream::{self, Stream};
+use futures::stream::Stream;
 use futures::{FutureExt, StreamExt};
 use respan_gateway_core::Fault;
 
@@ -84,26 +84,29 @@ impl<T: Send + 'static> Reader<T> {
         }
     }
 
-    /// Read the body to its end, or its first failure, before anything is
-    /// decoded: its frames are kept apart, to be decoded as they came.
+    /// Read the body, decoding each frame as it comes, until the decoder
+    /// decides: its first output (an answer relayed as it came, which then
+    /// streams from that frame on), its end, a failure or a broken body.
     ///
-    /// At most [`ERROR_BODY_CAP`] bytes are kept: once the frames read pass
-    /// it (the frame that passed it is kept whole) the body ends, cleanly, as
-    /// if the provider had sent no more. The decoder reads a shortened body
-    /// as it would a whole one, so an error answer keeps its verdict; a body
-    /// up to the cap is kept byte for byte.
-    pub(crate) async fn buffer(&mut self) {
-        let mut frames = Vec::new();
-        let mut kept = 0;
-        while let Some(frame) = self.body.next().await {
-            let broke = frame.is_err();
-            kept += frame.as_ref().map_or(0, Bytes::len);
-            frames.push(frame);
-            if broke || kept > ERROR_BODY_CAP {
-                break;
+    /// While nothing is decided, at most [`ERROR_BODY_CAP`] bytes are read:
+    /// once the frames read pass it (the frame that passed it is decoded
+    /// whole) the decoder is given the end, as if the provider had sent no
+    /// more. It reads a shortened body as it would a whole one, so an error
+    /// answer keeps its verdict; a body up to the cap is read byte for byte.
+    /// An answer decided before the cap is never cut.
+    pub(crate) async fn decide(&mut self) {
+        let mut read = 0;
+        while self.ready.is_empty() && !self.ended {
+            let frame = self.body.next().await;
+            read += frame
+                .as_ref()
+                .and_then(|f| f.as_ref().ok())
+                .map_or(0, Bytes::len);
+            self.read(frame);
+            if read > ERROR_BODY_CAP && self.ready.is_empty() && !self.ended {
+                self.read(None);
             }
         }
-        self.body = stream::iter(frames).boxed();
     }
 
     /// The provider's refusal at its head (rule 2), as far as its answer

@@ -38,7 +38,8 @@ curl localhost:8080/v1/messages \
 Each format served recognises its own requests (OpenAI Chat a `POST` to
 `.../chat/completions`, Anthropic Messages to `.../v1/messages`); anything
 else is a 404, unless the `passthrough` format is served last, which relays
-every other request to a vendor unread (see `gateway.example.yaml`).
+every other request to a vendor unread (see `gateway.example.yaml`), except
+a path readers could read two ways (a dot-segment, `;`, `\` or `%25`).
 
 No config file is needed to sit in front of Claude Code or Codex:
 

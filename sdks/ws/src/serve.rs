@@ -68,10 +68,12 @@ pub fn router(gateway: Gateway) -> Router {
 ///   fault's [`CloseCode`]) and the fault's code as the reason, never its
 ///   message.
 ///
-/// The client's frames are read no faster than the provider takes them, so
-/// its connection dropping is seen only after the frames sent before it are
-/// read: with a provider that is not reading, the session lasts until it
-/// does, or until [`serve_ws_until`]'s future completes.
+/// The client's frames are read no faster than the provider takes them,
+/// one frame ahead: while a frame waits to be taken, the next is read, so
+/// its connection dropping right behind the waiting frame is seen at once.
+/// Behind two or more frames not yet taken, it is seen only once all but
+/// one of them are: with a provider that is not reading, the session lasts
+/// until it does, or until [`serve_ws_until`]'s future completes.
 ///
 /// Messages up to [`MAX_MESSAGE`]. Only HTTP/1.1 upgrades, which is what
 /// `WebSocketUpgrade` accepts of a `GET` with `Upgrade: websocket`.

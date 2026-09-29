@@ -11,8 +11,9 @@
 //!   with its first bytes, a failure before any written as a refusal; a
 //!   streaming request's (an upgrade) when its reply resolves.
 //! - **The verdict at the head (rule 2).** A non-2xx answer, but a 101 to a
-//!   call that asked to switch, is read whole before [`dial`] resolves, so
-//!   a refusal is known as one however slowly its body comes.
+//!   call that asked to switch, is read before [`dial`] resolves until its
+//!   codec decides: a refusal is known as one however slowly its body
+//!   comes, and an answer the codec relays streams from its first output.
 //! - **Batches (rule 5).** A provider's outputs say `Pending` between the
 //!   frames it sent apart.
 //! - **A body ends at its first failure (B1)**, an encoder's panic on a
