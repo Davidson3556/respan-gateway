@@ -1,5 +1,5 @@
 //! The client edge: a request's body read into its inputs, and the answer
-//! written back, head and body, when this edge decides (rule 4).
+//! written back, head and body, when this edge decides (rule 3).
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -7,27 +7,30 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::{Ended, Events, Fault, Half, Origin, Reply};
+use respan_gateway_core::{Ended, Events, Fault, Half, Origin};
 
 use super::reader::Reader;
 use super::writer::Writer;
 use super::{Accepted, Came, PANICKED};
-use crate::{Answer, Ask, Body, Codec, Frames, Unwritten, into_http_body, plain};
+use crate::{
+    Body, Codec, Encoder, Frames, RequestHead, ResponseHead, Unwritten, answered, bodiless,
+    fresh_response_head, into_http_body, plain,
+};
 
 /// What the client edge hands its adapter: the answer's head and body, or
 /// a failure no codec can write.
-type Handed = Result<(Answer, Frames), Fault>;
+type Handed = Result<(ResponseHead, Frames), Fault>;
 
 /// The client edge of `codec` for `wire`: a one-shot request once its body
-/// is read, its input in its origin and its inputs ended; a streaming one at
-/// once, its data frames the inputs, which are never ended at once. The
-/// writer goes to the wire's slot as the request is in. It never awaits
-/// `reply`.
+/// is read, its input in its origin and no inputs following; a streaming one
+/// at once, its data frames the inputs. The writer goes to the wire's slot as
+/// the request is in. It never awaits `reply`.
+#[allow(clippy::type_complexity)]
 pub fn accept<C: Codec + Clone>(
     codec: &C,
     wire: Accepted,
-    reply: BoxFuture<'static, Reply<C::Output>>,
-) -> BoxFuture<'static, Half<C::Input>> {
+    reply: BoxFuture<'static, (Half<C::Output>, Ended)>,
+) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<C::Input>>, Fault>)> {
     let codec = codec.clone();
     async move {
         let Accepted {
@@ -46,7 +49,7 @@ pub fn accept<C: Codec + Clone>(
             };
             let make = Box::new(move || codec.request_decoder(&head));
             let inputs = Reader::inputs(frames, make);
-            return (Some(Arc::new(came) as Origin), Ok(inputs.boxed()));
+            return (Some(Arc::new(came) as Origin), Ok(Some(inputs.boxed())));
         }
         // One that fails while read is refused.
         let (raw, broken) = match read_whole(frames).await {
@@ -60,7 +63,7 @@ pub fn accept<C: Codec + Clone>(
             body: Some(raw),
         }) as Origin;
         match broken {
-            None => (Some(came), Ok(stream::empty().boxed())),
+            None => (Some(came), Ok(None)),
             Some(fault) => (Some(came), Err(fault)),
         }
     }
@@ -76,7 +79,7 @@ pub fn opening<C: Codec>(codec: &C, origin: &Origin) -> Option<Result<C::Input, 
 }
 
 /// The one input of a one-shot request's body.
-fn decode<C: Codec>(codec: &C, head: &Ask, raw: &Bytes) -> Result<C::Input, Fault> {
+fn decode<C: Codec>(codec: &C, head: &RequestHead, raw: &Bytes) -> Result<C::Input, Fault> {
     let mut decoder = codec.request_decoder(head);
     let mut inputs = Vec::new();
     decoder.decode(raw.clone(), &mut inputs)?;
@@ -103,12 +106,12 @@ async fn read_whole(mut body: Frames) -> Result<Bytes, Fault> {
 /// can write as plain text.
 async fn written<C: Codec>(
     codec: C,
-    reply: BoxFuture<'static, Reply<C::Output>>,
-    ask: Arc<Ask>,
+    reply: BoxFuture<'static, (Half<C::Output>, Ended)>,
+    ask: Arc<RequestHead>,
     body: Bytes,
     streaming: bool,
 ) -> http::Response<Body> {
-    let (_extensions, (origin, outputs), ended) = reply.await;
+    let ((origin, outputs), ended) = reply.await;
     let to = Client {
         codec,
         ask,
@@ -132,7 +135,7 @@ async fn written<C: Codec>(
 /// The client an answer is written to, in its codec.
 struct Client<C> {
     codec: C,
-    ask: Arc<Ask>,
+    ask: Arc<RequestHead>,
     body: Bytes,
     streaming: bool,
 }
@@ -152,17 +155,23 @@ impl<C: Codec> Client<C> {
         let Some(ended) = ended else {
             return Err(Fault::internal("an answer's end told twice"));
         };
-        let build = || {
-            let mut encoder =
-                (self.codec).response_encoder(None, &self.ask, &self.body, Some(&fault));
-            let head = encoder.head(None);
-            (encoder, head)
-        };
-        // A codec that panics building its encoder cannot write a refusal.
-        let Ok((encoder, head)) = std::panic::catch_unwind(AssertUnwindSafe(build)) else {
+        // The provider's answer as it came, else the codec's words under the
+        // fault's status and `Retry-After`. A codec that panics writing its
+        // refusal cannot write one.
+        let mut head = fresh_response_head();
+        let answer = answered(self.codec.name(), &fault, &mut head);
+        let write = || answer.unwrap_or_else(|| self.codec.refusal(&fault, &self.body, &mut head));
+        let Ok(body) = std::panic::catch_unwind(AssertUnwindSafe(write)) else {
             return unwritable(Some(ended), Fault::internal(PANICKED));
         };
-        let mut writer = Writer::answer(encoder, ended, hold, self.streaming);
+        // No body goes where HTTP has none.
+        let body = match bodiless(&self.ask.method, head.status) {
+            true => Bytes::new(),
+            false => body,
+        };
+        let mut encoder = Refusal { head, body };
+        let head = Encoder::<C::Output, _>::head(&mut encoder, None);
+        let mut writer = Writer::answer(Box::new(encoder), ended, hold, self.streaming);
         writer.refusal = Some(fault);
         if let Err(fault) = writer.first(false).await {
             return unwritable(writer.ended.take(), fault);
@@ -186,10 +195,12 @@ impl<C: Codec> Client<C> {
     ) -> Handed {
         let outputs = outputs.map(|o| o.map(|o| (o, None))).boxed();
         // A head goes only to a codec of the name it came in.
-        let answer = origin.as_ref().and_then(|o| o.downcast_ref::<Answer>());
+        let answer = origin
+            .as_ref()
+            .and_then(|o| o.downcast_ref::<ResponseHead>());
         let build = || {
             let codec = &self.codec;
-            let mut encoder = codec.response_encoder(answer, &self.ask, &self.body, None);
+            let mut encoder = codec.response_encoder(answer, &self.ask, &self.body);
             let head = encoder.head(None);
             let mut opening = BytesMut::new();
             // A body done before it began reads nothing, and its head goes at once.
@@ -232,6 +243,28 @@ impl<C: Codec> Client<C> {
             writer.tell_end();
         }
         Ok((head, writer.frames()))
+    }
+}
+
+/// A refusal's encoder: its head as written, and its body at the end,
+/// however it ends.
+struct Refusal {
+    head: ResponseHead,
+    body: Bytes,
+}
+
+impl<T> Encoder<T, ResponseHead> for Refusal {
+    fn head(&mut self, _first: Option<&T>) -> ResponseHead {
+        std::mem::replace(&mut self.head, fresh_response_head())
+    }
+
+    fn encode(&mut self, _value: &T, _out: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        out.extend_from_slice(&std::mem::take(&mut self.body));
+        Ok(())
     }
 }
 

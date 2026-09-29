@@ -17,7 +17,7 @@ use respan_gateway_core::{
 use respan_gateway_formats::conversation::{Conversation, set_model};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_http::{Answer, Ask, Asked, Body, Exchange, Transport};
+use respan_gateway_http::{Asked, Body, Exchange, RequestHead, ResponseHead, Transport};
 use respan_gateway_routing::{Attempt, Backoff, Until, Watchdog, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -84,7 +84,7 @@ struct Slow<T>(T, Duration);
 
 #[async_trait]
 impl<T: Transport> Transport for Slow<T> {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
     }

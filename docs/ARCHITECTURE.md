@@ -40,8 +40,8 @@ connection: the client edge is accepted, the provider edge is dialed.
    request is in flight from here, so `Gateway::idle` waits for a body still
    being read.
 3. `Format::accept` resolves once the request is in: a one-shot request
-   after its body is read, a session at once. It gives the client's origin
-   and its inputs. `Err` (a body that broke) is refused before any plugin.
+   after its body is read (no inputs follow), a session at once (inputs
+   follow). It gives the client's origin and its inputs, if any. `Err` (a body that broke) is refused before any plugin.
    The result is a `ClientContext`.
 4. Each plugin's `on_client`, in registration order: pass, answer (the rest
    are skipped) or refuse. A plugin may add filters, `set_target`, `call`
@@ -54,7 +54,7 @@ connection: the client edge is accepted, the provider edge is dialed.
    may hold the response (`until_content`, `until_end`), read it
    (`outputs`), or send it.
 7. The client-edge filters edit what is sent; the gateway resolves the
-   `reply` future it gave `accept`, with the session's extensions, the
+   `reply` future it gave `accept`, with the
    answer (the provider's origin on a relay, and its outputs or a refusal)
    and `Ended`. The client edge writes the head and body and calls `Ended`
    with how the answer ended.
@@ -74,14 +74,14 @@ outputs before them.
 | `Plugin` | Four hooks: `on_client`, `on_client_end`, `on_provider`, `on_provider_end`. |
 | `Filter<T>` | The one way to edit inputs or outputs as they stream. |
 | `ClientContext` | What `on_client` and its end hook see: the request, its extensions, its filters, `call`, `take_inputs`. |
-| `ProviderContext` | What a call's hooks see: the provider, format, first input, extensions, filters, `is_sent`, `is_head_only`; the request by `&`, so it cannot `call`. |
+| `ProviderContext` | What a call's hooks see: the provider, format, first input, extensions, filters, `is_sent`, `is_refused`; the request by `&`, so it cannot `call`. |
 | `Call` | A `'static`, `Clone`, `Sync` future, sent when awaited; `with_input` and `with_extension` shape it. |
 | `Response` | A call's answer, or `Response::stream` of a plugin's own; held (`until_content`, `until_end`), read (`outputs`) or sent. |
-| `Fault` | The one error: a code, message, retry and typed hints (`with`, `get`); the kernel knows no HTTP status ([0019](decisions/0019-status-out-of-the-kernel.md)). |
+| `Fault` | The one error: a code, message, retry and typed hints (`with`, `get`), such as an HTTP `Status` or a format's `Details`; the kernel reads neither ([0019](decisions/0019-status-out-of-the-kernel.md)). |
 | `Extensions` | A clonable type map that carries what the adapter and plugins share, unopened by the core. |
-| `Format` | The dialect and the edge contract, below. |
+| `Format` | One protocol's view of a kind and the edge contract, below. |
 
-Also aliases (`Events`, `Origin`, `Half`, `Reply`, `Ended`, `Dialed`), the
+Also aliases (`Events`, `Origin`, `Half`, `Ended`, `Dialed`), the
 `codes` module and re-exports of the crates the contracts use. The core
 depends on no `http` crate; `Gateway::handle` needs a tokio runtime, which
 runs end hooks detached.
@@ -97,48 +97,52 @@ wire and dialer, checked as they are registered.
 ```text
 trait Format { type Input; type Output; type Wire; type Dialer;
   fn name(&self) -> &str;
-  fn accepts(&self, wire: &Wire) -> bool;
+  fn accepts(&self, wire: &Wire) -> bool { false }
   fn is_content(&self, output: &Output) -> bool { true }
-  fn accept(&self, wire: Wire, reply: BoxFuture<Reply<Output>>) -> BoxFuture<Half<Input>>;
-  fn opening(&self, origin: &Origin) -> Option<Result<Input, Fault>>;
+  fn accept(&self, wire: Wire, reply: BoxFuture<(Half<Output>, Ended)>)
+      -> BoxFuture<(Option<Origin>, Result<Option<Events<Input>>, Fault>)>; // refuses
+  fn opening(&self, origin: &Origin) -> Option<Result<Input, Fault>> { None }
   fn dial(&self, dialer: &Dialer, extensions: Extensions, relay: Option<&Origin>,
           opening: Option<(&Input, bool)>, later: Option<Events<(Input, bool)>>)
       -> Result<Dialed<Output>, Fault>; }
 // Events<T>   = BoxStream<Result<T, Fault>>
 // Origin      = Arc<dyn Any>: what came with a head, sealed
 // Half<T>     = (Option<Origin>, Result<Events<T>, Fault>)
-// Reply<T>    = (Extensions, Half<T>, Ended)
 // Ended       = Box<dyn FnOnce(Result<(), Fault>)>
 ```
 
 The rules, in full in the rustdoc of `Format`:
 
-1. **An `Events` that nothing will follow is already ended**: its first
-   poll is `Ready(None)`. `accept`'s inputs say this; `dial` is told
-   `later: None` instead. The gateway polls a client's inputs once as the
-   session opens, keeps what that poll yields and reads it first. A
-   streaming request's inputs return `Pending` to it.
-2. **`accept` resolves when the request is in**, its origin kept, and
-   never awaits `reply`. `opening` gives the input that came with the head,
-   only if the inputs had ended then; the gateway calls it only when a
-   value is needed, never on an unchanged relay.
-3. **A provider edge classifies its answer at its head.** `dial` returns
+1. **`accept` resolves when the request is in**, its origin kept, and
+   never awaits `reply`. Its inputs are `Some(events)` if any follow the
+   head (a session) and `None` if none do (a one-shot request); `dial` is
+   told the same with `later: None`. `opening` gives the input that came
+   with the head, only for a request whose inputs are `None`; the gateway
+   calls it only when a value is needed, never on an unchanged relay.
+2. **A provider edge classifies its answer at its head.** `dial` returns
    `Err` now (not sent), a future's `Err` (sent, not answered),
    `Ok((origin, Err(fault)))` (answered and refused, which
-   `is_head_only` reports) or `Ok((origin, Ok(outputs)))` (open).
-4. **The client edge owns its head timing**; see below.
-5. **The client edge calls `Ended` exactly when its answer's end is out**,
+   `is_refused` reports) or `Ok((origin, Ok(outputs)))` (open).
+3. **The client edge owns its head timing**; see below.
+4. **The client edge calls `Ended` exactly when its answer's end is out**,
    or drops it: dropped, the session ends `abandoned`. `Ended(Err(f))` also
    ends the answer's call with `f`. Outputs dropped unread end their call as
    its end, if ready, says, else `abandoned`.
-6. **What a provider edge's outputs have ready at once is one batch**: the
+5. **What a provider edge's outputs have ready at once is one batch**: the
    call's filters see all of it before the client's see its first, so a
    meter sees usage that shares a frame with an output a client filter
    fails on. Outputs to be read apart return `Pending` between.
 
+The client edge has defaults (`accepts` is false, `accept` refuses,
+`opening` is `None`), so a format that keeps them is dial-only: an
+in-process model is a provider whose `Dialer` is the model
+(`examples/custom_transport.rs`).
+
 Each input carries a bool, whether it is the client's as decoded: an input
 a format cannot write is `bad_request` if it is, else `config`
-(`Fault::of_input`). A call's own input (`with_input`) is never the
+(`Fault::of_input`). The format applies it, not the core, because it fails
+an input where it writes it, out of the gateway's sight: an HTTP body's
+frames reach the transport, not the gateway. A call's own input (`with_input`) is never the
 client's. The model belongs to the kind (`Conversation.model`); its place
 on the wire is the format's.
 
@@ -158,13 +162,15 @@ gateway's, `upstream` and `truncated` a provider's, `internal` a bug,
 
 An HTTP format implements `Codec` (`crates/http`), one protocol's bytes:
 `accepts` a head, `request_decoder`, `request_encoder`, `response_decoder`,
-`response_encoder`, `is_content`, each body getting its own `Decoder` and
-`Encoder`, which keep that stream's state. `dialect!(Type)` makes it a
+`response_encoder`, `refusal` (the words of a refusal; the driver writes a
+provider's answer as it came instead), `is_content`, each body getting its
+own `Decoder` and `Encoder`, which keep that stream's state.
+`impl_format!(Type)` makes it a
 `Format` on the `Accepted` wire and `Dialer`. One symmetric driver runs
 every codec: a reader turns frames into events through a `Decoder`, a
 writer events into frames through an `Encoder`, on both edges. A
-`Dialer` is any `Transport`, whose `send(Exchange<Ask>)` returns the
-provider's `Exchange<Answer>`; the driver decides head timing, framing,
+`Dialer` is any `Transport`, whose `send(Exchange<RequestHead>)` returns the
+provider's `Exchange<ResponseHead>`; the driver decides head timing, framing,
 batches and the verdict at the head. A format on another wire implements
 `Format` itself.
 
@@ -233,7 +239,7 @@ adapter's `Asked` view of their head, and opaque traffic by its body.
 | Crate | What it is |
 |---|---|
 | `core` | The kernel: ten types, events only; no bytes, heads, keys, HTTP or kinds. |
-| `http` | HTTP's wire: `Codec`, `Decoder`, `Encoder`, `Transport`, `Exchange`, `Frames`, `Accepted`, `Dialer`, `dialect!`, the driver; the adapter (`serve`, `handle`), `Credential`, `Asked`, `Status`, and a transport's rules (`proxy_call`, `credentials`, `CallHeaders`). |
+| `http` | HTTP's wire: `Codec`, `Decoder`, `Encoder`, `Transport`, `Exchange`, `Frames`, `Accepted`, `Dialer`, `impl_format!`, the driver; the adapter (`serve`, `handle`), `Credential`, `Asked`, `Status`, and a transport's rules (`proxy_call`, `credentials`, `CallHeaders`). |
 | `formats` | The chat kind (`conversation`), `Usage`, `OpenAiChat`, `AnthropicMessages`, `opaque`, `sse`, `whole`, helpers for codecs. |
 | `server` | `router` (axum; bodies up to 32 MiB, no upgrades) and `HttpTransport`. |
 | `testkit` | `MockTransport`, `serve`, run helpers, and tests through the real formats. |
@@ -258,7 +264,7 @@ Every crate but `core` uses only the public API of the crates below it.
 | `until_content`, `until_end`; a call ends when its end is read | `Response`, `Batch` | core `until`; `sdks/routing/tests` |
 | A cut or broken upload never looks complete | events: `leg.rs`; bytes: the driver's writer | core `upload`; `crates/http/tests/driver_toy.rs` |
 | Edge contract: refusal at the head, outputs dropped unread | `call.rs`, `session.rs` | core `contract`; `sdks/ws/tests/kernel.rs` |
-| The fault split | core decides (`opening.rs`, `leg.rs`); the driver applies `Fault::of_input` | testkit `codec`, `custom` |
+| The fault split | core decides (`opening.rs`, `leg.rs`); the format applies `Fault::of_input` | testkit `codec`, `custom` |
 | Lazy decode; a big body relays unread | `opening.rs` | core `stress`; e2e |
 | Byte-exact relay; a key only on a same-name relay | `relay_origin`; the driver; `http::credentials` | testkit `relay`, `translate`; `crates/http/tests/rules.rs`; e2e; `sdks/ws/tests` (`passthrough`, `credentials`) |
 | Head timing, framing, batches, keep-alives | the driver, the formats | `crates/http/tests` (`driver_toy`, `driver_formats`); testkit `streams`, `line` |

@@ -327,8 +327,8 @@ plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
         );
         let json = |b: Result<respan_gateway_http::bytes::Bytes, Fault>| {
             b.ok()
-                .and_then(|b| respan_gateway_core::serde_json::from_slice(&b).ok())
-                .unwrap_or(respan_gateway_core::serde_json::Value::Null)
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .unwrap_or(serde_json::Value::Null)
         };
         assert_eq!(json(to_claude)["object"], "chat.completion");
         assert_eq!(json(to_gpt)["type"], "message");

@@ -170,8 +170,9 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
     impl Transport for Note {
         async fn send(
             &self,
-            call: respan_gateway_http::Exchange<respan_gateway_http::Ask>,
-        ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::Answer>, Fault> {
+            call: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
+        ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault>
+        {
             use respan_gateway_http::http_body_util::{self, BodyExt};
             let (call, _) = respan_gateway_http::call(call);
             let (head, body) = call.into_parts();
@@ -633,14 +634,14 @@ async fn it_sends_a_whole_body_with_its_length_and_streams_one_that_streams() {
     // A whole call is one frame of the kernel's body; one that `streams`
     // is sent as it arrives, of unknown size.
     let call = |body: Frames, streams: bool| {
-        let mut head = respan_gateway_http::fresh_ask();
+        let mut head = respan_gateway_http::fresh_request_head();
         head.method = http::Method::POST;
         head.uri = http::Uri::from_static("/echo");
         let mut call = Exchange::new(head, body);
         call.streams = streams;
         call
     };
-    let read = |resp: Exchange<respan_gateway_http::Answer>| async move {
+    let read = |resp: Exchange<respan_gateway_http::ResponseHead>| async move {
         let body = respan_gateway_http::into_http_body(resp.body);
         let body = body.collect().await.map(|b| b.to_bytes());
         String::from_utf8_lossy(&body.unwrap_or_default()).into_owned()

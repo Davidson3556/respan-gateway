@@ -1,14 +1,13 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, ready};
 use futures::stream::{self, BoxStream};
 use futures::{FutureExt, StreamExt, TryFutureExt};
 
 use crate::{Extensions, Fault};
 
-/// A stream of one kind's events; the first `Err` is its last item. One that
-/// nothing will follow is already ended: its first poll is `Ready(None)`.
+/// A stream of one kind's events; the first `Err` is its last item.
 pub type Events<T> = BoxStream<'static, Result<T, Fault>>;
 
 /// What came with a head, sealed: only its format opens it. The gateway
@@ -25,21 +24,18 @@ pub type Half<T> = (Option<Origin>, Result<Events<T>, Fault>);
 /// [`codes::ABANDONED`](crate::codes::ABANDONED).
 pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 
-/// What a client edge is given to send back: the session's extensions, the
-/// answer (the provider's origin on a relay, and its outputs or a refusal),
-/// and [`Ended`].
-pub type Reply<T> = (Extensions, Half<T>, Ended);
-
 /// A provider edge's answer, once dialed.
 pub type Dialed<T> = BoxFuture<'static, Result<Half<T>, Fault>>;
 
-/// A format: a dialect, one protocol's view of a kind, and its two edges,
-/// which the gateway routes events between. Serve one to clients with
+/// A format: one protocol's view of a kind, and its two edges, which the
+/// gateway routes events between. Serve one to clients with
 /// [`Gateway::serve`](crate::Gateway::serve), call a provider in one with
 /// [`Gateway::provider`](crate::Gateway::provider), and hand the gateway a
 /// client's connection with [`Gateway::handle`](crate::Gateway::handle).
-/// HTTP's formats implement it through `respan_gateway_http::dialect!`
-/// over a codec; a format on another wire implements it itself.
+/// HTTP's formats implement it through `respan_gateway_http::impl_format!`
+/// over a codec; a format on another wire implements it itself. A format
+/// that keeps the client edge's defaults is dial-only, such as an
+/// in-process model.
 ///
 /// The gateway never sees a byte, a head or a key: a client edge
 /// ([`accept`](Format::accept)) turns a connection into inputs and outputs
@@ -58,31 +54,24 @@ pub type Dialed<T> = BoxFuture<'static, Result<Half<T>, Fault>>;
 ///
 /// # Rules
 ///
-/// 1. An [`Events`] that nothing will follow is already ended: its first
-///    poll is `Ready(None)`. This holds for the inputs
-///    [`accept`](Format::accept) resolves with; `dial` is told `None`
-///    instead. The gateway polls a client's inputs once as the session
-///    opens, to tell whether any follow; what that poll yields is kept and
-///    read first. Inputs that must not be read ahead, or that flow even if
-///    none come, return `Pending` to that poll.
-/// 2. [`accept`](Format::accept) resolves when the request is in: a
-///    one-shot request once its body is read, which its origin keeps, its
-///    inputs ended; a session at once, its inputs the frames to come. The
-///    plugins run once it resolves. [`opening`](Format::opening) is `Some`
-///    only if the inputs had ended then.
-/// 3. A provider edge classifies its answer at its head: a refusal resolves
+/// 1. [`accept`](Format::accept) resolves when the request is in: a
+///    one-shot request once its body is read, which its origin keeps, no
+///    inputs following (`None`); a session at once, its inputs the frames to
+///    come. The plugins run once it resolves. [`opening`](Format::opening)
+///    is `Some` only for a request whose inputs are `None`.
+/// 2. A provider edge classifies its answer at its head: a refusal resolves
 ///    `Ok((origin, Err(fault)))`, which the gateway sends as a refusal and a
-///    call's [`is_head_only`](crate::ProviderContext::is_head_only) says.
-/// 4. The client edge owns its head timing: a refusal is written as one; an
+///    call's [`is_refused`](crate::ProviderContext::is_refused) says.
+/// 3. The client edge owns its head timing: a refusal is written as one; an
 ///    open answer's head when the edge decides, such as with its first
 ///    bytes, a failure before any written as a refusal, or at once for a
 ///    session.
-/// 5. The client edge calls [`Ended`] exactly when its answer's end is out,
+/// 4. The client edge calls [`Ended`] exactly when its answer's end is out,
 ///    or drops it. `Ended(Err(fault))` also ends the answer's call with
 ///    `fault`. Outputs dropped unread end their call as their end, if it is
 ///    ready, says, else abandoned. `Ended` dropped first ends the session
 ///    abandoned, and the outputs then end `Err` abandoned.
-/// 6. What a provider edge's outputs have ready at once is one batch: the
+/// 5. What a provider edge's outputs have ready at once is one batch: the
 ///    call's filters see all of it before the client's see its first, as a
 ///    meter sees usage that shares a frame with an output a client filter
 ///    fails on. Outputs to be read apart are `Pending` between.
@@ -114,8 +103,11 @@ pub trait Format: Send + Sync + 'static {
     fn name(&self) -> &str;
 
     /// Whether this format speaks on `wire`; the first served that does
-    /// takes it. It may look inside; the gateway does not.
-    fn accepts(&self, wire: &Self::Wire) -> bool;
+    /// takes it. It may look inside; the gateway does not. By default,
+    /// false: a format that keeps the client edge's defaults is dial-only.
+    fn accepts(&self, _wire: &Self::Wire) -> bool {
+        false
+    }
 
     /// Whether `output` is content, what
     /// [`Response::until_content`](crate::Response::until_content) stops
@@ -125,20 +117,28 @@ pub trait Format: Send + Sync + 'static {
     }
 
     /// The client edge: resolves once the client's request is in, with its
-    /// origin and the inputs that follow (`Err`: the request broke, and is
-    /// refused before any plugin). `reply` resolves with what to send back
-    /// ([`Reply`]); when to write the head is this edge's decision.
+    /// origin and the inputs that follow it (`None`: none do; `Err`: the
+    /// request broke, and is refused before any plugin). `reply` resolves
+    /// with what to send back, the answer and [`Ended`]; when to write the
+    /// head is this edge's decision. By default it refuses, never awaiting
+    /// `reply`, for a format nothing [`accepts`](Format::accepts).
+    #[allow(clippy::type_complexity)]
     fn accept(
         &self,
-        wire: Self::Wire,
-        reply: BoxFuture<'static, Reply<Self::Output>>,
-    ) -> BoxFuture<'static, Half<Self::Input>>;
+        _wire: Self::Wire,
+        _reply: BoxFuture<'static, (Half<Self::Output>, Ended)>,
+    ) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<Self::Input>>, Fault>)> {
+        let fault = Fault::not_found("this format only calls providers");
+        ready((None, Err(fault))).boxed()
+    }
 
     /// The input that came with a client's head, read from its origin: `Some`
-    /// only if the inputs had ended as the session opened (rule 1), as a
-    /// one-shot request's, else `None`. The gateway calls it only when a
-    /// value is needed, never on a relay of it unchanged.
-    fn opening(&self, origin: &Origin) -> Option<Result<Self::Input, Fault>>;
+    /// only for a request whose inputs are `None` (rule 1), as a one-shot
+    /// request's, else `None`. The gateway calls it only when a value is
+    /// needed, never on a relay of it unchanged. By default, `None`.
+    fn opening(&self, _origin: &Origin) -> Option<Result<Self::Input, Fault>> {
+        None
+    }
 
     /// The provider edge.
     ///
@@ -148,10 +148,12 @@ pub trait Format: Send + Sync + 'static {
     /// - `later`: the inputs that follow; `None` if none do.
     /// - Each input's bool is whether it is the client's as decoded, which
     ///   says whose fault it is if this format cannot write it
-    ///   ([`Fault::of_input`]).
+    ///   ([`Fault::of_input`]): the format applies it where it writes the
+    ///   input, out of the gateway's sight (an HTTP body's frames reach the
+    ///   transport, not the gateway).
     ///
     /// `Err` now: not sent. The future's `Err`: sent, and not answered.
-    /// `Ok((origin, Err(fault)))`: answered and refused (rule 3).
+    /// `Ok((origin, Err(fault)))`: answered and refused (rule 2).
     /// `Ok((origin, Ok(outputs)))`: open.
     fn dial(
         &self,
@@ -174,7 +176,10 @@ pub(crate) type AnyEvents = BoxStream<'static, Result<Values, Fault>>;
 
 pub(crate) type AnyHalf = (Option<Origin>, Result<AnyEvents, Fault>);
 
-pub(crate) type AnyReply = (Extensions, AnyHalf, Ended);
+pub(crate) type AnyReply = (AnyHalf, Ended);
+
+/// A client edge's accepted request: its origin, and its inputs if any follow.
+pub(crate) type AnyAccepted = (Option<Origin>, Result<Option<AnyEvents>, Fault>);
 
 /// Inputs going to a provider, each with whether it is the client's.
 pub(crate) type AnyInputs = BoxStream<'static, Result<(AnyInput, bool), Fault>>;
@@ -193,7 +198,7 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
         &self,
         wire: Box<dyn Any + Send>,
         reply: BoxFuture<'static, AnyReply>,
-    ) -> BoxFuture<'static, AnyHalf>;
+    ) -> BoxFuture<'static, AnyAccepted>;
     fn opening(&self, origin: &Origin) -> Option<Result<AnyInput, Fault>>;
     fn dial(
         &self,
@@ -279,16 +284,16 @@ impl<F: Format> AnyFormat for Erased<F> {
         &self,
         wire: Box<dyn Any + Send>,
         reply: BoxFuture<'static, AnyReply>,
-    ) -> BoxFuture<'static, AnyHalf> {
+    ) -> BoxFuture<'static, AnyAccepted> {
         let Ok(wire) = wire.downcast::<F::Wire>() else {
             let fault = Fault::internal("a wire of another type than its format's");
-            return futures::future::ready((None, Err(fault))).boxed();
+            return ready((None, Err(fault))).boxed();
         };
-        let reply = reply.map(|(ext, (origin, events), ended)| {
-            (ext, (origin, events.map(typed::<F::Output>)), ended)
-        });
-        let half = self.format.accept(*wire, reply.boxed());
-        half.map(|(origin, events)| (origin, events.map(erase)))
+        let reply = reply
+            .map(|((origin, events), ended)| ((origin, events.map(typed::<F::Output>)), ended));
+        let accepted = self.format.accept(*wire, reply.boxed());
+        accepted
+            .map(|(origin, events)| (origin, events.map(|e| e.map(erase))))
             .boxed()
     }
 

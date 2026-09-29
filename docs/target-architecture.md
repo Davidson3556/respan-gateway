@@ -235,7 +235,7 @@ Head timing (rule 4) and the verdict at the head (rule 3) live in the driver's `
 
 ### 2.8 WebSocket's composition (sdks/ws)
 
-- `JsonEvents` becomes `impl Codec` plus `dialect!(JsonEvents)`; its method bodies are unchanged.
+- `JsonEvents` becomes `impl Codec` plus `impl_format!(JsonEvents)`; its method bodies are unchanged.
 - `WsTransport` becomes `impl http::Transport`. It drops `type Ask/Answer` (`transport.rs:173-176`).
 - `serve_ws` builds `Accepted::new(head, frames, true)`, calls `handle`, and awaits its reply. On a 101 it upgrades and pumps; otherwise it returns the answer as it is. The `answer()` workaround (`serve.rs:100-115`) goes, because W1 is fixed in the driver.
 
@@ -278,7 +278,7 @@ impl ProviderContext {         // unchanged but for one removal
     pub fn input<T: Any>(&self) -> Result<&T, Fault>;
     pub fn filter<T: Clone + PartialEq + Send + Sync + 'static>(&mut self, f: impl Filter<T>) -> Result<(), Fault>;
     pub fn is_sent(&self) -> bool;       // dial returned Ok
-    pub fn is_head_only(&self) -> bool;  // answered, and refused at the head
+    pub fn is_refused(&self) -> bool;  // answered, and refused at the head
     pub fn extensions(&self) -> &Extensions;  pub fn extensions_mut(&mut self) -> &mut Extensions;
     // removed: edit_call() (provider.rs:173)
 }
@@ -382,16 +382,16 @@ Total: about 2,950, against 4,075 today (about −28%).
 
 **What each SDK changes:**
 - **routing**: `Watchdog<T: http::Transport>`; drop the `type Ask/Answer` lines (`lib.rs:285-286`). `first_success`, `race`, `Until` and `Attempt`: nothing.
-- **ledger**: nothing. `is_sent` and `is_head_only` keep their names and their tested values (§11 lists two untested shifts).
+- **ledger**: nothing. `is_sent` and `is_refused` keep their names and their tested values (§11 lists two untested shifts).
 - **text** (Holdback, Placeholders, guard, PII): nothing; they are filters only.
-- **mcp**: `StreamableHttp` becomes `impl Codec` plus `dialect!`; `StdioTransport` becomes `impl http::Transport`. It keeps reading `Credential` for ownership (`stdio.rs:322-330`).
+- **mcp**: `StreamableHttp` becomes `impl Codec` plus `impl_format!`; `StdioTransport` becomes `impl http::Transport`. It keeps reading `Credential` for ownership (`stdio.rs:322-330`).
 - **ws**: see §2.8.
 
 **Plugin code changes, all of them:**
 1. `examples/jobs.rs:139` hashes the conversation's origin bytes instead of `cx.body()`: `cx.input::<Conversation>()?.origin(cx.format()).map_or(&[][..], |o| &o.bytes)`. It is already chat-only.
 2. `edit_call`, `edit_response_head` and `relay` go. No SDK or example uses them; about 30 tests do (§10).
 3. Custom transports import `http::Transport` and `http::Exchange`: `fallback.rs` `Slow`, `custom_transport.rs` `Local`, `mcp_proxy`, `local_proxy`.
-4. Custom formats: `impl Codec` plus `dialect!(X)`.
+4. Custom formats: `impl Codec` plus `impl_format!(X)`.
 5. Embedders use `Accepted::new` and `handle`, or just `http::serve`.
 
 ## 6. Relay and credentials
@@ -428,7 +428,7 @@ Total: about 2,950, against 4,075 today (about −28%).
   1. The provider answers 403 to a relayed upgrade.
   2. `WsTransport` returns the answer (`transport.rs:201-214`).
   3. The driver's `dial`: not a 101 to a call that asked, so it reads the body through the codec's decoder (`whole::decoder` fails with the answer), giving `Ok((origin, Err(fault)))`.
-  4. `Call` is `Ok(refused Response)` and `is_head_only` is true.
+  4. `Call` is `Ok(refused Response)` and `is_refused` is true.
   5. The core resolves the client's reply as `Err(fault)`, keeping the answer because this is a relay.
   6. The WS client edge writes the refusal through `JsonEvents::response_encoder` (`events.rs:277-291`): 403 plus body, as it came. Then it calls `Ended(Err)`.
   7. `serve_ws` sees no 101 and returns it.
@@ -461,8 +461,8 @@ Total: about 2,950, against 4,075 today (about −28%).
 | Crate | After |
 |---|---|
 | core | Events-only kernel, the 10 types. Depends on async-trait, futures, serde_json, tokio. No `bytes`, no `http`. |
-| http | The HTTP wire, both ends: codec traits, one driver (`Reader`, `Writer`, `accept`, `opening`, `dial`), `dialect!`, `Transport`, `Exchange`, `Frames`, `Accepted`, `Dialer`, the adapter (`serve`, `handle`, unchanged API), rules, `Credential`, `Asked`, `Status`. About 982 lines now, about 2,100 after *(inference)*. |
-| formats | Dialects: `impl Codec` plus `dialect!`; bodies unchanged. |
+| http | The HTTP wire, both ends: codec traits, one driver (`Reader`, `Writer`, `accept`, `opening`, `dial`), `impl_format!`, `Transport`, `Exchange`, `Frames`, `Accepted`, `Dialer`, the adapter (`serve`, `handle`, unchanged API), rules, `Credential`, `Asked`, `Status`. About 982 lines now, about 2,100 after *(inference)*. |
+| formats | Dialects: `impl Codec` plus `impl_format!`; bodies unchanged. |
 | server | axum router plus `HttpTransport`. reqwest stays here and is untouched. |
 | sdks | ws (axum ws, tungstenite), mcp, routing, ledger, text: as in §5. |
 | testkit | `MockAt: http::Transport`; `serve` re-export unchanged, so about 400 scenario tests keep their calls. |
@@ -487,11 +487,11 @@ reqwest stays in `server`; axum in `server` and `ws`. No new crate.
    - Add the 22 core tests ported to the toy edge beside the old ones.
    - Core temporarily about 4,000 src plus 900 test lines.
    - **This is the riskiest step.**
-4. **The HTTP driver.** Add codec traits, driver, `Accepted`, `Dialer` and `dialect!` to `crates/http`, with its own tests (the 6 byte-level core tests moved here onto a toy codec). Nothing uses it yet. http +about 1,200.
+4. **The HTTP driver.** Add codec traits, driver, `Accepted`, `Dialer` and `impl_format!` to `crates/http`, with its own tests (the 6 byte-level core tests moved here onto a toy codec). Nothing uses it yet. http +about 1,200.
 5. **The flip** (one compiler-driven PR, about 80 files, mostly 2–5-line edits):
    - Delete the old `Format`, `Transport`, `Exchange`, `Body`, `Head`, `Decoder`, `Encoder`, `handle` and the legacy driver.
    - Rename `Dialect` to `Format` and `open` to `handle`.
-   - Formats: 39 `impl Format` become `impl Codec` plus `dialect!`.
+   - Formats: 39 `impl Format` become `impl Codec` plus `impl_format!`.
    - Transports: 34 `impl Transport` change imports.
    - `http::serve` builds `Accepted`; `config.rs:10-95` changes its bounds.
    - The old toy tests go; their ports landed in step 3.
@@ -514,13 +514,13 @@ reqwest stays in `server`; axum in `server` and `ws`. No new crate.
 
 ## 11. Costs, risks and what gets worse
 
-- **`Format` is heavier.** Four associated types, three edge methods, and a hairy `dial` signature. HTTP dialects hide it behind `dialect!`, a macro in the public API.
+- **`Format` is heavier.** Four associated types, three edge methods, and a hairy `dial` signature. HTTP dialects hide it behind `impl_format!`, a macro in the public API.
 - **Guarantees span two layers.** B1 and the panic guards have an event half in the core and a byte half in the driver. A second wire must write its own driver. A faulty third-party edge can break what the core used to enforce alone.
 - **The workspace is roughly flat.** Core −1,125, http +1,100, net about −100 to +200 *(inference)*.
 - **Rule 1 is a readiness contract.** "Ended at once" relies on a single non-blocking poll. The explicit `Option<Events>` alternative is Open question 7.
 - **Timing and billing shifts.**
   - A provider's non-2xx `Call` resolves after its (small) error body is read, not at its head.
-  - `is_head_only` is false for a 200 carrying an error and for an SSE stream whose first event is an error. The ledger then charges at least the reserve, not 0, against 0015's stated consequence. Neither case is tested; every tested case (`codec::a_call_says_whether_its_response_was_head_only`, `ledger every_call_settles_exactly_once`) keeps its value.
+  - `is_refused` is false for a 200 carrying an error and for an SSE stream whose first event is an error. The ledger then charges at least the reserve, not 0, against 0015's stated consequence. Neither case is tested; every tested case (`codec::a_call_says_whether_its_response_was_head_only`, `ledger every_call_settles_exactly_once`) keeps its value.
 - **Lost plugin powers.** Plugins lose head edits and `cx.relay`: no custom success status, no header edits on calls beyond `CallHeaders`, no replaying a cached head.
 - **A refusal before the first bytes, with held values.** When filters release held values at a failing end and those encode to bytes, the client may now get them plus an error event where today it gets a clean refusal (today's `deliver.rs:243` subtlety). No test pins it *(inference)*.
 - **The flip is a flag day**: compiler-driven, but about 80 files. The legacy driver temporarily grows the core in step 3.
@@ -530,10 +530,10 @@ reqwest stays in `server`; axum in `server` and `ws`. No new crate.
 ## 12. Open questions for the owner
 
 1. **Ten types, or eight by merging the contexts and folding `Call`?** Recommend 10: eight breaks every plugin and the compile-time "only `on_client` calls" guarantee.
-2. **The edge contract on `Format` plus a `dialect!` macro (10 types), or a separate core `Wire<F>` trait implemented by `http::Accepted` (11 types, no macro, a smaller `Format`)?** Recommend `Format` plus `dialect!`, unless you prefer 11 types to a macro.
+2. **The edge contract on `Format` plus a `impl_format!` macro (10 types), or a separate core `Wire<F>` trait implemented by `http::Accepted` (11 types, no macro, a smaller `Format`)?** Recommend `Format` plus `impl_format!`, unless you prefer 11 types to a macro.
 3. **Remove `edit_call`, `edit_response_head`, `relay` and `body()`?** Recommend yes. If plugins later need response headers, add an http extension read by the client edge; the contract already passes the extensions to it.
 4. **Credentials.** Keep lifting them into `Credential` and restoring on relay (recommended: tests and plugins read and remove it), or leave them in the origin.
-5. **Accept the two `is_head_only` shifts, or have the driver read 2xx unary bodies before resolving?** The second is exact, but `Call` then resolves later. Recommend accepting, and noting it in 0020.
+5. **Accept the two `is_refused` shifts, or have the driver read 2xx unary bodies before resolving?** The second is exact, but `Call` then resolves later. Recommend accepting, and noting it in 0020.
 6. **Make `Fault::abandoned` and `Fault::of_input` public?** Recommend yes: edges outside the core need both.
 7. **"Ended at once" convention, or `Option<Events>` for "nothing follows"?** Recommend the convention: no mode appears in the types.
 8. **Drop `bytes` from the core?** Recommend yes; it is cheap proof of sealing.

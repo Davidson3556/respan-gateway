@@ -133,7 +133,7 @@ impl ProviderContext {
     /// transport failed, before a head or in its body; and for a response
     /// that began. A fault alone cannot say which of these it is, as a
     /// provider's refusal and a response cut off look alike.
-    pub fn is_head_only(&self) -> bool {
+    pub fn is_refused(&self) -> bool {
         self.refused
     }
 

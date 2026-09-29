@@ -11,8 +11,8 @@ use respan_gateway_core::{
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_http::{Answer, Ask};
 use respan_gateway_http::{Exchange, Transport};
+use respan_gateway_http::{RequestHead, ResponseHead};
 use respan_gateway_routing::{Attempt, Backoff, Role, Until, Watchdog, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;
@@ -106,7 +106,7 @@ struct Slow<T>(T, Duration);
 
 #[async_trait]
 impl<T: Transport> Transport for Slow<T> {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
     }
@@ -117,10 +117,10 @@ struct Stall;
 
 #[async_trait]
 impl Transport for Stall {
-    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let first = stream::iter([Ok(Bytes::from(ROLE))]);
         let body = first.chain(stream::pending()).boxed();
-        let mut head = respan_gateway_http::fresh_answer();
+        let mut head = respan_gateway_http::fresh_response_head();
         let sse = HeaderValue::from_static("text/event-stream");
         head.headers.insert(http::header::CONTENT_TYPE, sse);
         Ok(Exchange::new(head, body))
@@ -132,7 +132,7 @@ struct Dribble;
 
 #[async_trait]
 impl Transport for Dribble {
-    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let frame = |s: &'static str| Ok(Bytes::from(s));
         let first = stream::iter([frame(ROLE), frame(HELLO)]);
         let rest = stream::once(async move {
@@ -140,7 +140,7 @@ impl Transport for Dribble {
             stream::iter([frame(STOP), frame(DONE)])
         });
         let body = stream::StreamExt::chain(first, stream::StreamExt::flatten(rest));
-        let mut head = respan_gateway_http::fresh_answer();
+        let mut head = respan_gateway_http::fresh_response_head();
         let sse = HeaderValue::from_static("text/event-stream");
         head.headers.insert(http::header::CONTENT_TYPE, sse);
         Ok(Exchange::new(head, body.boxed()))
@@ -152,7 +152,7 @@ struct Silent;
 
 #[async_trait]
 impl Transport for Silent {
-    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         std::future::pending().await
     }
 }
@@ -162,7 +162,7 @@ struct Refused;
 
 #[async_trait]
 impl Transport for Refused {
-    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         Err(Fault::upstream("connection refused"))
     }
 }

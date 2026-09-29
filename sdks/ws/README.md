@@ -20,7 +20,7 @@ events; OpenAI Realtime and Gemini Live run through the same code.
   ordinary HTTP answer to the handshake, before any upgrade. To mix sessions
   with plain HTTP, route the sessions to `serve_ws` on top of
   `respan_gateway_server::router`.
-- `JsonEvents::new(name, path)`: a `Codec` (made a `Format` by `dialect!`) whose kind is one JSON event per
+- `JsonEvents::new(name, path)`: a `Codec` (made a `Format` by `impl_format!`) whose kind is one JSON event per
   frame, `ClientEvent` in and `ProviderEvent` out (each has `json: Value`).
   A relay to a format of the same name is byte for byte while an event is
   unedited; an edited one is written from its JSON. Plugins filter events with

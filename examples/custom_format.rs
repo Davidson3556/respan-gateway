@@ -1,6 +1,6 @@
 //! Custom format: add a protocol, here OpenAI embeddings, by writing its
 //! kind (`EmbedRequest` in, `Embeddings` out) and its `Codec`, which
-//! `dialect!` makes a `Format`. Plugins
+//! `impl_format!` makes a `Format`. Plugins
 //! then read and edit its values, whatever bytes they came in.
 //!
 //! Each value keeps the bytes it came in (`Relayed`), so a message no one
@@ -10,7 +10,6 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::serde_json::{self, Value, json};
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -18,8 +17,9 @@ use respan_gateway_formats::conversation::units::INPUT_TOKENS;
 use respan_gateway_formats::{self as formats, Usage, relayed::Relayed, whole::Relay};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{HeaderValue, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{Answer, Ask, Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, RequestHead, ResponseHead, impl_format};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use serde_json::{self, Value, json};
 
 /// The kind's input: texts to embed.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -51,11 +51,11 @@ impl Codec for OpenAiEmbeddings {
         NAME
     }
 
-    fn accepts(&self, head: &Ask) -> bool {
+    fn accepts(&self, head: &RequestHead) -> bool {
         formats::posts_to(head, "/embeddings")
     }
 
-    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<EmbedRequest>> {
+    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<EmbedRequest>> {
         let name: Arc<str> = Arc::from(NAME);
         formats::message_decoder(move |raw| {
             let v: Value =
@@ -76,10 +76,10 @@ impl Codec for OpenAiEmbeddings {
     /// path and content type are this format's.
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<EmbedRequest, Ask>> {
+    ) -> Box<dyn Encoder<EmbedRequest, RequestHead>> {
         let mut head = formats::call_head(client);
         if streams {
             return formats::with_head(head, formats::whole::unstreamable(NAME));
@@ -99,8 +99,8 @@ impl Codec for OpenAiEmbeddings {
 
     fn response_decoder(
         &self,
-        head: &Answer,
-        _call: &Ask,
+        head: &ResponseHead,
+        _call: &RequestHead,
         _: &Bytes,
     ) -> Box<dyn Decoder<Embeddings>> {
         let name: Arc<str> = Arc::from(NAME);
@@ -121,31 +121,32 @@ impl Codec for OpenAiEmbeddings {
         })
     }
 
-    /// A refusal is the provider's answer as it came, else the fault as
-    /// this protocol's error under its status and `Retry-After`.
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        _ask: &Ask,
+        answer: Option<&ResponseHead>,
+        _ask: &RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Embeddings, Answer>> {
-        let mut head = formats::answer_head(answer);
-        let error =
-            |f: &Fault| Bytes::from(json!({ "error": { "message": f.message() } }).to_string());
-        if let Some(fault) = refusal {
-            let body = respan_gateway_http::answered(NAME, fault, &mut head)
-                .unwrap_or_else(|| error(fault));
-            formats::default_content_type(&mut head, "application/json");
-            return formats::with_head(head, formats::whole::written(body));
-        }
+    ) -> Box<dyn Encoder<Embeddings, ResponseHead>> {
+        let mut head = formats::response_head(answer);
         formats::default_content_type(&mut head, "application/json");
         let body = Relay::new(write_embeddings, error, false);
         formats::with_head(head, Box::new(body))
     }
+
+    /// This protocol's error under the fault's status and `Retry-After`;
+    /// the provider's own answer goes as it came.
+    fn refusal(&self, fault: &Fault, _body: &Bytes, head: &mut ResponseHead) -> Bytes {
+        formats::default_content_type(head, "application/json");
+        error(fault)
+    }
 }
 
-dialect!(OpenAiEmbeddings);
+/// The fault as this protocol's error body.
+fn error(fault: &Fault) -> Bytes {
+    Bytes::from(json!({ "error": { "message": fault.message() } }).to_string())
+}
+
+impl_format!(OpenAiEmbeddings);
 
 /// The JSON a value came in, to write its changes into.
 fn origin_json<T: PartialEq>(origin: &Relayed<T>) -> Value {

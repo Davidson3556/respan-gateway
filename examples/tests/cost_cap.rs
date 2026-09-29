@@ -1,5 +1,4 @@
 use super::*;
-use respan_gateway_core::serde_json;
 use respan_gateway_http::http::StatusCode;
 
 #[tokio::test]

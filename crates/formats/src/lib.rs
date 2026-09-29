@@ -20,13 +20,19 @@ pub use openai::OpenAiChat;
 pub use usage::Usage;
 
 use respan_gateway_core::Fault;
-use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{
     self, HeaderValue, header::CONTENT_ENCODING, header::CONTENT_TYPE,
 };
-use respan_gateway_http::{Answer, Ask};
 use respan_gateway_http::{Decoder, Encoder};
+use respan_gateway_http::{RequestHead, ResponseHead};
+use serde_json::{self, Value};
+
+/// A fault's extra fields for the client's error body, a JSON object, as a
+/// hint ([`Fault::with`]): the formats write them into their error
+/// bodies, and the kernel never reads them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Details(pub Value);
 
 /// A provider's message as JSON: a whole body, or an event's `data:`.
 pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
@@ -38,12 +44,12 @@ pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
 
 /// Whether a request is a `POST` to a path ending in `suffix`: the usual
 /// [`Codec::accepts`](respan_gateway_http::Codec::accepts).
-pub fn posts_to(head: &Ask, suffix: &str) -> bool {
+pub fn posts_to(head: &RequestHead, suffix: &str) -> bool {
     head.method == http::Method::POST && head.uri.path().ends_with(suffix)
 }
 
 /// Set a call's path, relative to the transport, keeping its query.
-pub fn set_path(head: &mut Ask, path: &str) {
+pub fn set_path(head: &mut RequestHead, path: &str) {
     let uri = match head.uri.query() {
         Some(query) => format!("{path}?{query}"),
         None => path.to_owned(),
@@ -55,27 +61,27 @@ pub fn set_path(head: &mut Ask, path: &str) {
 /// Mark a call whose body is not the client's bytes as sent, as when a
 /// value was written or its inputs stream: its `Content-Encoding`, the
 /// client's, goes.
-pub fn body_changed(head: &mut Ask) {
+pub fn body_changed(head: &mut RequestHead) {
     head.headers.remove(CONTENT_ENCODING);
 }
 
 /// A call's head: the client's for a relay, else a fresh one.
-pub fn call_head(client: Option<&Ask>) -> Ask {
+pub fn call_head(client: Option<&RequestHead>) -> RequestHead {
     client
         .cloned()
-        .unwrap_or_else(respan_gateway_http::fresh_ask)
+        .unwrap_or_else(respan_gateway_http::fresh_request_head)
 }
 
 /// A response's head: the provider's for a response in the client's
 /// format, else a fresh `200`.
-pub fn answer_head(answer: Option<&Answer>) -> Answer {
+pub fn response_head(answer: Option<&ResponseHead>) -> ResponseHead {
     answer
         .cloned()
-        .unwrap_or_else(respan_gateway_http::fresh_answer)
+        .unwrap_or_else(respan_gateway_http::fresh_response_head)
 }
 
 /// Set a response's content type to `value` if it has none (RFC 9110 8.3).
-pub fn default_content_type(head: &mut Answer, value: &'static str) {
+pub fn default_content_type(head: &mut ResponseHead, value: &'static str) {
     let value = HeaderValue::from_static(value);
     head.headers.entry(CONTENT_TYPE).or_insert(value);
 }

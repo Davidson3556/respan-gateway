@@ -4,25 +4,24 @@
 use bytes::{Bytes, BytesMut};
 use http::HeaderValue;
 use respan_gateway_core::Fault;
-use respan_gateway_core::serde_json;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
-use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{RequestHead, ResponseHead};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
 use crate::common::{
     Names, Reading, SoFar, UnaryEncoder, Wire, error_event, holding_start, merge_details,
     patch_content, patch_messages, patch_sampling, post_json, read_content, read_message,
-    reads_back, replace, request_decoder, response_decoder, response_encoder, says, says_error,
-    set, split_around, stop_json, unpatchable, unreadable_event, unsupported_fields,
+    reads_back, refusal, replace, request_decoder, response_decoder, response_encoder, says,
+    says_error, set, split_around, stop_json, unpatchable, unreadable_event, unsupported_fields,
     unwritable_content, write_content, write_message,
 };
 use crate::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
 };
 use crate::sse::{Events, SseDecoder, event, event_json, is_stream};
-use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 
 /// The API version sent when the client names none.
 const VERSION: &str = "2023-06-01";
@@ -56,49 +55,53 @@ impl Codec for AnthropicMessages {
         ANTHROPIC
     }
 
-    fn accepts(&self, head: &Ask) -> bool {
+    fn accepts(&self, head: &RequestHead) -> bool {
         crate::posts_to(head, "/v1/messages")
     }
 
-    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<Conversation>> {
+    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Conversation>> {
         request_decoder::<Self>()
     }
 
     /// The `anthropic-version` a relay passed, or the default.
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation, Ask>> {
+    ) -> Box<dyn Encoder<Conversation, RequestHead>> {
         let mut head = crate::call_head(client);
         let version = head.headers.entry(VERSION_HEADER);
         version.or_insert(HeaderValue::from_static(VERSION));
         post_json::<Self>(head, body, "/v1/messages", streams)
     }
 
-    fn response_decoder(&self, head: &Answer, call: &Ask, _: &Bytes) -> Box<dyn Decoder<Reply>> {
+    fn response_decoder(
+        &self,
+        head: &ResponseHead,
+        call: &RequestHead,
+        _: &Bytes,
+    ) -> Box<dyn Decoder<Reply>> {
         let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
         response_decoder::<Self>(head, call, stream)
     }
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply, Answer>> {
-        response_encoder::<Self>(
-            answer,
-            ask,
-            body,
-            refusal,
-            |head, relayed, _| match is_stream(head) {
+    ) -> Box<dyn Encoder<Reply, ResponseHead>> {
+        response_encoder::<Self>(answer, ask, body, |head, relayed, _| {
+            match is_stream(head) {
                 true => Box::new(EventStream::new(relayed)),
                 false => Box::new(UnaryEncoder::<Self>::new(relayed)),
-            },
-        )
+            }
+        })
+    }
+
+    fn refusal(&self, fault: &Fault, _body: &Bytes, head: &mut ResponseHead) -> Bytes {
+        refusal::<Self>(fault, head)
     }
 
     fn is_content(&self, reply: &Reply) -> bool {
@@ -106,7 +109,7 @@ impl Codec for AnthropicMessages {
     }
 }
 
-dialect!(AnthropicMessages);
+impl_format!(AnthropicMessages);
 
 /// Keys a conversation has a place for, or that change no output.
 const KNOWN: &[&str] = &[

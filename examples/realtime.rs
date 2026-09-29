@@ -34,15 +34,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_testkit::Outcomes;
 use respan_gateway_text::{Placeholders, Rewrite};
 use respan_gateway_ws::{ClientEvent, JsonEvents, ProviderEvent, WsTransport};
+use serde_json::{Value, json};
 
-/// The Realtime dialect: served and sent at `/v1/realtime`.
+/// The Realtime format: served and sent at `/v1/realtime`.
 fn realtime() -> JsonEvents {
     JsonEvents::new("openai-realtime", "/v1/realtime")
 }

@@ -1,65 +1,61 @@
-//! A model in this process, reached as a provider: a [`Transport`] that
-//! answers OpenAI Chat, JSON or SSE, as the request asks. It is a full
-//! provider, so it can be a target or a fallback, and every provider-edge
-//! plugin (billing, limits, guards) sees its calls.
+//! A model in this process, reached as a provider: a [`Format`] that only
+//! dials, its `Dialer` the model itself. No bytes are written or read: it
+//! takes the call's [`Conversation`] and answers with [`Reply`]s, which any
+//! client of the conversation kind (OpenAI Chat, Anthropic Messages) gets in
+//! its own protocol, JSON or SSE as it asked. It is a full provider, so it
+//! can be a target or a fallback, and every provider-edge plugin (billing,
+//! limits, guards) sees its calls.
 //!
-//! The transport speaks bytes, so it reuses the format as a codec on the
-//! provider's side: `request_decoder` reads the call into a
-//! [`Conversation`], `response_encoder` writes the answer's [`Reply`]s.
-//! Registered with `AnthropicMessages` instead, the same code answers in
-//! Anthropic's wire format.
+//! A format that keeps the client edge's defaults is dial-only.
 //!
 //! `cargo run -p respan-gateway-examples --example custom_transport`
 
-use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
-use respan_gateway_core::{Fault, Gateway, async_trait};
+use std::sync::Arc;
+
+use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
+use respan_gateway_core::{Dialed, Events, Extensions, Fault, Format, Gateway, Origin};
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
-use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::{Answer, Ask, Codec, Exchange, Transport, http};
 use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Your model: a conversation in, its answer out.
-trait LocalModel: Send + Sync + 'static {
-    fn answer(&self, chat: &Conversation) -> Result<String, Fault>;
-}
+type Model = Arc<dyn Fn(&Conversation) -> Result<String, Fault> + Send + Sync>;
 
 /// A toy model that echoes the last message.
-struct Echo;
+fn echo(chat: &Conversation) -> Result<String, Fault> {
+    let last = chat.messages.last().map(|m| m.text()).unwrap_or_default();
+    Ok(format!("you said: {last}"))
+}
 
-impl LocalModel for Echo {
-    fn answer(&self, chat: &Conversation) -> Result<String, Fault> {
-        let last = chat.messages.last().map(|m| m.text()).unwrap_or_default();
-        Ok(format!("you said: {last}"))
+/// The format of a model in this process: its dialer is the model.
+struct Local;
+
+impl Format for Local {
+    type Input = Conversation;
+    type Output = Reply;
+    type Wire = ();
+    type Dialer = Model;
+
+    fn name(&self) -> &str {
+        "local"
     }
-}
 
-/// `model`, reached through `format`'s wire protocol.
-struct Local<F, M> {
-    format: F,
-    model: M,
-}
-
-#[async_trait]
-impl<F, M> Transport for Local<F, M>
-where
-    F: Codec<Input = Conversation, Output = Reply>,
-    M: LocalModel,
-{
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
-        // A whole call's body is its one input.
-        let frames: Vec<Bytes> = call.body.try_collect().await?;
-        let call = http::Request::from_parts(call.head, Bytes::from(frames.concat()));
-        let chat = read_chat(&self.format, &call)?;
-        let answer = self.model.answer(&chat)?;
+    fn dial(
+        &self,
+        model: &Model,
+        _extensions: Extensions,
+        _relay: Option<&Origin>,
+        opening: Option<(&Conversation, bool)>,
+        _later: Option<Events<(Conversation, bool)>>,
+    ) -> Result<Dialed<Reply>, Fault> {
+        let (chat, _) = opening.ok_or_else(|| Fault::bad_request("no conversation"))?;
+        let answer = model(chat)?;
 
         // One reply per word, then the finish with usage (a word is a token here).
-        let mut usage = Usage::default();
         let words = |s: &str| s.split_whitespace().count() as f64;
-        usage.add(
-            units::INPUT_TOKENS,
-            chat.messages.iter().map(|m| words(&m.text())).sum(),
-        );
+        let mut usage = Usage::default();
+        let prompt = chat.messages.iter().map(|m| words(&m.text())).sum();
+        usage.add(units::INPUT_TOKENS, prompt);
         usage.add(units::OUTPUT_TOKENS, words(&answer));
         let model = chat.model.clone().unwrap_or_else(|| "local".into());
         let mut replies = vec![Reply::start("local-1", model)];
@@ -68,56 +64,15 @@ where
         let mut last = Reply::finished(Finish::Stop);
         last.usage = usage;
         replies.push(last);
-        write_replies(&self.format, &call, &replies)
+        let outputs = stream::iter(replies.into_iter().map(Ok)).boxed();
+        Ok(async move { Ok((None, Ok(outputs))) }.boxed())
     }
-}
-
-/// The call's conversation, read with the format's request decoder.
-fn read_chat<F: Codec<Input = Conversation>>(
-    format: &F,
-    call: &http::Request<Bytes>,
-) -> Result<Conversation, Fault> {
-    let head = call.clone().into_parts().0;
-    let mut decoder = format.request_decoder(&head);
-    let mut chats = Vec::new();
-    decoder.decode(call.body().clone(), &mut chats)?;
-    decoder.end(&mut chats)?;
-    chats
-        .pop()
-        .ok_or_else(|| Fault::bad_request("no conversation"))
-}
-
-/// The replies as a response, written with the format's response encoder,
-/// which also sets the content type: SSE if the call asked to stream.
-fn write_replies<F: Codec<Output = Reply>>(
-    format: &F,
-    call: &http::Request<Bytes>,
-    replies: &[Reply],
-) -> Result<Exchange<Answer>, Fault> {
-    let ask = call.clone().into_parts().0;
-    let mut encoder = format.response_encoder(None, &ask, call.body(), None);
-    let head = encoder.head(None);
-    let mut frames = Vec::new();
-    let mut out = BytesMut::new();
-    encoder.open(&mut out)?;
-    for reply in replies {
-        encoder.encode(reply, &mut out)?;
-        frames.push(out.split().freeze());
-    }
-    encoder.end(&Ok(()), &mut out)?;
-    frames.push(out.freeze());
-    let frames = frames.into_iter().filter(|f| !f.is_empty());
-    let body = stream::iter(frames.map(Ok)).boxed();
-    Ok(Exchange::new(head, body))
 }
 
 fn gateway() -> Result<Gateway, Fault> {
-    let local = Local {
-        format: OpenAiChat,
-        model: Echo,
-    };
+    let model: Model = Arc::new(echo);
     Gateway::new()
-        .provider("local", OpenAiChat, local)?
+        .provider("local", Local, model)?
         .serve(OpenAiChat)?
         .target("local")
 }

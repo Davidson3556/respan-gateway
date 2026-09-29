@@ -16,7 +16,7 @@ text/plain for what no format writes. None is a kernel rule (0001).
    the provider's status (a `Status` hint, 0019), `with_retry_after` and
    `with_answer(format, answer)`; an error within a response, such as an
    error event, is the same. Whether the provider refused before beginning
-   a response is `ProviderContext::is_head_only`, not a fact of the fault
+   a response is `ProviderContext::is_refused`, not a fact of the fault
    (0015). The client's format writes a refusal: the answer as it came if
    it read it, else the fault in its own words with its status and retry.
 2. **The rules live at the boundaries**, in `crates/http`: the adapter
@@ -55,5 +55,5 @@ text/plain for what no format writes. None is a kernel rule (0001).
 - 0013: the `http` types left the core too; head hooks became generic.
 - 0014, 0015: the flags this record named (an answer's `is_answer`, a
   `Relayed` marker, `handle`'s `streaming`, `Encoder::done`) became
-  `ProviderContext::is_head_only`, `Exchange::relayed`, `Exchange::streams`
+  `ProviderContext::is_refused`, `Exchange::relayed`, `Exchange::streams`
   and `Encoder::open`'s `Ok(true)`.

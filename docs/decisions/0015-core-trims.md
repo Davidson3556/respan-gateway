@@ -28,8 +28,7 @@ missing beside its writer. Two public types go.
    (amends 0012), on HTTP's `Exchange`. It means later frames follow the
    head. The adapter says it of a request (`Accepted::new`); the driver
    sets it on a call whose inputs are still flowing. The core has no such
-   flag: it asks whether a session's inputs are already ended (0020,
-   rule 1). `HttpTransport` sends a call whole or streamed by it, not by
+   flag: `accept` says whether inputs follow the head (0020). `HttpTransport` sends a call whole or streamed by it, not by
    its body's size hint.
 4. **`Fault` loses `in_place`, `is_answer` and `answered`** (amends 0008,
    0011, 0012, 0014). `with_answer(format, answer)` and `answer(format)`
@@ -37,23 +36,23 @@ missing beside its writer. Two public types go.
    provider refused before beginning a response is not a fact of a fault:
    a provider's 429 or 500, an error event and a cut stream are each a
    fault with a code and an untouched tally. The kernel says it on the
-   context, beside `is_sent`: **`ProviderContext::is_head_only()`**, true
+   context, beside `is_sent`: **`ProviderContext::is_refused()`**, true
    once the provider's head arrived and its body, not broken off by the
    transport, decoded no value.
 5. **`Outcome` goes** (amends 0003). `on_client_end(&self, cx, end:
    &Result<(), Fault>)`, `on_provider_end(&self, px, end)`, and
    `handle`'s future yields `Result<(), Fault>`. A per-call fact beyond
-   the end goes on the context, as `is_sent` and `is_head_only` are, not
+   the end goes on the context, as `is_sent` and `is_refused` are, not
    on a bundle.
 
 ## Consequences
 
 - `Relayed` and `Outcome` are gone: two public types fewer.
-- `is_sent` and `is_head_only` are facts of a call's context: the call was
+- `is_sent` and `is_refused` are facts of a call's context: the call was
   handed to its transport; the provider's head arrived and its body began no
   value.
 - `sdks/ledger` charges by them: not sent, 0; sent with no head, at least
-  its reserve; `Err` with `is_head_only`, unless `abandoned`, `truncated` or
+  its reserve; `Err` with `is_refused`, unless `abandoned`, `truncated` or
   `internal`, 0; ended `Ok` and reported, the tally; else at least the
   reserve. A provider's 429 or 500 is never billed. Where a provider says an
   error with 200, or a stream's first event is an error, before any value,

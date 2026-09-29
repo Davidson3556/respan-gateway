@@ -13,7 +13,7 @@
 //! `cargo run -p respan-gateway-examples --example embedded`
 
 use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::{Extensions, Fault, Gateway, serde_json};
+use respan_gateway_core::{Extensions, Fault, Gateway};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::bytes::Bytes;

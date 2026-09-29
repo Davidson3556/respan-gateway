@@ -1,5 +1,5 @@
 //! Whose keys reach the provider over WebSocket: the client's pass only on a
-//! same-dialect relay and only where the transport has none of its own; the
+//! same-name relay and only where the transport has none of its own; the
 //! connection's own headers are never the client's.
 #![allow(clippy::unwrap_used)]
 
@@ -46,7 +46,7 @@ fn header(upgrade: &Upgrade, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-// A relay in the client's own dialect passes its keys, header and query, and
+// A relay in the client's own format passes its keys, header and query, and
 // its other end-to-end headers; not its origin's, nor the client's
 // connection.
 #[tokio::test(flavor = "multi_thread")]
@@ -101,14 +101,14 @@ async fn a_transport_with_its_own_key_hides_the_clients() {
     assert_eq!(header(&up, "openai-beta").as_deref(), Some("realtime=v1"));
 }
 
-// A call in another dialect (formats of another name that translate through
+// A call in another format (formats of another name that translate through
 // the kind) carries none of the client's keys, even to a provider that has
 // none of its own: the key is for its own protocol's provider.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_translated_call_carries_none_of_the_clients_keys() {
     let probe = Probe::start().await;
-    let client_side = JsonEvents::new("one-dialect", "/v1/realtime");
-    let provider_side = JsonEvents::new("another-dialect", "/other");
+    let client_side = JsonEvents::new("one-name", "/v1/realtime");
+    let provider_side = JsonEvents::new("another-name", "/other");
     let gateway = Gateway::new()
         .serve(client_side)
         .unwrap()
@@ -122,7 +122,7 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
     say(&mut ws, r#"{"hello":1}"#).await;
     let up = first(&probe).await;
     probe.tell(0, Cmd::Send(r#"{"hi":  2}"#.into()));
-    // Written by the other dialect's format, not relayed, so from the JSON.
+    // Written by the other format, not relayed, so from the JSON.
     assert_eq!(heard_text(&mut ws).await, r#"{"hi":2}"#);
     eventually("the provider read it", || probe.texts().len() == 1).await;
     assert_eq!(probe.texts(), [r#"{"hello":1}"#]);

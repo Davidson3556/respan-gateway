@@ -75,31 +75,20 @@ pub(crate) fn cut<T: Send + 'static>(
     .boxed()
 }
 
-/// A session's inputs after its opening: read once, and the session's
-/// input filters.
+/// A session's inputs after its opening, if any follow: read once, and the
+/// session's input filters.
 pub(crate) struct Later {
     events: Mutex<Option<AnyEvents>>,
-    /// Whether they had ended when the session opened (rule 1).
+    /// Whether none follow the opening.
     pub(crate) ended: bool,
     pub(crate) filters: Layer,
 }
 
 impl Later {
-    /// `events`, polled once: ended at once, or kept with what came.
-    pub(crate) fn new(mut events: AnyEvents) -> Self {
-        let first = std::panic::catch_unwind(AssertUnwindSafe(|| events.next().now_or_never()));
-        let (events, ended) = match first {
-            Ok(Some(None)) => (None, true),
-            Ok(Some(Some(item))) => (Some(stream::once(ready(item)).chain(events).boxed()), false),
-            Ok(None) => (Some(events), false),
-            Err(_) => (
-                Some(stream::iter([Err(Fault::internal(PANICKED))]).boxed()),
-                false,
-            ),
-        };
+    pub(crate) fn new(events: Option<AnyEvents>) -> Self {
         Self {
+            ended: events.is_none(),
             events: Mutex::new(events),
-            ended,
             filters: Layer::default(),
         }
     }
@@ -167,12 +156,16 @@ impl Reading {
                     Some(events) => self.events.insert(events),
                     None => {
                         self.ended = true;
-                        // Filters ended and no events: the inputs ended.
-                        if locked(&self.later.filters).ended() {
-                            return None;
-                        }
-                        let taken = "the request's inputs were taken by another reader";
-                        return Some(Err(Fault::internal(taken)));
+                        // Filters ended and no events: the inputs ended as the
+                        // filters did, a cut by the session too.
+                        return match locked(&self.later.filters).outcome() {
+                            Some(Ok(())) => None,
+                            Some(Err(fault)) => Some(Err(fault)),
+                            None => {
+                                let taken = "the request's inputs were taken by another reader";
+                                Some(Err(Fault::internal(taken)))
+                            }
+                        };
                     }
                 },
             };
@@ -329,7 +322,7 @@ impl Outgoing {
 }
 
 /// Dropped before its end, unread: its call ends as its end, if it is
-/// ready, says, else abandoned as its source goes (rule 5).
+/// ready, says, else abandoned as its source goes (rule 4).
 impl Drop for Outgoing {
     fn drop(&mut self) {
         if self.done {
@@ -347,5 +340,60 @@ impl Drop for Outgoing {
             }
         };
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| batch.read()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+
+    use super::*;
+    use crate::format::Erased;
+    use crate::{Dialed, Events, Extensions, Format, Origin};
+
+    struct Nil;
+
+    impl Format for Nil {
+        type Input = String;
+        type Output = String;
+        type Wire = ();
+        type Dialer = ();
+
+        fn name(&self) -> &str {
+            "nil"
+        }
+
+        fn dial(
+            &self,
+            _: &(),
+            _: Extensions,
+            _: Option<&Origin>,
+            _: Option<(&String, bool)>,
+            _: Option<Events<(String, bool)>>,
+        ) -> Result<Dialed<String>, Fault> {
+            Err(Fault::internal("unused"))
+        }
+    }
+
+    /// B1: inputs cut by the session's end end `Err(abandoned)`, however
+    /// the end and the first poll are ordered: here the session has ended
+    /// but its cut is not yet idle, as when the end lands in the middle of
+    /// a poll that already saw the cut open.
+    #[tokio::test]
+    async fn a_cut_before_the_first_poll_is_never_a_clean_end() {
+        let cut = Arc::<InFlight>::default();
+        let _running = InFlight::enter(&cut);
+        let later = Arc::new(Later::new(Some(stream::pending().boxed())));
+        later.end(Err(Fault::abandoned()));
+        let format = Arc::new(Erased::new(Nil));
+        let mut inputs = inputs(later, format, None, &cut);
+        let first = inputs
+            .next()
+            .await
+            .map(|r| r.err().map(|f| f.code().to_string()));
+        assert_eq!(first, Some(Some("abandoned".to_string())));
+        assert!(inputs.next().await.is_none());
     }
 }

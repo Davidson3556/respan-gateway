@@ -2,14 +2,16 @@
 //! [`Encoder`]s it makes for each body.
 
 use bytes::{Bytes, BytesMut};
+use http::HeaderValue;
+use http::header::CONTENT_TYPE;
 use respan_gateway_core::Fault;
 
-use crate::{Answer, Ask};
+use crate::{RequestHead, ResponseHead};
 
 /// One protocol's codec on HTTP, stateless and shared: each body, either
 /// way, gets its own [`Decoder`] or [`Encoder`], which keeps that stream's
 /// state. The factories never fail: a failure travels in the stream.
-/// [`dialect!`](crate::dialect) makes it a
+/// [`impl_format!`](crate::impl_format) makes it a
 /// [`Format`](respan_gateway_core::Format), which HTTP's driver runs.
 ///
 /// A body is a stream of messages, each decoded into one value of the kind,
@@ -40,21 +42,23 @@ pub trait Codec: Send + Sync + 'static {
 
     /// Whether a request with `head` is in this protocol; the first served
     /// that accepts takes it.
-    fn accepts(&self, head: &Ask) -> bool;
+    fn accepts(&self, head: &RequestHead) -> bool;
 
     /// Decodes the client's request with `head`: its body when first read,
     /// or a streaming request's frames as they pass. `Err` with
     /// [`codes::BAD_REQUEST`](respan_gateway_core::codes::BAD_REQUEST) for
     /// bytes not in this protocol; what the kind has no place for stays in
     /// the input.
-    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Self::Input>>;
+    fn request_decoder(&self, head: &RequestHead) -> Box<dyn Decoder<Self::Input>>;
 
     /// Encodes a call. `client` is the client's head if the call relays the
-    /// client's message; `body` its first bytes, the client's when relayed
-    /// unread, else empty, to edit. The encoder writes the head
-    /// ([`Encoder::head`]), then any inputs written from their values.
-    /// `streams`: a streaming request's inputs follow, one per frame; a
-    /// protocol that cannot carry them fails [`Encoder::open`] with
+    /// client's message. `body` is its first bytes, the client's when
+    /// relayed unread, else empty; a codec edits them in place, since a relay
+    /// unread has no other place to add what the protocol needs to them. The
+    /// encoder writes the head ([`Encoder::head`]), then any inputs written
+    /// from their values. `streams`: a streaming request's inputs follow,
+    /// one per frame, which the head may need to say; a protocol that cannot
+    /// carry them fails [`Encoder::open`] with
     /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG).
     ///
     /// What this protocol cannot say is an `Err` of the encode it concerns,
@@ -65,13 +69,14 @@ pub trait Codec: Send + Sync + 'static {
     /// ([`Fault::of_input`]).
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Self::Input, Ask>>;
+    ) -> Box<dyn Encoder<Self::Input, RequestHead>>;
 
     /// Decodes a response with head `answer` to the call with head `call`
-    /// and first bytes `sent`. A provider's error answer ends `Err` with its
+    /// and first bytes `sent`, which a protocol that answers each message
+    /// (MCP) reads to know which it is answering. A provider's error answer ends `Err` with its
     /// status as a hint ([`Status`](crate::Status)),
     /// [`Fault::with_retry_after`] and [`Fault::with_answer`]; a body not in
     /// this protocol with
@@ -81,17 +86,14 @@ pub trait Codec: Send + Sync + 'static {
     /// be refused.
     fn response_decoder(
         &self,
-        answer: &Answer,
-        call: &Ask,
+        answer: &ResponseHead,
+        call: &RequestHead,
         sent: &Bytes,
     ) -> Box<dyn Decoder<Self::Output>>;
 
     /// Encodes a response to the client's request with head `ask` and body
     /// `body` (empty if streaming). `answer` is the provider's head on a
-    /// relay, to start the head from. A `refusal` is the response's one
-    /// failure, before any byte: write its answer as it came if this codec
-    /// read it ([`Fault::answer`], [`answered`](crate::answered)), else the
-    /// fault in this protocol's words. Each output to a streaming request is
+    /// relay, to start the head from. Each output to a streaming request is
     /// its own frame.
     ///
     /// Write an output as its bytes while it says the same, else from its
@@ -99,11 +101,24 @@ pub trait Codec: Send + Sync + 'static {
     /// comes: write a failure in this protocol's framing.
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Self::Output, Answer>>;
+    ) -> Box<dyn Encoder<Self::Output, ResponseHead>>;
+
+    /// The words of a refusal, the response's one failure before any byte:
+    /// `fault` in this protocol, as the body it returns, with any head
+    /// fields of its own set in `head`, which has the fault's status and
+    /// `Retry-After` already ([`error_head`](crate::error_head)). `body` is
+    /// the client's request body (empty if streaming). The driver writes
+    /// the provider's answer as it came instead, if this codec read it
+    /// ([`Fault::answer`], [`answered`](crate::answered)), and no body where
+    /// HTTP has none. By default, the message as plain text.
+    fn refusal(&self, fault: &Fault, _body: &Bytes, head: &mut ResponseHead) -> Bytes {
+        let text = HeaderValue::from_static("text/plain; charset=utf-8");
+        head.headers.insert(CONTENT_TYPE, text);
+        Bytes::from(fault.message().to_owned())
+    }
 
     /// Whether `output` is content, what
     /// [`Response::until_content`](respan_gateway_core::Response::until_content)

@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, ready};
-use futures::{FutureExt, StreamExt, stream};
 
 use crate::fault::PANICKED;
 use crate::format::{AnyFormat, AnyReply, Erased};
@@ -174,7 +174,7 @@ impl Gateway {
         let (origin, later) = half.unwrap_or_else(|_| (None, Err(Fault::internal(PANICKED))));
         let (later, broken) = match later {
             Ok(later) => (Later::new(later), None),
-            Err(fault) => (Later::new(stream::empty().boxed()), Some(fault)),
+            Err(fault) => (Later::new(None), Some(fault)),
         };
         let inner = self.inner.clone();
         let cx = ClientContext::new(format.clone(), origin, later, extensions, inner);
@@ -185,7 +185,7 @@ impl Gateway {
         // The request's end hooks run after its calls'.
         hooks.after = Some(settling);
         let reply = match broken {
-            Some(fault) => session::refusal(hooks.cx().extensions.clone(), fault, hooks),
+            Some(fault) => session::refusal(fault, hooks),
             None => {
                 // A plugin panic is refused like a failure.
                 let ran = AssertUnwindSafe(run(&self.inner, &mut hooks)).catch_unwind();
@@ -196,7 +196,7 @@ impl Gateway {
         // An edge that dropped its reply ends the session abandoned, but
         // one whose future panicked took its reply with it: the session
         // ends as the refusal says, `internal`.
-        if let Err((_, _, ended)) = tx.send(reply)
+        if let Err((_, ended)) = tx.send(reply)
             && panicked
         {
             ended(Err(Fault::internal(PANICKED)));
@@ -266,7 +266,7 @@ fn unwritten(fault: Fault) -> BoxFuture<'static, Result<(), Fault>> {
 /// The reply an edge gets if the gateway dropped the session first.
 fn abandoned() -> AnyReply {
     let half = (None, Err(Fault::abandoned()));
-    (Extensions::new(), half, Box::new(|_| {}))
+    (half, Box::new(|_| {}))
 }
 
 async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response, Fault> {

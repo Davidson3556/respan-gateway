@@ -10,7 +10,7 @@ use http::{HeaderMap, HeaderValue};
 use respan_gateway_core::{Extensions, Fault, async_trait};
 
 use crate::credential::{Credential, is_credential, take_query};
-use crate::{Answer, Ask, HOP_BY_HOP, remove_if, strip_named};
+use crate::{HOP_BY_HOP, RequestHead, ResponseHead, remove_if, strip_named};
 
 /// A body, its bytes one item per data frame, ending with an `Err` if it
 /// broke off.
@@ -84,13 +84,13 @@ pub trait Transport: Send + Sync + 'static {
     /// `Err` if the call could not be sent: [`Fault::upstream`] if the
     /// provider is unreachable, [`Fault::config`] if this transport cannot
     /// express it, or a failure of its own.
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault>;
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault>;
 }
 
 /// A shared transport; it forwards every method.
 #[async_trait]
 impl<T: Transport + ?Sized> Transport for Arc<T> {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         (**self).send(call).await
     }
 }
@@ -188,13 +188,13 @@ impl std::fmt::Debug for CallHeaders {
 /// transport's own `headers`, after removing the call's credential headers
 /// and parameters; with neither, the client's [`Credential`], only on a
 /// call that is `relayed`, as a key is for its own protocol's provider.
-pub fn credentials(call: &mut Exchange<crate::Ask>, headers: &HeaderMap) {
+pub fn credentials(call: &mut Exchange<crate::RequestHead>, headers: &HeaderMap) {
     keys(&mut call.head, &call.extensions, call.relayed, headers);
 }
 
 /// [`credentials`] for a call of `head` and `extensions`, `relayed` or not.
 pub(crate) fn keys(
-    head: &mut crate::Ask,
+    head: &mut crate::RequestHead,
     extensions: &Extensions,
     relayed: bool,
     headers: &HeaderMap,
@@ -229,7 +229,7 @@ mod tests {
     use futures::StreamExt;
 
     use super::*;
-    use crate::Ask;
+    use crate::RequestHead;
 
     fn head(headers: &[(&'static str, &'static str)]) -> http::request::Parts {
         let mut req = http::Request::new(());
@@ -262,7 +262,11 @@ mod tests {
     }
 
     /// A call with `head` and the client's `credential`, if any.
-    fn call(head: Ask, credential: Option<HeaderMap>, relayed: bool) -> Exchange<Ask> {
+    fn call(
+        head: RequestHead,
+        credential: Option<HeaderMap>,
+        relayed: bool,
+    ) -> Exchange<RequestHead> {
         let mut call = Exchange::new(head, futures::stream::empty().boxed());
         if let Some(client) = credential {
             call.extensions.insert(Credential::of(client));

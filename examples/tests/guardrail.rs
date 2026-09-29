@@ -2,8 +2,8 @@ use super::*;
 use respan_gateway_formats::conversation::{Message, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::posts_to;
-use respan_gateway_http::{Answer, Ask};
-use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
+use respan_gateway_http::{RequestHead, ResponseHead};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 #[derive(Clone)]
@@ -17,27 +17,27 @@ impl Codec for Responses {
         "responses"
     }
 
-    fn accepts(&self, head: &Ask) -> bool {
+    fn accepts(&self, head: &RequestHead) -> bool {
         posts_to(head, "/responses")
     }
 
-    fn request_decoder(&self, _: &Ask) -> Box<dyn Decoder<Sent<Self>>> {
+    fn request_decoder(&self, _: &RequestHead) -> Box<dyn Decoder<Sent<Self>>> {
         opaque::request_decoder()
     }
 
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Sent<Self>, Ask>> {
+    ) -> Box<dyn Encoder<Sent<Self>, RequestHead>> {
         opaque::request_encoder(client, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &Answer,
-        call: &Ask,
+        head: &ResponseHead,
+        call: &RequestHead,
         _: &Bytes,
     ) -> Box<dyn Decoder<Got<Self>>> {
         opaque::response_decoder("responses", head, call)
@@ -45,16 +45,15 @@ impl Codec for Responses {
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Got<Self>, Answer>> {
-        opaque::response_encoder("responses", answer, ask, refusal)
+    ) -> Box<dyn Encoder<Got<Self>, ResponseHead>> {
+        opaque::response_encoder(answer, ask)
     }
 }
 
-dialect!(Responses);
+impl_format!(Responses);
 
 /// The example's gateway, also serving the Responses API. Its one target
 /// stays OpenAI; the guard refuses Responses traffic before any call.

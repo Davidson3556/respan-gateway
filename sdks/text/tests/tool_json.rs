@@ -1,10 +1,10 @@
 //! Restoring and redacting inside tool calls keeps their JSON whole.
 
 use respan_gateway_core::Fault;
-use respan_gateway_core::serde_json::{self, Value, json};
 use respan_gateway_formats::conversation::{Conversation, Message, Piece, Reply, Role};
 use respan_gateway_testkit::run_filter as run;
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite};
+use serde_json::{self, Value, json};
 
 fn call(arguments: &str) -> Reply {
     Reply::other(

@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::serde_json::json;
 use respan_gateway_core::{Fault, async_trait};
+use respan_gateway_formats::Details;
 use respan_gateway_http::Status;
+use serde_json::json;
 use tokio::time::Instant;
 
 use crate::{INSUFFICIENT_FUNDS, UNKNOWN_ACCOUNT};
@@ -199,7 +200,7 @@ impl Ledger for MemoryLedger {
                 let msg = format!("account '{name}' cannot cover this call");
                 let details = json!({ "account": name, "available": available });
                 let fault = Fault::new(INSUFFICIENT_FUNDS, msg).with(Status(402));
-                return Err(fault.with_details(details));
+                return Err(fault.with(Details(details)));
             }
         }
         for name in &chain {

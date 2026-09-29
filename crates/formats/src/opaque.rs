@@ -8,7 +8,7 @@
 //!     type Output = Got<Raw>;
 //!     // name, accepts, and the four factories from this module
 //! }
-//! dialect!(Raw);
+//! impl_format!(Raw);
 //! ```
 
 use std::marker::PhantomData;
@@ -16,9 +16,8 @@ use std::marker::PhantomData;
 use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, StatusCode};
-use respan_gateway_http::{Answer, Ask, bodiless};
+use respan_gateway_http::{RequestHead, ResponseHead, bodiless};
 
-use crate::default_content_type;
 use respan_gateway_http::{Decoder, Encoder};
 
 /// A request's message in format `F`, as the client sent it.
@@ -84,9 +83,9 @@ pub fn request_decoder<F: 'static>() -> Box<dyn Decoder<Sent<F>>> {
 /// The request encoder: each message as it came, under the client's head
 /// ([`body_changed`](crate::body_changed) unless relayed unread).
 pub fn request_encoder<F: 'static>(
-    client: Option<&Ask>,
+    client: Option<&RequestHead>,
     streams: bool,
-) -> Box<dyn Encoder<Sent<F>, Ask>> {
+) -> Box<dyn Encoder<Sent<F>, RequestHead>> {
     let mut head = crate::call_head(client);
     let head = move |first: Option<&Sent<F>>| {
         if first.is_some() || streams {
@@ -103,8 +102,8 @@ pub fn request_encoder<F: 'static>(
 /// body; any other answer read whole ([`whole::answer`](crate::whole::answer)).
 pub fn response_decoder<F: 'static>(
     format: &str,
-    head: &Answer,
-    call: &Ask,
+    head: &ResponseHead,
+    call: &RequestHead,
 ) -> Box<dyn Decoder<Got<F>>> {
     let switched = head.status == StatusCode::SWITCHING_PROTOCOLS && asked_to_switch(call);
     match head.status.is_success() || switched {
@@ -117,84 +116,38 @@ pub fn response_decoder<F: 'static>(
 }
 
 /// Whether a call asked to switch protocols (RFC 9110 7.8).
-fn asked_to_switch(call: &Ask) -> bool {
+fn asked_to_switch(call: &RequestHead) -> bool {
     call.headers.contains_key(http::header::UPGRADE)
 }
 
-/// The response encoder of `format`: messages as they came; a `refusal` as
-/// the provider's answer as it came, else its message as plain text; a
-/// failure after bytes aborts the body; nothing for a bodiless response.
+/// The response encoder of a format: messages as they came; nothing for a
+/// bodiless response. A refusal is [`Codec::refusal`]'s default, its
+/// message as plain text.
+///
+/// [`Codec::refusal`]: respan_gateway_http::Codec::refusal
 pub fn response_encoder<F: 'static>(
-    format: &str,
-    answer: Option<&Answer>,
-    ask: &Ask,
-    refusal: Option<&Fault>,
-) -> Box<dyn Encoder<Got<F>, Answer>> {
-    let mut head = crate::answer_head(answer);
-    let body = response_body(format, &mut head, ask, refusal);
+    answer: Option<&ResponseHead>,
+    ask: &RequestHead,
+) -> Box<dyn Encoder<Got<F>, ResponseHead>> {
+    let head = crate::response_head(answer);
+    let body: Box<dyn Encoder<Got<F>, ()>> = match bodiless(&ask.method, head.status) {
+        true => crate::whole::no_body(),
+        false => Box::new(Writes),
+    };
     crate::with_head(head, body)
-}
-
-fn response_body<F: 'static>(
-    format: &str,
-    head: &mut Answer,
-    ask: &Ask,
-    refusal: Option<&Fault>,
-) -> Box<dyn Encoder<Got<F>, ()>> {
-    if let Some(fault) = refusal {
-        return crate::whole::refusal(
-            format,
-            head,
-            ask,
-            fault,
-            |_| {},
-            |head| {
-                default_content_type(head, "text/plain; charset=utf-8");
-                Bytes::from(fault.message().to_owned())
-            },
-        );
-    }
-    if bodiless(&ask.method, head.status) {
-        return crate::whole::no_body();
-    }
-    Box::new(Writes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_http::http::{HeaderValue, header::CONTENT_TYPE};
 
     #[derive(Clone)]
     struct Raw;
 
-    // A refusal without an answer in this format is plain text under its
-    // status; one with it goes as it came.
-    #[test]
-    fn a_refusal_is_its_answer_or_plain_text() {
-        let ask = respan_gateway_http::fresh_ask();
-        let fault = Fault::not_found("gone");
-        let mut encoder = response_encoder::<Raw>("raw", None, &ask, Some(&fault));
-        let head = encoder.head(None);
-        let mut out = BytesMut::new();
-        assert!(encoder.end(&Err(fault), &mut out).is_ok());
-        let plain = HeaderValue::from_static("text/plain; charset=utf-8");
-        assert_eq!(head.headers.get(CONTENT_TYPE), Some(&plain));
-        assert_eq!((head.status.as_u16(), &out[..]), (404, &b"gone"[..]));
-        let mut answer = http::Response::new(Bytes::from_static(b"{}"));
-        *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-        let fault = Fault::upstream("x").with_answer("raw", answer);
-        let mut encoder = response_encoder::<Raw>("raw", None, &ask, Some(&fault));
-        let head = encoder.head(None);
-        let mut out = BytesMut::new();
-        assert!(encoder.end(&Err(fault), &mut out).is_ok());
-        assert_eq!((head.status.as_u16(), &out[..]), (429, &b"{}"[..]));
-    }
-
     #[test]
     fn bytes_pass_as_they_came() {
-        let head = respan_gateway_http::fresh_answer();
-        let call = respan_gateway_http::fresh_ask();
+        let head = respan_gateway_http::fresh_response_head();
+        let call = respan_gateway_http::fresh_request_head();
         let mut decoder = response_decoder::<Raw>("raw", &head, &call);
         let mut got = Vec::new();
         assert!(decoder.decode(Bytes::from_static(b"a"), &mut got).is_ok());
@@ -211,7 +164,7 @@ mod tests {
     fn a_101_no_one_asked_for_fails_the_call() {
         let (mut head, ()) = http::Response::new(()).into_parts();
         head.status = StatusCode::SWITCHING_PROTOCOLS;
-        let call = respan_gateway_http::fresh_ask();
+        let call = respan_gateway_http::fresh_request_head();
         let mut decoder = response_decoder::<Raw>("raw", &head, &call);
         let mut got = Vec::new();
         assert!(decoder.decode(Bytes::from_static(b"a"), &mut got).is_ok());

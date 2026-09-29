@@ -18,7 +18,7 @@ use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
-use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -35,27 +35,30 @@ impl Codec for Raw {
         "raw"
     }
 
-    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
         head.uri.path().starts_with("/raw")
     }
 
-    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<Sent<Raw>>> {
+    fn request_decoder(
+        &self,
+        _request: &respan_gateway_http::RequestHead,
+    ) -> Box<dyn Decoder<Sent<Raw>>> {
         opaque::request_decoder()
     }
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Sent<Raw>, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<Sent<Raw>, respan_gateway_http::RequestHead>> {
         opaque::request_encoder(client, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &respan_gateway_http::Answer,
-        request: &respan_gateway_http::Ask,
+        head: &respan_gateway_http::ResponseHead,
+        request: &respan_gateway_http::RequestHead,
         _sent: &Bytes,
     ) -> Box<dyn Decoder<Got<Raw>>> {
         opaque::response_decoder("raw", head, request)
@@ -63,16 +66,15 @@ impl Codec for Raw {
 
     fn response_encoder(
         &self,
-        answer: Option<&respan_gateway_http::Answer>,
-        request: &respan_gateway_http::Ask,
+        answer: Option<&respan_gateway_http::ResponseHead>,
+        request: &respan_gateway_http::RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Got<Raw>, respan_gateway_http::Answer>> {
-        opaque::response_encoder("raw", answer, request, refusal)
+    ) -> Box<dyn Encoder<Got<Raw>, respan_gateway_http::ResponseHead>> {
+        opaque::response_encoder(answer, request)
     }
 }
 
-dialect!(Raw);
+impl_format!(Raw);
 
 /// A gateway serving `format`, calling `provider` of `format` over `mock`
 /// at `base`, with `plugins`, recording outcomes on both edges.
@@ -228,13 +230,13 @@ impl Codec for Counted {
         OpenAiChat.name()
     }
 
-    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
         OpenAiChat.accepts(head)
     }
 
     fn request_decoder(
         &self,
-        request: &respan_gateway_http::Ask,
+        request: &respan_gateway_http::RequestHead,
     ) -> Box<dyn Decoder<Conversation>> {
         self.0.fetch_add(1, Ordering::Relaxed);
         OpenAiChat.request_decoder(request)
@@ -242,17 +244,17 @@ impl Codec for Counted {
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<Conversation, respan_gateway_http::RequestHead>> {
         OpenAiChat.request_encoder(client, body, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &respan_gateway_http::Answer,
-        request: &respan_gateway_http::Ask,
+        head: &respan_gateway_http::ResponseHead,
+        request: &respan_gateway_http::RequestHead,
         sent: &Bytes,
     ) -> Box<dyn Decoder<Reply>> {
         OpenAiChat.response_decoder(head, request, sent)
@@ -260,16 +262,24 @@ impl Codec for Counted {
 
     fn response_encoder(
         &self,
-        answer: Option<&respan_gateway_http::Answer>,
-        request: &respan_gateway_http::Ask,
+        answer: Option<&respan_gateway_http::ResponseHead>,
+        request: &respan_gateway_http::RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply, respan_gateway_http::Answer>> {
-        OpenAiChat.response_encoder(answer, request, body, refusal)
+    ) -> Box<dyn Encoder<Reply, respan_gateway_http::ResponseHead>> {
+        OpenAiChat.response_encoder(answer, request, body)
+    }
+
+    fn refusal(
+        &self,
+        fault: &Fault,
+        body: &Bytes,
+        head: &mut respan_gateway_http::ResponseHead,
+    ) -> Bytes {
+        OpenAiChat.refusal(fault, body, head)
     }
 }
 
-dialect!(Counted);
+impl_format!(Counted);
 
 /// Reads the input that came with the head.
 struct Reads;
@@ -412,8 +422,8 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
     gw.idle().await;
 
-    let body: respan_gateway_core::serde_json::Value =
-        respan_gateway_core::serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
+    let body: serde_json::Value =
+        serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["usage"]["prompt_tokens"], 7);
     assert!(meter.total().is_empty());
     let billed = bills.0.lock().map(|u| u.get(units::INPUT_TOKENS)).ok();

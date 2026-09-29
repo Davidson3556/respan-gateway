@@ -298,8 +298,8 @@ struct NoHead;
 impl Transport for NoHead {
     async fn send(
         &self,
-        _call: respan_gateway_http::Exchange<respan_gateway_http::Ask>,
-    ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::Answer>, Fault> {
+        _call: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
+    ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault> {
         tokio::time::sleep(Duration::from_secs(1)).await;
         Err(Fault::upstream("no head within 1s"))
     }

@@ -1,6 +1,6 @@
 //! The edge contract on the toy edge: the provider edge's staged answer
 //! (`Format::dial`), the W1 fix (a provider that refuses at its head gives
-//! the client a clean refusal) and rule 5 (outputs dropped unread).
+//! the client a clean refusal) and rule 4 (outputs dropped unread).
 #![allow(clippy::unwrap_used)]
 
 mod edge;
@@ -29,7 +29,7 @@ fn refusing() -> Dialer {
     fnt(|c| {
         assert!(
             c.relayed,
-            "a same-dialect call with the session's inputs relays"
+            "a same-name call with the session's inputs relays"
         );
         async { Ok(answer(403, chunks(vec!["denied"]))) }.boxed()
     })
@@ -88,7 +88,7 @@ async fn a_failure_after_the_head_ends_the_body() {
     drop(tx);
 }
 
-/// Rule 5: an edge that writes a head alone and drops the outputs unread
+/// Rule 4: an edge that writes a head alone and drops the outputs unread
 /// (a bodiless answer) ends their call `Ok` if its end was ready, else
 /// abandoned; the session ends as the edge says.
 #[tokio::test(flavor = "multi_thread")]
@@ -217,7 +217,7 @@ impl Plugin for Endless {
     }
 }
 
-/// Rule 5: an edge that drops `Ended` first ends the session abandoned, and
+/// Rule 4: an edge that drops `Ended` first ends the session abandoned, and
 /// its outputs then end `Err(abandoned)`, however much the answer had left.
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_end_abandoned_once_the_edge_drops_ended() {

@@ -1,6 +1,6 @@
 //! A client in one format reaching a provider in another.
 
-use respan_gateway_core::{futures, serde_json};
+use respan_gateway_core::futures;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
 use std::sync::{Arc, Mutex};
@@ -201,8 +201,8 @@ struct Marks<T>(T, Arc<Mutex<Vec<bool>>>);
 impl<T: Transport> Transport for Marks<T> {
     async fn send(
         &self,
-        call: Exchange<respan_gateway_http::Ask>,
-    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
+        call: Exchange<respan_gateway_http::RequestHead>,
+    ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
         let relayed = call.relayed;
         self.1
             .lock()

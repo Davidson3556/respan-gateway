@@ -8,7 +8,7 @@ knows no usage format.
   case before it is sent (a 402, `Status` from `respan-gateway-http`, if it does not fit) and settles it from the
   call's `Tally`, or at least the hold when its cost may be partial (never
   reported, or cut off); nothing when the provider refused before
-  beginning a response (`ProviderContext::is_head_only` and a failure that is
+  beginning a response (`ProviderContext::is_refused` and a failure that is
   not a cut-off). `.ttl(..)` bounds a hold.
 - `Quote::new(accounts, reserve)`: who pays and the most the call can cost.
   The quote gets the call (`&mut ProviderContext`) and its `Tally`, so it

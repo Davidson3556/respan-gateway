@@ -3,10 +3,9 @@
 //! [`Plugin`]s and streams the [`Response`] back (`docs/ARCHITECTURE.md`).
 //!
 //! The kernel routes events and never sees a byte, a head or a key: a
-//! client edge and a provider edge, each a [`Format`] (a dialect) over a
-//! connection, turn bytes and heads into a kind's events and back (decision
-//! 0020). The byte machinery of HTTP's formats lives in
-//! `respan-gateway-http`.
+//! client edge and a provider edge, each a [`Format`] over a connection,
+//! turn bytes and heads into a kind's events and back (decision 0020). The
+//! byte machinery of HTTP's formats lives in `respan-gateway-http`.
 
 mod call;
 mod context;
@@ -26,14 +25,14 @@ pub use call::Call;
 pub use context::ClientContext;
 pub use extensions::Extensions;
 pub use fault::{Fault, codes};
-pub use format::{Dialed, Ended, Events, Format, Half, Origin, Reply};
+pub use format::{Dialed, Ended, Events, Format, Half, Origin};
 pub use gateway::Gateway;
 pub use plugin::{Filter, Plugin};
 pub use provider::ProviderContext;
 pub use response::Response;
 
 /// The crates the kernel's contracts use, at the kernel's versions.
-pub use {async_trait::async_trait, futures, serde_json};
+pub use {async_trait::async_trait, futures};
 
 /// Calling and reading inputs take `&mut ClientContext`, which `on_client`
 /// alone gets: end hooks and a call's hooks see the request by `&`.

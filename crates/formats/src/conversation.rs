@@ -9,14 +9,14 @@
 //! [`Content::Other`]); translating it is refused if it can change the
 //! answer.
 
-use respan_gateway_core::{Fault, serde_json};
+use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::Bytes;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::Usage;
-use crate::relayed::{Origin, Relayed};
+use crate::relayed::{Came, Relayed};
 
 /// Usage units every conversation format reports alike.
 pub mod units {
@@ -76,7 +76,7 @@ impl Conversation {
     }
 
     /// The body it was decoded from, if `format` decoded it.
-    pub fn origin(&self, format: &str) -> Option<&Origin<Conversation>> {
+    pub fn origin(&self, format: &str) -> Option<&Came<Conversation>> {
         self.origin.origin(format)
     }
 }
@@ -353,7 +353,7 @@ impl Reply {
     }
 
     /// The message it was decoded from, if `format` decoded it.
-    pub fn origin(&self, format: &str) -> Option<&Origin<Reply>> {
+    pub fn origin(&self, format: &str) -> Option<&Came<Reply>> {
         self.origin.origin(format)
     }
 }

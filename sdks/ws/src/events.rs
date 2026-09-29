@@ -4,17 +4,17 @@
 use std::sync::Arc;
 
 use respan_gateway_core::Fault;
-use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{self as formats, whole};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{CONNECTION, UPGRADE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
-use respan_gateway_http::{Answer, Ask};
-use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
+use respan_gateway_http::{RequestHead, ResponseHead};
+use serde_json::{self, Value};
 
 /// Whether `head` asks to upgrade to a WebSocket.
-fn upgrades(head: &Ask) -> bool {
+fn upgrades(head: &RequestHead) -> bool {
     let asks = head.headers.get_all(UPGRADE).iter();
     asks.filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(','))
@@ -133,11 +133,11 @@ impl Codec for JsonEvents {
         &self.name
     }
 
-    fn accepts(&self, head: &Ask) -> bool {
+    fn accepts(&self, head: &RequestHead) -> bool {
         head.method == Method::GET && upgrades(head) && head.uri.path().ends_with(&self.path)
     }
 
-    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<ClientEvent>> {
+    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<ClientEvent>> {
         let name = self.name.clone();
         formats::message_decoder(move |raw: Bytes| {
             let json = serde_json::from_slice(&raw)
@@ -148,10 +148,10 @@ impl Codec for JsonEvents {
 
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<ClientEvent, Ask>> {
+    ) -> Box<dyn Encoder<ClientEvent, RequestHead>> {
         let mut head = formats::call_head(client);
         if client.is_none() {
             head.method = Method::GET;
@@ -175,8 +175,8 @@ impl Codec for JsonEvents {
     /// call, as its format reads it.
     fn response_decoder(
         &self,
-        answer: &Answer,
-        call: &Ask,
+        answer: &ResponseHead,
+        call: &RequestHead,
         _sent: &Bytes,
     ) -> Box<dyn Decoder<ProviderEvent>> {
         let switched = answer.status == StatusCode::SWITCHING_PROTOCOLS && upgrades(call);
@@ -191,31 +191,15 @@ impl Codec for JsonEvents {
         })
     }
 
-    /// The provider's 101, or a fresh one; a `refusal` as the provider's
+    /// The provider's 101, or a fresh one; a refusal is the provider's
     /// answer as it came, else its message as plain text.
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<ProviderEvent, Answer>> {
-        let mut head = formats::answer_head(answer);
-        if let Some(fault) = refusal {
-            let body = match respan_gateway_http::answered(&self.name, fault, &mut head) {
-                Some(body) => body,
-                None => {
-                    formats::default_content_type(&mut head, "text/plain; charset=utf-8");
-                    Bytes::from(fault.message().to_owned())
-                }
-            };
-            let error = head.status.is_client_error() || head.status.is_server_error();
-            let body = match error {
-                true => whole::written(body),
-                false => whole::unwritable(),
-            };
-            return formats::with_head(head, body);
-        }
+    ) -> Box<dyn Encoder<ProviderEvent, ResponseHead>> {
+        let mut head = formats::response_head(answer);
         if upgrades(ask) && answer.is_none() {
             head.status = StatusCode::SWITCHING_PROTOCOLS;
             head.headers
@@ -229,4 +213,4 @@ impl Codec for JsonEvents {
     }
 }
 
-dialect!(JsonEvents);
+impl_format!(JsonEvents);

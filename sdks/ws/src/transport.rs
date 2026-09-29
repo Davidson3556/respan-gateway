@@ -12,7 +12,7 @@ use respan_gateway_core::{Fault, async_trait, codes};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap};
-use respan_gateway_http::{Answer, Ask, full};
+use respan_gateway_http::{RequestHead, ResponseHead, full};
 use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
@@ -172,7 +172,7 @@ fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
 
 #[async_trait]
 impl Transport for WsTransport {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let mut call = call;
         proxy_call(&mut call.head);
         strip_client_origin_headers(&mut call.head.headers);

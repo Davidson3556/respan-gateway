@@ -27,7 +27,7 @@ pair of formats grow with the square of the formats.
 - The client edge owns when a response head goes out. HTTP's goes with the
   body's first byte, so a failure before it is still a refusal; a quiet
   stream's codec opens it at once (`Encoder::open`), and an upgrade's goes
-  when the reply resolves (0020, rule 4).
+  when the reply resolves (0020, rule 3).
 - A `Call` runs in the task awaiting it; its request ends it, before its
   own end hooks.
 - Every filter gets exactly one end, even after a failure, drop or panic

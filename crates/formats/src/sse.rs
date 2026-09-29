@@ -1,10 +1,10 @@
 //! Server-sent events, for any format that streams them.
 
 use respan_gateway_core::Fault;
-use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_http::Decoder;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http;
+use serde_json::{self, Value};
 
 /// A response's content type, if it is readable.
 pub(crate) fn content_type(head: &http::response::Parts) -> Option<&str> {

@@ -12,11 +12,11 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::serde_json::{self, Map, Value};
 use respan_gateway_core::{Fault, Filter};
 use respan_gateway_formats::conversation::{Content, Conversation, Piece, Reply};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
+use serde_json::{self, Map, Value};
 
 /// The code of a refusal of content that cannot be read.
 pub const UNREADABLE: &str = "unreadable_content";

@@ -16,8 +16,8 @@ already streams; only a streaming request was missing.
 - A request streams its inputs if its adapter says so
   (`http::Accepted::new(head, body, streams)`; the HTTP adapter sets it
   for `Upgrade`): its client edge resolves `accept` at once, and the
-  inputs come after the head, one per data frame, never ended at once
-  (0020, rule 1). Any other request is whole: its body, even empty, is
+  inputs come after the head, one per data frame (`accept` returns
+  `Some(inputs)`, 0020). Any other request is whole: its body, even empty, is
   one input in its origin, so a quiet stream such as an MCP `GET` is an
   ordinary request.
 - `on_client` runs at the head, as waiting for more would deadlock a
@@ -63,5 +63,5 @@ already streams; only a streaming request was missing.
 - 0012: the adapter, not `Upgrade`, says whether a request streams; a 101
   is the formats' and the adapter's.
 - 0015: it said so with `Exchange::streams`, not an argument of `handle`.
-- 0020: the core has no flag: a session's inputs are an `Events` that is
-  ended at once or not (rule 1); `Exchange::streams` is HTTP's.
+- 0020: the core has no flag: `accept` returns `Some(inputs)` if inputs
+  follow the head and `None` if not; `Exchange::streams` is HTTP's.

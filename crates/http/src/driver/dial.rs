@@ -1,5 +1,5 @@
 //! The provider edge: a call written, head and body, handed to its
-//! transport, and the answer classified at its head (rule 3), then read
+//! transport, and the answer classified at its head (rule 2), then read
 //! into outputs.
 
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use respan_gateway_core::{Dialed, Events, Extensions, Fault, Origin};
 use super::Came;
 use super::reader::{Failure, Reader};
 use super::writer::Writer;
-use crate::{Answer, Ask, Codec, Dialer, Encoder, Exchange};
+use crate::{Codec, Dialer, Encoder, Exchange, RequestHead, ResponseHead};
 
 /// Whose content an input is: whose fault it is if it cannot be written.
 #[derive(Clone, Copy)]
@@ -47,7 +47,7 @@ impl Whose {
 ///   replaced; a call with its own input (`Call::with_input`) has none. The
 ///   transport passes on the client's keys
 ///   ([`credentials`](crate::credentials)) only then.
-/// - The answer is classified at its head (rule 3): a non-2xx answer, but
+/// - The answer is classified at its head (rule 2): a non-2xx answer, but
 ///   a 101 to a call that asked to switch protocols, is read whole before
 ///   this resolves, so its codec's failure before any output resolves
 ///   `Ok((origin, Err(fault)))`. It is read up to `ERROR_BODY_CAP` bytes
@@ -107,7 +107,7 @@ pub fn dial<C: Codec + Clone>(
 
 /// Whether `answer` to the call `sent` is read whole before it is
 /// classified: a non-2xx, but a 101 to a call that asked to switch.
-fn is_whole(answer: &Answer, sent: &Ask) -> bool {
+fn is_whole(answer: &ResponseHead, sent: &RequestHead) -> bool {
     let asked = sent.headers.contains_key(UPGRADE);
     let open = match answer.status {
         StatusCode::SWITCHING_PROTOCOLS => asked,
@@ -129,7 +129,15 @@ fn first_frame<C: Codec>(
     opening: Option<(&C::Input, bool)>,
     came: Option<&Came>,
     streams: bool,
-) -> Result<(Ask, Bytes, Box<dyn Encoder<C::Input, Ask>>, bool), Fault> {
+) -> Result<
+    (
+        RequestHead,
+        Bytes,
+        Box<dyn Encoder<C::Input, RequestHead>>,
+        bool,
+    ),
+    Fault,
+> {
     let client = came.map(|c| &*c.head);
     // A plugin's or filtered input as its value; else as it came, its bytes
     // unread if relayed.

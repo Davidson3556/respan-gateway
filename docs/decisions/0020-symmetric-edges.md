@@ -20,33 +20,36 @@ edge is a format speaking over a connection: the client edge is accepted,
 the provider edge is dialed. The core has ten public types (`Call`,
 `ClientContext`, `Extensions`, `Fault`, `Filter`, `Format`, `Gateway`,
 `Plugin`, `ProviderContext`, `Response`) and aliases (`Dialed`, `Ended`,
-`Events`, `Half`, `Origin`, `Reply`). It depends on no `http` crate and its contracts carry no head or body.
+`Events`, `Half`, `Origin`). It depends on no `http` crate and its
+contracts carry no head or body.
 
-**`Format` is the dialect and the edge contract.** Associated types `Input`
+**`Format` is one protocol's view of a kind and the edge contract.** Associated types `Input`
 and `Output` (the kind), `Wire` (a client connection as its adapter hands
 it over) and `Dialer` (how calls reach one provider); methods `name`,
 `accepts(&Wire)`, `is_content`, `accept` (the client edge), `opening` (the
 lazy first input) and `dial` (the provider edge). Formats of one name share
 a kind, wire and dialer. Its rules, in the rustdoc of `Format`:
 
-1. An `Events` that nothing will follow is already ended (its first poll
-   is `Ready(None)`); this holds for `accept`'s inputs, and `dial` is told
-   `later: None` instead. The gateway polls a client's inputs once as the
-   session opens and reads what that yields first. `opening` is `Some`
-   only if the inputs had ended then.
-2. `accept` resolves when the request is in and never awaits its `reply`;
+1. `accept` resolves when the request is in and never awaits its `reply`;
    the wire carries the adapter's slot, and the adapter drives
-   `Gateway::handle` to its end while it awaits that slot.
-3. A provider edge classifies its answer at its head: a refusal resolves
-   `Ok((origin, Err(fault)))`, which `is_head_only` reports.
-4. The client edge owns its head timing: a refusal is written as one; an
+   `Gateway::handle` to its end while it awaits that slot. Its inputs are
+   `Some(events)` if any follow the head and `None` if none do, as `dial`'s
+   `later` says it. `opening` is `Some` only for a request whose inputs are
+   `None`.
+2. A provider edge classifies its answer at its head: a refusal resolves
+   `Ok((origin, Err(fault)))`, which `is_refused` reports.
+3. The client edge owns its head timing: a refusal is written as one; an
    open answer's head when the edge decides.
-5. The client edge calls `Ended` exactly when its answer's end is out, or
+4. The client edge calls `Ended` exactly when its answer's end is out, or
    drops it (the session ends `abandoned`); `Ended(Err(f))` also ends the
    answer's call with `f`; outputs dropped unread end their call as its end,
    if ready, says, else `abandoned`.
-6. What a provider edge's outputs have ready at once is one batch: the
+5. What a provider edge's outputs have ready at once is one batch: the
    call's filters see it all before the client's see its first.
+
+The client edge has defaults (`accepts` is false, `accept` refuses, `opening`
+is `None`), so a format that keeps them is dial-only, such as an in-process
+model whose `Dialer` is the model.
 
 `dial` returns `Err` now (not sent), a future's `Err` (sent, not
 answered), `Ok((origin, Err(fault)))` (refused) or `Ok((origin, Ok(outputs)))`
@@ -77,7 +80,8 @@ another wire type never accepts it.
 
 **HTTP's bytes live in `crates/http`.** An HTTP format implements `Codec`
 (`accepts`, `request_decoder`, `request_encoder`, `response_decoder`,
-`response_encoder`, `is_content`) and gets `Format` from `dialect!(Type)`;
+`response_encoder`, `refusal`, `is_content`) and gets `Format` from
+`impl_format!(Type)`;
 `Wire` is `Accepted` and `Dialer` is `Dialer`, made of any `Transport`.
 `Decoder`, `Encoder`, `Transport`, `Exchange`, `Frames` and the adapter
 (`serve`, `handle`) are there. One symmetric pair, a reader (frames to
@@ -102,8 +106,8 @@ A format on another wire implements `Format` itself.
   or its format's own.
 - A streaming client that a provider refuses at its head gets a complete
   refusal, not a head and then a failing body (W1).
-- `is_head_only` means "the provider refused at its head", a refusal
-  classified by the provider edge (rule 3).
+- `is_refused` means "the provider refused at its head", a refusal
+  classified by the provider edge (rule 2).
 - `examples/jobs.rs` keys a request by its conversation's origin bytes.
 - Amends 0003, 0004, 0005, 0006, 0007, 0008, 0011, 0012, 0013, 0014, 0015 and
   0016, and supersedes 0017.
@@ -117,7 +121,7 @@ Six steps, each green:
 3. The kernel on the edge contract, under the name `Dialect`; the old
    `Format` and `Transport` served by a private legacy driver in the core.
    It adopted seven fixes to the draft: `dial`'s later inputs are an
-   `Option`; `Reply` and `Dialed` are aliases; the gateway polls a client's
+   `Option`; `Dialed` is an alias; the gateway polls a client's
    inputs once at open; `opening` is `Some` only if the inputs had ended;
    `accept` never awaits its reply; outputs dropped unread end their call as
    their end says; `Ended` dropped first cuts the outputs with
@@ -125,9 +129,33 @@ Six steps, each green:
 4. The HTTP driver added to `crates/http`.
 5. The flip: the legacy driver and the old `Format`, `Transport`,
    `Exchange`, `Decoder` and `Encoder` left the core; `Dialect` became
-   `Format`; every HTTP format became a `Codec` plus `dialect!`; transports
+   `Format`; every HTTP format became a `Codec` plus `impl_format!`; transports
    import `http::Transport`.
 6. Clean-up: the documentation and the decision records.
 
 The design, with the reasoning and the costs, is
 [target-architecture.md](../target-architecture.md).
+
+Loop 1 (a review of the contract's simplicity and naming), one pass:
+
+- `accept` returns `Option<Events<Input>>`: `None` means no inputs follow, as
+  `dial`'s `later` does. The rule that an `Events` whose first poll is
+  `Ready(None)` is ended, and the gateway's read-ahead that found it, are
+  gone.
+- The client edge's `reply` is `(Half<Output>, Ended)`: no edge read the
+  extensions it carried, and `Reply` left the core (now 5 aliases).
+- The client edge has defaults, so a provider-only format needs no stubs.
+- Kept, not changed: the per-input bool in `dial`. The core cannot own the
+  fault split: an HTTP body's frames are written by the format's encoder
+  and read by the transport, so a failure to write a later input never
+  passes through the core, and the flag of the last input pulled cannot be
+  matched to it there.
+- Renames: `is_head_only` is `is_refused`; `dialect!` is `impl_format!`
+  and "dialect" is no synonym of format; `relayed::Origin<T>` is
+  `Came<T>`; `Ask` and `Answer` are `RequestHead` and `ResponseHead`.
+- A `Codec` writes a refusal's words with `refusal(fault, body, head)`;
+  the driver writes a provider's answer as it came (`answered`) and the
+  status, so `response_encoder` lost its `refusal` parameter.
+- `Fault::with_details` and `details` are a hint, `formats::Details`, as
+  `Status` is (0019): the kernel never read them, and the core no longer
+  depends on `serde_json`.

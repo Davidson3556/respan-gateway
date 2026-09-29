@@ -8,7 +8,7 @@ use respan_gateway_http::bytes::Bytes;
 /// The bytes a value was decoded from, in `format`, and what they said.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct Origin<T> {
+pub struct Came<T> {
     /// The name of the format that decoded the bytes.
     pub format: Arc<str>,
     /// The message as it came.
@@ -20,7 +20,7 @@ pub struct Origin<T> {
 /// Where a value came from, if decoded; never part of what it says, so
 /// always equal.
 #[derive(Debug)]
-pub struct Relayed<T>(Option<Arc<Origin<T>>>);
+pub struct Relayed<T>(Option<Arc<Came<T>>>);
 
 /// Came from nowhere: made by a plugin.
 impl<T> Default for Relayed<T> {
@@ -47,7 +47,7 @@ impl<T: PartialEq> Relayed<T> {
     /// Decoded by `format` from `bytes`, which say `said`.
     pub fn came(format: &Arc<str>, bytes: Bytes, said: T) -> Self {
         let format = format.clone();
-        Self(Some(Arc::new(Origin {
+        Self(Some(Arc::new(Came {
             format,
             bytes,
             said,
@@ -55,7 +55,7 @@ impl<T: PartialEq> Relayed<T> {
     }
 
     /// Its origin if `format` decoded it: the shape to write changes into.
-    pub fn origin(&self, format: &str) -> Option<&Origin<T>> {
+    pub fn origin(&self, format: &str) -> Option<&Came<T>> {
         self.0.as_deref().filter(|o| *o.format == *format)
     }
 

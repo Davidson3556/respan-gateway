@@ -31,7 +31,7 @@ could carry.
 
 - Fewer public methods; `Encoder` implementations fold the done check
   into `open`, and delegating encoders can no longer forget to forward it.
-- A call refused before it began (`is_head_only`, 0015) is charged
+- A call refused before it began (`is_refused`, 0015) is charged
   nothing by the ledger; a failure after a value, at least its reserve.
 - With `Until::End`, `sdks/routing` judges a success by the end
   `until_end` returned.

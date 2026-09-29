@@ -16,7 +16,7 @@ use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::{BodyExt, Full};
-use respan_gateway_http::{Answer, Ask, Body, Credential};
+use respan_gateway_http::{Body, Credential, RequestHead, ResponseHead};
 use tokio::process::Command;
 
 use crate::session::Session;
@@ -180,7 +180,7 @@ fn no_session() -> Fault {
 
 #[async_trait]
 impl Transport for StdioTransport {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let (call, extensions) = respan_gateway_http::call(call);
         let resp = self.send_http(call, &extensions).await?;
         Ok(respan_gateway_http::answer(resp))

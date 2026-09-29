@@ -1,4 +1,3 @@
-use respan_gateway_core::serde_json::{self, json};
 use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role,
@@ -9,6 +8,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, run_filter as run, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
+use serde_json::{self, json};
 
 const OPENAI: &str = "http://openai.test/v1";
 const ANTHROPIC: &str = "http://anthropic.test/v1";

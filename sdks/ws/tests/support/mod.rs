@@ -15,7 +15,7 @@ use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
-use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{RequestHead, ResponseHead};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -41,27 +41,27 @@ impl Codec for Raw {
         "raw"
     }
 
-    fn accepts(&self, head: &Ask) -> bool {
+    fn accepts(&self, head: &RequestHead) -> bool {
         head.method == Method::GET && head.headers.contains_key(UPGRADE)
     }
 
-    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<Sent<Raw>>> {
+    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Sent<Raw>>> {
         opaque::request_decoder::<Raw>()
     }
 
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Sent<Raw>, Ask>> {
+    ) -> Box<dyn Encoder<Sent<Raw>, RequestHead>> {
         opaque::request_encoder::<Raw>(client, streams)
     }
 
     fn response_decoder(
         &self,
-        answer: &Answer,
-        call: &Ask,
+        answer: &ResponseHead,
+        call: &RequestHead,
         _sent: &Bytes,
     ) -> Box<dyn Decoder<Got<Raw>>> {
         opaque::response_decoder::<Raw>("raw", answer, call)
@@ -69,16 +69,15 @@ impl Codec for Raw {
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Got<Raw>, Answer>> {
-        opaque::response_encoder::<Raw>("raw", answer, ask, refusal)
+    ) -> Box<dyn Encoder<Got<Raw>, ResponseHead>> {
+        opaque::response_encoder::<Raw>(answer, ask)
     }
 }
 
-dialect!(Raw);
+impl_format!(Raw);
 
 /// A gateway serving over real sockets.
 pub struct Server {
@@ -583,7 +582,7 @@ async fn tap(
     }
 }
 
-use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 pub use respan_gateway_testkit::{Calls, Outcomes};
 use respan_gateway_ws::WsTransport;
 

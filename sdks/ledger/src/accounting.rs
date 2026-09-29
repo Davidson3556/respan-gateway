@@ -66,7 +66,7 @@ impl Tally {
 /// have billed without its cost reported in full (a tally never added to,
 /// a stream cut off, or a call sent that failed before its head) is
 /// charged at least its reserve; one the provider answered with an error
-/// (a refusal: [`ProviderContext::is_head_only`]) is charged nothing. It uses the provider edge alone: register
+/// (a refusal: [`ProviderContext::is_refused`]) is charged nothing. It uses the provider edge alone: register
 /// it last, so it prices the call as every other plugin left it, and once
 /// per gateway. A filter the quote adds is then the call's last, so it
 /// sees each output first, before another plugin's filter can fail on it.
@@ -114,7 +114,7 @@ impl<L: Ledger> Accounting<L> {
             _ if !px.is_sent() => 0,
             // The provider answered with an error before any content: its
             // refusal, not a response cut off or a client that left.
-            Err(fault) if px.is_head_only() && !is_cut(fault) => 0,
+            Err(fault) if px.is_refused() && !is_cut(fault) => 0,
             Ok(()) if hold.tally.is_reported() => spent,
             // Cut off, never reported, or sent and given up, such as timed
             // out waiting for its head: it may have reached the provider,

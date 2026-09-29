@@ -3,7 +3,7 @@
 //! text, each one input; a provider's dialer answers a status and text
 //! frames, each one event: `DONE` completes it, `ERR` fails it, `PANIC`
 //! panics its stream, and one that ends without `DONE` is truncated. The
-//! edges write the head as the contract's rule 4 says.
+//! edges write the head as the contract's rule 3 says.
 #![allow(dead_code, clippy::unwrap_used)]
 use std::future::Future;
 use std::pin::Pin;
@@ -132,8 +132,8 @@ impl Format for Toy {
     fn accept(
         &self,
         wire: ToyWire,
-        reply: BoxFuture<'static, Reply<Out>>,
-    ) -> BoxFuture<'static, Half<In>> {
+        reply: BoxFuture<'static, (Half<Out>, Ended)>,
+    ) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<In>>, Fault>)> {
         boom(18);
         let ToyWire {
             frames,
@@ -160,7 +160,7 @@ impl Format for Toy {
                 }) as Origin)
             };
             if streams {
-                return (origin(None), Ok(inputs(frames)));
+                return (origin(None), Ok(Some(inputs(frames))));
             }
             // One-shot: the request is in once its body is.
             let (mut frames, mut all) = (frames, String::new());
@@ -170,7 +170,7 @@ impl Format for Toy {
                     Err(fault) => return (origin(None), Err(fault)),
                 }
             }
-            (origin(Some(all)), Ok(stream::empty().boxed()))
+            (origin(Some(all)), Ok(None))
         }
         .boxed()
     }
@@ -291,8 +291,12 @@ fn events(body: Text) -> Events<Out> {
 
 /// Writes a reply: a refusal as one; an open answer's head at once if it
 /// streams, else with its first bytes, a failure before any refused.
-async fn write(reply: BoxFuture<'static, Reply<Out>>, streams: bool, quirk: Quirk) -> ToyReply {
-    let (_ext, (_origin, outputs), ended) = reply.await;
+async fn write(
+    reply: BoxFuture<'static, (Half<Out>, Ended)>,
+    streams: bool,
+    quirk: Quirk,
+) -> ToyReply {
+    let ((_origin, outputs), ended) = reply.await;
     let mut writer = Writer {
         outputs: stream::empty().boxed(),
         ended: Some(ended),
@@ -667,7 +671,7 @@ impl Plugin for Rec {
         boom(23);
         let mut log = self.log();
         log.prov_end.push((px.is_sent(), end.clone()));
-        log.head_only.push(px.is_head_only());
+        log.head_only.push(px.is_refused());
     }
 }
 

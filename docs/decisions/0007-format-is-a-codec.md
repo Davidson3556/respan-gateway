@@ -1,6 +1,6 @@
 # 0007. A format is one protocol's codec
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0020](0020-symmetric-edges.md) (the codec is `http::Codec`, in `crates/http`; the core's `Format` is the edge contract, which `dialect!` makes of a codec)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0020](0020-symmetric-edges.md) (the codec is `http::Codec`, in `crates/http`; the core's `Format` is the edge contract, which `impl_format!` makes of a codec)
 - Date: 2026-09-27
 
 ## Context
@@ -15,7 +15,7 @@ two places wrote a call's body.
 - An HTTP format is one protocol's codec (`http::Codec`): beside `name`
   and `accepts`, a request and a response decoder and encoder. Codec and
   transport are stateless and shared; each body, either way, gets its own
-  decoder or encoder, which keeps that stream's state. `dialect!(Type)`
+  decoder or encoder, which keeps that stream's state. `impl_format!(Type)`
   makes the codec a core `Format`, and one driver in `crates/http` runs
   every codec on both edges (0020).
 - Codecs see the heads they need: the request decoder the client's head;

@@ -66,7 +66,7 @@ the provider edge, each a format, own them
   provider's. Its `Input` and `Output` types are its kind: formats of one
   name relay each message as the bytes it came in, formats of one kind
   translate. An HTTP format is a **Codec** (`crates/http`), one
-  protocol's decoders and encoders, made a `Format` by `dialect!`; it
+  protocol's decoders and encoders, made a `Format` by `impl_format!`; it
   reaches a provider through a **Transport** (`http::Transport`), which
   owns the URL, the keys and the connection.
 - **Call**: what the gateway sends a provider on a request's behalf

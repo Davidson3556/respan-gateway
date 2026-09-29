@@ -5,7 +5,6 @@ use std::marker::PhantomData;
 use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, StatusCode};
-use respan_gateway_http::{Answer, Ask, bodiless};
 use respan_gateway_http::{Decoder, Encoder};
 
 /// A decoder for a body of `format` read whole: a success's bytes go to
@@ -46,7 +45,7 @@ pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault 
 }
 
 /// A decoder of nothing, for a response with no body
-/// ([`bodiless`]): it ends at once, whatever
+/// ([`bodiless`](respan_gateway_http::bodiless)): it ends at once, whatever
 /// bytes came.
 pub fn nothing<T: 'static>() -> Box<dyn Decoder<T>> {
     Box::new(Nothing)
@@ -76,7 +75,7 @@ pub fn unstreamable<T: 'static>(format: &str) -> Box<dyn Encoder<T, ()>> {
 }
 
 /// An encoder of a response with no body
-/// ([`bodiless`]): its head goes at once and
+/// ([`bodiless`](respan_gateway_http::bodiless)): its head goes at once and
 /// nothing more is read ([`Encoder::open`]).
 pub fn no_body<T: 'static>() -> Box<dyn Encoder<T, ()>> {
     Box::new(Plain {
@@ -85,61 +84,11 @@ pub fn no_body<T: 'static>() -> Box<dyn Encoder<T, ()>> {
     })
 }
 
-/// An encoder of a refusal a protocol cannot write, such as a fault whose
-/// status is no error's: it fails at the end, so the adapter writes it.
-pub fn unwritable<T: 'static>() -> Box<dyn Encoder<T, ()>> {
-    Box::new(Plain {
-        fails: true,
-        ..Plain::default()
-    })
-}
-
-/// Whether `status` says an error, as a refusal's must to be written.
-fn is_error(status: u16) -> bool {
-    (400..600).contains(&status)
-}
-
-/// An encoder that writes `body` at the end, however it ends, and no
-/// value: a refusal's.
-pub fn written<T: 'static>(body: Bytes) -> Box<dyn Encoder<T, ()>> {
-    Box::new(Plain {
-        body,
-        ..Plain::default()
-    })
-}
-
-/// A refusal of `fault` in `format` under `head`, to the request `ask`: the
-/// provider's answer as it came (then `answered` labels the head), else
-/// `words`; no body where HTTP has none; unwritable for a status no error's.
-pub(crate) fn refusal<T: 'static>(
-    format: &str,
-    head: &mut Answer,
-    ask: &Ask,
-    fault: &Fault,
-    answered: impl FnOnce(&mut Answer),
-    words: impl FnOnce(&mut Answer) -> Bytes,
-) -> Box<dyn Encoder<T, ()>> {
-    let body = match respan_gateway_http::answered(format, fault, head) {
-        Some(body) => {
-            answered(head);
-            body
-        }
-        None if !is_error(respan_gateway_http::status(fault).as_u16()) => return unwritable(),
-        None => words(head),
-    };
-    match bodiless(&ask.method, head.status) {
-        true => written(Bytes::new()),
-        false => written(body),
-    }
-}
-
-/// Writes no value: `body` at the end, or the end's failure if `fails`;
-/// fails to open with `unopenable`; done before it began if `done`.
+/// Writes no value; fails to open with `unopenable`; done before it began if
+/// `done`.
 #[derive(Default)]
 struct Plain {
-    body: Bytes,
     unopenable: Option<String>,
-    fails: bool,
     done: bool,
 }
 
@@ -157,11 +106,7 @@ impl<T> Encoder<T, ()> for Plain {
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        if self.fails {
-            return end.clone();
-        }
-        out.extend_from_slice(&std::mem::take(&mut self.body));
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
     }
 }

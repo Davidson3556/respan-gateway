@@ -12,9 +12,9 @@
 use std::sync::Arc;
 
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::http::{HeaderValue, StatusCode};
+use serde_json::{Value, json};
 
 use respan_gateway_http::Transport;
 use respan_gateway_mcp::{

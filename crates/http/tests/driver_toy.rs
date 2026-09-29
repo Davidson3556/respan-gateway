@@ -18,8 +18,8 @@ use respan_gateway_core::{Dialed, Extensions, Fault, Gateway, async_trait};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Accepted, Answer, Ask, Body, Codec, Decoder, Dialer, Encoder, Exchange, Frames, Transport,
-    dialect, fresh_answer, fresh_ask, http,
+    Accepted, Body, Codec, Decoder, Dialer, Encoder, Exchange, Frames, RequestHead, ResponseHead,
+    Transport, fresh_request_head, fresh_response_head, http, impl_format,
 };
 use respan_gateway_testkit::{Calls, Outcomes};
 
@@ -55,27 +55,32 @@ impl Codec for Toy {
         "toy"
     }
 
-    fn accepts(&self, _: &Ask) -> bool {
+    fn accepts(&self, _: &RequestHead) -> bool {
         true
     }
 
-    fn request_decoder(&self, _: &Ask) -> Box<dyn Decoder<In>> {
+    fn request_decoder(&self, _: &RequestHead) -> Box<dyn Decoder<In>> {
         Box::new(ReqDec)
     }
 
     fn request_encoder(
         &self,
-        _: Option<&Ask>,
+        _: Option<&RequestHead>,
         _: &mut Bytes,
         _: bool,
-    ) -> Box<dyn Encoder<In, Ask>> {
+    ) -> Box<dyn Encoder<In, RequestHead>> {
         Box::new(ReqEnc {
             open: self.open,
             upgrade: self.upgrade,
         })
     }
 
-    fn response_decoder(&self, answer: &Answer, _: &Ask, _: &Bytes) -> Box<dyn Decoder<Out>> {
+    fn response_decoder(
+        &self,
+        answer: &ResponseHead,
+        _: &RequestHead,
+        _: &Bytes,
+    ) -> Box<dyn Decoder<Out>> {
         Box::new(RespDec {
             done: false,
             status: answer.status.as_u16(),
@@ -84,20 +89,21 @@ impl Codec for Toy {
 
     fn response_encoder(
         &self,
-        _: Option<&Answer>,
-        _: &Ask,
+        _: Option<&ResponseHead>,
+        _: &RequestHead,
         _: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Out, Answer>> {
-        assert!(!(self.unwritable && refusal.is_some()), "unwritable");
-        let status = refusal.map_or(self.answers.unwrap_or(200), |f| {
-            respan_gateway_http::status(f).as_u16()
-        });
+    ) -> Box<dyn Encoder<Out, ResponseHead>> {
+        let status = self.answers.unwrap_or(200);
         Box::new(RespEnc { status })
+    }
+
+    fn refusal(&self, fault: &Fault, _: &Bytes, _: &mut ResponseHead) -> Bytes {
+        assert!(!self.unwritable, "unwritable");
+        Bytes::from(format!("ERR {}", fault.code()))
     }
 }
 
-dialect!(Toy);
+impl_format!(Toy);
 
 /// `BAD` decodes to `before-bad` and then fails, in the same chunk.
 struct ReqDec;
@@ -125,7 +131,7 @@ struct ReqEnc {
     upgrade: bool,
 }
 
-impl Encoder<In, Ask> for ReqEnc {
+impl Encoder<In, RequestHead> for ReqEnc {
     fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
         let Some((bytes, done)) = self.open else {
             return Ok(false);
@@ -134,8 +140,8 @@ impl Encoder<In, Ask> for ReqEnc {
         Ok(done)
     }
 
-    fn head(&mut self, _: Option<&In>) -> Ask {
-        let mut head = fresh_ask();
+    fn head(&mut self, _: Option<&In>) -> RequestHead {
+        let mut head = fresh_request_head();
         head.uri = http::Uri::from_static("/x");
         if self.upgrade {
             let websocket = http::HeaderValue::from_static("websocket");
@@ -193,9 +199,9 @@ struct RespEnc {
     status: u16,
 }
 
-impl Encoder<Out, Answer> for RespEnc {
-    fn head(&mut self, _: Option<&Out>) -> Answer {
-        let mut head = fresh_answer();
+impl Encoder<Out, ResponseHead> for RespEnc {
+    fn head(&mut self, _: Option<&Out>) -> ResponseHead {
+        let mut head = fresh_response_head();
         head.status = StatusCode::from_u16(self.status).unwrap();
         head
     }
@@ -215,22 +221,23 @@ impl Encoder<Out, Answer> for RespEnc {
     }
 }
 
-type Answering =
-    dyn Fn(Exchange<Ask>) -> BoxFuture<'static, Result<Exchange<Answer>, Fault>> + Send + Sync;
+type Answering = dyn Fn(Exchange<RequestHead>) -> BoxFuture<'static, Result<Exchange<ResponseHead>, Fault>>
+    + Send
+    + Sync;
 
 /// A transport of a function.
 struct Fnt(Arc<Answering>);
 
 #[async_trait]
 impl Transport for Fnt {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         (self.0)(call).await
     }
 }
 
 fn fnt<F>(f: F) -> Fnt
 where
-    F: Fn(Exchange<Ask>) -> BoxFuture<'static, Result<Exchange<Answer>, Fault>>
+    F: Fn(Exchange<RequestHead>) -> BoxFuture<'static, Result<Exchange<ResponseHead>, Fault>>
         + Send
         + Sync
         + 'static,
@@ -239,8 +246,8 @@ where
 }
 
 /// A response of `status` with body `frames`.
-fn answer(status: u16, frames: Frames) -> Exchange<Answer> {
-    let mut head = fresh_answer();
+fn answer(status: u16, frames: Frames) -> Exchange<ResponseHead> {
+    let mut head = fresh_response_head();
     head.status = StatusCode::from_u16(status).unwrap();
     Exchange::new(head, frames)
 }
@@ -347,8 +354,8 @@ fn send(tx: &Upload, text: &'static str) {
     tx.unbounded_send(Ok(Bytes::from(text))).unwrap();
 }
 
-fn ask() -> Ask {
-    let mut head = fresh_ask();
+fn ask() -> RequestHead {
+    let mut head = fresh_request_head();
     head.method = http::Method::POST;
     head
 }
@@ -506,20 +513,16 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     assert_eq!(seen.frames(), frames(&[Ok("hello"), Err("bad_request")]));
 }
 
-/// Rule 1: a streaming request's inputs are never ended at once, even with
-/// its body ended; a one-shot request's are.
+/// A streaming request's inputs follow, even with its body ended, and it has
+/// no opening; a one-shot request's do not, and its opening is its body.
 #[tokio::test]
-async fn a_streaming_requests_inputs_never_end_at_once() {
+async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     let (tx, body) = upload();
     drop(tx);
     let (wire, _answer) = Accepted::new(ask(), body, true);
     let (origin, inputs) =
         respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed()).await;
-    let mut inputs = inputs.unwrap();
-    assert!(
-        inputs.next().now_or_never().is_none(),
-        "its first poll waits"
-    );
+    let mut inputs = inputs.unwrap().unwrap();
     assert!(inputs.next().await.is_none());
     let origin = origin.unwrap();
     assert!(respan_gateway_http::opening(&Toy::default(), &origin).is_none());
@@ -527,7 +530,7 @@ async fn a_streaming_requests_inputs_never_end_at_once() {
     let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
     let (origin, inputs) =
         respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed()).await;
-    assert!(matches!(inputs.unwrap().next().now_or_never(), Some(None)));
+    assert!(matches!(inputs, Ok(None)));
     let opening = respan_gateway_http::opening(&Toy::default(), &origin.unwrap());
     assert_eq!(opening.map(|o| o.ok()), Some(Some(In("q".into()))));
 }
@@ -547,7 +550,7 @@ fn dial(codec: &Toy, transport: Fnt) -> Dialed<Out> {
     .unwrap()
 }
 
-/// Rule 6: a provider's outputs say `Pending` between the frames it sent
+/// Rule 5: a provider's outputs say `Pending` between the frames it sent
 /// apart, so each frame is its own batch, even when all are ready.
 #[tokio::test]
 async fn a_providers_frames_are_read_apart() {
@@ -576,7 +579,7 @@ fn late(text: &'static str) -> Frames {
     .boxed()
 }
 
-/// Rule 3: a non-2xx answer is read whole before the call resolves, so its
+/// Rule 2: a non-2xx answer is read whole before the call resolves, so its
 /// refusal is known at its head however slowly its body comes; a 2xx one's
 /// is read as far as it is ready.
 #[tokio::test]
@@ -592,7 +595,7 @@ async fn a_slow_refusal_is_known_at_its_head() {
     assert!(outputs.is_ok(), "open, its body still to come");
 }
 
-/// Rule 3's exception: a 101 to a call that asked to switch is open at
+/// Rule 2's exception: a 101 to a call that asked to switch is open at
 /// once; to one that did not, it is read whole like any other non-2xx.
 #[tokio::test]
 async fn a_101_is_open_only_to_a_call_that_asked_to_switch() {

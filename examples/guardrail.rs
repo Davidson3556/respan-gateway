@@ -17,7 +17,6 @@
 //! `cargo run -p respan-gateway-examples --example guardrail`
 
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
 use respan_gateway_core::{Response, async_trait};
 use respan_gateway_formats::conversation::{Conversation, Piece, Reply};
@@ -28,6 +27,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};
+use serde_json::{Value, json};
 
 const OPENAI: &str = "http://openai.test/v1";
 const BLOCKED: &str = "content_blocked";

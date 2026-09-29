@@ -5,7 +5,7 @@ that keep their bytes, so an unedited message relays byte for byte.
 
 - `ToServer` / `ToClient`: the kind, a client's request and a server's
   message.
-- `StreamableHttp::new(path)`: MCP over streamable HTTP as a `Codec` made a `Format` by `dialect!`;
+- `StreamableHttp::new(path)`: MCP over streamable HTTP as a `Codec` made a `Format` by `impl_format!`;
   `SESSION` is its session header.
 - `StdioTransport::new(program, args)`: an MCP server run as a child
   process per session, an `http::Transport`. `.max_sessions(n)` per owner (default 8),

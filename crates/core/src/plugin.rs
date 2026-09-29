@@ -242,6 +242,11 @@ impl Filters {
         filters
     }
 
+    /// How they ended, if they have.
+    pub(crate) fn outcome(&self) -> Option<Result<(), Fault>> {
+        self.1.clone()
+    }
+
     pub(crate) fn ended(&self) -> bool {
         self.1.is_some()
     }

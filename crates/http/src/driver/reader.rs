@@ -27,12 +27,9 @@ pub(crate) const ERROR_BODY_CAP: usize = 1 << 20;
 /// Builds a decoder once the first frame comes.
 type Make<T> = Box<dyn FnOnce() -> Box<dyn Decoder<T>> + Send>;
 
-/// A body read into events through a [`Decoder`], each frame's in turn.
-///
-/// - A provider's outputs say `Pending` between frames, so what the gateway
-///   finds ready at once, and takes as one batch, is one frame's (rule 6).
-/// - A streaming request's inputs say `Pending` to their first poll, so
-///   they are never ended at once, nor read ahead (rule 1).
+/// A body read into events through a [`Decoder`], each frame's in turn. A
+/// provider's outputs say `Pending` between frames, so what the gateway finds
+/// ready at once, and takes as one batch, is one frame's (rule 5).
 ///
 /// What was decoded before a failure comes before it; the failure ends it.
 pub(crate) struct Reader<T> {
@@ -49,8 +46,6 @@ pub(crate) struct Reader<T> {
     apart: bool,
     /// Whether it said `Pending` before reading the next frame.
     yielded: bool,
-    /// Whether it was polled yet; if not, its first poll says `Pending`.
-    started: bool,
 }
 
 /// Never pinned in place: its fields are moved, not projected.
@@ -60,13 +55,13 @@ impl<T: Send + 'static> Reader<T> {
     /// A streaming request's inputs: its data frames, each a message, even
     /// an empty one, through the decoder `make` builds at the first.
     pub(crate) fn inputs(body: Frames, make: Make<T>) -> Self {
-        Self::new(body, Some(make), None, None, false, false)
+        Self::new(body, Some(make), None, None, false)
     }
 
     /// A provider's outputs, through `decoder`, failing if the call's body
     /// did (`failed`).
     pub(crate) fn outputs(body: Frames, decoder: Box<dyn Decoder<T>>, failed: Failure) -> Self {
-        Self::new(body, None, Some(decoder), Some(failed), true, true)
+        Self::new(body, None, Some(decoder), Some(failed), true)
     }
 
     fn new(
@@ -75,7 +70,6 @@ impl<T: Send + 'static> Reader<T> {
         decoder: Option<Box<dyn Decoder<T>>>,
         failed: Option<Failure>,
         apart: bool,
-        started: bool,
     ) -> Self {
         Self {
             body,
@@ -87,7 +81,6 @@ impl<T: Send + 'static> Reader<T> {
             broke: false,
             apart,
             yielded: false,
-            started,
         }
     }
 
@@ -116,7 +109,7 @@ impl<T: Send + 'static> Reader<T> {
         self.body = stream::iter(frames).boxed();
     }
 
-    /// The provider's refusal at its head (rule 3), as far as its answer
+    /// The provider's refusal at its head (rule 2), as far as its answer
     /// is ready now, waiting for nothing: its decoder's failure before any
     /// output, the body unbroken, as a provider's error answer is.
     pub(crate) fn refused(&mut self) -> Option<Fault> {
@@ -172,11 +165,6 @@ impl<T: Send + 'static> Stream for Reader<T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
-        if !this.started {
-            this.started = true;
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
         loop {
             if let Some(value) = this.ready.pop_front() {
                 return Poll::Ready(Some(value));

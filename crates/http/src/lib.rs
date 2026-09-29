@@ -2,7 +2,7 @@
 //! HTTP at the gateway's edges: its formats and its rules.
 //!
 //! - **Formats.** A [`Codec`] is one protocol's bytes on HTTP;
-//!   [`dialect!`] makes it a [`Format`](respan_gateway_core::Format), which
+//!   [`impl_format!`] makes it a [`Format`](respan_gateway_core::Format), which
 //!   HTTP's one driver runs on both edges: a client's [`Accepted`] request,
 //!   and calls through a provider's [`Dialer`], made from any [`Transport`].
 //!
@@ -56,21 +56,21 @@ pub use transport::{
 };
 
 /// The head of an HTTP request.
-pub type Ask = http::request::Parts;
+pub type RequestHead = http::request::Parts;
 
 /// The head of an HTTP response.
-pub type Answer = http::response::Parts;
+pub type ResponseHead = http::response::Parts;
 
 /// An HTTP body of bytes whose error is a [`Fault`].
 pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, Fault>;
 
 /// A request head with nothing set: a `GET /`, for a format to fill.
-pub fn fresh_ask() -> Ask {
+pub fn fresh_request_head() -> RequestHead {
     http::Request::new(()).into_parts().0
 }
 
 /// A response head with nothing set: a `200`, for a format to fill.
-pub fn fresh_answer() -> Answer {
+pub fn fresh_response_head() -> ResponseHead {
     http::Response::new(()).into_parts().0
 }
 
@@ -98,7 +98,7 @@ pub fn full(bytes: impl Into<Bytes>) -> Body {
 /// An HTTP request as an exchange, its HTTP extensions dropped but the
 /// gateway's [`Extensions`] it carries, if any, which an embedder or test
 /// hands plugins with `req.extensions_mut().insert(extensions)`.
-pub fn ask<B>(req: http::Request<B>) -> Exchange<Ask>
+pub fn ask<B>(req: http::Request<B>) -> Exchange<RequestHead>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -112,7 +112,7 @@ where
 }
 
 /// An HTTP response as an exchange, such as a transport returns.
-pub fn answer<B>(resp: http::Response<B>) -> Exchange<Answer>
+pub fn answer<B>(resp: http::Response<B>) -> Exchange<ResponseHead>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -122,7 +122,7 @@ where
 }
 
 /// A call as an HTTP request, its extensions apart, as a transport sends it.
-pub fn call(call: Exchange<Ask>) -> (http::Request<Body>, Extensions) {
+pub fn call(call: Exchange<RequestHead>) -> (http::Request<Body>, Extensions) {
     let req = http::Request::from_parts(call.head, into_http_body(call.body));
     (req, call.extensions)
 }
@@ -223,7 +223,7 @@ pub(crate) struct Unwritten;
 
 /// A request as the adapter hands it on, and what its answer needs of it.
 pub(crate) struct Arrived {
-    pub(crate) head: Ask,
+    pub(crate) head: RequestHead,
     pub(crate) body: Frames,
     pub(crate) to: Asking,
 }
@@ -298,7 +298,7 @@ pub(crate) fn depart(
                 // A hop drops a bodiless answer's body once its head is out, so
                 // that is when the client leaves. Read what is ready now, so a
                 // refusal's end is told, then drop the rest: the session ends
-                // with its client (rule 5), never when a provider's stream
+                // with its client (rule 4), never when a provider's stream
                 // does.
                 while let Some(Some(_)) = body.frame().now_or_never() {}
                 body = full(Bytes::new());
@@ -417,11 +417,11 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
     method == Method::HEAD || matches!(status.as_u16(), 204 | 205 | 304)
 }
 
-/// What [`dialect!`] names, not for use elsewhere.
+/// What [`impl_format!`] names, not for use elsewhere.
 #[doc(hidden)]
 pub mod __private {
     pub use respan_gateway_core::futures::future::BoxFuture;
-    pub use respan_gateway_core::{Dialed, Events, Extensions, Fault, Format, Half, Origin, Reply};
+    pub use respan_gateway_core::{Dialed, Ended, Events, Extensions, Fault, Format, Half, Origin};
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use respan_gateway_core::futures::future::{BoxFuture, ready};
 use respan_gateway_core::futures::{FutureExt, StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{
-    Dialed, Events, Extensions, Fault, Format, Gateway, Half, Origin, ProviderContext,
+    Dialed, Ended, Events, Extensions, Fault, Format, Gateway, Half, Origin, ProviderContext,
 };
 use respan_gateway_http::Status;
 use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote, Tally};
@@ -50,10 +50,10 @@ impl Format for Pipe {
     fn accept(
         &self,
         wire: Question,
-        reply: BoxFuture<'static, respan_gateway_core::Reply<Reply>>,
-    ) -> BoxFuture<'static, Half<Question>> {
+        reply: BoxFuture<'static, (Half<Reply>, Ended)>,
+    ) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<Question>>, Fault>)> {
         tokio::spawn(async move {
-            let (_, (_, outputs), ended) = reply.await;
+            let ((_, outputs), ended) = reply.await;
             let end = match outputs {
                 Ok(outputs) => outputs.try_for_each(|_| ready(Ok(()))).await,
                 Err(fault) => Err(fault),
@@ -61,7 +61,7 @@ impl Format for Pipe {
             ended(end);
         });
         let origin = Arc::new(wire) as Origin;
-        ready((Some(origin), Ok(stream::empty().boxed()))).boxed()
+        ready((Some(origin), Ok(None))).boxed()
     }
 
     fn opening(&self, origin: &Origin) -> Option<Result<Question, Fault>> {

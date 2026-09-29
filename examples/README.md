@@ -30,8 +30,8 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 | [tenants](tenants.rs) | 13 | Versioned tenant config edited while requests run; per-tenant provider keys. |
 | [embedded](embedded.rs) | 14 | The gateway as a library in another Rust service. |
 | [billing](billing.rs) | - | Price each call's usage from your table into your store. |
-| [custom_format](custom_format.rs) | - | Add a protocol (OpenAI embeddings) as a kind and a `Codec` (`dialect!` makes it a `Format`). |
-| [custom_transport](custom_transport.rs) | - | A model in this process as a provider `http::Transport`. |
+| [custom_format](custom_format.rs) | - | Add a protocol (OpenAI embeddings) as a kind and a `Codec` (`impl_format!` makes it a `Format`). |
+| [custom_transport](custom_transport.rs) | - | A model in this process as a dial-only provider `Format`, no bytes. |
 
 ## Not built
 

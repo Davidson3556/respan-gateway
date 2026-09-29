@@ -10,13 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_http::Codec;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
+use serde_json::{Value, json};
 use support::*;
 
 const PATH: &str = "/v1/realtime?model=gpt-realtime";

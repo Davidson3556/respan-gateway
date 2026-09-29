@@ -120,8 +120,8 @@ pub mod chat_bound {
     //! `wallet.rs` and `cost_cap.rs`.
 
     use respan_gateway_core::Fault;
-    use respan_gateway_core::serde_json::{self, Map, Value};
     use respan_gateway_formats::conversation::{Content, Conversation};
+    use serde_json::{self, Map, Value};
 
     /// The most input tokens `chat` can be. A token is at least a byte, so
     /// bytes bound them: its text, the JSON of what the kind has no place for

@@ -6,14 +6,14 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use respan_gateway_core::Fault;
-use respan_gateway_core::serde_json::{self, Map, Value, json};
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{Answer, Ask, Status, bodiless};
+use respan_gateway_http::{RequestHead, ResponseHead, Status, bodiless};
+use serde_json::{self, Map, Value, json};
 
-use crate::Usage;
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
 use crate::sse::{content_type, event_data};
+use crate::{Details, Usage};
 use respan_gateway_http::{Decoder, Encoder};
 
 /// What a conversation format supplies; the plumbing around it is shared.
@@ -80,11 +80,11 @@ fn not_an_object() -> Fault {
 /// Make `head` a JSON `POST` to `path`, adding to a relayed `body` what
 /// the format needs ([`Wire::finish`]); a call whose inputs stream fails.
 pub(crate) fn post_json<W: Wire>(
-    mut head: Ask,
+    mut head: RequestHead,
     body: &mut Bytes,
     path: &str,
     streams: bool,
-) -> Box<dyn Encoder<Conversation, Ask>> {
+) -> Box<dyn Encoder<Conversation, RequestHead>> {
     head.method = http::Method::POST;
     crate::set_path(&mut head, path);
     let json = HeaderValue::from_static("application/json");
@@ -222,7 +222,7 @@ pub(crate) fn probe(raw: &[u8]) -> Asked {
 /// Finish a success's head and return whether its replies are relayed as
 /// their bytes. One framed otherwise than the client asked is reframed; a
 /// head without a content type gets the client's framing.
-fn made_head(head: &mut Answer, asks_stream: bool) -> bool {
+fn made_head(head: &mut ResponseHead, asks_stream: bool) -> bool {
     let reframe = crate::sse::is_stream(head) != asks_stream;
     if reframe {
         head.headers.remove(CONTENT_TYPE);
@@ -241,8 +241,8 @@ fn made_head(head: &mut Answer, asks_stream: bool) -> bool {
 /// A response of format `W` to the call `call`: nothing if it has no body,
 /// else SSE events decoded by `stream` for a stream, else one JSON message.
 pub(crate) fn response_decoder<W: Wire>(
-    head: &Answer,
-    call: &Ask,
+    head: &ResponseHead,
+    call: &RequestHead,
     stream: impl FnOnce() -> Box<dyn Decoder<Reply>>,
 ) -> Box<dyn Decoder<Reply>> {
     if head.status.is_success() && bodiless(&call.method, head.status) {
@@ -255,21 +255,19 @@ pub(crate) fn response_decoder<W: Wire>(
 }
 
 /// A response of format `W` to the client's request `ask` with `body`, from
-/// the provider's head `answer` if relayed: a refusal, nothing for a
-/// bodiless one, else `encoder` of the head, whether it relays the
-/// provider's bytes, and what the client [`Asked`].
+/// the provider's head `answer` if relayed: nothing for a bodiless one, else
+/// `encoder` of the head, whether it relays the provider's bytes, and what
+/// the client [`Asked`].
 pub(crate) fn response_encoder<W: Wire>(
-    answer: Option<&Answer>,
-    ask: &Ask,
+    answer: Option<&ResponseHead>,
+    ask: &RequestHead,
     body: &Bytes,
-    refusal: Option<&Fault>,
-    encoder: impl FnOnce(&Answer, bool, Asked) -> Box<dyn Encoder<Reply, ()>>,
-) -> Box<dyn Encoder<Reply, Answer>> {
-    let mut head = crate::answer_head(answer);
-    let body = match refusal {
-        Some(fault) => refused::<W>(&mut head, ask, fault),
-        None if bodiless(&ask.method, head.status) => crate::whole::no_body(),
-        None => {
+    encoder: impl FnOnce(&ResponseHead, bool, Asked) -> Box<dyn Encoder<Reply, ()>>,
+) -> Box<dyn Encoder<Reply, ResponseHead>> {
+    let mut head = crate::response_head(answer);
+    let body = match bodiless(&ask.method, head.status) {
+        true => crate::whole::no_body(),
+        false => {
             let asked = probe(body);
             let relayed = made_head(&mut head, asked.stream);
             encoder(&head, relayed, asked)
@@ -278,29 +276,34 @@ pub(crate) fn response_encoder<W: Wire>(
     crate::with_head(head, body)
 }
 
-/// A refusal in format `W` ([`whole::refusal`](crate::whole::refusal)), its
-/// own words as this format's JSON error.
-pub(crate) fn refused<W: Wire>(
-    head: &mut Answer,
-    ask: &Ask,
-    fault: &Fault,
-) -> Box<dyn Encoder<Reply, ()>> {
-    let answered = |head: &mut Answer| crate::default_content_type(head, "application/json");
-    crate::whole::refusal(W::NAME, head, ask, fault, answered, |head| {
-        head.headers
-            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        match fault.answer::<Bytes>(W::NAME) {
-            Some(words) => words.clone(),
-            None => W::error_body(fault).to_string().into(),
-        }
-    })
+/// A refusal in format `W`: its own words as this format's JSON error.
+/// The format has no error under a success, so a refusal under a status
+/// that says none is a plain 500, as the adapter writes what no format can.
+pub(crate) fn refusal<W: Wire>(fault: &Fault, head: &mut ResponseHead) -> Bytes {
+    if !(head.status.is_client_error() || head.status.is_server_error()) {
+        head.status = StatusCode::INTERNAL_SERVER_ERROR;
+        head.headers.clear();
+        let text = HeaderValue::from_static("text/plain; charset=utf-8");
+        head.headers.insert(CONTENT_TYPE, text);
+        return Bytes::from(fault.message().to_owned());
+    }
+    let json = HeaderValue::from_static("application/json");
+    head.headers.insert(CONTENT_TYPE, json);
+    match fault.answer::<Bytes>(W::NAME) {
+        Some(words) => words.clone(),
+        None => W::error_body(fault).to_string().into(),
+    }
 }
 
 /// One JSON message, decoded whole: one reply on success, else the
 /// provider's error.
-fn unary_decoder<W: Wire>(head: &Answer) -> Box<dyn Decoder<Reply>> {
+fn unary_decoder<W: Wire>(head: &ResponseHead) -> Box<dyn Decoder<Reply>> {
     let (name, status): (Arc<str>, _) = (Arc::from(W::NAME), head.status);
-    crate::whole::decoder(W::NAME, head, move |raw, out| {
+    // An error answer is relayed as it came, under this format's content
+    // type if it has none.
+    let mut head = head.clone();
+    crate::default_content_type(&mut head, "application/json");
+    crate::whole::decoder(W::NAME, &head, move |raw, out| {
         let v = serde_json::from_slice::<Value>(&raw).ok();
         if let Some(v) = v.as_ref().filter(|v| W::is_response(v)) {
             let mut reply = W::reply(v);
@@ -856,14 +859,15 @@ pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
     if let Some(top) = details.as_object_mut().filter(|_| std::ptr::eq(fields, v)) {
         top.remove("error");
     }
-    fault.with_details(details)
+    fault.with(Details(details))
 }
 
 /// Merge the fault's details into the format's error fields: each is added
 /// if missing, and a string or null replaces the format's but for
 /// `message` and `type`.
 pub(crate) fn merge_details(mut error: Value, fault: &Fault) -> Value {
-    let (Some(merged), Some(Value::Object(details))) = (error.as_object_mut(), fault.details())
+    let (Some(merged), Some(Value::Object(details))) =
+        (error.as_object_mut(), fault.get::<Details>().map(|d| &d.0))
     else {
         return error;
     };
@@ -1145,7 +1149,7 @@ mod tests {
 
     #[test]
     fn details_that_are_not_an_object_are_ignored() {
-        let fault = Fault::bad_request("m").with_details(json!([1]));
+        let fault = Fault::bad_request("m").with(Details(json!([1])));
         let body = crate::OpenAiChat::error_body(&fault);
         assert_eq!(
             body["error"],
@@ -1156,7 +1160,7 @@ mod tests {
     #[test]
     fn the_fault_says_message_and_type_the_provider_the_rest() {
         let details = json!({"message": "", "type": "https://x/p", "code": null, "extra": 1});
-        let fault = Fault::bad_request("m").with_details(details);
+        let fault = Fault::bad_request("m").with(Details(details));
         let body = crate::OpenAiChat::error_body(&fault);
         // The fault's words are the format's; the provider's `code` stays.
         let kept =
@@ -1169,14 +1173,14 @@ mod tests {
         let details = json!({"message": "x", "type": 5, "code": 7, "param": 3, "category": "pii"});
         let fault = Fault::new("blocked", "pii")
             .with(Status(403))
-            .with_details(details);
+            .with(Details(details));
         let body = crate::OpenAiChat::error_body(&fault);
         // OpenAI's `code` and `param` are strings: a number is not kept.
         let kept = json!({"message": "pii", "type": "blocked", "param": null, "code": "blocked", "category": "pii"});
         assert_eq!(body["error"], kept);
         // A string, as OpenAI's own errors give, is kept.
         let details = json!({"param": "messages", "code": "context_length_exceeded"});
-        let fault = Fault::bad_request("too long").with_details(details);
+        let fault = Fault::bad_request("too long").with(Details(details));
         let error = &crate::OpenAiChat::error_body(&fault)["error"];
         assert_eq!(
             (&error["param"], &error["code"]),
@@ -1203,7 +1207,7 @@ mod tests {
             json!({"errors": [{"code": "rate_limited", "message": "slow"}], "success": false});
         let fault = provider_error(StatusCode::TOO_MANY_REQUESTS, &cloudflare);
         assert_eq!((fault.code(), fault.message()), ("rate_limited", "slow"));
-        assert_eq!(fault.details(), Some(&cloudflare["errors"][0]));
+        assert_eq!(fault.get(), Some(&Details(cloudflare["errors"][0].clone())));
         let listed = provider_error(
             StatusCode::OK,
             &json!({"error": [{"type": "t", "message": "m"}]}),

@@ -1,5 +1,5 @@
 //! HTTP's one driver, which makes any [`Codec`] a
-//! [`Format`](respan_gateway_core::Format) ([`dialect!`](crate::dialect)):
+//! [`Format`](respan_gateway_core::Format) ([`impl_format!`](crate::impl_format)):
 //! its client edge ([`accept`], [`opening`]) serves an [`Accepted`]
 //! request, its provider edge ([`dial`]) calls through a [`Dialer`]. It is
 //! one symmetric pair: a reader turns frames into events through a
@@ -7,16 +7,14 @@
 //! [`Encoder`], on both edges. The byte half of the gateway's guarantees
 //! lives here:
 //!
-//! - **Head timing (rule 4).** A one-shot request's answer writes its head
+//! - **Head timing (rule 3).** A one-shot request's answer writes its head
 //!   with its first bytes, a failure before any written as a refusal; a
 //!   streaming request's (an upgrade) when its reply resolves.
-//! - **The verdict at the head (rule 3).** A non-2xx answer, but a 101 to a
+//! - **The verdict at the head (rule 2).** A non-2xx answer, but a 101 to a
 //!   call that asked to switch, is read whole before [`dial`] resolves, so
 //!   a refusal is known as one however slowly its body comes.
-//! - **Batches (rule 6).** A provider's outputs say `Pending` between the
+//! - **Batches (rule 5).** A provider's outputs say `Pending` between the
 //!   frames it sent apart.
-//! - **Streaming inputs (rule 1).** A streaming request's inputs are never
-//!   ended at once.
 //! - **A body ends at its first failure (B1)**, an encoder's panic on a
 //!   call's later frame fails the call (B2), and [`Encoder::open`]'s bytes
 //!   come first, done at once for a response with no body.
@@ -43,7 +41,7 @@ use respan_gateway_core::Gateway;
 pub use accept::{accept, opening};
 pub use dial::dial;
 
-use crate::{Ask, Body, Frames};
+use crate::{Body, Frames, RequestHead};
 #[cfg(doc)]
 use crate::{Codec, Dialer, Encoder};
 
@@ -57,7 +55,7 @@ type Writing = BoxFuture<'static, http::Response<Body>>;
 /// [`Wire`](respan_gateway_core::Format::Wire), which [`Gateway::handle`]
 /// takes. It carries the adapter's reply slot.
 pub struct Accepted {
-    head: Ask,
+    head: RequestHead,
     frames: Frames,
     streams: bool,
     slot: oneshot::Sender<Writing>,
@@ -75,7 +73,7 @@ impl Accepted {
     /// write. `None` if no format took the request: [`Gateway::handle`]'s
     /// end says why. Drive `handle` to its end while awaiting it.
     pub fn new(
-        head: Ask,
+        head: RequestHead,
         body: Frames,
         streams: bool,
     ) -> (Accepted, BoxFuture<'static, Option<http::Response<Body>>>) {
@@ -94,7 +92,7 @@ impl Accepted {
     }
 
     /// The request's head.
-    pub fn head(&self) -> &Ask {
+    pub fn head(&self) -> &RequestHead {
         &self.head
     }
 }
@@ -111,7 +109,7 @@ impl std::fmt::Debug for Accepted {
 /// What came with a client's head, its origin: the head, which a call that
 /// relays starts from, and a one-shot request's body, its bytes unread.
 struct Came {
-    head: Arc<Ask>,
+    head: Arc<RequestHead>,
     body: Option<Bytes>,
 }
 
@@ -122,8 +120,7 @@ struct Came {
 /// outlive the call that made them.
 ///
 /// ```
-/// # use respan_gateway_http::{Answer, Ask, Codec, Decoder, Encoder};
-/// # use respan_gateway_core::Fault;
+/// # use respan_gateway_http::{ResponseHead, RequestHead, Codec, Decoder, Encoder};
 /// # use bytes::Bytes;
 /// #[derive(Clone)]
 /// struct Echo;
@@ -131,22 +128,22 @@ struct Came {
 ///     type Input = String;
 ///     type Output = Vec<u8>;
 ///     fn name(&self) -> &str { "echo" }
-///     fn accepts(&self, _: &Ask) -> bool { true }
-///     # fn request_decoder(&self, _: &Ask) -> Box<dyn Decoder<String>> { unimplemented!() }
-///     # fn request_encoder(&self, _: Option<&Ask>, _: &mut Bytes, _: bool)
-///     #     -> Box<dyn Encoder<String, Ask>> { unimplemented!() }
-///     # fn response_decoder(&self, _: &Answer, _: &Ask, _: &Bytes)
+///     fn accepts(&self, _: &RequestHead) -> bool { true }
+///     # fn request_decoder(&self, _: &RequestHead) -> Box<dyn Decoder<String>> { unimplemented!() }
+///     # fn request_encoder(&self, _: Option<&RequestHead>, _: &mut Bytes, _: bool)
+///     #     -> Box<dyn Encoder<String, RequestHead>> { unimplemented!() }
+///     # fn response_decoder(&self, _: &ResponseHead, _: &RequestHead, _: &Bytes)
 ///     #     -> Box<dyn Decoder<Vec<u8>>> { unimplemented!() }
-///     # fn response_encoder(&self, _: Option<&Answer>, _: &Ask, _: &Bytes, _: Option<&Fault>)
-///     #     -> Box<dyn Encoder<Vec<u8>, Answer>> { unimplemented!() }
+///     # fn response_encoder(&self, _: Option<&ResponseHead>, _: &RequestHead, _: &Bytes)
+///     #     -> Box<dyn Encoder<Vec<u8>, ResponseHead>> { unimplemented!() }
 ///     // ...
 /// }
-/// respan_gateway_http::dialect!(Echo);
+/// respan_gateway_http::impl_format!(Echo);
 /// let gateway = respan_gateway_core::Gateway::new().serve(Echo);
 /// assert!(gateway.is_ok());
 /// ```
 #[macro_export]
-macro_rules! dialect {
+macro_rules! impl_format {
     ($t:ty) => {
         impl $crate::__private::Format for $t {
             type Input = <$t as $crate::Codec>::Input;
@@ -171,11 +168,17 @@ macro_rules! dialect {
                 wire: $crate::Accepted,
                 reply: $crate::__private::BoxFuture<
                     'static,
-                    $crate::__private::Reply<Self::Output>,
+                    ($crate::__private::Half<Self::Output>, $crate::__private::Ended),
                 >,
             ) -> $crate::__private::BoxFuture<
                 'static,
-                $crate::__private::Half<Self::Input>,
+                (
+                    ::core::option::Option<$crate::__private::Origin>,
+                    ::core::result::Result<
+                        ::core::option::Option<$crate::__private::Events<Self::Input>>,
+                        $crate::__private::Fault,
+                    >,
+                ),
             > {
                 $crate::accept(self, wire, reply)
             }

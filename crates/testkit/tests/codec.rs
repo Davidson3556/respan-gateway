@@ -8,15 +8,15 @@ use futures::{StreamExt, TryStreamExt};
 use http::header::{HOST, UPGRADE};
 use http::{HeaderValue, StatusCode};
 use http_body_util::BodyExt;
+use respan_gateway_core::futures;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
 };
-use respan_gateway_core::{futures, serde_json};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::bytes;
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
 use respan_gateway_http::{http, http_body_util};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve, streamed};
 
@@ -51,20 +51,20 @@ impl Codec for Msg {
         "msg"
     }
 
-    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
         head.uri.path().starts_with("/msg")
     }
 
-    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<In>> {
+    fn request_decoder(&self, _request: &respan_gateway_http::RequestHead) -> Box<dyn Decoder<In>> {
         Box::new(Numbering(0, Arc::from("msg")))
     }
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         body: &mut Bytes,
         _streams: bool,
-    ) -> Box<dyn Encoder<In, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<In, respan_gateway_http::RequestHead>> {
         let mut head = respan_gateway_formats::call_head(client);
         // The path names the input's text once changed; the client's path
         // says it for the client's own.
@@ -86,8 +86,8 @@ impl Codec for Msg {
 
     fn response_decoder(
         &self,
-        _head: &respan_gateway_http::Answer,
-        _request: &respan_gateway_http::Ask,
+        _head: &respan_gateway_http::ResponseHead,
+        _request: &respan_gateway_http::RequestHead,
         _sent: &Bytes,
     ) -> Box<dyn Decoder<Out>> {
         respan_gateway_formats::message_decoder(|raw: Bytes| {
@@ -97,15 +97,12 @@ impl Codec for Msg {
 
     fn response_encoder(
         &self,
-        answer: Option<&respan_gateway_http::Answer>,
-        request: &respan_gateway_http::Ask,
+        answer: Option<&respan_gateway_http::ResponseHead>,
+        request: &respan_gateway_http::RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Out, respan_gateway_http::Answer>> {
-        let mut head = respan_gateway_formats::answer_head(answer);
-        if let Some(fault) = refusal {
-            respan_gateway_http::error_head(&mut head, fault);
-        } else if respan_gateway_http::bodiless(&request.method, head.status) {
+    ) -> Box<dyn Encoder<Out, respan_gateway_http::ResponseHead>> {
+        let mut head = respan_gateway_formats::response_head(answer);
+        if respan_gateway_http::bodiless(&request.method, head.status) {
             return respan_gateway_formats::with_head(
                 head,
                 respan_gateway_formats::whole::no_body(),
@@ -116,9 +113,13 @@ impl Codec for Msg {
         }
         respan_gateway_formats::with_head(head, Box::new(Answers))
     }
+
+    fn refusal(&self, _: &Fault, _: &Bytes, _: &mut respan_gateway_http::ResponseHead) -> Bytes {
+        Bytes::new()
+    }
 }
 
-dialect!(Msg);
+impl_format!(Msg);
 
 /// Numbers the messages it decodes, each keeping its bytes.
 struct Numbering(usize, Arc<str>);
@@ -202,8 +203,8 @@ impl Echo {
 impl Transport for Echo {
     async fn send(
         &self,
-        call: Exchange<respan_gateway_http::Ask>,
-    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
+        call: Exchange<respan_gateway_http::RequestHead>,
+    ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
         let (head, body) = (call.head, call.body);
         let seen = self.0.clone();
         seen.lock().map(|mut s| s.push(head.uri.path().into())).ok();
@@ -218,7 +219,7 @@ impl Transport for Echo {
             seen.lock().map(|mut s| s.push(noted)).ok();
             frame
         });
-        let mut resp = respan_gateway_http::fresh_answer();
+        let mut resp = respan_gateway_http::fresh_response_head();
         if head.headers.contains_key(UPGRADE) {
             resp.status = StatusCode::SWITCHING_PROTOCOLS;
         }
@@ -473,8 +474,8 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
     impl Transport for Keeps {
         async fn send(
             &self,
-            call: Exchange<respan_gateway_http::Ask>,
-        ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
+            call: Exchange<respan_gateway_http::RequestHead>,
+        ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
             let mut head = call.head;
             respan_gateway_http::proxy_call(&mut head);
             *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(head.headers);
@@ -566,30 +567,30 @@ impl Codec for Noted {
         AnthropicMessages.name()
     }
 
-    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
         AnthropicMessages.accepts(head)
     }
 
     fn request_decoder(
         &self,
-        request: &respan_gateway_http::Ask,
+        request: &respan_gateway_http::RequestHead,
     ) -> Box<dyn Decoder<Conversation>> {
         AnthropicMessages.request_decoder(request)
     }
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<Conversation, respan_gateway_http::RequestHead>> {
         AnthropicMessages.request_encoder(client, body, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &respan_gateway_http::Answer,
-        request: &respan_gateway_http::Ask,
+        head: &respan_gateway_http::ResponseHead,
+        request: &respan_gateway_http::RequestHead,
         sent: &Bytes,
     ) -> Box<dyn Decoder<Reply>> {
         AnthropicMessages.response_decoder(head, request, sent)
@@ -597,14 +598,22 @@ impl Codec for Noted {
 
     fn response_encoder(
         &self,
-        answer: Option<&respan_gateway_http::Answer>,
-        request: &respan_gateway_http::Ask,
+        answer: Option<&respan_gateway_http::ResponseHead>,
+        request: &respan_gateway_http::RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply, respan_gateway_http::Answer>> {
-        let mut encoder = AnthropicMessages.response_encoder(answer, request, body, refusal);
+    ) -> Box<dyn Encoder<Reply, respan_gateway_http::ResponseHead>> {
+        let mut encoder = AnthropicMessages.response_encoder(answer, request, body);
         let head = encoder.head(None);
         respan_gateway_formats::with_head(head, Box::new(Noting(self.0.clone(), encoder)))
+    }
+
+    fn refusal(
+        &self,
+        fault: &Fault,
+        body: &Bytes,
+        head: &mut respan_gateway_http::ResponseHead,
+    ) -> Bytes {
+        AnthropicMessages.refusal(fault, body, head)
     }
 
     fn is_content(&self, reply: &Reply) -> bool {
@@ -612,11 +621,11 @@ impl Codec for Noted {
     }
 }
 
-dialect!(Noted);
+impl_format!(Noted);
 
 struct Noting(
     Arc<Mutex<Vec<&'static str>>>,
-    Box<dyn Encoder<Reply, respan_gateway_http::Answer>>,
+    Box<dyn Encoder<Reply, respan_gateway_http::ResponseHead>>,
 );
 
 impl Encoder<Reply, ()> for Noting {
@@ -810,12 +819,12 @@ async fn a_call_says_whether_its_response_was_head_only() {
     #[async_trait]
     impl Plugin for HeadOnly {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            assert!(!px.is_head_only(), "not before a head");
+            assert!(!px.is_refused(), "not before a head");
             Ok(())
         }
 
         async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
-            self.0.lock().map(|mut s| s.push(px.is_head_only())).ok();
+            self.0.lock().map(|mut s| s.push(px.is_refused())).ok();
         }
     }
 

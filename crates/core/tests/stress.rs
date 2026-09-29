@@ -62,8 +62,9 @@ impl Format for Counted {
     fn accept(
         &self,
         w: ToyWire,
-        r: futures::future::BoxFuture<'static, Reply<Out>>,
-    ) -> futures::future::BoxFuture<'static, Half<In>> {
+        r: futures::future::BoxFuture<'static, (Half<Out>, Ended)>,
+    ) -> futures::future::BoxFuture<'static, (Option<Origin>, Result<Option<Events<In>>, Fault>)>
+    {
         Toy.accept(w, r)
     }
     fn opening(&self, o: &Origin) -> Option<Result<In, Fault>> {

@@ -1,5 +1,4 @@
 use super::*;
-use respan_gateway_core::serde_json;
 
 fn models(mock: &MockTransport) -> Vec<String> {
     let model = |b: &[u8]| {

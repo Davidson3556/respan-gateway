@@ -3,21 +3,20 @@
 
 use bytes::{Bytes, BytesMut};
 use respan_gateway_core::Fault;
-use respan_gateway_core::serde_json;
 use respan_gateway_http::bytes;
-use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{RequestHead, ResponseHead};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
 use crate::common::{
     Names, Reading, SoFar, UnaryEncoder, Wire, error_event, holding_start, merge_details,
-    patch_messages, patch_sampling, post_json, probe, read_message, reads_back, request_decoder,
-    response_decoder, response_encoder, says, says_error, set, split_around, stop_json, unix_now,
-    unreadable_event, unsupported_fields, unwritable_content, write_message,
+    patch_messages, patch_sampling, post_json, probe, read_message, reads_back, refusal,
+    request_decoder, response_decoder, response_encoder, says, says_error, set, split_around,
+    stop_json, unix_now, unreadable_event, unsupported_fields, unwritable_content, write_message,
 };
 use crate::conversation::{Conversation, Finish, Piece, Reply, Role, Start, units};
 use crate::sse::{Events, SseDecoder, event, event_as, event_data, event_json, is_stream};
-use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 
 const OPENAI: &str = "openai-chat";
 
@@ -43,45 +42,49 @@ impl Codec for OpenAiChat {
         OPENAI
     }
 
-    fn accepts(&self, head: &Ask) -> bool {
+    fn accepts(&self, head: &RequestHead) -> bool {
         crate::posts_to(head, "/chat/completions")
     }
 
-    fn request_decoder(&self, _head: &Ask) -> Box<dyn Decoder<Conversation>> {
+    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Conversation>> {
         request_decoder::<Self>()
     }
 
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation, Ask>> {
+    ) -> Box<dyn Encoder<Conversation, RequestHead>> {
         post_json::<Self>(crate::call_head(client), body, "/chat/completions", streams)
     }
 
-    fn response_decoder(&self, head: &Answer, call: &Ask, _: &Bytes) -> Box<dyn Decoder<Reply>> {
+    fn response_decoder(
+        &self,
+        head: &ResponseHead,
+        call: &RequestHead,
+        _: &Bytes,
+    ) -> Box<dyn Decoder<Reply>> {
         let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
         response_decoder::<Self>(head, call, stream)
     }
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply, Answer>> {
-        response_encoder::<Self>(
-            answer,
-            ask,
-            body,
-            refusal,
-            |head, relayed, asked| match is_stream(head) {
+    ) -> Box<dyn Encoder<Reply, ResponseHead>> {
+        response_encoder::<Self>(answer, ask, body, |head, relayed, asked| {
+            match is_stream(head) {
                 false => Box::new(UnaryEncoder::<Self>::new(relayed)),
                 true => Box::new(Chunks::new(relayed, asked.usage)),
-            },
-        )
+            }
+        })
+    }
+
+    fn refusal(&self, fault: &Fault, _body: &Bytes, head: &mut ResponseHead) -> Bytes {
+        refusal::<Self>(fault, head)
     }
 
     fn is_content(&self, reply: &Reply) -> bool {
@@ -89,7 +92,7 @@ impl Codec for OpenAiChat {
     }
 }
 
-dialect!(OpenAiChat);
+impl_format!(OpenAiChat);
 
 /// Keys a conversation has a place for, or that change no output; `user`
 /// too, when it is a string.
@@ -769,7 +772,7 @@ mod tests {
 
     #[test]
     fn a_start_is_pushed_only_with_the_first_content_and_dropped_at_a_failure() {
-        let call = respan_gateway_http::fresh_ask();
+        let call = respan_gateway_http::fresh_request_head();
         let role = "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":2}}\n\n";
         let text =
             "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";

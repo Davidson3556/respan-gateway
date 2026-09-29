@@ -19,10 +19,10 @@ fn call(
     path: &str,
 ) -> (
     mpsc::UnboundedSender<Result<Bytes, Fault>>,
-    Exchange<respan_gateway_http::Ask>,
+    Exchange<respan_gateway_http::RequestHead>,
 ) {
     let (tx, rx) = mpsc::unbounded();
-    let mut head = respan_gateway_http::fresh_ask();
+    let mut head = respan_gateway_http::fresh_request_head();
     head.uri = path.parse().unwrap();
     head.headers.insert("upgrade", "websocket".parse().unwrap());
     let mut call = Exchange::new(head, rx.boxed());

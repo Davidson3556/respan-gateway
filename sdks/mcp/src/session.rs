@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use respan_gateway_core::Fault;
 use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_formats::sse;
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
@@ -15,6 +14,7 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::http_body::Frame;
 use respan_gateway_http::http_body_util::{BodyExt, StreamBody};
+use serde_json::{self, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc::{self, Sender};

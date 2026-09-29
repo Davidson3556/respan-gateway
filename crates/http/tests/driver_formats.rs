@@ -14,7 +14,7 @@ use respan_gateway_core::{
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
-use respan_gateway_http::{Answer, Ask, Body, Exchange, Transport};
+use respan_gateway_http::{Body, Exchange, RequestHead, ResponseHead, Transport};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -55,7 +55,7 @@ type Marks = Arc<Mutex<Vec<bool>>>;
 
 #[async_trait]
 impl<T: Transport> Transport for Marking<T> {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         lock(&self.1).push(call.relayed);
         self.0.send(call).await
     }
@@ -91,7 +91,7 @@ struct HeadOnly(Marks);
 #[async_trait]
 impl Plugin for HeadOnly {
     async fn on_provider_end(&self, px: &ProviderContext, _: &Result<(), Fault>) {
-        lock(&self.0).push(px.is_head_only());
+        lock(&self.0).push(px.is_refused());
     }
 }
 
@@ -503,7 +503,7 @@ async fn the_clients_key_reaches_a_provider_on_a_relay_alone() {
 struct SlowRefusal;
 
 impl SlowRefusal {
-    fn answer() -> (Answer, respan_gateway_http::Frames) {
+    fn answer() -> (ResponseHead, respan_gateway_http::Frames) {
         let (mut head, ()) = http::Response::new(()).into_parts();
         head.status = StatusCode::TOO_MANY_REQUESTS;
         head.headers
@@ -518,17 +518,17 @@ impl SlowRefusal {
 
 #[async_trait]
 impl Transport for SlowRefusal {
-    async fn send(&self, _: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let (head, body) = Self::answer();
         Ok(Exchange::new(head, body))
     }
 }
 
-/// Rule 3 over a real network: a refusal whose body comes slowly is read
-/// whole before the call resolves, so `is_head_only` says it was refused at
+/// Rule 2 over a real network: a refusal whose body comes slowly is read
+/// whole before the call resolves, so `is_refused` says it was refused at
 /// its head, and the client gets it whole.
 #[tokio::test]
-async fn a_slow_refusal_is_head_only() {
+async fn a_slow_refusal_is_refused() {
     let head_only = HeadOnly::default();
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, SlowRefusal)

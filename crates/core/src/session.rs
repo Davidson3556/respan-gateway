@@ -10,7 +10,7 @@ use crate::fault::PANICKED;
 use crate::format::{AnyFormat, AnyReply};
 use crate::leg::{Outgoing, cut, locked};
 use crate::lifecycle::EndHooks;
-use crate::{ClientContext, Ended, Extensions, Fault, Response};
+use crate::{ClientContext, Ended, Fault, Response};
 
 /// The reply to `answer`: a refusal, or the response's origin (on a relay)
 /// and outputs; with [`Ended`], which owns the session's end hooks.
@@ -20,7 +20,6 @@ pub(crate) async fn reply(
     mut hooks: EndHooks<ClientContext>,
 ) -> AnyReply {
     let cx = hooks.cx();
-    let ext = cx.extensions.clone();
     // A call's response goes only to its own request; one of another kind
     // fails, even with no outputs.
     let answer = answer.and_then(|resp| match resp.body.call() {
@@ -34,7 +33,7 @@ pub(crate) async fn reply(
     });
     let mut resp = match answer {
         Ok(resp) => resp,
-        Err(fault) => return refusal(ext, fault, hooks),
+        Err(fault) => return refusal(fault, hooks),
     };
     if resp.refused {
         // Its one batch is the refusal, through the call's filters.
@@ -52,7 +51,7 @@ pub(crate) async fn reply(
             true => fault,
             false => fault.unrelayed(),
         };
-        return refusal(ext, fault, hooks);
+        return refusal(fault, hooks);
     }
     let call = resp.body.call().cloned();
     let (outputs, until) = (cx.outputs.clone(), cx.cut.clone());
@@ -66,12 +65,12 @@ pub(crate) async fn reply(
     // Once the session ended, as when its edge dropped `Ended`, its outputs
     // are cut.
     let events = cut(outgoing.events(), &until);
-    (ext, (origin, Ok(events)), ended(hooks, call))
+    ((origin, Ok(events)), ended(hooks, call))
 }
 
 /// A refusal with `fault`, which the client edge writes as one.
-pub(crate) fn refusal(ext: Extensions, fault: Fault, hooks: EndHooks<ClientContext>) -> AnyReply {
-    (ext, (None, Err(fault)), ended(hooks, None))
+pub(crate) fn refusal(fault: Fault, hooks: EndHooks<ClientContext>) -> AnyReply {
+    ((None, Err(fault)), ended(hooks, None))
 }
 
 /// Ends the session once its edge wrote the end, and on a failure its

@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response};
 use respan_gateway_core::{async_trait, codes};
 use respan_gateway_http::Body;
@@ -14,6 +13,7 @@ use respan_gateway_mcp::{
     Owner, SESSION, StdioTransport, StreamableHttp, TIMED_OUT, ToClient, ToServer,
 };
 use respan_gateway_testkit::{MockTransport, mock, serve};
+use serde_json::{Value, json};
 
 const AT: &str = "http://mcp.test";
 
@@ -249,7 +249,7 @@ async fn an_mcp_servers_error_is_written_as_a_json_rpc_error() {
         let (status, headers, body, _) = send(&gw, request(Method::POST, init, &[])).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{program}");
         assert_eq!(headers["content-type"], "application/json");
-        let error: Value = respan_gateway_core::serde_json::from_str(&body).unwrap_or_default();
+        let error: Value = serde_json::from_str(&body).unwrap_or_default();
         assert_eq!(
             (&error["id"], &error["error"]["code"]),
             (&json!(1), &json!(-32603)),
@@ -275,8 +275,8 @@ struct Quiet;
 impl Transport for Quiet {
     async fn send(
         &self,
-        _call: respan_gateway_http::Exchange<respan_gateway_http::Ask>,
-    ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::Answer>, Fault> {
+        _call: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
+    ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault> {
         let never = respan_gateway_core::futures::stream::pending();
         let body = http_body_util::StreamBody::new(never).boxed_unsync();
         let resp = http::Response::builder().header("content-type", "text/event-stream");

@@ -11,16 +11,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{Fault, codes};
 use respan_gateway_formats::{self as formats, relayed::Relayed, sse, whole::Relay};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
-use respan_gateway_http::{Answer, Ask, bodiless};
+use respan_gateway_http::{RequestHead, ResponseHead, bodiless};
+use serde_json::{Value, json};
 
 use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, requests};
-use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 
 /// The header naming an MCP session.
 pub const SESSION: &str = "mcp-session-id";
@@ -64,12 +64,12 @@ impl Codec for StreamableHttp {
         NAME
     }
 
-    fn accepts(&self, head: &Ask) -> bool {
+    fn accepts(&self, head: &RequestHead) -> bool {
         let mcp = [Method::POST, Method::GET, Method::DELETE].contains(&head.method);
         head.uri.path() == self.path && mcp
     }
 
-    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<ToServer>> {
+    fn request_decoder(&self, head: &RequestHead) -> Box<dyn Decoder<ToServer>> {
         let (method, name) = (head.method.clone(), Arc::from(NAME));
         formats::message_decoder(move |raw| {
             let mut input = ToServer::new(method.clone(), Vec::new());
@@ -85,10 +85,10 @@ impl Codec for StreamableHttp {
 
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<ToServer, Ask>> {
+    ) -> Box<dyn Encoder<ToServer, RequestHead>> {
         let mut head = formats::call_head(client);
         if streams {
             return formats::with_head(head, formats::whole::unstreamable(NAME));
@@ -128,8 +128,8 @@ impl Codec for StreamableHttp {
 
     fn response_decoder(
         &self,
-        head: &Answer,
-        call: &Ask,
+        head: &ResponseHead,
+        call: &RequestHead,
         sent: &Bytes,
     ) -> Box<dyn Decoder<ToClient>> {
         if head.status.is_success() && bodiless(&call.method, head.status) {
@@ -151,20 +151,24 @@ impl Codec for StreamableHttp {
     }
 
     /// Messages as events or one JSON body, each as its bytes while it says
-    /// the same, and a failure as a JSON-RPC error per request unanswered:
-    /// a refusal under its status, unless a provider's answer in this
-    /// format, which goes as it came. A 202, a 204 and a response to a
-    /// `HEAD` have no body.
+    /// the same, and a failure as a JSON-RPC error per request unanswered.
+    /// A 202, a 204 and a response to a `HEAD` have no body.
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<ToClient, Answer>> {
-        let mut head = formats::answer_head(answer);
-        let body = response_body(&mut head, ask, body, refusal);
+    ) -> Box<dyn Encoder<ToClient, ResponseHead>> {
+        let mut head = formats::response_head(answer);
+        let body = response_body(&mut head, ask, body);
         formats::with_head(head, body)
+    }
+
+    /// A JSON-RPC error per request unanswered.
+    fn refusal(&self, fault: &Fault, request: &Bytes, head: &mut ResponseHead) -> Bytes {
+        formats::default_content_type(head, JSON);
+        let (pending, batch) = posted(request);
+        failure(fault, &pending, false, batch).into()
     }
 
     fn is_content(&self, output: &ToClient) -> bool {
@@ -172,26 +176,16 @@ impl Codec for StreamableHttp {
     }
 }
 
-dialect!(StreamableHttp);
+impl_format!(StreamableHttp);
 
 /// The body of a response with `head` to the client's request `ask` with
 /// `body` ([`StreamableHttp::response_encoder`]).
 fn response_body(
-    head: &mut Answer,
-    ask: &Ask,
+    head: &mut ResponseHead,
+    ask: &RequestHead,
     request: &Bytes,
-    refusal: Option<&Fault>,
 ) -> Box<dyn Encoder<ToClient, ()>> {
     {
-        if let Some(fault) = refusal {
-            let body = respan_gateway_http::answered(NAME, fault, head).unwrap_or_else(|| {
-                formats::default_content_type(head, JSON);
-                let (pending, batch) = posted(request);
-                failure(fault, &pending, false, batch).into()
-            });
-            let bodiless = bodiless(&ask.method, head.status);
-            return formats::whole::written(if bodiless { Bytes::new() } else { body });
-        }
         if bodiless(&ask.method, head.status) || head.status == StatusCode::ACCEPTED {
             return formats::whole::no_body();
         }

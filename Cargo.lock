@@ -1193,7 +1193,6 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "futures",
- "serde_json",
  "tokio",
 ]
 
@@ -1232,6 +1231,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1257,6 +1257,7 @@ dependencies = [
  "respan-gateway-formats",
  "respan-gateway-http",
  "respan-gateway-testkit",
+ "serde_json",
  "tokio",
 ]
 
@@ -1268,6 +1269,7 @@ dependencies = [
  "respan-gateway-formats",
  "respan-gateway-http",
  "respan-gateway-testkit",
+ "serde_json",
  "tokio",
 ]
 
@@ -1312,6 +1314,7 @@ dependencies = [
  "respan-gateway-formats",
  "respan-gateway-http",
  "respan-gateway-plugins",
+ "serde_json",
  "tokio",
 ]
 
@@ -1323,6 +1326,7 @@ dependencies = [
  "respan-gateway-formats",
  "respan-gateway-http",
  "respan-gateway-testkit",
+ "serde_json",
  "tokio",
 ]
 

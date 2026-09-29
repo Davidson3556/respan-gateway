@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait, serde_json,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};

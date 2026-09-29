@@ -22,7 +22,7 @@ use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bodiless;
 use respan_gateway_http::bytes;
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::serve;
 
@@ -55,11 +55,14 @@ impl Codec for Line {
         LINE
     }
 
-    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
         head.uri.path().starts_with("/line")
     }
 
-    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<LIn>> {
+    fn request_decoder(
+        &self,
+        _request: &respan_gateway_http::RequestHead,
+    ) -> Box<dyn Decoder<LIn>> {
         let name: Arc<str> = Arc::from(LINE);
         respan_gateway_formats::message_decoder(move |raw: Bytes| {
             let text = String::from_utf8_lossy(&raw).into_owned();
@@ -70,18 +73,18 @@ impl Codec for Line {
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         _body: &mut Bytes,
         _streams: bool,
-    ) -> Box<dyn Encoder<LIn, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<LIn, respan_gateway_http::RequestHead>> {
         respan_gateway_formats::with_head(line_head(client), Box::new(Lines))
     }
 
     /// Nothing for a success HTTP gives no body, as the standard formats.
     fn response_decoder(
         &self,
-        head: &respan_gateway_http::Answer,
-        request: &respan_gateway_http::Ask,
+        head: &respan_gateway_http::ResponseHead,
+        request: &respan_gateway_http::RequestHead,
         _sent: &Bytes,
     ) -> Box<dyn Decoder<LOut>> {
         if head.status.is_success() && bodiless(&request.method, head.status) {
@@ -90,25 +93,29 @@ impl Codec for Line {
         Box::new(LineDecoder::default())
     }
 
-    /// A refusal under its fault's status; no body where HTTP has none.
     fn response_encoder(
         &self,
-        answer: Option<&respan_gateway_http::Answer>,
-        request: &respan_gateway_http::Ask,
+        answer: Option<&respan_gateway_http::ResponseHead>,
+        request: &respan_gateway_http::RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<LOut, respan_gateway_http::Answer>> {
-        let mut head = respan_gateway_formats::answer_head(answer);
-        match refusal {
-            Some(fault) => respan_gateway_http::error_head(&mut head, fault),
-            None if bodiless(&request.method, head.status) => {
-                let body = respan_gateway_formats::whole::no_body();
-                return respan_gateway_formats::with_head(head, body);
-            }
-            None => {}
+    ) -> Box<dyn Encoder<LOut, respan_gateway_http::ResponseHead>> {
+        let head = respan_gateway_formats::response_head(answer);
+        if bodiless(&request.method, head.status) {
+            let body = respan_gateway_formats::whole::no_body();
+            return respan_gateway_formats::with_head(head, body);
         }
         let body = LineEncoder(request.method == http::Method::GET, None);
         respan_gateway_formats::with_head(head, Box::new(body))
+    }
+
+    /// A refusal under its fault's status.
+    fn refusal(
+        &self,
+        fault: &Fault,
+        _: &Bytes,
+        _: &mut respan_gateway_http::ResponseHead,
+    ) -> Bytes {
+        Bytes::from(format!("x:{}\n", fault.message()))
     }
 
     fn is_content(&self, output: &LOut) -> bool {
@@ -116,10 +123,12 @@ impl Codec for Line {
     }
 }
 
-dialect!(Line);
+impl_format!(Line);
 
 /// A call's head as Line writes it: the client's, or a fresh one, at `/line`.
-fn line_head(client: Option<&respan_gateway_http::Ask>) -> respan_gateway_http::Ask {
+fn line_head(
+    client: Option<&respan_gateway_http::RequestHead>,
+) -> respan_gateway_http::RequestHead {
     let mut head = respan_gateway_formats::call_head(client);
     respan_gateway_formats::set_path(&mut head, "/line");
     head
@@ -127,13 +136,16 @@ fn line_head(client: Option<&respan_gateway_http::Ask>) -> respan_gateway_http::
 
 /// Line's call encoder with `edit` run on its head, which sees the first
 /// input.
-struct EditHead<F>(Box<dyn Encoder<LIn, respan_gateway_http::Ask>>, Option<F>);
+struct EditHead<F>(
+    Box<dyn Encoder<LIn, respan_gateway_http::RequestHead>>,
+    Option<F>,
+);
 
-impl<F> Encoder<LIn, respan_gateway_http::Ask> for EditHead<F>
+impl<F> Encoder<LIn, respan_gateway_http::RequestHead> for EditHead<F>
 where
-    F: FnOnce(&mut respan_gateway_http::Ask, Option<&LIn>) + Send + 'static,
+    F: FnOnce(&mut respan_gateway_http::RequestHead, Option<&LIn>) + Send + 'static,
 {
-    fn head(&mut self, first: Option<&LIn>) -> respan_gateway_http::Ask {
+    fn head(&mut self, first: Option<&LIn>) -> respan_gateway_http::RequestHead {
         let mut head = self.0.head(first);
         if let Some(edit) = self.1.take() {
             edit(&mut head, first);
@@ -160,14 +172,17 @@ macro_rules! as_line {
         type Input = LIn;
         type Output = LOut;
 
-        fn request_decoder(&self, request: &respan_gateway_http::Ask) -> Box<dyn Decoder<LIn>> {
+        fn request_decoder(
+            &self,
+            request: &respan_gateway_http::RequestHead,
+        ) -> Box<dyn Decoder<LIn>> {
             Line.request_decoder(request)
         }
 
         fn response_decoder(
             &self,
-            head: &respan_gateway_http::Answer,
-            request: &respan_gateway_http::Ask,
+            head: &respan_gateway_http::ResponseHead,
+            request: &respan_gateway_http::RequestHead,
             sent: &Bytes,
         ) -> Box<dyn Decoder<LOut>> {
             Line.response_decoder(head, request, sent)
@@ -175,12 +190,20 @@ macro_rules! as_line {
 
         fn response_encoder(
             &self,
-            answer: Option<&respan_gateway_http::Answer>,
-            request: &respan_gateway_http::Ask,
+            answer: Option<&respan_gateway_http::ResponseHead>,
+            request: &respan_gateway_http::RequestHead,
             body: &Bytes,
-            refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<LOut, respan_gateway_http::Answer>> {
-            Line.response_encoder(answer, request, body, refusal)
+        ) -> Box<dyn Encoder<LOut, respan_gateway_http::ResponseHead>> {
+            Line.response_encoder(answer, request, body)
+        }
+
+        fn refusal(
+            &self,
+            fault: &Fault,
+            body: &Bytes,
+            head: &mut respan_gateway_http::ResponseHead,
+        ) -> Bytes {
+            Line.refusal(fault, body, head)
         }
 
         fn is_content(&self, output: &LOut) -> bool {
@@ -314,12 +337,12 @@ impl Script {
 impl Transport for Script {
     async fn send(
         &self,
-        _call: Exchange<respan_gateway_http::Ask>,
-    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
+        _call: Exchange<respan_gateway_http::RequestHead>,
+    ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
         let (status, frames) = lock(&self.0).pop_front().expect("scripted");
         let frames =
             futures::stream::iter(frames).map(|f| Ok::<_, Fault>(Bytes::from_static(f.as_bytes())));
-        let mut head = respan_gateway_http::fresh_answer();
+        let mut head = respan_gateway_http::fresh_response_head();
         head.status = status;
         Ok(Exchange::new(head, frames.boxed()))
     }
@@ -1315,16 +1338,16 @@ impl Codec for Pathed {
         "pathed"
     }
 
-    fn accepts(&self, _head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, _head: &respan_gateway_http::RequestHead) -> bool {
         false
     }
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         _body: &mut Bytes,
         _streams: bool,
-    ) -> Box<dyn Encoder<LIn, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<LIn, respan_gateway_http::RequestHead>> {
         let mut head = respan_gateway_formats::call_head(client);
         let head = move |first: Option<&LIn>| {
             // The model: the input, translated or changed.
@@ -1337,7 +1360,7 @@ impl Codec for Pathed {
     }
 }
 
-dialect!(Pathed);
+impl_format!(Pathed);
 
 /// Writes as Line does, but cannot say "untranslatable".
 struct Untranslatable;
@@ -1365,12 +1388,12 @@ struct Paths(Shared<String>);
 impl Transport for Paths {
     async fn send(
         &self,
-        call: Exchange<respan_gateway_http::Ask>,
-    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
+        call: Exchange<respan_gateway_http::RequestHead>,
+    ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
         lock(&self.0).push(call.head.uri.path().to_owned());
         let body = futures::stream::iter([Ok(Bytes::from_static(b"i:ok\ne\n"))]);
         Ok(Exchange::new(
-            respan_gateway_http::fresh_answer(),
+            respan_gateway_http::fresh_response_head(),
             body.boxed(),
         ))
     }
@@ -1575,25 +1598,25 @@ impl Codec for Posted {
         "posted"
     }
 
-    fn accepts(&self, _head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, _head: &respan_gateway_http::RequestHead) -> bool {
         false
     }
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<LIn, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<LIn, respan_gateway_http::RequestHead>> {
         let line = Line.request_encoder(client, body, streams);
-        let post = |head: &mut respan_gateway_http::Ask, _: Option<&LIn>| {
+        let post = |head: &mut respan_gateway_http::RequestHead, _: Option<&LIn>| {
             head.method = http::Method::POST;
         };
         Box::new(EditHead(line, Some(post)))
     }
 }
 
-dialect!(Posted);
+impl_format!(Posted);
 
 // `until_content` judges the response as its provider sent it, the call's method,
 // not the client's `HEAD`.
@@ -1634,26 +1657,26 @@ impl Codec for Seen {
         "line"
     }
 
-    fn accepts(&self, _head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, _head: &respan_gateway_http::RequestHead) -> bool {
         false
     }
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<LIn, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<LIn, respan_gateway_http::RequestHead>> {
         let line = Line.request_encoder(client, body, streams);
         let seen = self.0.clone();
-        let note = move |_: &mut respan_gateway_http::Ask, first: Option<&LIn>| {
+        let note = move |_: &mut respan_gateway_http::RequestHead, first: Option<&LIn>| {
             lock(&seen).push(first.is_some());
         };
         Box::new(EditHead(line, Some(note)))
     }
 }
 
-dialect!(Seen);
+impl_format!(Seen);
 
 // A call's first input is given as a value exactly when a filter ran over it;
 // an unfiltered one goes as the client's bytes.
@@ -1772,16 +1795,16 @@ impl Codec for InPath {
         "line"
     }
 
-    fn accepts(&self, _head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, _head: &respan_gateway_http::RequestHead) -> bool {
         false
     }
 
     fn request_encoder(
         &self,
-        client: Option<&respan_gateway_http::Ask>,
+        client: Option<&respan_gateway_http::RequestHead>,
         _body: &mut Bytes,
         _streams: bool,
-    ) -> Box<dyn Encoder<LIn, respan_gateway_http::Ask>> {
+    ) -> Box<dyn Encoder<LIn, respan_gateway_http::RequestHead>> {
         let (seen, head) = (self.0.clone(), line_head(client));
         let head = move |first: Option<&LIn>| {
             let raw = first
@@ -1794,7 +1817,7 @@ impl Codec for InPath {
     }
 }
 
-dialect!(InPath);
+impl_format!(InPath);
 
 /// Writes an input's bytes as they are, changed or not, as a format whose
 /// model is in the path does; one without, as Line does.

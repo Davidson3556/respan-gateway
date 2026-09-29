@@ -12,19 +12,19 @@ use http::header::{CONNECTION, CONTENT_ENCODING, UPGRADE};
 use http::{HeaderValue, StatusCode};
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
+use respan_gateway_core::futures;
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
 };
-use respan_gateway_core::{futures, serde_json};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{OpenAiChat, message_decoder, set_path};
-use respan_gateway_formats::{answer_head, call_head, headed, with_head};
+use respan_gateway_formats::{call_head, headed, response_head, with_head};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
-use respan_gateway_http::{Answer, Ask, Asked, fresh_answer};
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
+use respan_gateway_http::{Asked, RequestHead, ResponseHead, fresh_response_head};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::{Calls, MockTransport, mock, post, serve, streamed};
 use serde_json::{Value, json};
@@ -58,7 +58,7 @@ struct Heard(String);
 struct Talk;
 
 /// Whether the request is upgrading: its `Upgrade`, which a relay passes.
-fn upgrades(head: &Ask) -> bool {
+fn upgrades(head: &RequestHead) -> bool {
     head.headers.contains_key(UPGRADE)
 }
 
@@ -70,11 +70,14 @@ impl Codec for Talk {
         "talk"
     }
 
-    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
         head.uri.path().ends_with("/talk")
     }
 
-    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<Say>> {
+    fn request_decoder(
+        &self,
+        _request: &respan_gateway_http::RequestHead,
+    ) -> Box<dyn Decoder<Say>> {
         talk_decoder(false)
     }
 
@@ -83,10 +86,10 @@ impl Codec for Talk {
     /// the client's bytes loses their encoding.
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Say, Ask>> {
+    ) -> Box<dyn Encoder<Say, RequestHead>> {
         let mut head = call_head(client);
         set_path(&mut head, "/talk");
         if streams {
@@ -108,8 +111,8 @@ impl Codec for Talk {
     /// answer, a 101 no one asked for included, fails the call.
     fn response_decoder(
         &self,
-        head: &Answer,
-        call: &Ask,
+        head: &ResponseHead,
+        call: &RequestHead,
         _sent: &Bytes,
     ) -> Box<dyn Decoder<Heard>> {
         let switched = head.status == StatusCode::SWITCHING_PROTOCOLS && upgrades(call);
@@ -121,15 +124,11 @@ impl Codec for Talk {
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Heard, Answer>> {
-        let mut head = answer_head(answer);
-        if let Some(fault) = refusal {
-            respan_gateway_http::error_head(&mut head, fault);
-        }
+    ) -> Box<dyn Encoder<Heard, ResponseHead>> {
+        let mut head = response_head(answer);
         if upgrades(ask) && head.status == StatusCode::OK {
             head.status = StatusCode::SWITCHING_PROTOCOLS;
             let websocket = HeaderValue::from_static("websocket");
@@ -137,9 +136,13 @@ impl Codec for Talk {
         }
         with_head(head, Box::new(Write))
     }
+
+    fn refusal(&self, fault: &Fault, _: &Bytes, _: &mut ResponseHead) -> Bytes {
+        json!({ "error": fault.message() }).to_string().into()
+    }
 }
 
-dialect!(Talk);
+impl_format!(Talk);
 
 /// Decodes one talk message per body or data frame, keeping its bytes; an
 /// empty one says nothing, unless `strict`.
@@ -247,7 +250,7 @@ impl Echo {
 
 #[async_trait]
 impl Transport for Echo {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let (head, body, whole) = (call.head, call.body, !call.streams);
         self.heads
             .lock()
@@ -263,7 +266,7 @@ impl Transport for Echo {
             let v: Value = serde_json::from_slice(&frame).unwrap_or_default();
             Bytes::from(json!({ "heard": v["say"] }).to_string())
         });
-        let mut resp = Exchange::new(fresh_answer(), echoed.boxed());
+        let mut resp = Exchange::new(fresh_response_head(), echoed.boxed());
         if head.headers.contains_key(UPGRADE) {
             resp.head.status = StatusCode::SWITCHING_PROTOCOLS;
             let websocket = HeaderValue::from_static("websocket");
@@ -621,7 +624,7 @@ struct Early(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
 impl Transport for Early {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let mut body = call.body;
         let seen = self.0.clone();
         tokio::spawn(async move {
@@ -631,7 +634,7 @@ impl Transport for Early {
             }
         });
         let empty = futures::stream::empty::<Result<Bytes, Fault>>();
-        let mut resp = Exchange::new(fresh_answer(), empty.boxed());
+        let mut resp = Exchange::new(fresh_response_head(), empty.boxed());
         resp.head.status = StatusCode::SWITCHING_PROTOCOLS;
         let websocket = HeaderValue::from_static("websocket");
         resp.head.headers.insert(UPGRADE, websocket);
@@ -645,7 +648,7 @@ struct Never;
 
 #[async_trait]
 impl Transport for Never {
-    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         std::future::pending().await
     }
 }
@@ -656,7 +659,7 @@ struct Down;
 
 #[async_trait]
 impl Transport for Down {
-    async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         Err(Fault::upstream("unreachable"))
     }
 }
@@ -1029,21 +1032,21 @@ impl Codec for TalkHttp {
         "talk-http"
     }
 
-    fn accepts(&self, _head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, _head: &respan_gateway_http::RequestHead) -> bool {
         false
     }
 
-    fn request_decoder(&self, request: &respan_gateway_http::Ask) -> Box<dyn Decoder<Say>> {
+    fn request_decoder(&self, request: &respan_gateway_http::RequestHead) -> Box<dyn Decoder<Say>> {
         Talk.request_decoder(request)
     }
 
     /// One request and one answer: no streamed inputs.
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Say, Ask>> {
+    ) -> Box<dyn Encoder<Say, RequestHead>> {
         let mut head = call_head(client);
         if streams {
             let unstreamable = respan_gateway_formats::whole::unstreamable("talk-http");
@@ -1053,22 +1056,35 @@ impl Codec for TalkHttp {
         with_head(head, Box::new(Says("talk-http")))
     }
 
-    fn response_decoder(&self, head: &Answer, call: &Ask, sent: &Bytes) -> Box<dyn Decoder<Heard>> {
+    fn response_decoder(
+        &self,
+        head: &ResponseHead,
+        call: &RequestHead,
+        sent: &Bytes,
+    ) -> Box<dyn Decoder<Heard>> {
         Talk.response_decoder(head, call, sent)
     }
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Heard, Answer>> {
-        Talk.response_encoder(answer, ask, body, refusal)
+    ) -> Box<dyn Encoder<Heard, ResponseHead>> {
+        Talk.response_encoder(answer, ask, body)
+    }
+
+    fn refusal(
+        &self,
+        fault: &Fault,
+        body: &Bytes,
+        head: &mut respan_gateway_http::ResponseHead,
+    ) -> Bytes {
+        Talk.refusal(fault, body, head)
     }
 }
 
-dialect!(TalkHttp);
+impl_format!(TalkHttp);
 
 #[tokio::test]
 async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
@@ -1104,20 +1120,23 @@ impl Codec for Raw {
         "raw"
     }
 
-    fn accepts(&self, _head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, _head: &respan_gateway_http::RequestHead) -> bool {
         true
     }
 
-    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<Sent<Raw>>> {
+    fn request_decoder(
+        &self,
+        _request: &respan_gateway_http::RequestHead,
+    ) -> Box<dyn Decoder<Sent<Raw>>> {
         opaque::request_decoder()
     }
 
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         _body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Sent<Raw>, Ask>> {
+    ) -> Box<dyn Encoder<Sent<Raw>, RequestHead>> {
         let mut head = call_head(client);
         set_path(&mut head, "/");
         opaque::request_encoder(Some(&head), streams)
@@ -1125,8 +1144,8 @@ impl Codec for Raw {
 
     fn response_decoder(
         &self,
-        head: &Answer,
-        call: &Ask,
+        head: &ResponseHead,
+        call: &RequestHead,
         _sent: &Bytes,
     ) -> Box<dyn Decoder<Got<Raw>>> {
         opaque::response_decoder("raw", head, call)
@@ -1134,16 +1153,15 @@ impl Codec for Raw {
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         _body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Got<Raw>, Answer>> {
-        opaque::response_encoder("raw", answer, ask, refusal)
+    ) -> Box<dyn Encoder<Got<Raw>, ResponseHead>> {
+        opaque::response_encoder(answer, ask)
     }
 }
 
-dialect!(Raw);
+impl_format!(Raw);
 
 #[tokio::test]
 async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
@@ -1175,8 +1193,11 @@ async fn a_101_goes_only_to_a_request_that_asked() {
 
     #[async_trait]
     impl Transport for Switches {
-        async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
-            let mut resp = Exchange::new(fresh_answer(), futures::stream::empty().boxed());
+        async fn send(
+            &self,
+            _call: Exchange<RequestHead>,
+        ) -> Result<Exchange<ResponseHead>, Fault> {
+            let mut resp = Exchange::new(fresh_response_head(), futures::stream::empty().boxed());
             resp.head.status = StatusCode::SWITCHING_PROTOCOLS;
             Ok(resp)
         }
@@ -1334,7 +1355,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
 
     #[async_trait]
     impl Transport for ReadThenFail {
-        async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
             let _ = call.body.collect::<Vec<_>>().await;
             Err(Fault::upstream("unreachable after reading"))
         }
@@ -1607,35 +1628,51 @@ impl Codec for Strict {
     fn name(&self) -> &str {
         "talk"
     }
-    fn accepts(&self, h: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, h: &respan_gateway_http::RequestHead) -> bool {
         Talk.accepts(h)
     }
-    fn request_decoder(&self, _request: &respan_gateway_http::Ask) -> Box<dyn Decoder<Say>> {
+    fn request_decoder(
+        &self,
+        _request: &respan_gateway_http::RequestHead,
+    ) -> Box<dyn Decoder<Say>> {
         talk_decoder(true)
     }
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Say, Ask>> {
+    ) -> Box<dyn Encoder<Say, RequestHead>> {
         Talk.request_encoder(client, body, streams)
     }
-    fn response_decoder(&self, h: &Answer, call: &Ask, sent: &Bytes) -> Box<dyn Decoder<Heard>> {
+    fn response_decoder(
+        &self,
+        h: &ResponseHead,
+        call: &RequestHead,
+        sent: &Bytes,
+    ) -> Box<dyn Decoder<Heard>> {
         Talk.response_decoder(h, call, sent)
     }
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Heard, Answer>> {
-        Talk.response_encoder(answer, ask, body, refusal)
+    ) -> Box<dyn Encoder<Heard, ResponseHead>> {
+        Talk.response_encoder(answer, ask, body)
+    }
+
+    fn refusal(
+        &self,
+        fault: &Fault,
+        body: &Bytes,
+        head: &mut respan_gateway_http::ResponseHead,
+    ) -> Bytes {
+        Talk.refusal(fault, body, head)
     }
 }
 
-dialect!(Strict);
+impl_format!(Strict);
 
 // An input a filter adds at the end is sent.
 #[tokio::test]

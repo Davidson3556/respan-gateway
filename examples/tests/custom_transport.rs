@@ -1,8 +1,8 @@
 use super::*;
-use respan_gateway_core::{Plugin, ProviderContext, serde_json};
+use respan_gateway_core::{Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::AnthropicMessages;
-use respan_gateway_http::Status;
+use respan_gateway_http::{Status, http};
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
     let (status, headers, body) =
@@ -31,12 +31,9 @@ async fn answers_json_or_sse_as_asked() -> Result<(), Fault> {
 
 #[tokio::test]
 async fn the_same_model_answers_in_anthropics_format() -> Result<(), Fault> {
-    let local = Local {
-        format: AnthropicMessages,
-        model: Echo,
-    };
+    let model: Model = Arc::new(echo);
     let gw = Gateway::new()
-        .provider("local", AnthropicMessages, local)?
+        .provider("local", Local, model)?
         .serve(AnthropicMessages)?
         .target("local")?;
     let req = r#"{"model":"echo","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;

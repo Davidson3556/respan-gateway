@@ -13,10 +13,11 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+respan-gateway-formats.workspace = true
+serde_json.workspace = true
 respan-gateway-http.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-respan-gateway-formats.workspace = true
 respan-gateway-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

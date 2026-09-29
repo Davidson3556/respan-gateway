@@ -116,8 +116,8 @@ struct Scripted {
 impl Transport for Scripted {
     async fn send(
         &self,
-        call: Exchange<respan_gateway_http::Ask>,
-    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
+        call: Exchange<respan_gateway_http::RequestHead>,
+    ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
         let _: Vec<Bytes> = call.body.try_collect().await?;
         let (head, chunks) = reply(self.whole).into_parts();
         Ok(Exchange::new(head, body(chunks)))

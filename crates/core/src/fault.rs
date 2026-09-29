@@ -5,8 +5,6 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
-
 use crate::Extensions;
 
 pub(crate) const PANICKED: &str = "a plugin or format panicked";
@@ -38,8 +36,7 @@ pub mod codes {
     pub const INTERNAL: &str = "internal";
 }
 
-/// The one error type: a code, message and details for the client, a retry
-/// delay, a source for logs, typed hints a transport reads (an HTTP status is
+/// The one error type: a code and message for the client, a retry delay, a source for logs, typed hints a transport reads (an HTTP status is
 /// one, [`Fault::with`]), and a provider's answer, which the client's format
 /// writes and the kernel never reads. Implement
 /// `From<YourError> for Fault` so `?` works in hooks.
@@ -50,7 +47,6 @@ pub struct Fault(Box<Inner>);
 struct Inner {
     code: Cow<'static, str>,
     message: String,
-    details: Option<Value>,
     retry_after: Option<Duration>,
     source: Option<Arc<dyn Error + Send + Sync>>,
     /// Hints for the edges, which the kernel never reads.
@@ -65,18 +61,11 @@ impl Fault {
         Self(Box::new(Inner {
             code: code.into(),
             message: message.into(),
-            details: None,
             retry_after: None,
             source: None,
             hints: Extensions::new(),
             answer: None,
         }))
-    }
-
-    /// Extra fields for the client's error body, a JSON object.
-    pub fn with_details(mut self, details: Value) -> Self {
-        self.0.details = Some(details);
-        self
     }
 
     /// The underlying cause, for logs: an error or a message.
@@ -156,11 +145,6 @@ impl Fault {
         &self.0.message
     }
 
-    /// The extra fields for the client's error body, if any.
-    pub fn details(&self) -> Option<&Value> {
-        self.0.details.as_ref()
-    }
-
     /// The client's mistake.
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(codes::BAD_REQUEST, message)
@@ -225,7 +209,6 @@ impl fmt::Debug for Fault {
         f.debug_struct("Fault")
             .field("code", &self.0.code)
             .field("message", &self.0.message)
-            .field("details", &self.0.details)
             .field("retry_after", &self.0.retry_after)
             .field("source", &self.0.source.as_ref().map(|s| s.to_string()))
             .field("answer", &self.0.answer.as_ref().map(|(of, _)| &**of))
@@ -260,10 +243,7 @@ impl Error for Fault {
 impl PartialEq for Fault {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
-        a.code == b.code
-            && a.message == b.message
-            && a.details == b.details
-            && a.retry_after == b.retry_after
+        a.code == b.code && a.message == b.message && a.retry_after == b.retry_after
     }
 }
 
@@ -278,6 +258,10 @@ mod tests {
         limit: u32,
     }
 
+    /// A hint an edge reads: the limit a client is told.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Limit(u32);
+
     impl fmt::Display for PluginError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "over the limit of {}", self.limit)
@@ -289,7 +273,7 @@ mod tests {
     impl From<PluginError> for Fault {
         fn from(e: PluginError) -> Self {
             Fault::new("over_limit", e.to_string())
-                .with_details(serde_json::json!({ "limit": e.limit }))
+                .with(Limit(e.limit))
                 .with_source(e)
         }
     }
@@ -302,10 +286,7 @@ mod tests {
     fn plugin_errors_convert_with_question_mark() {
         let f = check().err();
         assert_eq!(f.as_ref().map(Fault::code), Some("over_limit"));
-        assert_eq!(
-            f.as_ref().and_then(Fault::details),
-            Some(&serde_json::json!({ "limit": 3 }))
-        );
+        assert_eq!(f.as_ref().and_then(Fault::get::<Limit>), Some(&Limit(3)));
         assert!(f.as_ref().and_then(|f| f.source()).is_some());
     }
 

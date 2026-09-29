@@ -32,8 +32,9 @@ HTTP.
 4. **`Extensions` are the core's own**, a clonable type map. The HTTP
    adapter takes an embedder's values from an `Extensions` it finds in the
    request's `http::Extensions`.
-5. **HTTP lives in `crates/http`**: `Ask`/`Answer`
-   (`http::request::Parts`, `http::response::Parts`), the adapter, the
+5. **HTTP lives in `crates/http`**: `Ask`/`Answer` (named `RequestHead`
+   and `ResponseHead` since 0020; `http::request::Parts`,
+   `http::response::Parts`), the adapter, the
    body, the codec traits, the driver and conversions (`ask`, `answer`,
    `call`). A fault's HTTP status is a hint defined there (0019).
 6. **No plugin touches a head.** The head hooks `edit_call`,
@@ -44,7 +45,7 @@ HTTP.
 ## Consequences
 
 - The core depends on no `http` crate.
-- An HTTP format implements `Codec` and `dialect!(Type)`; an HTTP
+- An HTTP format implements `Codec` and `impl_format!(Type)`; an HTTP
   transport implements `http::Transport`, with the heads
   `http::Ask` and `http::Answer`.
 - Body-only encoders are `Encoder<T, ()>`, given a head by
@@ -58,5 +59,5 @@ HTTP.
 - 0013 first typed `Format` and `Transport` by `type Ask; type Answer;`, a
   pair of head types the core carried; 0017 made `handle` untyped over
   them, and 0020 replaced the pair with `Wire` and `Dialer`.
-- 0015: `ProviderContext::is_head_only` sits beside `is_sent`; `relayed`
+- 0015: `ProviderContext::is_refused` sits beside `is_sent`; `relayed`
   and `streams` are fields of `Exchange`.

@@ -407,8 +407,9 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
     impl Transport for Cookie {
         async fn send(
             &self,
-            _req: respan_gateway_http::Exchange<respan_gateway_http::Ask>,
-        ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::Answer>, Fault> {
+            _req: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
+        ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault>
+        {
             let body = http_body_util::Full::new(bytes::Bytes::from(UNARY));
             let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(
                 http_body_util::BodyExt::map_err(body, Fault::from),

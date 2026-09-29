@@ -1,7 +1,7 @@
 //! The kernel's promises, driven through the OpenAI format.
 
 use futures::TryStreamExt;
-use respan_gateway_core::{futures, serde_json};
+use respan_gateway_core::futures;
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{http, http_body, http_body_util};
@@ -17,9 +17,9 @@ use respan_gateway_core::{
 use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
 };
-use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
+use respan_gateway_formats::{AnthropicMessages, Details, OpenAiChat, Usage};
 use respan_gateway_http::Asked;
-use respan_gateway_http::{Answer, Ask, Body};
+use respan_gateway_http::{Body, RequestHead, ResponseHead};
 use respan_gateway_testkit::{MockAt, MockTransport, Outcomes, mock, post, read_whole, serve};
 
 mod common;
@@ -32,7 +32,7 @@ use openai::{
     BACKUP, Cool, OnProvider, STREAM, STREAM_REQ, UNARY, UNARY_REQ, chat, gateway, provider, relay,
     unary_chat,
 };
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
 use serde_json::json;
 
 /// The error frame for a stream that stops short.
@@ -353,7 +353,7 @@ async fn edits_apply_the_last_added_first() {
 async fn a_refusal_is_an_error_in_the_client_format() {
     let fault = Fault::new("insufficient_credits", "balance too low")
         .with(Status(402))
-        .with_details(json!({ "balance": 0.12 }));
+        .with(Details(json!({ "balance": 0.12 })));
     let h = Harness::new(vec![Arc::new(Refuse(fault.clone()))], Some("openai"));
 
     let (status, headers, body) = h.send(chat()).await;
@@ -1107,7 +1107,7 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
 
     #[async_trait]
     impl respan_gateway_http::Transport for Silent {
-        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
             let never = http_body_util::StreamBody::new(futures::stream::pending());
             let mut resp = http::Response::new(Body::new(never));
             resp.headers_mut().insert(
@@ -2514,7 +2514,7 @@ async fn a_providers_trailers_are_not_passed_on() {
 
     #[async_trait]
     impl respan_gateway_http::Transport for Trailed {
-        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
             let mut trailers = http::HeaderMap::new();
             trailers.insert("x-trailer", HeaderValue::from_static("1"));
             let frames = [
@@ -2666,7 +2666,7 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
 
     #[async_trait]
     impl respan_gateway_http::Transport for Endless {
-        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
             let guard = Dropped(self.0.clone());
             let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
                 let _ = &guard;
@@ -3247,7 +3247,7 @@ struct TenantTransport(MockAt);
 
 #[async_trait]
 impl Transport for TenantTransport {
-    async fn send(&self, mut req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, mut req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         if let Some(key) = req.extensions.get::<TenantKey>().cloned() {
             let key = HeaderValue::from_static(key.0);
             req.head.headers.insert("x-tenant-key", key);
@@ -3582,7 +3582,7 @@ struct Endless(Arc<AtomicBool>);
 
 #[async_trait]
 impl Transport for Endless {
-    async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let guard = Dropped(self.0.clone());
         let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
             let _ = &guard;
@@ -3793,27 +3793,27 @@ impl Codec for Fragile {
         OpenAiChat.name()
     }
 
-    fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+    fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
         OpenAiChat.accepts(head)
     }
 
-    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Conversation>> {
+    fn request_decoder(&self, head: &RequestHead) -> Box<dyn Decoder<Conversation>> {
         OpenAiChat.request_decoder(head)
     }
 
     fn request_encoder(
         &self,
-        client: Option<&Ask>,
+        client: Option<&RequestHead>,
         body: &mut bytes::Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Conversation, Ask>> {
+    ) -> Box<dyn Encoder<Conversation, RequestHead>> {
         OpenAiChat.request_encoder(client, body, streams)
     }
 
     fn response_decoder(
         &self,
-        head: &Answer,
-        call: &Ask,
+        head: &ResponseHead,
+        call: &RequestHead,
         sent: &bytes::Bytes,
     ) -> Box<dyn Decoder<Reply>> {
         OpenAiChat.response_decoder(head, call, sent)
@@ -3821,23 +3821,29 @@ impl Codec for Fragile {
 
     fn response_encoder(
         &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
         body: &bytes::Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Reply, Answer>> {
-        Box::new(Garbling(
-            OpenAiChat.response_encoder(answer, ask, body, refusal),
-        ))
+    ) -> Box<dyn Encoder<Reply, ResponseHead>> {
+        Box::new(Garbling(OpenAiChat.response_encoder(answer, ask, body)))
+    }
+
+    fn refusal(
+        &self,
+        fault: &Fault,
+        body: &bytes::Bytes,
+        head: &mut respan_gateway_http::ResponseHead,
+    ) -> bytes::Bytes {
+        OpenAiChat.refusal(fault, body, head)
     }
 }
 
-dialect!(Fragile);
+impl_format!(Fragile);
 
-struct Garbling(Box<dyn Encoder<Reply, Answer>>);
+struct Garbling(Box<dyn Encoder<Reply, ResponseHead>>);
 
-impl Encoder<Reply, Answer> for Garbling {
-    fn head(&mut self, first: Option<&Reply>) -> Answer {
+impl Encoder<Reply, ResponseHead> for Garbling {
+    fn head(&mut self, first: Option<&Reply>) -> ResponseHead {
         self.0.head(first)
     }
 
@@ -4136,7 +4142,7 @@ async fn a_panicking_call_leaves_its_sibling_abandoned() {
 
     #[async_trait]
     impl Transport for Never {
-        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
             std::future::pending().await
         }
     }
@@ -4146,7 +4152,7 @@ async fn a_panicking_call_leaves_its_sibling_abandoned() {
 
     #[async_trait]
     impl Transport for Boom {
-        async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
             panic!("a buggy transport")
         }
     }
@@ -5044,27 +5050,27 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
             OpenAiChat.name()
         }
 
-        fn accepts(&self, head: &respan_gateway_http::Ask) -> bool {
+        fn accepts(&self, head: &respan_gateway_http::RequestHead) -> bool {
             OpenAiChat.accepts(head)
         }
 
-        fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Conversation>> {
+        fn request_decoder(&self, head: &RequestHead) -> Box<dyn Decoder<Conversation>> {
             OpenAiChat.request_decoder(head)
         }
 
         fn request_encoder(
             &self,
-            client: Option<&Ask>,
+            client: Option<&RequestHead>,
             body: &mut bytes::Bytes,
             streams: bool,
-        ) -> Box<dyn Encoder<Conversation, Ask>> {
+        ) -> Box<dyn Encoder<Conversation, RequestHead>> {
             OpenAiChat.request_encoder(client, body, streams)
         }
 
         fn response_decoder(
             &self,
-            head: &Answer,
-            call: &Ask,
+            head: &ResponseHead,
+            call: &RequestHead,
             sent: &bytes::Bytes,
         ) -> Box<dyn Decoder<Reply>> {
             OpenAiChat.response_decoder(head, call, sent)
@@ -5072,24 +5078,32 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
 
         fn response_encoder(
             &self,
-            answer: Option<&Answer>,
-            ask: &Ask,
+            answer: Option<&ResponseHead>,
+            ask: &RequestHead,
             body: &bytes::Bytes,
-            refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<Reply, Answer>> {
+        ) -> Box<dyn Encoder<Reply, ResponseHead>> {
             Box::new(Tallying(
                 self.0.clone(),
-                OpenAiChat.response_encoder(answer, ask, body, refusal),
+                OpenAiChat.response_encoder(answer, ask, body),
             ))
+        }
+
+        fn refusal(
+            &self,
+            fault: &Fault,
+            body: &bytes::Bytes,
+            head: &mut respan_gateway_http::ResponseHead,
+        ) -> bytes::Bytes {
+            OpenAiChat.refusal(fault, body, head)
         }
     }
 
-    dialect!(Tally);
+    impl_format!(Tally);
 
-    struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Reply, Answer>>);
+    struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Reply, ResponseHead>>);
 
-    impl Encoder<Reply, Answer> for Tallying {
-        fn head(&mut self, first: Option<&Reply>) -> Answer {
+    impl Encoder<Reply, ResponseHead> for Tallying {
+        fn head(&mut self, first: Option<&Reply>) -> ResponseHead {
             self.1.head(first)
         }
 
@@ -5749,7 +5763,7 @@ struct Paced(MockAt, Duration, Duration);
 
 #[async_trait]
 impl Transport for Paced {
-    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         tokio::time::sleep(self.1).await;
         use futures::StreamExt;
         let resp = self.0.send(call).await?;
