@@ -363,26 +363,21 @@ pub(crate) fn depart(
     }
 }
 
-/// The polls [`drain_ready`] spends on one body. Bytes are no measure: it
-/// discards what it reads, so a frame costs one poll however large, and a
-/// ready body's size is already in memory. What must be bounded is the
-/// polls, as a body that is always ready, or that yields and never gives a
-/// frame, would hold the thread forever. An output costs two polls a frame
-/// (one `Pending` woken at once, then the frame), so this reads the end of
-/// a ready body of 2048 frames, far more than any answer that has no body
-/// to send is made of, and returns within microseconds on one that has no
-/// end.
-const DRAIN_POLLS: usize = 4096;
-
-/// Read `body`'s frames until it ends, waits on something, or has spent
-/// [`DRAIN_POLLS`] polls. A bodiless answer's frames are content it cannot
-/// send, read only to reach its end, so a ready body of any size is read
-/// through and its end told. An output says
-/// `Pending` between the frames it sent apart (rule 5) but wakes itself at
-/// once, as a yield does, so a `Pending` that was woken during its poll is
-/// ready, and one that was not is waiting. Each poll runs outside tokio's
-/// cooperative budget: once a task's is spent, every poll of a ready source
-/// is such a yield, and the loop would spin on it.
+/// Read what `body` has ready now: until it ends, waits on something, or
+/// the task's budget is spent. A bodiless answer's frames are content it
+/// cannot send, read only to reach its end, so a ready body is read through
+/// and its end told (rule 4: dropped outputs end their call as its end, if
+/// ready, says, else `abandoned`). An output says `Pending` between the
+/// frames it sends apart (rule 5) but wakes itself at once, as a yield
+/// does, so a `Pending` that was woken during its poll is ready and one
+/// that was not is waiting: the gateway's own body cannot tell a source
+/// that yields between frames from one that has them all, so neither can
+/// this. What a task may do in one poll is what tokio's cooperative budget
+/// allows, so every poll spends from it, and a spent budget is not ready
+/// either: a body ready without end, or waking itself and never giving a
+/// frame, cannot hold the thread, and no count of ours stands in for the
+/// runtime's. A bodiless answer of more frames than that budget ends
+/// `abandoned`, as one still waiting does.
 fn drain_ready(body: &mut Body) {
     struct Woken(AtomicBool);
     impl futures::task::ArcWake for Woken {
@@ -393,16 +388,16 @@ fn drain_ready(body: &mut Body) {
     let woken = Arc::new(Woken(AtomicBool::new(false)));
     let waker = futures::task::waker(woken.clone());
     let mut cx = std::task::Context::from_waker(&waker);
-    for _ in 0..DRAIN_POLLS {
-        let next = std::future::poll_fn(|cx| {
-            http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), cx)
-        });
-        let mut next = std::pin::pin!(tokio::task::unconstrained(next));
-        match next.as_mut().poll(&mut cx) {
-            std::task::Poll::Pending if woken.0.swap(false, Ordering::SeqCst) => {}
-            std::task::Poll::Pending => return,
+    loop {
+        let mut budget = std::pin::pin!(tokio::task::consume_budget());
+        if budget.as_mut().poll(&mut cx).is_pending() {
+            return;
+        }
+        woken.0.store(false, Ordering::SeqCst);
+        match http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), &mut cx) {
+            std::task::Poll::Pending if woken.0.load(Ordering::SeqCst) => {}
             std::task::Poll::Ready(Some(Ok(_))) => {}
-            std::task::Poll::Ready(_) => return,
+            _ => return,
         }
     }
 }

@@ -114,10 +114,10 @@ target: p
     );
 }
 
-/// Passthrough forwards the path it matched, cleaned, and the query as it
+/// Passthrough forwards the segments it matched, as spelled, and the query as it
 /// came: whatever the spelling, the vendor gets one path.
 #[tokio::test]
-async fn passthrough_forwards_the_canonical_path() {
+async fn passthrough_forwards_the_matched_segments() {
     let (base, seen) = recorder().await;
     let gw = Gateway::start(&format!(
         "providers:
@@ -133,9 +133,12 @@ target: p
         ("/v1\\models", "/pt/v1/models"),
         ("/v1/./models", "/pt/v1/models"),
         ("/v1/x/../models?a=1", "/pt/v1/models?a=1"),
-        ("/v1/%6Dodels", "/pt/v1/models"),
+        ("/v1/%6Dodels", "/pt/v1/%6Dodels"),
         ("/v1/files/file-1?limit=2", "/pt/v1/files/file-1?limit=2"),
         ("/v1/a%20b", "/pt/v1/a%20b"),
+        ("/v1/%2e%2e/models", "/pt/models"),
+        ("/v1/a/%2E%2e/%2e/b;x=1//c", "/pt/v1/b;x=1/c"),
+        ("/v1/.;x/models", "/pt/v1/models"),
     ] {
         seen.lock().unwrap().clear();
         send_raw(&addr, sent).await;
