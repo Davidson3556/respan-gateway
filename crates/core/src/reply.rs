@@ -88,13 +88,12 @@ pub(crate) fn refusal(fault: Fault, hooks: EndHooks<ClientContext>) -> AnyReply 
 }
 
 /// Ends the request once its edge wrote the end, and on a failure its
-/// reply's call too, if its outputs are still held (dropped, they ended
-/// it); dropped uncalled, the request ends abandoned.
+/// reply's call too, unless it ended; dropped uncalled, the request ends
+/// abandoned, and its calls with it.
 fn ended(hooks: EndHooks<ClientContext>, call: Option<SharedCall>) -> Ended {
-    let call = call.as_ref().map(Arc::downgrade);
     Box::new(move |end| {
         let mut hooks = hooks;
-        if let (Err(fault), Some(call)) = (&end, call.and_then(|c| c.upgrade())) {
+        if let (Err(fault), Some(call)) = (&end, call) {
             locked(&call).finish(Err(fault.clone()));
         }
         hooks.finish(end);

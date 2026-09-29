@@ -134,8 +134,9 @@ The rules, in full in the rustdoc of `Format`:
 3. **The client edge owns its head timing**; see below.
 4. **The client edge calls `Ended` exactly when its reply's end is out**,
    or drops it: dropped, the request ends `abandoned`. `Ended(Err(f))` also
-   ends the reply's call with `f`. Outputs dropped unread end their call as
-   its end, if ready, says, else `abandoned`.
+   ends the reply's call with `f`, unless it ended. Outputs dropped unread
+   end their call as its end says, if ready; else the call ends with the
+   request, with `Ended`'s fault, or `abandoned`.
 5. **What a provider edge's outputs have ready at once is one batch**: the
    call's filters see all of it before the client's see its first, so a
    meter sees usage that shares a frame with an output a client filter

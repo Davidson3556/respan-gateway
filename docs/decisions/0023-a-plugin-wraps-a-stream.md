@@ -119,9 +119,10 @@ read (then an empty upload is what the client sent).
   its outputs, and the retry fix.
 - A call made before a wrap keeps the inputs as they were, as a call is a
   copy of the request as it is when made.
-- A wrap of outputs that ends them cleanly, as a deadline does, ends the
-  reply cleanly; the call, its outputs dropped unread, ends `abandoned`.
-  A plugin that wants the cut told ends its stream with a fault of its own.
+- A wrap of outputs that ends them cleanly ends the reply cleanly; the
+  call, its outputs dropped unread, ends `abandoned`. A plugin that wants
+  the cut told, as a deadline does, ends its stream with a fault of its
+  own, which ends the reply and its call (loop 5, below).
 - An edge's classification now reaches the end: a client edge that reports
   a client leaving as an input failure says `abandoned` (`sdks/ws` does,
   for a drop and a binary frame).
@@ -137,3 +138,21 @@ read (then an empty upload is what the client sent).
   await. `upload.rs` pins the retry on plain session inputs.
 - Supersedes 0022. Amends 0020 (a call carries the request's inputs, as
   plugins left them, or one input of its own).
+
+## History
+
+Loop 5 (simplicity and correctness), one pass:
+
+- **The reply holds its call strongly.** `Ended` held the reply's call
+  weakly from the first kernel (0020 step 3), so outputs dropped unread
+  ended it at once, `abandoned`, and `Ended(Err(f))` then found nothing to
+  end. An output wrap drops them whenever it stops reading, so a deadline
+  that ended its stream with `max_length` ended the reply with it and the
+  call `abandoned`, while the same cut made on the inputs said
+  `max_length`. `Ended` now holds the call: `Ended(Err(f))` ends it with
+  `f` unless it ended, and dropped outputs whose end is not ready leave it
+  to end with the request (Format rule 4). Nothing else changes: a call
+  ends once (its end hooks are guarded), the request's end still abandons
+  every open call before its own end hooks start, and `Ended` dropped
+  drops the call with the request, so no call outlives it and no cycle
+  forms (`Ended` is held by the edge, never by the call).

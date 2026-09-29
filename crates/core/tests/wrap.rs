@@ -554,6 +554,43 @@ async fn a_gate_and_a_deadline_compose_and_the_relay_is_kept() {
     assert!(rec.log().prov_codes().contains(&"abandoned".to_string()));
 }
 
+/// A deadline that cuts the outputs with a fault of its own ends the reply
+/// and the call with it, as `Ended(Err(f))` ends the reply's call (rule 4),
+/// though the wrap dropped the call's outputs unread.
+#[tokio::test]
+async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
+    struct Cut;
+    #[async_trait]
+    impl Plugin for Cut {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.wrap(|outputs: Events<Out>| {
+                let over = stream::once(async { Err(Fault::new("max_length", "over")) });
+                outputs.take(1).chain(over)
+            })?;
+            Ok(None)
+        }
+    }
+    let (body, rec) = (Body::default(), Rec::default());
+    let gw = Gateway::new()
+        .serve(Toy)
+        .unwrap()
+        .provider("p", Toy, body.provider(10))
+        .unwrap()
+        .plugin("rec", rec.clone())
+        .unwrap()
+        .plugin("cut", Cut)
+        .unwrap()
+        .target("p")
+        .unwrap();
+    let (tx, req) = upload();
+    let (res, end) = handle(&gw, req).await;
+    assert_eq!(read(res).await, Ok((200, "a;ERR max_length".into())));
+    assert_eq!(code(&end.await), "max_length");
+    drop(tx);
+    gw.idle().await;
+    assert_eq!(rec.log().prov_codes(), ["max_length"]);
+}
+
 /// Without a wrap, the same relay: the wraps change nothing of it.
 #[tokio::test]
 async fn a_plain_relay_has_the_same_heads() {

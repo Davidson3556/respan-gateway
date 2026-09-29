@@ -352,8 +352,9 @@ impl Outgoing {
     }
 }
 
-/// Dropped before its end, unread: its call ends as its end, if it is
-/// ready, says, else abandoned as its source goes (rule 4).
+/// Dropped before its end, unread: its call ends as its end says, if it is
+/// ready; else as its source goes, abandoned, or with its request if the
+/// reply holds it (rule 4).
 impl Drop for Outgoing {
     fn drop(&mut self) {
         if self.done {

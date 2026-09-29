@@ -66,9 +66,10 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 ///    session.
 /// 4. The client edge calls [`Ended`] exactly when its reply's end is out,
 ///    or drops it. `Ended(Err(fault))` also ends the reply's call with
-///    `fault`. Outputs dropped unread end their call as their end, if it is
-///    ready, says, else abandoned. `Ended` dropped first ends the request
-///    abandoned, and the outputs then end `Err` abandoned.
+///    `fault`, unless it ended. Outputs dropped unread end their call as
+///    their end says, if it is ready; else the call ends with the request,
+///    with `Ended`'s fault, or abandoned. `Ended` dropped first ends the
+///    request abandoned, and the outputs then end `Err` abandoned.
 /// 5. What a provider edge's outputs have ready at once is one batch: the
 ///    call's filters see all of it before the client's see its first, as a
 ///    meter sees usage that shares a frame with an output a client filter

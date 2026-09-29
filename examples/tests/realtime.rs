@@ -352,7 +352,7 @@ async fn a_session_is_closed_at_its_maximum_length() -> Result<(), Fault> {
         s.meter.ended(),
         [Ended {
             session: 1,
-            code: "abandoned".into(),
+            code: "max_length".into(),
             turns: 1
         }]
     );
