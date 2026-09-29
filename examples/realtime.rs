@@ -436,20 +436,23 @@ struct Turns {
 impl<L: Ledger> Wallet<L> {
     /// Holds a turn's worst case: what it reads (all the session so far) and
     /// the most it may say. Refused, closing the client, if the wallet cannot
-    /// cover it.
+    /// cover it. The hold is recorded before the ledger is asked, so a client
+    /// that leaves during the wait still has it settled (to no effect if it
+    /// never landed).
     async fn hold(&self) -> Result<(), Fault> {
         let amount = lock(&self.turns).bytes + TURN;
         let hold = HoldId::new();
-        let key = [self.key.clone()];
-        let held = self.ledger.reserve(&hold, &key, amount, HOUR).await;
-        held.map_err(|fault| fault.with(CloseCode(1008)))?;
         lock(&self.turns).holds.push_back((hold, amount));
-        Ok(())
+        let held = self
+            .ledger
+            .reserve(&hold, std::slice::from_ref(&self.key), amount, HOUR)
+            .await;
+        held.map_err(|fault| fault.with(CloseCode(1008)))
     }
 
     /// What the client says is counted; a `response.create` is capped at
     /// `TURN` output tokens and holds a turn first.
-    async fn before(&self, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
+    async fn before(self: Arc<Self>, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
         let mut said = 0;
         edit_texts(&mut event.json, SAID, &mut |text| said += text.len());
         lock(&self.turns).bytes += Amount::try_from(said).unwrap_or_default();
@@ -471,8 +474,9 @@ impl<L: Ledger> Wallet<L> {
     /// A turn the client did not ask for (the provider's voice detection
     /// starts them) is held when it begins, and cut if the wallet cannot
     /// cover it. What the provider says is counted. A `response.done`
-    /// settles the oldest hold at what the turn used.
-    async fn after(&self, event: ProviderEvent) -> Result<ProviderEvent, Fault> {
+    /// settles the oldest hold at what the turn used; the hold leaves the
+    /// list only once settled, so a client that leaves meanwhile settles it.
+    async fn after(self: Arc<Self>, event: ProviderEvent) -> Result<ProviderEvent, Fault> {
         let kind = event.json["type"].as_str().unwrap_or_default();
         if kind == "response.created" {
             let asked = {
@@ -488,17 +492,19 @@ impl<L: Ledger> Wallet<L> {
             let delta = event.json["delta"].as_str().unwrap_or_default().len();
             lock(&self.turns).bytes += Amount::try_from(delta).unwrap_or_default();
         } else if kind == "response.done" {
-            let hold = lock(&self.turns).holds.pop_front();
-            if let Some((hold, amount)) = hold {
+            let front = lock(&self.turns).holds.front().cloned();
+            if let Some((hold, amount)) = front {
                 let used = event.json["response"]["usage"]["total_tokens"].as_i64();
                 self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
+                lock(&self.turns).holds.pop_front();
             }
         }
         Ok(event)
     }
 
     /// A turn cut before its `response.done` may have cost all it was
-    /// held for: it is charged that, never $0.
+    /// held for: it is charged that, never $0. A hold already settled is
+    /// settled again to no effect.
     async fn end(&self) {
         let cut: Vec<_> = lock(&self.turns).holds.drain(..).collect();
         for (hold, amount) in cut {
@@ -539,17 +545,11 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
         });
         let asks = wallet.clone();
         cx.wrap(move |events: Events<ClientEvent>| {
-            events.and_then(move |event| {
-                let wallet = asks.clone();
-                async move { wallet.before(event).await }
-            })
+            events.and_then(move |event| asks.clone().before(event))
         })?;
         let answers = wallet.clone();
         cx.wrap(move |events: Events<ProviderEvent>| {
-            events.and_then(move |event| {
-                let wallet = answers.clone();
-                async move { wallet.after(event).await }
-            })
+            events.and_then(move |event| answers.clone().after(event))
         })?;
         cx.extensions_mut().insert(wallet);
         Ok(None)

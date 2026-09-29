@@ -276,8 +276,11 @@ impl Jobs {
         lock(&self.0.entries).insert(id.clone(), Entry::Running);
         let jobs = self.clone();
         let queued = json!({ "id": id, "status": "queued" }).to_string();
+        // Called here, not in the task: the request counts for `idle` from
+        // this call.
+        let served = respan_gateway_http::serve(&gateway, req);
         tokio::spawn(async move {
-            let (response, ended) = respan_gateway_http::serve(&gateway, req).await;
+            let (response, ended) = served.await;
             let body = response.into_body().collect().await.map(|b| b.to_bytes());
             let done = match (body, ended.await) {
                 (Ok(body), Ok(())) => Entry::Done(body),
