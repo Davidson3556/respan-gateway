@@ -167,3 +167,6 @@ Loop 2 (simplicity and use cases), one pass:
 - `accept` resolves `Result<(Option<Origin>, Option<Events<Input>>), Fault>`:
   nothing read the origin of a request that broke.
 - The per-input bool left `dial` (0021).
+- `Dialed` is inlined, as it differed from `Dialer` by one letter: `dial`
+  returns `Result<BoxFuture<Result<Half<Output>, Fault>>, Fault>`, which
+  spells out "not sent" and "sent, not answered" (now 4 aliases).

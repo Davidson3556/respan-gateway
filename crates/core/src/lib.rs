@@ -25,7 +25,7 @@ pub use call::Call;
 pub use context::ClientContext;
 pub use extensions::Extensions;
 pub use fault::{Fault, codes};
-pub use format::{Dialed, Ended, Events, Format, Half, Origin};
+pub use format::{Ended, Events, Format, Half, Origin};
 pub use gateway::Gateway;
 pub use plugin::{Filter, Plugin};
 pub use provider::ProviderContext;

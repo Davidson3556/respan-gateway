@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use edge::*;
 use respan_gateway_core::futures::StreamExt;
+use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -78,7 +79,7 @@ impl Format for Counted {
         r: Option<&Origin>,
         o: Option<&In>,
         l: Option<Events<In>>,
-    ) -> Result<Dialed<Out>, Fault> {
+    ) -> Result<BoxFuture<'static, Result<Half<Out>, Fault>>, Fault> {
         Toy.dial(d, e, r, o, l)
     }
 }

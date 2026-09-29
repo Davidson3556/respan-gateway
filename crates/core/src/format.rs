@@ -24,9 +24,6 @@ pub type Half<T> = (Option<Origin>, Result<Events<T>, Fault>);
 /// [`codes::ABANDONED`](crate::codes::ABANDONED).
 pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 
-/// A provider edge's answer, once dialed.
-pub type Dialed<T> = BoxFuture<'static, Result<Half<T>, Fault>>;
-
 /// A format: one protocol's view of a kind, and its two edges, which the
 /// gateway routes events between. Serve one to clients with
 /// [`Gateway::serve`](crate::Gateway::serve), call a provider in one with
@@ -156,6 +153,7 @@ pub trait Format: Send + Sync + 'static {
     /// `Err` now: not sent. The future's `Err`: sent, and not answered.
     /// `Ok((origin, Err(fault)))`: answered and refused (rule 2).
     /// `Ok((origin, Ok(outputs)))`: open.
+    #[allow(clippy::type_complexity)]
     fn dial(
         &self,
         dialer: &Self::Dialer,
@@ -163,7 +161,7 @@ pub trait Format: Send + Sync + 'static {
         relay: Option<&Origin>,
         opening: Option<&Self::Input>,
         later: Option<Events<Self::Input>>,
-    ) -> Result<Dialed<Self::Output>, Fault>;
+    ) -> Result<BoxFuture<'static, Result<Half<Self::Output>, Fault>>, Fault>;
 }
 
 /// An input, erased and shared.

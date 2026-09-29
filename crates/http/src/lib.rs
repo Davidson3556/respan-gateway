@@ -421,7 +421,7 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
 #[doc(hidden)]
 pub mod __private {
     pub use respan_gateway_core::futures::future::BoxFuture;
-    pub use respan_gateway_core::{Dialed, Ended, Events, Extensions, Fault, Format, Half, Origin};
+    pub use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Half, Origin};
 }
 
 #[cfg(test)]

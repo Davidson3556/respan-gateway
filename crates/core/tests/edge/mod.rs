@@ -188,7 +188,7 @@ impl Format for Toy {
         relay: Option<&Origin>,
         opening: Option<&In>,
         later: Option<Events<In>>,
-    ) -> Result<Dialed<Out>, Fault> {
+    ) -> Result<BoxFuture<'static, Result<Half<Out>, Fault>>, Fault> {
         boom(12);
         if extensions.get::<Unsendable>().is_some() {
             return Err(Fault::config("the toy cannot send this call"));

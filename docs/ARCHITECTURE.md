@@ -81,7 +81,7 @@ outputs before them.
 | `Extensions` | A clonable type map that carries what the adapter and plugins share, unopened by the core. |
 | `Format` | One protocol's view of a kind and the edge contract, below. |
 
-Also aliases (`Events`, `Origin`, `Half`, `Ended`, `Dialed`), the
+Also aliases (`Events`, `Origin`, `Half`, `Ended`), the
 `codes` module and re-exports of the crates the contracts use. The core
 depends on no `http` crate; `Gateway::handle` needs a tokio runtime, which
 runs end hooks detached.
@@ -104,7 +104,7 @@ trait Format { type Input; type Output; type Wire; type Dialer;
   fn opening(&self, origin: &Origin) -> Option<Result<Input, Fault>> { None }
   fn dial(&self, dialer: &Dialer, extensions: Extensions, relay: Option<&Origin>,
           opening: Option<&Input>, later: Option<Events<Input>>)
-      -> Result<Dialed<Output>, Fault>; }
+      -> Result<BoxFuture<Result<Half<Output>, Fault>>, Fault>; }
 // Events<T>   = BoxStream<Result<T, Fault>>
 // Origin      = Arc<dyn Any>: what came with a head, sealed
 // Half<T>     = (Option<Origin>, Result<Events<T>, Fault>)

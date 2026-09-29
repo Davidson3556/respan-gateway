@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use respan_gateway_core::futures::future::{BoxFuture, ready};
 use respan_gateway_core::futures::{FutureExt, StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{
-    Dialed, Ended, Events, Extensions, Fault, Format, Gateway, Half, Origin, ProviderContext,
+    Ended, Events, Extensions, Fault, Format, Gateway, Half, Origin, ProviderContext,
 };
 use respan_gateway_http::Status;
 use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote, Tally};
@@ -75,7 +75,7 @@ impl Format for Pipe {
         relay: Option<&Origin>,
         opening: Option<&Question>,
         _later: Option<Events<Question>>,
-    ) -> Result<Dialed<Reply>, Fault> {
+    ) -> Result<BoxFuture<'static, Result<Half<Reply>, Fault>>, Fault> {
         let relayed = relay.and_then(|o| o.downcast_ref::<Question>());
         let question = opening.or(relayed);
         if question.is_some_and(|q| q.0 == "unwritable") {

@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
 use http::StatusCode;
 use http::header::UPGRADE;
-use respan_gateway_core::{Dialed, Events, Extensions, Fault, Origin};
+use respan_gateway_core::{Events, Extensions, Fault, Half, Origin};
 
 use super::Came;
 use super::reader::{Failure, Reader};
@@ -35,6 +36,7 @@ use crate::{Codec, Dialer, Encoder, Exchange, RequestHead, ResponseHead};
 ///   body up to it is relayed byte for byte and a huge one cannot exhaust
 ///   memory. For another, what is ready of it when the
 ///   transport returns is read, waiting for nothing.
+#[allow(clippy::type_complexity)]
 pub fn dial<C: Codec + Clone>(
     codec: &C,
     dialer: &Dialer,
@@ -42,7 +44,7 @@ pub fn dial<C: Codec + Clone>(
     relay: Option<&Origin>,
     opening: Option<&C::Input>,
     later: Option<Events<C::Input>>,
-) -> Result<Dialed<C::Output>, Fault> {
+) -> Result<BoxFuture<'static, Result<Half<C::Output>, Fault>>, Fault> {
     let came = relay.and_then(|o| o.downcast_ref::<Came>());
     let (head, first, encoder, done) = first_frame(codec, opening, came, later.is_some())?;
     // A body done as it opens has no later inputs.

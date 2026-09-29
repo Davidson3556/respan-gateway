@@ -200,7 +200,13 @@ macro_rules! impl_format {
                 opening: ::core::option::Option<&Self::Input>,
                 later: ::core::option::Option<$crate::__private::Events<Self::Input>>,
             ) -> ::core::result::Result<
-                $crate::__private::Dialed<Self::Output>,
+                $crate::__private::BoxFuture<
+                    'static,
+                    ::core::result::Result<
+                        $crate::__private::Half<Self::Output>,
+                        $crate::__private::Fault,
+                    >,
+                >,
                 $crate::__private::Fault,
             > {
                 $crate::dial(self, dialer, extensions, relay, opening, later)
