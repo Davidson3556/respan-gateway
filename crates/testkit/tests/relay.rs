@@ -23,35 +23,19 @@ use respan_gateway_http::{Answer, Ask, Body};
 use respan_gateway_testkit::{MockAt, MockTransport, Outcomes, mock, post, read_whole, serve};
 
 mod common;
+mod openai;
 use common::{
-    AddProvider, Adds, CHAT, Call, Calls, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES,
-    Metered, Nameless, OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
+    Adds, CHAT, Call, Calls, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES, Metered,
+    Nameless, OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
+};
+use openai::{
+    BACKUP, Cool, OnProvider, STREAM, STREAM_REQ, UNARY, UNARY_REQ, chat, gateway, provider, relay,
+    unary_chat,
 };
 use serde_json::json;
 
-const BACKUP: &str = "http://backup.test/v1";
-
-const STREAM: &[&str] = &[
-    "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel",
-    "lo\"}}]}\n\ndata: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n",
-    "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
-    "data: [DONE]\n\n",
-];
-
-const STREAM_REQ: &str = r#"{"model":"gpt-x","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}"#;
-const UNARY_REQ: &str = r#"{"model":"gpt-x",  "messages":[]}"#;
-const UNARY: &str = r#"{"id":"c2","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}"#;
-
 /// The error frame for a stream that stops short.
 const TRUNCATED: &str = "data: {\"error\":{\"message\":\"stream ended before completion\",\"type\":\"truncated\",\"param\":null,\"code\":\"truncated\"}}\n\n";
-
-fn chat() -> Call {
-    call(CHAT, STREAM_REQ)
-}
-
-fn unary_chat() -> Call {
-    call(CHAT, UNARY_REQ)
-}
 
 /// An output guardrail: fails the response with 403 `blocked` at the first
 /// output it catches.
@@ -109,20 +93,6 @@ impl Plugin for Transcript {
     }
 }
 
-/// Sets the temperature of every request.
-struct Cool;
-
-#[async_trait]
-impl Plugin for Cool {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|chat: &mut Conversation| {
-            chat.temperature = Some(0.0);
-            Ok(())
-        })?;
-        Ok(None)
-    }
-}
-
 struct Refuse(Fault);
 
 #[async_trait]
@@ -156,7 +126,7 @@ impl Plugin for PanicAtEnd {
 }
 
 /// Answers from the first provider that succeeds, read to its content, as
-/// a provider's error answer is a failure (changed: was judged by status).
+/// a provider's error answer is a failure.
 struct Fallback(Vec<&'static str>);
 
 #[async_trait]
@@ -193,71 +163,12 @@ impl Plugin for Cached {
     }
 }
 
-/// A provider at `base_url` with its own key, or with no headers, so the
-/// client's credentials pass through.
-fn provider(
-    mock: &MockTransport,
-    name: &str,
-    base_url: &str,
-    key: Option<&'static str>,
-) -> AddProvider {
-    let mut headers = HeaderMap::new();
-    if let Some(k) = key {
-        headers.insert("authorization", HeaderValue::from_static(k));
-    }
-    add_provider(name, OpenAiChat, mock.at(base_url).with_headers(headers))
-}
-
-/// A gateway serving OpenAI clients: `providers`, `plugins` in order, and
-/// `target`.
-fn gateway(
-    list: impl IntoIterator<Item = AddProvider>,
-    plugins: Vec<Arc<dyn Plugin>>,
-    target: Option<&str>,
-) -> Result<Gateway, Fault> {
-    let gw = with_plugins(providers(list)?.serve(OpenAiChat)?, plugins)?;
-    match target {
-        Some(t) => gw.target(t),
-        None => Ok(gw),
-    }
-}
-
-impl Harness {
-    /// An [`Outcomes`] recorder, then `chain`, then `target`.
-    fn new(chain: Vec<Arc<dyn Plugin>>, target: Option<&str>) -> Self {
-        let (log, calls) = (Outcomes::default(), Calls::default());
-        let mock = MockTransport::new();
-        let mut plugins: Vec<Arc<dyn Plugin>> =
-            vec![Arc::new(log.clone()), Arc::new(calls.clone())];
-        plugins.extend(chain);
-        let usage = Metered::default();
-        plugins.push(Arc::new(usage.clone()));
-        let list = [
-            provider(&mock, "openai", OPENAI, Some("Bearer sk-test")),
-            provider(&mock, "backup", BACKUP, None),
-        ];
-        let gw = gateway(list, plugins, target).unwrap_or_else(|e| panic!("gateway: {e}"));
-        Self {
-            gw,
-            mock,
-            log,
-            calls,
-            usage,
-        }
-    }
-}
-
-fn relay() -> Harness {
-    Harness::new(Vec::new(), Some("openai"))
-}
-
 #[tokio::test]
 async fn a_stream_is_relayed_byte_for_byte_with_usage() {
     let h = relay();
     h.mock.reply(OPENAI, mock::sse(STREAM));
 
     assert_eq!(h.body(chat()).await, STREAM.concat());
-    // Changed: an outcome has no head, so no status.
     assert_eq!(h.log.only().end, Ok(()));
     let usage = h.usage.total();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
@@ -285,8 +196,7 @@ async fn an_error_page_is_relayed_as_it_is() {
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(body.ok().as_deref(), Some(page.as_bytes()));
-    // Changed: the provider answered with the failure, which the outcome
-    // carries, head and all; it has no head of its own.
+    // The provider answered with the failure, which the outcome carries.
     let o = h.log.only();
     assert!(matches!(o.end, Err(f) if f.status() == StatusCode::BAD_GATEWAY && f.is_answer()));
 }
@@ -419,7 +329,7 @@ async fn a_head_edit_keeps_the_relay() {
     let stamp = headers.get("x-served-by");
     assert_eq!(stamp, Some(&HeaderValue::from_static("respan")));
     assert_eq!(body.ok().as_deref(), Some(error.as_bytes()));
-    // Changed: an outcome has no head; this one is the provider's answer.
+    // This one is the provider's answer.
     assert!(matches!(h.log.only().end, Err(f) if f.is_answer()));
 }
 
@@ -511,7 +421,7 @@ async fn a_refusal_is_an_error_in_the_client_format() {
     assert_eq!(err["error"]["message"], "balance too low");
     assert_eq!(err["error"]["balance"], 0.12);
     assert!(h.mock.sent().is_empty());
-    // Changed: an outcome has no head; the fault carries the status.
+    // The fault carries the status.
     assert_eq!(h.log.only().end, Err(fault));
 }
 
@@ -524,7 +434,7 @@ async fn a_plugin_can_respond_itself() {
     assert_eq!(body["id"], "cached");
     assert_eq!(body["choices"][0]["message"]["content"], "hi");
     assert_eq!(body["usage"]["completion_tokens"], 1);
-    // Changed in 0009: a plugin's own answer passes no provider edge, so
+    // A plugin's own answer passes no provider edge, so
     // no meter there sees its usage; no call ran.
     assert_eq!(h.log.only().end, Ok(()));
     assert!(h.usage.all().is_empty());
@@ -632,7 +542,6 @@ async fn a_client_that_leaves_mid_response_ends_once() {
     drop(body);
     h.gw.idle().await;
 
-    // Changed: an outcome has no head.
     let o = h.log.only();
     assert!(matches!(o.end, Err(f) if f.code() == codes::ABANDONED));
 }
@@ -646,7 +555,6 @@ async fn a_client_that_leaves_before_a_response_ends_once() {
     assert!(gave_up.is_err());
     h.gw.idle().await;
 
-    // Changed: an outcome has no head.
     let o = h.log.only();
     assert!(matches!(o.end, Err(f) if f.code() == codes::ABANDONED));
     assert_eq!(
@@ -926,7 +834,7 @@ async fn caller_values_reach_plugins_by_type() {
 
     let (anonymous, _, _) = h.send(unary_chat()).await;
     let mut req = post(CHAT, UNARY_REQ);
-    // Changed (0013): the kernel's extensions travel in the HTTP request
+    // The kernel's extensions travel in the HTTP request
     // as one value of their own.
     let mut values = respan_gateway_core::Extensions::new();
     values.insert(Tenant("acme"));
@@ -1036,7 +944,7 @@ async fn a_refusal_its_format_cannot_write_is_a_plain_500() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
     assert_eq!(body.ok().as_deref(), Some(&b"not an error"[..]));
-    // Changed: an outcome has no head; the adapter wrote the plain 500.
+    // The adapter wrote the plain 500.
     let o = h.log.only();
     assert!(matches!(o.end, Err(f) if f.code() == "odd"));
 }
@@ -1131,7 +1039,7 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
     h.mock.reply(OPENAI, mock::sse(STREAM));
     let (status, _, _) = h.send(chat()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    // Changed: an outcome has no head; its fault has the status.
+    // Its fault has the status.
     let end = h.log.only().end;
     assert!(matches!(end, Err(f) if f.status() == StatusCode::FORBIDDEN));
 
@@ -1260,7 +1168,7 @@ async fn a_unary_guardrail_refuses_with_its_status() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert!(body.contains("\"code\":\"blocked\""), "{body}");
-    // Changed: an outcome has no head; its fault has the status.
+    // Its fault has the status.
     let end = h.log.only().end;
     assert!(matches!(end, Err(f) if f.status() == StatusCode::FORBIDDEN));
     // The head edits apply to the refusal.
@@ -1343,7 +1251,6 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
     assert!(gave_up.is_err());
     gw.idle().await;
 
-    // Changed: an outcome has no head, so what is left to check is its end.
     assert!(matches!(log.only().end, Err(f) if f.code() == codes::ABANDONED));
 }
 
@@ -1610,7 +1517,7 @@ async fn a_chunk_a_filter_splits_in_two_is_rebuilt_whole() {
     assert!(body.contains("\"content\":\" world\""), "{body}");
 }
 
-// Changed in 0009: a plugin's own bytes are relayed exactly, and pass no
+// A plugin's own bytes are relayed exactly, and pass no
 // provider edge, so no meter there sees their usage.
 #[tokio::test]
 async fn usage_in_a_plugins_own_bytes_reaches_no_meter() {
@@ -1862,7 +1769,6 @@ async fn an_embedder_reads_how_its_request_ended() {
     let (resp, ended) = serve(&h.gw, req).await;
     let _ = read_whole(resp).await;
 
-    // Changed: an outcome has no head, so no status.
     assert_eq!(ended.await.end, Ok(()));
 }
 
@@ -1910,7 +1816,7 @@ async fn every_response_says_how_its_request_ended() {
     let (resp, ended) = serve(&h.gw, post("/nowhere", UNARY_REQ)).await;
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    // Its outcome is that of the plain refusal (changed: with no head).
+    // Its outcome is that of the plain refusal.
     let end = ended.await.end.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err(codes::NOT_FOUND.to_owned()));
 }
@@ -2486,7 +2392,7 @@ async fn a_relayed_redirect_passes_as_it_came_and_is_no_answer() {
     // redirect's too.
     assert_eq!(headers["content-type"], "application/json");
     assert_eq!(body.ok().as_deref(), Some(&b""[..]));
-    // Changed: the redirect is a fault, a 502 to any other format, that
+    // The redirect is a fault, a 502 to any other format, that
     // carries the provider's answer.
     let end = h.log.only().end.err();
     assert_eq!(
@@ -2512,7 +2418,7 @@ async fn a_judge_reads_a_redirect_as_a_failure() {
                 .outputs::<Reply>()
                 .try_collect::<Vec<_>>()
                 .await;
-            // Changed: a 502 fault carrying the provider's 302.
+            // A 502 fault carrying the provider's 302.
             let fault = verdict.err();
             assert_eq!(
                 fault.as_ref().map(respan_gateway_http::status),
@@ -2606,7 +2512,7 @@ async fn a_redirect_answering_a_calls_own_input_is_a_bad_gateway() {
     impl Plugin for Trim {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let own = Conversation::new([Message::new(Role::User, "hi")]);
-            // Changed: the call's response fails as read, not the call at
+            // The call's response fails as read, not the call at
             // its head; sent, the provider's words stay off a client whose
             // message the call did not relay.
             Ok(Some(cx.call("openai").with_input(own).await?))
@@ -3269,7 +3175,6 @@ async fn a_call_dropped_unread_ends_once_as_abandoned() {
     assert_eq!(ended.len(), 2);
     let (call, dropped) = &ended[0];
     assert_eq!(call, "backup/gpt-x");
-    // Changed: an outcome has no head.
     assert!(matches!(&dropped.end, Err(f) if f.code() == codes::ABANDONED));
     assert_eq!(ended[1].1.end, Ok(()));
 }
@@ -3292,8 +3197,8 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
     // yet saw both calls.
     assert_eq!(bill.started(), ["openai/gpt-x", "backup/gpt-x"]);
     let ended = bill.ended();
-    // Changed: the failed call's end is the provider's answer, which
-    // carries its status; an outcome has no head.
+    // The failed call's end is the provider's answer, which carries its
+    // status.
     let (failed, answered) = (&ended[1].1, &ended[0].1);
     let failed = failed.end.as_ref().err();
     assert!(failed.is_some_and(|f| f.is_answer()));
@@ -3306,16 +3211,6 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
         .into_iter()
         .find(|(c, _)| c.starts_with("backup"));
     assert_eq!(backup.map(|(_, n)| n), Some(5.0));
-}
-
-/// Runs `f` on the provider edge of every call.
-struct OnProvider(fn(&mut ProviderContext) -> Result<(), Fault>);
-
-#[async_trait]
-impl Plugin for OnProvider {
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        (self.0)(px)
-    }
 }
 
 fn ended_with(bill: &Bill, code: &str) -> bool {
@@ -3364,7 +3259,6 @@ async fn a_client_that_leaves_mid_stream_ends_the_call_abandoned() {
     drop(body);
     h.gw.idle().await;
 
-    // Changed: an outcome has no head.
     assert!(ended_with(&bill, codes::ABANDONED));
 }
 
@@ -3374,7 +3268,7 @@ async fn a_call_the_transport_fails_ends_with_its_fault() {
     let h = Harness::new(vec![Arc::new(bill.clone())], Some("openai"));
 
     assert_eq!(h.text(chat()).await.0, StatusCode::BAD_GATEWAY);
-    // Changed: an outcome has no head; nor is this one an answer.
+    // This one is no answer.
     assert!(ended_with(&bill, codes::UPSTREAM));
     assert!(
         bill.ended()[0]
@@ -3570,8 +3464,8 @@ async fn reading_an_undecodable_input_does_not_stop_its_relay() {
     assert_eq!(h.mock.sent()[0].body(), request.as_bytes());
 }
 
-/// OpenAI under another type, whose codecs delegate. Changed (0013): a
-/// format's request encoder no longer sees the call's extensions; a
+/// OpenAI under another type, whose codecs delegate. A format's request
+/// encoder does not see the call's extensions; a
 /// provider-edge plugin writes such a key into the call's head with
 /// `edit_call`, or leaves it for the transport (below).
 struct Keyed;
@@ -4326,8 +4220,7 @@ async fn a_head_edit_that_panics_refuses_with_no_edits() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(!headers.contains_key("x-served-by"));
     assert_eq!(code(&h.log.only().end), codes::INTERNAL);
-    // The call ends with the panic that refused its response (changed: an
-    // outcome has no head).
+    // The call ends with the panic that refused its response.
     let ended = bill.ended();
     assert_eq!(code(&ended[0].1.end), codes::INTERNAL);
 }
@@ -4365,7 +4258,7 @@ async fn a_head_edit_sets_a_refusals_status_whatever_it_is() {
 
         let (status, _) = h.text(unary_chat()).await;
 
-        // Changed: an outcome has no head; the response's status is checked.
+        // The response's status is checked.
         assert_eq!(status, sent, "{edit} {panics}");
     }
 }
@@ -4390,7 +4283,6 @@ async fn a_panic_before_any_bytes_is_refused() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(body.contains(codes::INTERNAL), "{body}");
-    // Changed: an outcome has no head.
     assert_eq!(code(&h.log.only().end), codes::INTERNAL);
 }
 
@@ -4487,7 +4379,7 @@ async fn a_client_edge_failure_ends_the_call_however_its_bytes_were_split() {
     }
 }
 
-// Changed: a translated head keeps no status; a 304 is neither a success
+// A translated head keeps no status; a 304 is neither a success
 // nor an error, so a failure, in the client's words.
 #[tokio::test]
 async fn a_translated_304_is_a_bad_gateway() {
@@ -5384,8 +5276,7 @@ impl Plugin for ProviderCap {
 }
 
 // A marked call's own filter, added in `on_provider`, goes with each copy
-// sent, each its own, and each copy is metered. (Was
-// `Call::with_filter`, which 0009 removed.)
+// sent, each its own, and each copy is metered.
 #[tokio::test]
 async fn a_calls_own_filter_is_each_copys_own() {
     #[derive(Clone)]
@@ -5901,7 +5792,7 @@ impl Plugin for Fallback11 {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let mut last = Err(Fault::upstream("no provider to fall back on"));
         for name in &self.0 {
-            // Changed: a provider's error answer is the failure
+            // A provider's error answer is the failure
             // `until_content` returns, not a status to check first.
             let resp = match cx.call(*name).await {
                 Ok(resp) => resp,
@@ -6008,8 +5899,8 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_hidden_from_a_later_meter
     assert_eq!((&relayed, &translated), (&json!(99), &json!(99)));
 }
 
-// Every output a plugin makes is content for `until_content` (changed in 0009, which
-// removed the hidden client format that judged them): a plugin filters what
+// Every output a plugin makes is content for `until_content`: a plugin
+// filters what
 // is no content with the kind's own check, so a quiet reply, then a failure,
 // is not read to any content, and a fallback moves on.
 #[tokio::test]
@@ -6048,8 +5939,7 @@ async fn until_content_takes_every_output_a_plugin_makes_as_content() {
 }
 
 // `outputs` yields every value, keep-alives included, so a bridge
-// or merge can show usage; readers filter with the kind's own check (changed
-// in 0009: it hid them).
+// or merge can show usage; readers filter with the kind's own check.
 #[tokio::test]
 async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     /// Reads the call, noting each output's usage and whether it is

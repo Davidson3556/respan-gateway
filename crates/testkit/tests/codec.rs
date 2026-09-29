@@ -420,7 +420,7 @@ fn chat(mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
 
 // A relay passes the client's end-to-end headers and query as a proxy does,
 // minus conditions, ranges, overrides and encodings, and the transport strips
-// who sent it and cookies (MockTransport as HttpTransport does, since 0009); a
+// who sent it and cookies (MockTransport as HttpTransport does); a
 // translated call carries none.
 #[tokio::test]
 async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
@@ -457,10 +457,10 @@ async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
     assert!(translated.headers().get("x-trace").is_none());
 }
 
-// Changed in 0009: the kernel passes the client's cookies and forwarding
-// headers on; stripping them is the transport's policy, so one of its own
-// gets them. Changed in 0012: conditions, ranges, overrides and encodings
-// are the transport's to strip too ([`respan_gateway_http::proxy_call`]),
+// The kernel passes the client's cookies and forwarding headers on;
+// stripping them is the transport's policy, so one of its own gets them.
+// Conditions, ranges, overrides and encodings are the transport's to strip
+// too ([`respan_gateway_http::proxy_call`]),
 // which this one does, as an HTTP transport would.
 #[tokio::test]
 async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
@@ -731,7 +731,7 @@ async fn r13_a_request_decoders_two_inputs_of_one_frame_go_as_two() {
     assert_eq!(echo.seen(), ["/msg", "1|a", "2|two", "3|two"]);
 }
 
-// What the format sets is its own. Changed in 0012: a relay's call carries
+// What the format sets is its own. A relay's call carries
 // the client's head as the adapter handed it over, `Host` included, which a
 // transport strips ([`respan_gateway_http::proxy_call`]); this one does not.
 #[tokio::test]

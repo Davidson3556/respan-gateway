@@ -15,19 +15,17 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, Fault>) -> Result<T, Faul
     caught.unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
 }
 
-/// The codes the kernel uses. A code is any short machine-readable string;
-/// plugins may define their own.
+/// The kernel's codes; a plugin may use its own.
 pub mod codes {
     /// The client's request is not one the format or kind can take.
     pub const BAD_REQUEST: &str = "bad_request";
     /// Nothing takes the request: no format accepts it, or no plugin
     /// answers and there is no target.
     pub const NOT_FOUND: &str = "not_found";
-    /// A provider failed: unreachable, broken off, not in its format, a head
-    /// it may not send, or an error with no code of its own.
+    /// A provider failed: unreachable, broken off, not in its format, or an
+    /// error with no code of its own.
     pub const UPSTREAM: &str = "upstream";
-    /// A provider's stream stopped before its end, for billing and retries
-    /// to tell from a failed call.
+    /// A provider's stream stopped before its end.
     pub const TRUNCATED: &str = "truncated";
     /// A response or call ended before its end: the client left, a response
     /// was dropped, or its request ended first.
@@ -38,13 +36,10 @@ pub mod codes {
     pub const INTERNAL: &str = "internal";
 }
 
-/// The one error type at the plugin boundary: a status, code, message and
-/// optional details for the client, when to retry, an optional source for
-/// logs, and optionally the provider's own answer ([`Fault::answer`]).
-/// Plugins implement `From<TheirError> for Fault` so `?` works in hooks.
-///
-/// The kernel never reads the status or the answer: the client's format
-/// writes them ([`Format::response_encoder`](crate::Format::response_encoder)).
+/// The one error type: a status, code, message and details for the client,
+/// a retry delay, a source for logs, and a provider's answer, which the
+/// client's format writes and the kernel never reads. Implement
+/// `From<YourError> for Fault` so `?` works in hooks.
 #[derive(Clone)]
 pub struct Fault(Box<Inner>);
 
@@ -63,8 +58,7 @@ struct Inner {
 }
 
 impl Fault {
-    /// A fault with this status, code and message; a refusal goes out with
-    /// this status.
+    /// A fault of this status, code and message.
     pub fn new(
         status: impl Into<u16>,
         code: impl Into<Cow<'static, str>>,
@@ -82,8 +76,7 @@ impl Fault {
         }))
     }
 
-    /// Extra fields for the client's error body, as a JSON object; formats
-    /// ignore any other value and choose which fields they keep.
+    /// Extra fields for the client's error body, a JSON object.
     pub fn with_details(mut self, details: Value) -> Self {
         self.0.details = Some(details);
         self
@@ -95,31 +88,25 @@ impl Fault {
         self
     }
 
-    /// How long the client should wait before it tries again, which the
-    /// client's format writes, such as a provider's `Retry-After`.
+    /// How long the client should wait before it tries again.
     pub fn with_retry_after(mut self, wait: Duration) -> Self {
         self.0.retry_after = Some(wait);
         self
     }
 
-    /// How long to wait before trying again, if said
-    /// ([`Fault::with_retry_after`]).
+    /// How long to wait before trying again, if said.
     pub fn retry_after(&self) -> Option<Duration> {
         self.0.retry_after
     }
 
-    /// The provider answered with this failure in place of a response:
-    /// `answer` is its answer as `format` read it, such as its head and
-    /// body, which an encoder of that format writes as it came
-    /// ([`Fault::is_answer`]).
+    /// The provider answered with this failure in place of a response, as
+    /// `format` read it, which that format writes as it came.
     pub fn with_answer<A: Any + Send + Sync>(self, format: &str, answer: A) -> Self {
         self.answered(format, answer, true)
     }
 
-    /// Like [`Fault::with_answer`], for a failure the provider reported
-    /// within a response it had begun, such as an error event in a stream:
-    /// its words go as they came to a client of `format`, but it is no
-    /// answer ([`Fault::is_answer`]).
+    /// Like [`Fault::with_answer`], for a failure within a response the
+    /// provider began, such as an error event: no answer, but its words.
     pub fn with_words<A: Any + Send + Sync>(self, format: &str, words: A) -> Self {
         self.answered(format, words, false)
     }
@@ -137,9 +124,8 @@ impl Fault {
         answer.downcast_ref()
     }
 
-    /// Whether a provider answered with this failure in place of a
-    /// response ([`Fault::with_answer`]), such as with an error status: it
-    /// began no response, so a biller may charge nothing for it.
+    /// Whether a provider answered with this failure in place of a response
+    /// ([`Fault::with_answer`]), beginning none.
     pub fn is_answer(&self) -> bool {
         self.0.answered
     }
@@ -168,9 +154,7 @@ impl Fault {
         self
     }
 
-    /// The status it was made with ([`Fault::new`]), in HTTP's numbering
-    /// as the lingua franca, which a format of another protocol maps to its
-    /// own.
+    /// Its status, in HTTP's numbering, which another protocol maps.
     pub fn status(&self) -> u16 {
         self.0.status
     }
@@ -258,7 +242,7 @@ impl fmt::Display for Fault {
     }
 }
 
-/// A body that cannot fail, such as a `String` or `Full`, never makes one.
+/// What cannot fail never makes one.
 impl From<std::convert::Infallible> for Fault {
     fn from(never: std::convert::Infallible) -> Self {
         match never {}

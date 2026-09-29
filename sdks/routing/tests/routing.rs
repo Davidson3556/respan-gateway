@@ -324,7 +324,7 @@ async fn with_no_success_the_client_gets_the_last_429_and_its_retry_after() {
         headers.get(RETRY_AFTER).map(|v| v.as_bytes()),
         Some(&b"7"[..])
     );
-    // Changed: the 429 is a fault, which ended its call as it was read, so
+    // The 429 is a fault, which ended its call as it was read, so
     // no attempt won.
     let roles: Vec<_> = h.record.all().into_iter().map(|r| r.2).collect();
     assert_eq!(roles, [Role::Loser, Role::Loser]);

@@ -1,8 +1,7 @@
 #![warn(missing_docs)]
-//! HTTP at the gateway's edges. The kernel knows no HTTP: HTTP is a wire,
-//! a pair of head types ([`Ask`], [`Answer`]) that HTTP formats and
-//! transports share and the kernel carries without reading. The rules of
-//! HTTP live here, at the three places that own them:
+//! HTTP at the gateway's edges: a wire, a pair of head types ([`Ask`],
+//! [`Answer`]) the kernel carries unread, and its rules, at the three places
+//! that own them:
 //!
 //! - **The adapter** ([`serve`], [`handle`]) strips the connection's
 //!   headers from a request, lifts the client's credentials into a
@@ -38,8 +37,7 @@ use http_body_util::{BodyExt, Full, StreamBody};
 use respan_gateway_core::{Exchange, Extensions, Fault, Gateway, Outcome, codes};
 use respan_gateway_core::{bytes, futures};
 
-/// The crates whose types HTTP formats and transports use, so they build
-/// against the same versions.
+/// The crates HTTP formats and transports use, at these versions.
 pub use {http, http_body, http_body_util};
 
 pub use credential::Credential;
@@ -48,16 +46,13 @@ pub use transport::{
     strip_origin_headers,
 };
 
-/// The head of an HTTP request: the HTTP formats' and transports'
-/// [`Format::Ask`](respan_gateway_core::Format::Ask).
+/// The head of an HTTP request ([`Format::Ask`](respan_gateway_core::Format::Ask)).
 pub type Ask = http::request::Parts;
 
-/// The head of an HTTP response: the HTTP formats' and transports'
-/// [`Format::Answer`](respan_gateway_core::Format::Answer).
+/// The head of an HTTP response ([`Format::Answer`](respan_gateway_core::Format::Answer)).
 pub type Answer = http::response::Parts;
 
-/// An HTTP body of bytes whose error is a [`Fault`], as the adapter hands
-/// out and takes.
+/// An HTTP body of bytes whose error is a [`Fault`].
 pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, Fault>;
 
 /// A request head with nothing set: a `GET /`, for a format to fill.
@@ -70,8 +65,7 @@ pub fn fresh_answer() -> Answer {
     http::Response::new(()).into_parts().0
 }
 
-/// The kernel's body of an HTTP `body`: its data frames; trailers are
-/// dropped.
+/// The kernel's body of an HTTP `body`: its data frames, trailers dropped.
 pub fn body_of<B>(body: B) -> respan_gateway_core::Body
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
@@ -92,10 +86,9 @@ pub fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(Fault::from).boxed_unsync()
 }
 
-/// An HTTP request as an exchange: its head without its extensions, its
-/// body's data frames, and the kernel's [`Extensions`] it carries as an
-/// extension of its own, if any. For an embedder or a test that hands
-/// values to plugins: `req.extensions_mut().insert(extensions)`.
+/// An HTTP request as an exchange, its HTTP extensions dropped but the
+/// kernel's [`Extensions`] it carries, if any, which an embedder or test
+/// hands plugins with `req.extensions_mut().insert(extensions)`.
 pub fn ask<B>(req: http::Request<B>) -> Exchange<Ask>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
@@ -107,8 +100,8 @@ where
     Exchange::new(head, body_of(body)).with_extensions(extensions)
 }
 
-/// An HTTP response as an exchange, such as a transport's or a plugin's
-/// own to relay ([`ClientContext::relay`](respan_gateway_core::ClientContext::relay)).
+/// An HTTP response as an exchange, such as a transport's, or a plugin's to
+/// [`relay`](respan_gateway_core::ClientContext::relay).
 pub fn answer<B>(resp: http::Response<B>) -> Exchange<Answer>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
@@ -120,16 +113,8 @@ where
 
 /// A call as an HTTP request, its extensions apart, as a transport sends it.
 pub fn call(call: Exchange<Ask>) -> (http::Request<Body>, Extensions) {
-    let Exchange {
-        head,
-        body,
-        extensions,
-        ..
-    } = call;
-    (
-        http::Request::from_parts(head, into_http_body(body)),
-        extensions,
-    )
+    let req = http::Request::from_parts(call.head, into_http_body(call.body));
+    (req, call.extensions)
 }
 
 /// A message a plugin or format built wrong: a bug, a 500.
@@ -142,9 +127,8 @@ pub fn status(fault: &Fault) -> StatusCode {
     StatusCode::from_u16(fault.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-/// The client's request head as the adapter handed it over, without its
-/// credentials ([`Credential`]) or extensions: a read-only view for
-/// plugins of any kind (`cx.extensions().get::<Asked>()`).
+/// The client's request head, without its [`Credential`] or extensions: a
+/// read-only view for plugins (`cx.extensions().get::<Asked>()`).
 #[derive(Debug, Clone)]
 pub struct Asked(pub Arc<http::request::Parts>);
 
@@ -156,9 +140,8 @@ impl std::ops::Deref for Asked {
     }
 }
 
-/// [`handle`] `req`, streaming its inputs if it asks to switch protocols
-/// (`Upgrade`, RFC 9110 7.8): the adapter for an embedder, or a test, that
-/// performs every switch it is asked for.
+/// [`handle`] `req`, streaming if it asks to switch protocols (`Upgrade`):
+/// the adapter for an embedder or test that performs every switch.
 pub async fn serve<B>(
     gateway: &Gateway,
     req: http::Request<B>,
@@ -171,16 +154,14 @@ where
     handle(gateway, req, streaming).await
 }
 
-/// Hand `req` to `gateway` as an HTTP adapter does, its inputs streaming
-/// if `streaming`. Before: the headers its `Connection` names and a hop's
-/// own go, but `Upgrade` (RFC 9110 7.6.1); its credentials go into a [`Credential`]
-/// extension; an [`Asked`] view of what is left joins them. After: a
-/// failure no format can write goes as text/plain with its status, a 101
-/// to a request not `streaming` as a text/plain 500, and the response
-/// loses what a hop must not carry ([`outgoing`]). A response with no body
-/// ([`bodiless`]) goes with none, the gateway's read to its end apart, so
-/// the request ends as delivered. The adapter bounds a whole body and
-/// removes an `Upgrade` it will not perform. Call it on a tokio runtime.
+/// Hand `req` to `gateway` as an HTTP adapter does, streaming if
+/// `streaming`. Before: the hop's headers go but `Upgrade` (RFC 9110 7.6.1),
+/// credentials into a [`Credential`], and an [`Asked`] view joins them.
+/// After: what no format can write, or a 101 to a request not `streaming`,
+/// goes as text/plain ([`plain`]); the response loses a hop's headers
+/// ([`outgoing`]); a [`bodiless`] one goes with none, the gateway's body
+/// read apart. The caller bounds a whole body and removes an `Upgrade` it
+/// will not perform. Call it on a tokio runtime.
 pub async fn handle<B>(
     gateway: &Gateway,
     req: http::Request<B>,
@@ -198,10 +179,7 @@ where
     } = ask(req);
     let method = head.method.clone();
     let path = head.uri.path().to_owned();
-    strip_named(&mut head.headers);
-    for name in HOP_BY_HOP.iter().filter(|&n| n != UPGRADE) {
-        head.headers.remove(name);
-    }
+    strip_hops(&mut head.headers, true);
     if let Some(credential) = Credential::lift(&mut head) {
         extensions.insert(credential);
     }
@@ -224,7 +202,7 @@ where
             outgoing(&mut head);
             if bodiless(&method, head.status) {
                 tokio::spawn(async move { while body.frame().await.is_some() {} });
-                body = Full::new(Bytes::new()).map_err(Fault::from).boxed_unsync();
+                body = full(Bytes::new());
             }
             http::Response::from_parts(head, body)
         }
@@ -232,8 +210,8 @@ where
     (resp, outcome.boxed())
 }
 
-/// Connection headers (RFC 9110 7.6.1), the proxy's own (11.7), `Trailer`,
-/// as trailers are not delivered, and the length, which reframing changes.
+/// A hop's own headers: the connection's (RFC 9110 7.6.1), the proxy's
+/// (11.7), `Trailer`, as trailers are not delivered, and the length.
 const HOP_BY_HOP: [HeaderName; 10] = [
     CONNECTION,
     CONTENT_LENGTH,
@@ -247,13 +225,24 @@ const HOP_BY_HOP: [HeaderName; 10] = [
     UPGRADE,
 ];
 
-/// Whether `name` is a hop's own header ([`HOP_BY_HOP`]).
-fn is_hop_by_hop(name: &HeaderName) -> bool {
-    HOP_BY_HOP.contains(name)
+/// Remove the headers `Connection` names and a hop's own, but `Upgrade` if
+/// `keep_upgrade`.
+fn strip_hops(headers: &mut HeaderMap, keep_upgrade: bool) {
+    strip_named(headers);
+    for name in HOP_BY_HOP.iter().filter(|&n| !keep_upgrade || n != UPGRADE) {
+        headers.remove(name);
+    }
 }
 
-/// Remove the headers `Connection` names, but `Upgrade` (RFC 9110 7.6.1),
-/// as an adapter does on arrival.
+/// Remove each header whose name `is` says.
+pub(crate) fn remove_if(headers: &mut HeaderMap, is: impl Fn(&HeaderName) -> bool) {
+    let names: Vec<HeaderName> = headers.keys().filter(|n| is(n)).cloned().collect();
+    for name in names {
+        headers.remove(name);
+    }
+}
+
+/// Remove the headers `Connection` names, but `Upgrade` (RFC 9110 7.6.1).
 pub fn strip_named(headers: &mut HeaderMap) {
     let named: Vec<HeaderName> = headers
         .get_all(CONNECTION)
@@ -268,15 +257,12 @@ pub fn strip_named(headers: &mut HeaderMap) {
     }
 }
 
-/// A response head as sent to the client: without the headers its
-/// `Connection` names or a hop's own, but a 101's `Upgrade` with the
-/// `Connection: upgrade` it needs (RFC 9110 7.8), in the client's version.
+/// A response head as sent to the client: without a hop's headers, but a
+/// 101's `Upgrade` with its `Connection: upgrade` (RFC 9110 7.8), in the
+/// client's version.
 pub fn outgoing(head: &mut http::response::Parts) {
-    strip_named(&mut head.headers);
     let upgrade = head.status == StatusCode::SWITCHING_PROTOCOLS;
-    for name in HOP_BY_HOP.iter().filter(|&n| !upgrade || n != UPGRADE) {
-        head.headers.remove(name);
-    }
+    strip_hops(&mut head.headers, upgrade);
     if upgrade {
         let option = HeaderValue::from_static("upgrade");
         head.headers.insert(CONNECTION, option);
@@ -287,16 +273,15 @@ pub fn outgoing(head: &mut http::response::Parts) {
 /// `fault` as a text/plain response with its status and message, for what
 /// no format can write.
 pub fn plain(fault: &Fault) -> http::Response<Body> {
-    let body = Full::new(Bytes::from(fault.message().to_owned()));
-    let mut resp = http::Response::new(body.map_err(Fault::from).boxed_unsync());
+    let mut resp = http::Response::new(full(fault.message().to_owned()));
     *resp.status_mut() = status(fault);
     let text = HeaderValue::from_static("text/plain; charset=utf-8");
     resp.headers_mut().insert(CONTENT_TYPE, text);
     resp
 }
 
-/// Write `fault`'s status and its [`retry`](Fault::retry_after), as
-/// `Retry-After` in whole seconds, into `head`: a format's refusal.
+/// Write `fault`'s status and retry, as `Retry-After` in whole seconds, into
+/// `head`: a format's refusal.
 pub fn error_head(head: &mut http::response::Parts, fault: &Fault) {
     head.status = status(fault);
     if let Some(wait) = fault.retry_after() {
@@ -305,11 +290,9 @@ pub fn error_head(head: &mut http::response::Parts, fault: &Fault) {
     }
 }
 
-/// A refusal in format `name`: `fault`'s answer if `name` read it
-/// ([`Fault::with_answer`]), as an `http::Response<Bytes>`, whose head
-/// replaces `head` and whose body comes back; else `fault`'s status and
-/// retry written into `head` ([`error_head`]) and `None`, for the format
-/// to write the fault in its own words.
+/// A refusal in format `name`: if `name` read `fault`'s answer, an
+/// `http::Response<Bytes>`, its head replaces `head` and its body comes
+/// back; else [`error_head`] and `None`, for the format's own words.
 pub fn answered(name: &str, fault: &Fault, head: &mut http::response::Parts) -> Option<Bytes> {
     match fault.answer::<http::Response<Bytes>>(name) {
         Some(answer) => {
@@ -330,9 +313,8 @@ pub fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     value.trim().parse().ok().map(Duration::from_secs)
 }
 
-/// Whether a response of `status` to a request of `method` has no body
-/// (RFC 9110 9.3.2, 15.3.5, 15.3.6, 15.4.5): a format neither reads nor
-/// writes one.
+/// Whether a response of `status` to `method` has no body (RFC 9110 9.3.2,
+/// 15.3.5, 15.3.6, 15.4.5).
 pub fn bodiless(method: &Method, status: StatusCode) -> bool {
     method == Method::HEAD || matches!(status.as_u16(), 204 | 205 | 304)
 }

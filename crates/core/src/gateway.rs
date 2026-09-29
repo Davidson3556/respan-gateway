@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt};
@@ -14,7 +14,7 @@ use crate::format::AnyFormat;
 use crate::input::Later;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
-use crate::transport::{Head, Typed};
+use crate::transport::{AnyTransport, Erased, Head};
 use crate::{ClientContext, Exchange, Fault, Format, Outcome, Plugin, Response, Transport};
 
 /// A registered plugin and the plugins it runs after, by index.
@@ -40,10 +40,9 @@ pub(crate) struct Inner {
     pub(crate) in_flight: Arc<InFlight>,
 }
 
-/// The gateway. It has no server: an adapter or an embedding program hands
-/// it requests, and owns the rules of their transport. Built by value, each setting checked as it is given:
-/// `Gateway::new().provider(name, format, transport)?.serve(format)?.plugin(name, plugin)?`,
-/// then [`after`](Gateway::after) and [`target`](Gateway::target).
+/// The gateway. It has no server: an adapter or embedder hands it requests
+/// and owns their wire's rules. Built by value, each setting checked as
+/// given: `Gateway::new().provider(..)?.serve(..)?.plugin(..)?.target(..)?`.
 #[derive(Clone, Default)]
 pub struct Gateway {
     inner: Arc<Inner>,
@@ -67,10 +66,9 @@ impl Gateway {
         Gateway::default()
     }
 
-    /// Add provider `name`, speaking `format` over `transport`, which must
-    /// share its wire: a transport of other heads does not build. `Err`
-    /// with [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken,
-    /// or the format breaks [`Gateway::serve`]'s rules.
+    /// Add provider `name`, speaking `format` over `transport`, which shares
+    /// its heads. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the
+    /// name is taken or the format breaks [`Gateway::serve`]'s rules.
     pub fn provider<F, T>(
         mut self,
         name: impl Into<String>,
@@ -87,7 +85,7 @@ impl Gateway {
             return Err(Fault::config(format!("provider '{name}' is defined twice")));
         }
         let format = Arc::new(format);
-        let transport = Arc::new(Typed(transport));
+        let transport: Arc<AnyTransport> = Arc::new(Erased(transport));
         let provider = Provider { format, transport };
         self.inner_mut().providers.insert(name, provider);
         Ok(self)
@@ -96,16 +94,15 @@ impl Gateway {
     /// Serve clients of `format`: a request goes to the first format served
     /// on its wire that [`accepts`](Format::accepts) it. `Err` with
     /// [`codes::CONFIG`](crate::codes::CONFIG) if its input and output types
-    /// are one, or a format of its name is of another kind or wire.
+    /// are one, or a format of its name has another kind or wire.
     pub fn serve(mut self, format: impl Format) -> Result<Gateway, Fault> {
         self.check_format(&format)?;
         self.inner_mut().formats.push(Arc::new(format));
         Ok(self)
     }
 
-    /// Register `plugin` as `name`, its hooks run on every request and call
-    /// in the gateway's order. `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
+    /// Register `plugin` as `name`, its hooks run on every request and call.
+    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
     pub fn plugin(
         mut self,
         name: impl Into<String>,
@@ -128,11 +125,10 @@ impl Gateway {
         Ok(self)
     }
 
-    /// Run plugin `name` after each of `before`, on both edges. Next in
-    /// order is always the earliest registered plugin whose `after` plugins
-    /// have all run: registered `a`, `b`, `c` with `a` after `c` run `b`,
-    /// `c`, `a`. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) for an
-    /// unregistered name or a cycle.
+    /// Run plugin `name` after each of `before`, on both edges. Next is
+    /// always the earliest registered plugin whose `after` plugins have run:
+    /// `a`, `b`, `c` with `a` after `c` run `b`, `c`, `a`. `Err` with
+    /// [`codes::CONFIG`](crate::codes::CONFIG) for an unknown name or a cycle.
     pub fn after<S: AsRef<str>>(
         mut self,
         name: &str,
@@ -160,11 +156,9 @@ impl Gateway {
     }
 
     /// The provider called if every plugin passes and none set a target
-    /// ([`ClientContext::set_target`]), replacing any set before. A request
-    /// it cannot take is refused with
-    /// [`codes::CONFIG`](crate::codes::CONFIG), as [`ClientContext::call`]
-    /// fails. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) for an
-    /// unknown provider.
+    /// ([`ClientContext::set_target`]), replacing any set before; a request
+    /// it cannot take fails as [`ClientContext::call`] does. `Err` with
+    /// [`codes::CONFIG`](crate::codes::CONFIG) for an unknown provider.
     pub fn target(mut self, provider: impl Into<String>) -> Result<Gateway, Fault> {
         let target = provider.into();
         if !self.inner.providers.contains_key(&target) {
@@ -174,39 +168,33 @@ impl Gateway {
         Ok(self)
     }
 
-    /// Resolves once every request handed to this gateway has ended, its
-    /// response included, and every end hook has finished: await it on
-    /// shutdown, under a deadline of your own. A gateway changed after being
-    /// cloned is a new one with its own requests.
+    /// Resolves once every request handed to this gateway and every end hook
+    /// has finished: await it on shutdown, under a deadline of your own. A
+    /// gateway changed after being cloned is a new one with its own requests.
     pub async fn idle(&self) {
         self.inner.in_flight.idle().await;
     }
 
     /// Run `req`, a request on the wire of heads `Ask` and `Answer`, in the
-    /// first format served on that wire that accepts it. The adapter owns
-    /// the wire's rules: it takes out what no plugin or format should see
-    /// or pass on, such as the gateway's own credentials, before this, and
-    /// what a hop must not carry from the response after. The request's
-    /// extensions are the request's ([`ClientContext::extensions`]).
+    /// first format served on that wire that accepts it. The adapter owns the
+    /// wire's rules: it takes out what no plugin or format should see, such
+    /// as the gateway's own keys, before, and what a hop must not carry
+    /// after.
     ///
-    /// If `streaming`, the request's inputs stream: its body's data frames,
-    /// split by the adapter, are inputs as they arrive, and its response's
-    /// head goes out at once, as its client waits for it; for a WebSocket,
-    /// the adapter picks each message's type from the subprotocol and turns
-    /// a body's `Err` into a close code. Else its body is read in full, so
-    /// the caller bounds it; one that fails while read is refused.
+    /// If `streaming`, the body's data frames are inputs as they arrive and
+    /// the response's head goes out at once, as the client waits for it.
+    /// Else the body is read in full, so the caller bounds it; one that
+    /// fails while read is refused.
     ///
-    /// `Err` for what no format can write, for the adapter to write in
-    /// plain form: [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no
-    /// format on the wire accepts the request, or
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if the one that does
-    /// answers with another head than `Answer`, a format panicked or could
-    /// not write a refusal. All else is in the client's format.
+    /// `Err` for what no format can write, for the adapter to write plainly:
+    /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no format accepts
+    /// the request; [`codes::INTERNAL`](crate::codes::INTERNAL) if the one
+    /// that does answers with other heads, panicked or could not write a
+    /// refusal.
     ///
-    /// It comes with a future of the request's [`Outcome`], which resolves
-    /// once the response ends, before end hooks finish: await it after
-    /// reading the body. Call it on a tokio runtime, which runs the end
-    /// hooks; it panics outside one.
+    /// With it comes a future of the request's [`Outcome`], resolved once
+    /// the response ends, before end hooks finish. Call it on a tokio
+    /// runtime, which runs the end hooks; it panics outside one.
     pub async fn handle<Ask, Answer>(
         &self,
         req: Exchange<Ask>,
@@ -218,14 +206,8 @@ impl Gateway {
     {
         let answer = TypeId::of::<Answer>();
         let (resp, outcome) = self.handle_any(req, answer, streaming).await;
-        let resp = resp.and_then(|resp| {
-            let Exchange { head, body, .. } = resp;
-            match head.downcast::<Answer>() {
-                Ok(head) => Ok(Exchange::new(*head, body)),
-                Err(_) => Err(Fault::internal("a response of another wire than asked")),
-            }
-        });
-        (resp, outcome)
+        let other = "a response of another wire than asked";
+        (resp.and_then(|resp| resp.downcast(other)), outcome)
     }
 
     async fn handle_any<Ask: Send + Sync + 'static>(
@@ -260,7 +242,7 @@ impl Gateway {
             true => (None, Some(Later::new(body)), None),
             false => match read_whole(body).await {
                 Ok(bytes) => (Some(bytes), None, None),
-                Err((bytes, fault)) => (Some(bytes), None, Some(fault)),
+                Err(fault) => (Some(Bytes::new()), None, Some(fault)),
             },
         };
         let inner = self.inner.clone();
@@ -285,7 +267,7 @@ impl Gateway {
                 // A plugin panic is refused like a failure.
                 let ran = AssertUnwindSafe(run(&self.inner, &mut hooks)).catch_unwind();
                 match ran.await {
-                    Ok(Ok(resp)) => deliver(format, resp, hooks).await,
+                    Ok(Ok(resp)) => deliver(format, resp, None, hooks).await,
                     Ok(Err(f)) => refuse(format, f, hooks).await,
                     Err(_) => refuse(format, Fault::internal(PANICKED), hooks).await,
                 }
@@ -318,29 +300,21 @@ impl Gateway {
     /// `Ok` if `format`'s two types differ and formats of its name share its
     /// kind and wire.
     fn check_format(&self, format: &dyn AnyFormat) -> Result<(), Fault> {
-        let kind = format.kind();
-        let name = format.name();
-        if kind.0 == kind.1 {
-            return Err(Fault::config(format!(
-                "the kind of format {name} has one type for both directions"
-            )));
-        }
+        let (name, kind) = (format.name(), format.kind());
         let inner = &self.inner;
         let providers = inner.providers.values().map(|p| &*p.format);
-        let mut known = inner.formats.iter().map(|f| &**f).chain(providers);
-        if known.any(|f| f.name() == name && f.kind() != kind) {
-            return Err(Fault::config(format!(
-                "two formats named {name} are of different kinds"
-            )));
-        }
-        let known = inner.formats.iter().map(|f| &**f);
-        let mut known = known.chain(inner.providers.values().map(|p| &*p.format));
-        if known.any(|f| f.name() == name && f.wire() != format.wire()) {
-            return Err(Fault::config(format!(
-                "two formats named {name} are on different wires"
-            )));
-        }
-        Ok(())
+        let known = inner.formats.iter().map(|f| &**f).chain(providers);
+        let named: Vec<_> = known.filter(|f| f.name() == name).collect();
+        let fault = if kind.0 == kind.1 {
+            format!("the kind of format {name} has one type for both directions")
+        } else if named.iter().any(|f| f.kind() != kind) {
+            format!("two formats named {name} are of different kinds")
+        } else if named.iter().any(|f| f.wire() != format.wire()) {
+            format!("two formats named {name} are on different wires")
+        } else {
+            return Ok(());
+        };
+        Err(Fault::config(fault))
     }
 }
 
@@ -400,14 +374,11 @@ async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Res
     }
 }
 
-/// A whole body's bytes, or those read and the failure that broke it off.
-async fn read_whole(mut body: crate::Body) -> Result<bytes::Bytes, (bytes::Bytes, Fault)> {
+/// A whole body's bytes, or the failure that broke it off.
+async fn read_whole(mut body: crate::Body) -> Result<Bytes, Fault> {
     let mut all = BytesMut::new();
-    while let Some(frame) = body.next().await {
-        match frame {
-            Ok(bytes) => all.extend_from_slice(&bytes),
-            Err(fault) => return Err((bytes::Bytes::new(), fault)),
-        }
+    while let Some(bytes) = body.next().await {
+        all.extend_from_slice(&bytes?);
     }
     Ok(all.freeze())
 }

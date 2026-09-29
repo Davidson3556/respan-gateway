@@ -1,7 +1,6 @@
 #![warn(missing_docs)]
 //! The respan-gateway kernel: a [`Gateway`] runs each request through its
-//! [`Plugin`]s and streams the [`Response`] back.
-//! `docs/ARCHITECTURE.md` describes the pipeline.
+//! [`Plugin`]s and streams the [`Response`] back (`docs/ARCHITECTURE.md`).
 
 mod call;
 mod context;
@@ -26,8 +25,7 @@ pub use provider::ProviderContext;
 pub use response::Response;
 pub use transport::{Body, Exchange, Extensions, Transport};
 
-/// The crates whose types the kernel's contracts use, so a format or plugin
-/// builds against the same versions.
+/// The crates the kernel's contracts use, at the kernel's versions.
 pub use {async_trait::async_trait, bytes, futures, serde_json};
 
 /// Calling and reading inputs take `&mut ClientContext`, which `on_client`

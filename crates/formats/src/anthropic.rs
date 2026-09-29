@@ -2,7 +2,7 @@
 //! conversation kind.
 
 use bytes::{Bytes, BytesMut};
-use http::{HeaderValue, StatusCode};
+use http::HeaderValue;
 use respan_gateway_core::{Decoder, Encoder, Fault, Format};
 use respan_gateway_core::{bytes, serde_json};
 use respan_gateway_http::http;
@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 
 use crate::Usage;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, merge_details, patch_content,
-    patch_messages, patch_sampling, post_json, provider_error, read_content, read_message,
+    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, holding_start, merge_details,
+    patch_content, patch_messages, patch_sampling, post_json, read_content, read_message,
     reads_back, replace, request_decoder, response_decoder, response_encoder, says, says_error,
     set, split_around, stop_json, unpatchable, unreadable_event, unsupported_fields,
     unwritable_content, write_content, write_message,
@@ -20,7 +20,7 @@ use crate::common::{
 use crate::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
 };
-use crate::sse::{Events, SseDecoder, event, event_data, event_json, is_stream};
+use crate::sse::{Events, SseDecoder, event, event_json, is_stream};
 
 /// The API version sent when the client names none.
 const VERSION: &str = "2023-06-01";
@@ -462,10 +462,8 @@ impl Events<Reply> for Reading<AnthropicMessages> {
             out.push(unreadable_event(&self.name, raw));
             return Ok(());
         };
-        // Its data goes as it came to a client of this format.
         if says_error(&v) || v["type"] == "error" {
-            let data = Bytes::from(event_data(&raw).unwrap_or_default());
-            return Err(provider_error(StatusCode::OK, &v).with_words(&self.name, data));
+            return Err(error_event(&self.name, &raw, &v));
         }
         let usage = match v["type"].as_str() {
             Some("message_start") => &v["message"]["usage"],
@@ -583,8 +581,7 @@ impl EventStream {
             // What is known so far.
             "usage": AnthropicMessages::usage_body(&self.so_far.usage),
         });
-        let start = json!({ "type": "message_start", "message": message });
-        out.extend_from_slice(event(Some("message_start"), &start).as_bytes());
+        emit(out, json!({ "type": "message_start", "message": message }));
         self.relay_later(out);
     }
 
@@ -604,8 +601,7 @@ impl EventStream {
 
     fn close_block(&mut self, out: &mut BytesMut) {
         if let Some((_, index)) = self.open.take() {
-            let stop = json!({ "type": "content_block_stop", "index": index });
-            out.extend_from_slice(event(Some("content_block_stop"), &stop).as_bytes());
+            emit(out, json!({ "type": "content_block_stop", "index": index }));
         }
     }
 
@@ -623,7 +619,7 @@ impl EventStream {
                     "index": index,
                     "content_block": { "type": "text", "text": "" },
                 });
-                out.extend_from_slice(event(Some("content_block_start"), &start).as_bytes());
+                emit(out, start);
                 index
             }
         };
@@ -731,12 +727,14 @@ impl EventStream {
 }
 
 fn delta(index: u32, text: &str, out: &mut BytesMut) {
-    let delta = json!({
-        "type": "content_block_delta",
-        "index": index,
-        "delta": { "type": "text_delta", "text": text },
-    });
-    out.extend_from_slice(event(Some("content_block_delta"), &delta).as_bytes());
+    let delta = json!({ "type": "text_delta", "text": text });
+    let v = json!({ "type": "content_block_delta", "index": index, "delta": delta });
+    emit(out, v);
+}
+
+/// Write the event `v`, named by its type.
+fn emit(out: &mut BytesMut, v: Value) {
+    out.extend_from_slice(event(v["type"].as_str(), &v).as_bytes());
 }
 
 /// Whether the event `v` carries `piece`: text in a text block's start or
@@ -828,16 +826,13 @@ impl Encoder<Reply, ()> for EventStream {
             _ => {
                 let finish = self.so_far.finish.as_ref().unwrap_or(&Finish::Stop);
                 let reason = FINISH.reason(finish);
-                let delta = json!({
-                    "type": "message_delta",
-                    "delta": { "stop_reason": reason, "stop_sequence": null },
-                    "usage": AnthropicMessages::usage_body(&self.so_far.usage),
-                });
-                out.extend_from_slice(event(Some("message_delta"), &delta).as_bytes());
+                let delta = json!({ "stop_reason": reason, "stop_sequence": null });
+                let usage = AnthropicMessages::usage_body(&self.so_far.usage);
+                let v = json!({ "type": "message_delta", "delta": delta, "usage": usage });
+                emit(out, v);
             }
         }
-        let stop = json!({ "type": "message_stop" });
-        out.extend_from_slice(event(Some("message_stop"), &stop).as_bytes());
+        emit(out, json!({ "type": "message_stop" }));
         Ok(())
     }
 }

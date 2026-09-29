@@ -12,13 +12,10 @@ use crate::{ClientContext, Fault, ProviderContext, Response};
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Outcome {
-    /// `Ok` if the response was read to its end: delivered, or on the
-    /// provider edge read by whoever read it. `Err` with the fault that
-    /// refused, failed or stopped it: a provider's error its format read
-    /// ([`Fault::is_answer`] if the provider answered with it), an internal
-    /// fault for a panic, or [`codes::ABANDONED`](crate::codes::ABANDONED)
-    /// if it was dropped or cut off first. A fault's message may carry a
-    /// provider's words.
+    /// `Ok` if the response was read to its end. `Err` with the fault that
+    /// refused, failed or stopped it, such as a provider's error answer
+    /// ([`Fault::is_answer`]), or [`codes::ABANDONED`](crate::codes::ABANDONED)
+    /// if it was dropped or cut off first.
     pub end: Result<(), Fault>,
 }
 
@@ -29,14 +26,10 @@ impl Default for Outcome {
     }
 }
 
-/// The per-request extension point, on two edges: the client edge, once per
-/// request, and the provider edge, once per call the request makes. A
-/// plugin works on a kind through its types ([`ClientContext::input`],
-/// [`ClientContext::filter`]), whatever the request's format.
-///
-/// Plugins registered with [`Gateway::plugin`](crate::Gateway::plugin) see
-/// all traffic, in one order on both edges. A plugin for one kind lets
-/// other traffic pass, or refuses it with a status of its own:
+/// The extension point, on two edges: the client edge once per request, the
+/// provider edge once per call. Every plugin sees all traffic, in one order
+/// on both edges, and works on a kind through its types whatever the
+/// format; one for one kind lets other traffic pass, or refuses it:
 ///
 /// ```ignore
 /// if !cx.is_kind::<Conversation>() {
@@ -48,12 +41,9 @@ impl Default for Outcome {
 /// })?;
 /// ```
 ///
-/// To race calls, answer with the first read to its content
-/// ([`Response::until_content`]), or to its end ([`Response::until_end`]),
-/// and drop the others, which end
-/// [`codes::ABANDONED`](crate::codes::ABANDONED). To tell the winner in
-/// `on_provider_end`, give each call a flag
-/// ([`Call::with_extension`](crate::Call::with_extension)) set once read:
+/// To race calls, answer with the first read ([`Response::until_content`]
+/// or [`Response::until_end`]) and drop the others, which end abandoned. To
+/// tell the winner in `on_provider_end`, give each call a flag:
 ///
 /// ```ignore
 /// #[derive(Clone, Default)]
@@ -73,43 +63,31 @@ impl Default for Outcome {
 /// ```
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
-    /// The client edge, once per request, at its head. `Ok(None)` passes to
-    /// the next plugin; `Ok(Some(response))` answers, skipping the rest;
-    /// `Err` refuses, as the client's format writes the fault. If all pass,
-    /// the target is called ([`ClientContext::set_target`]); with none, the
-    /// request is refused [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
-    ///
-    /// To fall back, answer with the first call whose response reads to its
-    /// content ([`Response::until_content`]), else the last one's failure,
-    /// which carries a provider's answer.
+    /// The client edge, once per request, at its head. `Ok(None)` passes;
+    /// `Ok(Some(response))` answers, skipping the rest; `Err` refuses. If all
+    /// pass, the target is called; with none, the request is refused
+    /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         Ok(None)
     }
 
-    /// Once per request, after the response ended and every call's
-    /// `on_provider_end`, for each plugin whose `on_client` started. Calls
-    /// still pending or open end [`codes::ABANDONED`](crate::codes::ABANDONED)
-    /// first. Hooks run in order, detached, on the tokio runtime that ran
-    /// [`Gateway::handle`](crate::Gateway::handle); a panic does not stop the
-    /// others, and [`Gateway::idle`](crate::Gateway::idle) waits for all.
-    /// `cx.target()` is the last target set.
+    /// Once per request whose `on_client` started, after the response ended
+    /// and every call's `on_provider_end`; open calls end abandoned first.
+    /// End hooks run in order, detached on the runtime; a panic does not
+    /// stop the others, and [`Gateway::idle`](crate::Gateway::idle) waits.
     async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {}
 
-    /// The provider edge, before every call the request makes, for each
-    /// plugin in order until one refuses, whether or not its `on_client`
-    /// ran, without waiting for the end hooks of the request's earlier
-    /// calls, so a limit reserves here and settles in its end hook. `Err`
-    /// fails the call before anything is sent. It may stop at any await,
-    /// such as when a raced call is dropped, and its `on_provider_end` still
-    /// runs, so record what it reserves before awaiting.
+    /// The provider edge, before every call, until one plugin fails it,
+    /// waiting for no earlier call's end hooks: a limit reserves here and
+    /// settles in its end hook. It may stop at any await, such as when a
+    /// raced call is dropped, and `on_provider_end` still runs, so record a
+    /// reservation before awaiting.
     async fn on_provider(&self, _px: &mut ProviderContext) -> Result<(), Fault> {
         Ok(())
     }
 
-    /// Once per call whose `on_provider` started for this plugin: when the
-    /// call fails, its response's end is decoded, or its reader stops at a
-    /// failure, whoever reads it. One dropped or cut off first, as when its
-    /// request ends, ends [`codes::ABANDONED`](crate::codes::ABANDONED). Runs
+    /// Once per call whose `on_provider` started: when it fails, its
+    /// response's end is read, or it is dropped or cut off (abandoned). Runs
     /// like `on_client_end`, before it.
     async fn on_provider_end(&self, _px: &ProviderContext, _outcome: &Outcome) {}
 }
@@ -134,24 +112,18 @@ impl<P: Plugin + ?Sized> Plugin for Arc<P> {
     }
 }
 
-/// Edits a request's inputs or a response's outputs as they stream
-/// ([`ClientContext::filter`], [`ProviderContext::filter`]): change, drop,
-/// keep back or insert values of `T`, the format's input or output type.
-/// Every value reaches it, content or not
-/// ([`Format::is_content`](crate::Format::is_content)), such as a keep-alive
-/// or a message of usage alone: pass on at once what it has no reason to
-/// hold, or it waits too. What the other side's format cannot write fails
-/// the call or response. A panic is an internal fault. Filters are synchronous:
-/// compute what must be awaited in a hook, and apply it here.
+/// Edits inputs or outputs of `T` as they stream: change, drop, keep back or
+/// insert values. Every value reaches it, a keep-alive too, so pass on at
+/// once what it has no reason to hold. A panic is an internal fault.
+/// Synchronous: compute what must be awaited in a hook.
 pub trait Filter<T>: Send + 'static {
-    /// Take `value` and push what replaces it, if anything, to `out`. `Err`
-    /// fails the inputs or the response.
+    /// Take `value` and push what replaces it to `out`. `Err` fails the
+    /// inputs or the response.
     fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<(), Fault>;
 
-    /// The inputs or the response end `end`. Runs once at every end, a
-    /// failure, drop or panic included: push what it kept back to `out`,
-    /// sent before the end. Once it failed, what it passes on is dropped.
-    /// `Err` fails the inputs or response, keeping a provider's answer.
+    /// Runs once at every end, a failure, drop or panic included: push what
+    /// it kept back to `out`, dropped once it failed. `Err` fails the end,
+    /// keeping a provider's answer.
     fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<T>) -> Result<(), Fault> {
         Ok(())
     }
@@ -166,8 +138,7 @@ impl<T, F: FnMut(&mut T) -> Result<(), Fault> + Send + 'static> Filter<T> for F 
 }
 
 /// One edge's filters of one direction, their values' type erased.
-trait AnyList: Send {
-    fn as_any(&mut self) -> &mut dyn Any;
+trait AnyList: Any + Send {
     fn is_empty(&self) -> bool;
     fn run(&mut self, values: &mut Values) -> Result<(), Fault>;
     fn end(&mut self, end: &Result<(), Fault>, values: &mut Option<Values>) -> Option<Fault>;
@@ -178,10 +149,6 @@ trait AnyList: Send {
 struct List<T>(Vec<(Box<dyn Filter<T>>, bool)>);
 
 impl<T: Send + 'static> AnyList for List<T> {
-    fn as_any(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -269,10 +236,8 @@ impl Filters {
         let list = self
             .0
             .get_or_insert_with(|| Box::new(List::<T>(Vec::new())));
-        let List(list) = list
-            .as_any()
-            .downcast_mut::<List<T>>()
-            .ok_or_else(Fault::wrong_kind::<T>)?;
+        let list = &mut **list as &mut dyn Any;
+        let List(list) = list.downcast_mut().ok_or_else(Fault::wrong_kind::<T>)?;
         let filter = (Box::new(filter) as Box<dyn Filter<T>>, false);
         match input {
             true => list.insert(0, filter),
@@ -371,6 +336,10 @@ mod tests {
         filters
     }
 
+    fn read(noted: &Mutex<Vec<&'static str>>) -> Option<Vec<&'static str>> {
+        noted.lock().map(|n| n.clone()).ok()
+    }
+
     fn one(s: &str) -> Values {
         Box::new(vec![s.to_owned()])
     }
@@ -386,10 +355,7 @@ mod tests {
         let mut filters = filters(&noted, &[("bad", false), ("worse", false)]);
         assert!(filters.run(&mut one("bad")).is_err());
         let _ = filters.end(Ok(()), &mut None);
-        assert_eq!(
-            noted.lock().map(|n| n.clone()).ok(),
-            Some(vec!["worse", "bad"])
-        );
+        assert_eq!(read(&noted), Some(vec!["worse", "bad"]));
     }
 
     #[test]
@@ -404,7 +370,7 @@ mod tests {
             Some("second")
         );
         let _ = filters.end(Ok(()), &mut None);
-        let noted = noted.lock().map(|n| n.clone()).ok();
+        let noted = read(&noted);
         assert_eq!(noted, Some(vec!["first", "second", "third"]));
     }
 
@@ -435,7 +401,7 @@ mod tests {
         let _ = filters.add(Keep::<String>(Vec::new(), false), false);
         assert!(filters.run(&mut one("bad")).is_ok());
         assert!(filters.end(Ok(()), &mut None).is_err());
-        assert_eq!(noted.lock().map(|n| n.clone()).ok(), Some(vec!["bad"]));
+        assert_eq!(read(&noted), Some(vec!["bad"]));
     }
 
     /// Panics at its end.
@@ -460,7 +426,7 @@ mod tests {
             end.err().map(|f| f.code().to_owned()).as_deref(),
             Some("internal")
         );
-        assert_eq!(noted.lock().map(|n| n.clone()).ok(), Some(vec!["after"]));
+        assert_eq!(read(&noted), Some(vec!["after"]));
     }
 
     #[test]

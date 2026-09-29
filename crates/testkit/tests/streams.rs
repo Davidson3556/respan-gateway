@@ -2,7 +2,7 @@
 //! do, built from a channel-fed body.
 
 mod common;
-use common::{add_provider, providers};
+use common::{add_provider, providers, with_plugins};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -286,8 +286,7 @@ fn talk(echo: &Echo, mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> (Ga
     ];
     let gw = providers(list).and_then(|g| g.serve(Talk));
     let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
-    let mut named = plugins.into_iter().enumerate();
-    let gw = gw.and_then(|g| named.try_fold(g, |g, (i, p)| g.plugin(format!("p{i}"), p)));
+    let gw = gw.and_then(|g| with_plugins(g, plugins));
     let gw = gw.and_then(|g| g.target("echo"));
     (gw.unwrap_or_else(|e| panic!("{e}")), calls)
 }
@@ -617,8 +616,7 @@ fn talk_to(list: Vec<common::AddProvider>, plugins: Vec<Arc<dyn Plugin>>) -> (Ga
     let calls = Calls::default();
     let gw = providers(list).and_then(|g| g.serve(Talk));
     let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
-    let mut named = plugins.into_iter().enumerate();
-    let gw = gw.and_then(|g| named.try_fold(g, |g, (i, p)| g.plugin(format!("p{i}"), p)));
+    let gw = gw.and_then(|g| with_plugins(g, plugins));
     (gw.unwrap_or_else(|e| panic!("{e}")), calls)
 }
 
@@ -1224,7 +1222,7 @@ async fn a_head_edit_that_sets_101_unasked_is_refused() {
 
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let _ = frames(resp).await;
-    // Changed: the adapter refuses it and drops the gateway's response, so
+    // The adapter refuses it and drops the gateway's response, so
     // the request ends abandoned.
     assert_eq!(
         ended.await.end.map_err(|f| f.code().to_owned()),
@@ -1232,8 +1230,8 @@ async fn a_head_edit_that_sets_101_unasked_is_refused() {
     );
 }
 
-// Changed: `Response::with_status` is gone; a plugin sets its own status
-// with a head edit, after the format wrote the head.
+// A plugin sets its own status with a head edit, after the format wrote
+// the head.
 #[tokio::test]
 async fn a_plugins_head_edit_sets_its_status() {
     /// Accepts the request with nothing to say.
@@ -1542,7 +1540,7 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
 // ---- r6 internals probes ----
 
 /// The request's next call's `on_provider` does not wait for the end hooks
-/// of a call that ended (changed in 0009, which removed that wait): here the
+/// of a call that ended: here the
 /// dropped call's `on_provider_end` waits for the next call's `on_provider`,
 /// which the old rule deadlocked. The request's own end hooks still come
 /// after its calls'.

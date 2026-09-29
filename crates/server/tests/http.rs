@@ -405,7 +405,7 @@ const CLIENT: [(&str, &str); 7] = [
     ("x-tokenizer", "t"),
 ];
 
-// Changed: the adapter lifts the client's credentials into an extension,
+// The adapter lifts the client's credentials into an extension,
 // which the transport puts back when it has no keys of its own.
 #[test]
 fn without_headers_of_its_own_the_clients_credentials_pass_through() {
@@ -569,8 +569,8 @@ async fn it_strips_the_provider_origins_own_headers() {
     assert_eq!(resp.headers()["x-request-id"], "req_1");
 }
 
-// The client's cookies and forwarding headers are the transport's to strip
-// (moved out of the kernel in 0009); other end-to-end headers pass.
+// The client's cookies and forwarding headers are the transport's to strip;
+// other end-to-end headers pass.
 #[tokio::test]
 async fn it_strips_the_clients_cookies_and_forwarding_headers() {
     let provider = spawn(Router::new().route(
@@ -624,7 +624,7 @@ async fn it_sends_a_whole_body_with_its_length_and_streams_one_of_unknown_size()
     ))
     .await;
     let transport = http(&provider);
-    // Changed: a whole call is one frame of the kernel's body, a streamed
+    // A whole call is one frame of the kernel's body, a streamed
     // one of unknown size several.
     let call = |body: Body| {
         let mut head = respan_gateway_http::fresh_ask();

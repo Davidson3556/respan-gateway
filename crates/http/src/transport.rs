@@ -5,21 +5,16 @@ use http::{HeaderMap, HeaderValue};
 use respan_gateway_core::{Extensions, Relayed};
 
 use crate::credential::{Credential, is_credential, take_query};
-use crate::{is_hop_by_hop, strip_named};
+use crate::{HOP_BY_HOP, remove_if, strip_named};
 
-/// Strip from a call what a proxy does not pass on, as its head may be the
-/// client's ([`Format::request_encoder`](respan_gateway_core::Format::request_encoder)):
-/// the headers its `Connection` names and a hop's own (RFC 9110 7.6.1),
-/// `TE` included, but `Upgrade`, which gets the `Connection: upgrade` it
-/// needs (7.8); `Host`; `Expect`; conditions and ranges (13, 14), which
-/// ask of the client's copy; method overrides, as the format says the
-/// method; and `Accept-Encoding`, as the gateway decodes what it reads.
+/// Strip from a call, whose head may be the client's, what a proxy does not
+/// pass on: a hop's headers (RFC 9110 7.6.1) but `Upgrade`, which gets its
+/// `Connection: upgrade` (7.8); `Host`; `Expect`; conditions and ranges
+/// (13, 14); method overrides; and `Accept-Encoding`, as the gateway
+/// decodes what it reads.
 pub fn proxy_call(head: &mut http::request::Parts) {
     strip_named(&mut head.headers);
-    let names: Vec<HeaderName> = head.headers.keys().cloned().collect();
-    for name in names.iter().filter(|n| !passes(n)) {
-        head.headers.remove(name);
-    }
+    remove_if(&mut head.headers, |n| !passes(n));
     if head.headers.contains_key(UPGRADE) {
         let upgrade = HeaderValue::from_static("upgrade");
         head.headers.insert(CONNECTION, upgrade);
@@ -28,7 +23,7 @@ pub fn proxy_call(head: &mut http::request::Parts) {
 
 /// Whether a proxy passes on header `name` ([`proxy_call`]).
 fn passes(name: &HeaderName) -> bool {
-    let hop = is_hop_by_hop(name) && name != UPGRADE;
+    let hop = HOP_BY_HOP.contains(name) && name != UPGRADE;
     let name = name.as_str();
     let denied = matches!(
         name,
@@ -42,34 +37,25 @@ fn passes(name: &HeaderName) -> bool {
     !hop && !denied && !name.starts_with("if-")
 }
 
-/// Whether `name` is a header of the connection, never a transport's own
-/// to send: a hop's own, `Expect` or `Host`.
+/// Whether `name` is the connection's, never a transport's to send: a hop's
+/// own, `Expect` or `Host`.
 pub fn is_connection_header(name: &HeaderName) -> bool {
-    is_hop_by_hop(name) || name == header::EXPECT || name == header::HOST
+    HOP_BY_HOP.contains(name) || name == header::EXPECT || name == header::HOST
 }
 
-/// Remove the headers of the client's hop to the gateway from a call, as
-/// they belong to the gateway's origin, not the provider's: `Cookie` and
-/// the forwarding headers (`Forwarded`, RFC 7239; `Via`; `X-Forwarded-*`;
-/// `X-Real-IP`). Plugins still see them ([`Asked`](crate::Asked)); a call's
-/// [`CallHeaders`], written after, may set them again.
+/// Remove from a call the headers of the gateway's origin: `Cookie`,
+/// `Forwarded`, `Via`, `X-Forwarded-*` and `X-Real-IP`. Plugins still see
+/// them ([`Asked`](crate::Asked)); a call's [`CallHeaders`] may set them.
 pub fn strip_client_origin_headers(headers: &mut HeaderMap) {
-    let names: Vec<HeaderName> = headers
-        .keys()
-        .filter(|name| {
-            let name = name.as_str();
-            matches!(name, "cookie" | "forwarded" | "via" | "x-real-ip")
-                || name.starts_with("x-forwarded-")
-        })
-        .cloned()
-        .collect();
-    for name in names {
-        headers.remove(name);
-    }
+    remove_if(headers, |name| {
+        let name = name.as_str();
+        matches!(name, "cookie" | "forwarded" | "via" | "x-real-ip")
+            || name.starts_with("x-forwarded-")
+    });
 }
 
-/// Remove a provider origin's own headers from its response: cookies,
-/// alternative services and HSTS bind to the origin, which the gateway is not.
+/// Remove from a response the headers bound to the provider's origin:
+/// cookies, alternative services and HSTS.
 pub fn strip_origin_headers(headers: &mut HeaderMap) {
     for name in [
         header::SET_COOKIE,
@@ -80,9 +66,8 @@ pub fn strip_origin_headers(headers: &mut HeaderMap) {
     }
 }
 
-/// Headers for one call, sent as the transport's own and replacing those
-/// of the same name a transport has, such as a tenant's key set in
-/// `on_provider` (`px.extensions_mut().insert(CallHeaders(headers))`).
+/// Headers for one call, replacing the transport's own of their names, such
+/// as a tenant's key set in `on_provider`.
 #[derive(Clone, Default)]
 pub struct CallHeaders(pub HeaderMap);
 
@@ -94,13 +79,10 @@ impl std::fmt::Debug for CallHeaders {
     }
 }
 
-/// Decide whose keys a call carries: the call's [`CallHeaders`] (minus the
-/// connection's headers), else the transport's own `headers`, each
-/// replacing any of the same name, with any credential header or query
-/// parameter the call has removed first ([`Credential`] says which); else,
-/// with neither, the client's [`Credential`] from the call's `extensions`,
-/// passed through if the call relays the client's own message
-/// ([`Relayed`]), as a key is for its own protocol's provider alone.
+/// Decide whose keys a call carries: its [`CallHeaders`] over the
+/// transport's own `headers`, after removing the call's credential headers
+/// and parameters; with neither, the client's [`Credential`], only on a
+/// call marked [`Relayed`], as a key is for its own protocol's provider.
 pub fn credentials(head: &mut http::request::Parts, extensions: &Extensions, headers: &HeaderMap) {
     let mut own = headers.clone();
     if let Some(CallHeaders(call)) = extensions.get::<CallHeaders>() {
@@ -120,10 +102,7 @@ pub fn credentials(head: &mut http::request::Parts, extensions: &Extensions, hea
         }
         return;
     }
-    let names: Vec<HeaderName> = head.headers.keys().cloned().collect();
-    for name in names.iter().filter(|n| is_credential(n.as_str())) {
-        head.headers.remove(name);
-    }
+    remove_if(&mut head.headers, |n| is_credential(n.as_str()));
     take_query(&mut head.uri, is_credential);
     for name in own.keys() {
         head.headers.remove(name);

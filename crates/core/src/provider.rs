@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -17,14 +16,12 @@ use crate::{ClientContext, Extensions, Fault, Filter, Outcome, Plugin};
 #[derive(Clone)]
 pub(crate) struct Provider {
     pub(crate) format: Arc<dyn AnyFormat>,
-    pub(crate) transport: Arc<dyn AnyTransport>,
+    pub(crate) transport: Arc<AnyTransport>,
 }
 
 pub(crate) type CallEdit = Box<dyn FnOnce(&mut Head, &mut Bytes) -> Result<(), Fault> + Send>;
 
-/// One call to a provider, as the provider edge's hooks see it: its
-/// request, provider, format and first input, and edits and filters of the
-/// call.
+/// One call to a provider, as the provider edge's hooks see it.
 pub struct ProviderContext {
     /// The request as it was when the call was made.
     pub(crate) client: ClientContext,
@@ -108,8 +105,8 @@ impl ProviderContext {
     }
 
     /// Run `filter` as [`ClientContext::filter`] does, for this call alone:
-    /// over the inputs it sends, after the client edge's filters, or over its
-    /// response's outputs, whoever reads it, before them.
+    /// over its inputs after the client edge's filters, or its outputs,
+    /// whoever reads them, before them.
     pub fn filter<T: Clone + PartialEq + Send + Sync + 'static>(
         &mut self,
         filter: impl Filter<T>,
@@ -125,9 +122,8 @@ impl ProviderContext {
     }
 
     /// Whether the call was handed to its transport, so it may have reached
-    /// the provider: `false` in `on_provider`, and in `on_provider_end` for
-    /// a call refused or failed before it was sent, such as by a hook, an
-    /// edit, or an input that could not be written.
+    /// the provider: `false` in `on_provider`, and for a call that failed
+    /// before, such as by a hook, an edit or an input it could not write.
     pub fn is_sent(&self) -> bool {
         self.sent
     }
@@ -139,20 +135,17 @@ impl ProviderContext {
         &self.client.extensions
     }
 
-    /// Like [`ProviderContext::extensions`], for changing them, such as to
-    /// hand a tenant's key to the transport
-    /// ([`Transport::send`](crate::Transport::send)).
+    /// Like [`ProviderContext::extensions`], to change, such as to hand a
+    /// tenant's key to the transport.
     pub fn extensions_mut(&mut self) -> &mut Extensions {
         &mut self.client.extensions
     }
 
-    /// Edit this call's head, of type `H`, the provider's format's
-    /// [`Ask`](crate::Format::Ask), and its first frame, after its
-    /// [`request_encoder`](crate::Format::request_encoder) and before the
-    /// transport, in the order added; the decoder gets it as edited. `Err`
-    /// fails the call, as a head of another type does with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL). The kernel reads
-    /// nothing of it. Put credentials in an extension the transport reads
+    /// Edit this call's head, the provider's format's
+    /// [`Ask`](crate::Format::Ask), and first frame, after its
+    /// [`request_encoder`](crate::Format::request_encoder), in the order
+    /// added. `Err` fails the call, as `H` of another type does with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL). Keys go in an extension
     /// ([`ProviderContext::extensions_mut`]), as a transport may strip them.
     pub fn edit_call<H: Any>(
         &mut self,
@@ -166,23 +159,4 @@ impl ProviderContext {
         };
         unlocked(&mut self.call_edits).push(Box::new(edit));
     }
-}
-
-/// The provider `name`, if it exists and speaks `format` or another format
-/// of its kind.
-pub(crate) fn provider_for<'a>(
-    format: &dyn AnyFormat,
-    providers: &'a HashMap<String, Provider>,
-    name: &str,
-) -> Result<&'a Provider, Fault> {
-    let Some(p) = providers.get(name) else {
-        return Err(Fault::config(format!("unknown provider '{name}'")));
-    };
-    let (from, to) = (format.name(), p.format.name());
-    if from != to && format.kind() != p.format.kind() {
-        return Err(Fault::config(format!(
-            "the client speaks {from}, provider '{name}' speaks {to}, and they share no kind"
-        )));
-    }
-    Ok(p)
 }

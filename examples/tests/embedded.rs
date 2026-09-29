@@ -10,7 +10,7 @@ async fn handle_returns_the_response_and_its_outcome_with_no_server() -> Result<
     let (status, body, outcome) = ask(&gw, "Say hi").await?;
     assert_eq!(body, ANSWER, "a relay passes the provider's bytes");
     assert!(outcome.end.is_ok());
-    // Changed: the status is the response's; the outcome has no head.
+    // The status is the response's.
     assert_eq!(status, http::StatusCode::OK);
     gw.idle().await;
     let usage = tally.usage();

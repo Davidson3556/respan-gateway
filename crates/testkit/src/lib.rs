@@ -14,7 +14,7 @@ use http::header::CONTENT_TYPE;
 use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
 use respan_gateway_core::{
-    ClientContext, Exchange, Fault, Outcome, Plugin, ProviderContext, Transport,
+    ClientContext, Exchange, Fault, Filter, Outcome, Plugin, ProviderContext, Transport,
 };
 use respan_gateway_core::{async_trait, bytes, futures};
 use respan_gateway_http::{Answer, Ask, Body, http, http_body, http_body_util};
@@ -202,6 +202,16 @@ pub async fn read_whole(
     let (parts, body) = resp.into_parts();
     let body = body.collect().await.map(|b| b.to_bytes());
     (parts.status, parts.headers, body)
+}
+
+/// What `filter` passes on of `values`, then at a successful end.
+pub fn run_filter<T>(filter: &mut impl Filter<T>, values: Vec<T>) -> Result<Vec<T>, Fault> {
+    let mut out = Vec::new();
+    for value in values {
+        filter.edit(value, &mut out)?;
+    }
+    filter.end(&Ok(()), &mut out)?;
+    Ok(out)
 }
 
 /// A plugin that records each request's client-edge outcome; register it

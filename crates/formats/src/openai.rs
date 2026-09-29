@@ -2,17 +2,15 @@
 //! conversation kind.
 
 use bytes::{Bytes, BytesMut};
-use http::StatusCode;
 use respan_gateway_core::{Decoder, Encoder, Fault, Format};
 use respan_gateway_core::{bytes, serde_json};
-use respan_gateway_http::http;
 use respan_gateway_http::{Answer, Ask};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, holding_start, merge_details, patch_messages,
-    patch_sampling, post_json, probe, provider_error, read_message, reads_back, request_decoder,
+    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, holding_start, merge_details,
+    patch_messages, patch_sampling, post_json, probe, read_message, reads_back, request_decoder,
     response_decoder, response_encoder, says, says_error, set, split_around, stop_json, unix_now,
     unreadable_event, unsupported_fields, unwritable_content, write_message,
 };
@@ -444,10 +442,8 @@ impl Events<Reply> for Reading<OpenAiChat> {
             out.push(unreadable_event(&self.name, raw));
             return Ok(());
         };
-        // Its data goes as it came to a client of this format.
         if says_error(&v) {
-            let data = Bytes::from(data.unwrap_or_default());
-            return Err(provider_error(StatusCode::OK, &v).with_words(&self.name, data));
+            return Err(error_event(&self.name, &raw, &v));
         }
         let mut reply = chunk_reply(&v);
         reply.usage = self.totals.increment(&<OpenAiChat as Wire>::usage(&v));
@@ -734,7 +730,7 @@ impl Encoder<Reply, ()> for Chunks {
 mod tests {
 
     use super::*;
-    use http::HeaderValue;
+    use respan_gateway_http::http::{self, HeaderValue};
 
     use crate::common::{patch_request, write_request};
     use crate::conversation::Message;

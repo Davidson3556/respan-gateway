@@ -77,9 +77,7 @@ fn not_an_object() -> Fault {
 }
 
 /// Make `head` a JSON `POST` to `path`, adding to a relayed `body` what
-/// the format needs ([`Wire::finish`]). Its `Content-Encoding` goes unless
-/// it carries the client's bytes unread; a call whose inputs stream cannot
-/// be one.
+/// the format needs ([`Wire::finish`]); a call whose inputs stream fails.
 pub(crate) fn post_json<W: Wire>(
     mut head: Ask,
     body: &mut Bytes,
@@ -255,11 +253,10 @@ pub(crate) fn response_decoder<W: Wire>(
     }
 }
 
-/// A response of format `W` to the client's request `ask` with `body`,
-/// from the provider's head `answer` if relayed: a refusal ([`refused`]),
-/// nothing for a bodiless one, else `encoder` of the head, whether it
-/// relays the provider's replies as their bytes, and the client's
-/// request's [`Asked`].
+/// A response of format `W` to the client's request `ask` with `body`, from
+/// the provider's head `answer` if relayed: a refusal, nothing for a
+/// bodiless one, else `encoder` of the head, whether it relays the
+/// provider's bytes, and what the client [`Asked`].
 pub(crate) fn response_encoder<W: Wire>(
     answer: Option<&Answer>,
     ask: &Ask,
@@ -280,40 +277,27 @@ pub(crate) fn response_encoder<W: Wire>(
     crate::with_head(head, body)
 }
 
-/// A refusal in format `W`: the provider's answer as it came, else its
-/// words in this format ([`Fault::with_words`]) or the fault as this
-/// format's error, as JSON under the fault's status and retry; no body
-/// where HTTP has none. A fault whose status is no error's cannot be
-/// written.
+/// A refusal in format `W` ([`whole::refusal`](crate::whole::refusal)), its
+/// own words as this format's JSON error.
 pub(crate) fn refused<W: Wire>(
     head: &mut Answer,
     ask: &Ask,
     fault: &Fault,
 ) -> Box<dyn Encoder<Reply, ()>> {
-    let json = HeaderValue::from_static("application/json");
-    let body = match respan_gateway_http::answered(W::NAME, fault, head) {
-        Some(body) => {
-            head.headers.entry(CONTENT_TYPE).or_insert(json);
-            body
+    let answered = |head: &mut Answer| crate::default_content_type(head, "application/json");
+    crate::whole::refusal(W::NAME, head, ask, fault, answered, |head| {
+        head.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        match fault.answer::<Bytes>(W::NAME) {
+            Some(words) => words.clone(),
+            None => W::error_body(fault).to_string().into(),
         }
-        None if !crate::whole::is_error(fault.status()) => return crate::whole::unwritable(),
-        None => {
-            head.headers.insert(CONTENT_TYPE, json);
-            match fault.answer::<Bytes>(W::NAME) {
-                Some(words) => words.clone(),
-                None => W::error_body(fault).to_string().into(),
-            }
-        }
-    };
-    match bodiless(&ask.method, head.status) {
-        true => crate::whole::written(Bytes::new()),
-        false => crate::whole::written(body),
-    }
+    })
 }
 
 /// One JSON message, decoded whole: one reply on success, else the
 /// provider's error.
-pub(crate) fn unary_decoder<W: Wire>(head: &Answer) -> Box<dyn Decoder<Reply>> {
+fn unary_decoder<W: Wire>(head: &Answer) -> Box<dyn Decoder<Reply>> {
     let (name, status): (Arc<str>, _) = (Arc::from(W::NAME), head.status);
     crate::whole::decoder(W::NAME, head, move |raw, out| {
         let v = serde_json::from_slice::<Value>(&raw).ok();
@@ -500,7 +484,7 @@ impl SoFar {
 }
 
 /// Whether `reply` has a finish or content other than empty text.
-pub(crate) fn shows(reply: &Reply) -> bool {
+fn shows(reply: &Reply) -> bool {
     let empty = |p: &Piece| matches!(p, Piece::Text { text, .. } if text.is_empty());
     reply.finish.is_some() || reply.content.iter().any(|p| !empty(p))
 }
@@ -958,6 +942,13 @@ pub(crate) fn unreadable_event(name: &Arc<str>, raw: Bytes) -> Reply {
         Some(data) => Reply::other(name.clone(), data).came(name, raw),
         None => Reply::default().came(name, raw),
     }
+}
+
+/// The fault of a provider's error event `v`, whose data goes as it came
+/// to a client of this format.
+pub(crate) fn error_event(name: &Arc<str>, raw: &[u8], v: &Value) -> Fault {
+    let data = Bytes::from(event_data(raw).unwrap_or_default());
+    provider_error(StatusCode::OK, v).with_words(name, data)
 }
 
 /// Whether a JSON value says anything: not null or empty.

@@ -1,139 +1,29 @@
 //! HTTP's rules at the gateway's edges, which left the kernel (decision
 //! 0012): what the adapter ([`respan_gateway_http::serve`]) strips and lifts
 //! on arrival and on the way out, and what a transport (`MockAt`, which
-//! mirrors `HttpTransport`) strips from a call and passes through. Moved
-//! from the testkit's `relay.rs`, bodies unchanged but where marked.
+//! mirrors `HttpTransport`) strips from a call and passes through. It shares
+//! the testkit's relay harness.
 
 use std::sync::Arc;
 
 use respan_gateway_core::{
-    ClientContext, Fault, Format, Gateway, Plugin, ProviderContext, Response, Transport,
-    async_trait, bytes, futures,
+    ClientContext, Fault, Plugin, Response, Transport, async_trait, bytes, futures,
 };
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_formats::conversation::{Conversation, Reply};
-use respan_gateway_http::Body;
+use respan_gateway_formats::conversation::Reply;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util;
 use respan_gateway_http::{Asked, CallHeaders, Credential};
-use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
-const OPENAI: &str = "http://openai.test/v1";
-const BACKUP: &str = "http://backup.test/v1";
-const CHAT: &str = "/v1/chat/completions";
-
-const STREAM: &[&str] = &[
-    "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel",
-    "lo\"}}]}\n\ndata: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n",
-    "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
-    "data: [DONE]\n\n",
-];
-
-const STREAM_REQ: &str = r#"{"model":"gpt-x","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}"#;
-const UNARY_REQ: &str = r#"{"model":"gpt-x",  "messages":[]}"#;
-const UNARY: &str = r#"{"id":"c2","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}"#;
-
-type Call = http::Request<Body>;
-
-fn chat() -> Call {
-    post(CHAT, STREAM_REQ)
-}
-
-fn unary_chat() -> Call {
-    post(CHAT, UNARY_REQ)
-}
-
-/// A provider to add to a gateway.
-type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
-
-fn add_provider<F, T>(name: &str, format: F, transport: T) -> AddProvider
-where
-    F: Format,
-    T: Transport<Ask = F::Ask, Answer = F::Answer>,
-{
-    let name = name.to_owned();
-    Box::new(move |g| g.provider(name, format, transport))
-}
-
-/// A provider at `base_url` with its own key, or with no headers, so the
-/// client's credentials pass through.
-fn provider(
-    mock: &MockTransport,
-    name: &str,
-    base_url: &str,
-    key: Option<&'static str>,
-) -> AddProvider {
-    let mut headers = HeaderMap::new();
-    if let Some(k) = key {
-        headers.insert("authorization", HeaderValue::from_static(k));
-    }
-    add_provider(name, OpenAiChat, mock.at(base_url).with_headers(headers))
-}
-
-/// A gateway serving OpenAI clients: `list`, `plugins` in order, and
-/// `target`.
-fn gateway(
-    list: impl IntoIterator<Item = AddProvider>,
-    plugins: Vec<Arc<dyn Plugin>>,
-    target: Option<&str>,
-) -> Result<Gateway, Fault> {
-    let gw = list.into_iter().try_fold(Gateway::new(), |g, add| add(g))?;
-    let mut named = plugins.into_iter().enumerate();
-    let gw = named.try_fold(gw.serve(OpenAiChat)?, |gw, (i, p)| {
-        gw.plugin(format!("p{i}"), p)
-    })?;
-    match target {
-        Some(t) => gw.target(t),
-        None => Ok(gw),
-    }
-}
-
-/// A gateway on a mock transport, recording every outcome: `openai` with a
-/// key of its own, `backup` with none.
-struct Harness {
-    gw: Gateway,
-    mock: MockTransport,
-    log: Outcomes,
-    calls: Calls,
-}
-
-impl Harness {
-    fn new(chain: Vec<Arc<dyn Plugin>>, target: Option<&str>) -> Self {
-        let (log, calls, mock) = (Outcomes::default(), Calls::default(), MockTransport::new());
-        let mut plugins: Vec<Arc<dyn Plugin>> =
-            vec![Arc::new(log.clone()), Arc::new(calls.clone())];
-        plugins.extend(chain);
-        let list = [
-            provider(&mock, "openai", OPENAI, Some("Bearer sk-test")),
-            provider(&mock, "backup", BACKUP, None),
-        ];
-        let gw = gateway(list, plugins, target).unwrap_or_else(|e| panic!("gateway: {e}"));
-        Self {
-            gw,
-            mock,
-            log,
-            calls,
-        }
-    }
-
-    /// Send, read the whole response, and wait for the end hooks.
-    async fn send(&self, req: Call) -> (StatusCode, HeaderMap, Result<bytes::Bytes, Fault>) {
-        let out = read_whole(serve(&self.gw, req).await.0).await;
-        self.gw.idle().await;
-        out
-    }
-
-    /// Like `send`, for a body that must not be aborted.
-    async fn text(&self, call: Call) -> (StatusCode, String) {
-        let (status, _, body) = self.send(call).await;
-        let body = body.unwrap_or_else(|f| panic!("aborted: {f}"));
-        (status, String::from_utf8_lossy(&body).into_owned())
-    }
-}
-
-fn relay() -> Harness {
-    Harness::new(Vec::new(), Some("openai"))
-}
+#[path = "../../testkit/tests/common/mod.rs"]
+mod common;
+#[path = "../../testkit/tests/openai/mod.rs"]
+mod openai;
+use common::{CHAT, Harness, OPENAI, add_provider};
+use openai::{
+    BACKUP, Cool, OnProvider, STREAM, UNARY, UNARY_REQ, chat, gateway, relay, unary_chat,
+};
 
 /// Sends each request to the provider its `x-to` header names.
 struct ByHeader;
@@ -145,30 +35,6 @@ impl Plugin for ByHeader {
         let to = asked.and_then(|a| a.headers.get("x-to")?.to_str().ok());
         let to = to.unwrap_or_default().to_owned();
         cx.set_target(to);
-        Ok(None)
-    }
-}
-
-/// Runs `f` on the provider edge of every call.
-struct OnProvider(fn(&mut ProviderContext) -> Result<(), Fault>);
-
-#[async_trait]
-impl Plugin for OnProvider {
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        (self.0)(px)
-    }
-}
-
-/// Sets the temperature of every request.
-struct Cool;
-
-#[async_trait]
-impl Plugin for Cool {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|chat: &mut Conversation| {
-            chat.temperature = Some(0.0);
-            Ok(())
-        })?;
         Ok(None)
     }
 }
@@ -389,7 +255,7 @@ async fn a_changed_body_is_sent_without_the_clients_content_encoding() {
 async fn a_transport_with_its_own_key_drops_credentials_from_the_query() {
     let query = "key=a&api_key=b&access_token=c&api-version=1&beta=true";
     // `openai` has a key of its own; `backup` has none, so it puts the
-    // client's back (changed: after the rest, as the adapter lifted them).
+    // client's back, after the rest, as the adapter lifted them.
     let passed = "api-version=1&beta=true&key=a&api_key=b&access_token=c";
     for (target, base, sent) in [
         ("openai", OPENAI, Some("api-version=1&beta=true")),
@@ -465,7 +331,7 @@ async fn a_plugin_removes_the_gateways_own_credential() {
     #[async_trait]
     impl Plugin for Auth {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            // Changed: the adapter lifted the credential out of the head.
+            // The adapter lifted the credential out of the head.
             let credential = cx.extensions_mut().remove::<Credential>();
             match credential.as_ref().and_then(|c| c.get("x-gateway-auth")) {
                 Some(key) if key == "secret" => Ok(None),
@@ -528,8 +394,7 @@ async fn a_bodiless_response_ends_as_its_head_goes_out() {
     drop(resp);
     h.gw.idle().await;
 
-    // Changed: the adapter reads the body it does not send to its end; an
-    // outcome has no head.
+    // The adapter reads the body it does not send to its end.
     assert_eq!(h.log.only().end, Ok(()));
 }
 

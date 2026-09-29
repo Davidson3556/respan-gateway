@@ -52,8 +52,24 @@ macro_rules! bytes_type {
                 f.debug_tuple(stringify!($name)).field(&self.0).finish()
             }
         }
+
+        impl<F: 'static> Encoder<$name<F>, ()> for Writes {
+            fn head(&mut self, _first: Option<&$name<F>>) {}
+
+            fn encode(&mut self, value: &$name<F>, out: &mut BytesMut) -> Result<(), Fault> {
+                out.extend_from_slice(&value.0);
+                Ok(())
+            }
+
+            fn end(&mut self, end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
+                end.clone()
+            }
+        }
     };
 }
+
+/// Writes each message as it came.
+struct Writes;
 
 bytes_type!(Sent);
 bytes_type!(Got);
@@ -63,25 +79,8 @@ pub fn request_decoder<F: 'static>() -> Box<dyn Decoder<Sent<F>>> {
     crate::message_decoder(|bytes| Ok(Sent::new(bytes)))
 }
 
-/// Writes each message as it came.
-struct Writes;
-
-impl<F: 'static> Encoder<Sent<F>, ()> for Writes {
-    fn head(&mut self, _first: Option<&Sent<F>>) {}
-
-    fn encode(&mut self, sent: &Sent<F>, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(&sent.0);
-        Ok(())
-    }
-
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
-    }
-}
-
-/// The request encoder: each message as it came, the client's head kept
-/// as the kernel handed it over; unless the call carries the client's bytes
-/// unread, its `Content-Encoding` goes ([`body_changed`](crate::body_changed)).
+/// The request encoder: each message as it came, under the client's head
+/// ([`body_changed`](crate::body_changed) unless relayed unread).
 pub fn request_encoder<F: 'static>(
     client: Option<&Ask>,
     streams: bool,
@@ -120,11 +119,9 @@ fn asked_to_switch(call: &Ask) -> bool {
     call.headers.contains_key(http::header::UPGRADE)
 }
 
-/// The response encoder of `format`: messages as they came; a `refusal`
-/// as the provider's answer in `format` as it came, else its message as
-/// plain text under its status, if an error's. A failure once bytes went
-/// out is an `Err` that aborts the body. Nothing for a response with no
-/// body.
+/// The response encoder of `format`: messages as they came; a `refusal` as
+/// the provider's answer as it came, else its message as plain text; a
+/// failure after bytes aborts the body; nothing for a bodiless response.
 pub fn response_encoder<F: 'static>(
     format: &str,
     answer: Option<&Answer>,
@@ -143,36 +140,22 @@ fn response_body<F: 'static>(
     refusal: Option<&Fault>,
 ) -> Box<dyn Encoder<Got<F>, ()>> {
     if let Some(fault) = refusal {
-        let body = match respan_gateway_http::answered(format, fault, head) {
-            Some(body) => body,
-            None if !crate::whole::is_error(fault.status()) => return crate::whole::unwritable(),
-            None => {
+        return crate::whole::refusal(
+            format,
+            head,
+            ask,
+            fault,
+            |_| {},
+            |head| {
                 default_content_type(head, "text/plain; charset=utf-8");
                 Bytes::from(fault.message().to_owned())
-            }
-        };
-        let bodiless = bodiless(&ask.method, head.status);
-        return crate::whole::written(if bodiless { Bytes::new() } else { body });
+            },
+        );
     }
     if bodiless(&ask.method, head.status) {
         return crate::whole::no_body();
     }
-    Box::new(Gets)
-}
-
-struct Gets;
-
-impl<F: 'static> Encoder<Got<F>, ()> for Gets {
-    fn head(&mut self, _first: Option<&Got<F>>) {}
-
-    fn encode(&mut self, got: &Got<F>, out: &mut BytesMut) -> Result<(), Fault> {
-        out.extend_from_slice(&got.0);
-        Ok(())
-    }
-
-    fn end(&mut self, end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-        end.clone()
-    }
+    Box::new(Writes)
 }
 
 #[cfg(test)]

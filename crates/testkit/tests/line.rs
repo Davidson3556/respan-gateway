@@ -502,7 +502,7 @@ async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
 }
 
 /// The same for a provider's 204, translated between the standard formats.
-/// Changed: a translated success's head is the client's format's, so the
+/// A translated success's head is the client's format's, so the
 /// status goes; the call still ends as its head says.
 #[tokio::test]
 async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
@@ -619,7 +619,7 @@ async fn f6_a_refused_head_request_ends_with_its_fault() {
 }
 
 // Usage decoded after a call's filter failed, in the same frame, reaches no
-// filter, so no meter (changed in 0010: the kernel no longer counts it).
+// filter, so no meter.
 
 #[tokio::test]
 async fn f7_usage_decoded_after_a_calls_filter_failed_reaches_no_meter() {
@@ -677,7 +677,7 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
 }
 
 // A 101 to a whole request is refused whoever set it, here a call edit.
-// Changed: the adapter refuses it ([`respan_gateway_http::handle`]), so the
+// The adapter refuses it ([`respan_gateway_http::handle`]), so the
 // provider's body must be one this format reads for its head to get there.
 
 #[tokio::test]
@@ -991,8 +991,8 @@ async fn r9_1_a_204_read_through_outputs_ends_ok() {
     assert_eq!(log.calls()[0].end, Ok(()));
 }
 
-// A call filter added before one of the wrong kind still gets its end.
-// (`Call::with_filter` went in 0009; a marked call's `on_provider` adds them.)
+// A call filter, added by a marked call's `on_provider`, before one of the
+// wrong kind still gets its end.
 #[tokio::test]
 async fn r9_2_a_call_filter_before_a_failing_one_gets_its_end() {
     #[derive(Clone)]
@@ -1263,7 +1263,7 @@ fn over_budget(o: &mut LOut) -> Result<(), Fault> {
 }
 
 // A call filter's failure is written, and what follows it in its frame is
-// not, nor does it reach any filter (the usage count went in 0010).
+// not, nor does it reach any filter.
 #[tokio::test]
 async fn k9_7_what_follows_a_call_filters_failure_is_unwritten() {
     struct P;
@@ -1756,8 +1756,7 @@ async fn r11_5_a_plugins_answer_to_an_upgrading_request_heads_out_at_once() {
 }
 
 // A client `HEAD` whose call is a `POST` gets no body, and the call's body is
-// not read: it ends abandoned as the head goes out (changed in 0009, which
-// ends bodiless client responses directly).
+// not read: it ends abandoned as the head goes out.
 #[tokio::test]
 async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let log = Log::default();
@@ -1876,7 +1875,7 @@ impl Plugin for PanicsOnOutput {
 }
 
 // A filter that panics fails the call internal, and the usage after the
-// value it panics on, in its frame, reaches no filter (changed in 0010).
+// value it panics on, in its frame, reaches no filter.
 #[tokio::test]
 async fn r11_a_filter_that_panics_fails_the_call_internal() {
     let log = Log::default();

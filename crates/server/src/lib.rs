@@ -24,17 +24,15 @@ pub use reqwest;
 
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-/// A router sending every request to [`Gateway::handle`] through the HTTP
-/// adapter ([`respan_gateway_http::handle`]). It switches no protocols, so
-/// it ignores `Upgrade` and reads every body whole. A body over 32 MiB is
-/// refused 413 `too_large`, and one that breaks off 400 `bad_request`, both
-/// in the client's format.
+/// A router sending every request through the HTTP adapter
+/// ([`respan_gateway_http::handle`]). It switches no protocols, so it
+/// ignores `Upgrade` and reads every body whole: over 32 MiB is refused 413
+/// `too_large`, one that breaks off 400 `bad_request`.
 pub fn router(gateway: Gateway) -> Router {
     Router::new().fallback(handle).with_state(gateway)
 }
 
 async fn handle(State(gateway): State<Gateway>, mut req: Request) -> Response {
-    // It switches no protocols, so a client's `Upgrade` is not relayed.
     ignore_upgrade(req.headers_mut());
     let req = req.map(|body| {
         Limited::new(body, MAX_BODY_BYTES)
@@ -77,24 +75,24 @@ fn ignore_upgrade(headers: &mut HeaderMap) {
 /// Why a client's body did not arrive whole.
 fn body_fault(e: axum::BoxError) -> Fault {
     match e.is::<http_body_util::LengthLimitError>() {
-        true => too_large(),
+        true => Fault::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "request body too large",
+        ),
         false => Fault::bad_request("the request body broke off"),
     }
 }
 
-fn too_large() -> Fault {
-    let status = StatusCode::PAYLOAD_TOO_LARGE;
-    Fault::new(status, "too_large", "request body too large")
+/// A call the provider cannot be sent; the error is for logs.
+fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
+    Fault::config("the provider request is not valid").with_source(e)
 }
 
-/// Reaches one provider over HTTP(S) at a base URL, which each request's
-/// path extends, with headers of its own. Instances share one connection
-/// pool unless given their own client. A body of exact size is sent whole,
-/// a streaming one as it comes. It strips from each call what a proxy does
-/// not pass on ([`proxy_call`]) and the client's cookies and forwarding
-/// headers ([`strip_client_origin_headers`]), sends the call's keys
-/// ([`credentials`]), and strips the provider origin's headers from each
-/// response ([`strip_origin_headers`]).
+/// Reaches one provider over HTTP(S) at a base URL, which each call's path
+/// extends, sharing one connection pool unless given a client. It strips a
+/// call ([`proxy_call`], [`strip_client_origin_headers`]), sends its keys
+/// ([`credentials`]), and strips the response ([`strip_origin_headers`]).
 #[derive(Clone)]
 pub struct HttpTransport {
     client: reqwest::Client,
@@ -132,10 +130,8 @@ fn shared_client() -> Result<reqwest::Client, Fault> {
 
 impl HttpTransport {
     /// A transport to `base_url`: `http` or `https`, a host, an optional path
-    /// prefix such as `/v1`, and no query, fragment or credentials. With no
-    /// [`with_headers`](Self::with_headers), clients' credentials
-    /// ([`Credential`](respan_gateway_http::Credential)) pass through.
-    /// `Err` with `config` for any other URL.
+    /// prefix such as `/v1`, and no query, fragment or credentials, else
+    /// `Err` with `config`.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Fault> {
         // The URL may contain a key, so the error does not echo it.
         let url = reqwest::Url::parse(&base_url.into()).ok().filter(|u| {
@@ -160,9 +156,9 @@ impl HttpTransport {
         })
     }
 
-    /// Send `headers`, such as the API key, with every call, replacing any set
-    /// before; with any, clients' credentials are not passed through
-    /// ([`credentials`]). `Err` with `config` for a connection header.
+    /// Send `headers`, such as the API key, with every call, replacing any
+    /// set before, in place of the client's ([`credentials`]). `Err` with
+    /// `config` for a connection header.
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
         if let Some(name) = headers.keys().find(|k| is_connection_header(k)) {
             let name = name.as_str();
@@ -199,9 +195,7 @@ impl Transport for HttpTransport {
         credentials(&mut parts, &extensions, &self.headers);
         let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
-        parts.uri = url
-            .parse()
-            .map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
+        parts.uri = url.parse().map_err(invalid)?;
         // A whole call is one frame, or none if empty, and goes with its length.
         let body = match body.size_hint() {
             (_, Some(0 | 1)) => {
@@ -210,15 +204,15 @@ impl Transport for HttpTransport {
             }
             _ => reqwest::Body::wrap_stream(body),
         };
-        let req = reqwest::Request::try_from(http::Request::from_parts(parts, body))
-            .map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
+        let req =
+            reqwest::Request::try_from(http::Request::from_parts(parts, body)).map_err(invalid)?;
         let resp = self
             .client
             .execute(req)
             .await
             // The error names the provider's URL, which is for logs only.
             .map_err(|e| match e.is_builder() {
-                true => Fault::config("the provider request is not valid").with_source(e),
+                true => invalid(e),
                 false => Fault::upstream("the provider could not be reached").with_source(e),
             })?;
         let broke = |e| Fault::upstream("the provider's body broke off").with_source(e);

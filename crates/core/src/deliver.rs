@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use crate::format::{AnyEncoder, AnyFormat, Values};
 use crate::lifecycle::EndHooks;
 use crate::plugin::failed;
 use crate::response::{Batch, Source};
-use crate::transport::{Head, one_frame};
+use crate::transport::Head;
 use crate::{ClientContext, Exchange, Fault, Response};
 
 /// What `Gateway::handle` hands the adapter: the response, or a failure
@@ -26,40 +27,31 @@ pub(crate) async fn refuse(
     hooks: EndHooks<ClientContext>,
 ) -> Handed {
     let resp = Response::made(Err(fault.clone()));
-    send(format, resp, Some(fault), hooks).await
+    deliver(format, resp, Some(fault), hooks).await
 }
 
-/// Send `resp` to the client. Its head goes out with its body's first byte,
-/// so a response that fails before any is refused instead; a refusal its
-/// format cannot write goes back to the adapter. A streaming request's
-/// head goes out at once. Head edits apply to the outgoing head.
+/// Send `resp`, or the `refusal` it is, to the client. Its head goes out
+/// with its body's first byte, so a response that fails before any is
+/// refused instead, or at once for a streaming request; a refusal its
+/// format cannot write goes back to the adapter.
 pub(crate) async fn deliver(
-    format: &Arc<dyn AnyFormat>,
-    resp: Response,
-    hooks: EndHooks<ClientContext>,
-) -> Handed {
-    send(format, resp, None, hooks).await
-}
-
-async fn send(
     format: &Arc<dyn AnyFormat>,
     resp: Response,
     refusal: Option<Fault>,
     mut hooks: EndHooks<ClientContext>,
 ) -> Handed {
     let cx = hooks.cx();
-    if let Some(c) = resp.body.call() {
-        // A call's response goes only to its own request.
-        if !cx.open.holds(c) {
-            drop(resp);
-            let fault = Fault::internal("a response to another request was sent");
-            return Box::pin(refuse(format, fault, hooks)).await;
+    // A call's response goes only to its own request; one of another kind
+    // fails, even with no outputs.
+    let wrong = match resp.body.call() {
+        Some(c) if !cx.open.holds(c) => {
+            Some(Fault::internal("a response to another request was sent"))
         }
-    }
-    // A response of another kind fails, even with no outputs.
-    if resp.output.is_some_and(|output| output != format.kind().1) {
+        _ => (resp.output.is_some_and(|o| o != format.kind().1))
+            .then(|| Fault::another_kind("a response of another kind was sent".into())),
+    };
+    if let Some(fault) = wrong {
         drop(resp);
-        let fault = Fault::another_kind("a response of another kind was sent".into());
         return Box::pin(refuse(format, fault, hooks)).await;
     }
     let (ask, body) = (cx.head.clone(), cx.body().clone());
@@ -72,29 +64,29 @@ async fn send(
     } = resp;
     // A head goes only to a format of the name it came in.
     let answer = answer.filter(|_| source.relayed());
+    let refused = refusal.is_some();
     let build = || {
-        let answer = answer.as_deref();
+        let answer = answer.as_deref().map(|a| a as &dyn Any);
         let encoder = format.response_encoder(answer, &*ask, &body, refusal.as_ref());
         let mut encoder = encoder.ok_or_else(|| Fault::internal("a request of another wire"))?;
         let head = encoder.head(None);
         let mut opening = BytesMut::new();
-        let opened = match refusal {
-            Some(_) => Ok(()),
-            None => encoder.open(&mut opening),
+        let opened = match refused {
+            true => Ok(()),
+            false => encoder.open(&mut opening),
         };
         opened.map(|()| (encoder, head, opening))
     };
     // A format that panics building its encoder cannot write a refusal.
     let (encoder, mut head, opening) = match std::panic::catch_unwind(AssertUnwindSafe(build)) {
         Ok(Ok(built)) => built,
-        Ok(Err(fault)) if refusal.is_some() => return unwritable(hooks, fault),
+        Ok(Err(fault)) if refused => return unwritable(hooks, fault),
         Ok(Err(fault)) => {
             source.end(Err(fault.clone()));
             return Box::pin(refuse(format, fault, hooks)).await;
         }
         Err(_) => return unwritable(hooks, Fault::internal(PANICKED)),
     };
-    let refused = refusal.is_some();
     // A body done before it began reads nothing, and its head goes at once.
     let done = !refused && encoder.done();
     let mut pipe = Pipe {
@@ -138,7 +130,7 @@ async fn send(
         pipe.ahead.clear();
         pipe.source.close_unread();
         pipe.hooks.finish(Ok(()));
-        return Ok(Exchange::new(head, one_frame(Bytes::new())));
+        return Ok(Exchange::new(head, stream::empty().boxed()));
     }
     // With no bytes, it ends as its head goes out.
     if pipe.out.is_empty() {

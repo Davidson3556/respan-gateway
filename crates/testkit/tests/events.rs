@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use common::Metered;
+use common::{Metered, with_plugins};
 use http::StatusCode;
 use respan_gateway_core::{
     ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
@@ -88,8 +88,7 @@ fn gateway(
                 .plugin("log", log.clone())?
                 .plugin("calls", calls.clone())
         });
-    let mut named = plugins.into_iter().enumerate();
-    let gw = gw.and_then(|g| named.try_fold(g, |g, (i, p)| g.plugin(format!("p{i}"), p)));
+    let gw = gw.and_then(|g| with_plugins(g, plugins));
     let gw = gw.and_then(|g| g.target("p"));
     (gw.unwrap_or_else(|e| panic!("{e}")), log, calls)
 }
@@ -367,7 +366,7 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
 }
 
 // Usage in values a plugin makes is shown, and reaches no provider edge, so
-// no meter there (0009, which removed `with_usage`). A cached answer's usage
+// no meter there. A cached answer's usage
 // reaches billing in an extension.
 #[tokio::test]
 async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {

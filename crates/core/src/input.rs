@@ -40,9 +40,7 @@ pub(crate) struct Input {
 pub(crate) enum Whose {
     /// The client's, as decoded, whatever filters ran over it.
     Client,
-    /// The client's, changed by a plugin.
-    Edited,
-    /// A plugin's own.
+    /// A plugin's, or the client's changed by one.
     Plugin,
     /// The format's own, such as an end.
     Format,
@@ -53,7 +51,7 @@ impl Whose {
     pub(crate) fn fault(self, fault: Fault) -> Fault {
         match self {
             Whose::Client => fault.recoded(400, codes::BAD_REQUEST),
-            Whose::Edited | Whose::Plugin => fault.recoded(500, codes::CONFIG),
+            Whose::Plugin => fault.recoded(500, codes::CONFIG),
             Whose::Format => fault,
         }
     }
@@ -170,7 +168,7 @@ impl Input {
             (None, true) => ((Bytes::new(), None), Whose::Format),
             (Some(input), false) => {
                 let same = self.base().is_ok_and(|b| self.base.format.same(b, &input));
-                let whose = if same { Whose::Client } else { Whose::Edited };
+                let whose = if same { Whose::Client } else { Whose::Plugin };
                 ((Bytes::new(), Some(input)), whose)
             }
             (None, false) if relay => ((self.base.raw.clone(), None), Whose::Client),
@@ -248,7 +246,6 @@ pub(crate) fn stream(
         later,
         body: None,
         read: false,
-        format: like.base.format.clone(),
         like,
         call,
         decoder: None,
@@ -269,7 +266,7 @@ struct Reading {
     body: Option<Body>,
     /// Whether it read a data frame.
     read: bool,
-    format: Arc<dyn AnyFormat>,
+    /// The request's input, whose format decodes the frames.
     like: Input,
     call: InputFilters,
     /// Built at the first frame.
@@ -320,9 +317,9 @@ impl Reading {
     /// The frames of `bytes`, or of the body's end (`None`), through the
     /// filters, then at the end what they kept back.
     fn frames(&mut self, bytes: Option<Bytes>) -> Result<Vec<Frame>, Fault> {
-        let (format, like) = (&self.format, &self.like);
+        let base = &self.like.base;
         let decoder =
-            (self.decoder).get_or_insert_with(|| format.request_decoder(&*like.base.head));
+            (self.decoder).get_or_insert_with(|| base.format.request_decoder(&*base.head));
         let (values, end) = decoder.decode(bytes);
         let mut frames = match values {
             Some(values) => self.filter(values)?,
@@ -337,7 +334,7 @@ impl Reading {
     /// Run `values` through the client edge's filters, then the call's;
     /// once either ended, they are cut.
     fn filter(&mut self, values: Values) -> Result<Vec<Frame>, Fault> {
-        let format = self.format.clone();
+        let format = self.like.base.format.clone();
         let decoded = format.inputs(values);
         let mut frames: Vec<Frame> = Vec::with_capacity(decoded.len());
         let (mut client, mut call) = (locked(&self.later.filters), locked(&self.call));
@@ -358,7 +355,7 @@ impl Reading {
             // A frame the filters left equal to its decoding is the client's.
             for changed in format.inputs(values) {
                 let same = format.same(&input, &changed);
-                let whose = if same { Whose::Client } else { Whose::Edited };
+                let whose = if same { Whose::Client } else { Whose::Plugin };
                 frames.push(Frame {
                     input: changed,
                     whose,
@@ -384,7 +381,9 @@ impl Reading {
             None => (None, end),
         };
         call.end(end, &mut tail)?;
-        let inputs = tail.map(|v| self.format.inputs(v)).unwrap_or_default();
+        let inputs = tail
+            .map(|v| self.like.base.format.inputs(v))
+            .unwrap_or_default();
         let made = inputs.into_iter().map(|input| Frame {
             input,
             whose: Whose::Plugin,

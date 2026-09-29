@@ -2,7 +2,7 @@
 
 mod common;
 use bytes::{Bytes, BytesMut};
-use common::{AddProvider, add_provider, providers};
+use common::{AddProvider, add_provider, providers, with_plugins};
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
@@ -34,9 +34,7 @@ fn serving(
     plugins: Vec<Arc<dyn Plugin>>,
     target: Option<&str>,
 ) -> Result<Gateway, Fault> {
-    let mut named = plugins.into_iter().enumerate();
-    let gw = providers(list)?.serve(format)?;
-    let gw = named.try_fold(gw, |gw, (i, p)| gw.plugin(format!("p{i}"), p))?;
+    let gw = with_plugins(providers(list)?.serve(format)?, plugins)?;
     match target {
         Some(t) => gw.target(t),
         None => Ok(gw),
@@ -447,7 +445,7 @@ async fn a_default_target_of_another_kind_is_not_used() {
     assert!(mock.sent().is_empty());
 }
 
-// Changed in 0009: one default target, which a later `target` replaces; a
+// One default target, which a later `target` replaces; a
 // request it cannot take fails CONFIG, and routing by format is a plugin.
 #[tokio::test]
 async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format() {
@@ -878,7 +876,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     for gone in ["x-hop", "expect", "content-length"] {
         assert!(sent.headers().get(gone).is_none(), "{gone}");
     }
-    // Changed in 0009: `TE` goes like every connection header, as trailers
+    // `TE` goes like every connection header, as trailers
     // are not delivered.
     assert!(sent.headers().get("te").is_none());
     // A header `Connection` names is dropped; the provider's own still goes.
@@ -965,7 +963,7 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
             body: &Bytes,
             refusal: Option<&Fault>,
         ) -> Box<dyn Encoder<Answer, Head>> {
-            // Changed: a format writes a refusal's status, so this one
+            // A format writes a refusal's status, so this one
             // overrides it after.
             let encoder = V2.response_encoder(answer, ask, body, refusal);
             Box::new(EditedHead(encoder, |head: &mut Head| {
@@ -1201,7 +1199,7 @@ async fn a_redirect_is_passed_on_as_it_came_not_read_as_an_answer() {
     assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
     assert_eq!(headers["content-type"], "text/html");
     assert_eq!(body.ok().as_deref(), Some(&b"<html>moved</html>"[..]));
-    // Changed: the redirect is a fault, a 502 to any other format, that
+    // The redirect is a fault, a 502 to any other format, that
     // carries the provider's answer, 301 and all.
     let end = ended.await.end.err();
     assert_eq!(
@@ -1377,8 +1375,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         }
     }
 
-    /// Reads the input, and edits the header on the call (changed: a
-    /// plugin edits no client head; it edits a call's with `edit_call`).
+    /// Reads the input, and edits the header on the call.
     #[derive(Clone, Default)]
     struct Edit(std::sync::Arc<std::sync::Mutex<String>>);
 
@@ -1847,7 +1844,7 @@ async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_f
     assert_eq!(body.ok().as_deref(), Some(&b"busy"[..]));
 }
 
-// Changed: a translated success's head is the client format's alone; a
+// A translated success's head is the client format's alone; a
 // `Retry-After` crosses a translation only on a fault (`retry_after`).
 #[tokio::test]
 async fn a_translating_encoder_gets_none_of_the_providers_head() {

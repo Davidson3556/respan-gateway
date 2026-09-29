@@ -6,7 +6,7 @@ use respan_gateway_formats::conversation::{
 };
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http::{self, StatusCode};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, run_filter as run, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -26,15 +26,6 @@ impl Rewrite for Terms {
         }
         Ok(text.to_owned())
     }
-}
-
-fn run(filter: &mut impl Filter<Reply>, replies: Vec<Reply>) -> Result<Vec<Reply>, Fault> {
-    let mut out = Vec::new();
-    for reply in replies {
-        filter.edit(reply, &mut out)?;
-    }
-    filter.end(&Ok(()), &mut out)?;
-    Ok(out)
 }
 
 fn text(replies: &[Reply]) -> String {

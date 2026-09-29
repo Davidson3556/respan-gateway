@@ -4,19 +4,16 @@ use crate::http;
 use http::header::AUTHORIZATION;
 use http::{HeaderMap, HeaderName, HeaderValue};
 
-/// The credentials a client sent, which the adapter lifts out of its head
-/// ([`handle`](crate::handle)) so no plugin, format or relay passes them
-/// on by accident: its credential headers and query parameters. A header
-/// or parameter is one if the last `-` or `_` segment of its name is
-/// `authorization`, `auth`, `key`, `token`, `secret`, `password`,
-/// `credential` or `credentials`, but not an idempotency key.
+/// The credential headers and query parameters a client sent, which the
+/// adapter lifts out of its head ([`handle`](crate::handle)) into the
+/// request's extensions, so nothing passes them on by accident. A name is
+/// one if its last `-` or `_` segment is `authorization`, `auth`, `key`,
+/// `token`, `secret`, `password`, `credential` or `credentials`, but not an
+/// idempotency key.
 ///
-/// It sits in the request's extensions, which calls copy. A transport
-/// without keys of its own passes it through on a call that relays the
-/// client's own message, never a translated one ([`credentials`](crate::credentials));
-/// a plugin that authenticates the client with it removes it
-/// (`cx.extensions_mut().remove::<Credential>()`), so the gateway's own key
-/// never reaches a provider.
+/// A transport without keys passes it through on a relay alone
+/// ([`credentials`](crate::credentials)); a plugin that authenticates the
+/// client with the gateway's own key removes it.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Credential {
     headers: HeaderMap,
@@ -86,8 +83,7 @@ impl Credential {
         self.query.iter().map(String::as_str)
     }
 
-    /// Put its headers and parameters on `head`, each where `head` has
-    /// none of its name.
+    /// Put its headers and parameters on `head` where it has none of a name.
     pub(crate) fn restore(&self, head: &mut http::request::Parts) {
         for name in self.headers.keys() {
             if !head.headers.contains_key(name) {

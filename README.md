@@ -47,56 +47,46 @@ not: `https://api.anthropic.com`.
 
 ## Glossary
 
-In plain words: a client sends a request, plugins look at it, the gateway
-sends it on to a provider, and the response streams back through the
-plugins. A request carries inputs and its response carries outputs. A
-streaming request, as the HTTP adapter makes one that asks to switch
-protocols (`Upgrade`), such as a WebSocket, has its inputs stream after
-its head. Any other request is whole: its body, even empty, is its one
-input. The kernel reads no HTTP and has no `http` types: the adapter,
-transports and formats own its rules and its heads
-([0012](docs/decisions/0012-http-out-of-the-kernel.md),
-[0013](docs/decisions/0013-no-http-in-core.md)).
+A client sends a request, plugins look at it, the gateway sends it on to a
+provider, and the response streams back through the plugins. A request
+carries inputs, its response outputs. A streaming request, such as a
+WebSocket (the HTTP adapter makes one of a request asking to switch
+protocols), has its inputs stream after its head; any other is whole: its
+body, even empty, is its one input. The kernel has no HTTP: the adapter,
+transports and formats own its rules and heads
+([0013](docs/decisions/0013-no-http-in-core.md)).
 
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, or its own (`with_input`). The
   target is the provider called when every plugin passes: the one
-  `set_target` names, else the gateway's default (`Gateway::target`).
-- **Edge**: where hooks run. The client edge runs once per request
+  `set_target` names, else the gateway's (`Gateway::target`).
+- **Edge**: where hooks run: the client edge once per request
   (`on_client`), the provider edge once per call (`on_provider`). Each
-  edge's end hook (`on_client_end`, `on_provider_end`) runs once after
-  its request or call ends. `on_client` passes (`Ok(None)`), or returns
-  a response and skips the plugins after it, or refuses.
-- **Filter**: code that edits a request's inputs or a response's
-  outputs as they stream; its type says which. Filters see every
-  message, keep-alives and usage alone included, and pass on at once what
-  they have no reason to hold. `Format::is_content` says only what
-  `until_content` commits on.
+  edge's end hook (`on_client_end`, `on_provider_end`) runs once after it
+  ends. `on_client` passes (`Ok(None)`), answers, skipping the plugins
+  after it, or refuses.
+- **Filter**: edits a request's inputs or a response's outputs as they
+  stream; its type says which. Filters see every message, keep-alives and
+  usage alone included.
 - **Format**: one protocol's codec, such as OpenAI Chat: it recognises
   its requests, and reads and writes its requests and responses.
 - **Kind**: a format's two types, `Input` and `Output`. Formats of one
   kind translate into each other; traffic the gateway does not read is a
   kind of one format (`formats::opaque`).
 - **Message**: one message of a body, such as an SSE event, a WebSocket
-  frame or a whole body, decoded into one value of the kind: every one,
-  even one the kind cannot read, keeps the bytes it came in.
-- **Usage**: the kernel counts none, as kinds report it differently or
-  not at all ([0010](docs/decisions/0010-usage-out-of-core.md)). In the
-  chat kind it is `Reply.usage` (`formats::Usage`); a plugin meters a
-  call with a provider-edge filter registered after the filters that may
-  fail, and reads its sum in `on_provider_end`. A plugin's own answer
-  reaches no provider edge: a cache carries its stored usage in an
-  extension. A cost cap reserves before the call (`sdks/ledger`) and
-  settles from what that filter priced.
+  frame or a whole body, decoded into one value of the kind, which keeps
+  the bytes it came in.
 - **Refusal**: a failure before the response head goes out, sent in the
-  client's format with the fault's status and `Retry-After`; a provider's
-  error answer is one (`Fault::is_answer`), sent as it came to a client of
-  its format.
+  client's format with the fault's status and retry; a provider's error
+  answer (`Fault::is_answer`) goes as it came to a client of its format.
 - **Relay**: a format's promise to write each message as the bytes it
-  came in while it says the same, an edit written into them: the client's
-  inputs to a provider of that format, and the provider's response (or a
-  plugin's own, `cx.relay`) back. The kernel sends a whole request no
-  plugin changed as the client's bytes, unread.
+  came in while it says the same, an edit written into them. A whole
+  request no plugin changed goes as the client's bytes, unread.
+- **Usage**: not the kernel's
+  ([0010](docs/decisions/0010-usage-out-of-core.md)). The chat kind
+  reports it in `Reply.usage` (`formats::Usage`); a plugin meters a call
+  with a provider-edge filter and reads the sum in `on_provider_end`
+  (`examples/billing.rs`, `sdks/ledger`).
 
 ## Roadmap
 
@@ -106,7 +96,7 @@ test when its milestone lands. The kernel API is frozen after M2.
 
 | Milestone | Delivers |
 |---|---|
-| M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic with correct usage, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
+| M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
 | M2 Plugin API | Calls of their own input, async stream filters, unread bodies; API fixes before the freeze |
 | M3 Formats | Gemini, Responses, embeddings |
 | M4 Plugins | Fallback, hedge, limits, memo, ledger |

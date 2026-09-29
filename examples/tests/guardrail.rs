@@ -55,9 +55,8 @@ impl Format for Responses {
     }
 }
 
-/// The example's gateway, also serving the Responses API. Its one default
-/// target stays OpenAI (a second `target` would replace it since 0009); the
-/// guard refuses Responses traffic before any call.
+/// The example's gateway, also serving the Responses API. Its one target
+/// stays OpenAI; the guard refuses Responses traffic before any call.
 fn gateway_with_responses(mock: &MockTransport) -> Result<Gateway, Fault> {
     gateway(mock)?
         .provider("responses", Responses, mock.at(OPENAI))?

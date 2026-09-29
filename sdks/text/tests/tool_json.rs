@@ -1,18 +1,11 @@
 //! Restoring and redacting inside tool calls keeps their JSON whole.
 
+use respan_gateway_core::Fault;
 use respan_gateway_core::serde_json::{self, Value, json};
-use respan_gateway_core::{Fault, Filter};
 use respan_gateway_formats::conversation::{Conversation, Message, Piece, Reply, Role};
+use respan_gateway_testkit::run_filter as run;
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite};
 
-fn run(filter: &mut impl Filter<Reply>, replies: Vec<Reply>) -> Result<Vec<Reply>, Fault> {
-    let mut out = Vec::new();
-    for reply in replies {
-        filter.edit(reply, &mut out)?;
-    }
-    filter.end(&Ok(()), &mut out)?;
-    Ok(out)
-}
 fn call(arguments: &str) -> Reply {
     Reply::other(
         "openai",

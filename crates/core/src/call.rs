@@ -15,23 +15,19 @@ use crate::fault::PANICKED;
 use crate::format::{AnyEncoder, AnyInput};
 use crate::input::{Frame as InputFrame, Input, locked, stream as inputs};
 use crate::lifecycle::{EndHooks, InFlight};
-use crate::provider::{Provider, provider_for};
+use crate::provider::Provider;
 use crate::response::Batch;
-use crate::transport::{Head, one_frame};
-use crate::{ClientContext, Exchange, Extensions, Fault, ProviderContext, Response};
+use crate::transport::Head;
+use crate::{ClientContext, Exchange, Extensions, Fault, ProviderContext, Response, Transport};
 
-/// The mark the kernel puts in a call's extensions, as its transport gets
-/// them ([`Exchange::extensions`]), when the call relays the client's own message: its inputs, not a
-/// call's own, to a provider of the client's format's name, the call
-/// starting from the client's head. It is on no other call, whatever
-/// [`Call::with_extension`] or a plugin set before; a transport may pass
-/// on what belongs to the client only when it is there.
+/// The kernel's mark in the extensions of a call that relays the client's
+/// own message, to a provider of its format's name, and of no other call:
+/// a transport passes on what belongs to the client only when it is there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Relayed;
 
-/// A call from [`ClientContext::call`]: a copy of the request as it was
-/// then, sent when first awaited, which may outlive the hook. A clone is an
-/// unsent copy. Its settings apply to it alone.
+/// A call from [`ClientContext::call`], sent when first awaited; it may
+/// outlive the hook. A clone is an unsent copy.
 #[must_use = "a call is sent only when awaited"]
 pub struct Call {
     request: Arc<ClientContext>,
@@ -75,18 +71,16 @@ impl Call {
         }
     }
 
-    /// Send `input`, such as a judge's prompt, in place of the client's
-    /// inputs, written from its value. The provider may be of another kind;
-    /// `input` must be its format's input type, or the call fails with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL).
+    /// Send `input`, such as a judge's prompt, in place of the client's. It
+    /// must be the provider's input type, of any kind, or the call fails
+    /// with [`codes::INTERNAL`](crate::codes::INTERNAL).
     pub fn with_input<T: Any + Send + Sync>(mut self, input: T) -> Self {
         self.input = Some(Arc::new(input));
         self
     }
 
-    /// Put `value` in this call's extensions
-    /// ([`ProviderContext::extensions`]), for its hooks and transport, such
-    /// as a mark a plugin's `on_provider` reads to filter this call alone.
+    /// Put `value` in this call's extensions, for its hooks and transport,
+    /// such as a mark `on_provider` reads to filter this call alone.
     pub fn with_extension<T: Clone + Send + Sync + 'static>(mut self, value: T) -> Self {
         self.extensions.insert(value);
         self
@@ -139,12 +133,21 @@ async fn send(
 ) -> Result<Response, Fault> {
     // An own input sends nothing of the client's, so only its type must
     // match; provider details go to logs.
-    let providers = &cx.gateway.providers;
-    let p = match &own {
-        Some(_) => providers
-            .get(&provider)
-            .ok_or_else(|| Fault::config(format!("unknown provider '{provider}'"))),
-        None => provider_for(&*cx.format, providers, &provider),
+    let p = match cx.gateway.providers.get(&provider) {
+        None => Err(format!("unknown provider '{provider}'")),
+        // Relayed within one name, else translated within one kind.
+        Some(p)
+            if own.is_none()
+                && cx.format.name() != p.format.name()
+                && cx.format.kind() != p.format.kind() =>
+        {
+            Err(format!(
+                "the client speaks {}, provider '{provider}' speaks {}, and they share no kind",
+                cx.format.name(),
+                p.format.name()
+            ))
+        }
+        Some(p) => Ok(p),
     };
     let p = p.map_err(|e| {
         Fault::config("a provider this request cannot use was called").with_source(e)
@@ -205,7 +208,7 @@ async fn send_call(
     let px = edge.cx();
     // A streaming request's later inputs follow, unless the call has its own.
     let later = cx.later.as_ref().filter(|_| px.input.own_format.is_none());
-    let client = relay.then(|| &*px.client.head);
+    let client = relay.then(|| &*px.client.head as &dyn Any);
     let (mut head, mut first, encoder) = first_frame(&px.input, p, client, later.is_some())?;
     for edit in std::mem::take(unlocked(&mut px.call_edits)) {
         edit(&mut head, &mut first)?;
@@ -220,16 +223,14 @@ async fn send_call(
         .format
         .copy_ask(&*head)
         .ok_or_else(|| Fault::internal("a call's head of another wire than its format's"))?;
-    let sent_first = first.clone();
+    // An empty first frame is none, as an HTTP body of no bytes has none.
+    let first_frame = stream::iter((!first.is_empty()).then(|| Ok(first.clone())));
     let body = match later {
-        None => one_frame(first),
+        None => first_frame.boxed(),
         Some(later) => {
             let (input, filters) = (px.input.clone(), px.inputs.clone());
             let frames = inputs(later.clone(), input, filters, &px.cut);
-            let first = (!first.is_empty()).then(|| Ok(first));
-            stream::iter(first)
-                .chain(later_frames(frames, encoder))
-                .boxed()
+            first_frame.chain(later_frames(frames, encoder)).boxed()
         }
     };
     let call = Exchange::new(head, body).with_extensions(extensions);
@@ -237,7 +238,8 @@ async fn send_call(
     let resp = p.transport.send(call).await?;
     Ok(Response::decoded(
         &p.format,
-        (&*sent, &sent_first),
+        &*sent,
+        &first,
         resp,
         relay,
         later.is_some(),
@@ -252,7 +254,7 @@ async fn send_call(
 fn first_frame(
     input: &Input,
     p: &Provider,
-    client: Option<&(dyn Any + Send + Sync)>,
+    client: Option<&dyn Any>,
     streams: bool,
 ) -> Result<(Head, Bytes, Box<dyn AnyEncoder>), Fault> {
     let ((mut body, first), whose) = input.sent(client.is_some())?;
@@ -272,9 +274,7 @@ fn first_frame(
     };
     write().map_err(|fault| whose.fault(fault))?;
     if !more.is_empty() {
-        let mut all = BytesMut::from(&body[..]);
-        all.unsplit(more);
-        body = all.freeze();
+        body = [&body[..], &more[..]].concat().into();
     }
     Ok((head, body, encoder))
 }

@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
 use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -12,9 +13,8 @@ use crate::input::locked;
 use crate::transport::Head;
 use crate::{Body, Exchange, Fault};
 
-/// A response for the client, streaming from a provider or made by a
-/// plugin. Dropped before it is sent or read to its end, its call ends
-/// abandoned.
+/// A response for the client, from a provider or a plugin. Dropped unsent
+/// and unread, its call ends abandoned.
 #[must_use = "a response does nothing unless sent or read"]
 pub struct Response {
     /// The provider's head, handed to the client's format only if the
@@ -55,12 +55,18 @@ pub(crate) struct Unread(Option<(SharedCall, Result<(), Fault>)>);
 impl Drop for Unread {
     fn drop(&mut self) {
         if let Some((call, end)) = self.0.take() {
-            let mut batch = Batch::end(end);
-            let settle = std::panic::AssertUnwindSafe(|| locked(&call).settle(&mut batch));
-            let _ = std::panic::catch_unwind(settle);
-            locked(&call).finish(Err(Fault::internal(PANICKED)));
+            let _ = settle(&call, &mut Batch::end(end));
         }
     }
+}
+
+/// Settle `call` at the end `batch` holds; a panic ends it internal.
+fn settle(call: &SharedCall, batch: &mut Batch) -> std::thread::Result<()> {
+    let settled = std::panic::catch_unwind(AssertUnwindSafe(|| locked(call).settle(batch)));
+    if settled.is_err() {
+        locked(call).finish(Err(Fault::internal(PANICKED)));
+    }
+    settled
 }
 
 impl Batch {
@@ -80,12 +86,9 @@ impl Batch {
     /// it holds it, goes through the call's filters and ends the call. A
     /// panic ends the call internal.
     pub(crate) fn read(&mut self) {
-        let Some((call, _)) = self.unread.0.take() else {
-            return;
-        };
-        let settle = std::panic::AssertUnwindSafe(|| locked(&call).settle(self));
-        if let Err(panic) = std::panic::catch_unwind(settle) {
-            locked(&call).finish(Err(Fault::internal(PANICKED)));
+        if let Some((call, _)) = self.unread.0.take()
+            && let Err(panic) = settle(&call, self)
+        {
             std::panic::resume_unwind(panic);
         }
     }
@@ -113,15 +116,11 @@ impl Response {
         }
     }
 
-    /// A success of outputs of the client's kind, streamed by `stream`, such as
-    /// `stream::iter(outputs.map(Ok))` or a merge of calls'
-    /// [`outputs`](Response::outputs); the first `Err` fails it. Its head
-    /// goes out with its first byte, so a failure before any is refused, or
-    /// at once if the client's format opens it
-    /// ([`Encoder::open`](crate::Encoder::open)). Outputs of another type
-    /// fail it with [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
-    /// It passes no provider edge: to bill a cached answer, carry what it
-    /// cost in an extension. A plugin's error is a [`Fault`], not outputs.
+    /// A success of the client's outputs from `stream`, such as a merge of
+    /// calls' [`outputs`](Response::outputs); the first `Err` fails it, a
+    /// refusal before any output. Every output is content. It passes no
+    /// provider edge. Outputs of another type fail it with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
     pub fn stream<T, S>(stream: S) -> Self
     where
         T: Any + Send + Sync,
@@ -139,26 +138,19 @@ impl Response {
         Self::new(None, body, Some(TypeId::of::<T>()))
     }
 
-    /// Read it until its first content, a failure, or its end, and hold
-    /// what was read, so it is still unsent and a plugin can decide on it
-    /// or fall back. Content is a provider's output its format calls
-    /// content ([`Format::is_content`](crate::Format::is_content)), before
-    /// any filter, or any output a plugin made. One whose call streams the
-    /// request's inputs, or read this far already, returns at once. `Err`
-    /// with its fault if it fails first, such as a provider's error answer
-    /// ([`Fault::is_answer`]), which a refusal sends as it came.
+    /// Read it until its first content
+    /// ([`Format::is_content`](crate::Format::is_content), before filters),
+    /// a failure or its end, and hold what was read, unsent, to decide on
+    /// it or fall back. One whose call streams the request's inputs returns
+    /// at once. `Err` if it fails first, such as with a provider's error
+    /// answer, which a refusal sends as it came.
     pub async fn until_content(self) -> Result<Response, Fault> {
         self.read_until(false).await
     }
 
-    /// Read it to its end and hold all of it: its head as it came, every
-    /// output, and its end, `Ok` or a failure, such as to race calls for
-    /// completion. Sent, it is delivered as it would have been unread,
-    /// byte for byte when relayed unedited. Its call ends as the batch
-    /// holding its end is sent, read or dropped. One whose call streams the
-    /// request's inputs, whose body flows only once sent, returns at once.
-    /// `Err` as for [`until_content`](Response::until_content): a failure
-    /// before any content; a later failure is held.
+    /// Read it to its end and hold it all, a later failure too, such as to
+    /// race calls for completion; sent, it goes as it would have unread.
+    /// Otherwise as [`until_content`](Response::until_content).
     pub async fn until_end(self) -> Result<Response, Fault> {
         self.read_until(true).await
     }
@@ -189,11 +181,11 @@ impl Response {
         self.ahead.iter().find_map(|batch| batch.end.as_ref())
     }
 
-    /// Read it rather than send it, such as a judge's verdict: its outputs
-    /// of `T`, the kind's output type, as the provider edge's filters left
-    /// them, content or not (filter with the kind's own check), ending with an `Err` if it fails; at once
-    /// with [`codes::INTERNAL`](crate::codes::INTERNAL) for another type.
-    /// Its call ends with the stream, or abandoned if dropped first.
+    /// Read it rather than send it, such as a judge's verdict: every output
+    /// as `T`, as the provider edge's filters left them, then an `Err` if it
+    /// fails; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL)
+    /// for another type. Its call ends with the stream, or abandoned if
+    /// dropped first.
     pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T, Fault>> {
         if self.output != Some(TypeId::of::<T>()) {
             let fault = Fault::wrong_kind::<T>();
@@ -239,7 +231,8 @@ impl Response {
     /// flows only once sent if `streams`.
     pub(crate) fn decoded(
         format: &Arc<dyn AnyFormat>,
-        (call, sent): (&(dyn Any + Send + Sync), &bytes::Bytes),
+        call: &dyn Any,
+        sent: &bytes::Bytes,
         response: Exchange<Head>,
         relayed: bool,
         streams: bool,
@@ -326,7 +319,7 @@ impl Source {
         let frame = body.next().await;
         let mut batch = Batch::default();
         let mut content = false;
-        let decode = std::panic::AssertUnwindSafe(|| {
+        let decode = AssertUnwindSafe(|| {
             let (values, end) = match frame {
                 Some(Ok(bytes)) => decoder.decode(Some(bytes)),
                 Some(Err(f)) => (None, Some(Err(f))),
@@ -355,7 +348,7 @@ impl Source {
         let Source::Bytes { decoder, call, .. } = self else {
             return;
         };
-        let close = std::panic::AssertUnwindSafe(|| {
+        let close = AssertUnwindSafe(|| {
             let (values, end) = decoder.decode(None);
             let end = Some(match end {
                 Some(Err(_)) => Err(Fault::abandoned()),
