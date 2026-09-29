@@ -8,7 +8,19 @@
 //!   included (the text SDK's `Placeholders`, with its `Rewrite`; its
 //!   `Holdback` filters the chat kind, so a session holds its own).
 //! - `MaxLength`: a session is cut at a deadline a plugin chose, with a normal
-//!   close; the turns metered before it stay metered.
+//!   close (1000, reason `max_length`); the turns metered before it stay
+//!   metered. It wraps the provider's events (`ClientContext::wrap`), so it
+//!   makes no call: the relay, and the provider's head with its subprotocol,
+//!   stay, and it composes with every other plugin.
+//! - `Reserve` (use case 9): before each `response.create` reaches the
+//!   provider, a turn's worst case is held on the client's wallet (the ledger
+//!   SDK), and the turn is refused, closing the client with 1008, when the
+//!   wallet cannot cover it; its `response.done` settles what it cost. Turns
+//!   of parallel sessions cannot overspend one wallet.
+//! - `Vet` (use case 3 on a session): a remote classifier judges each thing
+//!   the client says before the provider reads it; a refusal closes the
+//!   session with the fault's close code. Both are input wraps: async work
+//!   on each input, which a filter cannot do.
 //! - `Meter`: each turn is metered when its `response.done` passes, not when
 //!   the session ends, so a session of hours is billed as it goes; a turn cut
 //!   before its `response.done` (or before its first event) is metered from
@@ -21,7 +33,7 @@
 //! event per text frame. Everything about Realtime's events is here, none in
 //! the SDK.
 //!
-//! Covered: text events both ways; a placeholder split across deltas; usage per
+//! Covered: text events both ways; a wallet held per turn; a classifier per input; a placeholder split across deltas; usage per
 //! turn; the session's end recorded as `ok`, `abandoned` (the client left),
 //! `truncated` (the provider's connection broke) or `upstream`.
 //!
@@ -33,18 +45,20 @@
 //!
 //! `cargo run -p respan-gateway-examples --example realtime`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::futures::StreamExt;
+use respan_gateway_core::futures::{Stream, StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Events, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
+use respan_gateway_http::{Credential, Status};
+use respan_gateway_ledger::{Amount, HoldId, Ledger, MemoryLedger};
 use respan_gateway_testkit::Outcomes;
 use respan_gateway_text::{Placeholders, Rewrite};
-use respan_gateway_ws::{ClientEvent, JsonEvents, ProviderEvent, WsTransport};
+use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
 use serde_json::{Value, json};
 
 /// The longest a session may last, unless a plugin says otherwise.
@@ -355,17 +369,151 @@ impl Plugin for Meter {
 
 /// Caps a session's length: its events are cut at a deadline chosen in
 /// `on_client`, so a plugin decides per session (a tenant's plan, a drain
-/// signal: any future works) and the client gets a normal close. It makes
-/// the call itself, so register it last; the filters of the plugins before
-/// it are on the call it makes.
+/// signal: any future works). The client gets Close 1000 with the reason
+/// `max_length`, and the request's end (`on_client_end`) says `max_length`,
+/// where a client that left says `abandoned`. The call's own end (a
+/// plugin's `on_provider_end`, as `Meter`'s) still says `abandoned`: the
+/// call is dropped unread when its outputs are cut.
 struct MaxLength(Duration);
+
+/// `events` until `limit` has passed, then a fault that closes normally.
+fn until(
+    limit: Duration,
+    events: Events<ProviderEvent>,
+) -> impl Stream<Item = Result<ProviderEvent, Fault>> {
+    let state = Some((events, Box::pin(tokio::time::sleep(limit))));
+    stream::unfold(state, |state| async {
+        let (mut events, mut timer) = state?;
+        tokio::select! {
+            () = &mut timer => {
+                let over = Fault::new("max_length", "the session reached its maximum length");
+                Some((Err(over.with(CloseCode(1000))), None))
+            }
+            next = events.next() => Some((next?, Some((events, timer)))),
+        }
+    })
+}
 
 #[async_trait]
 impl Plugin for MaxLength {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let events = cx.call("openai").await?.outputs::<ProviderEvent>();
-        let cut = events.take_until(tokio::time::sleep(self.0));
-        Ok(Some(Response::stream(cut)))
+        let limit = self.0;
+        cx.wrap(move |events| until(limit, events))?;
+        Ok(None)
+    }
+}
+
+/// The most a turn can cost, in tokens: held before it starts.
+const TURN: Amount = 1_000;
+
+/// A session's wallet: the client's key names its account in the ledger, and
+/// the holds of turns asked for and not yet done wait in order.
+struct Wallet<L> {
+    ledger: L,
+    key: String,
+    holds: Mutex<VecDeque<HoldId>>,
+}
+
+impl<L: Ledger> Wallet<L> {
+    /// A `response.create` holds a turn's worst case first, or is refused.
+    async fn before(&self, event: ClientEvent) -> Result<ClientEvent, Fault> {
+        if event.json["type"] == "response.create" {
+            let hold = HoldId::new();
+            let key = [self.key.clone()];
+            let held = self.ledger.reserve(&hold, &key, TURN, HOUR).await;
+            held.map_err(|fault| fault.with(CloseCode(1008)))?;
+            lock(&self.holds).push_back(hold);
+        }
+        Ok(event)
+    }
+
+    /// A `response.done` settles the oldest hold at what the turn used.
+    async fn after(&self, event: ProviderEvent) -> Result<ProviderEvent, Fault> {
+        let hold = match event.json["type"] == "response.done" {
+            true => lock(&self.holds).pop_front(),
+            false => None,
+        };
+        if let Some(hold) = hold {
+            let used = &event.json["response"]["usage"]["total_tokens"];
+            self.ledger
+                .settle(&hold, used.as_i64().unwrap_or(TURN))
+                .await?;
+        }
+        Ok(event)
+    }
+
+    /// A turn cut before its `response.done` may have cost all it was
+    /// held for: it is charged that, never $0.
+    async fn end(&self) {
+        let cut: Vec<HoldId> = lock(&self.holds).drain(..).collect();
+        for hold in cut {
+            let _ = self.ledger.settle(&hold, TURN).await;
+        }
+    }
+}
+
+/// Holds each turn on the client's wallet before the provider sees it.
+struct Reserve<L>(L);
+
+#[async_trait]
+impl<L: Ledger + Clone> Plugin for Reserve<L> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let key = cx
+            .extensions()
+            .get::<Credential>()
+            .and_then(Credential::bearer);
+        let key = key.ok_or_else(|| Fault::new("no_key", "no key").with(Status(401)))?;
+        let wallet = Arc::new(Wallet {
+            ledger: self.0.clone(),
+            key: key.to_owned(),
+            holds: Mutex::default(),
+        });
+        let asks = wallet.clone();
+        cx.wrap(move |events: Events<ClientEvent>| {
+            events.and_then(move |event| {
+                let wallet = asks.clone();
+                async move { wallet.before(event).await }
+            })
+        })?;
+        let answers = wallet.clone();
+        cx.wrap(move |events: Events<ProviderEvent>| {
+            events.and_then(move |event| {
+                let wallet = answers.clone();
+                async move { wallet.after(event).await }
+            })
+        })?;
+        cx.extensions_mut().insert(wallet);
+        Ok(None)
+    }
+
+    async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
+        if let Some(wallet) = cx.extensions().get::<Arc<Wallet<L>>>() {
+            wallet.end().await;
+        }
+    }
+}
+
+/// A remote classifier's verdict on one thing the client said. The wait
+/// stands for its network call; a real one is `client.post(..).await`.
+async fn classify(event: &ClientEvent) -> Result<(), Fault> {
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    match event.json.to_string().contains("evil") {
+        true => Err(Fault::new("flagged", "the classifier flagged an input").with(CloseCode(1008))),
+        false => Ok(()),
+    }
+}
+
+/// Every event the client says waits for the classifier, and the session
+/// ends with its refusal.
+struct Vet;
+
+#[async_trait]
+impl Plugin for Vet {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.wrap(|events: Events<ClientEvent>| {
+            events.and_then(|event| async move { classify(&event).await.map(|()| event) })
+        })?;
+        Ok(None)
     }
 }
 
@@ -377,14 +525,18 @@ fn gateway(
     provider: &str,
     meter: &Meter,
     ends: &Outcomes,
+    wallets: &MemoryLedger,
     longest: Duration,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
         .serve(realtime())?
         .provider("openai", realtime(), WsTransport::new(provider)?)?
+        .target("openai")?
         .plugin("ends", ends.clone())?
         .plugin("pii", Pii)?
         .plugin("meter", meter.clone())?
+        .plugin("vet", Vet)?
+        .plugin("reserve", Reserve(wallets.clone()))?
         .plugin("max", MaxLength(longest))
 }
 
@@ -504,7 +656,15 @@ async fn main() -> Result<(), Fault> {
     openai.answer(Answer::events(reply));
     let provider = openai.base_url().replace("http://", "ws://");
     let (meter, ends) = (Meter::default(), Outcomes::default());
-    let gw = gateway(provider.trim_end_matches("/v1"), &meter, &ends, HOUR)?;
+    let wallets = MemoryLedger::new();
+    wallets.open("sk-demo", None, 100_000);
+    let gw = gateway(
+        provider.trim_end_matches("/v1"),
+        &meter,
+        &ends,
+        &wallets,
+        HOUR,
+    )?;
     let addr = listen(&gw).await;
 
     let mut ws = client(addr).await;
@@ -527,6 +687,7 @@ async fn main() -> Result<(), Fault> {
     let _ = ws.send(close).await;
     gw.idle().await;
     println!("session ended: {:?}", meter.ended());
+    println!("wallet spent:  {}", wallets.spent("sk-demo"));
     Ok(())
 }
 

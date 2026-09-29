@@ -187,3 +187,46 @@ async fn a_zero_retention_tenant_is_refused_background_mode() -> Result<(), Faul
     assert!(mock.sent().is_empty(), "no job ran");
     Ok(())
 }
+
+// A poll of a response that was relayed, not a job, shows the signed id too.
+#[tokio::test(start_paused = true)]
+async fn a_poll_of_a_relayed_response_shows_the_signed_id() -> Result<(), Fault> {
+    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let reply = |status| format!(r#"{{"id":"native-77","status":"{status}"}}"#);
+    mock.reply(WEST, mock::json(StatusCode::OK, &reply("in_progress")));
+    mock.reply(WEST, mock::json(StatusCode::OK, &reply("completed")));
+    let gateway = slow_west(&mock, &seen)?;
+    let relayed = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
+    let id = relayed["id"].as_str().unwrap_or_default();
+    assert_ne!(id, "native-77");
+    let polled = send(&gateway, get(id)).await?;
+    assert_eq!(polled["id"], id);
+    assert_eq!(polled["status"], "completed");
+    // The provider was asked for its own id.
+    assert_eq!(mock.sent()[1].uri().path(), "/v1/responses/native-77");
+    Ok(())
+}
+
+// Tenants are told apart by every credential they send, `x-api-key` included.
+#[tokio::test(start_paused = true)]
+async fn tenants_with_other_credential_headers_do_not_share_ids() -> Result<(), Fault> {
+    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let body = r#"{"id":"native-1","output":"secret"}"#;
+    mock.reply(WEST, mock::json(StatusCode::OK, body));
+    let gateway = slow_west(&mock, &seen)?;
+    let with_key = |key: &str, mut req: http::Request<Body>| {
+        req.headers_mut().remove("authorization");
+        req.headers_mut()
+            .insert("x-api-key", key.parse().expect("a value"));
+        req
+    };
+    let post = request("POST", "/v1/responses", r#"{"background":true}"#);
+    let job = send(&gateway, with_key("alice", post)).await?;
+    gateway.idle().await;
+    let id = job["id"].as_str().unwrap_or_default();
+    let mallory = serve(&gateway, with_key("mallory", get(id))).await.0;
+    assert_eq!(read_whole(mallory).await.0, StatusCode::NOT_FOUND);
+    let alice = send(&gateway, with_key("alice", get(id))).await?;
+    assert_eq!(alice["output"], "secret");
+    Ok(())
+}

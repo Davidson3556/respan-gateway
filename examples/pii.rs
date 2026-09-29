@@ -9,11 +9,11 @@
 //! JSON arguments). What it cannot read, such as an image, is refused, as it
 //! might hold PII. A tool call in the answer is restored whether it comes
 //! whole or streamed: `Holdback` also holds the tail of each streamed call's
-//! arguments, so a placeholder split across their fragments is restored, and
-//! the restored value is escaped as JSON text. (Only OpenAI's chunk shape;
-//! Anthropic's `partial_json` fragments are not held.) A streamed call asking for
-//! several choices (`n` other than 1) is refused: choices after the first
-//! come as other content, which the restore cannot hold per choice.
+//! arguments (OpenAI's chunks, Anthropic's `partial_json` fragments), so a
+//! placeholder split across their fragments is restored, and the restored
+//! value is escaped as JSON text. A streamed call asking for several choices
+//! (`n` other than 1) is refused: choices after the first come as other
+//! content, which the restore cannot hold per choice.
 //!
 //! So it is two plugins, and order is registration order: `pii` registered
 //! first restores every response the client gets, whoever answers;

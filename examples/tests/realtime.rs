@@ -8,6 +8,7 @@ struct Session {
     gateway: Gateway,
     meter: Meter,
     ends: Outcomes,
+    wallets: MemoryLedger,
     addr: std::net::SocketAddr,
 }
 
@@ -17,16 +18,25 @@ async fn start() -> Result<Session, Fault> {
 
 /// A session that may last `longest`.
 async fn start_for(longest: Duration) -> Result<Session, Fault> {
+    start_with(longest, 100_000).await
+}
+
+/// A session that may last `longest`, for a wallet of `tokens`.
+async fn start_with(longest: Duration, tokens: Amount) -> Result<Session, Fault> {
     let openai = FakeOpenAi::start().await;
     let provider = openai.base_url().replace("http://", "ws://");
     let (meter, ends) = (Meter::default(), Outcomes::default());
-    let gateway = gateway(provider.trim_end_matches("/v1"), &meter, &ends, longest)?;
+    let wallets = MemoryLedger::new();
+    wallets.open("sk-demo", None, tokens);
+    let provider = provider.trim_end_matches("/v1");
+    let gateway = gateway(provider, &meter, &ends, &wallets, longest)?;
     let addr = listen(&gateway).await;
     Ok(Session {
         openai,
         gateway,
         meter,
         ends,
+        wallets,
         addr,
     })
 }
@@ -294,6 +304,23 @@ async fn a_client_that_leaves_is_recorded_abandoned() -> Result<(), Fault> {
     Ok(())
 }
 
+/// The Close the client is sent: its code and reason. Events before it are
+/// skipped; `None` if the connection broke without one.
+async fn closed(ws: &mut Client) -> Option<(u16, String)> {
+    use respan_gateway_core::futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        match next.expect("a close in time") {
+            Some(Ok(Message::Close(Some(frame)))) => {
+                return Some((frame.code.into(), frame.reason.to_string()));
+            }
+            Some(Ok(_)) => {}
+            _ => return None,
+        }
+    }
+}
+
 // A session past its maximum length is closed by its plugin, with a normal
 // close; what it said before is still restored and metered.
 #[tokio::test(flavor = "multi_thread")]
@@ -309,8 +336,9 @@ async fn a_session_is_closed_at_its_maximum_length() -> Result<(), Fault> {
     say(&mut ws, json!({ "type": "response.create" })).await;
     assert_eq!(said(&turn(&mut ws).await), "Noted: bob@x.io ok.");
 
-    // The client says nothing more: the session is cut at its deadline.
-    assert!(hear(&mut ws).await.is_none(), "the session was closed");
+    // The client says nothing more: the session is cut at its deadline,
+    // with a normal close.
+    assert_eq!(closed(&mut ws).await, Some((1000, "max_length".into())));
     assert!(
         began.elapsed() < Duration::from_secs(3),
         "{:?}",
@@ -318,5 +346,168 @@ async fn a_session_is_closed_at_its_maximum_length() -> Result<(), Fault> {
     );
     s.gateway.idle().await;
     assert_eq!(s.meter.turns().len(), 1);
+    // The call's end is `abandoned`, as for a client that left; the request's
+    // end is what tells the cut apart.
+    assert_eq!(
+        s.meter.ended(),
+        [Ended {
+            session: 1,
+            code: "abandoned".into(),
+            turns: 1
+        }]
+    );
+    assert_eq!(
+        s.ends.only().map_err(|f| f.code().to_owned()),
+        Err("max_length".into())
+    );
+    Ok(())
+}
+
+// The provider's head stays: a client that asks for a subprotocol (a browser
+// must) gets the provider's answer echoed while a session is capped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_capped_session_keeps_the_subprotocol_the_provider_chose() -> Result<(), Fault> {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let app = axum::Router::new().route(
+        "/v1/realtime",
+        axum::routing::get(|ws: WebSocketUpgrade| async move {
+            ws.protocols(["realtime"])
+                .on_upgrade(|mut socket| async move {
+                    let hello = json!({ "type": "session.created" }).to_string();
+                    let _ = socket.send(Message::Text(hello.into())).await;
+                    while let Some(Ok(_)) = socket.recv().await {}
+                })
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let (meter, ends) = (Meter::default(), Outcomes::default());
+    let wallets = MemoryLedger::new();
+    wallets.open("sk-demo", None, 100_000);
+    let gw = gateway(
+        &format!("ws://{at}"),
+        &meter,
+        &ends,
+        &wallets,
+        Duration::from_millis(300),
+    )?;
+    let addr = listen(&gw).await;
+
+    let mut req = format!("ws://{addr}/v1/realtime?model=gpt-realtime")
+        .into_client_request()
+        .expect("a request");
+    req.headers_mut()
+        .insert("authorization", "Bearer sk-demo".parse().expect("a value"));
+    req.headers_mut().insert(
+        "sec-websocket-protocol",
+        "realtime".parse().expect("a value"),
+    );
+    let (mut ws, head) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("a handshake");
+    assert_eq!(head.headers()["sec-websocket-protocol"], "realtime");
+    assert_eq!(heard(&mut ws).await["type"], "session.created");
+    assert_eq!(closed(&mut ws).await, Some((1000, "max_length".into())));
+    Ok(())
+}
+
+// Use case 9: a turn is held on the client's wallet before the provider sees
+// it, and settled at what it used. Eight sessions ask at once of a wallet
+// that holds three turns: three are answered, and the wallet never goes
+// negative.
+#[tokio::test(flavor = "multi_thread")]
+async fn parallel_sessions_cannot_overspend_one_wallet() -> Result<(), Fault> {
+    let s = start_with(HOUR, 3 * TURN).await?;
+    for _ in 0..8 {
+        let slow = Answer::events(script(&["ok"], usage(40, 9))).delay_first(300);
+        s.openai.answer(slow);
+    }
+    let mut sessions = Vec::new();
+    for _ in 0..8 {
+        let addr = s.addr;
+        sessions.push(tokio::spawn(async move {
+            let mut ws = client(addr).await;
+            hear(&mut ws).await;
+            say(&mut ws, json!({ "type": "response.create" })).await;
+            match hear(&mut ws).await {
+                Some(_) => Ok(turn(&mut ws).await),
+                None => Err(closed(&mut ws).await),
+            }
+        }));
+    }
+    let (mut answered, mut refused) = (0, 0);
+    for session in sessions {
+        match session.await.expect("a session") {
+            Ok(_) => answered += 1,
+            Err(_) => refused += 1,
+        }
+    }
+    assert_eq!((answered, refused), (3, 5));
+    let asked = read_by_provider(&s.openai);
+    assert_eq!(
+        asked.len(),
+        3,
+        "the provider saw only the turns held: {asked:?}"
+    );
+    s.gateway.idle().await;
+    // Each answered turn settled at the 49 tokens it used.
+    assert_eq!(s.wallets.spent("sk-demo"), 3 * 49);
+    assert_eq!(s.wallets.available("sk-demo"), 3 * TURN - 3 * 49);
+    Ok(())
+}
+
+// A refused turn closes its client with 1008, and the wallet is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_the_wallet_cannot_cover_closes_the_session_with_1008() -> Result<(), Fault> {
+    let s = start_with(HOUR, TURN / 2).await?;
+    let mut ws = client(s.addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    let close = closed(&mut ws).await;
+    assert_eq!(close, Some((1008, "insufficient_funds".into())));
+    assert!(read_by_provider(&s.openai).is_empty());
+    s.gateway.idle().await;
+    assert_eq!(s.wallets.available("sk-demo"), TURN / 2);
+    Ok(())
+}
+
+// A turn cut before its `response.done` is charged its whole hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_turn_is_charged_what_it_held() -> Result<(), Fault> {
+    let s = start_with(HOUR, 3 * TURN).await?;
+    let cut = Answer::events(script(&["one", "two"], usage(10, 2))).cut_after(3);
+    s.openai.answer(cut);
+    let mut ws = client(s.addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    while hear(&mut ws).await.is_some() {}
+    s.gateway.idle().await;
+    assert_eq!(s.wallets.spent("sk-demo"), TURN);
+    Ok(())
+}
+
+// Use case 3 on a session: a remote classifier vets each input before the
+// provider reads it; a flagged one closes the client with the fault's code.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flagged_input_never_reaches_the_provider_and_closes_the_session() -> Result<(), Fault> {
+    let s = start().await?;
+    let mut ws = client(s.addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, user_says("a fine sentence")).await;
+    assert_eq!(heard(&mut ws).await["type"], "conversation.item.added");
+    say(&mut ws, user_says("an evil plan")).await;
+    assert_eq!(closed(&mut ws).await, Some((1008, "flagged".into())));
+    s.gateway.idle().await;
+    let read = read_by_provider(&s.openai);
+    assert_eq!(read.len(), 1, "{read:?}");
+    assert!(!read[0].to_string().contains("evil"));
+    assert_eq!(
+        s.ends.only().map_err(|f| f.code().to_owned()),
+        Err("flagged".into())
+    );
     Ok(())
 }

@@ -13,10 +13,10 @@
 //!   as a job again, so a job cannot recurse; a tenant marked `NoContent`
 //!   (zero retention, as in `logging.rs`) is refused background mode, since
 //!   a job's answer must be kept until it is polled.
-//! - **Signed ids.** The client never sees a provider's id: it gets one that
+//! - **Signed ids.** The client never sees a provider's id, on a post or a poll: it gets one that
 //!   names the deployment (`resp_{deployment}{key}{tag}`, 38 characters, under
-//!   Azure's 64) and is signed together with the tenant (a hash of its
-//!   credential), so a later `GET` goes to the deployment the id names, with
+//!   Azure's 64) and is signed together with the tenant (a hash of all its
+//!   credentials, `x-api-key` included), so a later `GET` goes to the deployment the id names, with
 //!   the provider's own id in its path. A forged id, or another tenant's, is
 //!   a 404 before any call. Here the tag is a hash; use an HMAC.
 //!
@@ -41,7 +41,7 @@ use respan_gateway_core::{
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_formats::opaque::Got;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::http::{self, Method, header::AUTHORIZATION};
+use respan_gateway_http::http::{self, Method};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Asked, Body, Credential, Transport, built_wrong, full};
 use respan_gateway_testkit::{MockTransport, mock, read_whole, serve};
@@ -58,14 +58,20 @@ const SECRET: u64 = 0x5eed;
 /// Where a request that names no deployment goes; your routing decides.
 const DEFAULT: usize = 1;
 
-/// Who a request is for: a hash of its credential (a durable store hashes
-/// with SHA-256), which the adapter lifted into a [`Credential`].
+/// Who a request is for: a hash of all its credentials (a durable store
+/// hashes with SHA-256), which the adapter lifted into a [`Credential`]:
+/// `Authorization`, `x-api-key`, a key in the query, whatever the tenant
+/// sends. Tenants that send none are one.
 fn tenant(cx: &ClientContext) -> u64 {
-    let credential = cx.extensions().get::<Credential>();
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(credential) = cx.extensions().get::<Credential>() {
+        let headers = credential.headers().iter();
+        parts.extend(headers.map(|(name, value)| format!("{name}: {:?}", value.as_bytes())));
+        parts.extend(credential.query().map(str::to_owned));
+    }
+    parts.sort();
     let mut hasher = DefaultHasher::new();
-    credential
-        .and_then(|c| c.get(AUTHORIZATION.as_str()))
-        .hash(&mut hasher);
+    parts.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -123,6 +129,18 @@ fn answer(body: impl Into<Bytes>) -> Option<Response> {
     Some(Response::stream(stream::iter([Ok(body)])))
 }
 
+/// `got` with the signed `id` for the provider's, which is returned.
+fn show(got: &mut Got<Rest>, id: &str) -> Result<Option<String>, Fault> {
+    let mut body: Value = serde_json::from_slice(&got.0)
+        .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
+    let native = body["id"].as_str().map(str::to_owned);
+    if native.is_some() {
+        body["id"] = id.into();
+        *got = Got::new(body.to_string());
+    }
+    Ok(native)
+}
+
 fn not_found() -> Fault {
     Fault::not_found("no such response")
 }
@@ -158,6 +176,8 @@ impl Jobs {
                     ask.path.clone_from(&path);
                     Ok(())
                 })?;
+                let id = id.to_owned();
+                cx.filter(move |got: &mut Got<Rest>| show(got, &id).map(drop))?;
                 Ok(None)
             }
         }
@@ -174,13 +194,11 @@ impl Jobs {
         cx.set_target(DEPLOYMENTS[deployment]);
         let shared = self.clone();
         cx.filter(move |got: &mut Got<Rest>| {
-            let mut body: Value = serde_json::from_slice(&got.0)
-                .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
-            if let Some(native) = body["id"].as_str() {
-                let native = Entry::Native(native.to_owned());
-                shared.entries().entry(id.clone()).or_insert(native);
-                body["id"] = id.clone().into();
-                *got = Got::new(body.to_string());
+            if let Some(native) = show(got, &id)? {
+                shared
+                    .entries()
+                    .entry(id.clone())
+                    .or_insert(Entry::Native(native));
             }
             Ok(())
         })?;
