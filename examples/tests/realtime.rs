@@ -1795,3 +1795,53 @@ async fn done_or_closed(ws: &mut Client) -> Result<(), Option<(u16, String)>> {
         }
     }
 }
+
+/// Drops at every moment of a session whose turns the provider starts (voice
+/// detection) while the client's own `response.create` is held, against a
+/// slow ledger: every hold is settled once, none outlives its session, and
+/// the wallet never goes below 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn l9_provider_turns_and_a_client_that_leaves_at_any_moment_leave_no_hold()
+-> Result<(), Fault> {
+    let mut bad = Vec::new();
+    for at_ms in (0..450).step_by(10) {
+        let at = starts_turns(Duration::from_millis(30)).await;
+        let books = MemoryLedger::new();
+        books.open("sk-demo", None, 100_000);
+        let remote = Remote {
+            books: books.clone(),
+            ack: Duration::from_millis(40),
+            lag: Duration::from_millis(40),
+        };
+        let gw = Gateway::new()
+            .client(realtime())?
+            .provider(
+                "openai",
+                realtime(),
+                WsTransport::new(format!("ws://{at}"))?,
+            )?
+            .target("openai")?
+            .plugin("reserve", Reserve(remote))?;
+        let addr = listen(&gw).await;
+        let sampler = sample(&books);
+        let mut ws = client(addr).await;
+        hear(&mut ws).await;
+        let item = json!({ "type": "conversation.item.create", "item": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] } });
+        say(&mut ws, item.clone()).await;
+        say(&mut ws, json!({ "type": "response.create" })).await;
+        say(&mut ws, item).await;
+        tokio::time::sleep(Duration::from_millis(at_ms)).await;
+        drop(ws);
+        gw.idle().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let low = sampler.finish().await;
+        let (spent, left) = (books.spent("sk-demo"), books.available("sk-demo"));
+        if spent + left != 100_000 || low < 0 {
+            bad.push(format!(
+                "drop at {at_ms} ms: spent {spent} available {left} lowest {low}"
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    Ok(())
+}
