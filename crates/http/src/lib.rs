@@ -37,7 +37,7 @@ use futures::future::{BoxFuture, ready};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
-    RETRY_AFTER, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+    RETRY_AFTER, SEC_WEBSOCKET_PROTOCOL, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use http_body::Frame;
@@ -68,7 +68,8 @@ pub fn percent_decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
-pub use driver::{Accepted, accept, dial, opening};
+pub use driver::Accepted;
+use driver::ERROR_BODY_CAP;
 pub use transport::{
     CallHeaders, Dialer, Exchange, Frames, Transport, credentials, is_connection_header,
     proxy_call, strip_client_origin_headers, strip_origin_headers,
@@ -117,7 +118,7 @@ pub fn full(bytes: impl Into<Bytes>) -> Body {
 /// An HTTP request as an exchange, its HTTP extensions dropped but the
 /// gateway's [`Extensions`] it carries, if any, which an embedder or test
 /// hands plugins with `req.extensions_mut().insert(extensions)`.
-pub fn ask<B>(req: http::Request<B>) -> Exchange<RequestHead>
+pub fn from_request<B>(req: http::Request<B>) -> Exchange<RequestHead>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -131,7 +132,7 @@ where
 }
 
 /// An HTTP response as an exchange, such as a transport returns.
-pub fn answer<B>(resp: http::Response<B>) -> Exchange<ResponseHead>
+pub fn from_response<B>(resp: http::Response<B>) -> Exchange<ResponseHead>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -141,7 +142,7 @@ where
 }
 
 /// A call as an HTTP request, its extensions apart, as a transport sends it.
-pub fn call(call: Exchange<RequestHead>) -> (http::Request<Body>, Extensions) {
+pub fn into_request(call: Exchange<RequestHead>) -> (http::Request<Body>, Extensions) {
     let req = http::Request::from_parts(call.head, into_http_body(call.body));
     (req, call.extensions)
 }
@@ -251,6 +252,8 @@ pub(crate) struct Arrived {
 pub(crate) struct Asking {
     pub(crate) method: Method,
     pub(crate) path: String,
+    /// The subprotocol to answer a 101 with if the provider chose none.
+    pub(crate) protocol: Option<HeaderValue>,
 }
 
 /// A request as it arrives at the adapter ([`handle`]): the hop's headers
@@ -266,18 +269,31 @@ where
         body,
         mut extensions,
         ..
-    } = ask(req);
+    } = from_request(req);
     let method = head.method.clone();
     let path = head.uri.path().to_owned();
     strip_hops(&mut head.headers, true);
+    let offered = head.headers.contains_key(SEC_WEBSOCKET_PROTOCOL);
+    let mut protocol = None;
     if let Some(credential) = Credential::lift(&mut head) {
+        // A client that offered only keys still needs a subprotocol echoed
+        // (browsers fail a handshake that echoes none), so the first of them.
+        if offered && !head.headers.contains_key(SEC_WEBSOCKET_PROTOCOL) {
+            let keys = credential.headers().get(SEC_WEBSOCKET_PROTOCOL);
+            let first = keys.and_then(|v| v.to_str().ok()?.split(',').next());
+            protocol = first.and_then(|e| HeaderValue::from_str(e.trim()).ok());
+        }
         extensions.insert(credential);
     }
     extensions.insert(Asked(Arc::new(head.clone())));
     let arrived = Arrived {
         head,
         body,
-        to: Asking { method, path },
+        to: Asking {
+            method,
+            path,
+            protocol,
+        },
     };
     (arrived, extensions)
 }
@@ -314,6 +330,13 @@ pub(crate) fn depart(
             let (mut head, mut body) = resp.into_parts();
             let length = head.headers.get(CONTENT_LENGTH).cloned();
             outgoing(&mut head);
+            if head.status == StatusCode::SWITCHING_PROTOCOLS
+                && !head.headers.contains_key(SEC_WEBSOCKET_PROTOCOL)
+                && let Some(protocol) = &to.protocol
+            {
+                head.headers
+                    .insert(SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+            }
             if bodiless(&to.method, head.status) {
                 // A HEAD's or a 304's `Content-Length` is the provider's
                 // for the body it would send (RFC 9110 8.6); a 204 has none.
@@ -334,10 +357,16 @@ pub(crate) fn depart(
     }
 }
 
-/// Read `body`'s frames until it ends or waits on something. An output says
+/// Read `body`'s frames until it ends, waits on something, or has given
+/// [`ERROR_BODY_CAP`] bytes. A bodiless answer's frames are content it
+/// cannot send, read only to reach its end; the cap is the driver's for a
+/// body read only to be classified, far past any real one, and here it
+/// bounds a body that is always ready and never ends. An output says
 /// `Pending` between the frames it sent apart (rule 5) but wakes itself at
 /// once, as a yield does, so a `Pending` that was woken during its poll is
-/// ready, and one that was not is waiting.
+/// ready, and one that was not is waiting. Each poll runs outside tokio's
+/// cooperative budget: once a task's is spent, every poll of a ready source
+/// is such a yield, and the loop would spin on it.
 fn drain_ready(body: &mut Body) {
     struct Woken(AtomicBool);
     impl futures::task::ArcWake for Woken {
@@ -348,14 +377,21 @@ fn drain_ready(body: &mut Body) {
     let woken = Arc::new(Woken(AtomicBool::new(false)));
     let waker = futures::task::waker(woken.clone());
     let mut cx = std::task::Context::from_waker(&waker);
-    loop {
-        woken.0.store(false, Ordering::SeqCst);
-        match http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), &mut cx) {
-            std::task::Poll::Ready(Some(_)) => {}
-            std::task::Poll::Ready(None) => break,
-            std::task::Poll::Pending if woken.0.load(Ordering::SeqCst) => {}
-            std::task::Poll::Pending => break,
-        }
+    let mut read = 0;
+    while read < ERROR_BODY_CAP {
+        let next = std::future::poll_fn(|cx| {
+            http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), cx)
+        });
+        let mut next = std::pin::pin!(tokio::task::unconstrained(next));
+        let frame = loop {
+            match next.as_mut().poll(&mut cx) {
+                std::task::Poll::Pending if woken.0.swap(false, Ordering::SeqCst) => {}
+                std::task::Poll::Pending => return,
+                std::task::Poll::Ready(frame) => break frame,
+            }
+        };
+        let Some(Ok(frame)) = frame else { return };
+        read += frame.data_ref().map_or(1, |data| data.len().max(1));
     }
 }
 
@@ -471,6 +507,7 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
 /// What [`impl_format!`] names, not for use elsewhere.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::driver::{accept, dial, opening};
     pub use respan_gateway_core::futures::future::BoxFuture;
     pub use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Half, Origin};
 }

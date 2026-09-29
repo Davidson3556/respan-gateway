@@ -283,7 +283,7 @@ impl Transport for Quiet {
         let resp = resp
             .body::<Body>(body)
             .map_err(respan_gateway_http::built_wrong)?;
-        Ok(respan_gateway_http::answer(resp))
+        Ok(respan_gateway_http::from_response(resp))
     }
 }
 

@@ -417,7 +417,7 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
             let headers = resp.headers_mut();
             headers.insert("content-type", HeaderValue::from_static("application/json"));
             headers.insert("set-cookie", HeaderValue::from_static("a=1"));
-            Ok(respan_gateway_http::answer(resp))
+            Ok(respan_gateway_http::from_response(resp))
         }
     }
 

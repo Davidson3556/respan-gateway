@@ -13,7 +13,8 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 /// WebSocket subprotocol (`Sec-WebSocket-Protocol: realtime,
 /// openai-insecure-api-key.<key>`) is one too: an entry `name.value` whose
 /// `name` is such a name is lifted out of that header, under its name, and
-/// the other entries stay.
+/// the other entries stay; so is the entry after a bare such name
+/// (`token, <key>`), whose name stays.
 ///
 /// A transport without keys passes it through on a relay alone
 /// ([`credentials`](crate::credentials)); a plugin that authenticates the
@@ -155,20 +156,34 @@ pub(crate) fn take_query(uri: &mut http::Uri, is: impl Fn(&str) -> bool) -> Vec<
     taken
 }
 
-/// Take the entries of `Sec-WebSocket-Protocol` that carry a key
-/// (`openai-insecure-api-key.<key>`) out of `headers`, joined, if any.
+/// Take the entries of `Sec-WebSocket-Protocol` that carry a key out of
+/// `headers`, joined, if any; empty entries go (RFC 6455 4.1 has none). An
+/// entry carries one as `name.value` with a credential `name`
+/// (`openai-insecure-api-key.<key>`), or as the entry after a bare credential
+/// name, which is how a browser sends a key where it can set no header
+/// (Deepgram's `token, <key>`). That name stays: it is no secret, it names
+/// the protocol, and it is what a server answers with.
 pub(crate) fn take_protocol_keys(headers: &mut HeaderMap) -> Option<HeaderValue> {
     let all: Vec<&str> = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(',').map(str::trim))
+        .filter(|e| !e.is_empty())
         .collect();
-    let carries = |e: &&str| {
-        e.split_once('.')
-            .is_some_and(|(name, _)| is_credential(name))
-    };
-    let (keys, kept): (Vec<&str>, Vec<&str>) = all.into_iter().partition(carries);
+    let (mut keys, mut kept) = (Vec::new(), Vec::new());
+    let mut named = false;
+    for entry in all {
+        let dotted = entry
+            .split_once('.')
+            .is_some_and(|(name, _)| is_credential(name));
+        if dotted || named {
+            keys.push(entry);
+        } else {
+            kept.push(entry);
+        }
+        named = !dotted && !named && is_credential(entry);
+    }
     if keys.is_empty() {
         return None;
     }
@@ -195,8 +210,7 @@ pub(crate) fn is_credential(name: &str) -> bool {
     ];
     let name = crate::percent_decode(name).to_ascii_lowercase();
     let last = name.rsplit(['-', '_']).next().unwrap_or_default();
-    let idempotency = matches!(&*name, "idempotency-key" | "x-idempotency-key");
-    !idempotency && CREDENTIALS.contains(&last)
+    !name.contains("idempotency") && CREDENTIALS.contains(&last)
 }
 
 #[cfg(test)]
@@ -271,6 +285,40 @@ mod tests {
         let mut parts = head("/", &[("sec-websocket-protocol", "x-key.k")]);
         assert!(Credential::lift(&mut parts).is_some());
         assert!(parts.headers.get("sec-websocket-protocol").is_none());
+    }
+
+    #[test]
+    fn a_bare_subprotocol_key_after_a_credential_name_is_lifted_and_the_name_stays() {
+        let mut parts = head("/", &[("sec-websocket-protocol", "token, dg-secret")]);
+        let credential = Credential::lift(&mut parts).unwrap_or_default();
+        assert_eq!(parts.headers["sec-websocket-protocol"], "token");
+        let keys = credential.get("sec-websocket-protocol");
+        assert_eq!(keys.map(HeaderValue::as_bytes), Some(&b"dg-secret"[..]));
+        assert!(!format!("{credential:?}").contains("dg-secret"));
+        credential.restore(&mut parts);
+        assert_eq!(parts.headers["sec-websocket-protocol"], "token, dg-secret");
+    }
+
+    #[test]
+    fn empty_subprotocol_entries_go_with_a_lift() {
+        let mut parts = head(
+            "/",
+            &[(
+                "sec-websocket-protocol",
+                "realtime, , openai-insecure-api-key.k",
+            )],
+        );
+        assert!(Credential::lift(&mut parts).is_some());
+        assert_eq!(parts.headers["sec-websocket-protocol"], "realtime");
+    }
+
+    #[test]
+    fn an_idempotency_key_is_no_credential_in_any_spelling() {
+        let mut parts = head(
+            "/x?idempotency_key=a&Idempotency-Key=b",
+            &[("idempotency_key", "a"), ("x-idempotency-key", "b")],
+        );
+        assert_eq!(Credential::lift(&mut parts), None);
     }
 
     #[test]
