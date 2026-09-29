@@ -1999,8 +1999,8 @@ async fn a_calls_own_input_its_format_cannot_write_anew_is_the_plugins_fault() {
     #[async_trait]
     impl Plugin for Own {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let image = json!({"type": "image_url", "image_url": {"url": "u"}});
-            let message = Message::new(Role::User, Content::other(image));
+            let image = json!({"type": "image", "source": {"type": "url", "url": "u"}});
+            let message = Message::new(Role::User, Content::other("anthropic-messages", image));
             let own = Conversation::new([message]);
             cx.call("openai").with_input(own).await.map(Some)
         }

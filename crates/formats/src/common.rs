@@ -155,17 +155,24 @@ fn object(raw: &[u8]) -> Result<Map<String, Value>, Fault> {
 
 /// A conversation as a new request, if nothing is lost.
 pub(crate) fn write_request<W: Wire>(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
-    // What a plugin removed from `unsupported`, it chose to lose.
-    if let Some(key) = chat.unsupported.keys().next() {
-        return Err(untranslatable(&format!("'{key}' in the request")));
-    }
-    if !chat.messages.iter().all(Message::is_plain) {
-        return Err(untranslatable("messages other than text"));
+    // Fields in another format cannot be sent; what a plugin removed from
+    // `unsupported`, it chose to lose. Parts are checked as they are written.
+    if chat.unsupported_in.as_deref() != Some(W::NAME) {
+        if let Some(key) = chat.unsupported.keys().next() {
+            return Err(untranslatable(&format!("'{key}' in the request")));
+        }
+        let plain = |m: &Message| !matches!(m.role, Role::Other(_)) && m.unsupported.is_empty();
+        if !chat.messages.iter().all(plain) {
+            return Err(untranslatable(
+                "messages with fields the kind has no place for",
+            ));
+        }
     }
     let mut v = match W::write(chat)? {
         Value::Object(v) => v,
         _ => Map::new(),
     };
+    v.extend(chat.unsupported.clone());
     set(&mut v, "model", chat.model.clone().map(Into::into));
     Ok(v)
 }
@@ -614,6 +621,7 @@ impl<W: Wire> Reading<W> {
 /// A conversation's messages in the client's format: a client message (by
 /// shared source) as it was, or edited in its form; any other anew.
 pub(crate) fn patch_messages(
+    format: &str,
     old: &[Message],
     new: &[Message],
     roles: &Names<Role>,
@@ -628,7 +636,7 @@ pub(crate) fn patch_messages(
         }
         patch_fields(fields, &was.unsupported, &now.unsupported);
         if was.content != now.content {
-            let content = patch_content(fields.get("content"), &was.content, &now.content)?;
+            let content = patch_content(format, fields.get("content"), &was.content, &now.content)?;
             fields.insert("content".into(), content);
         }
         Ok(value)
@@ -636,7 +644,7 @@ pub(crate) fn patch_messages(
     let one = |m: &Message| match (m.source(), old.iter().find(|o| o.same_source(m))) {
         (Some(source), Some(was)) if was == m => Ok(source.clone()),
         (Some(source), Some(was)) => update(source, was, m),
-        _ => write_message(m, roles),
+        _ => write_message(format, m, roles),
     };
     new.iter().map(one).collect()
 }
@@ -650,10 +658,14 @@ fn patch_fields(v: &mut Map<String, Value>, was: &Map<String, Value>, now: &Map<
 }
 
 /// A message written anew: role, content and unsupported fields.
-pub(crate) fn write_message(m: &Message, roles: &Names<Role>) -> Result<Value, Fault> {
+pub(crate) fn write_message(
+    format: &str,
+    m: &Message,
+    roles: &Names<Role>,
+) -> Result<Value, Fault> {
     let mut v = Map::new();
     v.insert("role".into(), role_of(m, roles)?);
-    v.insert("content".into(), write_content(&m.content));
+    v.insert("content".into(), write_content(format, &m.content)?);
     v.extend(m.unsupported.clone());
     Ok(v.into())
 }
@@ -667,18 +679,23 @@ fn role_of(m: &Message, roles: &Names<Role>) -> Result<Value, Fault> {
     role.ok_or_else(|| unpatchable("a message has a role this format has no place for"))
 }
 
-/// Content as a string if it is one text, and parts otherwise.
-pub(crate) fn write_content(content: &[Content]) -> Value {
-    match content {
+/// Content as a string if it is one text, and parts otherwise; a part in
+/// a format other than `format` is refused.
+pub(crate) fn write_content(format: &str, content: &[Content]) -> Result<Value, Fault> {
+    Ok(match content {
         [] => "".into(),
         [Content::Text { text }] => text.as_str().into(),
-        parts => parts.iter().map(write_part).collect(),
-    }
+        parts => parts
+            .iter()
+            .map(|p| write_part(format, p))
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 /// Content `old`, which read `was`, changed to read `now`, parts keeping
 /// their JSON, such as a cache marker, where they can.
 pub(crate) fn patch_content(
+    format: &str,
     old: Option<&Value>,
     was: &[Content],
     now: &[Content],
@@ -686,7 +703,7 @@ pub(crate) fn patch_content(
     let Some(Value::Array(old)) =
         old.filter(|v| v.as_array().is_some_and(|a| a.len() == was.len()))
     else {
-        return Ok(write_content(now));
+        return write_content(format, now);
     };
     // Parts in the longest common subsequence keep their JSON. A gap
     // between them with as many parts as before is edited part by part;
@@ -702,18 +719,25 @@ pub(crate) fn patch_content(
         }
     }
     let mut out = Vec::with_capacity(m);
-    let gap = |out: &mut Vec<Value>, from: std::ops::Range<usize>, into: std::ops::Range<usize>| {
+    let gap = |out: &mut Vec<Value>,
+               from: std::ops::Range<usize>,
+               into: std::ops::Range<usize>|
+     -> Result<(), Fault> {
         if from.len() == into.len() {
-            let pairs = from.zip(into);
-            out.extend(pairs.map(|(i, j)| part_update(&old[i], &was[i], &now[j])));
+            for (i, j) in from.zip(into) {
+                out.push(part_update(format, &old[i], &was[i], &now[j])?);
+            }
         } else {
-            out.extend(into.map(|j| write_part(&now[j])));
+            for j in into {
+                out.push(write_part(format, &now[j])?);
+            }
         }
+        Ok(())
     };
     let (mut i, mut j, mut gap_start) = (0, 0, (0, 0));
     while i < n && j < m {
         if was[i] == now[j] {
-            gap(&mut out, gap_start.0..i, gap_start.1..j);
+            gap(&mut out, gap_start.0..i, gap_start.1..j)?;
             out.push(old[i].clone());
             (i, j) = (i + 1, j + 1);
             gap_start = (i, j);
@@ -723,36 +747,38 @@ pub(crate) fn patch_content(
             j += 1;
         }
     }
-    gap(&mut out, gap_start.0..n, gap_start.1..m);
+    gap(&mut out, gap_start.0..n, gap_start.1..m)?;
     Ok(out.into())
 }
 
-/// Content as parts: a string is one text part.
-pub(crate) fn read_content(v: &Value) -> Vec<Content> {
+/// Content of `format` as parts: a string is one text part.
+pub(crate) fn read_content(format: &str, v: &Value) -> Vec<Content> {
     match v {
         Value::String(text) => vec![Content::from(text.as_str())],
-        Value::Array(parts) => parts.iter().map(read_part).collect(),
+        Value::Array(parts) => parts.iter().map(|p| read_part(format, p)).collect(),
         Value::Null => Vec::new(),
-        other => vec![Content::other(other.clone())],
+        other => vec![Content::other(format, other.clone())],
     }
 }
 
-fn write_part(c: &Content) -> Value {
+/// A part as `format` has it: text, or a part in that format only.
+fn write_part(format: &str, c: &Content) -> Result<Value, Fault> {
     match c {
-        Content::Text { text } => json!({ "type": "text", "text": text }),
-        Content::Other { raw } => Value::clone(raw),
+        Content::Text { text } => Ok(json!({ "type": "text", "text": text })),
+        Content::Other { format: f, raw } if **f == *format => Ok(Value::clone(raw)),
+        Content::Other { format: f, .. } => Err(untranslatable(&format!("a part in {f}'s shape"))),
     }
 }
 
 /// A part changed: text keeps the part, and any cache marker on it.
-fn part_update(value: &Value, was: &Content, now: &Content) -> Value {
+fn part_update(format: &str, value: &Value, was: &Content, now: &Content) -> Result<Value, Fault> {
     match (was, now) {
         (Content::Text { .. }, Content::Text { text }) => {
             let mut value = value.clone();
             value["text"] = text.as_str().into();
-            value
+            Ok(value)
         }
-        _ => write_part(now),
+        _ => write_part(format, now),
     }
 }
 
@@ -776,7 +802,7 @@ impl Totals {
 }
 
 /// A message as a conversation keeps it.
-pub(crate) fn read_message(m: &Value, roles: &Names<Role>) -> Message {
+pub(crate) fn read_message(format: &str, m: &Value, roles: &Names<Role>) -> Message {
     let name = m["role"].as_str().unwrap_or_default();
     let role = roles
         .value(name)
@@ -785,19 +811,19 @@ pub(crate) fn read_message(m: &Value, roles: &Names<Role>) -> Message {
     let unsupported = fields.filter(|(k, v)| *k != "role" && *k != "content" && says(v));
     let unsupported = unsupported.map(|(k, v)| (k.clone(), v.clone())).collect();
     let mut message = Message::new(role, "").with_source(m.clone());
-    message.content = read_content(&m["content"]);
+    message.content = read_content(format, &m["content"]);
     message.unsupported = unsupported;
     message
 }
 
 /// A text part, even with a cache marker, or other content.
-fn read_part(p: &Value) -> Content {
+fn read_part(format: &str, p: &Value) -> Content {
     let known = |k: &str| k == "type" || k == "text" || k == "cache_control";
     let fields = p.as_object().into_iter().flatten();
     let more = fields.filter(|(k, _)| !known(k)).any(|(_, v)| says(v));
     match (p["type"].as_str(), p["text"].as_str()) {
         (Some("text"), Some(text)) if !more => Content::from(text),
-        _ => Content::other(p.clone()),
+        _ => Content::other(format, p.clone()),
     }
 }
 

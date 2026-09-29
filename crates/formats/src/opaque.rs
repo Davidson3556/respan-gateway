@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, StatusCode};
-use respan_gateway_http::{RequestHead, ResponseHead, bodiless};
+use respan_gateway_http::{Codec, RequestHead, ResponseHead, bodiless, impl_format};
 
 use respan_gateway_http::{Decoder, Encoder};
 
@@ -136,6 +136,62 @@ pub fn response_encoder<F: 'static>(
     };
     crate::with_head(head, body)
 }
+
+/// Every request no format before it accepts, relayed unread, byte for
+/// byte, to a provider of this format: how a vendor's other endpoints
+/// (token counting, files, a newer API) pass through a gateway that knows
+/// only its chat one. Serve it last, and send its requests to a provider of
+/// this format at the vendor's origin, as the client's path is relayed as it
+/// is. Named `passthrough`, so a client's key goes only to a provider of
+/// this format.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Passthrough;
+
+impl Codec for Passthrough {
+    type Input = Sent<Passthrough>;
+    type Output = Got<Passthrough>;
+
+    fn name(&self) -> &str {
+        "passthrough"
+    }
+
+    fn accepts(&self, _head: &RequestHead) -> bool {
+        true
+    }
+
+    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Sent<Passthrough>>> {
+        request_decoder()
+    }
+
+    fn request_encoder(
+        &self,
+        client: Option<&RequestHead>,
+        _body: &mut Bytes,
+        streams: bool,
+    ) -> Box<dyn Encoder<Sent<Passthrough>, RequestHead>> {
+        request_encoder(client, streams)
+    }
+
+    fn response_decoder(
+        &self,
+        head: &ResponseHead,
+        call: &RequestHead,
+        _body: &Bytes,
+    ) -> Box<dyn Decoder<Got<Passthrough>>> {
+        response_decoder(self.name(), head, call)
+    }
+
+    fn response_encoder(
+        &self,
+        answer: Option<&ResponseHead>,
+        ask: &RequestHead,
+        _body: &Bytes,
+    ) -> Box<dyn Encoder<Got<Passthrough>, ResponseHead>> {
+        response_encoder(answer, ask)
+    }
+}
+
+impl_format!(Passthrough);
 
 #[cfg(test)]
 mod tests {

@@ -37,7 +37,18 @@ curl localhost:8080/v1/messages \
 
 Each format served recognises its own requests (OpenAI Chat a `POST` to
 `.../chat/completions`, Anthropic Messages to `.../v1/messages`); anything
-else is a 404.
+else is a 404, unless the `passthrough` format is served last, which relays
+every other request to a vendor unread (see `gateway.example.yaml`).
+
+No config file is needed to sit in front of Claude Code or Codex:
+
+```bash
+cargo run -p respan-gateway -- proxy --anthropic   # ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+cargo run -p respan-gateway -- proxy --openai      # add --listen ADDR or --url BASE
+```
+
+It relays chat and every other endpoint of that vendor (`count_tokens`,
+`/v1/responses`) byte for byte, with each client's own credentials.
 
 A provider's `base_url` is the one its own SDK takes. OpenAI-compatible
 ones include the version, such as `https://api.openai.com/v1`,
@@ -106,7 +117,7 @@ test when its milestone lands. The kernel API is frozen after M2.
 | `crates/plugins` | First-party plugins, such as the model router. |
 | `crates/server` | The axum router and the HTTP transport. |
 | `crates/testkit` | A mock transport and tests through the real formats. |
-| `crates/respan-gateway` | The binary: YAML config and `check`. |
+| `crates/respan-gateway` | The binary: YAML config, `check` and `proxy`. |
 | `sdks/` | Building blocks for plugins: `routing`, `text`, `ledger`, `mcp`, `ws`. |
 | `examples/` | Runnable, tested examples of the [use cases](examples/README.md). |
 

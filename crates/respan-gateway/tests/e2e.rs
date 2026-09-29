@@ -954,3 +954,182 @@ fn check_says_ok_for_a_good_config_and_fails_a_bad_one() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown format 'nope'"));
 }
+
+// The vendor's other endpoints, and running with no config file.
+
+/// A config serving `format` and then `passthrough`, both to `base_url`
+/// (the vendor's origin), with no key of their own.
+fn with_passthrough(format: &str, base_url: &str) -> String {
+    format!(
+        "providers:
+  p: {{ format: {format}, base_url: '{base_url}' }}
+  any: {{ format: passthrough, base_url: '{base_url}' }}
+serve: [{format}, passthrough]
+target: p
+"
+    )
+}
+
+const COUNT_TOKENS: &str = "/v1/messages/count_tokens";
+const RESPONSES: &str = "/v1/responses";
+
+#[tokio::test]
+async fn an_endpoint_no_format_knows_is_relayed_byte_exact_with_the_clients_key() {
+    let anthropic = FakeAnthropic::start().await;
+    let gw = Gateway::start(&with_passthrough(
+        "anthropic-messages",
+        &anthropic.base_url(),
+    ))
+    .await;
+    let counted = r#"{ "input_tokens":  12,"x_new":1 }"#;
+    anthropic.answer(Answer::raw(counted).header("x-request-id", "req_1"));
+    let asked = r#"{ "model":"claude-sonnet-4-5",  "messages":[{"role":"user","content":"hi"}] }"#;
+    let headers = [
+        ANTHROPIC_KEY[0],
+        ANTHROPIC_KEY[1],
+        ("anthropic-beta", "token-counting-2024-11-01"),
+        ("content-type", "application/json"),
+    ];
+    let resp = post(gw.url(COUNT_TOKENS), &headers, asked).await;
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(header(resp.headers(), "x-request-id"), Some("req_1"));
+    assert_eq!(resp.text().await.unwrap(), counted);
+    let got = &anthropic.requests()[0];
+    assert_eq!(
+        (got.method.as_str(), got.path.as_str()),
+        ("POST", COUNT_TOKENS)
+    );
+    assert_eq!(got.raw, asked.as_bytes(), "the client's bytes, unread");
+    assert_eq!(got.header("x-api-key"), Some("sk-ant-client"));
+    assert_eq!(
+        got.header("anthropic-beta"),
+        Some("token-counting-2024-11-01")
+    );
+}
+
+#[tokio::test]
+async fn the_chat_format_still_answers_its_own_path_before_the_catch_all() {
+    let anthropic = FakeAnthropic::start().await;
+    let gw = Gateway::start(&with_passthrough(
+        "anthropic-messages",
+        &anthropic.base_url(),
+    ))
+    .await;
+    anthropic.answer(script(&ANTHROPIC_STREAM));
+    let headers = [ANTHROPIC_KEY[0], ANTHROPIC_KEY[1]];
+    let resp = post(
+        gw.url(MESSAGES),
+        &headers,
+        claude_request(r#","stream":true"#),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), sse(&ANTHROPIC_STREAM));
+    assert_eq!(anthropic.requests()[0].path, MESSAGES);
+}
+
+#[tokio::test]
+async fn serving_passthrough_needs_a_provider_of_that_format() {
+    let bin = env!("CARGO_BIN_EXE_respan-gateway");
+    let config = support::write_config(
+        "providers:
+  p: { format: openai-chat, base_url: 'http://127.0.0.1:1/v1' }
+serve: [openai-chat, passthrough]
+target: p
+",
+    );
+    let out = std::process::Command::new(bin)
+        .args(["--config", config.to_str().unwrap(), "check"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("exactly one provider"));
+}
+
+#[tokio::test]
+async fn proxy_needs_no_config_and_relays_claude_code_with_its_own_credentials() {
+    let anthropic = FakeAnthropic::start().await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--anthropic",
+        "--url",
+        &anthropic.base_url(),
+        "--listen",
+        "127.0.0.1:0",
+    ])
+    .await;
+    let headers = [
+        ("x-api-key", "sk-ant-own"),
+        ("anthropic-version", "2023-06-01"),
+        ("anthropic-beta", "interleaved-thinking-2025-05-14"),
+    ];
+    // Chat, streamed, byte for byte, in odd spacing.
+    anthropic.answer(script(&ANTHROPIC_STREAM));
+    let asked = r#"{ "model":"claude-sonnet-4-5","max_tokens":64, "stream":true,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"} }"#;
+    let resp = post(gw.url(MESSAGES), &headers, asked).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), sse(&ANTHROPIC_STREAM));
+    let got = &anthropic.requests()[0];
+    assert_eq!(got.raw, asked.as_bytes());
+    assert_eq!(got.header("x-api-key"), Some("sk-ant-own"));
+    assert_eq!(
+        got.header("anthropic-beta"),
+        Some("interleaved-thinking-2025-05-14")
+    );
+    // Token counting, which no chat format serves, is relayed too.
+    anthropic.answer(Answer::raw(r#"{"input_tokens":5}"#));
+    let counting = r#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}"#;
+    let resp = post(gw.url(COUNT_TOKENS), &headers, counting).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), r#"{"input_tokens":5}"#);
+    let got = &anthropic.requests()[1];
+    assert_eq!(got.path, COUNT_TOKENS);
+    assert_eq!(got.header("x-api-key"), Some("sk-ant-own"));
+}
+
+#[tokio::test]
+async fn proxy_relays_codex_the_responses_api_stream_byte_exact() {
+    let openai = FakeOpenAi::start().await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+        "--listen",
+        "127.0.0.1:0",
+    ])
+    .await;
+    let events = [
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"},\"x_new\":1}",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hel\"}",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}",
+    ];
+    openai.answer(script(&events));
+    let asked = r#"{ "model":"gpt-4.1-mini","input":"hi","stream":true }"#;
+    let resp = post(gw.url(RESPONSES), &[OPENAI_KEY], asked).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.text().await.unwrap(), sse(&events));
+    let got = &openai.requests()[0];
+    assert_eq!(got.path, RESPONSES);
+    assert_eq!(got.raw, asked.as_bytes());
+    assert_eq!(got.header("authorization"), Some("Bearer sk-client"));
+    // Chat completions still take the chat path, to the same vendor.
+    openai.answer(Answer::text("hi"));
+    let resp = post(gw.url(CHAT), &[OPENAI_KEY], openai_request("")).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(openai.requests()[1].path, CHAT);
+}
+
+#[test]
+fn proxy_without_a_vendor_or_with_a_bad_address_is_a_usage_error() {
+    let bin = env!("CARGO_BIN_EXE_respan-gateway");
+    for args in [
+        &["proxy"][..],
+        &["proxy", "--anthropic", "--listen", "nowhere"],
+    ] {
+        let out = std::process::Command::new(bin).args(args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        assert!(!out.stderr.is_empty(), "{args:?}");
+    }
+}

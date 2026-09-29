@@ -16,9 +16,14 @@
 //! (marked `NoContent`, as in `logging.rs`) is converted but not remembered.
 //! Swap `fake_pdf_to_text` for a real extractor.
 //!
-//! **Partial:** a fallback in another format (OpenAI to Anthropic) cannot
-//! take the file part; a `file_id` (a file uploaded earlier) is refused for
-//! a text-only target; the body limit is the server's, the same for all.
+//! A fallback in another format gets the PDF too: for an Anthropic target the
+//! filter rewrites the file part into Anthropic's own `document` part
+//! (`Content::other("anthropic-messages", ..)`), which the format sends as it
+//! is. A part in neither the target's shape nor the client's is refused, not
+//! guessed at.
+//!
+//! **Partial:** a `file_id` (a file uploaded earlier) is refused, not resolved;
+//! the body limit is the server's, the same for all.
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
@@ -31,13 +36,14 @@ use std::time::Duration;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Content, Conversation};
+use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use serde_json::json;
 use tokio::time::Instant;
 
 /// How many texts the memo keeps, across tenants.
@@ -56,7 +62,7 @@ fn pdf(part: &Content) -> Result<Option<&str>, Fault> {
         _ => return Ok(None),
     };
     if file["file_id"].is_string() {
-        return Err(Fault::bad_request("a stored file, for a text-only model"));
+        return Err(Fault::bad_request("a stored file cannot be read here"));
     }
     let data = file["file_data"].as_str();
     Ok(data.and_then(|d| d.strip_prefix("data:application/pdf;base64,")))
@@ -151,6 +157,9 @@ impl Plugin for PdfToText {
     }
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        if px.format() == "anthropic-messages" && px.is_kind::<Conversation>() {
+            return px.filter(pdf_as_document);
+        }
         if !self.text_only.contains(&px.provider()) || !px.is_kind::<Conversation>() {
             return Ok(());
         }
@@ -184,6 +193,21 @@ impl Plugin for PdfToText {
             Ok(())
         })
     }
+}
+
+/// A PDF part as Anthropic's `document` part, in the call to an Anthropic
+/// target only: the part is in the target's own shape, so it is sent as is.
+fn pdf_as_document(chat: &mut Conversation) -> Result<(), Fault> {
+    for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
+        if let Some(data) = pdf(part)? {
+            let source = json!({ "type": "base64", "media_type": "application/pdf", "data": data });
+            *part = Content::other(
+                "anthropic-messages",
+                json!({ "type": "document", "source": source }),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The text-only model, then the one that reads PDFs.
@@ -221,17 +245,41 @@ async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
     read_whole(serve(gw, req).await.0).await.0
 }
 
+/// As `gateway`, with the PDF reader an Anthropic model.
+fn gateway_claude(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
+    Gateway::new()
+        .provider("text-only", OpenAiChat, mock.at(TEXT))?
+        .provider("reads-pdf", AnthropicMessages, mock.at(PDF))?
+        .serve(OpenAiChat)?
+        .plugin("pdf-to-text", pdfs)?
+        .plugin("fallback", Fallback)
+}
+
+/// An Anthropic model's answer.
+const CLAUDE_OK: &str = r#"{"id":"m","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"Revenue is up."}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-    mock.reply(PDF, mock::json(StatusCode::OK, OK));
-    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
-    let status = send(&gw, "acme", REQUEST).await;
-    for sent in mock.sent() {
-        println!("{}\n  {}", sent.uri(), String::from_utf8_lossy(sent.body()));
+    // The fallback reads PDFs in OpenAI's format, then in Anthropic's.
+    for claude in [false, true] {
+        let mock = MockTransport::new();
+        mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+        mock.reply(
+            PDF,
+            mock::json(StatusCode::OK, if claude { CLAUDE_OK } else { OK }),
+        );
+        let pdfs = Arc::new(PdfToText::new(&["text-only"]));
+        let gw = if claude {
+            gateway_claude(&mock, pdfs)?
+        } else {
+            gateway(&mock, pdfs)?
+        };
+        let status = send(&gw, "acme", REQUEST).await;
+        for sent in mock.sent() {
+            println!("{}\n  {}", sent.uri(), String::from_utf8_lossy(sent.body()));
+        }
+        println!("client got {status}");
     }
-    println!("client got {status}");
     Ok(())
 }
 

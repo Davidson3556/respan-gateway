@@ -7,6 +7,8 @@
 //! changed relays byte for byte, and a changed one is written into them.
 //! `cargo run -p respan-gateway-examples --example custom_format` runs it
 //! against a mock provider.
+//!
+//! `batch_split.rs` builds on this kind (it includes this file as a module).
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -23,25 +25,25 @@ use serde_json::{self, Value, json};
 
 /// The kind's input: texts to embed.
 #[derive(Debug, Clone, Default, PartialEq)]
-struct EmbedRequest {
-    model: Option<String>,
-    input: Vec<String>,
+pub struct EmbedRequest {
+    pub model: Option<String>,
+    pub input: Vec<String>,
     origin: Relayed<EmbedRequest>,
 }
 
 /// The kind's output: a vector per input, and the usage.
 #[derive(Debug, Clone, Default, PartialEq)]
-struct Embeddings {
-    vectors: Vec<Vec<f64>>,
-    usage: Usage,
+pub struct Embeddings {
+    pub vectors: Vec<Vec<f64>>,
+    pub usage: Usage,
     origin: Relayed<Embeddings>,
 }
 
 const NAME: &str = "openai-embeddings";
 
 /// OpenAI's `POST /v1/embeddings`.
-#[derive(Clone)]
-struct OpenAiEmbeddings;
+#[derive(Debug, Clone)]
+pub struct OpenAiEmbeddings;
 
 impl Codec for OpenAiEmbeddings {
     type Input = EmbedRequest;

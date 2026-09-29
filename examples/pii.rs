@@ -7,9 +7,11 @@
 //! Every text of the request is scanned: messages, the system prompt, stop
 //! sequences, the end user's id, tools and earlier tool calls (inside their
 //! JSON arguments). What it cannot read, such as an image, is refused, as it
-//! might hold PII. A tool call in the answer is restored when it comes
-//! whole; streamed, its arguments come in fragments, and a placeholder
-//! split across two of them is not restored. A streamed call asking for
+//! might hold PII. A tool call in the answer is restored whether it comes
+//! whole or streamed: `Holdback` also holds the tail of each streamed call's
+//! arguments, so a placeholder split across their fragments is restored, and
+//! the restored value is escaped as JSON text. (Only OpenAI's chunk shape;
+//! Anthropic's `partial_json` fragments are not held.) A streamed call asking for
 //! several choices (`n` other than 1) is refused: choices after the first
 //! come as other content, which the restore cannot hold per choice.
 //!

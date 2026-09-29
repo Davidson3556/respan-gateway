@@ -169,3 +169,49 @@ async fn an_earlier_tool_call_with_quoted_emails_is_redacted() -> Result<(), Fau
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_placeholder_split_across_streamed_tool_arguments_is_restored() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    let call = |args: &str, first: bool| {
+        let mut call = json!({ "index": 0, "function": { "arguments": args } });
+        if first {
+            call["id"] = "call_1".into();
+            call["type"] = "function".into();
+            call["function"]["name"] = "send".into();
+        }
+        let chunk = json!({ "id": "c1", "model": "gpt", "choices": [{ "index": 0, "delta": { "tool_calls": [call] } }] });
+        format!("data: {chunk}\n\n")
+    };
+    let finish = json!({ "id": "c1", "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] });
+    let chunks = [
+        call("{\"to\":\"<EMA", true),
+        call("IL_", false),
+        call("1>\"}", false),
+        format!("data: {finish}\n\n"),
+        "data: [DONE]\n\n".to_owned(),
+    ];
+    mock.reply(
+        OPENAI,
+        mock::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>()),
+    );
+    let gw = gateway(&mock)?;
+    let (status, _, body) = read_whole(serve(&gw, chat(PROMPT.into(), json!({}))).await.0).await;
+    let body = String::from_utf8_lossy(&body?).into_owned();
+    assert_eq!(status, StatusCode::OK);
+    let mut args = String::new();
+    for data in body.lines().filter_map(|l| l.strip_prefix("data: ")) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        for c in v["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            args.push_str(c["function"]["arguments"].as_str().unwrap_or_default());
+        }
+    }
+    assert_eq!(args, r#"{"to":"bob@x.io"}"#, "{body}");
+    Ok(())
+}

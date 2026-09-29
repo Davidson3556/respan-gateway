@@ -8,8 +8,10 @@
 //!   included (the text SDK's `Placeholders`, with its `Rewrite`; its
 //!   `Holdback` filters the chat kind, so a session holds its own).
 //! - `Meter`: each turn is metered when its `response.done` passes, not when
-//!   the session ends, so a session of hours is billed as it goes; the session's
-//!   end is recorded once.
+//!   the session ends, so a session of hours is billed as it goes; a turn cut
+//!   before its `response.done` is metered from an estimate of the text it
+//!   sent (use case 9: a cut is never billed as $0); the session's end is
+//!   recorded once.
 //!
 //! The SDK (`respan-gateway-ws`) carries the session: `WsTransport` to the
 //! provider, `serve_ws` for the client, `JsonEvents` as the format, one JSON
@@ -21,12 +23,12 @@
 //! `truncated` (the provider's connection broke) or `upstream`.
 //!
 //! Not covered: audio (`input_audio_buffer.append` events are text, and pass
-//! unread, but the placeholders and the meter read text turns only); a turn cut
-//! before its `response.done` is not metered (a ledger would estimate it, as
-//! `respan-gateway-ledger` does for chat); a limit on a session's length or a
-//! drain of long sessions at shutdown; Gemini Live and Responses over
-//! WebSocket, which only need another `JsonEvents` and plugins that know their
-//! events; PII other than e-mail addresses (see `pii`).
+//! unread, but the placeholders and the meter read text turns only); the
+//! estimate of a cut turn counts output text only, its input is not estimated;
+//! draining sessions at shutdown and a maximum session length (the SDK's
+//! `serve_ws_until` does both, given a future per session); Gemini Live and
+//! Responses over WebSocket, which only need another `JsonEvents` and plugins
+//! that know their events; PII other than e-mail addresses (see `pii`).
 //!
 //! `cargo run -p respan-gateway-examples --example realtime`
 
@@ -227,6 +229,63 @@ impl Meter {
     }
 }
 
+/// Meters one session's turns: each at its `response.done`, and a turn cut
+/// before it (the session ended first) from an estimate of the text it sent,
+/// so a cut is never billed as $0.
+struct TurnMeter {
+    session: u64,
+    count: Arc<AtomicUsize>,
+    turns: Arc<Mutex<Vec<Turn>>>,
+    /// The output tokens estimated so far in the open turn, if one is open.
+    open: Option<u64>,
+}
+
+impl TurnMeter {
+    fn record(&self, status: &str, input_tokens: u64, output_tokens: u64) {
+        lock(&self.turns).push(Turn {
+            session: self.session,
+            status: status.to_owned(),
+            input_tokens,
+            output_tokens,
+        });
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Filter<ProviderEvent> for TurnMeter {
+    fn edit(&mut self, event: ProviderEvent, out: &mut Vec<ProviderEvent>) -> Result<(), Fault> {
+        let kind = event.json["type"].as_str().unwrap_or_default();
+        if kind == "response.created" {
+            self.open = Some(0);
+        } else if kind.ends_with(".delta")
+            && let Some(estimate) = &mut self.open
+        {
+            // About four bytes a token: an estimate, never zero for a delta.
+            let delta = event.json["delta"].as_str().unwrap_or_default();
+            *estimate += delta.len() as u64 / 4 + 1;
+        } else if kind == "response.done" {
+            self.open = None;
+            let response = &event.json["response"];
+            let used = |name: &str| response["usage"][name].as_u64().unwrap_or_default();
+            let status = response["status"].as_str().unwrap_or_default();
+            self.record(status, used("input_tokens"), used("output_tokens"));
+        }
+        out.push(event);
+        Ok(())
+    }
+
+    fn end(
+        &mut self,
+        _end: &Result<(), Fault>,
+        _out: &mut Vec<ProviderEvent>,
+    ) -> Result<(), Fault> {
+        if let Some(estimate) = self.open.take() {
+            self.record("cut", 0, estimate);
+        }
+        Ok(())
+    }
+}
+
 /// A session's number and the turns it metered, kept with its call.
 #[derive(Clone)]
 struct Metered(u64, Arc<AtomicUsize>);
@@ -237,20 +296,11 @@ impl Plugin for Meter {
         let session = self.began.fetch_add(1, Ordering::SeqCst) + 1;
         let count = Arc::new(AtomicUsize::new(0));
         px.extensions_mut().insert(Metered(session, count.clone()));
-        let turns = self.turns.clone();
-        px.filter(move |event: &mut ProviderEvent| {
-            let response = &event.json["response"];
-            if event.json["type"] == "response.done" {
-                let used = |name: &str| response["usage"][name].as_u64().unwrap_or_default();
-                lock(&turns).push(Turn {
-                    session,
-                    status: response["status"].as_str().unwrap_or_default().to_owned(),
-                    input_tokens: used("input_tokens"),
-                    output_tokens: used("output_tokens"),
-                });
-                count.fetch_add(1, Ordering::SeqCst);
-            }
-            Ok(())
+        px.filter(TurnMeter {
+            session,
+            count,
+            turns: self.turns.clone(),
+            open: None,
         })
     }
 

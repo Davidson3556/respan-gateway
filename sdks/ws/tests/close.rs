@@ -5,6 +5,7 @@ mod support;
 
 use std::sync::atomic::Ordering;
 
+use respan_gateway_core::Gateway;
 use support::*;
 
 const PATH: &str = "/v1/realtime";
@@ -279,4 +280,107 @@ async fn pings_are_answered_by_each_hop_and_carried_by_none() {
     close(&mut ws, 1000, "").await;
     idle(&server.gateway).await;
     assert_eq!(ends.only(), Ok(()));
+}
+
+/// A session served with `until` made per session, through a probe provider.
+async fn ending(
+    until: impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = &'static str> + Send>>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+) -> (
+    Probe,
+    Outcomes,
+    Calls,
+    Ws,
+    tokio::task::JoinHandle<()>,
+    Gateway,
+) {
+    use axum::extract::ws::WebSocketUpgrade;
+    use axum::extract::{Request, State};
+    let probe = Probe::start().await;
+    let (gateway, ends, calls) = relay(&probe.base());
+    let app = axum::Router::new()
+        .fallback(
+            move |State(gw): State<Gateway>, ws: WebSocketUpgrade, req: Request| {
+                let until = until.clone();
+                async move { respan_gateway_ws::serve_ws_until(&gw, ws, req, until()).await }
+            },
+        )
+        .with_state(gateway.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let ws = connect(addr, PATH, &[]).await.unwrap();
+    probe.connected(0).await;
+    (probe, ends, calls, ws, task, gateway)
+}
+
+// A session over its maximum length is closed 1001 with the reason, even
+// idle, and the provider's connection goes with it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_over_its_maximum_length_is_closed_going_away() {
+    let (probe, _ends, _calls, mut ws, task, gateway) = ending(|| {
+        Box::pin(async {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            "session_too_long"
+        })
+    })
+    .await;
+    say(&mut ws, "hello").await;
+    assert_eq!(
+        hear(&mut ws).await,
+        Heard::Closed(Some((1001, "session_too_long".into())))
+    );
+    idle(&gateway).await;
+    assert_eq!(probe.texts(), ["hello"]);
+    eventually("the provider's connection closed", || {
+        probe.live.load(Ordering::SeqCst) == 0
+    })
+    .await;
+    task.abort();
+}
+
+// At shutdown every open session is closed 1001 "draining"; one that has
+// already ended is not affected.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_drains_every_open_session() {
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let (probe, ends, _calls, mut ws, task, gateway) = ending(move || {
+        let mut stopped = stopped.clone();
+        Box::pin(async move {
+            let _ = stopped.wait_for(|stop| *stop).await;
+            "draining"
+        })
+    })
+    .await;
+    say(&mut ws, "one").await;
+    eventually("the provider read it", || probe.texts().len() == 1).await;
+    stop.send(true).unwrap();
+    assert_eq!(
+        hear(&mut ws).await,
+        Heard::Closed(Some((1001, "draining".into())))
+    );
+    idle(&gateway).await;
+    assert_eq!(ends.all().len(), 1, "the request ended once");
+    task.abort();
+}
+
+// A session that ends first is not touched by an `until` that never comes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_ends_first_closes_as_it_would() {
+    let (_probe, ends, _calls, mut ws, task, gateway) =
+        ending(|| Box::pin(std::future::pending())).await;
+    say(&mut ws, "one").await;
+    close(&mut ws, 1000, "bye").await;
+    assert!(matches!(
+        hear(&mut ws).await,
+        Heard::Closed(_) | Heard::Broken
+    ));
+    idle(&gateway).await;
+    assert_eq!(ends.only(), Ok(()));
+    task.abort();
 }

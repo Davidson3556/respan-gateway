@@ -3,6 +3,9 @@
 //! subscription token) passed through, since the transport sets no headers
 //! of its own. Beta headers, unknown request fields and unknown response
 //! events relay byte for byte: formats of one name relay, never re-encode.
+//! The binary does the same with no config file, and also relays the
+//! vendor's other endpoints (`count_tokens`): `respan-gateway proxy
+//! --anthropic`.
 //!
 //! `cargo run -p respan-gateway-examples --example local_proxy` runs offline
 //! against a mock; add `-- --serve 127.0.0.1:8080` to listen for real, then

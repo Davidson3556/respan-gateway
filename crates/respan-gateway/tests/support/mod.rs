@@ -28,9 +28,14 @@ impl Gateway {
     /// a port the OS picks, and waits, bounded, until it says where.
     pub async fn start(config: &str) -> Self {
         let path = write_config(&format!("listen: 127.0.0.1:0\n{config}"));
+        Self::run(&["--config", path.to_str().unwrap()]).await
+    }
+
+    /// Starts the binary with `args`, which give no config file and say
+    /// where to listen (`--listen 127.0.0.1:0`).
+    pub async fn run(args: &[&str]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
-            .arg("--config")
-            .arg(&path)
+            .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)

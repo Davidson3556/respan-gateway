@@ -6,7 +6,8 @@
 //!   and tool calls included, to read or edit, or a refusal if it carries
 //!   content with no text form, such as an image.
 //! - [`Holdback`]: a [`Reply`] filter that holds back trailing text that may
-//!   start a match, so a [`Rewrite`] sees each match whole.
+//!   start a match, so a [`Rewrite`] sees each match whole, in text and in a
+//!   streamed tool call's arguments.
 //! - [`Placeholders`]: hide values behind `<LABEL_n>` and restore them, a
 //!   placeholder split across deltas included.
 
@@ -16,7 +17,7 @@ use respan_gateway_core::{Fault, Filter};
 use respan_gateway_formats::conversation::{Content, Conversation, Piece, Reply};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use serde_json::{self, Map, Value};
+use serde_json::{self, Map, Value, json};
 
 /// The code of a refusal of content that cannot be read.
 pub const UNREADABLE: &str = "unreadable_content";
@@ -207,7 +208,7 @@ impl Readable for Conversation {
 
 /// Its texts and other content, such as a tool call. In a stream, a tool
 /// call's arguments come in fragments, each read on its own: a match split
-/// across fragments is not seen whole.
+/// across fragments is not seen whole, unless a [`Holdback`] holds them.
 impl Readable for Reply {
     fn edit_all(
         &mut self,
@@ -280,14 +281,19 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
 /// something, so nothing is sent while the start is held; one that is no
 /// content ([`Reply::is_content`]), such as a keep-alive or usage alone,
 /// passes at once unless replies wait before it. Other content, such as a
-/// tool call, is
-/// rewritten as [`Readable`] reads it, nothing held: a match split across a
-/// streamed tool call's fragments is not seen whole.
+/// tool call, is rewritten as [`Readable`] reads it. A streamed tool call's
+/// arguments (`function.arguments` in a chunk's `delta`, as OpenAI sends
+/// them) are held per call like text, so a match split across their
+/// fragments is seen whole and what replaces it is escaped as JSON text; the
+/// tail held at a finish or the end is released as a chunk of just that call's
+/// arguments. Anthropic's `partial_json` is not held.
 #[derive(Debug)]
 pub struct Holdback<R> {
     rewrite: R,
     /// The block whose trailing text is held, and that text.
     held: Option<(u32, String)>,
+    /// The tails of tool-call arguments held, by call.
+    arguments: Vec<Tail>,
     /// Replies that show nothing yet, in order.
     waiting: Vec<Reply>,
 }
@@ -298,6 +304,7 @@ impl<R: Rewrite> Holdback<R> {
         Self {
             rewrite,
             held: None,
+            arguments: Vec::new(),
             waiting: Vec::new(),
         }
     }
@@ -324,6 +331,129 @@ impl<R: Rewrite> Holdback<R> {
         }
         Ok(())
     }
+
+    /// Hold back the tail of each tool call's arguments in `raw` that may
+    /// start a match, with what was held of the call before in front. With
+    /// `open` false nothing is held: the message ends the response.
+    fn hold_arguments(&mut self, format: &Arc<str>, raw: &mut Arc<Value>, open: bool) {
+        let (rewrite, tails) = (&self.rewrite, &mut self.arguments);
+        for_arguments(Arc::make_mut(raw), &mut |path, arguments| {
+            let at = tails.iter().position(|t| t.path == path);
+            let before = at.map(|i| tails.remove(i).text).unwrap_or_default();
+            let mut text = before + arguments;
+            let mut cut = text.len();
+            if open {
+                cut -= rewrite.pending(&text);
+            }
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let tail = text.split_off(cut);
+            if !tail.is_empty() {
+                let (format, path) = (format.clone(), path.to_vec());
+                tails.push(Tail {
+                    format,
+                    path,
+                    text: tail,
+                });
+            }
+            *arguments = text;
+        });
+    }
+
+    /// Release the arguments held, rewritten, as one piece for each call.
+    fn release_arguments(&mut self) -> Result<Vec<Piece>, Fault> {
+        let tails = std::mem::take(&mut self.arguments);
+        let mut pieces = Vec::with_capacity(tails.len());
+        for Tail {
+            format,
+            path,
+            mut text,
+        } in tails
+        {
+            edit_json_text(&mut text, &mut |t| {
+                *t = self.rewritten(t)?;
+                Ok(())
+            })?;
+            pieces.push(Piece::other(format, skeleton(&path, text)));
+        }
+        Ok(pieces)
+    }
+}
+
+/// The tail of a tool call's arguments a [`Holdback`] holds, as JSON text.
+#[derive(Debug)]
+struct Tail {
+    /// The format of the chunks the call is in.
+    format: Arc<str>,
+    /// Where the arguments are in a chunk.
+    path: Vec<Step>,
+    text: String,
+}
+
+/// A step from a message's content to a value in it: what makes the same
+/// tool call's arguments in another chunk the same place.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    Key(String),
+    /// An element of an array.
+    Element,
+    /// The `index` the object being entered names itself by.
+    Index(u64),
+}
+
+/// Runs `visit` on each streamed tool call's arguments in `v` (a chunk's
+/// choices), with their place in it.
+fn for_arguments(v: &mut Value, visit: &mut impl FnMut(&[Step], &mut String)) {
+    fn walk(
+        v: &mut Value,
+        parent: &str,
+        delta: bool,
+        path: &mut Vec<Step>,
+        visit: &mut impl FnMut(&[Step], &mut String),
+    ) {
+        match v {
+            Value::Array(items) => {
+                for item in items {
+                    path.push(Step::Element);
+                    walk(item, parent, delta, path, visit);
+                    path.pop();
+                }
+            }
+            Value::Object(fields) => {
+                let index = fields.get("index").and_then(Value::as_u64);
+                path.extend(index.map(Step::Index));
+                for (name, value) in fields.iter_mut() {
+                    path.push(Step::Key(name.clone()));
+                    let calls = ["function", "function_call"].contains(&parent);
+                    match value {
+                        Value::String(s) if delta && calls && name == "arguments" => visit(path, s),
+                        _ => walk(value, name, delta || name == "delta", path, visit),
+                    }
+                    path.pop();
+                }
+                if index.is_some() {
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(v, "", false, &mut Vec::new(), visit);
+}
+
+/// The chunk that holds only `text` at `path`.
+fn skeleton(path: &[Step], text: String) -> Value {
+    match path {
+        [] => text.into(),
+        [Step::Key(name), rest @ ..] => json!({ name.as_str(): skeleton(rest, text) }),
+        [Step::Element, rest @ ..] => Value::Array(vec![skeleton(rest, text)]),
+        [Step::Index(n), rest @ ..] => {
+            let mut object = skeleton(rest, text);
+            object["index"] = (*n).into();
+            object
+        }
+    }
 }
 
 /// Whether a reader sees something in it: a finish or content that is not
@@ -342,6 +472,9 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
                 Piece::Text { block, text, .. } => (block, text),
                 mut other => {
                     self.release_into(&mut reply)?;
+                    if let Piece::Other { format, raw, .. } = &mut other {
+                        self.hold_arguments(format, raw, open);
+                    }
                     edit_piece(&mut other, &mut |text| {
                         *text = self.rewritten(text)?;
                         Ok(())
@@ -371,6 +504,7 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         }
         if !open {
             self.release_into(&mut reply)?;
+            reply.content.extend(self.release_arguments()?);
         }
         // No content, such as a keep-alive or usage alone, is not delayed
         // unless replies wait before it.
@@ -387,6 +521,11 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         out.append(&mut self.waiting);
         if let Some((block, text)) = self.release()? {
             out.push(Reply::text(block, text));
+        }
+        let mut arguments = Reply::default();
+        arguments.content = self.release_arguments()?;
+        if !arguments.content.is_empty() {
+            out.push(arguments);
         }
         Ok(())
     }

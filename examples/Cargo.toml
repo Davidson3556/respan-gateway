@@ -131,3 +131,13 @@ test = true
 name = "realtime"
 path = "realtime.rs"
 test = true
+
+[[example]]
+name = "batch_split"
+path = "batch_split.rs"
+test = true
+
+[[example]]
+name = "models_merge"
+path = "models_merge.rs"
+test = true

@@ -164,8 +164,8 @@ fn patch_system(
         .take_while(|m| m.role == Role::System)
         .collect();
     let patch = |m: &Message| match own.filter(|o| o.same_source(m)) {
-        Some(o) => patch_content(system, &o.content, &m.content),
-        None => Ok(write_content(&m.content)),
+        Some(o) => patch_content(ANTHROPIC, system, &o.content, &m.content),
+        None => write_content(ANTHROPIC, &m.content),
     };
     // One message keeps the prompt's own form, a string or parts.
     if let ([only], false) = (&lead[..], matches!(system, Some(Value::Array(_)))) {
@@ -227,11 +227,11 @@ impl Wire for AnthropicMessages {
         };
         if says(&v["system"]) {
             let mut system = Message::new(Role::System, "").with_source(v["system"].clone());
-            system.content = read_content(&v["system"]);
+            system.content = read_content(ANTHROPIC, &v["system"]);
             chat.messages.push(system);
         }
         for m in v["messages"].as_array().into_iter().flatten() {
-            chat.messages.push(read_message(m, &ROLES));
+            chat.messages.push(read_message(ANTHROPIC, m, &ROLES));
         }
         chat
     }
@@ -255,7 +255,9 @@ impl Wire for AnthropicMessages {
         set(
             &mut v,
             "system",
-            (!system.is_empty()).then(|| write_content(&system)),
+            (!system.is_empty())
+                .then(|| write_content(ANTHROPIC, &system))
+                .transpose()?,
         );
         // Anthropic refuses an empty turn but the last; dropping one leaves
         // consecutive turns of a role, which it combines.
@@ -264,7 +266,7 @@ impl Wire for AnthropicMessages {
             .iter()
             .enumerate()
             .filter(|&(i, m)| i == last || !is_empty(m));
-        let messages = kept.map(|(_, m)| write_message(m, &ROLES));
+        let messages = kept.map(|(_, m)| write_message(ANTHROPIC, m, &ROLES));
         let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
         v.insert("messages".into(), messages.into());
         set(&mut v, "temperature", chat.temperature.map(Into::into));
@@ -296,7 +298,7 @@ impl Wire for AnthropicMessages {
             patch_user(v, after.user.as_deref());
         }
         if before.messages != after.messages {
-            let messages = patch_messages(&before.messages, rest, &ROLES)?;
+            let messages = patch_messages(ANTHROPIC, &before.messages, rest, &ROLES)?;
             v.insert("messages".into(), messages.into());
         }
         Ok(())
@@ -1223,11 +1225,11 @@ mod tests {
     fn a_text_part_that_says_more_is_not_plain_text() {
         let cached =
             json!([{ "type": "text", "text": "hi", "cache_control": { "type": "ephemeral" } }]);
-        assert_eq!(read_content(&cached), [Content::from("hi")]);
+        assert_eq!(read_content(ANTHROPIC, &cached), [Content::from("hi")]);
         let cited = json!({ "type": "text", "text": "hi", "citations": [{ "type": "x" }] });
         assert_eq!(
-            read_content(&json!([cited.clone()])),
-            [Content::other(cited)]
+            read_content(ANTHROPIC, &json!([cited.clone()])),
+            [Content::other(ANTHROPIC, cited)]
         );
     }
 

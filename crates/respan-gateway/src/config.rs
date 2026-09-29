@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
-use respan_gateway_core::{Fault, Format, Gateway};
+use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::{Accepted, Dialer, Transport};
 use respan_gateway_plugins::ModelRouter;
@@ -18,7 +18,10 @@ pub struct Config {
     pub listen: Option<std::net::SocketAddr>,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
-    /// The formats served to clients, by name, tried in order.
+    /// The formats served to clients, by name, tried in order. Serve
+    /// `passthrough` last to relay every other request unread to the
+    /// provider of format `passthrough`, whose `base_url` is then the
+    /// vendor's origin, as clients' paths are sent as they are.
     pub serve: Vec<String>,
     /// Compiled-in plugins, in the order listed unless `after` says otherwise.
     #[serde(default)]
@@ -135,12 +138,41 @@ impl Config {
             });
             gateway = gateway.plugin(p.name.clone(), router)?;
         }
+        if self.serve.iter().any(|name| name == PASSTHROUGH) {
+            let mut own = self
+                .providers
+                .iter()
+                .filter(|(_, p)| p.format == PASSTHROUGH);
+            let (Some((name, _)), None) = (own.next(), own.next()) else {
+                let message =
+                    format!("serve: {PASSTHROUGH} needs exactly one provider of that format");
+                return Err(Fault::config(message));
+            };
+            gateway = gateway.plugin(PASSTHROUGH, SendTo(name.clone()))?;
+        }
         match &self.target {
             Some(target) => gateway
                 .target(target.as_str())
                 .map_err(|e| Fault::config(format!("target: {}", e.message()))),
             None => Ok(gateway),
         }
+    }
+}
+
+/// The name of the format that relays what no other served format accepts.
+const PASSTHROUGH: &str = "passthrough";
+
+/// Sends the requests of format `passthrough` to the provider `.0`: a
+/// default target serves one kind, and these are of another.
+struct SendTo(String);
+
+#[async_trait]
+impl Plugin for SendTo {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        if cx.format() == PASSTHROUGH {
+            cx.set_target(self.0.as_str());
+        }
+        Ok(None)
     }
 }
 
@@ -445,7 +477,7 @@ plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
         assert_eq!(
             resolve(yaml).err().as_deref(),
             Some(
-                "serve: unknown format 'nope'; compiled-in formats: [openai-chat, anthropic-messages]"
+                "serve: unknown format 'nope'; compiled-in formats: [openai-chat, anthropic-messages, passthrough]"
             )
         );
     }

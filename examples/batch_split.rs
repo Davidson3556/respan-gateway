@@ -1,0 +1,109 @@
+//! Use case 4, one request, many upstream calls: an embeddings batch over a
+//! provider's cap is split into calls of at most `cap` inputs, sent
+//! concurrently, and answered as one: the vectors in the client's order (a
+//! call's vector `i` is input `i` of its chunk, and the chunks are joined in
+//! order, so the merged index is the original one) and the usage of every
+//! call summed. A batch within the cap is not split: it relays byte for byte.
+//!
+//! Each chunk is a subrequest, `cx.call(p).with_input(chunk)`, so it is a
+//! call like any other: every plugin's `on_provider` runs before it, and a
+//! plugin that meters calls sees each one. A call built with `with_input` is
+//! not a relay, so the client's key does not go with it: the provider has
+//! its own key (`HttpTransport::new(url)?.with_headers(key)?`), or set the
+//! call's `CallHeaders` from the request's `Credential`.
+//!
+//! The embeddings kind and its codec are `custom_format`'s, included as a
+//! module.
+//!
+//! Not covered: a chunk that fails fails the request (no partial answer, no
+//! retry of one chunk; see `fallback` for retries); a bound on how many
+//! chunks run at once.
+//!
+//! `cargo run -p respan-gateway-examples --example batch_split`
+
+use respan_gateway_core::futures::future::try_join_all;
+use respan_gateway_core::futures::{TryStreamExt, stream};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+use respan_gateway_http::http::StatusCode;
+use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+
+#[allow(dead_code)]
+#[path = "custom_format.rs"]
+mod embeddings;
+use embeddings::{EmbedRequest, Embeddings, OpenAiEmbeddings};
+
+/// Splits a batch over `.0` inputs into concurrent calls to the target.
+struct Split(usize);
+
+#[async_trait]
+impl Plugin for Split {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let Ok(request) = cx.input::<EmbedRequest>().cloned() else {
+            return Ok(None);
+        };
+        let Some(target) = cx.target().map(str::to_owned) else {
+            return Ok(None);
+        };
+        if request.input.len() <= self.0 {
+            return Ok(None);
+        }
+        let calls = request.input.chunks(self.0).map(|chunk| {
+            let mut part = request.clone();
+            part.input = chunk.to_vec();
+            cx.call(target.clone()).with_input(part)
+        });
+        let answers = try_join_all(calls.map(|call| async move {
+            let outputs = call.await?.outputs::<Embeddings>();
+            outputs.try_collect::<Vec<_>>().await
+        }))
+        .await?;
+        let mut merged = Embeddings::default();
+        for answer in answers.iter().flatten() {
+            merged.vectors.extend(answer.vectors.iter().cloned());
+            merged.usage += &answer.usage;
+        }
+        Ok(Some(Response::stream(stream::iter([Ok(merged)]))))
+    }
+}
+
+const AT: &str = "https://api.openai.com/v1";
+
+fn gateway(mock: &MockTransport, cap: usize) -> Result<Gateway, Fault> {
+    Gateway::new()
+        .provider("openai", OpenAiEmbeddings, mock.at(AT))?
+        .serve(OpenAiEmbeddings)?
+        .plugin("split", Split(cap))?
+        .target("openai")
+}
+
+/// An answer with a vector `[n]` for each of `firsts`, using `tokens`.
+fn answer(firsts: &[f64], tokens: u64) -> mock::Reply {
+    let data: Vec<_> = firsts
+        .iter()
+        .enumerate()
+        .map(|(i, n)| serde_json::json!({ "index": i, "embedding": [n] }))
+        .collect();
+    let body = serde_json::json!({ "object": "list", "data": data, "model": "m",
+        "usage": { "prompt_tokens": tokens, "total_tokens": tokens } });
+    mock::json(StatusCode::OK, &body.to_string())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(AT, answer(&[0.0, 1.0], 2))
+        .reply(AT, answer(&[2.0, 3.0], 2))
+        .reply(AT, answer(&[4.0], 1));
+    let gw = gateway(&mock, 2)?;
+    let body = r#"{"model":"m","input":["a","b","c","d","e"]}"#;
+    let (status, _, answered) = read_whole(serve(&gw, post("/v1/embeddings", body)).await.0).await;
+    println!("{status} {}", String::from_utf8_lossy(&answered?));
+    for sent in mock.sent() {
+        println!("call: {}", String::from_utf8_lossy(sent.body()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "tests/batch_split.rs"]
+mod tests;

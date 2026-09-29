@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use respan_gateway_core::Fault;
+use respan_gateway_formats::opaque::Passthrough;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_server::{HttpTransport, router};
@@ -11,7 +12,11 @@ mod config;
 
 use config::KnownFormat;
 
-const USAGE: &str = "usage: respan-gateway [-c|--config <path>] [check] [-V|--version]";
+const USAGE: &str = "usage: respan-gateway [-c|--config <path>] [check] [-V|--version]
+       respan-gateway proxy (--anthropic | --openai) [--url <base_url>] [--listen <addr>]
+
+proxy needs no config file: it relays to the vendor with each client's own
+credentials, chat and every other endpoint of the vendor, byte for byte.";
 const DEFAULT_LISTEN: std::net::SocketAddr =
     std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -20,11 +25,33 @@ const SHUTDOWN: Duration = Duration::from_secs(30);
 
 /// Every format this binary speaks. A custom gateway builds its own
 /// `Gateway` in its own `main.rs`.
-fn formats() -> [KnownFormat; 2] {
+fn formats() -> [KnownFormat; 3] {
     [
         KnownFormat::of::<OpenAiChat>(),
         KnownFormat::of::<AnthropicMessages>(),
+        KnownFormat::of::<Passthrough>(),
     ]
+}
+
+/// The config of `proxy`: one vendor, no keys of its own, its chat format
+/// and every other request relayed to `url`. For OpenAI the chat provider's
+/// URL holds the version (`/v1`), the passthrough's is the origin.
+fn proxy_config(anthropic: bool, url: Option<&str>) -> Result<config::Config, String> {
+    let (format, default) = match anthropic {
+        true => ("anthropic-messages", "https://api.anthropic.com"),
+        false => ("openai-chat", "https://api.openai.com/v1"),
+    };
+    let url = url.unwrap_or(default).trim_end_matches('/');
+    let origin = url.strip_suffix("/v1").unwrap_or(url);
+    let yaml = format!(
+        "providers:
+  vendor: {{ format: {format}, base_url: '{url}' }}
+  any: {{ format: passthrough, base_url: '{origin}' }}
+serve: [{format}, passthrough]
+target: vendor
+"
+    );
+    config::Config::parse(&yaml).map_err(|e| e.message().to_owned())
 }
 
 /// A provider's transport: HTTP to `base_url`, sending `auth`.
@@ -36,6 +63,8 @@ fn http(base_url: &str, auth: HeaderMap) -> Result<HttpTransport, Fault> {
 async fn main() -> ExitCode {
     let mut config_path = "gateway.yaml".to_owned();
     let mut check_only = false;
+    // `proxy`: which vendor (true for Anthropic), its URL, where to listen.
+    let (mut proxy, mut vendor, mut url, mut listen) = (false, None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -44,6 +73,12 @@ async fn main() -> ExitCode {
                 None => return fail(USAGE),
             },
             "check" => check_only = true,
+            "proxy" => proxy = true,
+            "--anthropic" | "--openai" if proxy && vendor.is_none() => {
+                vendor = Some(arg == "--anthropic");
+            }
+            "--url" if proxy => url = args.next(),
+            "--listen" if proxy => listen = args.next(),
             "--version" | "-V" => {
                 println!("respan-gateway {VERSION}");
                 return ExitCode::SUCCESS;
@@ -52,9 +87,20 @@ async fn main() -> ExitCode {
         }
     }
 
-    let loaded = std::fs::read_to_string(&config_path)
-        .map_err(|e| e.to_string())
-        .and_then(|text| config::Config::parse(&text).map_err(|e| e.message().to_owned()));
+    let loaded = match (proxy, vendor) {
+        (true, Some(anthropic)) => {
+            config_path = "proxy".to_owned();
+            proxy_config(anthropic, url.as_deref()).and_then(|mut config| {
+                let addr = listen.as_deref().map(str::parse).transpose();
+                config.listen = addr.map_err(|e| format!("--listen: {e}"))?;
+                Ok(config)
+            })
+        }
+        (true, None) => return fail(USAGE),
+        (false, _) => std::fs::read_to_string(&config_path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| config::Config::parse(&text).map_err(|e| e.message().to_owned())),
+    };
     let config = match loaded {
         Ok(c) => c,
         Err(e) => return fail(&format!("{config_path}: {e}")),

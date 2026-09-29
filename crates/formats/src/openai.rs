@@ -152,14 +152,17 @@ impl Wire for OpenAiChat {
             chat.unsupported.shift_remove("user");
         }
         for m in v["messages"].as_array().into_iter().flatten() {
-            chat.messages.push(read_message(m, &ROLES));
+            chat.messages.push(read_message(OPENAI, m, &ROLES));
         }
         chat
     }
 
     fn write(chat: &Conversation) -> Result<Value, Fault> {
         let mut v = Map::new();
-        let messages = chat.messages.iter().map(|m| write_message(m, &ROLES));
+        let messages = chat
+            .messages
+            .iter()
+            .map(|m| write_message(OPENAI, m, &ROLES));
         let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
         v.insert("messages".into(), messages.into());
         set(&mut v, "stream", chat.stream.then_some(true.into()));
@@ -197,7 +200,7 @@ impl Wire for OpenAiChat {
             set(v, "user", after.user.clone().map(Into::into));
         }
         if before.messages != after.messages {
-            let messages = patch_messages(&before.messages, &after.messages, &ROLES)?;
+            let messages = patch_messages(OPENAI, &before.messages, &after.messages, &ROLES)?;
             v.insert("messages".into(), messages.into());
         }
         Ok(())
@@ -1495,14 +1498,45 @@ mod tests {
             edited.map(|v| v["messages"].clone()).ok(),
             Some(json!([{ "role": "user", "content": "HI" }, image]))
         );
-        // Removing it removes it; translating it is refused.
+        // Removing it removes it; sending it in another format is refused.
         let removed = patched(body.clone(), |c| drop(c.messages.pop()));
         assert_eq!(
             removed.map(|v| v["messages"].clone()).ok(),
             Some(json!([{ "role": "user", "content": "hi" }]))
         );
         let chat = OpenAiChat::read(&body);
-        assert!(write_request::<OpenAiChat>(&chat).is_err());
+        assert!(write_request::<crate::anthropic::AnthropicMessages>(&chat).is_err());
+        assert!(write_request::<OpenAiChat>(&chat).is_ok());
+    }
+
+    #[test]
+    fn what_is_already_in_the_targets_format_crosses_and_the_rest_is_refused() {
+        use crate::anthropic::AnthropicMessages;
+        let pdf = json!({ "type": "document", "source": { "type": "base64",
+            "media_type": "application/pdf", "data": "JVBERi0=" } });
+        let mut chat = OpenAiChat::read(&json!({ "model": "m", "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": "read" },
+                { "type": "file", "file": { "file_data": "x" } }] }] }));
+        // A part in OpenAI's shape does not reach Anthropic.
+        assert!(write_request::<AnthropicMessages>(&chat).is_err());
+        // One rewritten into Anthropic's does, byte for byte.
+        chat.messages[0].content[1] =
+            crate::conversation::Content::other("anthropic-messages", pdf.clone());
+        let sent = write_request::<AnthropicMessages>(&chat).map(Value::from);
+        assert_eq!(
+            sent.map(|v| v["messages"][0]["content"][1].clone()).ok(),
+            Some(pdf)
+        );
+        // The same holds for the fields of a request.
+        chat.unsupported
+            .insert("thinking".into(), json!({ "type": "enabled" }));
+        assert!(write_request::<AnthropicMessages>(&chat).is_err());
+        chat.unsupported_in = Some("anthropic-messages".into());
+        let sent = write_request::<AnthropicMessages>(&chat).map(Value::from);
+        assert_eq!(
+            sent.map(|v| v["thinking"].clone()).ok(),
+            Some(json!({ "type": "enabled" }))
+        );
     }
 
     #[test]

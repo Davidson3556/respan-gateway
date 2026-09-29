@@ -16,6 +16,42 @@ async fn only_the_text_only_attempt_gets_text_and_the_fallback_the_original() ->
 }
 
 #[tokio::test]
+async fn a_fallback_in_another_format_gets_the_pdf_in_its_own_shape() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+    mock.reply(PDF, mock::json(StatusCode::OK, CLAUDE_OK));
+    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
+    let mut req = post("/v1/chat/completions", REQUEST.to_owned());
+    req.headers_mut()
+        .insert("x-tenant", HeaderValue::from_static("acme"));
+    let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body?).contains("Revenue is up."));
+    let sent = mock.sent();
+    assert!(String::from_utf8_lossy(sent[0].body()).contains("[text of a 24-byte PDF]"));
+    assert!(sent[1].uri().path().ends_with("/messages"));
+    let body: serde_json::Value =
+        serde_json::from_slice(sent[1].body()).map_err(|_| Fault::internal("json"))?;
+    let part = &body["messages"][0]["content"][1];
+    assert_eq!(part["type"], "document");
+    assert_eq!(part["source"]["media_type"], "application/pdf");
+    assert_eq!(part["source"]["data"], "JVBERi0xLjcKJcfsj6IKMSAwIG9iago=");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_part_in_neither_shape_is_refused_by_the_other_format() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    // The text-only target fails, and no plugin rewrites the image for Claude.
+    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
+    let image = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}"#;
+    assert_eq!(send(&gw, "acme", image).await, StatusCode::BAD_REQUEST);
+    assert_eq!(mock.sent().len(), 1, "nothing was sent to Claude");
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_same_pdf_is_converted_once_per_tenant() -> Result<(), Fault> {
     let mock = MockTransport::new();
     for _ in 0..3 {

@@ -6,8 +6,8 @@
 //!
 //! What the kind has no form for stays as the client's format has it
 //! ([`Conversation::unsupported`], [`Message::unsupported`],
-//! [`Content::Other`]); translating it is refused if it can change the
-//! answer.
+//! [`Content::Other`]); it is sent only in the format it is in, and
+//! translating it is refused if it can change the answer.
 
 use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::Bytes;
@@ -55,6 +55,11 @@ pub struct Conversation {
     pub user: Option<String>,
     /// The request's fields the kind has no place for, such as its tools.
     pub unsupported: Map<String, Value>,
+    /// The name of the format that `unsupported`, the messages' own
+    /// `unsupported` and their `Role::Other` roles are in, set when a format
+    /// decodes the request. Only a call in that format can send them: a
+    /// plugin that translates them for another sets its name here.
+    pub unsupported_in: Option<Arc<str>>,
     /// The client's body it was decoded from.
     pub(crate) origin: Relayed<Conversation>,
 }
@@ -70,6 +75,7 @@ impl Conversation {
 
     /// For formats: decoded by `format` from `bytes`.
     pub fn came(mut self, format: &Arc<str>, bytes: Bytes) -> Self {
+        self.unsupported_in = Some(format.clone());
         self.origin = Relayed::default();
         self.origin = Relayed::came(format, bytes, self.clone());
         self
@@ -186,18 +192,22 @@ pub enum Content {
         /// The text.
         text: String,
     },
-    /// A part the kind has no form for, such as an image.
+    /// A part the kind has no form for, such as an image or a file, as
+    /// `format` has it; only a call in that format can send it.
     #[non_exhaustive]
     Other {
-        /// The part as the client's format has it.
+        /// The name of the format `raw` is in.
+        format: Arc<str>,
+        /// The part as that format has it.
         raw: Arc<Value>,
     },
 }
 
 impl Content {
-    /// A part the kind has no form for.
-    pub fn other(raw: impl Into<Value>) -> Self {
+    /// A part of `format` the kind has no form for.
+    pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
         Content::Other {
+            format: format.into(),
             raw: Arc::new(raw.into()),
         }
     }

@@ -28,6 +28,7 @@
 //! | Provider sends Close with another code | drop | ends `Err(upstream)` with a [`CloseCode`]; the client is sent that code |
 //! | Provider drops without Close | drop | ends `Err(truncated)`; the client is sent Close 1011 |
 //! | Provider sends a binary frame | drop | ends `Err(upstream)`; the client is sent Close 1011 |
+//! | `serve_ws_until`'s future completes | drop | dropped; the client is sent Close 1001 with the future's reason |
 //! | A fault ends the response | cut, `abandoned` | the client is sent Close 1011 (or the fault's [`CloseCode`]) with the fault's code as reason |
 //!
 //! A fault's message is never sent to the client, only its code.
@@ -39,7 +40,7 @@ mod serve;
 mod transport;
 
 pub use events::{ClientEvent, JsonEvents, ProviderEvent};
-pub use serve::{router, serve_ws};
+pub use serve::{router, serve_ws, serve_ws_until};
 pub use transport::WsTransport;
 
 /// How long a side waits for the other's part of a close: the gateway for a

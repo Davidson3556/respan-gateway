@@ -187,7 +187,7 @@ fn partial_match_is_the_longest_unfinished_start() {
 
 #[test]
 fn content_that_cannot_be_read_is_refused() {
-    let image = Content::other(json!({ "type": "image_url" }));
+    let image = Content::other("openai-chat", json!({ "type": "image_url" }));
     let mut message = Message::new(Role::User, "look");
     message.content.push(image);
     let chat = Conversation::new([message]);
@@ -294,28 +294,66 @@ fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault>
     Ok(())
 }
 
-#[test]
-fn a_whole_tool_call_is_restored_but_not_one_split_across_fragments() {
-    let call = |arguments: &str| {
-        let raw = json!([{ "index": 0, "delta": { "tool_calls": [{ "function": { "arguments": arguments } }] } }]);
-        Reply::other("openai", raw)
-    };
-    let arguments = |reply: &Reply| match &reply.content[..] {
-        [Piece::Other { raw, .. }] => {
-            raw[0]["delta"]["tool_calls"][0]["function"]["arguments"].clone()
+fn call_delta(index: u64, arguments: &str) -> Reply {
+    let call = json!({ "index": index, "function": { "arguments": arguments } });
+    Reply::other(
+        "openai-chat",
+        json!([{ "index": 0, "delta": { "tool_calls": [call] } }]),
+    )
+}
+
+/// The arguments of each streamed call in `replies`, by call.
+fn arguments_by_call(replies: &[Reply]) -> Vec<String> {
+    let mut calls: Vec<String> = Vec::new();
+    for piece in replies.iter().flat_map(|r| &r.content) {
+        let Piece::Other { raw, .. } = piece else {
+            continue;
+        };
+        for call in raw[0]["delta"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let at = call["index"].as_u64().unwrap_or_default() as usize;
+            calls.resize(calls.len().max(at + 1), String::new());
+            calls[at].push_str(call["function"]["arguments"].as_str().unwrap_or_default());
         }
-        other => panic!("{other:?}"),
-    };
-    let whole = run(
-        &mut Holdback::new(email()),
-        vec![call(r#"{"to":"<EMAIL_1>"}"#)],
+    }
+    calls
+}
+
+#[test]
+fn a_placeholder_split_across_three_argument_deltas_is_restored_by_call() {
+    let deltas = [
+        call_delta(0, r#"{"to":"<EMA"#),
+        call_delta(1, r#"{"cc":"<EMAIL_1>","n":"#),
+        call_delta(0, "IL_"),
+        call_delta(0, r#"1>"}"#),
+        call_delta(1, "3}"),
+        Reply::finished(Finish::ToolUse),
+    ];
+    let out = run(&mut Holdback::new(email()), deltas.into()).unwrap_or_default();
+    assert_eq!(
+        arguments_by_call(&out),
+        [r#"{"to":"bob@x.io"}"#, r#"{"cc":"bob@x.io","n":3}"#]
     );
-    let whole = whole.unwrap_or_default();
-    assert_eq!(arguments(&whole[0]), r#"{"to":"bob@x.io"}"#);
-    // Streamed: each fragment on its own, so one split is not restored.
-    let fragments = vec![call(r#"{"to":"<EMA"#), call(r#"IL_1>"}"#)];
-    let split = run(&mut Holdback::new(email()), fragments).unwrap_or_default();
-    assert_eq!(arguments(&split[0]), r#"{"to":"<EMA"#);
+    assert_eq!(
+        out.last().and_then(|r| r.finish.clone()),
+        Some(Finish::ToolUse)
+    );
+}
+
+#[test]
+fn a_tail_held_at_the_end_is_sent_then_and_never_lost() {
+    // The stream ends (cut) inside a placeholder: what was held goes out.
+    let out = run(
+        &mut Holdback::new(email()),
+        vec![call_delta(0, r#"{"to":"<EMA"#)],
+    );
+    assert_eq!(
+        arguments_by_call(&out.unwrap_or_default()),
+        [r#"{"to":"<EMA"#]
+    );
 }
 
 /// A guard: inputs must be readable, outputs go through `Terms`.
@@ -438,6 +476,63 @@ async fn a_placeholder_split_across_three_deltas_is_restored_in_either_stream() 
         text < stop && body.ends_with("{\"type\":\"message_stop\"}\n\n"),
         "{body}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_placeholder_split_across_three_streamed_argument_deltas_reaches_the_client_restored()
+-> Result<(), Fault> {
+    let call = |args: &str, first: bool| {
+        let mut call = json!({ "index": 0, "function": { "arguments": args } });
+        if first {
+            call["id"] = "call_1".into();
+            call["type"] = "function".into();
+            call["function"]["name"] = "send".into();
+        }
+        let chunk = json!({ "id": "c1", "model": "m", "choices": [{ "index": 0, "delta": { "tool_calls": [call] } }] });
+        format!("data: {chunk}\n\n")
+    };
+    let finish = json!({ "id": "c1", "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] });
+    let chunks = [
+        call(r#"{"to":"<EMA"#, true),
+        call("IL_", false),
+        call(r#"1>"}"#, false),
+        format!("data: {finish}\n\n"),
+        "data: [DONE]\n\n".to_owned(),
+    ];
+    let mock = MockTransport::new();
+    mock.reply(
+        OPENAI,
+        mock::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>()),
+    );
+    let gw = gateway(&mock, "openai", Restore(email()))?;
+    let (status, _, body) = read_whole(serve(&gw, openai_request(json!("hi"))).await.0).await;
+    let body = String::from_utf8_lossy(&body?).into_owned();
+    assert_eq!(status, StatusCode::OK);
+    let events = body.lines().filter_map(|l| l.strip_prefix("data: "));
+    let events: Vec<serde_json::Value> = events
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect();
+    let mut arguments = String::new();
+    let mut names = 0;
+    for call in events.iter().flat_map(|e| {
+        e["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+    }) {
+        arguments.push_str(call["function"]["arguments"].as_str().unwrap_or_default());
+        names += usize::from(call["function"]["name"].is_string());
+    }
+    assert_eq!(arguments, r#"{"to":"bob@x.io"}"#, "{body}");
+    assert_eq!(names, 1, "the name is said once: {body}");
+    // The held tail went out before the finish, and the stream still ends.
+    let last_args = body.rfind("bob@x.io");
+    assert!(
+        last_args < body.find("finish_reason\":\"tool_calls"),
+        "{body}"
+    );
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     Ok(())
 }
 

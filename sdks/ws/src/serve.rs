@@ -1,7 +1,8 @@
 //! The client edge: an axum adapter that accepts a WebSocket upgrade and
 //! hands the session to the gateway.
 
-use std::pin::pin;
+use std::future::Future;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -69,6 +70,33 @@ pub fn router(gateway: Gateway) -> Router {
 /// Messages up to [`MAX_MESSAGE`]. Only HTTP/1.1 upgrades, which is what
 /// `WebSocketUpgrade` accepts of a `GET` with `Upgrade: websocket`.
 pub async fn serve_ws(gateway: &Gateway, ws: WebSocketUpgrade, req: Request) -> Response {
+    serve_ws_until(gateway, ws, req, std::future::pending()).await
+}
+
+/// [`serve_ws`], and when `until` completes the session ends: the client is
+/// sent Close 1001 (going away) with the future's output as the reason (up to
+/// 123 bytes; say why briefly, as `"draining"` or `"session_too_long"`), and
+/// the response is dropped, ending its calls and request. It is
+/// how sessions of hours are drained at shutdown and bounded in length, idle
+/// ones included, and the adapter knows nothing of either: `until` is yours,
+/// made per session, such as
+///
+/// ```ignore
+/// serve_ws_until(&gateway, ws, req, async move {
+///     tokio::select! {
+///         _ = stop.wait_for(|stopped| *stopped) => "draining",
+///         _ = tokio::time::sleep(max_length) => "session_too_long",
+///     }
+/// })
+/// ```
+///
+/// A session that has ended by itself, or by the client's Close, ignores it.
+pub async fn serve_ws_until(
+    gateway: &Gateway,
+    ws: WebSocketUpgrade,
+    req: Request,
+    until: impl Future<Output = &'static str> + Send + 'static,
+) -> Response {
     let (input, frames) = mpsc::channel::<Result<Bytes, Fault>>(0);
     let req = req.map(|_| {
         let frames = frames.map_ok(http_body::Frame::data);
@@ -84,7 +112,7 @@ pub async fn serve_ws(gateway: &Gateway, ws: WebSocketUpgrade, req: Request) -> 
         ws = ws.protocols([chosen.to_str().unwrap_or_default().to_owned()]);
     }
     let mut upgraded = ws
-        .on_upgrade(move |socket| pump(socket, input, body_of(body)))
+        .on_upgrade(move |socket| pump(socket, input, body_of(body), Box::pin(until)))
         .into_response();
     // The provider's other headers go with the upgrade; the handshake's are axum's.
     let own = |name: &HeaderName| {
@@ -134,11 +162,19 @@ enum Told {
     Binary,
 }
 
-async fn pump(socket: WebSocket, input: mpsc::Sender<Result<Bytes, Fault>>, output: Frames) {
+/// When the session must end, with why.
+type Until = Pin<Box<dyn Future<Output = &'static str> + Send>>;
+
+async fn pump(
+    socket: WebSocket,
+    input: mpsc::Sender<Result<Bytes, Fault>>,
+    output: Frames,
+    until: Until,
+) {
     let (sink, stream) = socket.split();
     let (tell, told) = oneshot::channel();
     let mut heard = pin!(hear(stream, input, tell));
-    let mut wrote = pin!(write(sink, output, told));
+    let mut wrote = pin!(write(sink, output, told, until));
     tokio::select! {
         () = &mut wrote => {}
         heard = &mut heard => match heard {
@@ -191,12 +227,13 @@ async fn hear(
 }
 
 /// The response's frames as text messages, then a Close: 1000 for a clean
-/// end, else the fault's. After the client's Close (`told`), nothing is
+/// end, 1001 when `until` completes, else the fault's. After the client's Close (`told`), nothing is
 /// sent, as the connection is closing, and the response is read to its end.
 async fn write(
     mut sink: SplitSink<WebSocket, Message>,
     mut output: Frames,
     told: oneshot::Receiver<Told>,
+    mut until: Until,
 ) {
     let gone = Arc::new(AtomicBool::new(false));
     let mut told = told;
@@ -211,6 +248,7 @@ async fn write(
                 }
                 continue;
             }
+            reason = &mut until => break (1001, clipped(reason.to_owned())),
             next = output.next() => next,
         };
         match next {
@@ -236,12 +274,15 @@ async fn write(
 /// message.
 fn failure(fault: &Fault) -> (u16, String) {
     let code = fault.get::<CloseCode>().map_or(1011, |c| c.sendable());
-    let mut reason = fault.code().to_owned();
-    // A Close's reason takes at most 123 bytes.
+    (code, clipped(fault.code().to_owned()))
+}
+
+/// `reason` cut to the 123 bytes a Close's reason takes.
+fn clipped(mut reason: String) -> String {
     while reason.len() > 123 {
         reason.pop();
     }
-    (code, reason)
+    reason
 }
 
 async fn close(sink: &mut SplitSink<WebSocket, Message>, code: u16, reason: &str) {

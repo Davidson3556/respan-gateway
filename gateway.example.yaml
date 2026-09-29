@@ -16,6 +16,17 @@ providers:
     base_url: https://api.anthropic.com
     auth: { type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }
 
+# To relay a vendor's other endpoints too (Anthropic's count_tokens, OpenAI's
+# /v1/responses for Codex), add a provider of format `passthrough` at the
+# vendor's origin (no /v1) and serve `passthrough` last: it takes every
+# request no format before it accepts, unread, byte for byte, with the
+# client's own credentials:
+#   providers:
+#     anthropic-any: { format: passthrough, base_url: https://api.anthropic.com }
+#   serve: [openai-chat, anthropic-messages, passthrough]
+# With no config file at all: `respan-gateway proxy --anthropic` (or
+# `--openai`), which does exactly that for one vendor.
+#
 # The formats clients speak, tried in order; each recognises its own
 # requests: openai-chat a POST to .../chat/completions, anthropic-messages a
 # POST to .../v1/messages. Anything else is a 404.

@@ -212,10 +212,10 @@ async fn sessions_are_metered_apart() -> Result<(), Fault> {
     Ok(())
 }
 
-// A response cut before its `response.done` is not metered: the session
-// says how it ended, and the client is told the stream broke.
+// A response cut before its `response.done` is still billed, from an
+// estimate of the text it sent (use case 9), and the session says how it ended.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_turn_cut_before_it_is_done_is_not_metered() -> Result<(), Fault> {
+async fn a_turn_cut_before_it_is_done_is_billed_from_an_estimate() -> Result<(), Fault> {
     let s = start().await?;
     s.openai
         .answer(Answer::events(script(&["one", "two"], usage(10, 2))).cut_after(3));
@@ -228,13 +228,16 @@ async fn a_turn_cut_before_it_is_done_is_not_metered() -> Result<(), Fault> {
     }
     assert_eq!(heard, 3, "the events before the cut");
     s.gateway.idle().await;
-    assert!(s.meter.turns().is_empty());
+    let turns = s.meter.turns();
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert_eq!(turns[0].status, "cut");
+    assert!(turns[0].output_tokens > 0, "billed at zero: {turns:?}");
     assert_eq!(
         s.meter.ended(),
         [Ended {
             session: 1,
             code: "truncated".into(),
-            turns: 0
+            turns: 1
         }]
     );
     Ok(())
