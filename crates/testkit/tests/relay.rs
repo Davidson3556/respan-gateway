@@ -5984,7 +5984,9 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_hidden_from_a_later_meter
                 .plugin("to", To(target))
                 .unwrap_or_else(|e| panic!("{e}"));
             let _ = &mock;
-            let (_, _, body) = read_whole(serve(&gw, unary_chat()).await.0).await;
+            // Anthropic needs a message, so the translated call has one.
+            let ask = r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#;
+            let (_, _, body) = read_whole(serve(&gw, call(CHAT, ask)).await.0).await;
             gw.idle().await;
             let v: serde_json::Value =
                 serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();

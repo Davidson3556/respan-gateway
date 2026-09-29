@@ -177,6 +177,12 @@ fn patch_system(
     Ok(Value::Array(parts))
 }
 
+/// Whether a message says nothing: no content, or only empty text.
+fn is_empty(m: &Message) -> bool {
+    let empty = |c: &Content| matches!(c, Content::Text { text } if text.is_empty());
+    m.unsupported.is_empty() && m.content.iter().all(empty)
+}
+
 /// Set the metadata's user id, or remove it and the metadata if left empty.
 fn patch_user(v: &mut Map<String, Value>, user: Option<&str>) {
     let metadata = v.entry("metadata").or_insert(Value::Null);
@@ -227,6 +233,16 @@ impl Wire for AnthropicMessages {
 
     fn write(chat: &Conversation) -> Result<Value, Fault> {
         let (system, rest) = split_system(chat)?;
+        if rest.is_empty() {
+            return Err(Fault::bad_request(
+                "Anthropic needs at least one user or assistant message",
+            ));
+        }
+        if chat.temperature.is_some_and(|t| t > 1.0) {
+            return Err(Fault::bad_request(
+                "Anthropic's temperature is at most 1, so a higher one cannot be translated",
+            ));
+        }
         let mut v = Map::new();
         let max_tokens = chat.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         v.insert("max_tokens".into(), max_tokens.into());
@@ -236,7 +252,14 @@ impl Wire for AnthropicMessages {
             "system",
             (!system.is_empty()).then(|| write_content(&system)),
         );
-        let messages = rest.iter().map(|m| write_message(m, &ROLES));
+        // Anthropic refuses an empty turn but the last; dropping one leaves
+        // consecutive turns of a role, which it combines.
+        let last = rest.len().saturating_sub(1);
+        let kept = rest
+            .iter()
+            .enumerate()
+            .filter(|&(i, m)| i == last || !is_empty(m));
+        let messages = kept.map(|(_, m)| write_message(m, &ROLES));
         let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
         v.insert("messages".into(), messages.into());
         set(&mut v, "temperature", chat.temperature.map(Into::into));
@@ -955,6 +978,53 @@ mod tests {
         chat.messages
             .push(Message::new(Role::System, "now be long"));
         assert!(AnthropicMessages::write(&chat).is_err());
+    }
+
+    #[test]
+    fn a_temperature_above_1_is_refused() {
+        let mut chat = Conversation {
+            messages: vec![Message::new(Role::User, "hi")],
+            temperature: Some(1.5),
+            ..Conversation::default()
+        };
+        let refused = AnthropicMessages::write(&chat);
+        assert!(refused.is_err_and(|f| f.status() == 400));
+        chat.temperature = Some(1.0);
+        let body = AnthropicMessages::write(&chat).ok();
+        assert_eq!(body.map(|v| v["temperature"].clone()), Some(json!(1.0)));
+    }
+
+    #[test]
+    fn an_empty_turn_but_the_last_is_dropped() {
+        let chat = Conversation {
+            messages: vec![
+                Message::new(Role::User, "hi"),
+                Message::new(Role::Assistant, ""),
+                Message::new(Role::User, ""),
+                Message::new(Role::User, "again"),
+                Message::new(Role::Assistant, ""),
+            ],
+            ..Conversation::default()
+        };
+        let body = AnthropicMessages::write(&chat).ok();
+        assert_eq!(
+            body.map(|v| v["messages"].clone()),
+            Some(json!([
+                { "role": "user", "content": "hi" },
+                { "role": "user", "content": "again" },
+                { "role": "assistant", "content": "" },
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_request_of_only_system_messages_is_refused() {
+        let chat = Conversation {
+            messages: vec![Message::new(Role::System, "be brief")],
+            ..Conversation::default()
+        };
+        let refused = AnthropicMessages::write(&chat);
+        assert!(refused.is_err_and(|f| f.message().contains("at least one user or assistant")));
     }
 
     #[test]

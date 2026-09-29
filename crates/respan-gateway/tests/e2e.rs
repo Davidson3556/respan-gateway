@@ -816,7 +816,6 @@ async fn anthropic_accepts_the_translation_of(request: &str) {
 }
 
 #[tokio::test]
-#[ignore = "BUGS.md L1: an OpenAI temperature above 1 is sent to Anthropic as it is"]
 async fn an_openai_temperature_above_1_is_not_sent_to_anthropic_as_it_is() {
     // OpenAI takes 0..=2; Anthropic 0..=1.
     anthropic_accepts_the_translation_of(&format!(
@@ -826,7 +825,6 @@ async fn an_openai_temperature_above_1_is_not_sent_to_anthropic_as_it_is() {
 }
 
 #[tokio::test]
-#[ignore = "BUGS.md L2: an empty OpenAI assistant turn is sent to Anthropic, which refuses it"]
 async fn an_empty_openai_assistant_turn_is_not_sent_to_anthropic() {
     anthropic_accepts_the_translation_of(&format!(
         r#"{{"model":"{CLAUDE}","messages":[{{"role":"user","content":"hi"}},{{"role":"assistant","content":""}},{{"role":"user","content":"again"}}]}}"#
@@ -835,7 +833,6 @@ async fn an_empty_openai_assistant_turn_is_not_sent_to_anthropic() {
 }
 
 #[tokio::test]
-#[ignore = "BUGS.md L3: an OpenAI request of only system messages is sent to Anthropic with no messages"]
 async fn a_system_only_openai_request_is_not_sent_to_anthropic_without_messages() {
     // mockllm accepts `messages: []` (the real API does not), so this looks
     // at what was sent rather than at the answer.
