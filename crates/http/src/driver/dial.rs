@@ -42,13 +42,18 @@ impl Whose {
 ///   first input from its value (`opening`), else, on a relay, the
 ///   client's bytes unread; then its later inputs, if any follow, streamed
 ///   ([`Exchange::streams`]), else whole. [`Exchange::relayed`] is set if
-///   and only if the call was written from the client's origin, so the
-///   transport passes on the client's keys ([`credentials`](crate::credentials))
-///   only then.
+///   and only if the call carries the session's own inputs (it has an
+///   origin to relay), as the plugins' filters left them, even edited or
+///   replaced; a call with its own input (`Call::with_input`) has none. The
+///   transport passes on the client's keys
+///   ([`credentials`](crate::credentials)) only then.
 /// - The answer is classified at its head (rule 3): a non-2xx answer, but
 ///   a 101 to a call that asked to switch protocols, is read whole before
 ///   this resolves, so its codec's failure before any output resolves
-///   `Ok((origin, Err(fault)))`. For another, what is ready of it when the
+///   `Ok((origin, Err(fault)))`. It is read up to `ERROR_BODY_CAP` bytes
+///   (1 MiB): past it the body ends truncated after the frames read, so a
+///   body up to it is relayed byte for byte and a huge one cannot exhaust
+///   memory. For another, what is ready of it when the
 ///   transport returns is read, waiting for nothing.
 pub fn dial<C: Codec + Clone>(
     codec: &C,
@@ -77,6 +82,9 @@ pub fn dial<C: Codec + Clone>(
     };
     let mut call = Exchange::new(head, body);
     call.extensions = extensions;
+    // Not `opening`'s source: a filter's edit of the session's own input
+    // still relays (see `Exchange::relayed`); only a call of its own has no
+    // origin.
     call.relayed = came.is_some();
     call.streams = streams;
     let (codec, transport) = (codec.clone(), dialer.0.clone());

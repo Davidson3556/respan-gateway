@@ -170,6 +170,7 @@ impl Gateway {
             return unwritten(Fault::internal(PANICKED));
         };
         let half = AssertUnwindSafe(accepting).catch_unwind().await;
+        let panicked = half.is_err();
         let (origin, later) = half.unwrap_or_else(|_| (None, Err(Fault::internal(PANICKED))));
         let (later, broken) = match later {
             Ok(later) => (Later::new(later), None),
@@ -192,8 +193,14 @@ impl Gateway {
                 session::reply(&format, answer, hooks).await
             }
         };
-        // An edge that dropped its reply ends the session abandoned.
-        let _ = tx.send(reply);
+        // An edge that dropped its reply ends the session abandoned, but
+        // one whose future panicked took its reply with it: the session
+        // ends as the refusal says, `internal`.
+        if let Err((_, _, ended)) = tx.send(reply)
+            && panicked
+        {
+            ended(Err(Fault::internal(PANICKED)));
+        }
         let ended = ended.map(|told| told.expect("every request's end is told"));
         ended.boxed()
     }

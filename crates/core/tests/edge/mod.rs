@@ -141,8 +141,18 @@ impl Format for Toy {
             quirk,
             slot,
         } = wire;
-        let _ = slot.send(write(reply, streams, quirk).boxed());
+        // Point 19 panics in the returned future, which then owns the reply,
+        // as an edge's does that awaits it there.
+        let held = match PANIC.load(Ordering::SeqCst) == 19 {
+            true => Some(reply),
+            false => {
+                let _ = slot.send(write(reply, streams, quirk).boxed());
+                None
+            }
+        };
         async move {
+            let _held = held;
+            boom(19);
             let origin = |body| {
                 Some(Arc::new(ToyOrigin {
                     head: "/".into(),

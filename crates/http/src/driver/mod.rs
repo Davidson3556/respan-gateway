@@ -20,10 +20,11 @@
 //! - **A body ends at its first failure (B1)**, an encoder's panic on a
 //!   call's later frame fails the call (B2), and [`Encoder::open`]'s bytes
 //!   come first, done at once for a response with no body.
-//! - **Relay.** A call written from the client's origin starts from the
-//!   client's head and bytes, unread, and is
-//!   [`Exchange::relayed`](crate::Exchange::relayed); a provider's answer on
-//!   a relay is written from its head and bytes.
+//! - **Relay.** A call of the session's own inputs to a format of the same
+//!   name starts from the client's head and, if no filter edited them, bytes
+//!   unread, and is [`Exchange::relayed`](crate::Exchange::relayed), even if
+//!   a filter edited its inputs; a call with its own input is not. A
+//!   provider's answer on a relay is written from its head and bytes.
 
 mod accept;
 mod dial;

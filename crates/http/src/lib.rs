@@ -295,7 +295,12 @@ pub(crate) fn depart(
             let (mut head, mut body) = resp.into_parts();
             outgoing(&mut head);
             if bodiless(&to.method, head.status) {
-                tokio::spawn(async move { while body.frame().await.is_some() {} });
+                // A hop drops a bodiless answer's body once its head is out, so
+                // that is when the client leaves. Read what is ready now, so a
+                // refusal's end is told, then drop the rest: the session ends
+                // with its client (rule 5), never when a provider's stream
+                // does.
+                while let Some(Some(_)) = body.frame().now_or_never() {}
                 body = full(Bytes::new());
             }
             http::Response::from_parts(head, body)

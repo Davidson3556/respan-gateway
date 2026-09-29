@@ -184,7 +184,9 @@ head.
 
 The client's key rides along the same way. The adapter lifts it into a
 `Credential` extension, which the core carries unopened. The driver sets
-`Exchange::relayed` if and only if it wrote from an origin, and
+`Exchange::relayed` if and only if the call carries the session's own
+inputs to a same-name format, even as filters edited them (a call with
+`Call::with_input` does not), and
 `http::credentials` restores the client's key only then, after the call's
 `CallHeaders` and the transport's own. A plugin that removes `Credential`
 stops pass-through. A provider's error answer keeps its format's name

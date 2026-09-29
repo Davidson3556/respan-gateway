@@ -17,6 +17,13 @@ use crate::{Decoder, Frames};
 /// the response reads it here (B2).
 pub(crate) type Failure = Arc<OnceLock<Fault>>;
 
+/// The most bytes of an error answer's body that are read before it is
+/// classified. An error answer's body is only relayed or translated, and
+/// provider errors are a few KB of JSON or HTML, so 1 MiB is far past any
+/// real one; the cap bounds the memory a huge or never-ending body can take,
+/// as a time limit is the transport's job.
+pub(crate) const ERROR_BODY_CAP: usize = 1 << 20;
+
 /// Builds a decoder once the first frame comes.
 type Make<T> = Box<dyn FnOnce() -> Box<dyn Decoder<T>> + Send>;
 
@@ -86,12 +93,23 @@ impl<T: Send + 'static> Reader<T> {
 
     /// Read the body to its end, or its first failure, before anything is
     /// decoded: its frames are kept apart, to be decoded as they came.
+    ///
+    /// At most [`ERROR_BODY_CAP`] bytes are kept: once the frames read pass
+    /// it, the body ends [`truncated`](Fault::truncated) after them (the
+    /// frame that passed it is kept whole), so the decoder still reads what
+    /// came, and a body up to the cap is kept byte for byte.
     pub(crate) async fn buffer(&mut self) {
         let mut frames = Vec::new();
+        let mut kept = 0;
         while let Some(frame) = self.body.next().await {
             let broke = frame.is_err();
+            kept += frame.as_ref().map_or(0, Bytes::len);
             frames.push(frame);
             if broke {
+                break;
+            }
+            if kept > ERROR_BODY_CAP {
+                frames.push(Err(Fault::truncated()));
                 break;
             }
         }

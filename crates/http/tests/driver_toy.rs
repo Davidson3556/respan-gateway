@@ -5,7 +5,7 @@
 //! a status other than 200 fails its decoder.
 #![allow(clippy::unwrap_used)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -36,6 +36,8 @@ struct Toy {
     open: Option<(&'static str, bool)>,
     upgrade: bool,
     unwritable: bool,
+    /// The status its answers say, if not 200.
+    answers: Option<u16>,
 }
 
 fn opening(bytes: &'static str, done: bool) -> Toy {
@@ -88,7 +90,9 @@ impl Codec for Toy {
         refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Out, Answer>> {
         assert!(!(self.unwritable && refusal.is_some()), "unwritable");
-        let status = refusal.map_or(200, |f| respan_gateway_http::status(f).as_u16());
+        let status = refusal.map_or(self.answers.unwrap_or(200), |f| {
+            respan_gateway_http::status(f).as_u16()
+        });
         Box::new(RespEnc { status })
     }
 }
@@ -660,4 +664,199 @@ async fn a_refusal_no_codec_can_write_keeps_its_body_even_to_a_head() {
         assert_eq!(got.0, 500, "{method}");
         assert!(!got.1.is_empty(), "{method}: the refusal's text");
     }
+}
+
+/// An error answer is read whole to be relayed or translated, up to a cap
+/// (`ERROR_BODY_CAP`); past it, it is refused with what was read. Before
+/// the cap: a non-2xx body that never ends, pulled without bound.
+///
+/// (ADV-1: a non-2xx answer is read whole before `dial` resolves, with no
+/// bound: an error body that never ends is pulled forever, every frame
+/// held in memory, and the call never resolves.)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_error_answer_that_never_ends_is_refused_at_a_cap() {
+    let pulled = Arc::new(AtomicUsize::new(0));
+    let counter = pulled.clone();
+    let transport = fnt(move |_| {
+        let counter = counter.clone();
+        let body = stream::unfold(counter, |c| async move {
+            tokio::task::yield_now().await;
+            c.fetch_add(1, Ordering::SeqCst);
+            Some((Ok(Bytes::from(vec![b'x'; 64 * 1024])), c))
+        })
+        .boxed();
+        future::ready(Ok(answer(503, body))).boxed()
+    });
+    let dialed = tokio::time::timeout(Duration::from_secs(2), dial(&Toy::default(), transport));
+    let resolved = dialed.await.is_ok();
+    let frames = pulled.load(Ordering::SeqCst);
+    let mib = frames * 64 / 1024;
+    assert!(
+        resolved,
+        "dial still pending after 2s; it pulled {frames} frames ({mib} MiB) of a 503's body into memory"
+    );
+}
+
+/// ADV-2: the adapter drains the body of a bodiless answer (a HEAD) in a
+/// detached task. A provider stream that never ends keeps that task, the
+/// session and its call alive forever after the client has gone, and
+/// `Gateway::idle` never resolves. The same answer to a GET ends as the
+/// client drops it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bodiless_answer_ends_with_its_client() {
+    for method in [http::Method::GET, http::Method::HEAD] {
+        let transport = fnt(|_| {
+            let body = stream::iter([Ok(Bytes::from("a"))])
+                .chain(stream::pending())
+                .boxed();
+            future::ready(Ok(answer(200, body))).boxed()
+        });
+        let (gw, calls, _) = gateway_of(Toy::default(), transport);
+        let req = http::Request::builder().method(method.clone()).uri("/x");
+        let req = req.body(respan_gateway_http::full("q")).unwrap();
+        let (resp, _ended) = respan_gateway_http::serve(&gw, req).await;
+        assert_eq!(resp.status(), 200);
+        drop(resp); // the client leaves
+        let idle = tokio::time::timeout(Duration::from_secs(1), gw.idle()).await;
+        assert!(
+            idle.is_ok(),
+            "{method}: the session outlived its client; call ends so far: {:?}",
+            codes(calls.all())
+        );
+    }
+}
+
+/// A body that panics when polled, as a buggy adapter body could.
+fn panicking() -> Frames {
+    stream::poll_fn(|_| -> Poll<Option<Result<Bytes, Fault>>> { panic!("body panic") }).boxed()
+}
+
+/// ADV-3: a panic in `accept`'s future (here, reading a whole body) is
+/// documented as an internal fault for the adapter to write; it ends the
+/// session `abandoned` instead, so the client gets a 499.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panic_while_accepting_ends_internal() {
+    let (gw, _, _) = gateway_of(Toy::default(), fnt(|_| future::pending().boxed()));
+    let (resp, end) = open(&gw, panicking(), false).await;
+    assert!(resp.is_none(), "no codec wrote it");
+    assert_eq!(code(&end.await), "internal");
+}
+/// Answers with the target's response read to its end first.
+struct ReadToEnd;
+
+#[async_trait]
+impl respan_gateway_core::Plugin for ReadToEnd {
+    async fn on_client(
+        &self,
+        cx: &mut respan_gateway_core::ClientContext,
+    ) -> Result<Option<respan_gateway_core::Response>, Fault> {
+        let (resp, _) = cx.call("a").await?.until_end().await?;
+        Ok(Some(resp))
+    }
+}
+
+/// ADV-4: `Writer::ended` says it is "dropped first, so a client that
+/// leaves ends the request before its answer's call", but `values` is
+/// declared (so dropped) before it: a client that leaves after the head
+/// ends a call whose end was read ahead `Ok`, not abandoned.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_leaves_ends_the_request_before_its_call() {
+    let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "b", "DONE"])))).boxed());
+    let calls = Calls::default();
+    let gw = Gateway::new()
+        .serve(Toy::default())
+        .unwrap()
+        .provider("a", Toy::default(), transport)
+        .unwrap()
+        .plugin("calls", calls.clone())
+        .unwrap()
+        .plugin("read", ReadToEnd)
+        .unwrap();
+    let (resp, end) = open(&gw, chunks(vec!["q"]), false).await;
+    let resp = resp.unwrap();
+    assert_eq!(resp.status(), 200);
+    drop(resp); // the client leaves after the head, its body unread
+    assert_eq!(code(&end.await), "abandoned");
+    gw.idle().await;
+    assert_eq!(
+        codes(calls.all()),
+        ["abandoned"],
+        "the call outlived the request"
+    );
+}
+
+/// Replaces every call's input with its own prompt, through a filter.
+struct Rewrites;
+
+#[async_trait]
+impl respan_gateway_core::Plugin for Rewrites {
+    async fn on_provider(
+        &self,
+        px: &mut respan_gateway_core::ProviderContext,
+    ) -> Result<(), Fault> {
+        px.filter(|input: &mut In| {
+            *input = In("the plugin's own prompt".into());
+            Ok(())
+        })
+    }
+}
+
+/// Answers with a call of its own input to `a`, not the client's.
+struct Asks;
+
+#[async_trait]
+impl respan_gateway_core::Plugin for Asks {
+    async fn on_client(
+        &self,
+        cx: &mut respan_gateway_core::ClientContext,
+    ) -> Result<Option<respan_gateway_core::Response>, Fault> {
+        let call = cx.call("a").with_input(In("own prompt".into()));
+        Ok(Some(call.await?))
+    }
+}
+
+/// What the provider got, as (`relayed`, body), of a client's `question`
+/// through `plugin`.
+async fn provider_saw(plugin: impl respan_gateway_core::Plugin) -> Vec<(bool, String)> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let noting = {
+        let seen = seen.clone();
+        fnt(move |c| {
+            let seen = seen.clone();
+            async move {
+                let body: Vec<_> = c.body.collect().await;
+                let body = body
+                    .into_iter()
+                    .map(|b| text(&b.unwrap()))
+                    .collect::<String>();
+                lock(&seen).push((c.relayed, body));
+                Ok(answer(200, chunks(vec!["a", "DONE"])))
+            }
+            .boxed()
+        })
+    };
+    let gw = Gateway::new()
+        .serve(Toy::default())
+        .unwrap()
+        .provider("a", Toy::default(), noting)
+        .unwrap()
+        .target("a")
+        .unwrap()
+        .plugin("plugin", plugin)
+        .unwrap();
+    let (resp, _) = open(&gw, chunks(vec!["client question"]), false).await;
+    let _ = read(resp).await;
+    lock(&seen).clone()
+}
+
+/// `Exchange::relayed` means the session's own inputs to a format of the
+/// same name, as the plugins' filters left them: a filter-edited input
+/// still relays (a redactor keeps a subscription passthrough working); a
+/// call with its own input (`Call::with_input`) does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_edited_input_still_relays_but_a_calls_own_input_does_not() {
+    let edited = provider_saw(Rewrites).await;
+    assert_eq!(edited, [(true, "the plugin's own prompt<END>".to_string())]);
+    let own = provider_saw(Asks).await;
+    assert_eq!(own, [(false, "own prompt<END>".to_string())]);
 }

@@ -16,10 +16,10 @@ use respan_gateway_core::*;
 
 /// Points: 1 the client edge's input stream; 5 the provider edge's event
 /// stream; 12 `dial`; 13 `is_content`; 14 `opening`; 17 `accepts`; 18
-/// `accept`; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
+/// `accept`, 19 its future; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
 /// dial future; 29 a provider stream's first poll.
-const POINTS: [usize; 19] = [
-    1, 5, 12, 13, 14, 17, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32, 0,
+const POINTS: [usize; 20] = [
+    1, 5, 12, 13, 14, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32, 0,
 ];
 
 #[tokio::test(flavor = "multi_thread")]
@@ -81,9 +81,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                     let driver = tokio::spawn(async move {
                         let (res, end) = handle(&gw2, req).await;
                         let _ = read(res).await;
-                        tokio::time::timeout(Duration::from_secs(2), end)
-                            .await
-                            .is_ok()
+                        tokio::time::timeout(Duration::from_secs(2), end).await.ok()
                     });
                     let label = format!(
                         "panic {n} streams {streams} transport {transport_mode} script {script}"
@@ -96,10 +94,16 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                         Ok(Err(e)) => {
                             bad.push(format!("{label}: a panic escaped: {}", e.is_panic()))
                         }
-                        Ok(Ok(false)) => {
-                            bad.push(format!("{label}: the end future never resolved"))
+                        Ok(Ok(None)) => bad.push(format!("{label}: the end future never resolved")),
+                        // A panic in `accept`'s future is `internal`, not
+                        // `abandoned`, as `Gateway::handle` says.
+                        Ok(Ok(Some(end))) if n == 19 => {
+                            let code = end.as_ref().err().map(Fault::code);
+                            if code != Some(codes::INTERNAL) {
+                                bad.push(format!("{label}: ended {code:?}, not internal"));
+                            }
                         }
-                        Ok(Ok(true)) => {}
+                        Ok(Ok(Some(_))) => {}
                     }
                     if tokio::time::timeout(Duration::from_secs(2), gw.idle())
                         .await

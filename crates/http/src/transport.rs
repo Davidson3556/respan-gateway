@@ -28,9 +28,13 @@ pub struct Exchange<H> {
     /// Values for the transport, such as the client's credential; none on
     /// a response.
     pub extensions: Extensions,
-    /// Whether this call was written from the client's own message: its
-    /// head and bytes, on a relay to a provider of the client's codec's
-    /// name. The driver sets it then alone; a transport passes on what
+    /// Whether this call carries the session's own inputs to a format of
+    /// the same name as the client's, as the plugins' filters left them: a
+    /// filter that edits or replaces an input (a PII redactor, say) keeps
+    /// the relay, so a subscription passthrough still works. A call with
+    /// its own input ([`Call::with_input`](respan_gateway_core::Call::with_input))
+    /// is not one, so a plugin that wants its prompt billed to itself uses
+    /// it. The driver sets this then alone; a transport passes on what
     /// belongs to the client, such as its credential ([`credentials`]),
     /// only then. False on a response.
     pub relayed: bool,

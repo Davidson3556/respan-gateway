@@ -85,7 +85,11 @@ events through a `Decoder`) and a writer (events to frames through an
 `Encoder`), runs both edges, and owns head timing, the verdict at the head
 (a non-2xx answer, but a 101 to a call that asked to switch, is read whole
 before `dial` resolves), framing, batches and the byte guarantees. The
-driver sets `Exchange::relayed` if and only if it wrote from an origin.
+driver sets `Exchange::relayed` if and only if the call carries the
+session's own inputs to a format of the same name (it wrote from an
+origin), as the plugins' filters left them: a filter-edited input still
+relays, so a redactor keeps a subscription passthrough working; a call with
+`Call::with_input` does not, so a plugin bills its own prompt to itself.
 A format on another wire implements `Format` itself.
 
 ## Consequences

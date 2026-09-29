@@ -32,14 +32,15 @@ use crate::{Encoder, Frames};
 ///   told once its last bytes are handed out.
 pub(crate) struct Writer<T, H> {
     encoder: Box<dyn Encoder<T, H>>,
+    /// An answer's: told the end once its last bytes are handed out.
+    /// Declared first, so dropped first (fields drop in declaration order):
+    /// a client that leaves ends the request before its answer's call,
+    /// which `values` holds.
+    pub(crate) ended: Option<Ended>,
     /// The values; each input with whether it is the client's.
     pub(crate) values: Option<Events<(T, Option<bool>)>>,
     /// A call's: where its encoder panicked.
     call: Option<Failure>,
-    /// An answer's: told the end once its last bytes are handed out.
-    /// Dropped first, so a client that leaves ends the request before its
-    /// answer's call.
-    pub(crate) ended: Option<Ended>,
     /// An answer's one failure, a refusal, its fault alone.
     pub(crate) refusal: Option<Fault>,
     /// Bytes written and not yet handed out.
