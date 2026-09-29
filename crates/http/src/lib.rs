@@ -49,6 +49,24 @@ pub use {bytes, http, http_body, http_body_util};
 
 pub use codec::{Codec, Decoder, Encoder};
 pub use credential::Credential;
+
+/// `s` with its `%XX` escapes decoded, a bad UTF-8 sequence replaced: how a
+/// path or a parameter's name is compared, so a spelling cannot dodge a match.
+pub fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        let escaped = match bytes[i..] {
+            [b'%', hi, lo, ..] => hex(hi).zip(hex(lo)).map(|(h, l)| (h * 16 + l) as u8),
+            _ => None,
+        };
+        out.push(escaped.unwrap_or(bytes[i]));
+        i += if escaped.is_some() { 3 } else { 1 };
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 pub use driver::{Accepted, accept, dial, opening};
 pub use transport::{
     CallHeaders, Dialer, Exchange, Frames, Transport, credentials, is_connection_header,

@@ -1,7 +1,7 @@
 //! The client's credentials, lifted out of its head by the adapter.
 
 use crate::http;
-use http::header::AUTHORIZATION;
+use http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use http::{HeaderMap, HeaderName, HeaderValue};
 
 /// The credential headers and query parameters a client sent, which the
@@ -9,7 +9,11 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 /// request's extensions, so nothing passes them on by accident. A name is
 /// one if its last `-` or `_` segment is `authorization`, `auth`, `key`,
 /// `token`, `secret`, `password`, `credential` or `credentials`, but not an
-/// idempotency key.
+/// idempotency key; names are read percent-decoded. A key offered as a
+/// WebSocket subprotocol (`Sec-WebSocket-Protocol: realtime,
+/// openai-insecure-api-key.<key>`) is one too: an entry `name.value` whose
+/// `name` is such a name is lifted out of that header, under its name, and
+/// the other entries stay.
 ///
 /// A transport without keys passes it through on a relay alone
 /// ([`credentials`](crate::credentials)); a plugin that authenticates the
@@ -43,6 +47,9 @@ impl Credential {
                 credential.headers.append(name.clone(), value.clone());
             }
             head.headers.remove(&name);
+        }
+        if let Some(keys) = take_protocol_keys(&mut head.headers) {
+            credential.headers.append(SEC_WEBSOCKET_PROTOCOL, keys);
         }
         credential.query = take_query(&mut head.uri, is_credential);
         (!credential.is_empty()).then_some(credential)
@@ -86,8 +93,16 @@ impl Credential {
     /// Put its headers and parameters on `head` where it has none of a name.
     pub(crate) fn restore(&self, head: &mut http::request::Parts) {
         for name in self.headers.keys() {
-            if !head.headers.contains_key(name) {
-                for value in self.headers.get_all(name) {
+            let ours = self.headers.get_all(name);
+            if name == SEC_WEBSOCKET_PROTOCOL {
+                // Its other entries stay: the keys join them.
+                let all = head.headers.get_all(name).iter().chain(ours);
+                let all: Vec<&str> = all.filter_map(|v| v.to_str().ok()).collect();
+                if let Ok(all) = HeaderValue::from_str(&all.join(", ")) {
+                    head.headers.insert(name.clone(), all);
+                }
+            } else if !head.headers.contains_key(name) {
+                for value in ours {
                     head.headers.append(name.clone(), value.clone());
                 }
             }
@@ -140,19 +155,45 @@ pub(crate) fn take_query(uri: &mut http::Uri, is: impl Fn(&str) -> bool) -> Vec<
     taken
 }
 
+/// Take the entries of `Sec-WebSocket-Protocol` that carry a key
+/// (`openai-insecure-api-key.<key>`) out of `headers`, joined, if any.
+pub(crate) fn take_protocol_keys(headers: &mut HeaderMap) -> Option<HeaderValue> {
+    let all: Vec<&str> = headers
+        .get_all(SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(',').map(str::trim))
+        .collect();
+    let carries = |e: &&str| {
+        e.split_once('.')
+            .is_some_and(|(name, _)| is_credential(name))
+    };
+    let (keys, kept): (Vec<&str>, Vec<&str>) = all.into_iter().partition(carries);
+    if keys.is_empty() {
+        return None;
+    }
+    let keys = HeaderValue::from_str(&keys.join(", ")).ok()?;
+    match HeaderValue::from_str(&kept.join(", ")) {
+        Ok(kept) if !kept.is_empty() => headers.insert(SEC_WEBSOCKET_PROTOCOL, kept),
+        _ => headers.remove(SEC_WEBSOCKET_PROTOCOL),
+    };
+    Some(keys)
+}
+
 /// Whether a header or query parameter `name` names a credential.
 pub(crate) fn is_credential(name: &str) -> bool {
-    const CREDENTIALS: [&str; 8] = [
+    const CREDENTIALS: [&str; 9] = [
         "authorization",
         "auth",
         "key",
+        "apikey",
         "token",
         "secret",
         "password",
         "credential",
         "credentials",
     ];
-    let name = name.to_ascii_lowercase();
+    let name = crate::percent_decode(name).to_ascii_lowercase();
     let last = name.rsplit(['-', '_']).next().unwrap_or_default();
     let idempotency = matches!(&*name, "idempotency-key" | "x-idempotency-key");
     !idempotency && CREDENTIALS.contains(&last)
@@ -198,6 +239,50 @@ mod tests {
         credential.restore(&mut parts);
         assert_eq!(parts.headers["authorization"], "Bearer sk-1");
         assert_eq!(parts.uri, "/v1/x?alt=sse&key=k1");
+    }
+
+    #[test]
+    fn a_subprotocol_key_is_lifted_and_its_other_entries_stay() {
+        let mut parts = head(
+            "/v1/realtime",
+            &[(
+                "sec-websocket-protocol",
+                "realtime, openai-insecure-api-key.sk-1, openai-beta.realtime-v1",
+            )],
+        );
+        let credential = Credential::lift(&mut parts).unwrap_or_default();
+        assert_eq!(
+            parts.headers["sec-websocket-protocol"],
+            "realtime, openai-beta.realtime-v1"
+        );
+        assert_eq!(
+            credential
+                .get("sec-websocket-protocol")
+                .map(HeaderValue::as_bytes),
+            Some(&b"openai-insecure-api-key.sk-1"[..])
+        );
+        assert!(!format!("{credential:?}").contains("sk-1"));
+        credential.restore(&mut parts);
+        assert_eq!(
+            parts.headers["sec-websocket-protocol"],
+            "realtime, openai-beta.realtime-v1, openai-insecure-api-key.sk-1"
+        );
+        // Alone, the header goes whole.
+        let mut parts = head("/", &[("sec-websocket-protocol", "x-key.k")]);
+        assert!(Credential::lift(&mut parts).is_some());
+        assert!(parts.headers.get("sec-websocket-protocol").is_none());
+    }
+
+    #[test]
+    fn apikey_and_percent_encoded_names_are_credentials() {
+        let mut parts = head(
+            "/v1/x?apikey=a&api%5Fkey=b&%6Bey=c&alt=sse",
+            &[("x-apikey", "d")],
+        );
+        let credential = Credential::lift(&mut parts).unwrap_or_default();
+        assert_eq!(parts.uri, "/v1/x?alt=sse");
+        assert_eq!(credential.query().count(), 3);
+        assert!(credential.get("x-apikey").is_some());
     }
 
     #[test]

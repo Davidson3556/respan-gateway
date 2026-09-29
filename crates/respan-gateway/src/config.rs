@@ -114,6 +114,13 @@ impl Config {
                 .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
             gateway = (format.provider)(gateway, name.clone(), Dialer::from(reach))?;
         }
+        let after = (self.serve.iter().skip_while(|n| *n != PASSTHROUGH)).nth(1);
+        if let Some(after) = after {
+            return Err(Fault::config(format!(
+                "serve: '{after}' comes after '{PASSTHROUGH}', which accepts every request first; \
+                 serve '{PASSTHROUGH}' last"
+            )));
+        }
         for name in &self.serve {
             gateway = (format(name, "serve")?.serve)(gateway)?;
         }
@@ -469,6 +476,17 @@ plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
         assert!(bad.is_some_and(|e| e.message().contains("listen")));
         let good = Config::parse("listen: 127.0.0.1:8080\nserve: []");
         assert!(good.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8080)));
+    }
+
+    #[test]
+    fn a_format_served_after_passthrough_is_refused() {
+        let yaml = "serve: [passthrough, openai-chat]";
+        assert_eq!(
+            resolve(yaml).err().as_deref(),
+            Some(
+                "serve: 'openai-chat' comes after 'passthrough', which accepts every request first; serve 'passthrough' last"
+            )
+        );
     }
 
     #[test]
