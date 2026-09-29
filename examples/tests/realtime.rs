@@ -41,11 +41,12 @@ async fn start_with(longest: Duration, tokens: Amount) -> Result<Session, Fault>
     })
 }
 
-/// The events the provider read, in order.
+/// The events the provider read, in order, but for the `session.update` the
+/// gateway opens each session with.
 fn read_by_provider(openai: &FakeOpenAi) -> Vec<Value> {
     let all = openai.requests();
     all.iter()
-        .filter(|r| r.method == "WS")
+        .filter(|r| r.method == "WS" && r.body["type"] != "session.update")
         .map(|r| r.body.clone())
         .collect()
 }
@@ -519,12 +520,15 @@ async fn a_flagged_input_never_reaches_the_provider_and_closes_the_session() -> 
 #[derive(Clone, Default)]
 struct Raw {
     read: Arc<Mutex<Vec<Value>>>,
+    /// The `session.update`s, apart.
+    sessions: Arc<Mutex<Vec<Value>>>,
 }
 
 /// A provider that keeps to `max_output_tokens`, unlike a script: a
 /// `response.create` is answered with a turn that would say `wants` tokens,
-/// cut at the cap. An `input_audio_buffer.commit` starts a turn of `wants`
-/// tokens by itself, as server voice detection does. A turn's usage is
+/// cut at the cap of the response or of the session. An
+/// `input_audio_buffer.commit` starts a turn of `wants` tokens by itself, as
+/// server voice detection does, cut at the session's cap. A turn's usage is
 /// its output tokens alone.
 async fn raw_provider(raw: Raw, wants: u64) -> std::net::SocketAddr {
     use axum::extract::ws::{Message, WebSocketUpgrade};
@@ -537,13 +541,23 @@ async fn raw_provider(raw: Raw, wants: u64) -> std::net::SocketAddr {
                     .on_upgrade(move |mut socket| async move {
                         let hello = json!({ "type": "session.created" }).to_string();
                         let _ = socket.send(Message::Text(hello.into())).await;
+                        let mut session_cap = u64::MAX;
                         while let Some(Ok(Message::Text(text))) = socket.recv().await {
                             let event: Value = serde_json::from_str(&text).unwrap_or_default();
+                            if event["type"] == "session.update" {
+                                let cap = event["session"]["max_output_tokens"].as_u64();
+                                session_cap = cap.unwrap_or(session_cap);
+                                lock(&raw.sessions).push(event);
+                                let ack = json!({ "type": "session.updated" }).to_string();
+                                let _ = socket.send(Message::Text(ack.into())).await;
+                                continue;
+                            }
                             lock(&raw.read).push(event.clone());
                             let cap = event["response"]["max_output_tokens"].as_u64();
+                            let cap = cap.unwrap_or(u64::MAX).min(session_cap);
                             let tokens = match event["type"].as_str() {
-                                Some("response.create") => wants.min(cap.unwrap_or(u64::MAX)),
-                                Some("input_audio_buffer.commit") => wants,
+                                Some("response.create") => wants.min(cap),
+                                Some("input_audio_buffer.commit") => wants.min(session_cap),
                                 _ => continue,
                             };
                             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -932,4 +946,175 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
         "the session ended {after:?} after the client left"
     );
     Ok(())
+}
+
+/// A provider that answers each `response.create` with `answer(event)`.
+async fn answering(answer: fn(&Value) -> Vec<Value>) -> std::net::SocketAddr {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    let app = axum::Router::new().route(
+        "/v1/realtime",
+        axum::routing::get(move |ws: WebSocketUpgrade| async move {
+            ws.protocols(["realtime"])
+                .on_upgrade(move |mut socket| async move {
+                    let hello = json!({ "type": "session.created" }).to_string();
+                    let _ = socket.send(Message::Text(hello.into())).await;
+                    while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                        let event: Value = serde_json::from_str(&text).unwrap_or_default();
+                        if event["type"] == "response.create" {
+                            for reply in answer(&event) {
+                                let _ = socket.send(Message::Text(reply.to_string().into())).await;
+                            }
+                        }
+                    }
+                })
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    at
+}
+
+/// The example's gateway in front of `at`, with a wallet of `tokens`.
+async fn front(
+    at: std::net::SocketAddr,
+    tokens: Amount,
+) -> (Gateway, MemoryLedger, std::net::SocketAddr) {
+    let (meter, ends) = (Meter::default(), Outcomes::default());
+    let wallets = MemoryLedger::new();
+    wallets.open("sk-demo", None, tokens);
+    let gw = gateway(&format!("ws://{at}"), &meter, &ends, &wallets, HOUR).expect("a gateway");
+    let addr = listen(&gw).await;
+    (gw, wallets, addr)
+}
+
+/// The `max_output_tokens` of each `session.update` a raw provider read.
+fn session_caps(raw: &Raw) -> Vec<Value> {
+    let sessions = lock(&raw.sessions);
+    let caps = sessions
+        .iter()
+        .map(|e| e["session"]["max_output_tokens"].clone());
+    caps.collect()
+}
+
+/// Turns the provider starts (voice detection) are bounded by the session's
+/// cap, which the gateway sets before the client says anything: three
+/// sessions whose turns would say 2,500 tokens, against three caps, are all
+/// answered and the wallet never goes negative. The client never hears the
+/// provider's `session.updated` for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn turns_the_provider_starts_cannot_overdraw_the_wallet() {
+    let (raw, gw, _meter, wallets, addr) = raw_session(2_500, 3 * TURN).await;
+    let sampler = sample(&wallets);
+    let mut sessions = Vec::new();
+    for _ in 0..3 {
+        sessions.push(tokio::spawn(async move {
+            let mut ws = client(addr).await;
+            hear(&mut ws).await;
+            say(&mut ws, json!({ "type": "input_audio_buffer.commit" })).await;
+            let events = turn(&mut ws).await;
+            close(&mut ws).await;
+            assert!(events.iter().all(|e| e["type"] != "session.updated"));
+            last(&events)["response"]["usage"]["total_tokens"].clone()
+        }));
+    }
+    for session in sessions {
+        assert_eq!(session.await.expect("a session"), TURN);
+    }
+    gw.idle().await;
+    assert_eq!(wallets.spent("sk-demo"), 3 * TURN);
+    let min = sampler.finish().await;
+    assert!(min >= 0, "went negative: {min}");
+    assert_eq!(session_caps(&raw), vec![json!(TURN); 3]);
+}
+
+/// A client's own `session.update` cannot lift the cap either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_update_cannot_lift_the_cap() {
+    let (raw, gw, _meter, _wallets, addr) = raw_session(5, 100_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let lift = json!({ "type": "session.update", "session": { "max_output_tokens": "inf" } });
+    say(&mut ws, lift).await;
+    assert_eq!(heard(&mut ws).await["type"], "session.updated");
+    close(&mut ws).await;
+    gw.idle().await;
+    assert_eq!(session_caps(&raw), [json!(TURN), json!(TURN)]);
+}
+
+/// A `response.create` the provider refuses (an `error` naming its event)
+/// never ran: its hold is released at once, and a turn after it is held as
+/// usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_response_create_the_provider_refuses_is_not_charged() {
+    let at = answering(|create| match create["response"]["voice"] == "bad" {
+        true => vec![json!({ "type": "error", "error": {
+            "type": "invalid_request_error", "event_id": create["event_id"] } })],
+        false => script(&["ok"], usage(0, 5)),
+    })
+    .await;
+    let (gw, wallets, addr) = front(at, 100_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let bad = json!({ "type": "response.create", "response": { "voice": "bad" } });
+    say(&mut ws, bad).await;
+    assert_eq!(heard(&mut ws).await["type"], "error");
+    assert_eq!(wallets.available("sk-demo"), 100_000, "released at once");
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    assert_eq!(last(&turn(&mut ws).await)["type"], "response.done");
+    close(&mut ws).await;
+    gw.idle().await;
+    assert_eq!(wallets.spent("sk-demo"), 5);
+}
+
+/// What a tool returns enters the context as much as what the user says: a
+/// 40 KB `function_call_output` is held, so a wallet of two caps refuses the
+/// turn that reads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_output_is_held_like_text() {
+    let (raw, gw, _meter, wallets, addr) = raw_session(5, 2 * TURN).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let output = "x".repeat(40_000);
+    let item = json!({ "type": "function_call_output", "call_id": "call_1", "output": output });
+    let create = json!({ "type": "conversation.item.create", "item": item });
+    say(&mut ws, create).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    let refused = closed(&mut ws).await;
+    assert_eq!(refused, Some((1008, "insufficient_funds".into())));
+    gw.idle().await;
+    assert!(
+        lock(&raw.read)
+            .iter()
+            .all(|e| e["type"] != "response.create")
+    );
+    assert_eq!(wallets.spent("sk-demo"), 0);
+}
+
+/// Audio is not text: base64 audio deltas are not what a turn reads, so
+/// after turns of 60 KB of audio, a small wallet still holds the next one.
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_deltas_are_not_counted_as_text() {
+    let at = answering(|_| {
+        let audio = "A".repeat(60_000);
+        vec![
+            json!({ "type": "response.created", "response": { "id": "r" } }),
+            json!({ "type": "response.output_audio.delta", "response_id": "r", "delta": audio }),
+            json!({ "type": "response.output_audio_transcript.delta", "delta": "hi" }),
+            json!({ "type": "response.done", "response": { "usage": usage(20, 10) } }),
+        ]
+    })
+    .await;
+    let (gw, wallets, addr) = front(at, 5_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    for _ in 0..2 {
+        say(&mut ws, json!({ "type": "response.create" })).await;
+        assert_eq!(last(&turn(&mut ws).await)["type"], "response.done");
+    }
+    close(&mut ws).await;
+    gw.idle().await;
+    assert_eq!(wallets.spent("sk-demo"), 2 * 30);
 }

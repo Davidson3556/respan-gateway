@@ -32,7 +32,7 @@ impl Rest {
 pub struct Ask {
     /// The HTTP method.
     pub method: Method,
-    /// The path, and the query if there is one.
+    /// The path; the query stays as it came (`Asked` has it).
     pub path: String,
     /// The body.
     pub body: Bytes,

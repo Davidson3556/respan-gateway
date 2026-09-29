@@ -13,17 +13,22 @@
 //!   makes no call: the relay, and the provider's head with its subprotocol,
 //!   stay, and it composes with every other plugin.
 //! - `Reserve` (use case 9): every turn is bounded, held and settled on the
-//!   client's wallet (the ledger SDK). A `response.create` is rewritten to
-//!   ask for at most `TURN` output tokens, and holds what the session has
-//!   said so far plus that cap; it is refused, closing the client with 1008,
-//!   when the wallet cannot cover it, and its `response.done` settles what
-//!   it cost. A turn the provider starts on its own (server voice
-//!   detection) is held when its `response.created` passes, and cut with
-//!   1008 if the wallet cannot cover it. So parallel sessions cannot
-//!   overspend one wallet, as long as the provider keeps to the cap (a
-//!   turn the provider starts itself has none, and settles at what it used)
-//!   and the text is what it costs (audio and the provider's own defaults
-//!   are not counted). The key may come in any credential form.
+//!   client's wallet (the ledger SDK). The session is capped before the
+//!   client says anything (an input wrap opens it with a `session.update`
+//!   of `max_output_tokens`, and caps the client's own), and a
+//!   `response.create` is rewritten to ask for at most `TURN` output tokens.
+//!   A turn holds what the session has said so far (every string that enters
+//!   its context, a tool's `output` and `arguments` included, but not audio)
+//!   plus that cap; it is refused, closing the client with 1008, when the
+//!   wallet cannot cover it, and its `response.done` settles what it cost. A
+//!   turn the provider starts on its own (server voice detection) is held
+//!   when its `response.created` passes, and cut with 1008 if the wallet
+//!   cannot cover it. A `response.create` the provider refuses with an
+//!   `error` is released. So parallel sessions cannot overspend one wallet,
+//!   provided the provider honours `max_output_tokens` and the gateway saw
+//!   the context (what the provider adds on its own, such as default
+//!   instructions, and the tokens of audio it reads, are not counted). The
+//!   key may come in any credential form.
 //! - `Vet` (use case 3 on a session): a remote classifier judges each thing
 //!   the client says before the provider reads it; a refusal closes the
 //!   session with the fault's close code. Both are input wraps: async work
@@ -117,6 +122,8 @@ fn edit_texts(event: &mut Value, keys: &[&str], edit: &mut dyn FnMut(&mut String
 const SAID: &[&str] = &["text", "instructions"];
 /// What the provider says whole, and what it says in tool arguments.
 const WRITTEN: &[&str] = &["text", "transcript", "arguments", "instructions"];
+/// Every string that enters a session's context, either way: what a hold counts.
+const CONTEXT: &[&str] = &["text", "transcript", "arguments", "instructions", "output"];
 
 /// Restores placeholders in the provider's events. A delta is held back where
 /// a placeholder may begin, per item; a `*.done` event, or the end, releases
@@ -429,8 +436,9 @@ struct Turns {
     bytes: Amount,
     /// Holds of turns not yet done, oldest first, with what each holds.
     holds: VecDeque<(HoldId, Amount)>,
-    /// How many of them have not begun (no `response.created` yet).
-    unbegun: usize,
+    /// The holds of `response.create`s that have not begun (no
+    /// `response.created` yet), oldest first, by the event's id.
+    unbegun: VecDeque<(String, HoldId)>,
 }
 
 impl<L: Ledger> Wallet<L> {
@@ -439,7 +447,7 @@ impl<L: Ledger> Wallet<L> {
     /// cover it. The hold is recorded before the ledger is asked, so a client
     /// that leaves during the wait still has it settled (to no effect if it
     /// never landed).
-    async fn hold(&self) -> Result<(), Fault> {
+    async fn hold(&self) -> Result<HoldId, Fault> {
         let amount = lock(&self.turns).bytes + TURN;
         let hold = HoldId::new();
         lock(&self.turns).holds.push_back((hold, amount));
@@ -447,14 +455,16 @@ impl<L: Ledger> Wallet<L> {
             .ledger
             .reserve(&hold, std::slice::from_ref(&self.key), amount, HOUR)
             .await;
-        held.map_err(|fault| fault.with(CloseCode(1008)))
+        held.map_err(|fault| fault.with(CloseCode(1008)))?;
+        Ok(hold)
     }
 
     /// What the client says is counted; a `response.create` is capped at
-    /// `TURN` output tokens and holds a turn first.
+    /// `TURN` output tokens and holds a turn first; a `session.update` is
+    /// capped the same, for the turns the provider starts.
     async fn before(self: Arc<Self>, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
         let mut said = 0;
-        edit_texts(&mut event.json, SAID, &mut |text| said += text.len());
+        edit_texts(&mut event.json, CONTEXT, &mut |text| said += text.len());
         lock(&self.turns).bytes += Amount::try_from(said).unwrap_or_default();
         if event.json["type"] == "response.create" {
             let response = &mut event.json["response"];
@@ -465,8 +475,20 @@ impl<L: Ledger> Wallet<L> {
             if cap.as_i64().is_none_or(|n| n > TURN) {
                 *cap = TURN.into();
             }
-            self.hold().await?;
-            lock(&self.turns).unbegun += 1;
+            // The provider's `error` names the event it refuses by this id.
+            let id = match event.json["event_id"].as_str() {
+                Some(id) => id.to_owned(),
+                None => format!("reserve_{}", HoldId::new()),
+            };
+            event.json["event_id"] = id.clone().into();
+            let hold = self.hold().await?;
+            lock(&self.turns).unbegun.push_back((id, hold));
+        } else if event.json["type"] == "session.update" {
+            // The cap of the turns the provider starts on its own.
+            let cap = &mut event.json["session"]["max_output_tokens"];
+            if cap.as_i64().is_none_or(|n| n > TURN) {
+                *cap = TURN.into();
+            }
         }
         Ok(event)
     }
@@ -479,16 +501,27 @@ impl<L: Ledger> Wallet<L> {
     async fn after(self: Arc<Self>, event: ProviderEvent) -> Result<ProviderEvent, Fault> {
         let kind = event.json["type"].as_str().unwrap_or_default();
         if kind == "response.created" {
-            let asked = {
-                let mut turns = lock(&self.turns);
-                let asked = turns.unbegun > 0;
-                turns.unbegun = turns.unbegun.saturating_sub(1);
-                asked
-            };
+            let asked = lock(&self.turns).unbegun.pop_front().is_some();
             if !asked {
                 self.hold().await?;
             }
-        } else if kind.ends_with(".delta") {
+        } else if kind == "error" {
+            // A `response.create` the provider refused never ran: its hold
+            // is released, not charged at the session's end.
+            let id = event.json["error"]["event_id"].as_str().unwrap_or_default();
+            let refused = {
+                let mut turns = lock(&self.turns);
+                let at = turns.unbegun.iter().position(|(asked, _)| asked == id);
+                let refused = at.and_then(|at| turns.unbegun.remove(at));
+                if let Some((_, hold)) = &refused {
+                    turns.holds.retain(|(held, _)| held != hold);
+                }
+                refused
+            };
+            if let Some((_, hold)) = refused {
+                self.ledger.settle(&hold, 0).await?;
+            }
+        } else if kind.ends_with(".delta") && !kind.ends_with("audio.delta") {
             let delta = event.json["delta"].as_str().unwrap_or_default().len();
             lock(&self.turns).bytes += Amount::try_from(delta).unwrap_or_default();
         } else if kind == "response.done" {
@@ -515,12 +548,10 @@ impl<L: Ledger> Wallet<L> {
 
 /// The account a credential names: the token of a bearer, of a key in the
 /// query (`api_key=sk-..`) or of a subprotocol (`openai-insecure-api-key.sk-..`);
-/// a real one looks the key up. `Sec-WebSocket-Key` is the handshake's nonce,
-/// which the adapter lifts as a "key", so it is skipped.
+/// a real one looks the key up.
 fn account(credential: &Credential) -> Option<String> {
-    let headers = credential.headers().iter();
-    let headers = headers.filter(|(name, _)| *name != "sec-websocket-key");
-    let values = headers.filter_map(|(_, value)| value.to_str().ok());
+    let values = credential.headers().iter();
+    let values = values.filter_map(|(_, value)| value.to_str().ok());
     let value = values.chain(credential.query()).next()?;
     let token = value.rsplit([' ', '.', '=']).next();
     Some(token.unwrap_or(value).to_owned())
@@ -545,10 +576,22 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
         });
         let asks = wallet.clone();
         cx.wrap(move |events: Events<ClientEvent>| {
-            events.and_then(move |event| asks.clone().before(event))
+            // The session is capped before the client says anything, so the
+            // turns the provider starts (voice detection) are bounded too.
+            let open = json!({ "type": "session.update", "session": { "type": "realtime" } });
+            let open = stream::once(async move { Ok(ClientEvent::new(open)) });
+            open.chain(events)
+                .and_then(move |event| asks.clone().before(event))
         })?;
         let answers = wallet.clone();
         cx.wrap(move |events: Events<ProviderEvent>| {
+            // The provider's answer to the session's cap is not the client's.
+            let mut ours = true;
+            let events = events.try_filter(move |event| {
+                let mine = ours && event.json["type"] == "session.updated";
+                ours &= !mine;
+                std::future::ready(!mine)
+            });
             events.and_then(move |event| answers.clone().after(event))
         })?;
         cx.extensions_mut().insert(wallet);

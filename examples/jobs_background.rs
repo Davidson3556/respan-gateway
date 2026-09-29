@@ -26,12 +26,16 @@
 //!   (which also picks the deployment the chained turn goes to) and every
 //!   `/v1/responses/{id}...` path (`GET`, `DELETE`, `/cancel`,
 //!   `/input_items`), with the provider's id in what goes out and the
-//!   signed one in what comes back.
+//!   signed one in what comes back, the `previous_response_id` an answer
+//!   echoes included. The endpoints under the prefix that are not ids
+//!   (`/v1/responses/input_tokens`) pass through to the default deployment.
 //!
 //! The format is `rest`'s: its input carries the method and path, so what a
 //! plugin changes in it, the encoder writes.
 //!
-//! **Not built:** a durable store (this one is in memory, and forgets
+//! **Not built:** streaming (`"stream": true`, or `?stream=true`, is refused
+//! with 400: mapping ids in an event stream needs an event-aware filter), a
+//! durable store (this one is in memory, and forgets
 //! nothing), a webhook when a job finishes, holding the tenant's budget
 //! for a job for as long as it runs, and ids of a job still running: the
 //! provider has not named it yet, so its `/cancel` and a
@@ -140,27 +144,28 @@ fn answer(body: impl Into<Bytes>) -> Option<Response> {
     Some(Response::stream(stream::iter([Ok(body)])))
 }
 
-/// `got` with the signed `id` for the provider's, which is returned.
-fn show(got: &mut Got<Rest>, id: &str) -> Result<Option<String>, Fault> {
-    let mut body: Value = serde_json::from_slice(&got.0)
-        .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
-    let native = body["id"].as_str().map(str::to_owned);
-    if native.is_some() {
-        body["id"] = id.into();
-        *got = Got::new(body.to_string());
-    }
-    Ok(native)
-}
+/// The Responses endpoints under `/v1/responses/` that are not ids.
+const ENDPOINTS: [&str; 1] = ["input_tokens"];
 
 fn not_found() -> Fault {
     Fault::not_found("no such response")
 }
 
 /// The signed id at the start of a path `/v1/responses/{id}...`, and the rest
-/// of the path (`/cancel`, `?stream=true`, or nothing).
+/// of the path (`/cancel`, `?background=true`, or nothing).
 fn split(path: &str) -> Option<(&str, &str)> {
     let path = path.strip_prefix("/v1/responses/")?;
-    Some(path.split_at(path.find(['/', '?']).unwrap_or(path.len())))
+    let (id, rest) = path.split_at(path.find(['/', '?']).unwrap_or(path.len()));
+    (!ENDPOINTS.contains(&id)).then_some((id, rest))
+}
+
+/// Whether a request asks for a streamed answer, in its body or its query.
+fn streams(cx: &ClientContext, body: &Value) -> bool {
+    let asked = cx.extensions().get::<Asked>();
+    let query = asked
+        .and_then(|asked| asked.uri.query())
+        .unwrap_or_default();
+    body["stream"] == true || query.split('&').any(|pair| pair == "stream=true")
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -168,6 +173,26 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Jobs {
+    /// `got` with the signed `id` for the provider's, which is returned, and
+    /// the signed id for the `previous_response_id` it echoes.
+    fn show(&self, got: &mut Got<Rest>, id: &str) -> Result<Option<String>, Fault> {
+        let mut body: Value = serde_json::from_slice(&got.0)
+            .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
+        let native = body["id"].as_str().map(str::to_owned);
+        if native.is_some() {
+            body["id"] = id.into();
+        }
+        if let Some(previous) = body["previous_response_id"].as_str() {
+            let natives = lock(&self.0.natives);
+            let signed = natives.iter().find(|(_, native)| *native == previous);
+            if let Some((signed, _)) = signed {
+                body["previous_response_id"] = signed.as_str().into();
+            }
+        }
+        *got = Got::new(body.to_string());
+        Ok(native)
+    }
+
     /// The provider's id for a signed one, if it has named it.
     fn native(&self, id: &str) -> Option<String> {
         lock(&self.0.natives).get(id).cloned()
@@ -218,7 +243,8 @@ impl Jobs {
             Ok(())
         })?;
         let id = id.to_owned();
-        cx.filter(move |got: &mut Got<Rest>| show(got, &id).map(drop))?;
+        let jobs = self.clone();
+        cx.filter(move |got: &mut Got<Rest>| jobs.show(got, &id).map(drop))?;
         Ok(None)
     }
 
@@ -233,7 +259,7 @@ impl Jobs {
         cx.set_target(DEPLOYMENTS[deployment]);
         let jobs = self.clone();
         cx.filter(move |got: &mut Got<Rest>| {
-            if let Some(native) = show(got, &id)? {
+            if let Some(native) = jobs.show(got, &id)? {
                 lock(&jobs.0.natives).insert(id.clone(), native);
             }
             Ok(())
@@ -308,6 +334,11 @@ impl Plugin for Jobs {
                 verify(&id, tenant(cx)).ok_or_else(|| Fault::internal("bad job id"))?;
             self.chain(cx, &body)?;
             return self.relay(cx, id, deployment);
+        }
+        if streams(cx, &body) {
+            return Err(Fault::bad_request(
+                "streaming is not supported by this example",
+            ));
         }
         if let Some((id, rest)) = split(&ask.path) {
             return self.route(cx, &ask, id, rest);

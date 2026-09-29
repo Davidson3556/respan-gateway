@@ -396,3 +396,65 @@ async fn l5_idle_waits_for_a_background_job_on_a_multi_threaded_runtime() -> Res
     );
     Ok(())
 }
+
+/// A streamed request is refused, clearly, before any call: on a post, on a
+/// background post, and on a poll.
+#[tokio::test(start_paused = true)]
+async fn a_streamed_request_is_refused_before_any_call() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let requests = [
+        request("POST", "/v1/responses", r#"{"stream":true,"input":"hi"}"#),
+        request(
+            "POST",
+            "/v1/responses",
+            r#"{"stream":true,"background":true}"#,
+        ),
+        request("GET", "/v1/responses/resp_0?stream=true", ""),
+    ];
+    for req in requests {
+        let (status, _, body) = read_whole(serve(&gateway, req).await.0).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+        let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+        assert!(body.contains("streaming is not supported"), "{body}");
+    }
+    assert!(mock.sent().is_empty());
+    Ok(())
+}
+
+/// A chained response echoes its `previous_response_id`: the client sees
+/// the signed id it sent, never the provider's.
+#[tokio::test(start_paused = true)]
+async fn an_echoed_previous_response_id_is_signed_too() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(WEST, mock::json(StatusCode::OK, r#"{"id":"native-1"}"#));
+    mock.reply(
+        WEST,
+        mock::json(
+            StatusCode::OK,
+            r#"{"id":"native-2","previous_response_id":"native-1"}"#,
+        ),
+    );
+    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let first = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
+    let chained = json!({ "previous_response_id": first["id"], "input": "more" }).to_string();
+    let second = send(&gateway, request("POST", "/v1/responses", &chained)).await?;
+    assert_ne!(second["id"], "native-2");
+    assert_eq!(second["previous_response_id"], first["id"]);
+    Ok(())
+}
+
+/// An endpoint under the prefix that is not an id passes through to the
+/// default deployment.
+#[tokio::test(start_paused = true)]
+async fn an_endpoint_under_the_prefix_that_is_not_an_id_passes_through() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    let counted = r#"{"object":"response.input_tokens","input_tokens":3}"#;
+    mock.reply(WEST, mock::json(StatusCode::OK, counted));
+    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let req = request("POST", "/v1/responses/input_tokens", r#"{"input":"hi"}"#);
+    let answer = send(&gateway, req).await?;
+    assert_eq!(answer["input_tokens"], 3);
+    assert_eq!(mock.sent().len(), 1);
+    Ok(())
+}
