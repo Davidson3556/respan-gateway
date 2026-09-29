@@ -22,7 +22,7 @@ use crate::{ClientContext, Fault, ProviderContext, Response};
 /// })?;
 /// ```
 ///
-/// To race calls, answer with the first read ([`Response::until_content`]
+/// To race calls, reply with the first read ([`Response::until_content`]
 /// or [`Response::until_end`]) and drop the others, which end abandoned. To
 /// tell the winner in `on_provider_end`, give each call a flag:
 ///
@@ -45,7 +45,7 @@ use crate::{ClientContext, Fault, ProviderContext, Response};
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
     /// The client edge, once per request, at its head. `Ok(None)` passes;
-    /// `Ok(Some(response))` answers, skipping the rest; `Err` refuses. If all
+    /// `Ok(Some(response))` replies, skipping the rest; `Err` refuses. If all
     /// pass, the target is called; with none, the request is refused
     /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {

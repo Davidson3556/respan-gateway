@@ -86,7 +86,7 @@ impl Gateway {
 
     /// Register `plugin` as `name`; its hooks run on every request and call,
     /// after those of the plugins registered before it, on both edges. A
-    /// plugin that answers skips the ones after it, so register it after
+    /// plugin that replies skips the ones after it, so register it after
     /// every plugin that must see each request. `Err` with
     /// [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
     pub fn plugin(
@@ -131,11 +131,11 @@ impl Gateway {
     /// Serve `wire` in the first format served ([`Gateway::serve`]) that
     /// [`accepts`](Format::accepts) it: resolves once its client edge has
     /// its reply, with a future of how the session ended, as
-    /// [`Plugin::on_client_end`] gets it, resolved once the answer's end is
+    /// [`Plugin::on_client_end`] gets it, resolved once the reply's end is
     /// out, before end hooks finish. The caller built `wire`, so it knows
     /// its type; a format of another wire type never accepts it.
     ///
-    /// If no format accepts it, the wire is dropped, unanswered, and the end
+    /// If no format accepts it, the wire is dropped with no reply, and the end
     /// is `Err`, for the adapter to write plainly:
     /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND), or
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) if one panicked. The
@@ -189,8 +189,8 @@ impl Gateway {
             None => {
                 // A plugin panic is refused like a failure.
                 let ran = AssertUnwindSafe(run(&self.inner, &mut hooks)).catch_unwind();
-                let answer = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-                session::reply(&format, answer, hooks).await
+                let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+                session::reply(&format, resp, hooks).await
             }
         };
         // An edge that dropped its reply ends the session abandoned, but

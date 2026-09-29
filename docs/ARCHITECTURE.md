@@ -11,7 +11,7 @@ record.
 
 ```
                 control plane: on_client · cx.call · on_provider · end hooks
-                   (decide, race, fall back, answer, refuse, splice)
+                   (decide, race, fall back, reply, refuse, splice)
                                         │
  client ══ Wire ══╗                     ▼                    ╔══ Dialer ══ provider
                   ║ client edge   ┌───────────┐  provider edge║
@@ -43,7 +43,7 @@ connection: the client edge is accepted, the provider edge is dialed.
    after its body is read (no inputs follow), a session at once (inputs
    follow). It gives the client's origin and its inputs, if any. `Err` (a body that broke) is refused before any plugin.
    The result is a `ClientContext`.
-4. Each plugin's `on_client`, in registration order: pass, answer (the rest
+4. Each plugin's `on_client`, in registration order: pass, reply (the rest
    are skipped) or refuse. A plugin may add filters, `set_target`, `call`
    and `take_inputs`; no plugin touches a head.
 5. If all pass, `cx.call(target)`: each plugin's `on_provider` (an `Err`
@@ -54,13 +54,13 @@ connection: the client edge is accepted, the provider edge is dialed.
    may hold the response (`until_content`, `until_end`), read it
    (`outputs`), or send it.
 7. The client-edge filters edit what is sent; the gateway resolves the
-   `reply` future it gave `accept`, with the
-   answer (the provider's origin on a relay, and its outputs or a refusal)
-   and `Ended`. The client edge writes the head and body and calls `Ended`
-   with how the answer ended.
+   `reply` future it gave `accept` with the reply (the provider's origin on
+   a relay, and the outputs or a refusal) and `Ended`. The client edge
+   writes the reply's head and body and calls `Ended` with how the reply
+   ended.
 8. `Ended` ends any open calls `abandoned`, then each call's
    `on_provider_end` runs, then `on_client_end`. `handle`'s end future
-   resolves once the answer's end is out, before end hooks finish.
+   resolves once the reply's end is out, before end hooks finish.
 
 Output filters run provider edge first and the last added first; input
 filters the first added first: a plugin sees inputs after earlier plugins,
@@ -124,9 +124,9 @@ The rules, in full in the rustdoc of `Format`:
    `Ok((origin, Err(fault)))` (answered and refused, which
    `is_refused` reports) or `Ok((origin, Ok(outputs)))` (open).
 3. **The client edge owns its head timing**; see below.
-4. **The client edge calls `Ended` exactly when its answer's end is out**,
+4. **The client edge calls `Ended` exactly when its reply's end is out**,
    or drops it: dropped, the session ends `abandoned`. `Ended(Err(f))` also
-   ends the answer's call with `f`. Outputs dropped unread end their call as
+   ends the reply's call with `f`. Outputs dropped unread end their call as
    its end, if ready, says, else `abandoned`.
 5. **What a provider edge's outputs have ready at once is one batch**: the
    call's filters see all of it before the client's see its first, so a
@@ -147,7 +147,7 @@ sight: an HTTP body's frames reach the transport, not the gateway
 belongs to the kind (`Conversation.model`); its place on the wire is the
 format's.
 
-**Head timing, per edge.** A refusal is written as one, a complete answer.
+**Head timing, per edge.** A refusal is written as one, a complete reply.
 HTTP's client edge writes a one-shot request's head with its first bytes, so
 a failure before any is still a refusal; `Encoder::open` opens a quiet
 stream at once; an upgrade's head goes when `reply` resolves. HTTP's
@@ -185,7 +185,7 @@ changed gets `opening: None`: the driver writes the origin's head and raw
 body unread, and a changed value is written into its own bytes by the
 format. The provider's origin returns to the client edge only on a relay, so
 the client's format writes the provider's head; a translated call is written
-from a fresh head both ways. A cached answer (`Response::stream` of stored
+from a fresh head both ways. A cached reply (`Response::stream` of stored
 values) keeps each value's bytes for a client of that format under a fresh
 head.
 

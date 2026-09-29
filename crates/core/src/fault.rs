@@ -20,7 +20,7 @@ pub mod codes {
     /// The client's request is not one the format or kind can take.
     pub const BAD_REQUEST: &str = "bad_request";
     /// Nothing takes the request: no format accepts it, or no plugin
-    /// answers and there is no target.
+    /// replies and there is no target.
     pub const NOT_FOUND: &str = "not_found";
     /// A provider failed: unreachable, broken off, not in its format, or an
     /// error with no code of its own.

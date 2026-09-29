@@ -69,7 +69,7 @@ the provider edge, each a format, own them
   served, plugins and a default target, each registered by value.
 - **Plugin**: four hooks, `on_client` and `on_client_end` once per
   request, `on_provider` and `on_provider_end` once per call, in
-  registration order. `on_client` passes (`Ok(None)`), answers or refuses.
+  registration order. `on_client` passes (`Ok(None)`), replies or refuses.
 - **Filter**: edits a request's inputs or a response's outputs as they
   stream; its type says which. It sees every message.
 - **Format**: one protocol's view of a kind, such as OpenAI Chat, and the

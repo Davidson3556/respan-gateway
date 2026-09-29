@@ -19,7 +19,7 @@ pub type Origin = Arc<dyn Any + Send + Sync>;
 /// why there are none.
 pub type Half<T> = (Option<Origin>, Result<Events<T>, Fault>);
 
-/// Called by a client edge once its answer's end is out, with how it ended;
+/// Called by a client edge once its reply's end is out, with how it ended;
 /// dropped uncalled, the session ends
 /// [`codes::ABANDONED`](crate::codes::ABANDONED).
 pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
@@ -60,11 +60,11 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 ///    `Ok((origin, Err(fault)))`, which the gateway sends as a refusal and a
 ///    call's [`is_refused`](crate::ProviderContext::is_refused) says.
 /// 3. The client edge owns its head timing: a refusal is written as one; an
-///    open answer's head when the edge decides, such as with its first
+///    open reply's head when the edge decides, such as with its first
 ///    bytes, a failure before any written as a refusal, or at once for a
 ///    session.
-/// 4. The client edge calls [`Ended`] exactly when its answer's end is out,
-///    or drops it. `Ended(Err(fault))` also ends the answer's call with
+/// 4. The client edge calls [`Ended`] exactly when its reply's end is out,
+///    or drops it. `Ended(Err(fault))` also ends the reply's call with
 ///    `fault`. Outputs dropped unread end their call as their end, if it is
 ///    ready, says, else abandoned. `Ended` dropped first ends the session
 ///    abandoned, and the outputs then end `Err` abandoned.
@@ -116,7 +116,7 @@ pub trait Format: Send + Sync + 'static {
     /// The client edge: resolves once the client's request is in, with its
     /// origin and the inputs that follow it (`None`: none do; `Err`: the
     /// request broke, and is refused before any plugin). `reply` resolves
-    /// with what to send back, the answer and [`Ended`]; when to write the
+    /// with what to write back, the reply and [`Ended`]; when to write its
     /// head is this edge's decision. By default it refuses, never awaiting
     /// `reply`, for a format nothing [`accepts`](Format::accepts).
     #[allow(clippy::type_complexity)]

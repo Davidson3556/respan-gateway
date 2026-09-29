@@ -265,7 +265,7 @@ impl Outgoing {
             if self.done {
                 return None;
             }
-            // A panic reading or filtering ends the call and the answer.
+            // A panic reading or filtering ends the call and the reply.
             if AssertUnwindSafe(self.step()).catch_unwind().await.is_err() {
                 let fault = Fault::internal(PANICKED);
                 self.source.end(Err(fault.clone()));
