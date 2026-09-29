@@ -15,8 +15,9 @@ pub type Events<T> = BoxStream<'static, Result<T, Fault>>;
 /// back only then.
 pub type Origin = Arc<dyn Any + Send + Sync>;
 
-/// One direction of a two-way stream: its head's origin, and its events or
-/// why there are none.
+/// Outputs under a head: its origin, and the outputs or why there are none.
+/// A provider edge's answer ([`Format::dial`]), and the reply a client edge
+/// writes ([`Format::accept`]).
 pub type Half<T> = (Option<Origin>, Result<Events<T>, Fault>);
 
 /// Called by a client edge once its reply's end is out, with how it ended;
