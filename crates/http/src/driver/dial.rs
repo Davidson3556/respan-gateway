@@ -51,9 +51,9 @@ impl Whose {
 ///   a 101 to a call that asked to switch protocols, is read whole before
 ///   this resolves, so its codec's failure before any output resolves
 ///   `Ok((origin, Err(fault)))`. It is read up to `ERROR_BODY_CAP` bytes
-///   (1 MiB): past it the body ends truncated after the frames read, so a
-///   body up to it is relayed byte for byte and a huge one cannot exhaust
-///   memory. For another, what is ready of it when the
+///   (1 MiB): past it the body ends after the frames read, as a shorter
+///   body would, so the answer keeps its verdict, a body up to it is
+///   relayed byte for byte and a huge one cannot exhaust memory. For another, what is ready of it when the
 ///   transport returns is read, waiting for nothing.
 pub fn dial<C: Codec + Clone>(
     codec: &C,

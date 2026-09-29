@@ -88,9 +88,10 @@ impl<T: Send + 'static> Reader<T> {
     /// decoded: its frames are kept apart, to be decoded as they came.
     ///
     /// At most [`ERROR_BODY_CAP`] bytes are kept: once the frames read pass
-    /// it, the body ends [`truncated`](Fault::truncated) after them (the
-    /// frame that passed it is kept whole), so the decoder still reads what
-    /// came, and a body up to the cap is kept byte for byte.
+    /// it (the frame that passed it is kept whole) the body ends, cleanly, as
+    /// if the provider had sent no more. The decoder reads a shortened body
+    /// as it would a whole one, so an error answer keeps its verdict; a body
+    /// up to the cap is kept byte for byte.
     pub(crate) async fn buffer(&mut self) {
         let mut frames = Vec::new();
         let mut kept = 0;
@@ -98,11 +99,7 @@ impl<T: Send + 'static> Reader<T> {
             let broke = frame.is_err();
             kept += frame.as_ref().map_or(0, Bytes::len);
             frames.push(frame);
-            if broke {
-                break;
-            }
-            if kept > ERROR_BODY_CAP {
-                frames.push(Err(Fault::truncated()));
+            if broke || kept > ERROR_BODY_CAP {
                 break;
             }
         }

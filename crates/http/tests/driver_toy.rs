@@ -863,3 +863,29 @@ async fn a_filter_edited_input_still_relays_but_a_calls_own_input_does_not() {
     let own = provider_saw(Asks).await;
     assert_eq!(own, [(false, "own prompt<END>".to_string())]);
 }
+
+/// L2-1: a HEAD whose provider answer is complete and ready at once: the
+/// client got all a HEAD can carry, yet how does the session end?
+#[tokio::test(flavor = "multi_thread")]
+async fn a_complete_bodiless_answer_ends_ok() {
+    let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "DONE"])))).boxed());
+    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
+    let req = http::Request::builder()
+        .method(http::Method::HEAD)
+        .uri("/x");
+    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    assert_eq!(resp.status(), 200);
+    let got = read(Some(resp)).await;
+    let end = ended.await;
+    gw.idle().await;
+    assert_eq!(
+        (code(&end), codes(calls.all()), codes(outcomes.all())),
+        (
+            "ok".to_string(),
+            vec!["ok".to_string()],
+            vec!["ok".to_string()]
+        ),
+        "client read {got:?}"
+    );
+}

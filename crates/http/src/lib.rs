@@ -293,14 +293,30 @@ pub(crate) fn depart(
         }
         Ok(resp) => {
             let (mut head, mut body) = resp.into_parts();
+            let length = head.headers.get(CONTENT_LENGTH).cloned();
             outgoing(&mut head);
             if bodiless(&to.method, head.status) {
+                // A HEAD's or a 304's `Content-Length` is the provider's
+                // for the body it would send (RFC 9110 8.6); a 204 has none.
+                let kept = to.method == Method::HEAD || head.status == StatusCode::NOT_MODIFIED;
+                if let Some(length) = length.filter(|_| kept) {
+                    head.headers.insert(CONTENT_LENGTH, length);
+                }
                 // A hop drops a bodiless answer's body once its head is out, so
                 // that is when the client leaves. Read what is ready now, so a
                 // refusal's end is told, then drop the rest: the session ends
                 // with its client (rule 4), never when a provider's stream
-                // does.
-                while let Some(Some(_)) = body.frame().now_or_never() {}
+                // does. An output says `Pending` once before each frame
+                // (rule 5), so ready is a second `Pending` in a row.
+                let mut yielded = false;
+                loop {
+                    match body.frame().now_or_never() {
+                        Some(Some(_)) => yielded = false,
+                        Some(None) => break,
+                        None if yielded => break,
+                        None => yielded = true,
+                    }
+                }
                 body = full(Bytes::new());
             }
             http::Response::from_parts(head, body)
