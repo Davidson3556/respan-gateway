@@ -365,3 +365,34 @@ async fn the_paths_under_a_signed_id_reach_the_provider_with_its_own() -> Result
     assert_eq!(status, StatusCode::NOT_FOUND);
     Ok(())
 }
+
+/// `idle` after a background POST: the job's answer must be pollable, as
+/// the example's `main` and doc promise. On a multi-threaded runtime the
+/// spawned task that calls `serve` may not have run when the POST's
+/// request ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn l5_idle_waits_for_a_background_job_on_a_multi_threaded_runtime() -> Result<(), Fault> {
+    let mut early = 0;
+    for _ in 0..200 {
+        let mock = MockTransport::new();
+        let done = r#"{"id":"native-1","output":"done"}"#;
+        mock.reply(WEST, mock::json(StatusCode::OK, done));
+        let jobs = Jobs::default();
+        let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+        let queued = send(
+            &gateway,
+            request("POST", "/v1/responses", r#"{"background":true}"#),
+        )
+        .await?;
+        gateway.idle().await;
+        let polled = send(&gateway, get(queued["id"].as_str().unwrap_or_default())).await?;
+        if polled["output"] != "done" {
+            early += 1;
+        }
+    }
+    assert_eq!(
+        early, 0,
+        "idle resolved before the job was done in {early}/200"
+    );
+    Ok(())
+}

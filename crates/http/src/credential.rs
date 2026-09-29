@@ -209,7 +209,9 @@ pub(crate) fn take_protocol_keys(headers: &mut HeaderMap, markers: bool) -> Opti
         .filter(|k| !k.is_empty())
 }
 
-/// Whether a header or query parameter `name` names a credential.
+/// Whether a header or query parameter `name` names a credential. The
+/// WebSocket handshake's own `Sec-WebSocket-*` headers (its `Key` nonce, its
+/// `Accept`) are the connection's, not a secret.
 pub(crate) fn is_credential(name: &str) -> bool {
     const CREDENTIALS: [&str; 9] = [
         "authorization",
@@ -224,7 +226,9 @@ pub(crate) fn is_credential(name: &str) -> bool {
     ];
     let name = crate::percent_decode(name).to_ascii_lowercase();
     let last = name.rsplit(['-', '_']).next().unwrap_or_default();
-    !name.contains("idempotency") && CREDENTIALS.contains(&last)
+    !name.contains("idempotency")
+        && !name.starts_with("sec-websocket-")
+        && CREDENTIALS.contains(&last)
 }
 
 #[cfg(test)]
@@ -249,6 +253,9 @@ mod tests {
                 ("authorization", "Bearer sk-1"),
                 ("x-api-key", "k2"),
                 ("idempotency-key", "i"),
+                ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+                ("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+                ("sec-websocket-extensions", "permessage-deflate"),
                 ("x-custom", "c"),
             ],
         );
@@ -261,6 +268,11 @@ mod tests {
         assert!(parts.headers.get("authorization").is_none());
         assert!(parts.headers.get("x-api-key").is_none());
         assert_eq!(parts.headers["idempotency-key"], "i");
+        for handshake in ["key", "accept", "extensions"] {
+            let name = format!("sec-websocket-{handshake}");
+            assert!(parts.headers.contains_key(&name), "{name} was lifted");
+            assert!(credential.get(&name).is_none(), "{name} is a credential");
+        }
         assert_eq!(parts.uri, "/v1/x?alt=sse");
         let debug = format!("{credential:?}");
         assert!(!debug.contains("sk-1") && debug.contains("authorization"));

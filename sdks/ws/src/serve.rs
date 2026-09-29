@@ -219,16 +219,24 @@ async fn hear(
             Some(Ok(Message::Binary(_))) => {
                 let _ = tell.send(Told::Binary);
                 // The client's own end, which no one waits for: 1003 says why.
-                let _ = input.send(Err(Fault::abandoned())).await;
+                end_input(&input);
                 return Heard::Binary;
             }
             Some(Ok(_)) => {}
             Some(Err(_)) | None => {
-                let _ = input.send(Err(Fault::abandoned())).await;
+                end_input(&input);
                 return Heard::Dropped;
             }
         }
     }
+}
+
+/// End `input` with `abandoned`, at once: a fresh sender always has a slot,
+/// so this never waits for the gateway to read past what is still pending
+/// (an input wrap's wait), which would keep the session alive, and its
+/// provider fed, after the client left.
+fn end_input(input: &mpsc::Sender<Result<Bytes, Fault>>) {
+    let _ = input.clone().try_send(Err(Fault::abandoned()));
 }
 
 /// The response's frames as text messages, then a Close: 1000 for a clean

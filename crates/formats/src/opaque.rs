@@ -88,8 +88,8 @@ pub fn request_encoder<F: 'static>(
 ) -> Box<dyn Encoder<Sent<F>, RequestHead>> {
     let mut head = crate::call_head(client);
     if client.is_some() {
-        // The path the client's request was matched by, not its spelling.
-        let path = crate::canonical_path(head.uri.path());
+        // The path the client's request was matched by: its segments, as spelled.
+        let path = crate::forwarded_path(head.uri.path());
         crate::set_path(&mut head, &path);
     }
     let head = move |first: Option<&Sent<F>>| {

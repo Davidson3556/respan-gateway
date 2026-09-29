@@ -1067,3 +1067,72 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
         assert_eq!(done.load(Ordering::SeqCst), 1, "round {round}");
     }
 }
+
+/// A complete bodiless answer of several small frames, all ready (a plugin's
+/// or an in-process dialer's answer to a HEAD): its end was ready, so it
+/// ends `ok`. (How many ready frames the drain reads is the task's budget.)
+#[tokio::test]
+async fn a_complete_bodiless_answer_of_many_ready_frames_ends_ok() {
+    let transport = fnt(|_| {
+        let frames = (0..8).map(|_| Ok(Bytes::from("a")));
+        let body = stream::iter(frames.chain([Ok(Bytes::from("DONE"))])).boxed();
+        future::ready(Ok(answer(200, body))).boxed()
+    });
+    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
+    let req = http::Request::builder()
+        .method(http::Method::HEAD)
+        .uri("/x");
+    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    assert_eq!(resp.status(), 200);
+    let _ = read(Some(resp)).await;
+    let end = ended.await;
+    gw.idle().await;
+    assert_eq!(
+        (code(&end), codes(calls.all()), codes(outcomes.all())),
+        (
+            "ok".to_string(),
+            vec!["ok".to_string()],
+            vec!["ok".to_string()]
+        )
+    );
+}
+
+/// The same answer with its frames sent apart (each after a yield, as a
+/// source that says `Pending` between outputs does): its end is not ready
+/// when the head goes out (rule 4: outputs dropped unread end their call as
+/// its end, if ready, says, else `abandoned`), however soon the next frame
+/// wakes itself, so it ends `abandoned`.
+#[tokio::test]
+async fn a_bodiless_answer_of_frames_sent_apart_ends_abandoned() {
+    let transport = fnt(|_| {
+        let body = stream::unfold(0, |n| async move {
+            tokio::task::yield_now().await;
+            match n {
+                3000 => Some((Ok(Bytes::from("DONE")), n + 1)),
+                n if n > 3000 => None,
+                n => Some((Ok(Bytes::from("a")), n + 1)),
+            }
+        })
+        .boxed();
+        future::ready(Ok(answer(200, body))).boxed()
+    });
+    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
+    let req = http::Request::builder()
+        .method(http::Method::HEAD)
+        .uri("/x");
+    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    assert_eq!(resp.status(), 200);
+    let _ = read(Some(resp)).await;
+    let end = ended.await;
+    gw.idle().await;
+    assert_eq!(
+        (code(&end), codes(calls.all()), codes(outcomes.all())),
+        (
+            "abandoned".to_string(),
+            vec!["abandoned".to_string()],
+            vec!["abandoned".to_string()]
+        )
+    );
+}
