@@ -156,15 +156,20 @@ pub fn response_encoder<F: 'static>(
 /// is. Named `passthrough`, so a client's key goes only to a provider of
 /// this format.
 ///
-/// It forwards what it never read, so it takes only a path that every
-/// reader reads one way: percent-decoded once, no `;`, `\` or `%`, and no
-/// `.` or `..` segment. Any other path is no format's, a 404: a format
-/// before it matched it by one reading, and a vendor, or a front end before
-/// it, may read another, such as its chat endpoint, which would carry a
-/// chat call past the chat format and its plugins. This refuses paths with
-/// matrix parameters (`;v=1`), a literal `%` (`%25`), a backslash, or a
-/// dot-segment, which no vendor API this relays is known to need; an
-/// escaped `/` (a Bedrock ARN's `%2F`), a `:` or an `@` still pass.
+/// It forwards what it never read, so it takes only a path every reader
+/// reads one way: percent-decoded once, every byte is an ASCII letter or
+/// digit or one of `/ - _ . ~ : @ + = ,` and `!`, and no segment is `.`,
+/// `..` or ends in `.`. Any other path (non-ASCII, a space, a decoded `?`,
+/// `#`, `%`, `;` or `\`, a control character, a quote) is no format's, a
+/// 404: a format before it matched it by one reading, and a vendor, or a
+/// front end before it, may read another, such as its chat endpoint, which
+/// would carry a chat call past the chat format and its plugins.
+///
+/// This is an allowlist because each special character some reader treats
+/// its own way was found one loop at a time: with a list of what is
+/// allowed, a new one is refused by default. No vendor API this relays
+/// needs more, as ids and model names are ASCII: an escaped `/` (a Bedrock
+/// ARN's `%2F`), a `:` or an `@` (Vertex) and base64's `+` and `=` pass.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Passthrough;
 

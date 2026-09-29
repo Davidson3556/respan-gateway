@@ -101,21 +101,33 @@ pub(crate) fn forwarded_path(path: &str) -> String {
     }
 }
 
-/// Whether every reader reads a path one way: percent-decoded once, it
-/// holds no `;`, `\` or `%`, and no segment is `.` or `..`. Readers differ
-/// only in what they do with those: a servlet container cuts `;params`
-/// before it decodes, the URL standard reads a `\` as a slash and resolves
-/// dot-segments before it decodes, nginx decodes first, and a reader that
-/// decodes twice reads a `%25` escape again. Without them, each reads the
+/// The bytes a passthrough path may hold once percent-decoded once, besides
+/// ASCII letters and digits.
+///
+/// This is an allowlist because readers disagree about special characters,
+/// and each loop found another: `;` (servlets), `\` (the URL standard), `%`
+/// (double decoders), case, NUL, a decoded `?` or `#` (a front end that
+/// decodes and reparses as a URL), Unicode case folding. A denylist is
+/// beaten by the next one; here a character some reader treats specially is
+/// refused by default. No vendor path needs more: ids, model names and
+/// versions are ASCII, a Bedrock ARN needs `:` and an escaped `/`, a Vertex
+/// model `@` and `:`, and a base64 id `+`, `/` and `=`. A space is refused
+/// (some readers trim it), as is any non-ASCII byte.
+const PATH_BYTES: &str = "/-_.~:@+=,!";
+
+/// Whether every reader reads a path one way: percent-decoded once, every
+/// character is an ASCII letter or digit or in [`PATH_BYTES`], and no
+/// segment is `.`, `..` or ends in `.` (Windows trims trailing dots). With
+/// no `;`, `\`, `%`, `?`, `#`, control or non-ASCII byte left to read, and no
+/// dot-segment to resolve before or after decoding, every reader reads the
 /// same names, as an escaped `/` splits a name without moving it: what
 /// [`clean_path`] reads.
 pub(crate) fn reads_one_way(path: &str) -> bool {
     let decoded = respan_gateway_http::percent_decode(path);
-    !decoded.contains([';', '\\', '%'])
-        && !decoded.chars().any(|c| c.is_ascii_control())
-        && decoded
-            .split('/')
-            .all(|s| s != "." && s != ".." && !s.ends_with(['.', ' ']))
+    decoded
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || PATH_BYTES.contains(c))
+        && decoded.split('/').all(|s| !s.ends_with('.'))
 }
 
 /// Whether a request's path ends in `suffix`, however it is spelled (see
@@ -378,6 +390,21 @@ mod path_readers {
         decode_first(p).to_ascii_lowercase()
     }
 
+    /// A front end that decodes the path and hands the result on as a URL
+    /// (Apache mod_rewrite `[P]`, CVE-2023-25690): a decoded `?` or `#`
+    /// ends the path.
+    fn query_cut(p: &str) -> String {
+        let decoded = percent_decode(p);
+        let path = decoded.split(['?', '#']).next().unwrap_or_default();
+        dots(path.split('/').map(str::to_owned))
+    }
+
+    /// A router folding case per character with Unicode rules (Java
+    /// `equalsIgnoreCase`, Go `EqualFold`): `\u{17f}` reads `s`, `\u{131}` `i`.
+    fn unicode_case(p: &str) -> String {
+        decode_first(p).to_uppercase().to_lowercase()
+    }
+
     /// Every path of up to three more segments after a chat prefix, from
     /// the spellings readers differ on: for each one passthrough accepts,
     /// each reader of the forwarded path reads what matching read, so none
@@ -420,6 +447,12 @@ mod path_readers {
             "completions.",
             "completions%20",
             "completions%2e",
+            "completions%3Fx",
+            "%3F",
+            "completions%23x",
+            "completion%C5%BF",
+            "complet%C4%B1ons",
+            "%E2%84%AAx",
         ];
         let (mut bad, mut accepted, mut n) = (Vec::new(), 0, 0);
         for prefix in ["/v1/chat", "/v1/chat/completions"] {
@@ -447,6 +480,8 @@ mod path_readers {
                     ("NUL-cut", nul_cut(&sent)),
                     ("trailing-dot", trailing(&sent)),
                     ("case-insensitive", case_insensitive(&sent)),
+                    ("query-cut", query_cut(&sent)),
+                    ("unicode-case", unicode_case(&sent)),
                 ] {
                     if clean_path(&read) != matched {
                         bad.push(format!(
@@ -477,6 +512,15 @@ mod path_readers {
             "/v1/./models",
             "/v1/x/%2e%2E/models",
             "/v1\\models",
+            "/v1/chat/completions%3Fx=1",
+            "/v1/chat/completions%23frag",
+            "/v1/files/%FF",
+            "/v1/completion%C5%BF",
+            "/v1/my%20file",
+            "/v1/a%00b",
+            "/v1/a%22b",
+            "/v1/a*b",
+            "/v1/models.",
         ] {
             assert!(!reads_one_way(path), "{path}");
         }
@@ -484,7 +528,11 @@ mod path_readers {
             "/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A1%3Aapplication-inference-profile%2Fabc/invoke",
             "/v1beta/models/gemini-2.0-flash:generateContent",
             "/v1/models/claude@2024:rawPredict",
-            "/v1//files/%FF/",
+            "/v1//files/file-AbC123/",
+            "/v1/responses/resp_Ab%2B%2Fg==",
+            "/v1/models/ft:gpt-4o:org:custom:9x8y7z",
+            "/api/event_logging/batch",
+            "/a/b~c_d,e!f",
             "/",
         ] {
             assert!(reads_one_way(path), "{path}");

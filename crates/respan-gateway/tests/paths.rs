@@ -115,8 +115,8 @@ target: p
 }
 
 /// Passthrough forwards a path's segments as spelled, and the query as it
-/// came; a path readers could read two ways (a dot-segment, `;`, `\` or a
-/// `%25`, raw or escaped) is no format's, a 404 that reaches no vendor.
+/// came; a path readers could read two ways (a dot-segment, `;`, `\`, a
+/// `%25` or a space, raw or escaped) is no format's, a 404 that reaches no vendor.
 #[tokio::test]
 async fn passthrough_forwards_the_matched_segments() {
     let (base, seen) = recorder().await;
@@ -133,7 +133,7 @@ target: p
     for (sent, forwarded) in [
         ("/v1/%6Dodels", "/pt/v1/%6Dodels"),
         ("/v1/files/file-1?limit=2", "/pt/v1/files/file-1?limit=2"),
-        ("/v1/a%20b", "/pt/v1/a%20b"),
+        ("/v1/a%2Bb%2F=", "/pt/v1/a%2Bb%2F="),
         ("/v1//files/?a=../b;c", "/pt/v1/files?a=../b;c"),
     ] {
         seen.lock().unwrap().clear();
@@ -143,6 +143,7 @@ target: p
     }
     for sent in [
         "/v1\\models",
+        "/v1/a%20b",
         "/v1/./models",
         "/v1/x/../models?a=1",
         "/v1/%2e%2e/models",

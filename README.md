@@ -39,7 +39,12 @@ Each format served recognises its own requests (OpenAI Chat a `POST` to
 `.../chat/completions`, Anthropic Messages to `.../v1/messages`); anything
 else is a 404, unless the `passthrough` format is served last, which relays
 every other request to a vendor unread (see `gateway.example.yaml`), except
-a path readers could read two ways (a dot-segment, `;`, `\` or `%25`).
+a path readers could read two ways. Passthrough takes a path only if, after
+one percent-decode, every byte is an ASCII letter or digit or one of
+`/ - _ . ~ : @ + = , !`, and no segment is `.`, `..` or ends in `.`; anything
+else (non-ASCII, space, `?`, `#`, `%`, `;`, `\`, control characters) is a 404.
+It is an allowlist, so a character some reader treats specially is refused
+until someone shows a vendor needs it.
 
 No config file is needed to sit in front of Claude Code or Codex:
 

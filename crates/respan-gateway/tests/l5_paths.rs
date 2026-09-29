@@ -85,7 +85,7 @@ target: p
         "/storage/v1/b/bkt/o/dir%2Ffile.txt",
         "/v1beta/models/gemini-2.0-flash:generateContent",
         "/v1/projects/p/locations/l/publishers/anthropic/models/claude@2024:rawPredict",
-        "/v1/files/%FF",
+        "/v1/files/file-AbC123%2B%2F==",
     ] {
         seen.lock().unwrap().clear();
         send_raw(&addr, sent).await;
