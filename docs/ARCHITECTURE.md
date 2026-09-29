@@ -26,8 +26,9 @@ Every request and every call is a two-way stream of one kind's events:
 inputs toward the provider, outputs back. A request is the whole exchange
 with one client; a *session* is a request whose inputs stream after its
 head, such as a WebSocket, and a one-shot request has one input. Filters
-wrap those streams (the data plane). Plugins decide where a request goes
-(the control plane). An
+edit those streams value by value, and wraps replace them with a plugin's
+own for work that waits (the data plane). Plugins decide where a request
+goes (the control plane). An
 edge is a [`Format`](../crates/core/src/format.rs) speaking over a
 connection: the client edge is accepted, the provider edge is dialed.
 
@@ -48,8 +49,8 @@ connection: the client edge is accepted, the provider edge is dialed.
    follow). It gives the client's origin and its inputs, if any. `Err` (a body that broke) is refused before any plugin.
    The result is a `ClientContext`.
 4. Each plugin's `on_client`, in registration order: pass, reply (the rest
-   are skipped) or refuse. A plugin may add filters, `set_target`, `call`
-   and `take_inputs`; no plugin touches a head.
+   are skipped) or refuse. A plugin may add filters and wraps,
+   `set_target`, `call` and `take_inputs`; no plugin touches a head.
 5. If all pass, `cx.call(target)`: each plugin's `on_provider` (an `Err`
    fails the call), then `Format::dial` on the provider's format with its
    dialer. What it resolves is the call's `Response`: open, or refused at
@@ -57,18 +58,19 @@ connection: the client edge is accepted, the provider edge is dialed.
 6. The call's provider-edge filters edit each output as decoded. A plugin
    may hold the response (`until_content`, `until_end`), read it
    (`outputs`), or send it.
-7. The client-edge filters edit what is sent; the gateway resolves the
-   `reply` future it gave `accept` with the reply (the provider's origin on
-   a relay, and the outputs or a refusal) and `Ended`. The client edge
+7. The client-edge filters and wraps edit what is sent; the gateway
+   resolves the `reply` future it gave `accept` with the reply (the
+   provider's origin on a relay, and the outputs or a refusal) and
+   `Ended`. The client edge
    writes the reply's head and body and calls `Ended` with how the reply
    ended.
 8. `Ended` ends any open calls `abandoned`, then each call's
    `on_provider_end` runs, then `on_client_end`. `handle`'s end future
    resolves once the reply's end is out, before end hooks finish.
 
-Output filters run provider edge first and the last added first; input
-filters the first added first: a plugin sees inputs after earlier plugins,
-outputs before them.
+Output filters and wraps run provider edge first and the last added first;
+input filters and wraps the first added first: a plugin sees inputs after
+earlier plugins, outputs before them.
 
 ## The core's ten types
 
@@ -77,9 +79,9 @@ outputs before them.
 | `Gateway` | Built by value (`provider`, `serve`, `plugin`, `target`); `handle` and `idle` are its runtime. |
 | `Plugin` | Four hooks: `on_client`, `on_client_end`, `on_provider`, `on_provider_end`. |
 | `Filter<T>` | The one way to edit inputs or outputs as they stream. |
-| `ClientContext` | What `on_client` and its end hook see: the request, its extensions, its filters, `call`, `take_inputs`, and `gateway` for a job that outlives the request. |
+| `ClientContext` | What `on_client` and its end hook see: the request, its extensions, its filters and wraps, `call`, `take_inputs`, and `gateway` for a job that outlives the request. |
 | `ProviderContext` | What a call's hooks see: the provider, format, first input, extensions, filters, `is_sent`, `is_refused`; the request by `&`, so it cannot `call`. |
-| `Call` | A `'static`, `Clone`, `Sync` future, sent when awaited; `with_input` (one input of its own), `with_inputs` (a stream of its own) and `with_extension` shape it. |
+| `Call` | A `'static`, `Clone`, `Sync` future, sent when awaited; `with_input` (one input of its own) and `with_extension` shape it. |
 | `Response` | A call's answer, or `Response::stream` of a plugin's own; held (`until_content`, `until_end`), read (`outputs`) or sent. |
 | `Fault` | The one error: a code, message, retry and typed hints (`with`, `get`), such as an HTTP `Status` or a format's `Details`; the kernel reads neither ([0019](decisions/0019-status-out-of-the-kernel.md)). |
 | `Extensions` | A clonable type map that carries what the adapter and plugins share, unopened by the core. |
@@ -184,10 +186,11 @@ batches and the verdict at the head. A format on another wire implements
 ## Relay and credentials
 
 One function decides relay (`relay_origin` in `call.rs`): the client's origin
-reaches a provider only when the call carries the request's own inputs (it
-has none of its own, `with_input` or `with_inputs`, which no plugin can
-forge) and goes to a format of the client's name. Then `dial` gets `relay`, and a relay whose opening no plugin
-changed gets `opening: None`: the driver writes the origin's head and raw
+reaches a provider only when the call carries the request's inputs, as
+filters and wraps left them, not an input of its own (`with_input`, a
+plugin's own request, such as a judge's prompt), and goes to a format of
+the client's name. Then `dial` gets `relay`, and a relay whose opening no
+plugin changed gets `opening: None`: the driver writes the origin's head and raw
 body unread, and a changed value is written into its own bytes by the
 format. The provider's origin returns to the client edge only on a relay, so
 the client's format writes the provider's head; a translated call is written
@@ -197,9 +200,9 @@ head.
 
 The client's key rides along the same way. The adapter lifts it into a
 `Credential` extension, which the core carries unopened. The driver sets
-`Exchange::relayed` if and only if the call carries the request's own
-inputs to a same-name format, even as filters edited them (a call with
-`with_input` or `with_inputs` does not), and
+`Exchange::relayed` if and only if the call carries the request's inputs
+to a same-name format, even as filters and wraps edited them (a call with
+`with_input` does not), and
 `http::credentials` restores the client's key only then, after the call's
 `CallHeaders` and the transport's own. A plugin that removes `Credential`
 stops pass-through. A provider's error answer keeps its format's name
@@ -219,19 +222,24 @@ A bridge (WebSocket in, SSE out) keeps `call = cx.call(p)`, returns
 `Response::stream`, and per message from `take_inputs()` sends
 `call.clone().with_input(chat)` and reads `outputs()`.
 
-**Async work on each input** of a session, such as a remote classifier, a
-reserve per turn or translating mid-session, is a call with inputs of the
-plugin's own: `cx.call(p).with_inputs(stream)`, typically
-`cx.take_inputs()` mapped asynchronously
-([0022](decisions/0022-a-calls-own-streamed-inputs.md)). They stream as a
-session's do: pulled as the provider reads, through the call's input
-filters, cut `abandoned` at the request's end, never relayed. Filters stay
-synchronous, so a batch stays whole to them.
+**Work that waits**, such as a remote classifier on each input of a
+session, a reserve per turn, translating mid-session or a deadline that
+cuts a session, is a wrap: `cx.wrap(|turns: Events<Turn>|
+turns.and_then(check))` or `cx.wrap(|events: Events<Event>|
+events.take_until(sleep(limit)))`
+([0023](decisions/0023-a-plugin-wraps-a-stream.md)). No plugin makes the
+call, so wraps compose with each other and with filters, a call still
+relays and the provider's head still reaches the client. A wrap is pulled
+as its reader reads and cut `abandoned` at the request's end, never with a
+clean end; inputs that fail end the call, and the reply, with that fault.
+A whole request's one input has no stream to wrap: a plugin awaits in
+`on_client` and edits it with a filter. Filters stay synchronous, so a
+batch stays whole to them.
 
 `until_content` reads until the first content (`Format::is_content`, before
 filters), a failure or the end, and holds what it read unsent; `until_end`
-reads to the end. Both return at once for a call that streams inputs, the
-request's or its own, as waiting could deadlock a peer that waits for input. A call ends
+reads to the end. Both return at once for a call that streams the
+request's inputs, as waiting could deadlock a peer that waits for input. A call ends
 when the batch holding its end is sent, read or dropped
 ([0011](decisions/0011-read-until-content-or-end.md)). A fallback:
 
@@ -278,7 +286,8 @@ Every crate but `core` uses only the public API of the crates below it.
 | `Gateway::idle` covers a request from the call to `handle`, a body still being read and a job's request | `InFlight`, entered when `handle` is called | core `lifecycle`; e2e |
 | A parked call ends `abandoned` with its request | `call.rs` (`Sending`, `OpenCalls`) | core `cancellation`; testkit `streams` |
 | `until_content`, `until_end`; a call ends when its end is read | `Response`, `Batch` | core `until`; `sdks/routing/tests` |
-| A cut or broken upload never looks complete, a call's own streamed inputs too | events: `leg.rs`; bytes: the driver's writer | core `upload`, `own_inputs`; `crates/http/tests/driver_toy.rs` |
+| A cut or broken upload never looks complete, a wrapped one too; a retry never gets inputs another call read | events: `leg.rs`; bytes: the driver's writer | core `upload`, `wrap`; `crates/http/tests/driver_toy.rs` |
+| Inputs that fail end their call and the reply with that fault | `leg.rs` (`Reading`), `call.rs` (`dial`) | core `wrap` |
 | Edge contract: refusal at the head, outputs dropped unread | `call.rs`, `reply.rs` | core `contract`; `sdks/ws/tests/kernel.rs` |
 | The fault split | the kind (`Relayed::whose`), where the format writes an input | testkit `codec`, `line`, `custom`, `translate` |
 | Lazy decode; a big body relays unread | `opening.rs` | core `stress`; e2e |

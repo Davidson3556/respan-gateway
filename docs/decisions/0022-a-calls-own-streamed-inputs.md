@@ -1,6 +1,6 @@
 # 0022. A call's own streamed inputs
 
-- Status: accepted
+- Status: superseded by [0023](0023-a-plugin-wraps-a-stream.md)
 - Date: 2026-09-29
 
 ## Context

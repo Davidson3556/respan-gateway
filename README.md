@@ -71,7 +71,9 @@ the provider edge, each a format, own them
   request, `on_provider` and `on_provider_end` once per call, in
   registration order. `on_client` passes (`Ok(None)`), replies or refuses.
 - **Filter**: edits a request's inputs or a response's outputs as they
-  stream; its type says which. It sees every message.
+  stream; its type says which. It sees every message. For work that waits,
+  such as a remote check or a deadline, a plugin wraps the stream in its
+  own instead (`cx.wrap`).
 - **Format**: one protocol's view of a kind, such as OpenAI Chat, and the
   two edges that speak it: it accepts a client's connection and dials a
   provider's. Its `Input` and `Output` types are its kind: formats of one
@@ -81,10 +83,10 @@ the provider edge, each a format, own them
   reaches a provider through a **Transport** (`http::Transport`), which
   owns the URL, the keys and the connection.
 - **Call**: what the gateway sends a provider on a request's behalf
-  (`cx.call`): the request's inputs, or its own (`with_input`, or a stream
-  with `with_inputs`). Only a call
-  of the request's inputs to a provider of the client's format name is a
-  relay, and carries the client's origin and key.
+  (`cx.call`): the request's inputs, as filters and wraps left them, or
+  one input of its own (`with_input`). Only a call of the request's inputs
+  to a provider of the client's format name is a relay, and carries the
+  client's origin and key.
 - **Response**: what a call, or `Response::stream`, gives back: read
   (`outputs`), held (`until_content`, `until_end`) or sent.
 - **Fault**: the one error: a code that says whose fault it is, a message,

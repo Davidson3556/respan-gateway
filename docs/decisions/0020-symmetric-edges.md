@@ -1,6 +1,6 @@
 # 0020. Symmetric edges
 
-- Status: accepted; amended by 0021 and 0022
+- Status: accepted; amended by 0021, 0022 and 0023
 - Date: 2026-09-29
 
 ## Context
@@ -184,7 +184,8 @@ Loop 3 (simplicity, use cases and correctness), one pass:
   is never missed.
 - A call may carry a stream of its own inputs (`Call::with_inputs`, 0022),
   so async work on each input of a session is a plugin, not a wrapped
-  `Format`.
+  `Format`. (Loop 4: replaced by `ClientContext::wrap`, 0023, which keeps
+  the relay.)
 - Words: "request" is the whole exchange everywhere, "session" only a
   request whose inputs stream. The internal `session.rs` is `reply.rs`, as
   it turns a response into the client edge's reply.
