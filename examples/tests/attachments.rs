@@ -40,13 +40,17 @@ async fn a_fallback_in_another_format_gets_the_pdf_in_its_own_shape() -> Result<
 }
 
 #[tokio::test]
-async fn a_part_in_neither_shape_is_refused_by_the_other_format() -> Result<(), Fault> {
+async fn a_part_in_neither_shape_is_never_sent_to_the_other_format() -> Result<(), Fault> {
     let mock = MockTransport::new();
     // The text-only target fails, and no plugin rewrites the image for Claude.
     mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
     let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
     let image = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}"#;
-    assert_eq!(send(&gw, "acme", image).await, StatusCode::BAD_REQUEST);
+    // The client gets the provider's answer, not the fallback's refusal.
+    assert_eq!(
+        send(&gw, "acme", image).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
     assert_eq!(mock.sent().len(), 1, "nothing was sent to Claude");
     Ok(())
 }
@@ -68,7 +72,7 @@ async fn the_same_pdf_is_converted_once_per_tenant() -> Result<(), Fault> {
 }
 
 #[tokio::test]
-async fn stored_oversized_and_slow_pdfs_fail_before_any_call() -> Result<(), Fault> {
+async fn oversized_and_slow_pdfs_fail_before_any_call() -> Result<(), Fault> {
     let mock = MockTransport::new();
     // Real time: a blocking thread does not see tokio's paused clock.
     let strict = PdfToText {
@@ -81,14 +85,90 @@ async fn stored_oversized_and_slow_pdfs_fail_before_any_call() -> Result<(), Fau
         ..PdfToText::new(&["text-only", "reads-pdf"])
     };
     let gw = gateway(&mock, Arc::new(strict))?;
-    let stored = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-abc"}}]}]}"#;
-    assert_eq!(send(&gw, "acme", stored).await, StatusCode::BAD_REQUEST);
     let large = send(&gw, "acme", REQUEST).await;
     assert_eq!(large, StatusCode::PAYLOAD_TOO_LARGE);
     let small = REQUEST.replace("JVBERi0xLjcKJcfsj6IKMSAwIG9iago=", "JVBE");
     let slow = send(&gw, "acme", &small).await;
     assert_eq!(slow, StatusCode::GATEWAY_TIMEOUT);
     assert!(mock.sent().is_empty());
+    Ok(())
+}
+
+/// A request naming a stored file, and the file: 12 bytes.
+const STORED: &str = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"file_id":"file-abc"}}]}]}"#;
+const FILE: &str = "%PDF-1.7 abc";
+
+#[tokio::test]
+async fn a_stored_file_is_fetched_under_the_tenants_key_and_converted() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(STORE, mock::json(StatusCode::OK, FILE));
+    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+    mock.reply(PDF, mock::json(StatusCode::OK, OK));
+    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
+    assert_eq!(send(&gw, "acme", STORED).await, StatusCode::OK);
+
+    let sent = mock.sent();
+    assert_eq!(
+        sent[0].uri().to_string(),
+        "http://files.test/v1/files/file-abc/content"
+    );
+    assert_eq!(
+        sent[0].headers()["authorization"],
+        "Bearer tenant-key",
+        "the tenant's own key"
+    );
+    let text_only = String::from_utf8_lossy(sent[1].body());
+    assert!(text_only.contains("[text of a 12-byte PDF]"), "{text_only}");
+    // The fallback that reads PDFs gets the file inline, not its id.
+    let inline = String::from_utf8_lossy(sent[2].body());
+    assert!(
+        inline.contains("data:application/pdf;base64,JVBERi0xLjcgYWJj"),
+        "{inline}"
+    );
+    assert!(!inline.contains("file-abc"), "{inline}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_file_reaches_an_anthropic_fallback_as_a_document() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(STORE, mock::json(StatusCode::OK, FILE));
+    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+    mock.reply(PDF, mock::json(StatusCode::OK, CLAUDE_OK));
+    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
+    assert_eq!(send(&gw, "acme", STORED).await, StatusCode::OK);
+    let claude: serde_json::Value =
+        serde_json::from_slice(mock.sent()[2].body()).map_err(|_| Fault::internal("json"))?;
+    let part = &claude["messages"][0]["content"][1];
+    assert_eq!(part["source"]["data"], "JVBERi0xLjcgYWJj");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_file_that_is_missing_or_too_large_fails_before_any_call() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(
+        STORE,
+        mock::json(StatusCode::NOT_FOUND, r#"{"error":"no file"}"#),
+    );
+    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
+    assert_eq!(send(&gw, "acme", STORED).await, StatusCode::NOT_FOUND);
+
+    let strict = PdfToText {
+        max: 8,
+        ..PdfToText::new(&["text-only"])
+    };
+    mock.reply(STORE, mock::json(StatusCode::OK, FILE));
+    let gw = gateway(&mock, Arc::new(strict))?;
+    assert_eq!(
+        send(&gw, "acme", STORED).await,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert!(
+        mock.sent()
+            .iter()
+            .all(|c| c.uri().host() == Some("files.test"))
+    );
     Ok(())
 }
 
@@ -166,5 +246,22 @@ async fn a_zero_retention_pdf_is_converted_but_never_remembered() -> Result<(), 
         3,
         "not served from a memo"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_agent_request_with_tools_and_a_pdf_falls_back_to_claude() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+    mock.reply(PDF, mock::json(StatusCode::OK, CLAUDE_OK));
+    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
+    let tool = r#"{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}"#;
+    let body = REQUEST.replace(r#"{"model""#, &format!(r#"{{"tools":[{tool}],"model""#));
+    assert_eq!(send(&gw, "acme", &body).await, StatusCode::OK);
+    let sent: serde_json::Value =
+        serde_json::from_slice(mock.sent()[1].body()).map_err(|_| Fault::internal("json"))?;
+    assert_eq!(sent["tools"][0]["name"], "read");
+    assert_eq!(sent["tools"][0]["input_schema"]["type"], "object");
+    assert_eq!(sent["messages"][0]["content"][1]["type"], "document");
     Ok(())
 }

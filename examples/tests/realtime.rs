@@ -243,6 +243,31 @@ async fn a_turn_cut_before_it_is_done_is_billed_from_an_estimate() -> Result<(),
     Ok(())
 }
 
+// A turn cut before any text came may have cost all it was allowed: it is
+// charged its hold as output, and its input from what the client said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_cut_before_any_delta_is_billed_at_least_its_hold() -> Result<(), Fault> {
+    let s = start().await?;
+    s.openai
+        .answer(Answer::events(script(&["one", "two"], usage(10, 2))).cut_after(1));
+    let mut ws = client(s.addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, user_says(&"a long question ".repeat(10))).await;
+    assert_eq!(heard(&mut ws).await["type"], "conversation.item.added");
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    while hear(&mut ws).await.is_some() {}
+    s.gateway.idle().await;
+    let turns = s.meter.turns();
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert_eq!(turns[0].status, "cut");
+    assert!(turns[0].output_tokens >= HOLD, "under its hold: {turns:?}");
+    assert!(
+        turns[0].input_tokens >= 40,
+        "input not estimated: {turns:?}"
+    );
+    Ok(())
+}
+
 // A client that leaves in the middle of a turn: recorded abandoned.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_that_leaves_is_recorded_abandoned() -> Result<(), Fault> {

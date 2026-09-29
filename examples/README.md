@@ -14,7 +14,7 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 
 | Example | Use cases | What it shows |
 | --- | --- | --- |
-| [attachments](attachments.rs) | 1 | A PDF becomes text only in calls to text-only targets, and a `document` part in calls to an Anthropic fallback, per attempt, under a time budget. |
+| [attachments](attachments.rs) | 1 | A PDF becomes text only in calls to text-only targets, and a `document` part in calls to an Anthropic fallback, per attempt, under a time budget; a stored `file_id` is fetched from a files endpoint under the tenant's key first. |
 | [pii](pii.rs) | 2 | E-mail addresses hidden in every call's input and restored across stream deltas, tool-call arguments included. |
 | [guardrail](guardrail.rs) | 3 | A term list no request skips: every response the client gets and every call's input. |
 | [batch_split](batch_split.rs) | 4 | An embeddings batch over a provider's cap split into concurrent calls (`with_input`), merged in order, usage summed. |
@@ -22,9 +22,10 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 | [fallback](fallback.rs) | 4, 6 | Retry with `Retry-After`, fallback to another format, a hedged race, a stall watchdog. |
 | [judge](judge.rs) | 5 | A plugin that asks a small model to pick the target, as a subrequest. |
 | [mcp_proxy](mcp_proxy.rs) | 7 (MCP part) | MCP over streamable HTTP with a tool allow-list; optionally a stdio server. |
-| [realtime](realtime.rs) | 7 (WebSocket part) | OpenAI Realtime over WebSocket: e-mail addresses hidden from the provider and restored across deltas, each turn metered as it completes, a turn cut before `response.done` from an estimate. |
+| [realtime](realtime.rs) | 7 (WebSocket part) | OpenAI Realtime over WebSocket: e-mail addresses hidden from the provider and restored across deltas, each turn metered as it completes, a turn cut before `response.done` charged from an estimate and at least a hold. |
 | [jobs](jobs.rs) | 8 | An idempotent request: a retry or duplicate gets the stored result; one provider call. |
-| [wallet](wallet.rs) | 9 | Nested prepaid wallets; fifty parallel requests never overspend $1. |
+| [jobs_background](jobs_background.rs) | 8 | A background job that outlives its client (the plugin re-enters its own gateway), polled later; signed ids that name a deployment and route a later `GET`. |
+| [wallet](wallet.rs) | 9 (and 4) | Nested prepaid wallets; fifty parallel requests never overspend $1; the loser of a hedge pays at least its hold. |
 | [cost_cap](cost_cap.rs) | 9 | A per-call cost cap: bound `max_tokens`, hold it, cut a runaway stream, settle. |
 | [admission](admission.rs) | 10 | Requests wait in a priority queue, round-robin across end users, for a slot, else 429 with `Retry-After`. |
 | [logging](logging.rs) | 11 | Request logs to a sink you choose; a zero-retention tenant stores no content. |
@@ -38,7 +39,7 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 ## Not built
 
 - Use case 7: audio turns, and Gemini Live and Responses over WebSocket.
-  `realtime` estimates a cut turn's output text only, not its input. Draining
+  Draining
   sessions at shutdown and a maximum session length are in the SDK
   (`serve_ws_until`, tested there), not wired into `realtime`.
 - Use case 4: retrying one chunk of a split batch (`batch_split` fails the
@@ -46,16 +47,19 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
   given their names).
 - Use case 10: weighted shares per end user, and a queue shared by several
   gateway processes.
-- Use case 8: signed job ids.
+- Use case 8: a webhook when a job finishes, and holding the tenant's budget
+  for a job while it runs.
 - Use case 2: streamed calls with several choices (`n > 1`) are refused by
   `pii`, not restored; Anthropic's streamed `partial_json` fragments are not
   held, only OpenAI's tool-call arguments.
-- Use case 1: `file_id` references (refused, not resolved).
-- Use case 8: durable holds and jobs that survive a restart (`jobs` keeps
-  results in memory; its header shows a durable store).
+- Use case 1: a stored file's type is assumed to be PDF (a real resolver asks
+  the files endpoint for it).
+- Use case 8: jobs that survive a restart (`jobs` and `jobs_background` keep
+  results in memory; `jobs`'s header shows a durable store).
 - In a request, the text SDK reads Anthropic tool blocks (`tool_use`,
   `tool_result`) as content with no text form, so it refuses them. In a
   reply they are read and edited.
-- Translating a request with tools between chat formats: a field or part is
-  sent only in the format it is in (a plugin rewrites it for the target, as
-  `attachments` does); nothing converts one format's tools to another's.
+- Tools between chat formats: OpenAI chat and Anthropic messages translate
+  them (`tools`, `tool_choice`, calls and results, streamed too); tools an
+  API runs itself (Anthropic's web search) and other fields either side has no
+  place for are refused.

@@ -16,9 +16,10 @@ use crate::common::{
 };
 use crate::conversation::{Conversation, Finish, Piece, Reply, Role, Start, units};
 use crate::sse::{Events, SseDecoder, event, event_as, event_data, event_json, is_stream};
+use crate::tools::{Fragment, fragments};
 use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 
-const OPENAI: &str = "openai-chat";
+pub(crate) const OPENAI: &str = "openai-chat";
 
 /// OpenAI Chat Completions, named `openai-chat`: a `POST` to any path
 /// ending in `/chat/completions`. The provider's base URL includes the
@@ -271,6 +272,13 @@ impl Wire for OpenAiChat {
         let text: String = so_far.text.values().map(String::as_str).collect();
         let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
         let (id, model) = so_far.start.clone().unwrap_or_default();
+        let mut message = json!({ "role": "assistant", "content": text });
+        if !so_far.calls.is_empty() {
+            message["tool_calls"] = so_far.calls.openai().into();
+            if text.is_empty() {
+                message["content"] = Value::Null;
+            }
+        }
         json!({
             "id": id,
             "object": "chat.completion",
@@ -278,7 +286,7 @@ impl Wire for OpenAiChat {
             "model": model,
             "choices": [{
                 "index": 0,
-                "message": { "role": "assistant", "content": text },
+                "message": message,
                 "finish_reason": FINISH.reason(finish),
             }],
             "usage": Self::usage_body(&so_far.usage),
@@ -499,7 +507,7 @@ fn content(v: &Value, key: &str) -> Vec<Piece> {
 }
 
 /// Choice fields that carry no content: OpenRouter's, vLLM's and Azure's.
-const INERT_CHOICE: &[&str] = &[
+pub(crate) const INERT_CHOICE: &[&str] = &[
     "native_finish_reason",
     "stop_reason",
     "content_filter_results",
@@ -575,6 +583,9 @@ struct Chunks {
     held: Option<BytesMut>,
     /// A written finish, kept back to the end and sent before those chunks.
     finish: Option<BytesMut>,
+    /// The tool calls written so far, and whether the last has no arguments yet.
+    calls: u32,
+    bare: bool,
 }
 
 impl Chunks {
@@ -608,6 +619,36 @@ impl Chunks {
         self.begin(out);
         let choices = json!([{ "index": 0, "delta": delta, "finish_reason": null }]);
         self.chunk(out, choices, None);
+    }
+
+    /// Write a piece of a tool call another format made: its start opens
+    /// the next call, arguments go to the last.
+    fn call(&mut self, fragment: Fragment, out: &mut BytesMut) {
+        let arguments = &fragment.arguments;
+        let call = match fragment.start {
+            Some((id, name)) => {
+                self.end_call(out);
+                self.calls += 1;
+                self.bare = arguments.is_empty();
+                let function = json!({ "name": name, "arguments": arguments });
+                let call = json!({ "index": self.calls - 1, "id": id, "type": "function", "function": function });
+                return self.choice(out, json!({ "tool_calls": [call] }));
+            }
+            None => {
+                json!({ "index": self.calls.saturating_sub(1), "function": { "arguments": arguments } })
+            }
+        };
+        self.bare &= arguments.is_empty();
+        self.choice(out, json!({ "tool_calls": [call] }));
+    }
+
+    /// Ends the last tool call: one that had no arguments has none, as JSON.
+    fn end_call(&mut self, out: &mut BytesMut) {
+        if std::mem::take(&mut self.bare) {
+            let function = json!({ "arguments": "{}" });
+            let call = json!({ "index": self.calls - 1, "function": function });
+            self.choice(out, json!({ "tool_calls": [call] }));
+        }
     }
 
     fn chunk(&self, out: &mut BytesMut, choices: Value, usage: Option<Value>) {
@@ -666,7 +707,10 @@ impl Chunks {
                         choices => self.chunk(&mut all, choices.clone(), None),
                     }
                 }
-                Piece::Other { .. } => return Err(unwritable_content()),
+                Piece::Other { format, raw } => match fragments(format, raw) {
+                    Some(calls) => calls.into_iter().for_each(|f| self.call(f, &mut all)),
+                    None => return Err(unwritable_content()),
+                },
             }
         }
         if let Some(f) = &reply.finish {
@@ -723,6 +767,7 @@ impl Encoder<Reply, ()> for Chunks {
             self.write(&Reply::finished(Finish::Stop), out)?;
         }
         self.begin(out);
+        self.end_call(out);
         out.extend_from_slice(&self.finish.take().unwrap_or_default());
         out.extend_from_slice(&self.held.take().unwrap_or_default());
         // Relayed chunks carry their own usage chunk.

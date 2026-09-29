@@ -22,8 +22,17 @@
 //! is. A part in neither the target's shape nor the client's is refused, not
 //! guessed at.
 //!
-//! **Partial:** a `file_id` (a file uploaded earlier) is refused, not resolved;
-//! the body limit is the server's, the same for all.
+//! A `file_id` (a file uploaded earlier) is resolved before any call, in
+//! `on_client`: the files endpoint is asked as a subrequest
+//! (`cx.call("files").with_input(Ask::get(..))`, a format of `rest`), under
+//! the tenant's own key, not the gateway's, so a tenant reads only its own
+//! files. The file is read within the size limit and the time budget, and
+//! replaces its reference in the conversation as an inline part, so it is then
+//! converted like any other PDF, in every call. A stored file is taken to be a
+//! PDF, as only PDFs are converted here; a real resolver reads the file's type
+//! from `GET /v1/files/{id}`.
+//!
+//! **Partial:** the body limit is the server's, the same for all.
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
@@ -33,14 +42,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
+use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_formats::conversation::{Content, Conversation};
+use respan_gateway_formats::opaque::Got;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
-use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
+use respan_gateway_http::{Asked, CallHeaders, Credential};
 use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use serde_json::json;
@@ -55,18 +69,38 @@ fn fake_pdf_to_text(base64: &str) -> Result<String, Fault> {
     Ok(format!("[text of a {}-byte PDF]", base64.len() * 3 / 4))
 }
 
-/// The base64 of `part` if it is an inline PDF; `Err` for a stored file.
-fn pdf(part: &Content) -> Result<Option<&str>, Fault> {
-    let file = match part {
-        Content::Other { raw, .. } if raw["type"] == "file" => &raw["file"],
-        _ => return Ok(None),
-    };
-    if file["file_id"].is_string() {
-        return Err(Fault::bad_request("a stored file cannot be read here"));
+/// The `file` of `part` if it is a file part.
+fn file(part: &Content) -> Option<&serde_json::Value> {
+    match part {
+        Content::Other { raw, .. } if raw["type"] == "file" => Some(&raw["file"]),
+        _ => None,
     }
-    let data = file["file_data"].as_str();
-    Ok(data.and_then(|d| d.strip_prefix("data:application/pdf;base64,")))
 }
+
+/// The base64 of `part` if it is an inline PDF.
+fn pdf(part: &Content) -> Option<&str> {
+    let data = file(part)?["file_data"].as_str()?;
+    data.strip_prefix("data:application/pdf;base64,")
+}
+
+/// The ids of the stored files `chat` refers to.
+fn stored(chat: &Conversation) -> Vec<String> {
+    let parts = chat.messages.iter().flat_map(|m| &m.content);
+    let ids = parts.filter_map(|part| file(part)?["file_id"].as_str());
+    ids.map(str::to_owned).collect()
+}
+
+fn too_large() -> Fault {
+    Fault::new("too_large", "PDF too large").with(Status(413))
+}
+
+fn too_slow() -> Fault {
+    let slow = "the PDF took too long to read";
+    Fault::new("conversion_timeout", slow).with(Status(504))
+}
+
+/// The files endpoint: a provider named `files`, whose paths the plugin sets.
+const FILES: Rest = Rest::new("files", "/v1/files");
 
 /// When the request's conversion budget runs out.
 #[derive(Clone, Copy)]
@@ -117,9 +151,8 @@ impl PdfToText {
         until: Instant,
         keep: bool,
     ) -> Result<Arc<str>, Fault> {
-        let large = Fault::new("too_large", "PDF too large").with(Status(413));
         if base64.len() > self.max {
-            return Err(large);
+            return Err(too_large());
         }
         let key = (tenant.to_owned(), self.hasher.hash_one(&base64));
         if keep && let Some(text) = self.memo().get(&key) {
@@ -127,11 +160,9 @@ impl PdfToText {
         }
         let convert = self.convert;
         let work = tokio::task::spawn_blocking(move || convert(&base64));
-        let slow = "the PDF took too long to read";
-        let slow = |_| Fault::new("conversion_timeout", slow).with(Status(504));
         let panicked = |e| Fault::internal("the PDF converter panicked").with_source(e);
         let text = tokio::time::timeout_at(until, work).await;
-        let text: Arc<str> = text.map_err(slow)?.map_err(panicked)??.into();
+        let text: Arc<str> = text.map_err(|_| too_slow())?.map_err(panicked)??.into();
         self.conversions.fetch_add(1, Ordering::Relaxed);
         if !keep {
             return Ok(text);
@@ -148,11 +179,69 @@ impl PdfToText {
     }
 }
 
+impl PdfToText {
+    /// The stored file `id` as an inline PDF part's data, asked of the files
+    /// endpoint under the tenant's key, read within `max` and `until`.
+    async fn fetch(
+        &self,
+        cx: &mut ClientContext,
+        id: &str,
+        until: Instant,
+    ) -> Result<String, Fault> {
+        let key = cx.extensions().get::<Credential>();
+        let key = key.map(|c| CallHeaders(c.headers().clone()));
+        let call = cx
+            .call("files")
+            .with_input(Ask::get(format!("/v1/files/{id}/content")));
+        let call = key
+            .into_iter()
+            .fold(call, |call, key| call.with_extension(key));
+        let read = async {
+            let mut bytes = Vec::new();
+            let mut chunks = call.await?.outputs::<Got<Rest>>();
+            while let Some(chunk) = chunks.try_next().await? {
+                bytes.extend_from_slice(&chunk.0);
+                if bytes.len() > self.max / 4 * 3 {
+                    return Err(too_large());
+                }
+            }
+            Ok(bytes)
+        };
+        let bytes = tokio::time::timeout_at(until, read).await;
+        let bytes = bytes.map_err(|_| too_slow())??;
+        Ok(format!(
+            "data:application/pdf;base64,{}",
+            STANDARD.encode(bytes)
+        ))
+    }
+}
+
 #[async_trait]
 impl Plugin for PdfToText {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let deadline = Deadline(Instant::now() + self.budget);
-        cx.extensions_mut().insert(deadline);
+        let deadline = Instant::now() + self.budget;
+        cx.extensions_mut().insert(Deadline(deadline));
+        let ids = cx.input::<Conversation>().map(stored).unwrap_or_default();
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        // Resolved here, in `on_client`, which may call: the provider edge cannot.
+        let mut inline = HashMap::new();
+        for id in ids {
+            let data = self.fetch(cx, &id, deadline).await?;
+            inline.insert(id, data);
+        }
+        cx.filter(move |chat: &mut Conversation| {
+            for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
+                let data = file(part).and_then(|f| f["file_id"].as_str());
+                let Some(data) = data.and_then(|id| inline.get(id)) else {
+                    continue;
+                };
+                let file = json!({ "file_data": data });
+                *part = Content::other("openai-chat", json!({ "type": "file", "file": file }));
+            }
+            Ok(())
+        })?;
         Ok(None)
     }
 
@@ -174,7 +263,7 @@ impl Plugin for PdfToText {
         let chat = px.input::<Conversation>()?;
         let mut pdfs = Vec::new();
         for part in chat.messages.iter().flat_map(|m| &m.content) {
-            pdfs.extend(pdf(part)?.map(str::to_owned));
+            pdfs.extend(pdf(part).map(str::to_owned));
         }
         // Filters are synchronous: convert here, then swap the parts in.
         let mut texts = Vec::with_capacity(pdfs.len());
@@ -184,7 +273,7 @@ impl Plugin for PdfToText {
         let mut texts = texts.into_iter();
         px.filter(move |chat: &mut Conversation| {
             for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
-                if pdf(part)?.is_some()
+                if pdf(part).is_some()
                     && let Some(text) = texts.next()
                 {
                     *part = Content::from(&*text);
@@ -199,7 +288,7 @@ impl Plugin for PdfToText {
 /// target only: the part is in the target's own shape, so it is sent as is.
 fn pdf_as_document(chat: &mut Conversation) -> Result<(), Fault> {
     for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
-        if let Some(data) = pdf(part)? {
+        if let Some(data) = pdf(part) {
             let source = json!({ "type": "base64", "media_type": "application/pdf", "data": data });
             *part = Content::other(
                 "anthropic-messages",
@@ -225,11 +314,13 @@ impl Plugin for Fallback {
 
 const TEXT: &str = "http://text-only.test/v1";
 const PDF: &str = "http://reads-pdf.test/v1";
+const STORE: &str = "http://files.test";
 
 fn gateway(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("text-only", OpenAiChat, mock.at(TEXT))?
         .provider("reads-pdf", OpenAiChat, mock.at(PDF))?
+        .provider("files", FILES, mock.at(STORE))?
         .serve(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)
@@ -240,8 +331,12 @@ const OK: &str = r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant
 
 async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
     let mut req = post("/v1/chat/completions", body.to_owned());
-    req.headers_mut()
-        .insert("x-tenant", HeaderValue::from_static(tenant));
+    let headers = req.headers_mut();
+    headers.insert("x-tenant", HeaderValue::from_static(tenant));
+    headers.insert(
+        "authorization",
+        HeaderValue::from_static("Bearer tenant-key"),
+    );
     read_whole(serve(gw, req).await.0).await.0
 }
 
@@ -250,6 +345,7 @@ fn gateway_claude(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway,
     Gateway::new()
         .provider("text-only", OpenAiChat, mock.at(TEXT))?
         .provider("reads-pdf", AnthropicMessages, mock.at(PDF))?
+        .provider("files", FILES, mock.at(STORE))?
         .serve(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)

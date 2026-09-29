@@ -7,7 +7,9 @@
 //! What the kind has no form for stays as the client's format has it
 //! ([`Conversation::unsupported`], [`Message::unsupported`],
 //! [`Content::Other`]); it is sent only in the format it is in, and
-//! translating it is refused if it can change the answer.
+//! translating it is refused if it can change the answer. The exception is
+//! tools between OpenAI chat and Anthropic messages, which the formats
+//! rewrite: `tools`, `tool_choice`, calls and results, whole or streamed.
 
 use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::Bytes;
@@ -269,7 +271,7 @@ pub enum Piece {
         text: String,
     },
     /// Content the kind has no form for, such as a tool call, as `format`
-    /// has it; translating it is refused.
+    /// has it; translating it is refused, but for a tool call.
     #[non_exhaustive]
     Other {
         /// The name of the format `raw` is in.

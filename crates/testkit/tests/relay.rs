@@ -2219,16 +2219,20 @@ async fn a_reframed_stream_that_fails_is_refused_in_the_clients_words() {
 }
 
 #[tokio::test]
-async fn a_tool_call_cannot_be_reframed_yet_and_says_so() {
+async fn a_tool_call_is_reframed_as_the_client_asked() {
     let h = Harness::new(vec![Arc::new(Flip)], Some("openai"));
     let tool = r#"{"id":"c3","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"t","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, tool));
 
     let (status, _, body) = h.send(chat()).await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert!(body.contains("written anew"), "{body}");
+    assert!(
+        body.contains(r#""name":"f""#) && body.contains(r#""arguments":"{}""#),
+        "{body}"
+    );
+    assert!(body.contains(r#""finish_reason":"tool_calls""#), "{body}");
 }
 
 #[tokio::test]

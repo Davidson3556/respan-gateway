@@ -13,6 +13,7 @@ use serde_json::{self, Map, Value, json};
 
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
 use crate::sse::{content_type, event_data};
+use crate::tools::{Calls, fragments};
 use crate::{Details, Usage};
 use respan_gateway_http::{Decoder, Encoder};
 
@@ -154,28 +155,35 @@ fn object(raw: &[u8]) -> Result<Map<String, Value>, Fault> {
 }
 
 /// Refuses fields in a format other than `W` (see
-/// [`Conversation::unsupported_in`]): they cannot be sent as `W`. What a
-/// plugin removed from `unsupported`, it chose to lose. Parts are checked as
-/// they are written.
+/// [`Conversation::unsupported_in`]): they cannot be sent as `W`. Parts are
+/// checked as they are written.
 fn refuse_foreign<W: Wire>(chat: &Conversation) -> Result<(), Fault> {
-    if chat.unsupported_in.as_deref() == Some(W::NAME) {
-        return Ok(());
+    match chat.unsupported_in.as_deref() == Some(W::NAME) {
+        true => Ok(()),
+        false => refuse_leftovers(chat),
     }
+}
+
+/// Refuses what only the client's format can send. What a plugin removed
+/// from `unsupported`, it chose to lose.
+pub(crate) fn refuse_leftovers(chat: &Conversation) -> Result<(), Fault> {
     if let Some(key) = chat.unsupported.keys().next() {
         return Err(untranslatable(&format!("'{key}' in the request")));
     }
     let plain = |m: &Message| !matches!(m.role, Role::Other(_)) && m.unsupported.is_empty();
-    if !chat.messages.iter().all(plain) {
-        return Err(untranslatable(
+    match chat.messages.iter().all(plain) {
+        true => Ok(()),
+        false => Err(untranslatable(
             "messages with fields the kind has no place for",
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// A conversation as a new request, if nothing is lost.
 pub(crate) fn write_request<W: Wire>(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
-    refuse_foreign::<W>(chat)?;
+    // Fields in another format are rewritten or refused; parts are checked
+    // as they are written.
+    let chat = &*crate::tools::adopt(chat, W::NAME)?;
     let mut v = match W::write(chat)? {
         Value::Object(v) => v,
         _ => Map::new(),
@@ -470,6 +478,8 @@ pub(crate) struct SoFar {
     pub(crate) start: Option<(String, String)>,
     /// Text by content block, in block order, for a whole response.
     pub(crate) text: BTreeMap<u32, String>,
+    /// Tool calls, in the order they were made.
+    pub(crate) calls: Calls,
     pub(crate) finish: Option<Finish>,
     pub(crate) usage: Usage,
 }
@@ -495,7 +505,10 @@ impl SoFar {
                 // Some providers refuse an empty text block.
                 Piece::Text { text, .. } if text.is_empty() => {}
                 Piece::Text { block, text } => self.text.entry(*block).or_default().push_str(text),
-                Piece::Other { .. } => return Err(unwritable_content()),
+                Piece::Other { format, raw } => match fragments(format, raw) {
+                    Some(all) => all.into_iter().for_each(|f| self.calls.add(f)),
+                    None => return Err(unwritable_content()),
+                },
             }
         }
         Ok(())
@@ -953,6 +966,17 @@ impl Names<Finish> {
             replace(v, pointer, self.reason(finish));
         }
     }
+}
+
+/// The text of `content`, if it is all text.
+pub(crate) fn text_of(content: &[Content]) -> Option<String> {
+    content
+        .iter()
+        .map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            Content::Other { .. } => None,
+        })
+        .collect()
 }
 
 /// A plugin's change that cannot be made in the client's format.

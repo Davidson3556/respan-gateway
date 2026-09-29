@@ -13,6 +13,7 @@ pub mod whole;
 mod anthropic;
 pub mod conversation;
 mod openai;
+mod tools;
 mod usage;
 
 pub use anthropic::AnthropicMessages;

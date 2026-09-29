@@ -17,7 +17,7 @@
 //! (a second provider call) rather than replaying half an answer. To
 //! outlive the connection, run the job as its own request that a task
 //! reads to the end (`tokio::spawn` of `Gateway::handle`), and let clients
-//! wait on the store. Signed operation ids and durable holds are not built.
+//! wait on the store. `jobs_background` does it, with signed ids.
 //!
 //! `cargo run -p respan-gateway-examples --example jobs`
 
