@@ -223,6 +223,7 @@ impl Wire for AnthropicMessages {
                 .collect(),
             user: v["metadata"]["user_id"].as_str().map(Into::into),
             unsupported: unsupported_fields(v, KNOWN, &[]),
+            unsupported_in: Some(ANTHROPIC.into()),
             ..Conversation::default()
         };
         if says(&v["system"]) {
