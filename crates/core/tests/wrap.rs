@@ -591,6 +591,71 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
     assert_eq!(rec.log().prov_codes(), ["max_length"]);
 }
 
+/// A refusal of an input before the provider answered its head: a
+/// transport that fails its dial because its body broke (as an HTTP client
+/// does when a streamed upload errors) must not turn the client's refusal
+/// into the provider's fault. The reply and the call end with the refusal.
+#[tokio::test]
+async fn l5_a_refusal_before_the_providers_head_is_the_refusal() {
+    struct Gate;
+    #[async_trait]
+    impl Plugin for Gate {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.wrap(|i: Events<In>| {
+                i.and_then(|x| async move {
+                    match x.0.as_str() {
+                        "evil" => Err(Fault::bad_request("flagged")),
+                        _ => Ok(x),
+                    }
+                })
+            })?;
+            Ok(None)
+        }
+    }
+    let rec = Rec::default();
+    // Reads the body before answering, as a server does with a whole
+    // request; a body that breaks fails the send, as reqwest's does.
+    let dialer = fnt(|c| {
+        async move {
+            let mut body = c.body;
+            while let Some(f) = body.next().await {
+                if f.is_err() {
+                    return Err(Fault::upstream("error sending request"));
+                }
+            }
+            Ok(answer(200, done()))
+        }
+        .boxed()
+    });
+    let gw = Gateway::new()
+        .serve(Toy)
+        .unwrap()
+        .provider("p", Toy, dialer)
+        .unwrap()
+        .plugin("rec", rec.clone())
+        .unwrap()
+        .plugin("gate", Gate)
+        .unwrap()
+        .target("p")
+        .unwrap();
+    let (tx, r) = upload();
+    send(&tx, "evil");
+    let (res, end) = handle(&gw, r).await;
+    let got = read(res).await;
+    let end = code(&end.await);
+    gw.idle().await;
+    let prov = rec.log().prov_codes();
+    assert_eq!(
+        (got, end, prov),
+        (
+            Ok((400, "ERR bad_request".into())),
+            "bad_request".into(),
+            vec!["bad_request".to_string()]
+        )
+    );
+    drop(tx);
+}
+
 /// Without a wrap, the same relay: the wraps change nothing of it.
 #[tokio::test]
 async fn a_plain_relay_has_the_same_heads() {

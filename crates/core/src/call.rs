@@ -219,8 +219,9 @@ type Flowing = Option<(Arc<Later>, Arc<dyn AnyFormat>)>;
 
 /// Dial `p` with the call's opening and `later` inputs: the provider's
 /// origin (on a relay alone) and events, a refusal at the head as one `Err`.
-/// Inputs that fail, not cut, end the events with that fault, so the call
-/// and the reply end as the inputs did, for the client edge to say.
+/// Inputs that fail, not cut, end the call with that fault, before the
+/// provider's head too, so the call and the reply end as the inputs did,
+/// for the client edge to say.
 async fn dial(
     cx: &ClientContext,
     p: &Provider,
@@ -230,7 +231,7 @@ async fn dial(
     let px = edge.cx();
     let relay = relay_origin(cx, px.opening.own, p);
     let opening = px.opening.sent(relay.is_some())?;
-    let (fail, failed) = oneshot::channel();
+    let (fail, mut failed) = oneshot::channel();
     let later = later.map(|(later, format)| {
         let call = Some((px.inputs.clone(), fail));
         inputs(later, format, call, &px.cut)
@@ -241,7 +242,11 @@ async fn dial(
             .dial(dialer, ext, relay.as_ref(), opening.as_ref(), later)
     })?;
     px.sent = true;
-    let (origin, events) = dialed.await?;
+    let (origin, events) = match dialed.await {
+        Ok(dialed) => dialed,
+        // Inputs that failed first, as a refusal of one, are why.
+        Err(fault) => return Err(failed.try_recv().ok().flatten().unwrap_or(fault)),
+    };
     // A provider's head goes only to a client of the name it came in.
     let origin = relay.and(origin);
     // A reader dropped with no failure says nothing.
