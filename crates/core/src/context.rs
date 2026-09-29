@@ -164,8 +164,10 @@ impl ClientContext {
 
     /// The gateway this request came to, such as for a job that outlives
     /// the request to hand it requests of its own; [`Gateway::idle`] waits
-    /// for them. Move it into that job, not into the plugin: the gateway
-    /// holds its plugins, so a plugin that keeps it frees neither.
+    /// for each from the moment [`Gateway::handle`] is called, so call it
+    /// here and await its future in the job's task. Move the gateway into
+    /// that job, not into the plugin: the gateway holds its plugins, so a
+    /// plugin that keeps it frees neither.
     pub fn gateway(&self) -> Gateway {
         Gateway {
             inner: self.gateway.clone(),

@@ -4,12 +4,12 @@
 
 mod edge;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use edge::*;
 use respan_gateway_core::futures::FutureExt;
-use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::*;
 
 fn gateway_of(rec: &Rec) -> Gateway {
@@ -193,15 +193,14 @@ async fn a_call_of_the_clients_value_cloned_gets_no_client_origin() {
 
 /// A job that outlives its request reaches the gateway through the
 /// request's context and hands it a request of its own, which runs every
-/// plugin; `idle` waits for it once handed.
+/// plugin; `idle` waits for it from the moment it is handed.
 #[tokio::test(flavor = "current_thread")]
 async fn a_job_hands_its_gateway_a_request_of_its_own() {
     #[derive(Clone)]
     struct Mark;
 
-    /// Starts a job for each request that is not a job's, and says when the
-    /// job's request was handed over.
-    struct Detach(Mutex<Option<oneshot::Sender<()>>>);
+    /// Starts a job for each request that is not a job's.
+    struct Detach;
 
     #[async_trait]
     impl Plugin for Detach {
@@ -209,31 +208,99 @@ async fn a_job_hands_its_gateway_a_request_of_its_own() {
             if cx.extensions().get::<Mark>().is_some() {
                 return Ok(None);
             }
-            let (gw, handed) = (cx.gateway(), lock(&self.0).take());
+            let (wire, reply) = ToyWire::new(req(vec!["job"]));
+            let mut marked = Extensions::new();
+            marked.insert(Mark);
+            // Handed here, awaited in the job's own task.
+            let job = cx.gateway().handle(wire, marked);
             tokio::spawn(async move {
-                let (wire, reply) = ToyWire::new(req(vec!["job"]));
-                let mut marked = Extensions::new();
-                marked.insert(Mark);
-                let _end = gw.handle(wire, marked).await;
-                handed.map(|h| h.send(()));
+                let _end = job.await;
                 let _ = read(reply.await.ok_or_else(|| Fault::internal("none"))).await;
             });
             Ok(None)
         }
     }
 
-    let (tx, handed) = oneshot::channel();
     let rec = Rec::default();
-    let gw = gateway_of(&rec)
-        .plugin("detach", Detach(Mutex::new(Some(tx))))
-        .unwrap();
+    let gw = gateway_of(&rec).plugin("detach", Detach).unwrap();
     let (res, _end) = handle(&gw, req(vec!["hi"])).await;
     assert_eq!(read(res).await.map(|(s, _)| s), Ok(200));
-    handed.await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), gw.idle())
         .await
         .expect("idle once the job ended");
     let log = rec.log();
     assert_eq!(log.client_start, 2);
     assert_eq!(log.client_codes(), ["ok", "ok"]);
+}
+
+/// A request counts for `idle` from the moment `handle` is called, before
+/// its future is polled (loop 3, bug 3).
+#[tokio::test(flavor = "current_thread")]
+async fn a_request_counts_from_the_moment_handle_is_called() {
+    let gw = gateway_of(&Rec::default());
+    let (wire, _reply) = ToyWire::new(req(vec!["q"]));
+    let handling = gw.handle(wire, Extensions::new());
+    assert!(
+        gw.idle().now_or_never().is_none(),
+        "idle resolved although handle had been called"
+    );
+    drop(handling);
+    assert!(
+        gw.idle().now_or_never().is_some(),
+        "a dropped request counts no more"
+    );
+}
+
+/// A job handed to the gateway from an end hook, whose task may run only
+/// after the hook's own count is gone: `idle` must not resolve before the
+/// job's request ends (loop 3, bug 3). Many rounds on several threads, as
+/// the race is timing's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_waits_for_a_job_started_in_an_end_hook() {
+    #[derive(Clone)]
+    struct Mark;
+
+    /// Counts each job's end; starts a job from each other request's end.
+    struct Detach(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Plugin for Detach {
+        async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
+            if cx.extensions().get::<Mark>().is_some() {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+            let (wire, reply) = ToyWire::new(req(vec!["job"]));
+            let mut marked = Extensions::new();
+            marked.insert(Mark);
+            let job = cx.gateway().handle(wire, marked);
+            tokio::spawn(async move {
+                let end = job.await;
+                let _ = read(reply.await.ok_or_else(|| Fault::internal("none"))).await;
+                let _ = end.await;
+            });
+        }
+    }
+
+    let rounds = std::env::var("IDLE_ROUNDS").map_or(300, |n| n.parse().unwrap());
+    let mut early = 0;
+    for _ in 0..rounds {
+        let done = Arc::new(AtomicUsize::new(0));
+        let gw = gateway_of(&Rec::default())
+            .plugin("detach", Detach(done.clone()))
+            .unwrap();
+        let (res, end) = handle(&gw, req(vec!["hi"])).await;
+        let _ = read(res).await;
+        let _ = end.await;
+        tokio::time::timeout(Duration::from_secs(2), gw.idle())
+            .await
+            .unwrap();
+        if done.load(Ordering::SeqCst) == 0 {
+            early += 1;
+        }
+    }
+    assert_eq!(
+        early, 0,
+        "idle resolved before the job ended in {early}/{rounds}"
+    );
 }

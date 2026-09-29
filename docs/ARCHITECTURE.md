@@ -37,8 +37,9 @@ connection: the client edge is accepted, the provider edge is dialed.
 2. `handle` gives the wire to the first served format whose `accepts` says
    yes. None: the wire is dropped and the end is `Err(not_found)` (or
    `internal` if a format panicked), for the adapter to write plainly. The
-   request is in flight from here, so `Gateway::idle` waits for a body still
-   being read.
+   request is in flight from the call on, before its future is polled, so
+   `Gateway::idle` waits for a body still being read and for a job's request
+   handed from an end hook; the future borrows nothing.
 3. `Format::accept` resolves once the request is in: a one-shot request
    after its body is read (no inputs follow), a session at once (inputs
    follow). It gives the client's origin and its inputs, if any. `Err` (a body that broke) is refused before any plugin.
@@ -260,7 +261,7 @@ Every crate but `core` uses only the public API of the crates below it.
 | Guarantee | Where | Pinned by |
 |---|---|---|
 | Each hook that started gets its end once, on drop or panic too | `lifecycle.rs`; `Ended` owns the end hooks | `crates/core/tests`: `cancellation` (a drop at every await), `panic_matrix` (a panic at every place user code runs), `stress` |
-| `Gateway::idle` covers a request still reading its body | `InFlight`, entered in `handle` | core `lifecycle`; e2e |
+| `Gateway::idle` covers a request from the call to `handle`, a body still being read and a job's request | `InFlight`, entered when `handle` is called | core `lifecycle`; e2e |
 | A parked call ends `abandoned` with its request | `call.rs` (`Sending`, `OpenCalls`) | core `cancellation`; testkit `streams` |
 | `until_content`, `until_end`; a call ends when its end is read | `Response`, `Batch` | core `until`; `sdks/routing/tests` |
 | A cut or broken upload never looks complete | events: `leg.rs`; bytes: the driver's writer | core `upload`; `crates/http/tests/driver_toy.rs` |

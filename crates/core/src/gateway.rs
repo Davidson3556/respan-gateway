@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -130,7 +131,7 @@ impl Gateway {
 
     /// Serve `wire` in the first format served ([`Gateway::serve`]) that
     /// [`accepts`](Format::accepts) it: resolves once its client edge has
-    /// its reply, with a future of how the session ended, as
+    /// its reply, with a future of how the request ended, as
     /// [`Plugin::on_client_end`] gets it, resolved once the reply's end is
     /// out, before end hooks finish. The caller built `wire`, so it knows
     /// its type; a format of another wire type never accepts it.
@@ -141,68 +142,83 @@ impl Gateway {
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) if one panicked. The
     /// adapter owns the wire's rules: it takes out what no plugin or format
     /// should see, such as the gateway's own keys, before, and what a hop
-    /// must not carry after. The session counts for [`Gateway::idle`] from
-    /// this call on. Call it on a tokio runtime, which runs the end hooks;
-    /// it panics outside one.
-    pub async fn handle<W: Send + 'static>(
+    /// must not carry after.
+    ///
+    /// The request counts for [`Gateway::idle`] from this call on, before
+    /// the future is first polled, and the future borrows nothing: a job
+    /// that hands the gateway a request calls `handle` where it starts, and
+    /// awaits the future in its own task, so `idle` never misses it. Await
+    /// it on a tokio runtime, which runs the end hooks; it panics outside
+    /// one.
+    // It resolves twice by design: once the reply is ready, then at its end.
+    #[allow(clippy::async_yields_async)]
+    pub fn handle<W: Send + 'static>(
         &self,
         wire: W,
         extensions: Extensions,
-    ) -> BoxFuture<'static, Result<(), Fault>> {
+    ) -> impl Future<Output = BoxFuture<'static, Result<(), Fault>>> + Send + 'static {
         let wire: Box<dyn Any + Send> = Box::new(wire);
         // A format that panics in `accepts` is the adapter's to write.
         let served = &self.inner.served;
         let accepts = || served.iter().find(|d| d.accepts(&*wire)).cloned();
         let format = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
-            Ok(Some(format)) => format,
-            Ok(None) => {
-                let text = "no format served accepts this request";
-                return unwritten(Fault::not_found(text));
-            }
-            Err(_) => return unwritten(Fault::internal(PANICKED)),
+            Ok(Some(format)) => Ok(format),
+            Ok(None) => Err(Fault::not_found("no format served accepts this request")),
+            Err(_) => Err(Fault::internal(PANICKED)),
         };
-        // In flight while the request comes in, so `idle` waits for it.
+        // In flight from this call on, while the request comes in too, so
+        // `idle` waits for it.
         let reading = InFlight::enter(&self.inner.in_flight);
         let (tx, rx) = oneshot::channel::<AnyReply>();
         let reply = rx.map(|reply| reply.unwrap_or_else(|_| abandoned()));
-        let accept = AssertUnwindSafe(|| format.accept(wire, reply.boxed()));
-        let Ok(accepting) = std::panic::catch_unwind(accept) else {
-            return unwritten(Fault::internal(PANICKED));
-        };
-        let accepted = AssertUnwindSafe(accepting).catch_unwind().await;
-        let panicked = accepted.is_err();
-        let accepted = accepted.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-        let (origin, later, broken) = match accepted {
-            Ok((origin, later)) => (origin, Later::new(later), None),
-            Err(fault) => (None, Later::new(None), Some(fault)),
-        };
+        let accepting = format.and_then(|format| {
+            let accept = AssertUnwindSafe(|| format.accept(wire, reply.boxed()));
+            let accepting = std::panic::catch_unwind(accept);
+            accepting
+                .map_err(|_| Fault::internal(PANICKED))
+                .map(|a| (format, a))
+        });
         let inner = self.inner.clone();
-        let cx = ClientContext::new(format.clone(), origin, later, extensions, inner);
-        let (outcome, ended) = oneshot::channel();
-        let settling = cx.settling.clone();
-        let mut hooks = EndHooks::new(&self.inner.in_flight, cx, Some(outcome));
-        drop(reading);
-        // The request's end hooks run after its calls'.
-        hooks.after = Some(settling);
-        let reply = match broken {
-            Some(fault) => session::refusal(fault, hooks),
-            None => {
-                // A plugin panic is refused like a failure.
-                let ran = AssertUnwindSafe(run(&self.inner, &mut hooks)).catch_unwind();
-                let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-                session::reply(&format, resp, hooks).await
+        async move {
+            let (format, accepting) = match accepting {
+                Ok(accepting) => accepting,
+                Err(fault) => return unwritten(fault),
+            };
+            let accepted = AssertUnwindSafe(accepting).catch_unwind().await;
+            let panicked = accepted.is_err();
+            let accepted = accepted.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+            let (origin, later, broken) = match accepted {
+                Ok((origin, later)) => (origin, Later::new(later), None),
+                Err(fault) => (None, Later::new(None), Some(fault)),
+            };
+            let in_flight = inner.in_flight.clone();
+            let cx = ClientContext::new(format.clone(), origin, later, extensions, inner.clone());
+            let (outcome, ended) = oneshot::channel();
+            let settling = cx.settling.clone();
+            let mut hooks = EndHooks::new(&in_flight, cx, Some(outcome));
+            drop(reading);
+            // The request's end hooks run after its calls'.
+            hooks.after = Some(settling);
+            let reply = match broken {
+                Some(fault) => session::refusal(fault, hooks),
+                None => {
+                    // A plugin panic is refused like a failure.
+                    let ran = AssertUnwindSafe(run(&inner, &mut hooks)).catch_unwind();
+                    let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+                    session::reply(&format, resp, hooks).await
+                }
+            };
+            // An edge that dropped its reply ends the request abandoned, but
+            // one whose future panicked took its reply with it: the request
+            // ends as the refusal says, `internal`.
+            if let Err((_, ended)) = tx.send(reply)
+                && panicked
+            {
+                ended(Err(Fault::internal(PANICKED)));
             }
-        };
-        // An edge that dropped its reply ends the session abandoned, but
-        // one whose future panicked took its reply with it: the session
-        // ends as the refusal says, `internal`.
-        if let Err((_, ended)) = tx.send(reply)
-            && panicked
-        {
-            ended(Err(Fault::internal(PANICKED)));
+            let ended = ended.map(|told| told.expect("every request's end is told"));
+            ended.boxed()
         }
-        let ended = ended.map(|told| told.expect("every request's end is told"));
-        ended.boxed()
     }
 
     /// The settings, for a by-value method to change; a shared gateway is
