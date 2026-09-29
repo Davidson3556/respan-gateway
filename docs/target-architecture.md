@@ -1,7 +1,9 @@
 > **Historical.** This is the design document for 0020, kept as it was
 > written. Later decisions changed parts of it: `Fault::of_input` and the
 > per-input flag left in 0021, `Dialed` was inlined, and `Dialect` became
-> `Format`. The implemented architecture is in
+> `Format`. Names were also changed: `Half` is now `Headed`, `opening` is
+> `input`, `later` is `inputs`, and `Gateway::serve` is `Gateway::client`.
+> The body below keeps the old names. The implemented architecture is in
 > [ARCHITECTURE.md](ARCHITECTURE.md) and the [decisions](decisions/); where
 > they differ, they win.
 
