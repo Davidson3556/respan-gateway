@@ -729,6 +729,36 @@ async fn a_bodiless_answer_ends_with_its_client() {
     }
 }
 
+/// A bodiless answer whose end is not ready when its head goes out has
+/// nothing to say the end with: the client leaving ends it `abandoned`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bodiless_answer_whose_end_is_not_ready_ends_abandoned() {
+    let transport = fnt(|_| {
+        let body = stream::iter([Ok(Bytes::from("a"))])
+            .chain(stream::pending())
+            .boxed();
+        future::ready(Ok(answer(200, body))).boxed()
+    });
+    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
+    let req = http::Request::builder()
+        .method(http::Method::HEAD)
+        .uri("/x");
+    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    assert_eq!(resp.status(), 200);
+    drop(resp);
+    let end = ended.await;
+    gw.idle().await;
+    assert_eq!(
+        (code(&end), codes(calls.all()), codes(outcomes.all())),
+        (
+            "abandoned".to_string(),
+            vec!["abandoned".to_string()],
+            vec!["abandoned".to_string()]
+        )
+    );
+}
+
 /// A body that panics when polled, as a buggy adapter body could.
 fn panicking() -> Frames {
     stream::poll_fn(|_| -> Poll<Option<Result<Bytes, Fault>>> { panic!("body panic") }).boxed()

@@ -29,6 +29,7 @@ mod driver;
 mod transport;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -306,20 +307,36 @@ pub(crate) fn depart(
                 // that is when the client leaves. Read what is ready now, so a
                 // refusal's end is told, then drop the rest: the session ends
                 // with its client (rule 4), never when a provider's stream
-                // does. An output says `Pending` once before each frame
-                // (rule 5), so ready is a second `Pending` in a row.
-                let mut yielded = false;
-                loop {
-                    match body.frame().now_or_never() {
-                        Some(Some(_)) => yielded = false,
-                        Some(None) => break,
-                        None if yielded => break,
-                        None => yielded = true,
-                    }
-                }
+                // does.
+                drain_ready(&mut body);
                 body = full(Bytes::new());
             }
             http::Response::from_parts(head, body)
+        }
+    }
+}
+
+/// Read `body`'s frames until it ends or waits on something. An output says
+/// `Pending` between the frames it sent apart (rule 5) but wakes itself at
+/// once, as a yield does, so a `Pending` that was woken during its poll is
+/// ready, and one that was not is waiting.
+fn drain_ready(body: &mut Body) {
+    struct Woken(AtomicBool);
+    impl futures::task::ArcWake for Woken {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let woken = Arc::new(Woken(AtomicBool::new(false)));
+    let waker = futures::task::waker(woken.clone());
+    let mut cx = std::task::Context::from_waker(&waker);
+    loop {
+        woken.0.store(false, Ordering::SeqCst);
+        match http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), &mut cx) {
+            std::task::Poll::Ready(Some(_)) => {}
+            std::task::Poll::Ready(None) => break,
+            std::task::Poll::Pending if woken.0.load(Ordering::SeqCst) => {}
+            std::task::Poll::Pending => break,
         }
     }
 }
