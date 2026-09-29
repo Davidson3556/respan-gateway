@@ -5,6 +5,7 @@ use std::future::Future;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body as AxumBody;
@@ -66,6 +67,11 @@ pub fn router(gateway: Gateway) -> Router {
 /// - the response ending clean closes with 1000; failing, with 1011 (or the
 ///   fault's [`CloseCode`]) and the fault's code as the reason, never its
 ///   message.
+///
+/// The client's frames are read no faster than the provider takes them, so
+/// its connection dropping is seen only after the frames sent before it are
+/// read: with a provider that is not reading, the session lasts until it
+/// does, or until [`serve_ws_until`]'s future completes.
 ///
 /// Messages up to [`MAX_MESSAGE`]. Only HTTP/1.1 upgrades, which is what
 /// `WebSocketUpgrade` accepts of a `GET` with `Upgrade: websocket`.
@@ -256,8 +262,14 @@ async fn write(
                 let Ok(text) = Utf8Bytes::try_from(bytes) else {
                     break (1011, "internal".to_owned());
                 };
-                if sink.send(Message::Text(text)).await.is_err() {
-                    return;
+                // A client that stopped reading blocks the send: `until` still ends it.
+                tokio::select! {
+                    sent = sink.send(Message::Text(text)) => {
+                        if sent.is_err() {
+                            return;
+                        }
+                    }
+                    reason = &mut until => break (1001, clipped(reason.to_owned())),
                 }
             }
             Some(Ok(_)) => {}
@@ -285,13 +297,21 @@ fn clipped(mut reason: String) -> String {
     reason
 }
 
+/// How long a Close is given to leave: it is under 130 bytes, so a client
+/// that has not taken it in this time has stopped reading, and waiting on it
+/// would keep the session alive past its end.
+const CLOSE_SEND: Duration = Duration::from_secs(1);
+
 async fn close(sink: &mut SplitSink<WebSocket, Message>, code: u16, reason: &str) {
     let frame = CloseFrame {
         code,
         reason: Utf8Bytes::from(reason.to_owned()),
     };
-    let _ = sink.send(Message::Close(Some(frame))).await;
-    let _ = sink.close().await;
+    let _ = tokio::time::timeout(CLOSE_SEND, async {
+        let _ = sink.send(Message::Close(Some(frame))).await;
+        let _ = sink.close().await;
+    })
+    .await;
 }
 
 #[cfg(test)]
