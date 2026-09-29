@@ -22,9 +22,9 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 | [fallback](fallback.rs) | 4, 6 | Retry with `Retry-After`, fallback to another format, a hedged race, a stall watchdog. |
 | [judge](judge.rs) | 5 | A plugin that asks a small model to pick the target, as a subrequest. |
 | [mcp_proxy](mcp_proxy.rs) | 7 (MCP part) | MCP over streamable HTTP with a tool allow-list; optionally a stdio server. |
-| [realtime](realtime.rs) | 7 (WebSocket part) | OpenAI Realtime over WebSocket: e-mail addresses hidden from the provider and restored across deltas, each turn metered as it completes, a turn cut before `response.done` charged from an estimate and at least a hold. |
+| [realtime](realtime.rs) | 7 (WebSocket part) | OpenAI Realtime over WebSocket: e-mail addresses hidden from the provider and restored across deltas, each turn metered as it completes, a turn cut before `response.done` charged from an estimate and at least a hold, a session cut at a maximum length by a plugin. |
 | [jobs](jobs.rs) | 8 | An idempotent request: a retry or duplicate gets the stored result; one provider call. |
-| [jobs_background](jobs_background.rs) | 8 | A background job that outlives its client (the plugin re-enters its own gateway), polled later; signed ids that name a deployment and route a later `GET`. |
+| [jobs_background](jobs_background.rs) | 8 | A background job that outlives its client (the plugin re-enters its own gateway with `cx.gateway()`; refused to zero-retention tenants), polled later; signed ids that name a deployment, bind the tenant and route a later `GET`. |
 | [wallet](wallet.rs) | 9 (and 4) | Nested prepaid wallets; fifty parallel requests never overspend $1; the loser of a hedge pays at least its hold. |
 | [cost_cap](cost_cap.rs) | 9 | A per-call cost cap: bound `max_tokens`, hold it, cut a runaway stream, settle. |
 | [admission](admission.rs) | 10 | Requests wait in a priority queue, round-robin across end users, for a slot, else 429 with `Retry-After`. |
@@ -40,8 +40,8 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 
 - Use case 7: audio turns, and Gemini Live and Responses over WebSocket.
   Draining
-  sessions at shutdown and a maximum session length are in the SDK
-  (`serve_ws_until`, tested there), not wired into `realtime`.
+  sessions at shutdown is `serve_ws_until` in the SDK (a maximum session
+  length is `realtime`'s `MaxLength` plugin).
 - Use case 4: retrying one chunk of a split batch (`batch_split` fails the
   request), and a list of providers read from the gateway (`models_merge` is
   given their names).

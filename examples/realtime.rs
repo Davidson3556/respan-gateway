@@ -1,5 +1,5 @@
 //! Use case 7, a two-way session: OpenAI Realtime over WebSocket through the
-//! gateway, with two plugins over its events.
+//! gateway, with plugins over its events.
 //!
 //! - `Pii`: an e-mail address the user says is hidden behind a placeholder
 //!   before the provider reads it (`conversation.item.create`,
@@ -7,6 +7,8 @@
 //!   text the provider sends back, a placeholder split across deltas
 //!   included (the text SDK's `Placeholders`, with its `Rewrite`; its
 //!   `Holdback` filters the chat kind, so a session holds its own).
+//! - `MaxLength`: a session is cut at a deadline a plugin chose, with a normal
+//!   close; the turns metered before it stay metered.
 //! - `Meter`: each turn is metered when its `response.done` passes, not when
 //!   the session ends, so a session of hours is billed as it goes; a turn cut
 //!   before its `response.done` (or before its first event) is metered from
@@ -24,8 +26,8 @@
 //! `truncated` (the provider's connection broke) or `upstream`.
 //!
 //! Not covered: audio (`input_audio_buffer.append` events are text, and pass
-//! unread, but the placeholders and the meter read text turns only); draining sessions at shutdown and a maximum session length (the SDK's
-//! `serve_ws_until` does both, given a future per session); Gemini Live and
+//! unread, but the placeholders and the meter read text turns only); draining sessions at shutdown (the SDK's `serve_ws_until`, given a
+//! future per session, or `MaxLength` with a shared signal); Gemini Live and
 //! Responses over WebSocket, which only need another `JsonEvents` and plugins
 //! that know their events; PII other than e-mail addresses (see `pii`).
 //!
@@ -34,7 +36,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
+use respan_gateway_core::futures::StreamExt;
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -42,6 +46,9 @@ use respan_gateway_testkit::Outcomes;
 use respan_gateway_text::{Placeholders, Rewrite};
 use respan_gateway_ws::{ClientEvent, JsonEvents, ProviderEvent, WsTransport};
 use serde_json::{Value, json};
+
+/// The longest a session may last, unless a plugin says otherwise.
+const HOUR: Duration = Duration::from_secs(3600);
 
 /// The Realtime format: served and sent at `/v1/realtime`.
 fn realtime() -> JsonEvents {
@@ -346,18 +353,39 @@ impl Plugin for Meter {
     }
 }
 
+/// Caps a session's length: its events are cut at a deadline chosen in
+/// `on_client`, so a plugin decides per session (a tenant's plan, a drain
+/// signal: any future works) and the client gets a normal close. It makes
+/// the call itself, so register it last; the filters of the plugins before
+/// it are on the call it makes.
+struct MaxLength(Duration);
+
+#[async_trait]
+impl Plugin for MaxLength {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let events = cx.call("openai").await?.outputs::<ProviderEvent>();
+        let cut = events.take_until(tokio::time::sleep(self.0));
+        Ok(Some(Response::stream(cut)))
+    }
+}
+
 /// The gateway: sessions served and relayed to the provider at `provider`
 /// (`ws://host`). For real use, the transport is
 /// `WsTransport::new("wss://api.openai.com")?.with_headers(key)?`, or without
 /// `with_headers`, so each client's own key is relayed.
-fn gateway(provider: &str, meter: &Meter, ends: &Outcomes) -> Result<Gateway, Fault> {
+fn gateway(
+    provider: &str,
+    meter: &Meter,
+    ends: &Outcomes,
+    longest: Duration,
+) -> Result<Gateway, Fault> {
     Gateway::new()
         .serve(realtime())?
         .provider("openai", realtime(), WsTransport::new(provider)?)?
         .plugin("ends", ends.clone())?
         .plugin("pii", Pii)?
         .plugin("meter", meter.clone())?
-        .target("openai")
+        .plugin("max", MaxLength(longest))
 }
 
 /// Serve `gateway` to WebSocket clients on a free port.
@@ -476,7 +504,7 @@ async fn main() -> Result<(), Fault> {
     openai.answer(Answer::events(reply));
     let provider = openai.base_url().replace("http://", "ws://");
     let (meter, ends) = (Meter::default(), Outcomes::default());
-    let gw = gateway(provider.trim_end_matches("/v1"), &meter, &ends)?;
+    let gw = gateway(provider.trim_end_matches("/v1"), &meter, &ends, HOUR)?;
     let addr = listen(&gw).await;
 
     let mut ws = client(addr).await;

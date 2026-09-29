@@ -12,10 +12,15 @@ struct Session {
 }
 
 async fn start() -> Result<Session, Fault> {
+    start_for(HOUR).await
+}
+
+/// A session that may last `longest`.
+async fn start_for(longest: Duration) -> Result<Session, Fault> {
     let openai = FakeOpenAi::start().await;
     let provider = openai.base_url().replace("http://", "ws://");
     let (meter, ends) = (Meter::default(), Outcomes::default());
-    let gateway = gateway(provider.trim_end_matches("/v1"), &meter, &ends)?;
+    let gateway = gateway(provider.trim_end_matches("/v1"), &meter, &ends, longest)?;
     let addr = listen(&gateway).await;
     Ok(Session {
         openai,
@@ -286,5 +291,32 @@ async fn a_client_that_leaves_is_recorded_abandoned() -> Result<(), Fault> {
             turns: 0
         }]
     );
+    Ok(())
+}
+
+// A session past its maximum length is closed by its plugin, with a normal
+// close; what it said before is still restored and metered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_is_closed_at_its_maximum_length() -> Result<(), Fault> {
+    let s = start_for(Duration::from_millis(500)).await?;
+    let reply = script(&["Noted: <EMA", "IL_1> ok."], usage(4, 2));
+    s.openai.answer(Answer::events(reply));
+    let mut ws = client(s.addr).await;
+    let began = std::time::Instant::now();
+    assert_eq!(heard(&mut ws).await["type"], "session.created");
+    say(&mut ws, user_says("mail bob@x.io")).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    assert_eq!(said(&turn(&mut ws).await), "Noted: bob@x.io ok.");
+
+    // The client says nothing more: the session is cut at its deadline.
+    assert!(hear(&mut ws).await.is_none(), "the session was closed");
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        began.elapsed()
+    );
+    s.gateway.idle().await;
+    assert_eq!(s.meter.turns().len(), 1);
     Ok(())
 }

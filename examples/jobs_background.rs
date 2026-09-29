@@ -9,11 +9,16 @@
 //!   [`Credential`], and the provider gets the tenant's key. A poll is
 //!   answered from the plugin's store: `in_progress`, then the finished body.
 //!   `Gateway::idle` waits for the detached run, so a shutdown can drain it.
+//!   The job's run is marked [`Job`], and a marked request is never started
+//!   as a job again, so a job cannot recurse; a tenant marked `NoContent`
+//!   (zero retention, as in `logging.rs`) is refused background mode, since
+//!   a job's answer must be kept until it is polled.
 //! - **Signed ids.** The client never sees a provider's id: it gets one that
 //!   names the deployment (`resp_{deployment}{key}{tag}`, 38 characters, under
-//!   Azure's 64) and is signed, so a later `GET` goes to the deployment the id
-//!   names, with the provider's own id in its path. A forged id is a 404
-//!   before any call. Here the tag is a hash; use an HMAC.
+//!   Azure's 64) and is signed together with the tenant (a hash of its
+//!   credential), so a later `GET` goes to the deployment the id names, with
+//!   the provider's own id in its path. A forged id, or another tenant's, is
+//!   a 404 before any call. Here the tag is a hash; use an HMAC.
 //!
 //! The format is `rest`'s: its input carries the method and path, so what a
 //! plugin changes in it, the encoder writes.
@@ -22,16 +27,12 @@
 //! nothing), a webhook when a job finishes, and holding the tenant's budget
 //! for a job for as long as it runs.
 //!
-//! **Friction:** a plugin has no handle to its gateway. `Jobs::attach` is
-//! given it once the last builder call is made (a changed gateway is a new
-//! one), and the plugin and its gateway then hold each other.
-//!
 //! `cargo run -p respan-gateway-examples --example jobs_background`
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::{
@@ -40,7 +41,7 @@ use respan_gateway_core::{
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_formats::opaque::Got;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::http::{self, Method};
+use respan_gateway_http::http::{self, Method, header::AUTHORIZATION};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Asked, Body, Credential, Transport, built_wrong, full};
 use respan_gateway_testkit::{MockTransport, mock, read_whole, serve};
@@ -57,19 +58,33 @@ const SECRET: u64 = 0x5eed;
 /// Where a request that names no deployment goes; your routing decides.
 const DEFAULT: usize = 1;
 
-/// `resp_` + deployment + 16 hex of the key + 16 hex of the tag.
-fn sign(deployment: usize, key: u64) -> String {
+/// Who a request is for: a hash of its credential (a durable store hashes
+/// with SHA-256), which the adapter lifted into a [`Credential`].
+fn tenant(cx: &ClientContext) -> u64 {
+    let credential = cx.extensions().get::<Credential>();
+    let mut hasher = DefaultHasher::new();
+    credential
+        .and_then(|c| c.get(AUTHORIZATION.as_str()))
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `resp_` + deployment + 16 hex of the key + 16 hex of the tag, which
+/// covers the tenant too, so the id is only good for the tenant it was
+/// issued to.
+fn sign(deployment: usize, key: u64, tenant: u64) -> String {
     let mut tag = DefaultHasher::new();
-    (SECRET, deployment, key).hash(&mut tag);
+    (SECRET, deployment, key, tenant).hash(&mut tag);
     format!("resp_{deployment}{key:016x}{:016x}", tag.finish())
 }
 
-/// The deployment a signed id names; `None` if it was not signed here.
-fn verify(id: &str) -> Option<usize> {
+/// The deployment a signed id names; `None` if it was not signed here for
+/// this tenant.
+fn verify(id: &str, tenant: u64) -> Option<usize> {
     let rest = id.strip_prefix("resp_").filter(|r| r.len() == 33)?;
     let deployment: usize = rest[..1].parse().ok()?;
     let key = u64::from_str_radix(&rest[1..17], 16).ok()?;
-    (deployment < DEPLOYMENTS.len() && sign(deployment, key) == id).then_some(deployment)
+    (deployment < DEPLOYMENTS.len() && sign(deployment, key, tenant) == id).then_some(deployment)
 }
 
 /// What the plugin knows of an id it issued.
@@ -83,14 +98,17 @@ enum Entry {
     Done(Bytes),
 }
 
-/// Marks the gateway's own run of a job, with its id.
+/// Marks the gateway's own run of a job, with its id. A request that
+/// carries it is never started as a job: re-entry cannot recurse.
 #[derive(Clone)]
 struct Job(String);
 
+/// Marks a zero-retention request; your tenancy plugin sets it.
+#[derive(Clone)]
+struct NoContent;
+
 #[derive(Default)]
 struct Shared {
-    /// The plugin's own gateway, set once it is built.
-    gateway: OnceLock<Gateway>,
     /// A durable store (SQL, Redis) with a TTL in production.
     entries: Mutex<HashMap<String, Entry>>,
     keys: AtomicU64,
@@ -110,11 +128,6 @@ fn not_found() -> Fault {
 }
 
 impl Jobs {
-    /// Give the plugin its gateway, once the last builder call is made.
-    fn attach(&self, gateway: &Gateway) {
-        let _ = self.0.gateway.set(gateway.clone());
-    }
-
     fn entries(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
         self.0
             .entries
@@ -123,16 +136,16 @@ impl Jobs {
     }
 
     /// The job's own run, re-entered: route it to the deployment its id names.
-    fn rerun(cx: &mut ClientContext, Job(id): &Job) -> Result<Option<Response>, Fault> {
-        let deployment = verify(id).ok_or_else(|| Fault::internal("a job's own id is bad"))?;
-        cx.set_target(DEPLOYMENTS[deployment]);
-        Ok(None)
+    /// Its answer is kept as the client would have got it: with the signed id.
+    fn rerun(&self, cx: &mut ClientContext, Job(id): &Job) -> Result<Option<Response>, Fault> {
+        let deployment = verify(id, tenant(cx)).ok_or_else(|| Fault::internal("bad job id"))?;
+        self.relay(cx, id.clone(), deployment)
     }
 
     /// A poll: a job's state, or the response at the deployment the id names.
     fn poll(&self, cx: &mut ClientContext, path: &str) -> Result<Option<Response>, Fault> {
         let id = path.rsplit('/').next().unwrap_or_default();
-        let deployment = verify(id).ok_or_else(not_found)?;
+        let deployment = verify(id, tenant(cx)).ok_or_else(not_found)?;
         match self.entries().get(id).cloned().ok_or_else(not_found)? {
             Entry::Done(body) => Ok(answer(body)),
             Entry::Running => Ok(answer(
@@ -151,6 +164,7 @@ impl Jobs {
     }
 
     /// A relayed request: the client sees the signed id for the provider's.
+    /// A job's entry is already there, and stays.
     fn relay(
         &self,
         cx: &mut ClientContext,
@@ -163,9 +177,8 @@ impl Jobs {
             let mut body: Value = serde_json::from_slice(&got.0)
                 .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
             if let Some(native) = body["id"].as_str() {
-                shared
-                    .entries()
-                    .insert(id.clone(), Entry::Native(native.to_owned()));
+                let native = Entry::Native(native.to_owned());
+                shared.entries().entry(id.clone()).or_insert(native);
                 body["id"] = id.clone().into();
                 *got = Got::new(body.to_string());
             }
@@ -176,8 +189,13 @@ impl Jobs {
 
     /// A background job: answer now; run it as a request of the gateway's own.
     fn start(&self, cx: &ClientContext, ask: &Ask, id: String) -> Result<Option<Response>, Fault> {
-        let gateway = self.0.gateway.get().cloned();
-        let gateway = gateway.ok_or_else(|| Fault::internal("Jobs::attach was not called"))?;
+        if cx.extensions().get::<NoContent>().is_some() {
+            return Err(Fault::bad_request(
+                "background mode keeps output: not for this tenant",
+            ));
+        }
+        // Moved into the job, not kept in the plugin: the gateway holds it.
+        let gateway = cx.gateway();
         let mut extensions = Extensions::new();
         extensions.insert(Job(id.clone()));
         // The job is the tenant's: it runs with the tenant's key.
@@ -218,13 +236,13 @@ impl Plugin for Jobs {
             return Ok(None);
         };
         if let Some(job) = cx.extensions().get::<Job>().cloned() {
-            return Self::rerun(cx, &job);
+            return self.rerun(cx, &job);
         }
         if ask.method == Method::GET {
             return self.poll(cx, &ask.path);
         }
         let key = self.0.keys.fetch_add(1, Ordering::Relaxed) + 1;
-        let id = sign(DEFAULT, key);
+        let id = sign(DEFAULT, key, tenant(cx));
         let background = String::from_utf8_lossy(&ask.body).contains(r#""background":true"#);
         match background {
             true => self.start(cx, &ask, id),
@@ -236,7 +254,6 @@ impl Plugin for Jobs {
 const EAST: &str = "http://east.test";
 const WEST: &str = "http://west.test";
 
-/// The gateway, before `jobs` is given it: do that after the last builder call.
 fn gateway(east: impl Transport, west: impl Transport, jobs: &Jobs) -> Result<Gateway, Fault> {
     Gateway::new()
         .serve(RESPONSES)?
@@ -267,7 +284,6 @@ async fn main() -> Result<(), Fault> {
     mock.reply(WEST, mock::json(http::StatusCode::OK, done));
     let jobs = Jobs::default();
     let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
-    jobs.attach(&gateway);
 
     let queued = send(
         &gateway,

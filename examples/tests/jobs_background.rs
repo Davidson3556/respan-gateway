@@ -36,9 +36,7 @@ impl Plugin for Seen {
 fn slow_west(mock: &MockTransport, seen: &Seen) -> Result<Gateway, Fault> {
     let jobs = Jobs::default();
     let west = Slow(mock.at(WEST), Duration::from_secs(60));
-    let gateway = gateway(mock.at(EAST), west, &jobs)?.plugin("seen", seen.clone())?;
-    jobs.attach(&gateway);
-    Ok(gateway)
+    gateway(mock.at(EAST), west, &jobs)?.plugin("seen", seen.clone())
 }
 
 fn get(id: &str) -> http::Request<Body> {
@@ -59,14 +57,18 @@ async fn a_background_job_outlives_its_client_and_is_polled_later() -> Result<()
     .await?;
     let id = queued["id"].as_str().unwrap_or_default();
     assert_eq!(queued["status"], "queued");
-    assert!(id.len() <= 64 && verify(id) == Some(DEFAULT), "{id}");
+    assert!(id.starts_with("resp_1") && id.len() <= 64, "{id}");
 
     // The client is gone; the provider has not answered yet.
     assert_eq!(send(&gateway, get(id)).await?["status"], "in_progress");
     gateway.idle().await;
     assert_eq!(send(&gateway, get(id)).await?["output"], "done");
 
-    // One call, with the tenant's key, and from the re-entered run only:
+    // The client sees the signed id, never the provider's.
+    assert_eq!(send(&gateway, get(id)).await?["id"], id);
+
+    // One call, with the tenant's key, and from the re-entered run only
+    // (the job's body says `background`, and is not started as a job again):
     // the later plugin never saw the client's request, `jobs` answered it.
     let sent = mock.sent();
     assert_eq!(sent.len(), 1, "a poll is answered from the store");
@@ -140,5 +142,48 @@ async fn a_forged_id_is_refused_before_any_call() -> Result<(), Fault> {
         assert_eq!(status, StatusCode::NOT_FOUND, "{forged}");
     }
     assert_eq!(mock.sent().len(), 1, "no call for a forged id");
+    Ok(())
+}
+
+/// The same request, from a tenant with another key.
+fn as_other(mut req: http::Request<Body>) -> http::Request<Body> {
+    let key = "Bearer other-key".parse().expect("a header value");
+    req.headers_mut().insert("authorization", key);
+    req
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_id_is_only_good_for_the_tenant_it_was_issued_to() -> Result<(), Fault> {
+    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let done = r#"{"id":"native-1","output":"secret"}"#;
+    mock.reply(WEST, mock::json(StatusCode::OK, done));
+    mock.reply(WEST, mock::json(StatusCode::OK, r#"{"id":"native-2"}"#));
+    let gateway = slow_west(&mock, &seen)?;
+    let job = request("POST", "/v1/responses", r#"{"background":true}"#);
+    let job = send(&gateway, job).await?;
+    let relayed = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
+    gateway.idle().await;
+
+    for id in [&job["id"], &relayed["id"]] {
+        let id = id.as_str().unwrap_or_default();
+        let (status, ..) = read_whole(serve(&gateway, as_other(get(id))).await.0).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+    }
+    assert_eq!(mock.sent().len(), 2, "no call for another tenant's id");
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_zero_retention_tenant_is_refused_background_mode() -> Result<(), Fault> {
+    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let gateway = slow_west(&mock, &seen)?;
+    let mut req = request("POST", "/v1/responses", r#"{"background":true}"#);
+    let mut values = respan_gateway_core::Extensions::new();
+    values.insert(NoContent);
+    req.extensions_mut().insert(values);
+    let (status, ..) = read_whole(serve(&gateway, req).await.0).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    gateway.idle().await;
+    assert!(mock.sent().is_empty(), "no job ran");
     Ok(())
 }
