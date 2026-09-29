@@ -103,7 +103,7 @@ trait Format { type Input; type Output; type Wire; type Dialer;
       -> BoxFuture<Result<(Option<Origin>, Option<Events<Input>>), Fault>>; // refuses
   fn opening(&self, origin: &Origin) -> Option<Result<Input, Fault>> { None }
   fn dial(&self, dialer: &Dialer, extensions: Extensions, relay: Option<&Origin>,
-          opening: Option<(&Input, bool)>, later: Option<Events<(Input, bool)>>)
+          opening: Option<&Input>, later: Option<Events<Input>>)
       -> Result<Dialed<Output>, Fault>; }
 // Events<T>   = BoxStream<Result<T, Fault>>
 // Origin      = Arc<dyn Any>: what came with a head, sealed
@@ -138,13 +138,14 @@ The client edge has defaults (`accepts` is false, `accept` refuses,
 in-process model is a provider whose `Dialer` is the model
 (`examples/custom_transport.rs`).
 
-Each input carries a bool, whether it is the client's as decoded: an input
-a format cannot write is `bad_request` if it is, else `config`
-(`Fault::of_input`). The format applies it, not the core, because it fails
-an input where it writes it, out of the gateway's sight: an HTTP body's
-frames reach the transport, not the gateway. A call's own input (`with_input`) is never the
-client's. The model belongs to the kind (`Conversation.model`); its place
-on the wire is the format's.
+An input a format cannot write is `bad_request` if it says what the
+client's bytes said, else `config`, a plugin's. The kind tells them apart,
+as each value keeps what it was decoded to (`Relayed::whose` in `formats`),
+and the format applies it where it writes the input, out of the gateway's
+sight: an HTTP body's frames reach the transport, not the gateway
+([0021](decisions/0021-the-kind-owns-the-fault-split.md)). The model
+belongs to the kind (`Conversation.model`); its place on the wire is the
+format's.
 
 **Head timing, per edge.** A refusal is written as one, a complete answer.
 HTTP's client edge writes a one-shot request's head with its first bytes, so
@@ -264,7 +265,7 @@ Every crate but `core` uses only the public API of the crates below it.
 | `until_content`, `until_end`; a call ends when its end is read | `Response`, `Batch` | core `until`; `sdks/routing/tests` |
 | A cut or broken upload never looks complete | events: `leg.rs`; bytes: the driver's writer | core `upload`; `crates/http/tests/driver_toy.rs` |
 | Edge contract: refusal at the head, outputs dropped unread | `call.rs`, `session.rs` | core `contract`; `sdks/ws/tests/kernel.rs` |
-| The fault split | core decides (`opening.rs`, `leg.rs`); the format applies `Fault::of_input` | testkit `codec`, `custom` |
+| The fault split | the kind (`Relayed::whose`), where the format writes an input | testkit `codec`, `line`, `custom`, `translate` |
 | Lazy decode; a big body relays unread | `opening.rs` | core `stress`; e2e |
 | Byte-exact relay; a key only on a same-name relay | `relay_origin`; the driver; `http::credentials` | testkit `relay`, `translate`; `crates/http/tests/rules.rs`; e2e; `sdks/ws/tests` (`passthrough`, `credentials`) |
 | Head timing, framing, batches, keep-alives | the driver, the formats | `crates/http/tests` (`driver_toy`, `driver_formats`); testkit `streams`, `line` |

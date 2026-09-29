@@ -289,7 +289,8 @@ impl Encoder<Jev, ()> for Prompts {
             out.extend_from_slice(bytes);
             return Ok(());
         }
-        let v = self.0.write(jev, origin.map(|o| (&o.bytes, &o.said)))?;
+        let v = self.0.write(jev, origin.map(|o| (&o.bytes, &o.said)));
+        let v = v.map_err(|f| jev.origin.whose(jev, f))?;
         out.extend_from_slice(v.to_string().as_bytes());
         Ok(())
     }

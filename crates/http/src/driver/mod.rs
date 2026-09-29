@@ -197,10 +197,8 @@ macro_rules! impl_format {
                 dialer: &$crate::Dialer,
                 extensions: $crate::__private::Extensions,
                 relay: ::core::option::Option<&$crate::__private::Origin>,
-                opening: ::core::option::Option<(&Self::Input, bool)>,
-                later: ::core::option::Option<
-                    $crate::__private::Events<(Self::Input, bool)>,
-                >,
+                opening: ::core::option::Option<&Self::Input>,
+                later: ::core::option::Option<$crate::__private::Events<Self::Input>>,
             ) -> ::core::result::Result<
                 $crate::__private::Dialed<Self::Output>,
                 $crate::__private::Fault,

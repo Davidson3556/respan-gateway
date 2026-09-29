@@ -1,6 +1,6 @@
 # 0020. Symmetric edges
 
-- Status: accepted
+- Status: accepted; amended by 0021
 - Date: 2026-09-29
 
 ## Context
@@ -53,10 +53,10 @@ model whose `Dialer` is the model.
 
 `dial` returns `Err` now (not sent), a future's `Err` (sent, not
 answered), `Ok((origin, Err(fault)))` (refused) or `Ok((origin, Ok(outputs)))`
-(open). Each input carries whether it is the client's as decoded, which says
-whose fault it is if the format cannot write it (`Fault::of_input`).
-`Fault::abandoned` and `Fault::of_input` are public for edges outside the
-core.
+(open). Each input carried whether it was the client's as decoded, which
+said whose fault it is if the format cannot write it (`Fault::of_input`);
+0021 moved that to the kind. `Fault::abandoned` is public for edges outside
+the core.
 
 **Heads travel as sealed origins.** An `Origin` is what came with a head
 (for a client, the head and a whole body), opened only by a format of the
@@ -149,7 +149,8 @@ Loop 1 (a review of the contract's simplicity and naming), one pass:
   fault split: an HTTP body's frames are written by the format's encoder
   and read by the transport, so a failure to write a later input never
   passes through the core, and the flag of the last input pulled cannot be
-  matched to it there.
+  matched to it there. (Reversed in loop 2 by 0021: the format applies the
+  split, but the kind, not the core, knows it.)
 - Renames: `is_head_only` is `is_refused`; `dialect!` is `impl_format!`
   and "dialect" is no synonym of format; `relayed::Origin<T>` is
   `Came<T>`; `Ask` and `Answer` are `RequestHead` and `ResponseHead`.
@@ -159,3 +160,10 @@ Loop 1 (a review of the contract's simplicity and naming), one pass:
 - `Fault::with_details` and `details` are a hint, `formats::Details`, as
   `Status` is (0019): the kernel never read them, and the core no longer
   depends on `serde_json`.
+
+Loop 2 (simplicity and use cases), one pass:
+
+- `Format::Output` and both `filter<T>` lost an unused `PartialEq` bound.
+- `accept` resolves `Result<(Option<Origin>, Option<Events<Input>>), Fault>`:
+  nothing read the origin of a request that broke.
+- The per-input bool left `dial` (0021).

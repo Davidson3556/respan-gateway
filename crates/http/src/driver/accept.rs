@@ -136,9 +136,6 @@ struct Client<C> {
     streaming: bool,
 }
 
-/// Outputs as a writer takes them.
-type Outputs<T> = Events<(T, Option<bool>)>;
-
 impl<C: Codec> Client<C> {
     /// A refusal: an answer that is `fault` alone, which the client's codec
     /// writes. `hold` is an answer whose call it ends.
@@ -146,7 +143,7 @@ impl<C: Codec> Client<C> {
         self,
         fault: Fault,
         ended: Option<Ended>,
-        hold: Option<Outputs<C::Output>>,
+        hold: Option<Events<C::Output>>,
     ) -> Handed {
         let Some(ended) = ended else {
             return Err(Fault::internal("an answer's end told twice"));
@@ -189,7 +186,6 @@ impl<C: Codec> Client<C> {
         outputs: Events<C::Output>,
         ended: Ended,
     ) -> Handed {
-        let outputs = outputs.map(|o| o.map(|o| (o, None))).boxed();
         // A head goes only to a codec of the name it came in.
         let answer = origin
             .as_ref()

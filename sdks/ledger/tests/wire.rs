@@ -73,11 +73,11 @@ impl Format for Pipe {
         dialer: &Scripted,
         _extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<(&Question, bool)>,
-        _later: Option<Events<(Question, bool)>>,
+        opening: Option<&Question>,
+        _later: Option<Events<Question>>,
     ) -> Result<Dialed<Reply>, Fault> {
         let relayed = relay.and_then(|o| o.downcast_ref::<Question>());
-        let question = opening.map(|(q, _)| q).or(relayed);
+        let question = opening.or(relayed);
         if question.is_some_and(|q| q.0 == "unwritable") {
             return Err(Fault::bad_request("unwritable"));
         }

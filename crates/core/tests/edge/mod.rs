@@ -186,8 +186,8 @@ impl Format for Toy {
         dialer: &Dialer,
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<(&In, bool)>,
-        later: Option<Events<(In, bool)>>,
+        opening: Option<&In>,
+        later: Option<Events<In>>,
     ) -> Result<Dialed<Out>, Fault> {
         boom(12);
         if extensions.get::<Unsendable>().is_some() {
@@ -195,7 +195,7 @@ impl Format for Toy {
         }
         let relayed = relay.and_then(|o| o.downcast_ref::<ToyOrigin>());
         let text = match (opening, relayed) {
-            (Some((input, _)), _) => Some(input.0.clone()),
+            (Some(input), _) => Some(input.0.clone()),
             (None, Some(origin)) => origin.body.clone(),
             (None, None) => None,
         };
@@ -248,11 +248,11 @@ fn inputs(frames: Text) -> Events<In> {
 
 /// A call's later inputs as text frames: each its text, then `<END>` if
 /// they ended cleanly, else the failure.
-fn written(later: Events<(In, bool)>) -> Text {
+fn written(later: Events<In>) -> Text {
     stream::unfold(Some(later), |later| async move {
         let mut later = later?;
         match later.next().await {
-            Some(Ok((input, _))) => Some((Ok(input.0), Some(later))),
+            Some(Ok(input)) => Some((Ok(input.0), Some(later))),
             Some(Err(fault)) => Some((Err(fault), None)),
             None => Some((Ok("<END>".into()), None)),
         }

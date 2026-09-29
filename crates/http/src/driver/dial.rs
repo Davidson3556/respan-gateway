@@ -15,26 +15,6 @@ use super::reader::{Failure, Reader};
 use super::writer::Writer;
 use crate::{Codec, Dialer, Encoder, Exchange, RequestHead, ResponseHead};
 
-/// Whose content an input is: whose fault it is if it cannot be written.
-#[derive(Clone, Copy)]
-enum Whose {
-    /// The client's as decoded (`true`), whatever filters ran over it, or a
-    /// plugin's (`false`).
-    Of(bool),
-    /// The codec's own, such as an end.
-    Codec,
-}
-
-impl Whose {
-    /// `fault`, of content that cannot be written, as whose it is.
-    fn fault(self, fault: Fault) -> Fault {
-        match self {
-            Whose::Of(clients) => fault.of_input(clients),
-            Whose::Codec => fault,
-        }
-    }
-}
-
 /// The provider edge of `codec` through `dialer`, as
 /// [`Format::dial`](respan_gateway_core::Format::dial):
 ///
@@ -60,8 +40,8 @@ pub fn dial<C: Codec + Clone>(
     dialer: &Dialer,
     extensions: Extensions,
     relay: Option<&Origin>,
-    opening: Option<(&C::Input, bool)>,
-    later: Option<Events<(C::Input, bool)>>,
+    opening: Option<&C::Input>,
+    later: Option<Events<C::Input>>,
 ) -> Result<Dialed<C::Output>, Fault> {
     let came = relay.and_then(|o| o.downcast_ref::<Came>());
     let (head, first, encoder, done) = first_frame(codec, opening, came, later.is_some())?;
@@ -121,12 +101,11 @@ fn is_whole(answer: &ResponseHead, sent: &RequestHead) -> bool {
 /// bytes, then the client's bytes if relayed unread, else the input written
 /// from its value, then the end unless it `streams`; the encoder; and
 /// whether the body is done as it opens, when the first frame is the
-/// opening bytes alone. Content that cannot be written is whose it is
-/// (`Whose`).
+/// opening bytes alone.
 #[allow(clippy::type_complexity)]
 fn first_frame<C: Codec>(
     codec: &C,
-    opening: Option<(&C::Input, bool)>,
+    opening: Option<&C::Input>,
     came: Option<&Came>,
     streams: bool,
 ) -> Result<
@@ -141,29 +120,24 @@ fn first_frame<C: Codec>(
     let client = came.map(|c| &*c.head);
     // A plugin's or filtered input as its value; else as it came, its bytes
     // unread if relayed.
-    let (mut body, first, whose) = match (opening, came.and_then(|c| c.body.as_ref())) {
-        (Some((input, clients)), _) => (Bytes::new(), Some(input), Whose::Of(clients)),
-        (None, Some(raw)) => (raw.clone(), None, Whose::Of(true)),
-        (None, None) => (Bytes::new(), None, Whose::Codec),
+    let mut body = match (opening, came.and_then(|c| c.body.as_ref())) {
+        (None, Some(raw)) => raw.clone(),
+        _ => Bytes::new(),
     };
+    let first = opening;
     let mut encoder = codec.request_encoder(client, &mut body, streams);
     let head = encoder.head(first);
-    // What cannot be opened is the codec's to say, whoever's input it is.
     let mut opening = BytesMut::new();
     if encoder.open(&mut opening)? {
         return Ok((head, opening.freeze(), encoder, true));
     }
     let mut more = BytesMut::new();
-    let mut write = || {
-        if let Some(first) = first {
-            encoder.encode(first, &mut more)?;
-        }
-        match streams {
-            true => Ok(()),
-            false => encoder.end(&Ok(()), &mut more),
-        }
-    };
-    write().map_err(|fault| whose.fault(fault))?;
+    if let Some(first) = first {
+        encoder.encode(first, &mut more)?;
+    }
+    if !streams {
+        encoder.end(&Ok(()), &mut more)?;
+    }
     if !opening.is_empty() || !more.is_empty() {
         body = [&opening[..], &body[..], &more[..]].concat().into();
     }

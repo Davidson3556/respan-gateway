@@ -128,7 +128,6 @@ impl<T, F: FnMut(&mut T) -> Result<(), Fault> + Send + 'static> Filter<T> for F 
 
 /// One edge's filters of one direction, their values' type erased.
 trait AnyList: Any + Send {
-    fn is_empty(&self) -> bool;
     fn run(&mut self, values: &mut Values) -> Result<(), Fault>;
     fn end(&mut self, end: &Result<(), Fault>, values: &mut Option<Values>) -> Option<Fault>;
 }
@@ -138,10 +137,6 @@ trait AnyList: Any + Send {
 struct List<T>(Vec<(Box<dyn Filter<T>>, bool)>);
 
 impl<T: Send + 'static> AnyList for List<T> {
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// Each value in turn through every filter, so what one fails on leaves
     /// those before it written.
     fn run(&mut self, values: &mut Values) -> Result<(), Fault> {
@@ -249,10 +244,6 @@ impl Filters {
 
     pub(crate) fn ended(&self) -> bool {
         self.1.is_some()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.as_ref().is_none_or(|list| list.is_empty())
     }
 
     /// Run `values` through the filters until the first failure; `values`

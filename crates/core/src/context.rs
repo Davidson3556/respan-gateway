@@ -144,7 +144,7 @@ impl ClientContext {
             return stream::once(ready(self.opening.get::<T>().cloned())).boxed();
         }
         let items = inputs(self.later.clone(), self.format.clone(), None, &self.cut);
-        let typed = |(input, _): (AnyInput, bool)| {
+        let typed = |input: AnyInput| {
             let typed = input.downcast_ref::<T>().cloned();
             typed.ok_or_else(Fault::wrong_kind::<T>)
         };

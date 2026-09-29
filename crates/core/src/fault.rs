@@ -127,14 +127,6 @@ impl Fault {
         self
     }
 
-    /// The same fault under `code`, without its hints, which were of
-    /// another cause.
-    pub(crate) fn recoded(mut self, code: &'static str) -> Self {
-        self.0.hints = Extensions::new();
-        self.0.code = code.into();
-        self
-    }
-
     /// The machine-readable code, one of [`codes`] or the plugin's own.
     pub fn code(&self) -> &str {
         &self.0.code
@@ -169,17 +161,6 @@ impl Fault {
     /// client left.
     pub fn abandoned() -> Self {
         Self::new(codes::ABANDONED, "abandoned")
-    }
-
-    /// The same fault, of an input an edge could not write, as whose it is:
-    /// [`codes::BAD_REQUEST`] if the client's as decoded (`clients`), else
-    /// [`codes::CONFIG`], a plugin's; its hints go, as they were of
-    /// another cause.
-    pub fn of_input(self, clients: bool) -> Self {
-        self.recoded(match clients {
-            true => codes::BAD_REQUEST,
-            false => codes::CONFIG,
-        })
     }
 
     /// A setup that cannot work.
@@ -305,7 +286,6 @@ mod tests {
         assert_eq!(f.get::<u16>(), None);
         let g = f.clone().with(8_u8);
         assert_eq!((f.get::<u8>(), g.get::<u8>()), (Some(&7), Some(&8)));
-        assert_eq!(f.recoded("y").get::<u8>(), None);
     }
 
     #[test]

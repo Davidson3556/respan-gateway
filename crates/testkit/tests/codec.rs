@@ -159,7 +159,7 @@ impl Encoder<In, ()> for Numbered {
             None => input.1.clone(),
         };
         if text.contains("no") {
-            return Err(Fault::internal("msg cannot say no"));
+            return Err(input.2.whose(input, Fault::internal("msg cannot say no")));
         }
         self.0 += 1;
         out.extend_from_slice(format!("{}|{text}", self.0).as_bytes());
@@ -314,7 +314,7 @@ async fn r7_a_bad_frame_aborts_the_call() {
 
 // Content that cannot be written is whose it is, by one rule for the first
 // input and later frames alike: the client's if filters left it equal to its
-// decoding, else a plugin's.
+// decoding, else a plugin's. The kind tells them apart (`Relayed::whose`).
 #[tokio::test]
 async fn r8_the_fault_of_content_that_cannot_be_written_is_whose_it_is() {
     let cases = [

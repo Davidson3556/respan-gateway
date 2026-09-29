@@ -222,8 +222,10 @@ async fn dial(
         inputs(cx.later.clone(), cx.format.clone(), call, &px.cut)
     });
     let (dialer, ext) = (&*p.dialer, px.client.extensions.clone());
-    let opening = opening.as_ref().map(|(input, clients)| (input, *clients));
-    let dialed = guarded(|| p.format.dial(dialer, ext, relay.as_ref(), opening, later))?;
+    let dialed = guarded(|| {
+        p.format
+            .dial(dialer, ext, relay.as_ref(), opening.as_ref(), later)
+    })?;
     px.sent = true;
     let (origin, events) = dialed.await?;
     // A provider's head goes only to a client of the name it came in.

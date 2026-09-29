@@ -23,8 +23,7 @@ use crate::{Encoder, Frames};
 ///   failure as its end, so no clean end follows one (B1). A panic in the
 ///   encoder ends it `internal`, in the body and in its [`Failure`], which
 ///   the response reads, as the transport may read the body where nothing
-///   unwinds to the call (B2). What cannot be written is whose it is
-///   ([`Fault::of_input`]).
+///   unwinds to the call (B2).
 /// - **A client's answer** ([`Writer::answer`]) is one frame per output to
 ///   a streaming request, else one per batch. A failure is written in the
 ///   protocol's words ([`Encoder::end`]), again as the end's own failure if
@@ -37,8 +36,8 @@ pub(crate) struct Writer<T, H> {
     /// a client that leaves ends the request before its answer's call,
     /// which `values` holds.
     pub(crate) ended: Option<Ended>,
-    /// The values; each input with whether it is the client's.
-    pub(crate) values: Option<Events<(T, Option<bool>)>>,
+    /// The values.
+    pub(crate) values: Option<Events<T>>,
     /// A call's: where its encoder panicked.
     call: Option<Failure>,
     /// An answer's one failure, a refusal, its fault alone.
@@ -55,15 +54,9 @@ pub(crate) struct Writer<T, H> {
 }
 
 impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
-    /// A streamed call's body after its first frame: `later`, each with
-    /// whether it is the client's, then the end.
-    pub(crate) fn call(
-        encoder: Box<dyn Encoder<T, H>>,
-        later: Events<(T, bool)>,
-        failed: Failure,
-    ) -> Self {
-        let later = later.map(|input| input.map(|(input, clients)| (input, Some(clients))));
-        let mut writer = Self::new(encoder, Some(later.boxed()), true);
+    /// A streamed call's body after its first frame: `later`, then the end.
+    pub(crate) fn call(encoder: Box<dyn Encoder<T, H>>, later: Events<T>, failed: Failure) -> Self {
+        let mut writer = Self::new(encoder, Some(later), true);
         writer.call = Some(failed);
         writer
     }
@@ -73,7 +66,7 @@ impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
     pub(crate) fn answer(
         encoder: Box<dyn Encoder<T, H>>,
         ended: Ended,
-        outputs: Option<Events<(T, Option<bool>)>>,
+        outputs: Option<Events<T>>,
         streaming: bool,
     ) -> Self {
         let mut writer = Self::new(encoder, outputs, streaming);
@@ -81,11 +74,7 @@ impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
         writer
     }
 
-    fn new(
-        encoder: Box<dyn Encoder<T, H>>,
-        values: Option<Events<(T, Option<bool>)>>,
-        streaming: bool,
-    ) -> Self {
+    fn new(encoder: Box<dyn Encoder<T, H>>, values: Option<Events<T>>, streaming: bool) -> Self {
         Self {
             encoder,
             values,
@@ -150,14 +139,7 @@ impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
         let mut out = BytesMut::new();
         let encoder = &mut self.encoder;
         let step = std::panic::catch_unwind(AssertUnwindSafe(|| match &input {
-            Some(Ok((input, whose))) => {
-                let written = encoder.encode(input, &mut out);
-                let of = |f: Fault| match whose {
-                    Some(clients) => f.of_input(*clients),
-                    None => f,
-                };
-                written.map_err(of).map(|()| true)
-            }
+            Some(Ok(input)) => encoder.encode(input, &mut out).map(|()| true),
             None => encoder.end(&Ok(()), &mut out).map(|()| false),
             Some(Err(fault)) => Err(fault.clone()),
         }));
@@ -247,7 +229,7 @@ impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
             (None, None) => Some(Err(Fault::abandoned())),
         };
         let end = match next {
-            Some(Ok((output, _))) => self.encode(&output).err().map(Err),
+            Some(Ok(output)) => self.encode(&output).err().map(Err),
             Some(Err(fault)) => Some(Err(fault)),
             None => Some(Ok(())),
         };

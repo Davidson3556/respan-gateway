@@ -117,24 +117,29 @@ struct RequestEncoder<W>(PhantomData<W>);
 impl<W: Wire> Encoder<Conversation, ()> for RequestEncoder<W> {
     fn head(&mut self, _first: Option<&Conversation>) {}
 
+    /// What cannot be written is the client's fault only as decoded.
     fn encode(&mut self, chat: &Conversation, out: &mut BytesMut) -> Result<(), Fault> {
-        let mut v = match chat.origin(W::NAME) {
-            Some(o) if o.said == *chat && !W::unfinished(&o.bytes) => {
-                out.extend_from_slice(&o.bytes);
-                return Ok(());
-            }
-            Some(o) if o.said == *chat => object(&o.bytes)?,
-            Some(o) => patch_request::<W>(&o.bytes, &o.said, chat)?,
-            None => write_request::<W>(chat)?,
-        };
-        W::finish(&mut v);
-        out.extend_from_slice(&to_bytes(&v)?);
+        let bytes = request_bytes::<W>(chat).map_err(|f| chat.origin.whose(chat, f))?;
+        out.extend_from_slice(&bytes);
         Ok(())
     }
 
     fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
     }
+}
+
+/// `chat` as a request of this format: the client's bytes, with changes
+/// written in, or anew; then what the format adds ([`Wire::finish`]).
+fn request_bytes<W: Wire>(chat: &Conversation) -> Result<Bytes, Fault> {
+    let mut v = match chat.origin(W::NAME) {
+        Some(o) if o.said == *chat && !W::unfinished(&o.bytes) => return Ok(o.bytes.clone()),
+        Some(o) if o.said == *chat => object(&o.bytes)?,
+        Some(o) => patch_request::<W>(&o.bytes, &o.said, chat)?,
+        None => write_request::<W>(chat)?,
+    };
+    W::finish(&mut v);
+    to_bytes(&v)
 }
 
 /// `v` as JSON bytes.

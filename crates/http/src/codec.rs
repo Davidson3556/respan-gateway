@@ -31,7 +31,7 @@ use crate::{RequestHead, ResponseHead};
 /// a plugin for one kind read another's traffic.
 pub trait Codec: Send + Sync + 'static {
     /// What a request carries, one or a stream.
-    type Input: Clone + PartialEq + Send + Sync + 'static;
+    type Input: Clone + Send + Sync + 'static;
 
     /// What a response carries, one or a stream.
     type Output: Clone + Send + Sync + 'static;
@@ -62,11 +62,11 @@ pub trait Codec: Send + Sync + 'static {
     /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG).
     ///
     /// What this protocol cannot say is an `Err` of the encode it concerns,
-    /// never dropped: the driver makes it
+    /// never dropped, with whose fault it is:
     /// [`codes::BAD_REQUEST`](respan_gateway_core::codes::BAD_REQUEST) if
-    /// the input is the client's as decoded, else
-    /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG)
-    /// ([`Fault::of_input`]).
+    /// the input says what the client's bytes said, else
+    /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG), a plugin's
+    /// ([`Format::dial`](respan_gateway_core::Format::dial)).
     fn request_encoder(
         &self,
         client: Option<&RequestHead>,

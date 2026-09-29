@@ -86,7 +86,7 @@ pub type Dialed<T> = BoxFuture<'static, Result<Half<T>, Fault>>;
 /// the wire: `handle`'s end says why, for the adapter to write plainly.
 pub trait Format: Send + Sync + 'static {
     /// What a client sends, one or a stream.
-    type Input: Clone + PartialEq + Send + Sync + 'static;
+    type Input: Clone + Send + Sync + 'static;
 
     /// What a provider answers, one or a stream.
     type Output: Clone + Send + Sync + 'static;
@@ -145,11 +145,13 @@ pub trait Format: Send + Sync + 'static {
     /// - `opening`: the first input, to write from its value; `None` on a
     ///   relay means the origin's own, as it came.
     /// - `later`: the inputs that follow; `None` if none do.
-    /// - Each input's bool is whether it is the client's as decoded, which
-    ///   says whose fault it is if this format cannot write it
-    ///   ([`Fault::of_input`]): the format applies it where it writes the
-    ///   input, out of the gateway's sight (an HTTP body's frames reach the
-    ///   transport, not the gateway).
+    ///
+    /// An input this format cannot write fails with whose fault it is:
+    /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) if it says what the
+    /// client's bytes said, else [`codes::CONFIG`](crate::codes::CONFIG), a
+    /// plugin's. The kind tells them apart, as a value that keeps what it
+    /// was decoded to can be compared with it; the gateway does not, as an
+    /// input may fail where the format writes it, out of its sight.
     ///
     /// `Err` now: not sent. The future's `Err`: sent, and not answered.
     /// `Ok((origin, Err(fault)))`: answered and refused (rule 2).
@@ -159,8 +161,8 @@ pub trait Format: Send + Sync + 'static {
         dialer: &Self::Dialer,
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<(&Self::Input, bool)>,
-        later: Option<Events<(Self::Input, bool)>>,
+        opening: Option<&Self::Input>,
+        later: Option<Events<Self::Input>>,
     ) -> Result<Dialed<Self::Output>, Fault>;
 }
 
@@ -180,8 +182,8 @@ pub(crate) type AnyReply = (AnyHalf, Ended);
 /// A client edge's accepted request: its origin, and its inputs if any follow.
 pub(crate) type AnyAccepted = Result<(Option<Origin>, Option<AnyEvents>), Fault>;
 
-/// Inputs going to a provider, each with whether it is the client's.
-pub(crate) type AnyInputs = BoxStream<'static, Result<(AnyInput, bool), Fault>>;
+/// Inputs going to a provider.
+pub(crate) type AnyInputs = BoxStream<'static, Result<AnyInput, Fault>>;
 
 pub(crate) type AnyDialed = BoxFuture<'static, Result<AnyHalf, Fault>>;
 
@@ -204,13 +206,11 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
         dialer: &(dyn Any + Send + Sync),
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<(&AnyInput, bool)>,
+        opening: Option<&AnyInput>,
         later: Option<AnyInputs>,
     ) -> Result<AnyDialed, Fault>;
     /// Whether any of `outputs` is content.
     fn any_content(&self, outputs: &Values) -> bool;
-    /// Whether two inputs are equal.
-    fn same(&self, a: &AnyInput, b: &AnyInput) -> bool;
     /// Inputs as values, each moved if not shared.
     fn values(&self, inputs: Vec<AnyInput>) -> Values;
     /// Values of inputs, each shared.
@@ -306,24 +306,20 @@ impl<F: Format> AnyFormat for Erased<F> {
         dialer: &(dyn Any + Send + Sync),
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<(&AnyInput, bool)>,
+        opening: Option<&AnyInput>,
         later: Option<AnyInputs>,
     ) -> Result<AnyDialed, Fault> {
         let dialer = dialer
             .downcast_ref()
             .ok_or_else(|| Fault::internal("a dialer of another type than its format's"))?;
-        let opening = match opening {
-            Some((input, clients)) => {
-                let input = input.downcast_ref();
-                Some((input.ok_or_else(Fault::wrong_kind::<F::Input>)?, clients))
-            }
-            None => None,
-        };
-        let later = later.map(|later| {
-            later
-                .map(|item| item.and_then(|(input, clients)| Ok((owned(input)?, clients))))
-                .boxed()
-        });
+        let opening = opening
+            .map(|input| {
+                input
+                    .downcast_ref()
+                    .ok_or_else(Fault::wrong_kind::<F::Input>)
+            })
+            .transpose()?;
+        let later = later.map(|later| later.map(|item| item.and_then(owned)).boxed());
         let dialed = self
             .format
             .dial(dialer, extensions, relay, opening, later)?;
@@ -338,11 +334,6 @@ impl<F: Format> AnyFormat for Erased<F> {
             .into_iter()
             .flatten()
             .any(|output| self.format.is_content(output))
-    }
-
-    fn same(&self, a: &AnyInput, b: &AnyInput) -> bool {
-        let (a, b) = (a.downcast_ref::<F::Input>(), b.downcast_ref::<F::Input>());
-        a.is_some() && a == b
     }
 
     fn values(&self, inputs: Vec<AnyInput>) -> Values {

@@ -543,15 +543,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
 fn dial(codec: &Toy, transport: Fnt) -> Dialed<Out> {
     let dialer = Dialer::from(transport);
     let input = In("q".into());
-    respan_gateway_http::dial(
-        codec,
-        &dialer,
-        Extensions::new(),
-        None,
-        Some((&input, true)),
-        None,
-    )
-    .unwrap()
+    respan_gateway_http::dial(codec, &dialer, Extensions::new(), None, Some(&input), None).unwrap()
 }
 
 /// Rule 5: a provider's outputs say `Pending` between the frames it sent
@@ -642,14 +634,7 @@ async fn only_a_call_written_from_the_clients_origin_is_relayed() {
         respan_gateway_http::dial(&toy, &dialer, Extensions::new(), Some(&origin), None, None);
     let _ = relayed.unwrap().await.unwrap();
     let input = In("own".into());
-    let own = respan_gateway_http::dial(
-        &toy,
-        &dialer,
-        Extensions::new(),
-        None,
-        Some((&input, false)),
-        None,
-    );
+    let own = respan_gateway_http::dial(&toy, &dialer, Extensions::new(), None, Some(&input), None);
     let _ = own.unwrap().await.unwrap();
     assert_eq!(*lock(&marks), [true, false]);
 }

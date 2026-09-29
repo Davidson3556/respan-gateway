@@ -1370,7 +1370,9 @@ impl Encoder<LIn, ()> for Untranslatable {
 
     fn encode(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
         match input.0.contains("untranslatable") {
-            true => Err(Fault::internal("pathed cannot say it")),
+            true => Err(input
+                .1
+                .whose(input, Fault::internal("pathed cannot say it"))),
             false => Lines.encode(input, out),
         }
     }

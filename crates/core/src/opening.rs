@@ -117,24 +117,14 @@ impl Opening {
         filtered.map(drop)
     }
 
-    /// What a call writes first, and whether it is the client's as decoded:
-    /// a call's own or a changed input as its value; on a relay, unchanged,
-    /// `None` (the origin's own, never decoded); else the decoded opening,
-    /// if any.
-    pub(crate) fn sent(&self, relay: bool) -> Result<Option<(AnyInput, bool)>, Fault> {
-        let changed = self.changed.clone().transpose()?;
-        Ok(match changed {
-            Some(input) if self.own.is_some() => Some((input, false)),
-            Some(input) => {
-                let base = self.base().and_then(Result::ok);
-                let same = base.is_some_and(|b| self.base.format.same(b, &input));
-                Some((input, same))
-            }
-            None if relay => None,
-            None => match self.base() {
-                None => None,
-                Some(base) => Some((base?.clone(), true)),
-            },
-        })
+    /// What a call writes first: a call's own or a changed input as its
+    /// value; on a relay, unchanged, `None` (the origin's own, never
+    /// decoded); else the decoded opening, if any.
+    pub(crate) fn sent(&self, relay: bool) -> Result<Option<AnyInput>, Fault> {
+        match &self.changed {
+            Some(changed) => changed.clone().map(Some),
+            None if relay => Ok(None),
+            None => self.base().map(|base| base.cloned()).transpose(),
+        }
     }
 }

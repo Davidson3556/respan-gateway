@@ -101,8 +101,8 @@ impl Later {
     }
 }
 
-/// `later`'s inputs through the session's input filters, then `call`'s,
-/// each with whether it is the client's as decoded; cut, when `until` is
+/// `later`'s inputs through the session's input filters, then `call`'s;
+/// cut, when `until` is
 /// idle or either layer ended, with `Err(abandoned)`. Taken on the first
 /// poll; given back if none was read.
 pub(crate) fn inputs(
@@ -137,12 +137,12 @@ struct Reading {
     read: bool,
     format: Arc<dyn AnyFormat>,
     layers: Vec<Layer>,
-    ready: VecDeque<Result<(AnyInput, bool), Fault>>,
+    ready: VecDeque<Result<AnyInput, Fault>>,
     ended: bool,
 }
 
 impl Reading {
-    async fn next(&mut self) -> Option<Result<(AnyInput, bool), Fault>> {
+    async fn next(&mut self) -> Option<Result<AnyInput, Fault>> {
         loop {
             if let Some(item) = self.ready.pop_front() {
                 return Some(item);
@@ -186,28 +186,17 @@ impl Reading {
     }
 
     /// Each input through the layers, as it is ready; once a layer ended,
-    /// they are cut. One the layers left equal to its decoding is the
-    /// client's.
+    /// they are cut.
     fn filter(&mut self, values: Values) -> Result<(), Fault> {
         let layers: Vec<&Layer> = self.layers.iter().collect();
         for input in self.format.inputs(values) {
-            let (ended, empty) = layers.iter().fold((false, true), |(ended, empty), l| {
-                let f = locked(l);
-                (ended || f.ended(), empty && f.is_empty())
-            });
-            if ended {
+            if layers.iter().any(|l| locked(l).ended()) {
                 return Err(Fault::abandoned());
             }
-            if empty {
-                self.ready.push_back(Ok((input, true)));
-                continue;
-            }
-            let mut values = self.format.values(vec![input.clone()]);
+            let mut values = self.format.values(vec![input]);
             run(&layers, &mut values)?;
-            for changed in self.format.inputs(values) {
-                let same = self.format.same(&input, &changed);
-                self.ready.push_back(Ok((changed, same)));
-            }
+            self.ready
+                .extend(self.format.inputs(values).into_iter().map(Ok));
         }
         Ok(())
     }
@@ -221,8 +210,7 @@ impl Reading {
         let end = self::end(&layers, end, &mut tail);
         if end.is_ok() {
             let made = tail.map(|v| self.format.inputs(v)).unwrap_or_default();
-            let made = made.into_iter().map(|input| Ok((input, false)));
-            self.ready.extend(made);
+            self.ready.extend(made.into_iter().map(Ok));
         }
         end
     }
@@ -370,8 +358,8 @@ mod tests {
             _: &(),
             _: Extensions,
             _: Option<&Origin>,
-            _: Option<(&String, bool)>,
-            _: Option<Events<(String, bool)>>,
+            _: Option<&String>,
+            _: Option<Events<String>>,
         ) -> Result<Dialed<String>, Fault> {
             Err(Fault::internal("unused"))
         }

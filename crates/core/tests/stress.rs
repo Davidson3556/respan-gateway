@@ -76,8 +76,8 @@ impl Format for Counted {
         d: &Dialer,
         e: Extensions,
         r: Option<&Origin>,
-        o: Option<(&In, bool)>,
-        l: Option<Events<(In, bool)>>,
+        o: Option<&In>,
+        l: Option<Events<In>>,
     ) -> Result<Dialed<Out>, Fault> {
         Toy.dial(d, e, r, o, l)
     }

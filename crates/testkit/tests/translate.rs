@@ -507,6 +507,35 @@ async fn a_request_that_cannot_be_translated_is_refused() {
     assert!(h.mock.sent().is_empty());
 }
 
+// The same request, edited by a plugin, is the plugin's fault: a 500, as
+// the conversation no longer says what the client's bytes said.
+#[tokio::test]
+async fn an_edited_request_that_cannot_be_translated_is_the_gateways_fault() {
+    /// Edits every conversation.
+    struct Edit;
+
+    #[async_trait]
+    impl Plugin for Edit {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(|chat: &mut Conversation| {
+                chat.temperature = Some(0.5);
+                Ok(())
+            })?;
+            Ok(None)
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Edit)]);
+    let tools = json!([{ "type": "function", "function": { "name": "f" } }]);
+    let body = json!({ "model": "claude-x", "messages": [], "tools": tools });
+
+    let (status, _) = h.text(call(CHAT, body.to_string())).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::CONFIG));
+    assert!(h.mock.sent().is_empty());
+}
+
 #[tokio::test]
 async fn a_cut_translated_stream_ends_with_an_error_in_the_client_format() {
     let h = Harness::new(Vec::new());
