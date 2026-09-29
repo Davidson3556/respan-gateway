@@ -1114,7 +1114,7 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
                 "content-type",
                 HeaderValue::from_static("text/event-stream"),
             );
-            Ok(respan_gateway_http::answer(resp))
+            Ok(respan_gateway_http::from_response(resp))
         }
     }
 
@@ -2531,7 +2531,7 @@ async fn a_providers_trailers_are_not_passed_on() {
             let mut resp = http::Response::new(Body::new(body));
             resp.headers_mut()
                 .insert("content-type", HeaderValue::from_static("application/json"));
-            Ok(respan_gateway_http::answer(resp))
+            Ok(respan_gateway_http::from_response(resp))
         }
     }
 
@@ -2681,7 +2681,7 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
                 "content-type",
                 HeaderValue::from_static("text/event-stream"),
             );
-            Ok(respan_gateway_http::answer(resp))
+            Ok(respan_gateway_http::from_response(resp))
         }
     }
 
@@ -3595,7 +3595,7 @@ impl Transport for Endless {
         let mut resp = http::Response::new(Body::new(body));
         let sse = HeaderValue::from_static("text/event-stream");
         resp.headers_mut().insert("content-type", sse);
-        Ok(respan_gateway_http::answer(resp))
+        Ok(respan_gateway_http::from_response(resp))
     }
 }
 

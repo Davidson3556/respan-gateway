@@ -40,6 +40,7 @@ use respan_gateway_core::Gateway;
 
 pub use accept::{accept, opening};
 pub use dial::dial;
+pub(crate) use reader::ERROR_BODY_CAP;
 
 use crate::{Body, Frames, RequestHead};
 #[cfg(doc)]
@@ -180,7 +181,7 @@ macro_rules! impl_format {
                     $crate::__private::Fault,
                 >,
             > {
-                $crate::accept(self, wire, reply)
+                $crate::__private::accept(self, wire, reply)
             }
 
             fn opening(
@@ -189,7 +190,7 @@ macro_rules! impl_format {
             ) -> ::core::option::Option<
                 ::core::result::Result<Self::Input, $crate::__private::Fault>,
             > {
-                $crate::opening(self, origin)
+                $crate::__private::opening(self, origin)
             }
 
             fn dial(
@@ -209,7 +210,7 @@ macro_rules! impl_format {
                 >,
                 $crate::__private::Fault,
             > {
-                $crate::dial(self, dialer, extensions, relay, opening, later)
+                $crate::__private::dial(self, dialer, extensions, relay, opening, later)
             }
         }
     };

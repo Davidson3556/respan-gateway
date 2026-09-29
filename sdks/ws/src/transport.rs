@@ -206,7 +206,7 @@ impl Transport for WsTransport {
                 parts.headers.remove(header::CONTENT_LENGTH);
                 let body = full(body);
                 let mut answer =
-                    respan_gateway_http::answer(http::Response::from_parts(parts, body));
+                    respan_gateway_http::from_response(http::Response::from_parts(parts, body));
                 strip_origin_headers(&mut answer.head.headers);
                 return Ok(answer);
             }

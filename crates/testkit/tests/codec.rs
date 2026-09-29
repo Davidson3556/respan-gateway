@@ -482,7 +482,7 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
             let mut resp = http::Response::new(http_body_util::Full::new(Bytes::from(UNARY)));
             let json = HeaderValue::from_static("application/json");
             resp.headers_mut().insert("content-type", json);
-            Ok(respan_gateway_http::answer(resp))
+            Ok(respan_gateway_http::from_response(resp))
         }
     }
 

@@ -181,9 +181,9 @@ fn no_session() -> Fault {
 #[async_trait]
 impl Transport for StdioTransport {
     async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
-        let (call, extensions) = respan_gateway_http::call(call);
+        let (call, extensions) = respan_gateway_http::into_request(call);
         let resp = self.send_http(call, &extensions).await?;
-        Ok(respan_gateway_http::answer(resp))
+        Ok(respan_gateway_http::from_response(resp))
     }
 }
 

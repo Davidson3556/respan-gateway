@@ -174,7 +174,7 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
         ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault>
         {
             use respan_gateway_http::http_body_util::{self, BodyExt};
-            let (call, _) = respan_gateway_http::call(call);
+            let (call, _) = respan_gateway_http::into_request(call);
             let (head, body) = call.into_parts();
             let body = body.collect().await?.to_bytes();
             self.0.lock().map(|mut n| n.push((head.headers, body))).ok();
@@ -183,7 +183,7 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
             let mut resp = http::Response::new(body.map_err(Fault::from).boxed_unsync());
             let json = http::HeaderValue::from_static("application/json");
             resp.headers_mut().insert("content-type", json);
-            Ok(respan_gateway_http::answer(resp))
+            Ok(respan_gateway_http::from_response(resp))
         }
     }
 

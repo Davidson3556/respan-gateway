@@ -521,21 +521,21 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     drop(tx);
     let (wire, _answer) = Accepted::new(ask(), body, true);
     let (origin, inputs) =
-        respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed())
+        respan_gateway_http::__private::accept(&Toy::default(), wire, future::pending().boxed())
             .await
             .unwrap();
     let mut inputs = inputs.unwrap();
     assert!(inputs.next().await.is_none());
     let origin = origin.unwrap();
-    assert!(respan_gateway_http::opening(&Toy::default(), &origin).is_none());
+    assert!(respan_gateway_http::__private::opening(&Toy::default(), &origin).is_none());
 
     let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
     let (origin, inputs) =
-        respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed())
+        respan_gateway_http::__private::accept(&Toy::default(), wire, future::pending().boxed())
             .await
             .unwrap();
     assert!(inputs.is_none());
-    let opening = respan_gateway_http::opening(&Toy::default(), &origin.unwrap());
+    let opening = respan_gateway_http::__private::opening(&Toy::default(), &origin.unwrap());
     assert_eq!(opening.map(|o| o.ok()), Some(Some(In("q".into()))));
 }
 
@@ -543,7 +543,15 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
 fn dial(codec: &Toy, transport: Fnt) -> BoxFuture<'static, Result<Half<Out>, Fault>> {
     let dialer = Dialer::from(transport);
     let input = In("q".into());
-    respan_gateway_http::dial(codec, &dialer, Extensions::new(), None, Some(&input), None).unwrap()
+    respan_gateway_http::__private::dial(
+        codec,
+        &dialer,
+        Extensions::new(),
+        None,
+        Some(&input),
+        None,
+    )
+    .unwrap()
 }
 
 /// Rule 5: a provider's outputs say `Pending` between the frames it sent
@@ -625,16 +633,30 @@ async fn only_a_call_written_from_the_clients_origin_is_relayed() {
     };
     let dialer = Dialer::from(marking);
     let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
-    let (origin, _) = respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed())
-        .await
-        .unwrap();
+    let (origin, _) =
+        respan_gateway_http::__private::accept(&Toy::default(), wire, future::pending().boxed())
+            .await
+            .unwrap();
     let origin = origin.unwrap();
     let toy = Toy::default();
-    let relayed =
-        respan_gateway_http::dial(&toy, &dialer, Extensions::new(), Some(&origin), None, None);
+    let relayed = respan_gateway_http::__private::dial(
+        &toy,
+        &dialer,
+        Extensions::new(),
+        Some(&origin),
+        None,
+        None,
+    );
     let _ = relayed.unwrap().await.unwrap();
     let input = In("own".into());
-    let own = respan_gateway_http::dial(&toy, &dialer, Extensions::new(), None, Some(&input), None);
+    let own = respan_gateway_http::__private::dial(
+        &toy,
+        &dialer,
+        Extensions::new(),
+        None,
+        Some(&input),
+        None,
+    );
     let _ = own.unwrap().await.unwrap();
     assert_eq!(*lock(&marks), [true, false]);
 }

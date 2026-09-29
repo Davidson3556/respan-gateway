@@ -23,7 +23,7 @@ impl Transport for Canned {
         let mut resp = http::Response::new(Full::new(self.0.clone()));
         let value = http::HeaderValue::from_static(self.1);
         resp.headers_mut().insert(http::header::CONTENT_TYPE, value);
-        Ok(respan_gateway_http::answer(resp))
+        Ok(respan_gateway_http::from_response(resp))
     }
 }
 
