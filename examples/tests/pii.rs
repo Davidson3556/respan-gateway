@@ -215,3 +215,116 @@ async fn a_placeholder_split_across_streamed_tool_arguments_is_restored() -> Res
     assert_eq!(args, r#"{"to":"bob@x.io"}"#, "{body}");
     Ok(())
 }
+
+fn sse_call(args: &str, first: bool, index: u64) -> String {
+    let mut call = json!({ "index": index, "function": { "arguments": args } });
+    if first {
+        call["id"] = format!("call_{index}").into();
+        call["type"] = "function".into();
+        call["function"]["name"] = "send".into();
+    }
+    let chunk = json!({ "id": "c1", "object": "chat.completion.chunk", "model": "gpt", "choices": [{ "index": 0, "delta": { "tool_calls": [call] }, "finish_reason": null }] });
+    format!("data: {chunk}\n\n")
+}
+
+async fn stream_of(chunks: Vec<String>) -> Result<(StatusCode, String), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(
+        OPENAI,
+        mock::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>()),
+    );
+    let gw = gateway(&mock)?;
+    let (status, _, body) = read_whole(serve(&gw, chat(PROMPT.into(), json!({}))).await.0).await;
+    Ok((status, String::from_utf8_lossy(&body?).into_owned()))
+}
+
+fn joined_args(body: &str, index: u64) -> (String, Vec<serde_json::Value>) {
+    let mut args = String::new();
+    let mut all = Vec::new();
+    for data in body.lines().filter_map(|l| l.strip_prefix("data: ")) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        for c in v["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if c["index"].as_u64() == Some(index) {
+                args.push_str(c["function"]["arguments"].as_str().unwrap_or_default());
+            }
+        }
+        all.push(v);
+    }
+    (args, all)
+}
+
+/// B-e2e-1: a placeholder held at the finish chunk (the call's JSON left
+/// open, as a `length` cut does) goes out restored, as a well-formed chunk
+/// before the finish.
+#[tokio::test]
+async fn b_a_tail_held_at_the_finish_goes_out_before_it() -> Result<(), Fault> {
+    let finish = json!({ "id": "c1", "object": "chat.completion.chunk", "model": "gpt", "choices": [{ "index": 0, "delta": {}, "finish_reason": "length" }] });
+    let chunks = vec![
+        sse_call("{\"to\":\"<EMA", true, 0),
+        sse_call("IL_1>", false, 0),
+        format!("data: {finish}\n\n"),
+        "data: [DONE]\n\n".to_owned(),
+    ];
+    let (status, body) = stream_of(chunks).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (args, all) = joined_args(&body, 0);
+    assert_eq!(args, "{\"to\":\"bob@x.io", "{body}");
+    // Every chunk is a chat.completion.chunk with an id; the finish is last.
+    for v in &all {
+        assert!(
+            v["id"].is_string() && v["object"] == "chat.completion.chunk",
+            "{v}\n{body}"
+        );
+    }
+    let last_finish = all
+        .iter()
+        .rposition(|v| v["choices"][0]["finish_reason"].is_string());
+    let last_args = all
+        .iter()
+        .rposition(|v| !v["choices"][0]["delta"]["tool_calls"].is_null());
+    assert!(last_args < last_finish, "{body}");
+    Ok(())
+}
+
+/// B-e2e-2: the split `\\` escape end to end.
+#[tokio::test]
+async fn b_a_split_backslash_before_a_placeholder_is_restored_end_to_end() -> Result<(), Fault> {
+    let finish = json!({ "id": "c1", "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] });
+    let chunks = vec![
+        sse_call("{\"p\":\"C:\\", true, 0),
+        sse_call("\\<EMAIL_1>\"}", false, 0),
+        format!("data: {finish}\n\n"),
+        "data: [DONE]\n\n".to_owned(),
+    ];
+    let (status, body) = stream_of(chunks).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (args, _) = joined_args(&body, 0);
+    let parsed: serde_json::Value = serde_json::from_str(&args).unwrap_or_default();
+    assert_eq!(parsed["p"], "C:\\bob@x.io", "{args}");
+    Ok(())
+}
+
+/// B-e2e-3: two calls interleaved, each split, through the real encoder.
+#[tokio::test]
+async fn b_two_interleaved_calls_are_restored_end_to_end() -> Result<(), Fault> {
+    let finish = json!({ "id": "c1", "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] });
+    let chunks = vec![
+        sse_call("{\"to\":\"<EM", true, 0),
+        sse_call("{\"to\":\"<EMAIL", true, 1),
+        sse_call("AIL_1>\"}", false, 0),
+        sse_call("_2>", false, 1),
+        format!("data: {finish}\n\n"),
+        "data: [DONE]\n\n".to_owned(),
+    ];
+    let (status, body) = stream_of(chunks).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(joined_args(&body, 0).0, "{\"to\":\"bob@x.io\"}", "{body}");
+    assert_eq!(joined_args(&body, 1).0, "{\"to\":\"alice@y.org", "{body}");
+    Ok(())
+}

@@ -1539,6 +1539,31 @@ mod tests {
         );
     }
 
+    /// Fields tagged as another format's are refused in a patched request,
+    /// as `write_request` refuses them.
+    #[test]
+    fn fields_in_another_format_are_not_patched_into_the_clients_request() {
+        let raw: Bytes = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.into();
+        let v: Value = serde_json::from_slice(&raw).unwrap_or_default();
+        let mut before = OpenAiChat::read(&v);
+        before.unsupported_in = Some(OpenAiChat::NAME.into());
+        let mut after = before.clone();
+        after.unsupported_in = Some("anthropic-messages".into());
+        after
+            .unsupported
+            .insert("thinking".into(), json!({ "type": "enabled" }));
+        assert!(write_request::<OpenAiChat>(&after).is_err());
+        let patched = patch_request::<OpenAiChat>(&raw, &before, &after);
+        assert!(patched.is_err(), "sent: {:?}", patched.map(Value::from));
+        // Tagged for this format, the same change is written in.
+        after.unsupported_in = Some(OpenAiChat::NAME.into());
+        let patched = patch_request::<OpenAiChat>(&raw, &before, &after);
+        assert_eq!(
+            patched.map(|v| v["thinking"].clone()).ok(),
+            Some(json!({ "type": "enabled" }))
+        );
+    }
+
     #[test]
     fn a_stream_made_from_replies_always_finishes() {
         let mut enc = Chunks::new(false, false);

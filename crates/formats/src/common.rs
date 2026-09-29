@@ -196,7 +196,11 @@ pub(crate) fn patch_request<W: Wire>(
         set(&mut v, "model", chat.model.clone().map(Into::into));
     }
     W::patch(&mut v, before, chat)?;
-    // What a plugin changed among the unsupported fields.
+    // What a plugin changed among the unsupported fields: fields it moved
+    // to another format (`unsupported_in`) cannot be sent.
+    if before.unsupported != chat.unsupported && before.unsupported_in != chat.unsupported_in {
+        return Err(untranslatable("changed fields in another format"));
+    }
     patch_fields(&mut v, &before.unsupported, &chat.unsupported);
     Ok(v)
 }

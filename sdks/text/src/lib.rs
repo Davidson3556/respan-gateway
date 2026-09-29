@@ -38,8 +38,12 @@ type Edit<'a> = dyn FnMut(&mut String) -> Result<(), Fault> + 'a;
 ///   arguments, each string, name and number (so a card number is read; a
 ///   changed number is written back as the edit's text);
 /// - in a reply's streamed delta, a tool call's arguments as pieces of JSON
-///   text: what an edit writes is escaped, but a bare number there is not
-///   quoted; the delta's other strings as plain text.
+///   text, read as the text they stand for (`\u0062` is `b`): what an edit
+///   writes is escaped, but a bare number there is not quoted; the delta's
+///   other strings as plain text;
+/// - a whole tool call's arguments that do not parse (cut off by a token
+///   limit) as that JSON text, not as one text, so a value an edit writes
+///   into them cannot add a key.
 ///
 /// Booleans, and the request's own numbers and field names, are not texts.
 pub trait Readable: Clone {
@@ -104,7 +108,13 @@ fn edit_raw(v: &mut Value, parent: &str, delta: bool, edit: &mut Edit) -> Result
                 let arguments = name == "partial_json"
                     || (name == "arguments" && ["function", "function_call"].contains(&parent));
                 match &mut value {
-                    Value::String(s) if delta && arguments => edit_json_text(s, edit)?,
+                    // Arguments that do not parse (cut off by a token limit)
+                    // are JSON text too: a value written there is escaped.
+                    Value::String(s)
+                        if arguments && (delta || serde_json::from_str::<Value>(s).is_err()) =>
+                    {
+                        edit_json_text(s, edit)?
+                    }
                     Value::String(s) if delta => edit(s)?,
                     _ if name == "input" && !delta => edit_json(&mut value, true, edit)?,
                     _ => edit_raw(&mut value, &name, delta || name == "delta", edit)?,
@@ -142,37 +152,103 @@ fn edit_string(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
     }
 }
 
-/// Runs `edit` on a piece of JSON text between its quotes and escapes,
-/// escaping what it writes, so the JSON stays whole however it is split.
-/// Escaping text that needs none leaves it as it is.
-fn edit_json_text(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text.as_str();
-    while !rest.is_empty() {
-        let plain = rest.find(['"', '\\']).unwrap_or(rest.len());
-        let mut part = rest[..plain].to_owned();
-        edit(&mut part)?;
-        if part == rest[..plain] {
-            out.push_str(&part);
-        } else {
-            let quoted = Value::String(part).to_string();
-            out.push_str(&quoted[1..quoted.len() - 1]);
-        }
-        rest = &rest[plain..];
-        // A quote, or an escape (`\uXXXX` with its four digits), as it is.
-        let mark = match rest.strip_prefix('\\').and_then(|r| r.chars().next()) {
-            Some('u') => {
-                2 + rest[2..]
-                    .bytes()
-                    .take(4)
-                    .take_while(u8::is_ascii_hexdigit)
-                    .count()
-            }
-            Some(c) => 1 + c.len_utf8(),
-            None => rest.chars().next().map_or(0, char::len_utf8),
+/// The steps of JSON text: each a character, or an escape with the
+/// character it stands for, `None` if the text ends inside it (a `\`, a
+/// partial `\uXXXX`, or a high surrogate whose pair may follow).
+fn steps(mut raw: &str) -> impl Iterator<Item = (&str, Option<char>)> {
+    std::iter::from_fn(move || {
+        let first = raw.chars().next()?;
+        let (len, meaning) = match first {
+            '\\' => escape(raw),
+            c => (c.len_utf8(), Some(c)),
         };
-        out.push_str(&rest[..mark]);
-        rest = &rest[mark..];
+        let (step, rest) = raw.split_at(len);
+        raw = rest;
+        Some((step, meaning))
+    })
+}
+
+/// The length and meaning of the escape `raw` starts with.
+fn escape(raw: &str) -> (usize, Option<char>) {
+    let hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
+    // The code unit of the `\uXXXX` `s` starts with.
+    let unit = |s: &str| {
+        let digits = s.strip_prefix("\\u")?.get(..4)?;
+        u32::from_str_radix(digits, 16).ok().filter(|_| hex(digits))
+    };
+    let lone = Some('\u{FFFD}');
+    match raw[1..].chars().next() {
+        None => (1, None),
+        Some('u') => match unit(raw) {
+            None if raw.len() < 6 && hex(&raw[2..]) => (raw.len(), None),
+            None => (1, Some('\\')),
+            Some(high @ 0xD800..0xDC00) => {
+                let rest = &raw[6..];
+                let started = rest.bytes().zip(*b"\\u").all(|(a, b)| a == b)
+                    && hex(rest.get(2..).unwrap_or(""));
+                match unit(rest) {
+                    Some(low @ 0xDC00..0xE000) => {
+                        let pair = 0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00);
+                        (12, char::from_u32(pair))
+                    }
+                    None if rest.len() < 6 && started => (raw.len(), None),
+                    _ => (6, lone),
+                }
+            }
+            Some(unit) => (6, char::from_u32(unit).or(lone)),
+        },
+        Some(c) => {
+            let named = [
+                ('n', '\n'),
+                ('t', '\t'),
+                ('r', '\r'),
+                ('b', '\u{8}'),
+                ('f', '\u{c}'),
+            ];
+            let meaning = named.iter().find(|(k, _)| *k == c).map_or(c, |(_, v)| *v);
+            (1 + c.len_utf8(), Some(meaning))
+        }
+    }
+}
+
+/// The text `raw` (JSON text with no cut-off escape) stands for.
+fn unescape(raw: &str) -> String {
+    steps(raw).filter_map(|(_, c)| c).collect()
+}
+
+/// `text` as JSON text, between quotes.
+fn escaped(text: &str) -> String {
+    let quoted = Value::String(text.to_owned()).to_string();
+    quoted[1..quoted.len() - 1].to_owned()
+}
+
+/// The run of JSON text before its first quote that is not escaped, and the
+/// rest, from that quote.
+fn run(raw: &str) -> (&str, &str) {
+    let steps = steps(raw).take_while(|(s, _)| *s != "\"");
+    raw.split_at(steps.map(|(s, _)| s.len()).sum())
+}
+
+/// Runs `edit` on each run of a piece of JSON text between its quotes, as
+/// the text it stands for (`b` reads as `b`, so a check sees a term
+/// however it is spelled). A run is written escaped if changed and as it
+/// came otherwise, so the JSON stays whole.
+fn edit_json_text(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
+    let (mut out, mut rest) = (String::with_capacity(text.len()), text.as_str());
+    while !rest.is_empty() {
+        let (before, after) = run(rest);
+        let (mut plain, quote) = (unescape(before), after.get(..1).unwrap_or(""));
+        let was = plain.clone();
+        if !plain.is_empty() {
+            edit(&mut plain)?;
+        }
+        out.push_str(&if plain == was {
+            before.to_owned()
+        } else {
+            escaped(&plain)
+        });
+        out.push_str(quote);
+        rest = &after[quote.len()..];
     }
     *text = out;
     Ok(())
@@ -333,21 +409,20 @@ impl<R: Rewrite> Holdback<R> {
     }
 
     /// Hold back the tail of each tool call's arguments in `raw` that may
-    /// start a match, with what was held of the call before in front. With
-    /// `open` false nothing is held: the message ends the response.
+    /// start a match or is a cut-off escape, with what was held of the call
+    /// before in front. With `open` false nothing is held: the message ends
+    /// the response.
     fn hold_arguments(&mut self, format: &Arc<str>, raw: &mut Arc<Value>, open: bool) {
         let (rewrite, tails) = (&self.rewrite, &mut self.arguments);
         for_arguments(Arc::make_mut(raw), &mut |path, arguments| {
             let at = tails.iter().position(|t| t.path == path);
             let before = at.map(|i| tails.remove(i).text).unwrap_or_default();
             let mut text = before + arguments;
-            let mut cut = text.len();
-            if open {
-                cut -= rewrite.pending(&text);
-            }
-            while !text.is_char_boundary(cut) {
-                cut -= 1;
-            }
+            let cut = if open {
+                held_from(&text, |t| rewrite.pending(t))
+            } else {
+                text.len()
+            };
             let tail = text.split_off(cut);
             if !tail.is_empty() {
                 let (format, path) = (format.clone(), path.to_vec());
@@ -379,6 +454,37 @@ impl<R: Rewrite> Holdback<R> {
         }
         Ok(pieces)
     }
+}
+
+/// Where the tail of `text`, JSON text, that a [`Holdback`] holds begins: a
+/// cut-off escape, and the text `pending` says may start a match, read as
+/// the text it stands for, in the last run between quotes.
+fn held_from(text: &str, pending: impl Fn(&str) -> usize) -> usize {
+    let mut unfinished = text.len();
+    let mut last = 0;
+    let mut at = 0;
+    for (step, meaning) in steps(text) {
+        match (step, meaning) {
+            (_, None) => {
+                unfinished = at;
+                break;
+            }
+            ("\"", _) => last = at + 1,
+            _ => {}
+        }
+        at += step.len();
+    }
+    let run = &text[last..unfinished];
+    let mut keep = pending(&unescape(run));
+    let mut cut = run.len();
+    for (step, meaning) in steps(run).collect::<Vec<_>>().into_iter().rev() {
+        if keep == 0 {
+            break;
+        }
+        keep = keep.saturating_sub(meaning.map_or(0, char::len_utf8));
+        cut -= step.len();
+    }
+    last + cut
 }
 
 /// The tail of a tool call's arguments a [`Holdback`] holds, as JSON text.
