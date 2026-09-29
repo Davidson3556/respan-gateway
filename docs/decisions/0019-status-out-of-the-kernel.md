@@ -40,8 +40,8 @@ neutral.
 - The kernel holds no HTTP number. The wire is unchanged: every status in
   the tests and the end-to-end suite is the same.
 - `Fault::status` and `Fault::new`'s status argument are gone (amends 0013,
-  0012 and 0003). `Format`, `Decoder`, `Encoder` and `Transport` did not
-  change.
+  0012 and 0003). The format and transport contracts did not change by
+  this record (0020 later moved them).
 - Another wire adds its own hint type the same way.
 - Equality ignores hints, as it does source and answer; it compared the
   status before.

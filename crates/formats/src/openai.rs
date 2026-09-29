@@ -2,8 +2,9 @@
 //! conversation kind.
 
 use bytes::{Bytes, BytesMut};
-use respan_gateway_core::{Decoder, Encoder, Fault, Format};
-use respan_gateway_core::{bytes, serde_json};
+use respan_gateway_core::Fault;
+use respan_gateway_core::serde_json;
+use respan_gateway_http::bytes;
 use respan_gateway_http::{Answer, Ask};
 use serde_json::{Map, Value, json};
 
@@ -16,6 +17,7 @@ use crate::common::{
 };
 use crate::conversation::{Conversation, Finish, Piece, Reply, Role, Start, units};
 use crate::sse::{Events, SseDecoder, event, event_as, event_data, event_json, is_stream};
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 
 const OPENAI: &str = "openai-chat";
 
@@ -33,9 +35,7 @@ const FINISH: Names<Finish> = Names(&[
     ("content_filter", Finish::Filtered),
 ]);
 
-impl Format for OpenAiChat {
-    type Ask = Ask;
-    type Answer = Answer;
+impl Codec for OpenAiChat {
     type Input = Conversation;
     type Output = Reply;
 
@@ -88,6 +88,8 @@ impl Format for OpenAiChat {
         reply.is_content()
     }
 }
+
+dialect!(OpenAiChat);
 
 /// Keys a conversation has a place for, or that change no output; `user`
 /// too, when it is a string.

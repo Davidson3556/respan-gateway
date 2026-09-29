@@ -9,8 +9,8 @@
 //! [`Content::Other`]); translating it is refused if it can change the
 //! answer.
 
-use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::{Fault, serde_json};
+use respan_gateway_http::bytes::Bytes;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};

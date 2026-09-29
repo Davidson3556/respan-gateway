@@ -5,14 +5,10 @@ use std::collections::BTreeMap;
 
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
-use std::sync::Arc;
 
-use respan_gateway_core::{Fault, Format, Gateway, Transport};
-use respan_gateway_http::{Answer, Ask};
-
-/// A transport of HTTP calls, as every provider the binary knows speaks.
-pub type HttpWire = dyn Transport<Ask = Ask, Answer = Answer>;
+use respan_gateway_core::{Fault, Format, Gateway};
 use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_http::{Accepted, Dialer, Transport};
 use respan_gateway_plugins::ModelRouter;
 use serde::Deserialize;
 
@@ -71,15 +67,16 @@ pub struct ModelRoute {
 /// provider that speaks it or serve its clients.
 pub struct KnownFormat {
     pub name: String,
-    pub provider: fn(Gateway, name: String, transport: Arc<HttpWire>) -> Result<Gateway, Fault>,
+    pub provider: fn(Gateway, name: String, dialer: Dialer) -> Result<Gateway, Fault>,
     pub serve: fn(Gateway) -> Result<Gateway, Fault>,
 }
 
 impl KnownFormat {
-    pub fn of<F: Format<Ask = Ask, Answer = Answer> + Default>() -> Self {
+    /// An HTTP format, as every provider the binary knows speaks.
+    pub fn of<F: Format<Wire = Accepted, Dialer = Dialer> + Default>() -> Self {
         Self {
             name: F::default().name().to_owned(),
-            provider: |gateway, name, transport| gateway.provider(name, F::default(), transport),
+            provider: |gateway, name, dialer| gateway.provider(name, F::default(), dialer),
             serve: |gateway| gateway.serve(F::default()),
         }
     }
@@ -92,7 +89,7 @@ impl Config {
 
     /// Builds the gateway: each provider's transport comes from `transport`,
     /// given its base URL and auth headers; formats are found in `formats`.
-    pub fn build<T: Transport<Ask = Ask, Answer = Answer>>(
+    pub fn build<T: Transport>(
         &self,
         transport: impl Fn(&str, HeaderMap) -> Result<T, Fault>,
         formats: &[KnownFormat],
@@ -112,7 +109,7 @@ impl Config {
             let auth = auth_headers(name, p.auth.as_ref())?;
             let reach = transport(&p.base_url, auth)
                 .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
-            gateway = (format.provider)(gateway, name.clone(), Arc::new(reach))?;
+            gateway = (format.provider)(gateway, name.clone(), Dialer::from(reach))?;
         }
         for name in &self.serve {
             gateway = (format(name, "serve")?.serve)(gateway)?;
@@ -328,7 +325,7 @@ plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
                 "https://api.openai.com/v1/chat/completions"
             ]
         );
-        let json = |b: Result<respan_gateway_core::bytes::Bytes, Fault>| {
+        let json = |b: Result<respan_gateway_http::bytes::Bytes, Fault>| {
             b.ok()
                 .and_then(|b| respan_gateway_core::serde_json::from_slice(&b).ok())
                 .unwrap_or(respan_gateway_core::serde_json::Value::Null)

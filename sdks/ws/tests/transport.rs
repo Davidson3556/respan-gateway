@@ -6,8 +6,9 @@ mod support;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
-use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::{Exchange, Fault, Transport};
+use respan_gateway_core::Fault;
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_ws::WsTransport;
 use std::sync::atomic::Ordering;
 use support::*;

@@ -11,7 +11,7 @@ use crate::{Extensions, Fault};
 /// nothing will follow is already ended: its first poll is `Ready(None)`.
 pub type Events<T> = BoxStream<'static, Result<T, Fault>>;
 
-/// What came with a head, sealed: only its dialect opens it. The gateway
+/// What came with a head, sealed: only its format opens it. The gateway
 /// hands a client's to a provider edge only on a relay, and a provider's
 /// back only then.
 pub type Origin = Arc<dyn Any + Send + Sync>;
@@ -33,31 +33,43 @@ pub type Reply<T> = (Extensions, Half<T>, Ended);
 /// A provider edge's answer, once dialed.
 pub type Dialed<T> = BoxFuture<'static, Result<Half<T>, Fault>>;
 
-/// A dialect: one protocol's view of a kind, and its two edges, which the
-/// gateway routes events between. Its name and kind are
-/// [`Format`](crate::Format)'s; it is the edge contract that replaces the
-/// codec (a temporary name, decision 0020). Serve one with
-/// [`Gateway::serve_dialect`](crate::Gateway::serve_dialect), call one with
-/// [`Gateway::provider_dialect`](crate::Gateway::provider_dialect), and hand
-/// the gateway a client's connection with
-/// [`Gateway::open`](crate::Gateway::open).
+/// A format: a dialect, one protocol's view of a kind, and its two edges,
+/// which the gateway routes events between. Serve one to clients with
+/// [`Gateway::serve`](crate::Gateway::serve), call a provider in one with
+/// [`Gateway::provider`](crate::Gateway::provider), and hand the gateway a
+/// client's connection with [`Gateway::handle`](crate::Gateway::handle).
+/// HTTP's formats implement it through `respan_gateway_http::dialect!`
+/// over a codec; a format on another wire implements it itself.
 ///
 /// The gateway never sees a byte, a head or a key: a client edge
-/// ([`accept`](Dialect::accept)) turns a connection into inputs and outputs
-/// back into it, a provider edge ([`dial`](Dialect::dial)) the reverse, and
-/// heads travel as sealed [`Origin`]s.
+/// ([`accept`](Format::accept)) turns a connection into inputs and outputs
+/// back into it, a provider edge ([`dial`](Format::dial)) the reverse, and
+/// heads travel as sealed [`Origin`]s, which only a format of the name they
+/// came in opens.
+///
+/// Its kind is its pair of value types, through which formats of one kind
+/// translate. They must differ, as the type names the direction, and should
+/// belong to the kind alone: a shared type such as `serde_json::Value` lets
+/// a plugin for one kind read another's traffic. Formats of one name relay
+/// rather than translate, and share a kind, a wire and a dialer. Every
+/// message decodes to one value, even one the kind cannot read, which keeps
+/// its bytes: a relay loses nothing only if the format writes a value as
+/// the bytes it came in while it says the same.
 ///
 /// # Rules
 ///
 /// 1. An [`Events`] that nothing will follow is already ended: its first
-///    poll is `Ready(None)`. The gateway polls a client's inputs once as the
-///    session opens, to tell whether any follow; what that poll yields is
-///    kept and read first. Inputs that must not be read ahead, or that flow
-///    even if none come, return `Pending` to that poll.
-/// 2. [`accept`](Dialect::accept) resolves when the request is in: a
+///    poll is `Ready(None)`. This holds for the inputs
+///    [`accept`](Format::accept) resolves with; `dial` is told `None`
+///    instead. The gateway polls a client's inputs once as the session
+///    opens, to tell whether any follow; what that poll yields is kept and
+///    read first. Inputs that must not be read ahead, or that flow even if
+///    none come, return `Pending` to that poll.
+/// 2. [`accept`](Format::accept) resolves when the request is in: a
 ///    one-shot request once its body is read, which its origin keeps, its
 ///    inputs ended; a session at once, its inputs the frames to come. The
-///    plugins run once it resolves.
+///    plugins run once it resolves. [`opening`](Format::opening) is `Some`
+///    only if the inputs had ended then.
 /// 3. A provider edge classifies its answer at its head: a refusal resolves
 ///    `Ok((origin, Err(fault)))`, which the gateway sends as a refusal and a
 ///    call's [`is_head_only`](crate::ProviderContext::is_head_only) says.
@@ -77,13 +89,13 @@ pub type Dialed<T> = BoxFuture<'static, Result<Half<T>, Fault>>;
 ///
 /// # The adapter's part
 ///
-/// [`accept`](Dialect::accept) must not await its `reply`, which resolves
+/// [`accept`](Format::accept) must not await its `reply`, which resolves
 /// only once `accept`'s future did and the plugins ran: the `Wire` carries
 /// the adapter's slot, through which the edge hands over what it writes, and
-/// the adapter drives [`Gateway::open`](crate::Gateway::open) to its end
-/// while it awaits that slot. A slot dropped unfilled means no dialect took
-/// the wire: `open`'s end says why, for the adapter to write plainly.
-pub trait Dialect: Send + Sync + 'static {
+/// the adapter drives [`Gateway::handle`](crate::Gateway::handle) to its end
+/// while it awaits that slot. A slot dropped unfilled means no format took
+/// the wire: `handle`'s end says why, for the adapter to write plainly.
+pub trait Format: Send + Sync + 'static {
     /// What a client sends, one or a stream.
     type Input: Clone + PartialEq + Send + Sync + 'static;
 
@@ -97,11 +109,11 @@ pub trait Dialect: Send + Sync + 'static {
     /// How calls reach one provider: a URL and keys, a process, a socket.
     type Dialer: Send + Sync + 'static;
 
-    /// The protocol's identity. Dialects of one name relay rather than
+    /// The protocol's identity. Formats of one name relay rather than
     /// translate, and share a kind, a wire and a dialer.
     fn name(&self) -> &str;
 
-    /// Whether this dialect speaks on `wire`; the first served that does
+    /// Whether this format speaks on `wire`; the first served that does
     /// takes it. It may look inside; the gateway does not.
     fn accepts(&self, wire: &Self::Wire) -> bool;
 
@@ -135,7 +147,7 @@ pub trait Dialect: Send + Sync + 'static {
     ///   relay means the origin's own, as it came.
     /// - `later`: the inputs that follow; `None` if none do.
     /// - Each input's bool is whether it is the client's as decoded, which
-    ///   says whose fault it is if this dialect cannot write it
+    ///   says whose fault it is if this format cannot write it
     ///   ([`Fault::of_input`]).
     ///
     /// `Err` now: not sent. The future's `Err`: sent, and not answered.
@@ -169,12 +181,12 @@ pub(crate) type AnyInputs = BoxStream<'static, Result<(AnyInput, bool), Fault>>;
 
 pub(crate) type AnyDialed = BoxFuture<'static, Result<AnyHalf, Fault>>;
 
-/// A [`Dialect`] with its types erased, as the gateway keeps it.
-pub(crate) trait AnyDialect: Send + Sync + 'static {
+/// A [`Format`] with its types erased, as the gateway keeps it.
+pub(crate) trait AnyFormat: Send + Sync + 'static {
     fn name(&self) -> &str;
     /// Its input and output types.
     fn kind(&self) -> (TypeId, TypeId);
-    /// What its wire is, which dialects of one name share.
+    /// What its wire is, which formats of one name share.
     fn wire(&self) -> (TypeId, TypeId);
     fn accepts(&self, wire: &dyn Any) -> bool;
     fn accept(
@@ -203,22 +215,17 @@ pub(crate) trait AnyDialect: Send + Sync + 'static {
     fn append(&self, values: &mut Values, more: Values);
 }
 
-/// A dialect, erased, and its wire as registration checks it.
-pub(crate) struct Erased<D> {
-    dialect: D,
+/// A format, erased, and its wire as registration checks it.
+pub(crate) struct Erased<F> {
+    format: F,
     wire: (TypeId, TypeId),
 }
 
-impl<D: Dialect> Erased<D> {
-    /// `dialect` on its own wire and dialer.
-    pub(crate) fn new(dialect: D) -> Self {
-        let wire = (TypeId::of::<D::Wire>(), TypeId::of::<D::Dialer>());
-        Self { dialect, wire }
-    }
-
-    /// `dialect` on `wire`, such as an old format's pair of head types.
-    pub(crate) fn on(dialect: D, wire: (TypeId, TypeId)) -> Self {
-        Self { dialect, wire }
+impl<F: Format> Erased<F> {
+    /// `format` on its own wire and dialer.
+    pub(crate) fn new(format: F) -> Self {
+        let wire = (TypeId::of::<F::Wire>(), TypeId::of::<F::Dialer>());
+        Self { format, wire }
     }
 }
 
@@ -250,13 +257,13 @@ fn owned<T: Clone + Send + Sync + 'static>(input: AnyInput) -> Result<T, Fault> 
     Ok(Arc::try_unwrap(input).unwrap_or_else(|shared| (*shared).clone()))
 }
 
-impl<D: Dialect> AnyDialect for Erased<D> {
+impl<F: Format> AnyFormat for Erased<F> {
     fn name(&self) -> &str {
-        self.dialect.name()
+        self.format.name()
     }
 
     fn kind(&self) -> (TypeId, TypeId) {
-        (TypeId::of::<D::Input>(), TypeId::of::<D::Output>())
+        (TypeId::of::<F::Input>(), TypeId::of::<F::Output>())
     }
 
     fn wire(&self) -> (TypeId, TypeId) {
@@ -265,7 +272,7 @@ impl<D: Dialect> AnyDialect for Erased<D> {
 
     fn accepts(&self, wire: &dyn Any) -> bool {
         wire.downcast_ref()
-            .is_some_and(|wire| self.dialect.accepts(wire))
+            .is_some_and(|wire| self.format.accepts(wire))
     }
 
     fn accept(
@@ -273,20 +280,20 @@ impl<D: Dialect> AnyDialect for Erased<D> {
         wire: Box<dyn Any + Send>,
         reply: BoxFuture<'static, AnyReply>,
     ) -> BoxFuture<'static, AnyHalf> {
-        let Ok(wire) = wire.downcast::<D::Wire>() else {
-            let fault = Fault::internal("a wire of another type than its dialect's");
+        let Ok(wire) = wire.downcast::<F::Wire>() else {
+            let fault = Fault::internal("a wire of another type than its format's");
             return futures::future::ready((None, Err(fault))).boxed();
         };
         let reply = reply.map(|(ext, (origin, events), ended)| {
-            (ext, (origin, events.map(typed::<D::Output>)), ended)
+            (ext, (origin, events.map(typed::<F::Output>)), ended)
         });
-        let half = self.dialect.accept(*wire, reply.boxed());
+        let half = self.format.accept(*wire, reply.boxed());
         half.map(|(origin, events)| (origin, events.map(erase)))
             .boxed()
     }
 
     fn opening(&self, origin: &Origin) -> Option<Result<AnyInput, Fault>> {
-        let opening = self.dialect.opening(origin)?;
+        let opening = self.format.opening(origin)?;
         Some(opening.map(|input| Arc::new(input) as AnyInput))
     }
 
@@ -300,11 +307,11 @@ impl<D: Dialect> AnyDialect for Erased<D> {
     ) -> Result<AnyDialed, Fault> {
         let dialer = dialer
             .downcast_ref()
-            .ok_or_else(|| Fault::internal("a dialer of another type than its dialect's"))?;
+            .ok_or_else(|| Fault::internal("a dialer of another type than its format's"))?;
         let opening = match opening {
             Some((input, clients)) => {
                 let input = input.downcast_ref();
-                Some((input.ok_or_else(Fault::wrong_kind::<D::Input>)?, clients))
+                Some((input.ok_or_else(Fault::wrong_kind::<F::Input>)?, clients))
             }
             None => None,
         };
@@ -314,7 +321,7 @@ impl<D: Dialect> AnyDialect for Erased<D> {
                 .boxed()
         });
         let dialed = self
-            .dialect
+            .format
             .dial(dialer, extensions, relay, opening, later)?;
         Ok(dialed
             .map_ok(|(origin, events)| (origin, events.map(erase)))
@@ -322,41 +329,41 @@ impl<D: Dialect> AnyDialect for Erased<D> {
     }
 
     fn any_content(&self, outputs: &Values) -> bool {
-        let outputs = outputs.downcast_ref::<Vec<D::Output>>();
+        let outputs = outputs.downcast_ref::<Vec<F::Output>>();
         outputs
             .into_iter()
             .flatten()
-            .any(|output| self.dialect.is_content(output))
+            .any(|output| self.format.is_content(output))
     }
 
     fn same(&self, a: &AnyInput, b: &AnyInput) -> bool {
-        let (a, b) = (a.downcast_ref::<D::Input>(), b.downcast_ref::<D::Input>());
+        let (a, b) = (a.downcast_ref::<F::Input>(), b.downcast_ref::<F::Input>());
         a.is_some() && a == b
     }
 
     fn values(&self, inputs: Vec<AnyInput>) -> Values {
-        let inputs = inputs.into_iter().filter_map(|i| owned::<D::Input>(i).ok());
+        let inputs = inputs.into_iter().filter_map(|i| owned::<F::Input>(i).ok());
         Box::new(inputs.collect::<Vec<_>>())
     }
 
     fn inputs(&self, values: Values) -> Vec<AnyInput> {
-        let inputs = values.downcast::<Vec<D::Input>>().map(|v| *v);
+        let inputs = values.downcast::<Vec<F::Input>>().map(|v| *v);
         let inputs = inputs.unwrap_or_default().into_iter();
         inputs.map(|input| Arc::new(input) as AnyInput).collect()
     }
 
     fn append(&self, values: &mut Values, more: Values) {
-        let more = more.downcast::<Vec<D::Output>>().map(|v| *v);
-        if let (Some(values), Ok(mut more)) = (values.downcast_mut::<Vec<D::Output>>(), more) {
+        let more = more.downcast::<Vec<F::Output>>().map(|v| *v);
+        if let (Some(values), Ok(mut more)) = (values.downcast_mut::<Vec<F::Output>>(), more) {
             values.append(&mut more);
         }
     }
 }
 
-/// Whether `T` is `dialect`'s input type (`true`) or output type (`false`);
+/// Whether `T` is `format`'s input type (`true`) or output type (`false`);
 /// `Err` for another.
-pub(crate) fn is_input<T: Any>(dialect: &dyn AnyDialect) -> Result<bool, Fault> {
-    match dialect.kind() {
+pub(crate) fn is_input<T: Any>(format: &dyn AnyFormat) -> Result<bool, Fault> {
+    match format.kind() {
         (input, _) if input == TypeId::of::<T>() => Ok(true),
         (_, output) if output == TypeId::of::<T>() => Ok(false),
         _ => Err(Fault::wrong_kind::<T>()),

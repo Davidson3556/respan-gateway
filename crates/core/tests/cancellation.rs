@@ -1,21 +1,25 @@
-//! Dropping a request or its response at every await point: every hook and
+//! Dropping a session or its reply at every await point: every hook and
 //! filter still ends once, `idle` resolves and the end future resolves.
+//! On the toy edge, the sweeps add the client edge's quirks (see `edge::Quirk`), as the edge
+//! owns `Ended`.
 #![allow(clippy::unwrap_used)]
 
-mod toy;
+mod edge;
 
 use std::time::Duration;
 
+use edge::*;
 use respan_gateway_core::futures::{FutureExt, StreamExt};
 use respan_gateway_core::*;
-use toy::*;
 
-/// Drive `handle` for `h` polls, then its body for `b` polls per frame, and
-/// drop whatever is left.
-async fn drive(gw: &Gateway, streams: bool, h: usize, b: usize) -> Option<BoxedEnd> {
-    let (res, end) = limit(handle(gw, req_of(vec!["one", "two"], streams)), h).await?;
-    if let Ok(ex) = res {
-        let mut body = ex.body;
+/// Drive `handle` and the reply for `h` polls, then its body for `b` polls
+/// per frame, and drop whatever is left.
+async fn drive(gw: &Gateway, streams: bool, quirk: Quirk, h: usize, b: usize) -> Option<End> {
+    let mut req = req_of(vec!["one", "two"], streams);
+    req.quirk = quirk;
+    let (res, end) = limit(handle(gw, req), h).await?;
+    if let Ok(reply) = res {
+        let mut body = reply.body;
         let mut n = 0;
         while let Some(Some(_)) = limit(body.next(), b).await {
             n += 1;
@@ -27,44 +31,47 @@ async fn drive(gw: &Gateway, streams: bool, h: usize, b: usize) -> Option<BoxedE
     Some(end)
 }
 
-type BoxedEnd = respan_gateway_core::futures::future::BoxFuture<'static, Result<(), Fault>>;
-
 const SCENARIOS: std::ops::Range<usize> = 0..4;
 const POINTS: std::ops::Range<usize> = 0..24;
+const QUIRKS: std::ops::Range<u8> = 0..3;
 
 #[tokio::test(flavor = "current_thread")]
 async fn hooks_end_once_when_dropped_at_every_await() {
     let mut failures = vec![];
-    for scenario in SCENARIOS {
-        for streams in [false, true] {
-            for h in POINTS {
-                for b in POINTS {
-                    let rec = Rec::default();
-                    let gw = gateway(scenario, &rec);
-                    let end = drive(&gw, streams, h, b).await;
-                    let idle = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
-                    let (cs, ce, ps, pe) = {
-                        let l = rec.log();
-                        (
-                            l.client_start,
-                            l.client_end.len(),
-                            l.prov_start,
-                            l.prov_end.len(),
-                        )
-                    };
-                    let at = format!("scenario {scenario} streams {streams} h {h} b {b}");
-                    if idle.is_err() || cs != ce || ps != pe {
-                        failures.push(format!(
-                            "{at}: idle {} client {cs}/{ce} provider {ps}/{pe}",
-                            idle.is_ok()
-                        ));
-                    }
-                    if let Some(end) = end
-                        && tokio::time::timeout(Duration::from_secs(1), end)
-                            .await
-                            .is_err()
-                    {
-                        failures.push(format!("{at}: the end future never resolved"));
+    for quirk in QUIRKS {
+        for scenario in SCENARIOS {
+            for streams in [false, true] {
+                for h in POINTS {
+                    for b in POINTS {
+                        let rec = Rec::default();
+                        let gw = gateway(scenario, &rec);
+                        let end = drive(&gw, streams, quirk, h, b).await;
+                        let idle = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
+                        let (cs, ce, ps, pe) = {
+                            let l = rec.log();
+                            (
+                                l.client_start,
+                                l.client_end.len(),
+                                l.prov_start,
+                                l.prov_end.len(),
+                            )
+                        };
+                        let at = format!(
+                            "quirk {quirk} scenario {scenario} streams {streams} h {h} b {b}"
+                        );
+                        if idle.is_err() || cs != ce || ps != pe {
+                            failures.push(format!(
+                                "{at}: idle {} client {cs}/{ce} provider {ps}/{pe}",
+                                idle.is_ok()
+                            ));
+                        }
+                        if let Some(end) = end
+                            && tokio::time::timeout(Duration::from_secs(1), end)
+                                .await
+                                .is_err()
+                        {
+                            failures.push(format!("{at}: the end future never resolved"));
+                        }
                     }
                 }
             }
@@ -81,22 +88,24 @@ async fn hooks_end_once_when_dropped_at_every_await() {
 #[tokio::test(flavor = "current_thread")]
 async fn filters_end_once_when_dropped_at_every_await() {
     let mut failures = vec![];
-    for scenario in SCENARIOS {
-        for streams in [false, true] {
-            for h in POINTS {
-                for b in POINTS {
-                    let rec = Rec::default();
-                    let ends = Ends::default();
-                    let gw = gateway(scenario, &rec)
-                        .plugin("ends", ends.clone())
-                        .unwrap();
-                    drive(&gw, streams, h, b).await;
-                    let _ = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
-                    let counts = ends.counts();
-                    if counts.iter().any(|c| *c != 1) {
-                        failures.push(format!(
-                            "scenario {scenario} streams {streams} h {h} b {b}: {counts:?}"
-                        ));
+    for quirk in QUIRKS {
+        for scenario in SCENARIOS {
+            for streams in [false, true] {
+                for h in POINTS {
+                    for b in POINTS {
+                        let rec = Rec::default();
+                        let ends = Ends::default();
+                        let gw = gateway(scenario, &rec)
+                            .plugin("ends", ends.clone())
+                            .unwrap();
+                        drive(&gw, streams, quirk, h, b).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
+                        let counts = ends.counts();
+                        if counts.iter().any(|c| *c != 1) {
+                            failures.push(format!(
+                                "quirk {quirk} scenario {scenario} streams {streams} h {h} b {b}: {counts:?}"
+                            ));
+                        }
                     }
                 }
             }
@@ -110,7 +119,7 @@ async fn filters_end_once_when_dropped_at_every_await() {
     );
 }
 
-/// A call kept by a spawned task ends with its request, however far it got.
+/// A call kept by a spawned task ends with its session, however far it got.
 type Tasks = std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<Result<(), Fault>>>>>;
 struct Spawner(Tasks);
 #[async_trait]
@@ -142,7 +151,7 @@ async fn spawned_calls_end_with_their_request() {
                 for _ in 0..delay {
                     tokio::task::yield_now().await;
                 }
-                Ok(Exchange::new(Ans(200), futures::stream::pending().boxed()))
+                Ok(answer(200, futures::stream::pending().boxed()))
             }
             .boxed()
         });

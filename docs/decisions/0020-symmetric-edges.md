@@ -1,104 +1,129 @@
 # 0020. Symmetric edges
 
-- Status: in progress (step 3 of the migration has landed)
+- Status: accepted
 - Date: 2026-09-29
 
 ## Context
 
-The target is a core that routes events and never sees a byte, a head or a
-key ([target architecture, §1 Summary](../target-architecture.md#1-summary),
-a working draft kept outside the repository). Every session and every call
-is a two-way stream of the kind's events. An edge is a dialect (`Format`)
-speaking over a connection: the client edge is accepted, the provider edge
-is dialed. Heads travel only as sealed origins that only their dialect
-opens. The core hands the client's origin to a provider edge in one case:
-the call carries the session's own inputs to a format of the same name. So
-a byte-exact relay, and the client's key, ride along only then. The byte
-machinery (codecs, framing, head timing) moves into one symmetric driver in
-`crates/http`.
-
-The migration runs in six steps, each green: a throwaway spike; removing
-the head hooks (this step); the kernel on the new contract with the old
-byte code as a private legacy driver; the HTTP driver; the flip; clean-up.
-The owner approved the draft's answers to its open questions: ten public
-types; the edge contract on `Format` plus a `dialect!` macro; removal of
-the head hooks; `Credential` still lifted into extensions; `is_head_only`'s
-two shifts accepted; `Fault::abandoned` and `Fault::of_input` public; an
-`Events` that nothing follows is already ended; no `bytes` in the core;
-codecs in `crates/http`; the driver and the flip as separate steps.
-
-Sealing forbids a plugin to write a head, read the client's raw bytes, or
-make a head of its own: once heads are sealed, no plugin holds one.
+The kernel carried bytes, heads and keys: it decoded and encoded bodies,
+timed the response head, and let plugins edit heads. So the kernel knew
+HTTP's shape, a streaming request was a flag, and a second wire
+(WebSocket, stdio, an embedder's own) had to look like HTTP. The core
+should route events and never see a byte, a head or a key, and a plugin
+should never hold a head.
 
 ## Decision
 
-Step 2 removes those powers:
+**The core is events-only.** Every session and every call is a two-way
+stream of one kind's events: inputs toward the provider, outputs back. An
+edge is a format speaking over a connection: the client edge is accepted,
+the provider edge is dialed. The core has ten public types (`Call`,
+`ClientContext`, `Extensions`, `Fault`, `Filter`, `Format`, `Gateway`,
+`Plugin`, `ProviderContext`, `Response`) and aliases (`Dialed`, `Ended`,
+`Events`, `Half`, `Origin`, `Reply`). It depends on no `http` crate and its contracts carry no head or body.
 
-1. **`ProviderContext::edit_call` goes.** A call's head and bytes are its
-   format's to write. A key for one call is a value in its extensions
-   (`CallHeaders`, or one its transport reads).
-2. **`ClientContext::edit_response_head` goes.** A response's head is the
-   client's format's to write: relayed, from the provider's; a refusal's,
-   from its fault (`Status` is a hint, 0019).
-3. **`ClientContext::relay` goes.** A plugin answers with
-   `Response::stream` of values. A value that keeps its origin is written
-   as its bytes to a client of that format, under a head written anew.
-4. **`ClientContext::body()` goes.** A plugin that needs the bytes an
-   input came in reads the value's origin (`Conversation::origin`).
+**`Format` is the dialect and the edge contract.** Associated types `Input`
+and `Output` (the kind), `Wire` (a client connection as its adapter hands
+it over) and `Dialer` (how calls reach one provider); methods `name`,
+`accepts(&Wire)`, `is_content`, `accept` (the client edge), `opening` (the
+lazy first input) and `dial` (the provider edge). Formats of one name share
+a kind, wire and dialer. Its rules, in the rustdoc of `Format`:
 
-The kernel plumbing that served only these goes too: a call's list of
-edits and its run before the transport, and the client edge's list of head
-edits and its run before the head goes out. The client edge keeps its
-output filters on its context alone. Nothing else changes.
+1. An `Events` that nothing will follow is already ended (its first poll
+   is `Ready(None)`); this holds for `accept`'s inputs, and `dial` is told
+   `later: None` instead. The gateway polls a client's inputs once as the
+   session opens and reads what that yields first. `opening` is `Some`
+   only if the inputs had ended then.
+2. `accept` resolves when the request is in and never awaits its `reply`;
+   the wire carries the adapter's slot, and the adapter drives
+   `Gateway::handle` to its end while it awaits that slot.
+3. A provider edge classifies its answer at its head: a refusal resolves
+   `Ok((origin, Err(fault)))`, which `is_head_only` reports.
+4. The client edge owns its head timing: a refusal is written as one; an
+   open answer's head when the edge decides.
+5. The client edge calls `Ended` exactly when its answer's end is out, or
+   drops it (the session ends `abandoned`); `Ended(Err(f))` also ends the
+   answer's call with `f`; outputs dropped unread end their call as its end,
+   if ready, says, else `abandoned`.
+6. What a provider edge's outputs have ready at once is one batch: the
+   call's filters see it all before the client's see its first.
+
+`dial` returns `Err` now (not sent), a future's `Err` (sent, not
+answered), `Ok((origin, Err(fault)))` (refused) or `Ok((origin, Ok(outputs)))`
+(open). Each input carries whether it is the client's as decoded, which says
+whose fault it is if the format cannot write it (`Fault::of_input`).
+`Fault::abandoned` and `Fault::of_input` are public for edges outside the
+core.
+
+**Heads travel as sealed origins.** An `Origin` is what came with a head
+(for a client, the head and a whole body), opened only by a format of the
+name it came in. The core hands the client's origin to a provider edge in
+one case: the call carries the session's own inputs (it has no
+`with_input`) to a format of the same name (`relay_origin` in
+`call.rs`). So a byte-exact relay, and the client's key, ride along only
+then. A provider's origin returns to the client edge only on a relay.
+
+**No plugin touches a head.** `ProviderContext::edit_call`,
+`ClientContext::edit_response_head`, `ClientContext::relay` and
+`ClientContext::body()` are gone. A key for one call is a value in its
+extensions (`CallHeaders`). A plugin answers with `Response::stream` of
+values, which a client of the format they came in gets as their bytes under
+a fresh head. A plugin that needs the bytes an input came in reads the
+value's origin (`Conversation::origin`).
+
+**`Gateway::handle<W>(wire, extensions)` takes the caller's wire**, one
+generic, and returns the future of how the session ended. A format of
+another wire type never accepts it.
+
+**HTTP's bytes live in `crates/http`.** An HTTP format implements `Codec`
+(`accepts`, `request_decoder`, `request_encoder`, `response_decoder`,
+`response_encoder`, `is_content`) and gets `Format` from `dialect!(Type)`;
+`Wire` is `Accepted` and `Dialer` is `Dialer`, made of any `Transport`.
+`Decoder`, `Encoder`, `Transport`, `Exchange`, `Frames` and the adapter
+(`serve`, `handle`) are there. One symmetric pair, a reader (frames to
+events through a `Decoder`) and a writer (events to frames through an
+`Encoder`), runs both edges, and owns head timing, the verdict at the head
+(a non-2xx answer, but a 101 to a call that asked to switch, is read whole
+before `dial` resolves), framing, batches and the byte guarantees. The
+driver sets `Exchange::relayed` if and only if it wrote from an origin.
+A format on another wire implements `Format` itself.
 
 ## Consequences
 
-- Plugins lose a custom success status, header edits on calls beyond
-  `CallHeaders` and extensions, and replaying a cached head. If plugins
-  need response headers later, an HTTP extension that the client edge
-  reads can carry them: the target contract hands that edge the session's
-  extensions.
-- A 204, 205, 304 or 101 reaches a client only as a relayed provider's
-  head or its format's own. The adapter's rules are unchanged.
+- A plugin loses a custom success status, header edits on calls beyond
+  `CallHeaders` and extensions, and replaying a cached head. If plugins need
+  response headers, an HTTP extension that the client edge reads can carry
+  them.
+- A 204, 205, 304 or 101 reaches a client only as a relayed provider's head
+  or its format's own.
+- A streaming client that a provider refuses at its head gets a complete
+  refusal, not a head and then a failing body (W1).
+- `is_head_only` means "the provider refused at its head", a refusal
+  classified by the provider edge (rule 3).
 - `examples/jobs.rs` keys a request by its conversation's origin bytes.
-- The core's toy panic points 30 and 31 moved from the head edits to a
-  client output filter's end and the request encoder's `open`, which runs
-  where a call's head is written.
-- No new public type. `Format`, `Decoder`, `Encoder` and `Transport` did not
-  change.
-- Amends 0003, 0004, 0007, 0008, 0013 and 0015, which named the removed
-  methods.
+- Amends 0003, 0004, 0005, 0006, 0007, 0008, 0011, 0012, 0013, 0014, 0015 and
+  0016, and supersedes 0017.
 
-## Step 3: the kernel on the contract
+## History
 
-The kernel routes events. The edge contract is in the core under a
-temporary name, `Dialect` (with `Events`, `Origin`, `Half`, `Ended`,
-`Reply`, `Dialed`), served with `Gateway::serve_dialect`, called with
-`Gateway::provider_dialect` and opened with `Gateway::open`; the flip
-renames them. It adopts the seven fixes to the draft: `dial`'s later
-inputs are an `Option` (`None`: none follow), and "ended at once" holds
-for `accept`'s inputs alone; `Reply` and `Dialed` are aliases; the gateway
-polls a client's inputs once as the session opens and keeps what that
-poll yields; `opening` is `Some` only if the inputs had ended then;
-`accept` never awaits its reply, the wire carries the adapter's slot, and
-the adapter drives `open` while it awaits the slot; outputs dropped unread
-end their call as their end, if ready, says, else abandoned; and `Ended`
-dropped first cuts the outputs with `Err(abandoned)`.
+Six steps, each green:
 
-`Format` and `Transport` did not change. A private driver
-(`core/src/legacy`) serves every old format and transport as a dialect and
-its dialer: the byte code the kernel had, moved, with one new part, the
-answer classified at its head (rule 3). It reads what of the answer is
-ready when the transport returns, waiting for nothing; a decoder's failure
-before any value, the body unbroken, is a refusal. So a streaming client
-its provider refuses gets a complete refusal (W1 is fixed), and
-`is_head_only` says "refused at its head", which is the tested meaning.
+1. A throwaway spike: the kernel on the contract with a toy edge.
+2. The head hooks and `body()` removed from plugins.
+3. The kernel on the edge contract, under the name `Dialect`; the old
+   `Format` and `Transport` served by a private legacy driver in the core.
+   It adopted seven fixes to the draft: `dial`'s later inputs are an
+   `Option`; `Reply` and `Dialed` are aliases; the gateway polls a client's
+   inputs once at open; `opening` is `Some` only if the inputs had ended;
+   `accept` never awaits its reply; outputs dropped unread end their call as
+   their end says; `Ended` dropped first cuts the outputs with
+   `Err(abandoned)`.
+4. The HTTP driver added to `crates/http`.
+5. The flip: the legacy driver and the old `Format`, `Transport`,
+   `Exchange`, `Decoder` and `Encoder` left the core; `Dialect` became
+   `Format`; every HTTP format became a `Codec` plus `dialect!`; transports
+   import `http::Transport`.
+6. Clean-up: the documentation and the decision records.
 
-One rule the draft did not state: what a provider edge's outputs have
-ready at once is one batch, whose values the call's filters see before
-the client's see the first. It keeps usage metered when a client filter
-fails on a value that shares its frame (`line.rs::f2_...`). The driver
-says `Pending` between frames, so its batch is a frame, as before.
-
-`Fault::abandoned` and `Fault::of_input` are public, for edges outside the
-core.
+The design, with the reasoning and the costs, is
+[target-architecture.md](../target-architecture.md).

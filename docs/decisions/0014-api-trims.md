@@ -1,6 +1,6 @@
 # 0014. API trims
 
-- Status: accepted
+- Status: accepted, amended by [0020](0020-symmetric-edges.md) (`Encoder` is `http::Encoder`)
 - Date: 2026-09-28
 
 ## Context
@@ -19,7 +19,7 @@ could carry.
    hold, a tenant's `CallHeaders`, a tally), and `client()` is `&` so
    that no provider hook can `call` or `take_inputs`.
 3. **`Encoder::open` returns `Ok(true)` for a body done before it
-   began**; there is no separate method. `Encoder` has four methods.
+   began**; there is no separate method. `http::Encoder` has four methods.
 4. **`Response::until_end` returns the end with the held response**:
    `Ok((response, end))`, `end` `Ok` for a call that streams the
    request's inputs, which returns at once. There is no separate accessor.

@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::dialect::Values;
 use crate::fault::guarded;
+use crate::format::Values;
 use crate::{ClientContext, Fault, ProviderContext, Response};
 
 /// The extension point, on two edges: the client edge once per request, the

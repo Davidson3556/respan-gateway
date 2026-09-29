@@ -1,6 +1,6 @@
 # 0007. A format is one protocol's codec
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0020](0020-symmetric-edges.md) (no head hooks)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0020](0020-symmetric-edges.md) (the codec is `http::Codec`, in `crates/http`; the core's `Format` is the edge contract, which `dialect!` makes of a codec)
 - Date: 2026-09-27
 
 ## Context
@@ -12,10 +12,12 @@ two places wrote a call's body.
 
 ## Decision
 
-- A format is one protocol's codec: beside `name` and `accepts`, a
-  request and a response decoder and encoder. Format and transport are
-  stateless and shared; each body, either way, gets its own decoder or
-  encoder, which keeps that stream's state.
+- An HTTP format is one protocol's codec (`http::Codec`): beside `name`
+  and `accepts`, a request and a response decoder and encoder. Codec and
+  transport are stateless and shared; each body, either way, gets its own
+  decoder or encoder, which keeps that stream's state. `dialect!(Type)`
+  makes the codec a core `Format`, and one driver in `crates/http` runs
+  every codec on both edges (0020).
 - Codecs see the heads they need: the request decoder the client's head;
   the request encoder the client's head on a relay, and the call's first
   bytes to edit; the response decoder the answer and the call as sent;
@@ -29,13 +31,13 @@ two places wrote a call's body.
   request's frames are decoded as they pass.
 - A whole call is one frame of exact size; a streaming call's encoder is
   fed each later input.
-- A format is never told whether it relays, only handed the heads that a
-  relay passes on.
+- A codec is never told whether it relays, only handed the heads that a
+  relay passes on: the client's head reaches a call's encoder only when
+  the call relays, the provider's a response's encoder only then.
 - Content that cannot be written is whose it is, one rule for every
   input: `BAD_REQUEST` if filters left it equal to its decoding, else
   `CONFIG`, as is a call's own input.
-- Bodies are `Bytes`, which only formats read, as the kernel does not
-  know JSON.
+- Bodies are `Bytes`, which only codecs read: the kernel sees no byte.
 
 ## Consequences
 
@@ -55,3 +57,5 @@ two places wrote a call's body.
 - 0012: the kernel stopped filling calls and keeping a translated head's
   status; the proxy's header list moved to `http::proxy_call`.
 - 0013: codecs take their wire's heads, not `http` types.
+- 0020: the codec traits moved to `crates/http`; the core's `Format` is the
+  edge contract.

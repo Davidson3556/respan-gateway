@@ -1,6 +1,6 @@
 # 0005. No routes: formats recognise requests, plugins are global
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0018](0018-plugin-order-is-registration-order.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0018](0018-plugin-order-is-registration-order.md), [0020](0020-symmetric-edges.md) (`accepts` takes the wire; `handle` takes it)
 - Date: 2026-09-26
 
 ## Context
@@ -14,16 +14,18 @@ chain per route lets a guardrail run on one endpoint and not the next
 
 ### Formats recognise their requests
 
-- `Format::accepts(&self, head)` decides from the head alone.
-- `Gateway::serve(format)` adds a format clients speak; a request goes to
-  the first on its wire that accepts it. One none accepts is an `Err` from
-  `handle`, which the adapter writes as a plain 404.
+- `Format::accepts(&self, wire)` decides from the wire it is handed; for an
+  HTTP format (`Codec::accepts`) that is the request head.
+- `Gateway::serve(format)` adds a format clients speak; a wire goes to
+  the first that accepts it. One none accepts is an `Err(not_found)` in
+  `handle`'s end, which the adapter writes as a plain 404.
 - First-party formats match method and path suffix (`formats::posts_to`):
   OpenAI Chat a `POST` to `.../chat/completions`, Anthropic Messages to
   `.../v1/messages`.
-- `Gateway::handle(req)`: the adapter sends every request to it, bounds a
-  whole body, and says whether inputs stream (`req.streams`).
-  `ClientContext::format()` names the client's format.
+- `Gateway::handle(wire, extensions)`: the adapter sends every request to
+  it as its own wire type (`http::Accepted`, which says whether inputs
+  stream; the caller bounds a whole body). `ClientContext::format()` names
+  the client's format.
 
 ### One plugin registry
 
@@ -89,5 +91,5 @@ chain per route lets a guardrail run on one endpoint and not the next
 - 0012: `handle` takes whether the request streams, and returns `Err` for
   what no format can write.
 - 0013: formats are served per wire.
-- 0017: `handle` is untyped.
+- 0017: `handle` was untyped; 0020: it takes the caller's wire, one generic.
 - 0018: registration order is the plugin order; `after` left the kernel.

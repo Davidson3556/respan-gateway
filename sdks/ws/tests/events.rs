@@ -10,11 +10,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::serde_json::{Value, json};
 use respan_gateway_core::{
-    ClientContext, Fault, Filter, Format, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
+use respan_gateway_http::Codec;
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
 use support::*;
 

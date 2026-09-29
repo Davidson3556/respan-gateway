@@ -6,19 +6,19 @@ use common::{AddProvider, add_provider, providers, with_plugins};
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
+use respan_gateway_core::futures;
 use respan_gateway_core::serde_json;
-use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, Response, codes,
-};
-use respan_gateway_core::{bytes, futures};
+use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Response, codes};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::whole::Relay;
 use respan_gateway_formats::{self as formats, default_content_type, sse};
 use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
+use respan_gateway_http::bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Answer as Head, Ask};
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -30,7 +30,7 @@ fn to(format: &str, body: impl Into<Bytes>) -> http::Request<respan_gateway_http
 
 /// A gateway serving `format`: `providers`, `plugins` in order, `target`.
 fn serving(
-    format: impl Format,
+    format: impl respan_gateway_core::Format,
     list: impl IntoIterator<Item = AddProvider>,
     plugins: Vec<Arc<dyn Plugin>>,
     target: Option<&str>,
@@ -111,9 +111,7 @@ const V2: JevFormat = JevFormat {
     answer: "text",
 };
 
-impl Format for JevFormat {
-    type Ask = Ask;
-    type Answer = Head;
+impl Codec for JevFormat {
     type Input = Jev;
     type Output = Answer;
 
@@ -122,7 +120,7 @@ impl Format for JevFormat {
     }
 
     fn accepts(&self, head: &Ask) -> bool {
-        formats::posts_to(head, &format!("/{}", Format::name(self)))
+        formats::posts_to(head, &format!("/{}", Codec::name(self)))
     }
 
     fn request_decoder(&self, _request: &Ask) -> Box<dyn Decoder<Jev>> {
@@ -186,6 +184,8 @@ impl Format for JevFormat {
         answer.text.is_some()
     }
 }
+
+dialect!(JevFormat);
 
 impl JevFormat {
     fn response_body(
@@ -678,11 +678,10 @@ fn formats_of_one_name_and_different_kinds_do_not_build() {
 #[test]
 fn a_kind_of_one_type_for_both_directions_does_not_build() {
     /// Jev whose kind names `Jev` as both its input and output.
+    #[derive(Clone)]
     struct OneWay;
 
-    impl Format for OneWay {
-        type Ask = Ask;
-        type Answer = Head;
+    impl Codec for OneWay {
         type Input = Jev;
         type Output = Jev;
 
@@ -691,7 +690,7 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
         }
 
         fn accepts(&self, head: &Ask) -> bool {
-            formats::posts_to(head, &format!("/{}", Format::name(self)))
+            formats::posts_to(head, &format!("/{}", Codec::name(self)))
         }
 
         fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
@@ -728,6 +727,8 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
         }
     }
 
+    dialect!(OneWay);
+
     let mock = MockTransport::new();
     let err = serving(
         OneWay,
@@ -745,11 +746,10 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
 #[tokio::test]
 async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     /// A protocol the gateway only passes on.
+    #[derive(Clone)]
     struct Opaque;
 
-    impl Format for Opaque {
-        type Ask = Ask;
-        type Answer = Head;
+    impl Codec for Opaque {
         type Input = Sent<Opaque>;
         type Output = Got<Opaque>;
 
@@ -758,7 +758,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
         }
 
         fn accepts(&self, head: &Ask) -> bool {
-            formats::posts_to(head, &format!("/{}", Format::name(self)))
+            formats::posts_to(head, &format!("/{}", Codec::name(self)))
         }
 
         fn request_decoder(&self, _request: &Ask) -> Box<dyn Decoder<Self::Input>> {
@@ -796,6 +796,8 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
             opaque::response_encoder("opaque", answer, ask, refusal)
         }
     }
+
+    dialect!(Opaque);
 
     /// A guardrail that asks for the jev request.
     struct Guard;
@@ -913,11 +915,10 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
 #[tokio::test]
 async fn a_format_that_writes_errors_as_200_is_refused_once() {
     /// Jev over a protocol that puts errors in a 200, as JSON-RPC does.
+    #[derive(Clone)]
     struct InBand;
 
-    impl Format for InBand {
-        type Ask = Ask;
-        type Answer = Head;
+    impl Codec for InBand {
         type Input = Jev;
         type Output = Answer;
 
@@ -926,7 +927,7 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
         }
 
         fn accepts(&self, head: &Ask) -> bool {
-            formats::posts_to(head, &format!("/{}", Format::name(self)))
+            formats::posts_to(head, &format!("/{}", Codec::name(self)))
         }
 
         fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
@@ -967,6 +968,8 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
         }
     }
 
+    dialect!(InBand);
+
     struct Deny;
 
     #[async_trait]
@@ -984,11 +987,10 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
 
 #[tokio::test]
 async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
+    #[derive(Clone)]
     struct Broken;
 
-    impl Format for Broken {
-        type Ask = Ask;
-        type Answer = Head;
+    impl Codec for Broken {
         type Input = Jev;
         type Output = Answer;
 
@@ -997,7 +999,7 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
         }
 
         fn accepts(&self, head: &Ask) -> bool {
-            formats::posts_to(head, &format!("/{}", Format::name(self)))
+            formats::posts_to(head, &format!("/{}", Codec::name(self)))
         }
 
         fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
@@ -1033,6 +1035,8 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
             panic!("a buggy format")
         }
     }
+
+    dialect!(Broken);
 
     let log = Outcomes::default();
     let gw =
@@ -1305,11 +1309,10 @@ async fn a_jev_error_inside_a_success_translated_is_refused_in_the_clients_words
 #[tokio::test]
 async fn the_input_is_read_from_the_head_as_it_arrived() {
     /// Jev whose prompt is in the `x-prompt` header, which it passes on.
+    #[derive(Clone)]
     struct Headed;
 
-    impl Format for Headed {
-        type Ask = Ask;
-        type Answer = Head;
+    impl Codec for Headed {
         type Input = Jev;
         type Output = Answer;
 
@@ -1318,7 +1321,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         }
 
         fn accepts(&self, head: &Ask) -> bool {
-            formats::posts_to(head, &format!("/{}", Format::name(self)))
+            formats::posts_to(head, &format!("/{}", Codec::name(self)))
         }
 
         fn request_decoder(&self, request: &Ask) -> Box<dyn Decoder<Jev>> {
@@ -1371,6 +1374,8 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         }
     }
 
+    dialect!(Headed);
+
     /// Reads the input.
     #[derive(Clone, Default)]
     struct Read(std::sync::Arc<std::sync::Mutex<String>>);
@@ -1412,11 +1417,10 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 }
 
 /// A protocol of no kind that accepts any `POST`, relayed as it came.
+#[derive(Clone)]
 struct Anywhere;
 
-impl Format for Anywhere {
-    type Ask = Ask;
-    type Answer = Head;
+impl Codec for Anywhere {
     type Input = Sent<Anywhere>;
     type Output = Got<Anywhere>;
 
@@ -1465,6 +1469,8 @@ impl Format for Anywhere {
         opaque::response_encoder("anywhere", answer, ask, refusal)
     }
 }
+
+dialect!(Anywhere);
 
 /// Notes the client's format, then refuses the request.
 #[derive(Clone, Default)]
@@ -1772,19 +1778,16 @@ async fn a_refusal_goes_out_with_its_faults_status_even_a_success() {
 struct Open;
 
 #[async_trait]
-impl respan_gateway_core::Transport for Open {
-    type Ask = Ask;
-    type Answer = Head;
-
+impl respan_gateway_http::Transport for Open {
     async fn send(
         &self,
-        _call: respan_gateway_core::Exchange<Ask>,
-    ) -> Result<respan_gateway_core::Exchange<Head>, Fault> {
+        _call: respan_gateway_http::Exchange<Ask>,
+    ) -> Result<respan_gateway_http::Exchange<Head>, Fault> {
         use futures::StreamExt;
         let first = Bytes::from("data: hello\n\n");
         let body = futures::stream::iter([Ok(first)]).chain(futures::stream::pending());
         let head = respan_gateway_http::fresh_answer();
-        Ok(respan_gateway_core::Exchange::new(head, body.boxed()))
+        Ok(respan_gateway_http::Exchange::new(head, body.boxed()))
     }
 }
 
@@ -1836,9 +1839,7 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
     #[derive(Clone, Default)]
     struct Noting(Arc<std::sync::Mutex<Option<http::HeaderMap>>>);
 
-    impl Format for Noting {
-        type Ask = Ask;
-        type Answer = Head;
+    impl Codec for Noting {
         type Input = Jev;
         type Output = Answer;
 
@@ -1886,6 +1887,8 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
             V1.response_encoder(answer, ask, body, refusal)
         }
     }
+
+    dialect!(Noting);
 
     let mock = MockTransport::new();
     let noting = Noting::default();

@@ -3,13 +3,13 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 
 use crate::Fault;
-use crate::dialect::{AnyDialect, AnyInput, Origin};
 use crate::fault::{PANICKED, guarded};
+use crate::format::{AnyFormat, AnyInput, Origin};
 use crate::plugin::Filters;
 
 /// The client's origin, its opening input decoded when first needed.
 struct Base {
-    dialect: Arc<dyn AnyDialect>,
+    format: Arc<dyn AnyFormat>,
     origin: Option<Origin>,
     decoded: OnceLock<Option<Result<AnyInput, Fault>>>,
 }
@@ -22,14 +22,14 @@ pub(crate) struct Opening {
     /// Set once a filter ran over it or a call brings its own; a filter's
     /// failure is kept.
     changed: Option<Result<AnyInput, Fault>>,
-    /// The dialect of a call's own input, which `changed` then has.
-    pub(crate) own: Option<Arc<dyn AnyDialect>>,
+    /// The format of a call's own input, which `changed` then has.
+    pub(crate) own: Option<Arc<dyn AnyFormat>>,
 }
 
 impl Opening {
-    pub(crate) fn new(dialect: Arc<dyn AnyDialect>, origin: Option<Origin>) -> Self {
+    pub(crate) fn new(format: Arc<dyn AnyFormat>, origin: Option<Origin>) -> Self {
         let base = Base {
-            dialect,
+            format,
             origin,
             decoded: OnceLock::new(),
         };
@@ -40,15 +40,15 @@ impl Opening {
         }
     }
 
-    /// Bring `input`, a call's own, of `dialect`'s kind.
-    pub(crate) fn bring(&mut self, dialect: Arc<dyn AnyDialect>, input: AnyInput) {
+    /// Bring `input`, a call's own, of `format`'s kind.
+    pub(crate) fn bring(&mut self, format: Arc<dyn AnyFormat>, input: AnyInput) {
         self.changed = Some(Ok(input));
-        self.own = Some(dialect);
+        self.own = Some(format);
     }
 
-    /// The dialect whose kind it is of.
-    fn dialect(&self) -> &Arc<dyn AnyDialect> {
-        self.own.as_ref().unwrap_or(&self.base.dialect)
+    /// The format whose kind it is of.
+    fn format(&self) -> &Arc<dyn AnyFormat> {
+        self.own.as_ref().unwrap_or(&self.base.format)
     }
 
     /// The client's opening, decoded once; `None` if none came.
@@ -57,7 +57,7 @@ impl Opening {
         let decoded = base.decoded.get_or_init(|| {
             let origin = base.origin.as_ref()?;
             // A panic is an internal fault.
-            let opening = AssertUnwindSafe(|| base.dialect.opening(origin));
+            let opening = AssertUnwindSafe(|| base.format.opening(origin));
             std::panic::catch_unwind(opening)
                 .unwrap_or_else(|_| Some(Err(Fault::internal(PANICKED))))
         });
@@ -78,7 +78,7 @@ impl Opening {
 
     /// The opening as `T`; another type is refused without decoding.
     pub(crate) fn get<T: Any>(&self) -> Result<&T, Fault> {
-        if self.dialect().kind().0 != TypeId::of::<T>() {
+        if self.format().kind().0 != TypeId::of::<T>() {
             return Err(Fault::wrong_kind::<T>());
         }
         self.value()?
@@ -89,18 +89,18 @@ impl Opening {
     /// Run the one input of a session or call whose inputs ended through
     /// `filters`, and end them: it stays one input.
     pub(crate) fn filter(&mut self, mut filters: Filters) -> Result<(), Fault> {
-        let dialect = self.dialect().clone();
+        let format = self.format().clone();
         let filtered = self.value().cloned().and_then(|input| {
             // Dropping the held copy lets an input no one shares be moved.
             drop(self.changed.take());
             let filtered = guarded(|| {
-                let mut values = Some(dialect.values(vec![input]));
+                let mut values = Some(format.values(vec![input]));
                 let edited = match &mut values {
                     Some(values) => filters.run(values),
                     None => Ok(()),
                 };
                 filters.end(edited, &mut values)?;
-                let inputs = values.map(|v| dialect.inputs(v)).unwrap_or_default();
+                let inputs = values.map(|v| format.inputs(v)).unwrap_or_default();
                 // Dropping a whole body's one input is refusing, `Err`'s job.
                 match <[AnyInput; 1]>::try_from(inputs) {
                     Ok([input]) => Ok(input),
@@ -127,7 +127,7 @@ impl Opening {
             Some(input) if self.own.is_some() => Some((input, false)),
             Some(input) => {
                 let base = self.base().and_then(Result::ok);
-                let same = base.is_some_and(|b| self.base.dialect.same(b, &input));
+                let same = base.is_some_and(|b| self.base.format.same(b, &input));
                 Some((input, same))
             }
             None if relay => None,

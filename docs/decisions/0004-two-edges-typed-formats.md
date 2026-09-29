@@ -1,6 +1,6 @@
 # 0004. Two edges, typed formats
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0015](0015-core-trims.md), [0020](0020-symmetric-edges.md) (no head hooks)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0015](0015-core-trims.md), [0020](0020-symmetric-edges.md) (a provider is a name, a format and its dialer; a transport is HTTP's; no head hooks)
 - Date: 2026-09-26
 
 ## Context
@@ -55,15 +55,18 @@ what the client sends and gets, whatever the format.
 
 ### Providers
 
-- A provider is a name, a format and a transport sharing its wire,
-  `Gateway::provider(name, format, transport)`, with no type of its own.
-- The transport owns where and how: a URL and credentials, a process, a
-  socket, or in-process code. It may keep state its calls share.
-- `Transport::send` gets the call as its format wrote it.
-  A relay's call starts from the client's head, so the transport strips
-  what its protocol forbids a proxy to pass on (`http::proxy_call`). Its
-  body carries the inputs, one per data frame; its extensions are the
-  call's, with `Exchange::relayed` set on a relay alone.
+- A provider is a name, a format and its dialer (`Format::Dialer`),
+  `Gateway::provider(name, format, dialer)`, with no type of its own. The
+  dialer owns where and how: a URL and credentials, a process, a socket, or
+  in-process code, and any state its calls share. For an HTTP format it is
+  any `http::Transport` (`impl Into<Dialer>`), so the core knows no
+  transport.
+- `Format::dial` writes the call; for an HTTP format the driver does and
+  `http::Transport::send(Exchange<Ask>)` gets it as written. A relay's call
+  starts from the client's head, so the transport strips what its protocol
+  forbids a proxy to pass on (`http::proxy_call`). Its body carries the
+  inputs, one per data frame; its extensions are the call's, with
+  `Exchange::relayed` set on a relay alone.
 - The transport decides whose keys reach the provider. `HttpTransport`
   sends `CallHeaders`, else its own headers, else the client's
   `Credential`, the last only on a relay. It strips the client origin's
@@ -74,8 +77,9 @@ what the client sends and gets, whatever the format.
 ## Consequences
 
 - A provider without HTTP, such as an MCP server over stdio, needs only a
-  transport of its own.
-- The core has no notion of credentials or origins.
+  transport of its own, or a format with a dialer of its own.
+- The core has no notion of credentials; an origin is a sealed value it
+  hands on and never opens.
 
 ## History
 
@@ -88,3 +92,5 @@ what the client sends and gets, whatever the format.
   credentials became an extension.
 - 0013: `Transport::send` takes an `Exchange` of its wire's heads.
 - 0015: the end is a plain `Result<(), Fault>`; `relayed` is a field.
+- 0020: `Transport` and `Exchange` moved to `crates/http`; a provider is a
+  name, a format and its dialer.

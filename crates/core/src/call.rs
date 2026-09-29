@@ -8,8 +8,8 @@ use std::task::{Poll, Waker};
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
 
-use crate::dialect::{AnyEvents, AnyInput, Origin};
 use crate::fault::{PANICKED, guarded};
+use crate::format::{AnyEvents, AnyInput, Origin};
 use crate::gateway::Registered;
 use crate::leg::{self, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
@@ -138,13 +138,13 @@ async fn send(
         // Relayed within one name, else translated within one kind.
         Some(p)
             if own.is_none()
-                && cx.dialect.name() != p.dialect.name()
-                && cx.dialect.kind() != p.dialect.kind() =>
+                && cx.format.name() != p.format.name()
+                && cx.format.kind() != p.format.kind() =>
         {
             Err(format!(
                 "the client speaks {}, provider '{provider}' speaks {}, and they share no kind",
-                cx.dialect.name(),
-                p.dialect.name()
+                cx.format.name(),
+                p.format.name()
             ))
         }
         Some(p) => Ok(p),
@@ -154,19 +154,19 @@ async fn send(
     })?;
     let mut opening = cx.opening.clone();
     if let Some(own) = own {
-        if p.dialect.kind().0 != (*own).type_id() {
+        if p.format.kind().0 != (*own).type_id() {
             return Err(Fault::another_kind(format!(
                 "a call's own input is not the input type of provider '{provider}'"
             )));
         }
-        opening.bring(p.dialect.clone(), own);
+        opening.bring(p.format.clone(), own);
     }
     let mut client = cx.copy();
     client.extensions.extend(extensions);
     let cut = Arc::default();
     let px = ProviderContext {
         client,
-        dialect: p.dialect.clone(),
+        format: p.format.clone(),
         provider,
         // A call's own input is none of the client's: nothing follows it.
         flowing: opening.own.is_none() && !cx.later.ended,
@@ -186,7 +186,7 @@ async fn send(
     // A panic ends this call as internal before unwinding, so the drop
     // during unwinding does not end it abandoned.
     match AssertUnwindSafe(sent).catch_unwind().await {
-        Ok(Ok((origin, events))) => Ok(Response::of_call(&p.dialect, origin, events, edge)),
+        Ok(Ok((origin, events))) => Ok(Response::of_call(&p.format, origin, events, edge)),
         Ok(Err(fault)) => {
             edge.finish(Err(fault.clone()));
             Err(fault)
@@ -200,9 +200,9 @@ async fn send(
 
 /// The one way a client's origin reaches a provider: a call that carries
 /// the session's own inputs (no input of its own, which no plugin can
-/// forge) to a dialect of the client's name.
+/// forge) to a format of the client's name.
 fn relay_origin(cx: &ClientContext, own: bool, p: &Provider) -> Option<Origin> {
-    (!own && cx.dialect.name() == p.dialect.name())
+    (!own && cx.format.name() == p.format.name())
         .then(|| cx.origin.clone())
         .flatten()
 }
@@ -219,11 +219,11 @@ async fn dial(
     let opening = px.opening.sent(relay.is_some())?;
     let later = px.flowing.then(|| {
         let call = Some(px.inputs.clone());
-        inputs(cx.later.clone(), cx.dialect.clone(), call, &px.cut)
+        inputs(cx.later.clone(), cx.format.clone(), call, &px.cut)
     });
     let (dialer, ext) = (&*p.dialer, px.client.extensions.clone());
     let opening = opening.as_ref().map(|(input, clients)| (input, *clients));
-    let dialed = guarded(|| p.dialect.dial(dialer, ext, relay.as_ref(), opening, later))?;
+    let dialed = guarded(|| p.format.dial(dialer, ext, relay.as_ref(), opening, later))?;
     px.sent = true;
     let (origin, events) = dialed.await?;
     // A provider's head goes only to a client of the name it came in.

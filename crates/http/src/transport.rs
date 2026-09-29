@@ -1,11 +1,112 @@
-//! What an HTTP transport does to a call and its response.
+//! How the gateway reaches a provider over HTTP ([`Transport`], [`Dialer`]),
+//! and what a transport does to a call and its response.
 
+use std::sync::Arc;
+
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue};
-use respan_gateway_core::{Exchange, Extensions};
+use respan_gateway_core::{Extensions, Fault, async_trait};
 
 use crate::credential::{Credential, is_credential, take_query};
-use crate::{HOP_BY_HOP, remove_if, strip_named};
+use crate::{Answer, Ask, HOP_BY_HOP, remove_if, strip_named};
+
+/// A body, its bytes one item per data frame, ending with an `Err` if it
+/// broke off.
+pub type Frames = BoxStream<'static, Result<Bytes, Fault>>;
+
+/// One direction of an HTTP exchange: a head, a body and [`Extensions`].
+/// What a [`Transport`] sends and gets back.
+#[non_exhaustive]
+pub struct Exchange<H> {
+    /// The head: a request's method, URI and headers, or a response's
+    /// status and headers.
+    pub head: H,
+    /// The bytes after the head.
+    pub body: Frames,
+    /// Values for the transport, such as the client's credential; none on
+    /// a response.
+    pub extensions: Extensions,
+    /// Whether this call was written from the client's own message: its
+    /// head and bytes, on a relay to a provider of the client's codec's
+    /// name. The driver sets it then alone; a transport passes on what
+    /// belongs to the client, such as its credential ([`credentials`]),
+    /// only then. False on a response.
+    pub relayed: bool,
+    /// Whether the body's frames follow the head as they come: a streaming
+    /// request's inputs. A transport sends such a body as it comes, else
+    /// whole.
+    pub streams: bool,
+}
+
+impl<H> Exchange<H> {
+    /// An exchange of `head` and `body`, with no extensions, not relayed,
+    /// not streaming.
+    pub fn new(head: H, body: Frames) -> Self {
+        Self {
+            head,
+            body,
+            extensions: Extensions::new(),
+            relayed: false,
+            streams: false,
+        }
+    }
+}
+
+impl<H: std::fmt::Debug> std::fmt::Debug for Exchange<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Exchange")
+            .field("head", &self.head)
+            .field("extensions", &self.extensions)
+            .field("relayed", &self.relayed)
+            .field("streams", &self.streams)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How the gateway reaches one provider over HTTP: a URL and keys, a
+/// process, a socket or in-process code, with any state its calls share.
+#[async_trait]
+pub trait Transport: Send + Sync + 'static {
+    /// Send `call` and return the provider's response, whatever it says,
+    /// once its head arrives; return redirects rather than follow them.
+    /// A relay's head starts from the client's, so strip what a proxy must
+    /// not pass on ([`proxy_call`](crate::proxy_call)). Send a body that
+    /// [`streams`](Exchange::streams) as it comes, else whole; one that ends
+    /// with an `Err` aborts the message. Decide whose keys reach the
+    /// provider ([`credentials`]).
+    ///
+    /// `Err` if the call could not be sent: [`Fault::upstream`] if the
+    /// provider is unreachable, [`Fault::config`] if this transport cannot
+    /// express it, or a failure of its own.
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault>;
+}
+
+/// A shared transport; it forwards every method.
+#[async_trait]
+impl<T: Transport + ?Sized> Transport for Arc<T> {
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        (**self).send(call).await
+    }
+}
+
+/// How a codec's calls reach one provider: any [`Transport`], shared. A
+/// format's [`Dialer`](respan_gateway_core::Format::Dialer).
+#[derive(Clone)]
+pub struct Dialer(pub(crate) Arc<dyn Transport>);
+
+impl<T: Transport> From<T> for Dialer {
+    fn from(transport: T) -> Self {
+        Dialer(Arc::new(transport))
+    }
+}
+
+impl std::fmt::Debug for Dialer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Dialer").finish_non_exhaustive()
+    }
+}
 
 /// Strip from a call, whose head may be the client's, what a proxy does not
 /// pass on: a hop's headers (RFC 9110 7.6.1) but `Upgrade`, which gets its

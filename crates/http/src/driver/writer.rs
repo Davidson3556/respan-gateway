@@ -6,10 +6,11 @@ use std::panic::AssertUnwindSafe;
 use bytes::{Bytes, BytesMut};
 use futures::stream;
 use futures::{FutureExt, StreamExt};
-use respan_gateway_core::{Encoder, Ended, Events, Fault};
+use respan_gateway_core::{Ended, Events, Fault};
 
+use super::PANICKED;
 use super::reader::Failure;
-use super::{Frames, PANICKED};
+use crate::{Encoder, Frames};
 
 /// A body written from events through an [`Encoder`], whose head was
 /// asked already: framing, the end on `Err`, and panic guards. The two

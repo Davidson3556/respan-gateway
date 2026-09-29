@@ -1,3 +1,5 @@
+> Design document; the implemented architecture is in ARCHITECTURE.md and decision 0020. Where they differ (contract fixes made during the spike, final names), ARCHITECTURE.md wins.
+
 I have what I need. I read the core (all 13 source files), the formats, http and server crates, sdks/ws and sdks/mcp, skimmed routing, ledger, text and the examples, and read the e2e suite, crates/core/tests, the Stage C draft, both core reviews and BUGS.md. Nothing was edited or built. I counted 846 `#[test]`/`#[tokio::test]` attributes, which matches the stated suite size. Line numbers cite HEAD d58a6b2. Everything marked *(inference)* is my estimate and was not measured.
 
 ---

@@ -3,14 +3,15 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::bytes::{Bytes, BytesMut};
+use respan_gateway_core::Fault;
 use respan_gateway_core::serde_json::{self, Value};
-use respan_gateway_core::{Decoder, Encoder, Fault, Format};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{self as formats, whole};
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{CONNECTION, UPGRADE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 
 /// Whether `head` asks to upgrade to a WebSocket.
 fn upgrades(head: &Ask) -> bool {
@@ -124,9 +125,7 @@ impl JsonEvents {
     }
 }
 
-impl Format for JsonEvents {
-    type Ask = Ask;
-    type Answer = Answer;
+impl Codec for JsonEvents {
     type Input = ClientEvent;
     type Output = ProviderEvent;
 
@@ -229,3 +228,5 @@ impl Format for JsonEvents {
         formats::with_head(head, Box::new(body))
     }
 }
+
+dialect!(JsonEvents);

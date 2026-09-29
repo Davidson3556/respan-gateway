@@ -1,5 +1,5 @@
 //! The edge contract on the toy edge: the provider edge's staged answer
-//! (`Dialect::dial`), the W1 fix (a provider that refuses at its head gives
+//! (`Format::dial`), the W1 fix (a provider that refuses at its head gives
 //! the client a clean refusal) and rule 5 (outputs dropped unread).
 #![allow(clippy::unwrap_used)]
 
@@ -14,9 +14,9 @@ use respan_gateway_core::*;
 
 fn gateway_of(rec: &Rec, dialer: Dialer) -> Gateway {
     Gateway::new()
-        .serve_dialect(Toy)
+        .serve(Toy)
         .unwrap()
-        .provider_dialect("a", Toy, dialer)
+        .provider("a", Toy, dialer)
         .unwrap()
         .target("a")
         .unwrap()
@@ -137,9 +137,7 @@ impl Plugin for Fails {
 }
 
 /// `dial`'s stages: a sync `Err` is not sent; a future `Err` is sent, with
-/// no answer; an answer is sent. The twin of `panics.rs`
-/// (`a_call_is_sent_only_once_handed_to_its_transport`), mode 2 being
-/// `dial`'s sync `Err`.
+/// no answer; an answer is sent. Mode 2 is `dial`'s sync `Err`.
 #[tokio::test(flavor = "current_thread")]
 async fn a_call_is_sent_only_once_handed_to_its_transport() {
     // (how it fails before or at its dialer, whether it was sent)
@@ -174,8 +172,8 @@ async fn a_call_is_sent_only_once_handed_to_its_transport() {
 
 /// A panic in the provider edge's stream while `until_end` or
 /// `until_content` reads unwinds through the plugin that awaits it, so the
-/// session is refused `internal`, and the call ends `internal`. The twin of
-/// `panics.rs` (a decoder panic there; the edge's stream here).
+/// session is refused `internal`, and the call ends `internal`, as a
+/// decoder's panic does in HTTP's driver.
 #[tokio::test(flavor = "current_thread")]
 async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
     for (mode, chunks) in [(2u8, vec!["a", "PANIC"]), (1, vec!["PANIC"])] {
@@ -185,9 +183,9 @@ async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
             async move { Ok(answer(200, slow(chunks))) }.boxed()
         });
         let gw = Gateway::new()
-            .serve_dialect(Toy)
+            .serve(Toy)
             .unwrap()
-            .provider_dialect("a", Toy, t)
+            .provider("a", Toy, t)
             .unwrap()
             .plugin("rec", rec.clone())
             .unwrap()
@@ -226,7 +224,7 @@ async fn outputs_end_abandoned_once_the_edge_drops_ended() {
     for streams in [false, true] {
         let rec = Rec::default();
         let gw = Gateway::new()
-            .serve_dialect(Toy)
+            .serve(Toy)
             .unwrap()
             .plugin("rec", rec.clone())
             .unwrap()

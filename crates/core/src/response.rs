@@ -7,8 +7,8 @@ use futures::stream::{self, BoxStream, Stream};
 use futures::{FutureExt, StreamExt};
 
 use crate::call::{CallEdge, SharedCall};
-use crate::dialect::{AnyDialect, AnyEvents, Origin, Values};
 use crate::fault::PANICKED;
+use crate::format::{AnyEvents, AnyFormat, Origin, Values};
 use crate::leg::{cut, locked};
 use crate::{Events, Fault};
 
@@ -243,7 +243,7 @@ impl Response {
     /// A provider's answer through `call`'s provider edge, its origin kept
     /// only on a relay: cut at the call's end, so a waiting reader wakes.
     pub(crate) fn of_call(
-        dialect: &Arc<dyn AnyDialect>,
+        format: &Arc<dyn AnyFormat>,
         origin: Option<Origin>,
         events: AnyEvents,
         mut call: CallEdge,
@@ -251,10 +251,10 @@ impl Response {
         let px = call.cx();
         let (streams, refused) = (px.flowing, px.refused);
         let events = cut(events, &px.cut);
-        let output = Some(dialect.kind().1);
+        let output = Some(format.kind().1);
         let body = Source::Events {
             events,
-            dialect: dialect.clone(),
+            format: format.clone(),
             call: Some(call.share()),
         };
         Self {
@@ -269,7 +269,7 @@ impl Response {
 pub(crate) enum Source {
     Events {
         events: AnyEvents,
-        dialect: Arc<dyn AnyDialect>,
+        format: Arc<dyn AnyFormat>,
         call: Option<SharedCall>,
     },
     /// Outputs a plugin made, each of which is content.
@@ -292,12 +292,12 @@ impl Source {
     /// provider's stream, `is_content` or a filter ends the call internal
     /// and unwinds on.
     pub(crate) async fn next(&mut self) -> (Batch, bool) {
-        let (events, dialect, call) = match self {
+        let (events, format, call) = match self {
             Source::Events {
                 events,
-                dialect,
+                format,
                 call,
-            } => (events, dialect, call),
+            } => (events, format, call),
             Source::Made(made) => {
                 let truncated = || Batch::end(Err(Fault::truncated()));
                 let batch = made.next().await.unwrap_or_else(truncated);
@@ -324,12 +324,12 @@ impl Source {
                 {
                     match events.next().now_or_never() {
                         None => break,
-                        Some(Some(Ok(more))) => dialect.append(values, more),
+                        Some(Some(Ok(more))) => format.append(values, more),
                         Some(Some(Err(fault))) => batch.end = Some(Err(fault)),
                         Some(None) => batch.end = Some(Ok(())),
                     }
                 }
-                let content = (batch.values.as_ref()).is_some_and(|v| dialect.any_content(v));
+                let content = (batch.values.as_ref()).is_some_and(|v| format.any_content(v));
                 if let Some(call) = call {
                     batch = std::mem::take(&mut batch).of(call);
                 }

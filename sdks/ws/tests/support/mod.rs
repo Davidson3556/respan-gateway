@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::{Decoder, Encoder, Fault, Format, Gateway};
+use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_formats::opaque::{self, Got, Sent};
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
 use respan_gateway_http::{Answer, Ask};
@@ -30,11 +30,10 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 
 /// A WebSocket session relayed unread: opaque traffic, the kernel's format
 /// for what it does not read.
+#[derive(Clone)]
 pub struct Raw;
 
-impl Format for Raw {
-    type Ask = Ask;
-    type Answer = Answer;
+impl Codec for Raw {
     type Input = Sent<Raw>;
     type Output = Got<Raw>;
 
@@ -78,6 +77,8 @@ impl Format for Raw {
         opaque::response_encoder::<Raw>("raw", answer, ask, refusal)
     }
 }
+
+dialect!(Raw);
 
 /// A gateway serving over real sockets.
 pub struct Server {
@@ -582,6 +583,7 @@ async fn tap(
     }
 }
 
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 pub use respan_gateway_testkit::{Calls, Outcomes};
 use respan_gateway_ws::WsTransport;
 

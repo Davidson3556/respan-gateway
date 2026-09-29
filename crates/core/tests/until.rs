@@ -1,17 +1,17 @@
 //! `until_content` and `until_end` read a response without changing what it
-//! is, and in time linear in its size.
+//! is, and in time linear in its size. The toy dialer answers text events,
+//! not bytes.
 #![allow(clippy::unwrap_used)]
 
-mod toy;
+mod edge;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use respan_gateway_core::bytes::Bytes;
+use edge::*;
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::*;
-use toy::*;
 
 type Script = Vec<Result<&'static str, ()>>;
 
@@ -29,9 +29,9 @@ async fn run(
         async move {
             let items: Vec<_> = script
                 .iter()
-                .map(|s| s.map(Bytes::from).map_err(|()| Fault::upstream("cut")))
+                .map(|s| s.map(str::to_string).map_err(|()| Fault::upstream("cut")))
                 .collect();
-            Ok(Exchange::new(Ans(status), stream::iter(items).boxed()))
+            Ok(answer(status, stream::iter(items).boxed()))
         }
         .boxed()
     });
@@ -52,7 +52,7 @@ async fn run(
         ends.into_iter()
             .map(|e| {
                 e.as_ref()
-                    .map_err(|f| (f.code().to_string(), toy::number(f)))
+                    .map_err(|f| (f.code().to_string(), edge::number(f)))
                     .map_or_else(|e| format!("{e:?}"), |()| "ok".into())
             })
             .collect()
@@ -63,8 +63,7 @@ async fn run(
 }
 
 /// Read to its content or its end and sent, a response is as it would have
-/// been unread: the same bytes, the same ends. (A decoder that panics is
-/// the one exception: `until_end` refuses, see `panics.rs`.)
+/// been unread: the same bytes, the same ends.
 #[tokio::test(flavor = "current_thread")]
 async fn reading_a_response_first_changes_nothing() {
     let scripts: Vec<(&str, Script, u16)> = vec![
@@ -104,21 +103,19 @@ async fn reading_a_response_first_changes_nothing() {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
-/// The time to read `n` chunks of a response as `mode` says, a small chunk
-/// at a time; the best of a few runs, so a noisy machine cannot fail it.
+/// The time to read `n` events of a response as `mode` says; the best of a
+/// few runs, so a noisy machine cannot fail it.
 async fn time_of(mode: u8, lead: &'static str, n: usize) -> Duration {
     let mut best = Duration::MAX;
     for _ in 0..3 {
-        let t =
-            fnt(move |_| {
-                async move {
-                    let chunks = stream::iter((0..n).map(move |_| Ok(Bytes::from(lead)))).chain(
-                        stream::iter([Ok(Bytes::from("x")), Ok(Bytes::from("DONE"))]),
-                    );
-                    Ok(Exchange::new(Ans(200), chunks.boxed()))
-                }
-                .boxed()
-            });
+        let t = fnt(move |_| {
+            async move {
+                let chunks = stream::iter((0..n).map(move |_| Ok(lead.to_string())))
+                    .chain(stream::iter([Ok("x".to_string()), Ok("DONE".to_string())]));
+                Ok(answer(200, chunks.boxed()))
+            }
+            .boxed()
+        });
         let gw = Gateway::new()
             .serve(Toy)
             .unwrap()
@@ -136,8 +133,7 @@ async fn time_of(mode: u8, lead: &'static str, n: usize) -> Duration {
 }
 
 /// B3: a read to the end, or through a run without content, takes time in
-/// proportion to the response, not its square: twice the chunks take well
-/// under three times as long (four, if it is quadratic).
+/// proportion to the response, not its square.
 #[tokio::test(flavor = "current_thread")]
 async fn reading_until_is_linear_in_the_chunks() {
     for (mode, lead) in [(2u8, "c"), (1, "keepalive")] {
@@ -154,10 +150,8 @@ async fn reading_until_is_linear_in_the_chunks() {
     }
 }
 
-/// Suspected: `until_content` on a response with no content reads and holds
-/// all of it, to its end. That is what it says (a stream that never has
-/// content is the caller's to bound, as `sdks/routing`'s watchdog does),
-/// and what it held is sent whole.
+/// `until_content` on a response with no content reads and holds all of it,
+/// to its end, and what it held is sent whole.
 #[tokio::test(flavor = "current_thread")]
 async fn until_content_holds_a_response_without_content_to_its_end() {
     let reads = Arc::new(AtomicUsize::new(0));
@@ -167,9 +161,9 @@ async fn until_content_holds_a_response_without_content_to_its_end() {
         async move {
             let body = stream::iter(0..1000).map(move |i| {
                 counted.fetch_add(1, Ordering::SeqCst);
-                Ok(Bytes::from(if i == 999 { "DONE" } else { "keepalive" }))
+                Ok((if i == 999 { "DONE" } else { "keepalive" }).to_string())
             });
-            Ok(Exchange::new(Ans(200), body.boxed()))
+            Ok(answer(200, body.boxed()))
         }
         .boxed()
     });

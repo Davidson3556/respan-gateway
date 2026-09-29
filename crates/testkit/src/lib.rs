@@ -13,11 +13,11 @@ use http::StatusCode;
 use http::header::CONTENT_TYPE;
 use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
-use respan_gateway_core::{
-    ClientContext, Exchange, Fault, Filter, Plugin, ProviderContext, Transport,
-};
-use respan_gateway_core::{async_trait, bytes, futures};
+use respan_gateway_core::{ClientContext, Fault, Filter, Plugin, ProviderContext};
+use respan_gateway_core::{async_trait, futures};
+use respan_gateway_http::bytes;
 use respan_gateway_http::{Answer, Ask, Body, http, http_body, http_body_util};
+use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_http::{
     credentials, proxy_call, strip_client_origin_headers, strip_origin_headers,
 };
@@ -135,9 +135,6 @@ impl MockAt {
 
 #[async_trait]
 impl Transport for MockAt {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         // Keep alike with `HttpTransport::send` in the server crate.
         let mut call = call;

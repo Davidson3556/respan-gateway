@@ -1,5 +1,5 @@
-//! A toy dialect on the core's public API alone, on the edge contract
-//! ([`Dialect`]): no codec and no bytes. A client wire carries its frames as
+//! A toy format on the core's public API alone, on the edge contract
+//! ([`Format`]): no codec and no bytes. A client wire carries its frames as
 //! text, each one input; a provider's dialer answers a status and text
 //! frames, each one event: `DONE` completes it, `ERR` fails it, `PANIC`
 //! panics its stream, and one that ends without `DONE` is truncated. The
@@ -109,7 +109,7 @@ impl ToyWire {
 
 pub struct Toy;
 
-impl Dialect for Toy {
+impl Format for Toy {
     type Input = In;
     type Output = Out;
     type Wire = ToyWire;
@@ -413,11 +413,11 @@ pub fn ok_resp(v: Vec<&'static str>) -> Answer {
 
 pub type End = BoxFuture<'static, Result<(), Fault>>;
 
-/// `Gateway::open` on the toy wire, as its adapter does it: the reply,
+/// `Gateway::handle` on the toy wire, as its adapter does it: the reply,
 /// or the end the adapter writes plainly if the gateway dropped the wire.
 pub async fn handle(gw: &Gateway, req: Req) -> (Result<ToyReply, Fault>, End) {
     let (wire, reply) = ToyWire::new(req);
-    let end = gw.open(wire, Extensions::new()).await.shared();
+    let end = gw.handle(wire, Extensions::new()).await.shared();
     match reply.await {
         Some(reply) => (Ok(reply), end.boxed()),
         None => {
@@ -732,30 +732,22 @@ pub fn gateway(scenario: usize, rec: &Rec) -> Gateway {
         }
         .boxed()
     });
-    let gw = Gateway::new().serve_dialect(Toy).unwrap();
+    let gw = Gateway::new().serve(Toy).unwrap();
     let gw = match scenario {
-        0 => gw
-            .provider_dialect("a", Toy, slow_ok)
-            .unwrap()
-            .target("a")
-            .unwrap(),
+        0 => gw.provider("a", Toy, slow_ok).unwrap().target("a").unwrap(),
         1 => gw
-            .provider_dialect("a", Toy, reads_body)
+            .provider("a", Toy, reads_body)
             .unwrap()
             .target("a")
             .unwrap(),
         2 => gw
-            .provider_dialect("a", Toy, slow_ok)
+            .provider("a", Toy, slow_ok)
             .unwrap()
-            .provider_dialect("b", Toy, fast_ok)
+            .provider("b", Toy, fast_ok)
             .unwrap()
             .plugin("racer", Racer)
             .unwrap(),
-        3 => gw
-            .provider_dialect("a", Toy, cut)
-            .unwrap()
-            .target("a")
-            .unwrap(),
+        3 => gw.provider("a", Toy, cut).unwrap().target("a").unwrap(),
         _ => unreachable!(),
     };
     gw.plugin("rec", rec.clone())

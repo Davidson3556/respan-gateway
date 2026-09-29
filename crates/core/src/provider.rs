@@ -3,17 +3,17 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use crate::dialect::{AnyDialect, is_input};
+use crate::format::{AnyFormat, is_input};
 use crate::leg::{Layer, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::opening::Opening;
 use crate::plugin::Filters;
 use crate::{ClientContext, Extensions, Fault, Filter, Plugin};
 
-/// A provider the gateway can call: a dialect and its dialer.
+/// A provider the gateway can call: a format and its dialer.
 #[derive(Clone)]
 pub(crate) struct Provider {
-    pub(crate) dialect: Arc<dyn AnyDialect>,
+    pub(crate) format: Arc<dyn AnyFormat>,
     pub(crate) dialer: Arc<dyn Any + Send + Sync>,
 }
 
@@ -21,8 +21,8 @@ pub(crate) struct Provider {
 pub struct ProviderContext {
     /// The request as it was when the call was made.
     pub(crate) client: ClientContext,
-    /// The provider's dialect.
-    pub(crate) dialect: Arc<dyn AnyDialect>,
+    /// The provider's format.
+    pub(crate) format: Arc<dyn AnyFormat>,
     pub(crate) provider: String,
     /// Its first input: its own, or the request's opening.
     pub(crate) opening: Opening,
@@ -38,7 +38,7 @@ pub struct ProviderContext {
     /// In `cut` until it ends, then in its request's `settling` until its
     /// end hooks finish, as its request's end hooks wait for them.
     pub(crate) running: InFlightGuard,
-    /// Set once its dialect took it to send.
+    /// Set once its format took it to send.
     pub(crate) sent: bool,
     /// Set if the provider answered and refused it at its head.
     pub(crate) refused: bool,
@@ -87,14 +87,14 @@ impl ProviderContext {
 
     /// The name of the provider's format.
     pub fn format(&self) -> &str {
-        self.dialect.name()
+        self.format.name()
     }
 
     /// Whether `T` is the provider's format's
     /// [`Input`](crate::Format::Input) or [`Output`](crate::Format::Output)
     /// type, which the typed accessors take.
     pub fn is_kind<T: Any>(&self) -> bool {
-        is_input::<T>(&*self.dialect).is_ok()
+        is_input::<T>(&*self.format).is_ok()
     }
 
     /// This call's first input as `T`, the call's input type: its own
@@ -111,7 +111,7 @@ impl ProviderContext {
         &mut self,
         filter: impl Filter<T>,
     ) -> Result<(), Fault> {
-        match is_input::<T>(&*self.dialect)? {
+        match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
             // Later inputs follow only a streaming request, never an own input.
             true if self.flowing => locked(&self.inputs).add(filter, true),

@@ -11,8 +11,8 @@ use respan_gateway_core::{Ended, Events, Fault, Half, Origin, Reply};
 
 use super::reader::Reader;
 use super::writer::Writer;
-use super::{Accepted, Came, Codec, Frames, PANICKED};
-use crate::{Answer, Ask, Body, into_http_body, plain};
+use super::{Accepted, Came, PANICKED};
+use crate::{Answer, Ask, Body, Codec, Frames, Unwritten, into_http_body, plain};
 
 /// What the client edge hands its adapter: the answer's head and body, or
 /// a failure no codec can write.
@@ -121,7 +121,11 @@ async fn written<C: Codec>(
     };
     match handed {
         Ok((head, body)) => http::Response::from_parts(head, into_http_body(body)),
-        Err(fault) => plain(&fault),
+        Err(fault) => {
+            let mut resp = plain(&fault);
+            resp.extensions_mut().insert(Unwritten);
+            resp
+        }
     }
 }
 

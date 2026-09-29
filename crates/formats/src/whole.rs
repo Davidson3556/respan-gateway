@@ -2,10 +2,11 @@
 
 use std::marker::PhantomData;
 
-use respan_gateway_core::bytes::{Bytes, BytesMut};
-use respan_gateway_core::{Decoder, Encoder, Fault};
+use respan_gateway_core::Fault;
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_http::{Answer, Ask, bodiless};
+use respan_gateway_http::{Decoder, Encoder};
 
 /// A decoder for a body of `format` read whole: a success's bytes go to
 /// `on_body` at the end; any other answer ends `Err` ([`answer`]).

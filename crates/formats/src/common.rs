@@ -5,15 +5,16 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use respan_gateway_core::bytes::{BufMut, Bytes, BytesMut};
+use respan_gateway_core::Fault;
 use respan_gateway_core::serde_json::{self, Map, Value, json};
-use respan_gateway_core::{Decoder, Encoder, Fault};
+use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{Answer, Ask, Status, bodiless};
 
 use crate::Usage;
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
 use crate::sse::{content_type, event_data};
+use respan_gateway_http::{Decoder, Encoder};
 
 /// What a conversation format supplies; the plumbing around it is shared.
 pub(crate) trait Wire: Send + Sync + 'static {

@@ -1,6 +1,6 @@
-//! HTTP's driver ([`respan_gateway_http::codec`]) on a toy codec: the byte
-//! half of the kernel's guarantees, moved here from the core's tests
-//! (decision 0020, step 4), and the driver's own rules. Requests and
+//! HTTP's driver on a toy codec: the byte half of the gateway's
+//! guarantees, moved here from the core's tests (decision 0020), and the
+//! driver's own rules. Requests and
 //! responses are strings; a response is complete once it says `DONE`, and
 //! a status other than 200 fails its decoder.
 #![allow(clippy::unwrap_used)]
@@ -10,17 +10,17 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use respan_gateway_core::bytes::{Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::future::{self, BoxFuture};
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::{Dialed, Extensions, Fault, Gateway, async_trait};
-use respan_gateway_http::codec::{
-    self, Accepted, Codec, Decoder, Dialer, Encoder, Exchange, Frames, Transport,
-};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Answer, Ask, Body, dialect, fresh_answer, fresh_ask, http};
+use respan_gateway_http::{
+    Accepted, Answer, Ask, Body, Codec, Decoder, Dialer, Encoder, Exchange, Frames, Transport,
+    dialect, fresh_answer, fresh_ask, http,
+};
 use respan_gateway_testkit::{Calls, Outcomes};
 
 #[derive(Clone, PartialEq, Debug)]
@@ -29,17 +29,19 @@ struct In(String);
 struct Out(String);
 
 /// The toy codec; its request encoder opens with `open`'s bytes, saying
-/// whether the body is done, and its calls ask to switch if `upgrade`.
+/// whether the body is done, its calls ask to switch if `upgrade`, and it
+/// cannot write a refusal if `unwritable`.
 #[derive(Clone, Default)]
 struct Toy {
     open: Option<(&'static str, bool)>,
     upgrade: bool,
+    unwritable: bool,
 }
 
 fn opening(bytes: &'static str, done: bool) -> Toy {
     Toy {
         open: Some((bytes, done)),
-        upgrade: false,
+        ..Toy::default()
     }
 }
 
@@ -85,6 +87,7 @@ impl Codec for Toy {
         _: &Bytes,
         refusal: Option<&Fault>,
     ) -> Box<dyn Encoder<Out, Answer>> {
+        assert!(!(self.unwritable && refusal.is_some()), "unwritable");
         let status = refusal.map_or(200, |f| respan_gateway_http::status(f).as_u16());
         Box::new(RespEnc { status })
     }
@@ -315,9 +318,9 @@ impl Seen {
 fn gateway_of(codec: Toy, transport: Fnt) -> (Gateway, Calls, Outcomes) {
     let (calls, outcomes) = (Calls::default(), Outcomes::default());
     let gw = Gateway::new()
-        .serve_dialect(Toy::default())
+        .serve(Toy::default())
         .unwrap()
-        .provider_dialect("a", codec, transport)
+        .provider("a", codec, transport)
         .unwrap()
         .target("a")
         .unwrap()
@@ -357,7 +360,7 @@ async fn open(
     BoxFuture<'static, Result<(), Fault>>,
 ) {
     let (wire, answer) = Accepted::new(ask(), frames, streams);
-    let end = gw.open(wire, Extensions::new()).await;
+    let end = gw.handle(wire, Extensions::new()).await;
     (answer.await, end)
 }
 
@@ -506,7 +509,8 @@ async fn a_streaming_requests_inputs_never_end_at_once() {
     let (tx, body) = upload();
     drop(tx);
     let (wire, _answer) = Accepted::new(ask(), body, true);
-    let (origin, inputs) = codec::accept(&Toy::default(), wire, future::pending().boxed()).await;
+    let (origin, inputs) =
+        respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed()).await;
     let mut inputs = inputs.unwrap();
     assert!(
         inputs.next().now_or_never().is_none(),
@@ -514,12 +518,13 @@ async fn a_streaming_requests_inputs_never_end_at_once() {
     );
     assert!(inputs.next().await.is_none());
     let origin = origin.unwrap();
-    assert!(codec::opening(&Toy::default(), &origin).is_none());
+    assert!(respan_gateway_http::opening(&Toy::default(), &origin).is_none());
 
     let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
-    let (origin, inputs) = codec::accept(&Toy::default(), wire, future::pending().boxed()).await;
+    let (origin, inputs) =
+        respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed()).await;
     assert!(matches!(inputs.unwrap().next().now_or_never(), Some(None)));
-    let opening = codec::opening(&Toy::default(), &origin.unwrap());
+    let opening = respan_gateway_http::opening(&Toy::default(), &origin.unwrap());
     assert_eq!(opening.map(|o| o.ok()), Some(Some(In("q".into()))));
 }
 
@@ -527,7 +532,7 @@ async fn a_streaming_requests_inputs_never_end_at_once() {
 fn dial(codec: &Toy, transport: Fnt) -> Dialed<Out> {
     let dialer = Dialer::from(transport);
     let input = In("q".into());
-    codec::dial(
+    respan_gateway_http::dial(
         codec,
         &dialer,
         Extensions::new(),
@@ -617,13 +622,15 @@ async fn only_a_call_written_from_the_clients_origin_is_relayed() {
     };
     let dialer = Dialer::from(marking);
     let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
-    let (origin, _) = codec::accept(&Toy::default(), wire, future::pending().boxed()).await;
+    let (origin, _) =
+        respan_gateway_http::accept(&Toy::default(), wire, future::pending().boxed()).await;
     let origin = origin.unwrap();
     let toy = Toy::default();
-    let relayed = codec::dial(&toy, &dialer, Extensions::new(), Some(&origin), None, None);
+    let relayed =
+        respan_gateway_http::dial(&toy, &dialer, Extensions::new(), Some(&origin), None, None);
     let _ = relayed.unwrap().await.unwrap();
     let input = In("own".into());
-    let own = codec::dial(
+    let own = respan_gateway_http::dial(
         &toy,
         &dialer,
         Extensions::new(),
@@ -633,4 +640,24 @@ async fn only_a_call_written_from_the_clients_origin_is_relayed() {
     );
     let _ = own.unwrap().await.unwrap();
     assert_eq!(*lock(&marks), [true, false]);
+}
+
+/// A refusal no codec can write goes as plain text, with its body, even to
+/// a `HEAD` request: the adapter's rule for a body does not apply to it.
+#[tokio::test]
+async fn a_refusal_no_codec_can_write_keeps_its_body_even_to_a_head() {
+    let toy = Toy {
+        unwritable: true,
+        ..Toy::default()
+    };
+    // No target: every request is refused.
+    let gw = Gateway::new().serve(toy).unwrap();
+    for method in [http::Method::POST, http::Method::HEAD] {
+        let req = http::Request::builder().method(method.clone()).uri("/x");
+        let req = req.body(respan_gateway_http::full("q")).unwrap();
+        let (resp, _) = respan_gateway_http::serve(&gw, req).await;
+        let got = read(Some(resp)).await.unwrap();
+        assert_eq!(got.0, 500, "{method}");
+        assert!(!got.1.is_empty(), "{method}: the refusal's text");
+    }
 }

@@ -1,19 +1,18 @@
 //! The kernel's promises, driven through the OpenAI format.
 
 use futures::TryStreamExt;
-use respan_gateway_core::{bytes, futures, serde_json};
+use respan_gateway_core::{futures, serde_json};
 use respan_gateway_http::Status;
+use respan_gateway_http::bytes;
 use respan_gateway_http::{http, http_body, http_body_util};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_core::Exchange;
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
-    Response, Transport, codes,
+    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, codes,
 };
 use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
@@ -33,6 +32,7 @@ use openai::{
     BACKUP, Cool, OnProvider, STREAM, STREAM_REQ, UNARY, UNARY_REQ, chat, gateway, provider, relay,
     unary_chat,
 };
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
 use serde_json::json;
 
 /// The error frame for a stream that stops short.
@@ -1106,10 +1106,7 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
     struct Silent;
 
     #[async_trait]
-    impl respan_gateway_core::Transport for Silent {
-        type Ask = Ask;
-        type Answer = Answer;
-
+    impl respan_gateway_http::Transport for Silent {
         async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let never = http_body_util::StreamBody::new(futures::stream::pending());
             let mut resp = http::Response::new(Body::new(never));
@@ -2516,10 +2513,7 @@ async fn a_providers_trailers_are_not_passed_on() {
     struct Trailed;
 
     #[async_trait]
-    impl respan_gateway_core::Transport for Trailed {
-        type Ask = Ask;
-        type Answer = Answer;
-
+    impl respan_gateway_http::Transport for Trailed {
         async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let mut trailers = http::HeaderMap::new();
             trailers.insert("x-trailer", HeaderValue::from_static("1"));
@@ -2671,10 +2665,7 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
     struct Endless(Arc<AtomicBool>);
 
     #[async_trait]
-    impl respan_gateway_core::Transport for Endless {
-        type Ask = Ask;
-        type Answer = Answer;
-
+    impl respan_gateway_http::Transport for Endless {
         async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let guard = Dropped(self.0.clone());
             let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
@@ -3256,9 +3247,6 @@ struct TenantTransport(MockAt);
 
 #[async_trait]
 impl Transport for TenantTransport {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, mut req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         if let Some(key) = req.extensions.get::<TenantKey>().cloned() {
             let key = HeaderValue::from_static(key.0);
@@ -3594,9 +3582,6 @@ struct Endless(Arc<AtomicBool>);
 
 #[async_trait]
 impl Transport for Endless {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let guard = Dropped(self.0.clone());
         let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
@@ -3797,11 +3782,10 @@ fn text_chunk(text: &str) -> String {
 
 /// OpenAI Chat whose model panics on an empty body and whose encoder
 /// writes part of the text `bad`, then fails.
+#[derive(Clone)]
 struct Fragile;
 
-impl Format for Fragile {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Fragile {
     type Input = Conversation;
     type Output = Reply;
 
@@ -3847,6 +3831,8 @@ impl Format for Fragile {
         ))
     }
 }
+
+dialect!(Fragile);
 
 struct Garbling(Box<dyn Encoder<Reply, Answer>>);
 
@@ -4150,9 +4136,6 @@ async fn a_panicking_call_leaves_its_sibling_abandoned() {
 
     #[async_trait]
     impl Transport for Never {
-        type Ask = Ask;
-        type Answer = Answer;
-
         async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             std::future::pending().await
         }
@@ -4163,9 +4146,6 @@ async fn a_panicking_call_leaves_its_sibling_abandoned() {
 
     #[async_trait]
     impl Transport for Boom {
-        type Ask = Ask;
-        type Answer = Answer;
-
         async fn send(&self, _req: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             panic!("a buggy transport")
         }
@@ -5056,9 +5036,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
     #[derive(Clone, Default)]
     struct Tally(Arc<Mutex<Usage>>);
 
-    impl Format for Tally {
-        type Ask = respan_gateway_http::Ask;
-        type Answer = respan_gateway_http::Answer;
+    impl Codec for Tally {
         type Input = Conversation;
         type Output = Reply;
 
@@ -5105,6 +5083,8 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
             ))
         }
     }
+
+    dialect!(Tally);
 
     struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Reply, Answer>>);
 
@@ -5769,9 +5749,6 @@ struct Paced(MockAt, Duration, Duration);
 
 #[async_trait]
 impl Transport for Paced {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         tokio::time::sleep(self.1).await;
         use futures::StreamExt;

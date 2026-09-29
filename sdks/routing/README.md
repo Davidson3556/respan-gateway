@@ -15,7 +15,7 @@ its `Head`, unread, it cannot be told from a success.
   call in turn, retried as `Backoff::new(tries, base, max)` says.
 - `race(calls, stagger, Until) -> Result<Response, Fault>`: start each call
   `stagger` after the last; the first success wins.
-- `Watchdog::new(transport, head, idle)`: a `Transport` that fails a call
+- `Watchdog::new(transport, head, idle)`: an `http::Transport` that wraps another and fails a call
   whose head is late or whose body goes silent.
 - `Attempt` (extension on each call): its `index()` and `Role`.
 

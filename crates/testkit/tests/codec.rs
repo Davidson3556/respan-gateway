@@ -9,13 +9,14 @@ use http::header::{HOST, UPGRADE};
 use http::{HeaderValue, StatusCode};
 use http_body_util::BodyExt;
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Exchange, Fault, Format, Gateway, Plugin, ProviderContext,
-    Response, Transport, async_trait, codes,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
 };
-use respan_gateway_core::{bytes, futures, serde_json};
+use respan_gateway_core::{futures, serde_json};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_http::bytes;
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
 use respan_gateway_http::{http, http_body_util};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve, streamed};
 
@@ -39,11 +40,10 @@ struct Out(String);
 /// numbers the frames it writes (`n|text`), puts a changed text in the path,
 /// and cannot say "no". The
 /// message `bad` is not `msg`, and `two` decodes to two inputs.
+#[derive(Clone)]
 struct Msg;
 
-impl Format for Msg {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Msg {
     type Input = In;
     type Output = Out;
 
@@ -117,6 +117,8 @@ impl Format for Msg {
         respan_gateway_formats::with_head(head, Box::new(Answers))
     }
 }
+
+dialect!(Msg);
 
 /// Numbers the messages it decodes, each keeping its bytes.
 struct Numbering(usize, Arc<str>);
@@ -198,10 +200,10 @@ impl Echo {
 
 #[async_trait]
 impl Transport for Echo {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
-
-    async fn send(&self, call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+    async fn send(
+        &self,
+        call: Exchange<respan_gateway_http::Ask>,
+    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
         let (head, body) = (call.head, call.body);
         let seen = self.0.clone();
         seen.lock().map(|mut s| s.push(head.uri.path().into())).ok();
@@ -469,10 +471,10 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
 
     #[async_trait]
     impl Transport for Keeps {
-        type Ask = respan_gateway_http::Ask;
-        type Answer = respan_gateway_http::Answer;
-
-        async fn send(&self, call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+        async fn send(
+            &self,
+            call: Exchange<respan_gateway_http::Ask>,
+        ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
             let mut head = call.head;
             respan_gateway_http::proxy_call(&mut head);
             *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(head.headers);
@@ -556,9 +558,7 @@ async fn r9_a_calls_own_input_is_written_from_its_value_alone() {
 #[derive(Clone, Default)]
 struct Noted(Arc<Mutex<Vec<&'static str>>>);
 
-impl Format for Noted {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Noted {
     type Input = Conversation;
     type Output = Reply;
 
@@ -611,6 +611,8 @@ impl Format for Noted {
         AnthropicMessages.is_content(reply)
     }
 }
+
+dialect!(Noted);
 
 struct Noting(
     Arc<Mutex<Vec<&'static str>>>,

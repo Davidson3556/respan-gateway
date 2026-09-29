@@ -3,8 +3,9 @@
 
 use bytes::{Bytes, BytesMut};
 use http::HeaderValue;
-use respan_gateway_core::{Decoder, Encoder, Fault, Format};
-use respan_gateway_core::{bytes, serde_json};
+use respan_gateway_core::Fault;
+use respan_gateway_core::serde_json;
+use respan_gateway_http::bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Answer, Ask};
 use serde_json::{Map, Value, json};
@@ -21,6 +22,7 @@ use crate::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
 };
 use crate::sse::{Events, SseDecoder, event, event_json, is_stream};
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 
 /// The API version sent when the client names none.
 const VERSION: &str = "2023-06-01";
@@ -46,9 +48,7 @@ const ANTHROPIC: &str = "anthropic-messages";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnthropicMessages;
 
-impl Format for AnthropicMessages {
-    type Ask = Ask;
-    type Answer = Answer;
+impl Codec for AnthropicMessages {
     type Input = Conversation;
     type Output = Reply;
 
@@ -105,6 +105,8 @@ impl Format for AnthropicMessages {
         reply.is_content()
     }
 }
+
+dialect!(AnthropicMessages);
 
 /// Keys a conversation has a place for, or that change no output.
 const KNOWN: &[&str] = &[

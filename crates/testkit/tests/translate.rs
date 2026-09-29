@@ -1,14 +1,13 @@
 //! A client in one format reaching a provider in another.
 
-use respan_gateway_core::{bytes, futures, serde_json};
+use respan_gateway_core::{futures, serde_json};
+use respan_gateway_http::bytes;
 use respan_gateway_http::http;
 use std::sync::{Arc, Mutex};
 
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
-use respan_gateway_core::{
-    ClientContext, Exchange, Fault, Plugin, ProviderContext, Response, Transport, codes,
-};
+use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response, codes};
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply, units};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_plugins::ModelRouter;
@@ -20,6 +19,7 @@ use common::{
     Nameless, OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
 };
 use respan_gateway_core::Filter;
+use respan_gateway_http::{Exchange, Transport};
 use serde_json::{Value, json};
 
 const ANTHROPIC: &str = "http://anthropic.test";
@@ -199,10 +199,10 @@ struct Marks<T>(T, Arc<Mutex<Vec<bool>>>);
 
 #[async_trait]
 impl<T: Transport> Transport for Marks<T> {
-    type Ask = T::Ask;
-    type Answer = T::Answer;
-
-    async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
+    async fn send(
+        &self,
+        call: Exchange<respan_gateway_http::Ask>,
+    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
         let relayed = call.relayed;
         self.1
             .lock()
@@ -1974,7 +1974,7 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     assert!(matches!(&ends[..], [o] if o.as_ref().is_err_and(|f| f.code() == codes::UPSTREAM)));
     let answer = ends[0].as_ref().err();
     let answer = answer.and_then(|f| {
-        f.answer::<http::Response<respan_gateway_core::bytes::Bytes>>("anthropic-messages")
+        f.answer::<http::Response<respan_gateway_http::bytes::Bytes>>("anthropic-messages")
     });
     assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
 }

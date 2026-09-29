@@ -6,7 +6,7 @@
 //! are streams of frames, **one body item per text frame**. This crate is
 //! the two edges and a format for it:
 //!
-//! - [`WsTransport`]: an outbound [`Transport`](respan_gateway_core::Transport)
+//! - [`WsTransport`]: an outbound [`Transport`](respan_gateway_http::Transport)
 //!   that connects to a `ws://` or `wss://` provider.
 //! - [`serve_ws`] and [`router`]: an axum adapter that accepts the client's
 //!   upgrade and pumps frames both ways.

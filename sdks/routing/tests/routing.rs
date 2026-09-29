@@ -3,16 +3,16 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::Exchange;
-use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::futures::StreamExt;
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, Transport, async_trait, codes,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
 };
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_routing::{Attempt, Backoff, Role, Until, Watchdog, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;
@@ -106,10 +106,7 @@ struct Slow<T>(T, Duration);
 
 #[async_trait]
 impl<T: Transport> Transport for Slow<T> {
-    type Ask = T::Ask;
-    type Answer = T::Answer;
-
-    async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
+    async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
     }
@@ -120,9 +117,6 @@ struct Stall;
 
 #[async_trait]
 impl Transport for Stall {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let first = stream::iter([Ok(Bytes::from(ROLE))]);
         let body = first.chain(stream::pending()).boxed();
@@ -138,9 +132,6 @@ struct Dribble;
 
 #[async_trait]
 impl Transport for Dribble {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let frame = |s: &'static str| Ok(Bytes::from(s));
         let first = stream::iter([frame(ROLE), frame(HELLO)]);
@@ -161,9 +152,6 @@ struct Silent;
 
 #[async_trait]
 impl Transport for Silent {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         std::future::pending().await
     }
@@ -174,9 +162,6 @@ struct Refused;
 
 #[async_trait]
 impl Transport for Refused {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         Err(Fault::upstream("connection refused"))
     }

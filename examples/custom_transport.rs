@@ -11,12 +11,12 @@
 //!
 //! `cargo run -p respan-gateway-examples --example custom_transport`
 
-use respan_gateway_core::bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
-use respan_gateway_core::{Exchange, Fault, Format, Gateway, Transport, async_trait};
+use respan_gateway_core::{Fault, Gateway, async_trait};
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
-use respan_gateway_http::{Answer, Ask, http};
+use respan_gateway_http::bytes::{Bytes, BytesMut};
+use respan_gateway_http::{Answer, Ask, Codec, Exchange, Transport, http};
 use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Your model: a conversation in, its answer out.
@@ -43,12 +43,9 @@ struct Local<F, M> {
 #[async_trait]
 impl<F, M> Transport for Local<F, M>
 where
-    F: Format<Ask = Ask, Answer = Answer, Input = Conversation, Output = Reply>,
+    F: Codec<Input = Conversation, Output = Reply>,
     M: LocalModel,
 {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         // A whole call's body is its one input.
         let frames: Vec<Bytes> = call.body.try_collect().await?;
@@ -76,7 +73,7 @@ where
 }
 
 /// The call's conversation, read with the format's request decoder.
-fn read_chat<F: Format<Ask = Ask, Input = Conversation>>(
+fn read_chat<F: Codec<Input = Conversation>>(
     format: &F,
     call: &http::Request<Bytes>,
 ) -> Result<Conversation, Fault> {
@@ -92,7 +89,7 @@ fn read_chat<F: Format<Ask = Ask, Input = Conversation>>(
 
 /// The replies as a response, written with the format's response encoder,
 /// which also sets the content type: SSE if the call asked to stream.
-fn write_replies<F: Format<Ask = Ask, Answer = Answer, Output = Reply>>(
+fn write_replies<F: Codec<Output = Reply>>(
     format: &F,
     call: &http::Request<Bytes>,
     replies: &[Reply],

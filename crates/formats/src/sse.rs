@@ -1,8 +1,9 @@
 //! Server-sent events, for any format that streams them.
 
-use respan_gateway_core::bytes::{Bytes, BytesMut};
+use respan_gateway_core::Fault;
 use respan_gateway_core::serde_json::{self, Value};
-use respan_gateway_core::{Decoder, Fault};
+use respan_gateway_http::Decoder;
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http;
 
 /// A response's content type, if it is readable.
@@ -147,7 +148,7 @@ where
 }
 
 /// A comment of one line, which clients skip, such as a quiet stream's
-/// opening bytes ([`Encoder::open`](respan_gateway_core::Encoder::open)).
+/// opening bytes ([`Encoder::open`](respan_gateway_http::Encoder::open)).
 pub fn comment(text: &str) -> String {
     format!(": {text}\n\n")
 }

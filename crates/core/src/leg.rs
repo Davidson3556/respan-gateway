@@ -13,8 +13,8 @@ use futures::stream::{self, BoxStream};
 use futures::{FutureExt, StreamExt};
 
 use crate::Fault;
-use crate::dialect::{AnyDialect, AnyEvents, AnyInput, AnyInputs, Values};
 use crate::fault::{PANICKED, guarded};
+use crate::format::{AnyEvents, AnyFormat, AnyInput, AnyInputs, Values};
 use crate::lifecycle::InFlight;
 use crate::plugin::Filters;
 use crate::response::{Batch, Source};
@@ -118,7 +118,7 @@ impl Later {
 /// poll; given back if none was read.
 pub(crate) fn inputs(
     later: Arc<Later>,
-    dialect: Arc<dyn AnyDialect>,
+    format: Arc<dyn AnyFormat>,
     call: Option<Layer>,
     until: &Arc<InFlight>,
 ) -> AnyInputs {
@@ -128,7 +128,7 @@ pub(crate) fn inputs(
         later,
         events: None,
         read: false,
-        dialect,
+        format,
         layers,
         ready: VecDeque::new(),
         ended: false,
@@ -146,7 +146,7 @@ struct Reading {
     events: Option<AnyEvents>,
     /// Whether it read an input.
     read: bool,
-    dialect: Arc<dyn AnyDialect>,
+    format: Arc<dyn AnyFormat>,
     layers: Vec<Layer>,
     ready: VecDeque<Result<(AnyInput, bool), Fault>>,
     ended: bool,
@@ -197,7 +197,7 @@ impl Reading {
     /// client's.
     fn filter(&mut self, values: Values) -> Result<(), Fault> {
         let layers: Vec<&Layer> = self.layers.iter().collect();
-        for input in self.dialect.inputs(values) {
+        for input in self.format.inputs(values) {
             let (ended, empty) = layers.iter().fold((false, true), |(ended, empty), l| {
                 let f = locked(l);
                 (ended || f.ended(), empty && f.is_empty())
@@ -209,10 +209,10 @@ impl Reading {
                 self.ready.push_back(Ok((input, true)));
                 continue;
             }
-            let mut values = self.dialect.values(vec![input.clone()]);
+            let mut values = self.format.values(vec![input.clone()]);
             run(&layers, &mut values)?;
-            for changed in self.dialect.inputs(values) {
-                let same = self.dialect.same(&input, &changed);
+            for changed in self.format.inputs(values) {
+                let same = self.format.same(&input, &changed);
                 self.ready.push_back(Ok((changed, same)));
             }
         }
@@ -227,7 +227,7 @@ impl Reading {
         let layers: Vec<&Layer> = self.layers.iter().collect();
         let end = self::end(&layers, end, &mut tail);
         if end.is_ok() {
-            let made = tail.map(|v| self.dialect.inputs(v)).unwrap_or_default();
+            let made = tail.map(|v| self.format.inputs(v)).unwrap_or_default();
             let made = made.into_iter().map(|input| Ok((input, false)));
             self.ready.extend(made);
         }

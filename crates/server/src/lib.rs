@@ -13,8 +13,9 @@ use http::header;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use respan_gateway_core::futures::TryStreamExt;
-use respan_gateway_core::{Exchange, Fault, Gateway, Transport, async_trait};
+use respan_gateway_core::{Fault, Gateway, async_trait};
 use respan_gateway_http::{Answer, Ask, Status, http, http_body_util};
+use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
@@ -177,9 +178,6 @@ impl HttpTransport {
 
 #[async_trait]
 impl Transport for HttpTransport {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let mut call = call;
         proxy_call(&mut call.head);

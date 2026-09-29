@@ -23,7 +23,8 @@ use std::time::Duration;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::{self, FuturesUnordered};
 use respan_gateway_core::futures::{FutureExt, StreamExt};
-use respan_gateway_core::{Call, Exchange, Fault, Response, Transport, async_trait, codes};
+use respan_gateway_core::{Call, Fault, Response, async_trait, codes};
+use respan_gateway_http::{Ask, Exchange, Transport};
 
 /// How often to try one call, and how long to wait between tries.
 #[derive(Debug, Clone, Copy)]
@@ -282,10 +283,10 @@ impl<T: Transport> Watchdog<T> {
 
 #[async_trait]
 impl<T: Transport> Transport for Watchdog<T> {
-    type Ask = T::Ask;
-    type Answer = T::Answer;
-
-    async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
+    async fn send(
+        &self,
+        call: Exchange<Ask>,
+    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
         let stalled = |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
         let resp = tokio::time::timeout(self.head, self.inner.send(call)).await;
         let mut resp = resp.map_err(|_| stalled(self.head))??;

@@ -1,10 +1,10 @@
 //! Use case 14, the gateway as a library: another Rust service runs the
 //! pipeline in-process, with no server and no second hop. It builds a
-//! [`Gateway`], hands [`Gateway::handle`] an exchange on the HTTP wire (an
-//! `http` request head and its body), whole, reads the response and awaits
-//! how the request ended. It knows its wire, so it erases the request's head
-//! and downcasts the response's itself. With no HTTP hop, it needs no adapter; `Err`
-//! is what no format could write.
+//! [`Gateway`], hands [`Gateway::handle`] a request on the HTTP wire (an
+//! [`Accepted`] `http` request head and its body, whole), reads the answer
+//! and awaits how the request ended. With no HTTP hop, it needs none of the
+//! adapter's rules (`respan_gateway_http::serve` applies them); no answer
+//! means no format took the request, and the end says why.
 //!
 //! The kernel counts no usage:
 //! the embedder tallies it with a plugin that sums what each call's
@@ -12,12 +12,13 @@
 //!
 //! `cargo run -p respan-gateway-examples --example embedded`
 
-use respan_gateway_core::bytes::Bytes;
-use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
-use respan_gateway_core::{Exchange, Fault, Gateway, serde_json};
+use respan_gateway_core::futures::{StreamExt, stream};
+use respan_gateway_core::{Extensions, Fault, Gateway, serde_json};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_http::{Answer, http};
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http_body_util::BodyExt;
+use respan_gateway_http::{Accepted, http};
 use respan_gateway_testkit::{MockTransport, mock};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -48,11 +49,16 @@ async fn ask(
         .map_err(respan_gateway_http::built_wrong)?
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
-    let (resp, outcome) = gw.handle(Exchange::new(head, body).erase()).await;
-    let resp = resp?.downcast::<Answer>("a response of another wire than HTTP")?;
+    let (wire, answer) = Accepted::new(head, body, false);
+    let outcome = gw.handle(wire, Extensions::new()).await;
+    let Some(resp) = answer.await else {
+        let fault = outcome.await.err();
+        return Err(fault.unwrap_or_else(|| Fault::internal("no format answered")));
+    };
     // Read the body first: the end resolves once the response ends.
-    let body: Vec<Bytes> = resp.body.try_collect().await?;
-    Ok((resp.head.status, body.concat().into(), outcome.await))
+    let (head, body) = resp.into_parts();
+    let body = body.collect().await?.to_bytes();
+    Ok((head.status, body, outcome.await))
 }
 
 #[tokio::main]

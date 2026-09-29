@@ -13,15 +13,16 @@ use futures::StreamExt;
 use http::StatusCode;
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
+use respan_gateway_core::futures;
 use respan_gateway_core::{
-    Call, ClientContext, Decoder, Encoder, Exchange, Fault, Filter, Format, Gateway, Plugin,
-    ProviderContext, Response, Transport, async_trait,
+    Call, ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::Usage;
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bodiless;
+use respan_gateway_http::bytes;
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::serve;
 
@@ -43,11 +44,10 @@ const LINE: &str = "line";
 /// Lines: `i:X` text, `u:N` usage of N `t`, `e` the end, `x:M` a failure;
 /// any other line is no content. Each line is one value; a body ends at its
 /// end, complete only after `e`.
+#[derive(Clone)]
 struct Line;
 
-impl Format for Line {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Line {
     type Input = LIn;
     type Output = LOut;
 
@@ -116,6 +116,8 @@ impl Format for Line {
     }
 }
 
+dialect!(Line);
+
 /// A call's head as Line writes it: the client's, or a fresh one, at `/line`.
 fn line_head(client: Option<&respan_gateway_http::Ask>) -> respan_gateway_http::Ask {
     let mut head = respan_gateway_formats::call_head(client);
@@ -155,8 +157,6 @@ where
 /// The members a format of Line's kind takes from Line as they are.
 macro_rules! as_line {
     () => {
-        type Ask = respan_gateway_http::Ask;
-        type Answer = respan_gateway_http::Answer;
         type Input = LIn;
         type Output = LOut;
 
@@ -312,10 +312,10 @@ impl Script {
 
 #[async_trait]
 impl Transport for Script {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
-
-    async fn send(&self, _call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+    async fn send(
+        &self,
+        _call: Exchange<respan_gateway_http::Ask>,
+    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
         let (status, frames) = lock(&self.0).pop_front().expect("scripted");
         let frames =
             futures::stream::iter(frames).map(|f| Ok::<_, Fault>(Bytes::from_static(f.as_bytes())));
@@ -1305,9 +1305,10 @@ async fn k9_7_a_client_filter_fails_a_plugins_own_outputs_which_count_nothing() 
 
 /// Line's kind under another name, so calls to it translate: it puts the
 /// model, the input, in the call's path, and cannot say "untranslatable".
+#[derive(Clone)]
 struct Pathed;
 
-impl Format for Pathed {
+impl Codec for Pathed {
     as_line!();
 
     fn name(&self) -> &str {
@@ -1336,6 +1337,8 @@ impl Format for Pathed {
     }
 }
 
+dialect!(Pathed);
+
 /// Writes as Line does, but cannot say "untranslatable".
 struct Untranslatable;
 
@@ -1360,10 +1363,10 @@ struct Paths(Shared<String>);
 
 #[async_trait]
 impl Transport for Paths {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
-
-    async fn send(&self, call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+    async fn send(
+        &self,
+        call: Exchange<respan_gateway_http::Ask>,
+    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
         lock(&self.0).push(call.head.uri.path().to_owned());
         let body = futures::stream::iter([Ok(Bytes::from_static(b"i:ok\ne\n"))]);
         Ok(Exchange::new(
@@ -1562,9 +1565,10 @@ async fn r10_3_a_panic_while_closing_ends_the_edge_internal() {
 
 /// Line's kind under another name, whose calls are always a `POST`, as
 /// OpenAI's and Anthropic's are.
+#[derive(Clone)]
 struct Posted;
 
-impl Format for Posted {
+impl Codec for Posted {
     as_line!();
 
     fn name(&self) -> &str {
@@ -1588,6 +1592,8 @@ impl Format for Posted {
         Box::new(EditHead(line, Some(post)))
     }
 }
+
+dialect!(Posted);
 
 // `until_content` judges the response as its provider sent it, the call's method,
 // not the client's `HEAD`.
@@ -1618,9 +1624,10 @@ async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
 
 /// Line under its own name, so calls to it relay, noting whether its
 /// request encoder got a first input.
+#[derive(Clone)]
 struct Seen(Shared<bool>);
 
-impl Format for Seen {
+impl Codec for Seen {
     as_line!();
 
     fn name(&self) -> &str {
@@ -1645,6 +1652,8 @@ impl Format for Seen {
         Box::new(EditHead(line, Some(note)))
     }
 }
+
+dialect!(Seen);
 
 // A call's first input is given as a value exactly when a filter ran over it;
 // an unfiltered one goes as the client's bytes.
@@ -1753,9 +1762,10 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
 /// Line's kind, whose request encoder writes a change into the client's
 /// bytes, as a model-in-path format does; notes whether it got a first
 /// input, and its bytes.
+#[derive(Clone)]
 struct InPath(Shared<(bool, Bytes)>);
 
-impl Format for InPath {
+impl Codec for InPath {
     as_line!();
 
     fn name(&self) -> &str {
@@ -1783,6 +1793,8 @@ impl Format for InPath {
         respan_gateway_formats::headed(head, Box::new(AsItCame))
     }
 }
+
+dialect!(InPath);
 
 /// Writes an input's bytes as they are, changed or not, as a format whose
 /// model is in the path does; one without, as Line does.

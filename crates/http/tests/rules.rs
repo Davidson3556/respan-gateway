@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::{ClientContext, Fault, Plugin, Response, Transport, async_trait, bytes};
+use respan_gateway_core::{ClientContext, Fault, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
@@ -22,6 +22,7 @@ use common::{CHAT, Harness, OPENAI, add_provider};
 use openai::{
     BACKUP, Cool, OnProvider, STREAM, UNARY, UNARY_REQ, chat, gateway, relay, unary_chat,
 };
+use respan_gateway_http::Transport;
 
 /// Sends each request to the provider its `x-to` header names.
 struct ByHeader;
@@ -404,13 +405,10 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
 
     #[async_trait]
     impl Transport for Cookie {
-        type Ask = respan_gateway_http::Ask;
-        type Answer = respan_gateway_http::Answer;
-
         async fn send(
             &self,
-            _req: respan_gateway_core::Exchange<Self::Ask>,
-        ) -> Result<respan_gateway_core::Exchange<Self::Answer>, Fault> {
+            _req: respan_gateway_http::Exchange<respan_gateway_http::Ask>,
+        ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::Answer>, Fault> {
             let body = http_body_util::Full::new(bytes::Bytes::from(UNARY));
             let mut resp = http::Response::new(http_body_util::BodyExt::boxed_unsync(
                 http_body_util::BodyExt::map_err(body, Fault::from),

@@ -1,7 +1,12 @@
 #![warn(missing_docs)]
-//! HTTP at the gateway's edges: a wire, a pair of head types ([`Ask`],
-//! [`Answer`]) the kernel carries unread, and its rules, at the three places
-//! that own them:
+//! HTTP at the gateway's edges: its formats and its rules.
+//!
+//! - **Formats.** A [`Codec`] is one protocol's bytes on HTTP;
+//!   [`dialect!`] makes it a [`Format`](respan_gateway_core::Format), which
+//!   HTTP's one driver runs on both edges: a client's [`Accepted`] request,
+//!   and calls through a provider's [`Dialer`], made from any [`Transport`].
+//!
+//! Its rules live at the three places that own them:
 //!
 //! - **The adapter** ([`serve`], [`handle`]) strips the connection's
 //!   headers from a request, lifts the client's credentials into a
@@ -18,15 +23,16 @@
 //!   ([`retry_after`]), and writes no body where HTTP has none
 //!   ([`bodiless`]).
 
-pub mod codec;
+mod codec;
 mod credential;
+mod driver;
 mod transport;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, ready};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
@@ -35,22 +41,24 @@ use http::header::{
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
-use respan_gateway_core::{Exchange, Extensions, Fault, Gateway, codes};
-use respan_gateway_core::{bytes, futures};
+use respan_gateway_core::futures;
+use respan_gateway_core::{Extensions, Fault, Gateway, codes};
 
 /// The crates HTTP formats and transports use, at these versions.
-pub use {http, http_body, http_body_util};
+pub use {bytes, http, http_body, http_body_util};
 
+pub use codec::{Codec, Decoder, Encoder};
 pub use credential::Credential;
+pub use driver::{Accepted, accept, dial, opening};
 pub use transport::{
-    CallHeaders, credentials, is_connection_header, proxy_call, strip_client_origin_headers,
-    strip_origin_headers,
+    CallHeaders, Dialer, Exchange, Frames, Transport, credentials, is_connection_header,
+    proxy_call, strip_client_origin_headers, strip_origin_headers,
 };
 
-/// The head of an HTTP request ([`Format::Ask`](respan_gateway_core::Format::Ask)).
+/// The head of an HTTP request.
 pub type Ask = http::request::Parts;
 
-/// The head of an HTTP response ([`Format::Answer`](respan_gateway_core::Format::Answer)).
+/// The head of an HTTP response.
 pub type Answer = http::response::Parts;
 
 /// An HTTP body of bytes whose error is a [`Fault`].
@@ -66,8 +74,8 @@ pub fn fresh_answer() -> Answer {
     http::Response::new(()).into_parts().0
 }
 
-/// The kernel's body of an HTTP `body`: its data frames, trailers dropped.
-pub fn body_of<B>(body: B) -> respan_gateway_core::Body
+/// The [`Frames`] of an HTTP `body`: its data frames, trailers dropped.
+pub fn body_of<B>(body: B) -> Frames
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -77,8 +85,8 @@ where
     data.boxed()
 }
 
-/// An HTTP [`Body`] of the kernel's `body`, one data frame per item.
-pub fn into_http_body(body: respan_gateway_core::Body) -> Body {
+/// An HTTP [`Body`] of `body`'s frames, one data frame per item.
+pub fn into_http_body(body: Frames) -> Body {
     StreamBody::new(body.map_ok(Frame::data)).boxed_unsync()
 }
 
@@ -88,7 +96,7 @@ pub fn full(bytes: impl Into<Bytes>) -> Body {
 }
 
 /// An HTTP request as an exchange, its HTTP extensions dropped but the
-/// kernel's [`Extensions`] it carries, if any, which an embedder or test
+/// gateway's [`Extensions`] it carries, if any, which an embedder or test
 /// hands plugins with `req.extensions_mut().insert(extensions)`.
 pub fn ask<B>(req: http::Request<B>) -> Exchange<Ask>
 where
@@ -177,13 +185,14 @@ where
 }
 
 /// Hand `req` to `gateway` as an HTTP adapter does, streaming if
-/// `streaming`. Before: the hop's headers go but `Upgrade` (RFC 9110 7.6.1),
-/// credentials into a [`Credential`], and an [`Asked`] view joins them.
-/// After: what no format can write, or a 101 to a request not `streaming`,
-/// goes as text/plain ([`plain`]); the response loses a hop's headers
-/// ([`outgoing`]); a [`bodiless`] one goes with none, the gateway's body
-/// read apart. The caller bounds a whole body and removes an `Upgrade` it
-/// will not perform. Call it on a tokio runtime.
+/// `streaming`: as an [`Accepted`] request, to [`Gateway::handle`]. Before:
+/// the hop's headers go but `Upgrade` (RFC 9110 7.6.1), credentials into a
+/// [`Credential`], and an [`Asked`] view joins them. After: what no format
+/// can write, or a 101 to a request not `streaming`, goes as text/plain
+/// ([`plain`]); the response loses a hop's headers ([`outgoing`]); a
+/// [`bodiless`] one goes with none, the gateway's body read apart. The
+/// caller bounds a whole body and removes an `Upgrade` it will not perform.
+/// Call it on a tokio runtime.
 pub async fn handle<B>(
     gateway: &Gateway,
     req: http::Request<B>,
@@ -194,18 +203,28 @@ where
     B::Error: Into<Fault>,
 {
     let (Arrived { head, body, to }, extensions) = arrive(req);
-    let mut req = Exchange::new(head, body);
-    req.extensions = extensions;
-    req.streams = streaming;
-    let (resp, outcome) = typed(gateway, req).await;
-    let resp = resp.map(|r| http::Response::from_parts(r.head, into_http_body(r.body)));
-    (depart(&to, streaming, resp), outcome.boxed())
+    let (wire, answer) = Accepted::new(head, body, streaming);
+    let ended = gateway.handle(wire, extensions).await;
+    let (resp, ended) = match answer.await {
+        Some(resp) => (Ok(resp), ended),
+        None => {
+            let fault = ended.await.err();
+            let fault = fault.unwrap_or_else(|| Fault::internal("no format answered"));
+            (Err(fault.clone()), ready(Err(fault)).boxed())
+        }
+    };
+    (depart(&to, streaming, resp), ended)
 }
+
+/// Marks the plain text of a refusal no codec could write, which goes as
+/// it is: HTTP's rules for a body do not apply to it.
+#[derive(Clone, Copy)]
+pub(crate) struct Unwritten;
 
 /// A request as the adapter hands it on, and what its answer needs of it.
 pub(crate) struct Arrived {
     pub(crate) head: Ask,
-    pub(crate) body: respan_gateway_core::Body,
+    pub(crate) body: Frames,
     pub(crate) to: Asking,
 }
 
@@ -253,6 +272,14 @@ pub(crate) fn depart(
     streaming: bool,
     resp: Result<http::Response<Body>, Fault>,
 ) -> http::Response<Body> {
+    // A refusal no codec could write goes as the client edge wrote it.
+    let resp = match resp {
+        Ok(mut resp) => match resp.extensions_mut().remove::<Unwritten>() {
+            Some(Unwritten) => return resp,
+            None => Ok(resp),
+        },
+        Err(fault) => Err(fault),
+    };
     match resp {
         Err(fault) if fault.code() == codes::NOT_FOUND => {
             let text = format!("no format served accepts {} {}", to.method, to.path);
@@ -274,20 +301,6 @@ pub(crate) fn depart(
             http::Response::from_parts(head, body)
         }
     }
-}
-
-/// [`Gateway::handle`] on the HTTP wire: the request's head erased, the
-/// response's downcast, `INTERNAL` if a format answered on another wire.
-async fn typed(
-    gateway: &Gateway,
-    req: Exchange<Ask>,
-) -> (
-    Result<Exchange<Answer>, Fault>,
-    BoxFuture<'static, Result<(), Fault>>,
-) {
-    let (resp, outcome) = gateway.handle(req.erase()).await;
-    let other = "a response of another wire than asked";
-    (resp.and_then(|r| r.downcast(other)), outcome)
 }
 
 /// A hop's own headers: the connection's (RFC 9110 7.6.1), the proxy's
@@ -399,11 +412,15 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
     method == Method::HEAD || matches!(status.as_u16(), 204 | 205 | 304)
 }
 
+/// What [`dialect!`] names, not for use elsewhere.
+#[doc(hidden)]
+pub mod __private {
+    pub use respan_gateway_core::futures::future::BoxFuture;
+    pub use respan_gateway_core::{Dialed, Events, Extensions, Fault, Format, Half, Origin, Reply};
+}
+
 #[cfg(test)]
 mod tests {
-    use respan_gateway_core::bytes::BytesMut;
-    use respan_gateway_core::{Encoder, Format};
-
     use super::*;
 
     fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
@@ -530,91 +547,5 @@ mod tests {
         let resp = plain(&Fault::not_found("nothing here"));
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(resp.headers()[CONTENT_TYPE], "text/plain; charset=utf-8");
-    }
-
-    /// A format on the HTTP request wire that answers with heads of
-    /// its own.
-    struct Elsewhere;
-
-    struct Silent;
-
-    impl Encoder<u8, ()> for Silent {
-        fn head(&mut self, _first: Option<&u8>) {}
-
-        fn encode(&mut self, _value: &u8, _out: &mut BytesMut) -> Result<(), Fault> {
-            Ok(())
-        }
-
-        fn end(&mut self, _end: &Result<(), Fault>, _out: &mut BytesMut) -> Result<(), Fault> {
-            Ok(())
-        }
-    }
-
-    impl Format for Elsewhere {
-        type Ask = Ask;
-        type Answer = ();
-        type Input = String;
-        type Output = u8;
-
-        fn name(&self) -> &str {
-            "elsewhere"
-        }
-
-        fn accepts(&self, _head: &Ask) -> bool {
-            true
-        }
-
-        fn request_decoder(&self, _head: &Ask) -> Box<dyn respan_gateway_core::Decoder<String>> {
-            respan_gateway_formats::message_decoder(|b: Bytes| {
-                Ok(String::from_utf8_lossy(&b).into_owned())
-            })
-        }
-
-        fn request_encoder(
-            &self,
-            _client: Option<&Ask>,
-            _body: &mut Bytes,
-            _streams: bool,
-        ) -> Box<dyn Encoder<String, Ask>> {
-            unreachable!("no provider")
-        }
-
-        fn response_decoder(
-            &self,
-            _answer: &(),
-            _call: &Ask,
-            _sent: &Bytes,
-        ) -> Box<dyn respan_gateway_core::Decoder<u8>> {
-            unreachable!("no provider")
-        }
-
-        fn response_encoder(
-            &self,
-            _answer: Option<&()>,
-            _ask: &Ask,
-            _body: &Bytes,
-            _refusal: Option<&Fault>,
-        ) -> Box<dyn Encoder<u8, ()>> {
-            Box::new(Silent)
-        }
-    }
-
-    // An adapter that types its wire wrongly gets `INTERNAL` from its
-    // downcast, not a panic: the kernel does not check the wire.
-    #[tokio::test]
-    #[allow(clippy::unwrap_used)]
-    async fn an_adapter_of_the_wrong_wire_gets_internal_from_its_downcast() {
-        // No target is set, so the request is refused in the format's own
-        // heads, which are not HTTP's.
-        let gateway = Gateway::new().serve(Elsewhere).unwrap();
-        let req = || http::Request::post("/").body(Full::new(Bytes::from_static(b"hi")));
-        let (resp, _) = typed(&gateway, ask(req().unwrap())).await;
-        assert_eq!(
-            resp.err().map(|f| f.code().to_owned()).as_deref(),
-            Some(codes::INTERNAL)
-        );
-        // Through `handle` the same is a plain 500, not a panic.
-        let (resp, _) = handle(&gateway, req().unwrap(), false).await;
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

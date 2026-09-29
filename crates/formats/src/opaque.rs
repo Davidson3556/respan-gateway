@@ -3,21 +3,23 @@
 //! byte: one value per body or data frame.
 //!
 //! ```ignore
-//! impl Format for Raw {
+//! impl Codec for Raw {
 //!     type Input = Sent<Raw>;
 //!     type Output = Got<Raw>;
 //!     // name, accepts, and the four factories from this module
 //! }
+//! dialect!(Raw);
 //! ```
 
 use std::marker::PhantomData;
 
-use respan_gateway_core::bytes::{Bytes, BytesMut};
-use respan_gateway_core::{Decoder, Encoder, Fault};
+use respan_gateway_core::Fault;
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_http::{Answer, Ask, bodiless};
 
 use crate::default_content_type;
+use respan_gateway_http::{Decoder, Encoder};
 
 /// A request's message in format `F`, as the client sent it.
 pub struct Sent<F>(pub Bytes, PhantomData<fn() -> F>);
@@ -163,6 +165,7 @@ mod tests {
     use super::*;
     use respan_gateway_http::http::{HeaderValue, header::CONTENT_TYPE};
 
+    #[derive(Clone)]
     struct Raw;
 
     // A refusal without an answer in this format is plain text under its

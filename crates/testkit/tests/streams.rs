@@ -12,19 +12,19 @@ use http::header::{CONNECTION, CONTENT_ENCODING, UPGRADE};
 use http::{HeaderValue, StatusCode};
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
-use respan_gateway_core::Exchange;
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
-    Response, Transport, async_trait, codes,
+    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
 };
-use respan_gateway_core::{bytes, futures, serde_json};
+use respan_gateway_core::{futures, serde_json};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{OpenAiChat, message_decoder, set_path};
 use respan_gateway_formats::{answer_head, call_head, headed, with_head};
 use respan_gateway_http::Body;
+use respan_gateway_http::bytes;
 use respan_gateway_http::{Answer, Ask, Asked, fresh_answer};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, dialect};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::{Calls, MockTransport, mock, post, serve, streamed};
 use serde_json::{Value, json};
@@ -54,6 +54,7 @@ struct Heard(String);
 
 /// A protocol of JSON messages at `/talk`: one per data frame each way once
 /// upgraded, else one request and one answer.
+#[derive(Clone)]
 struct Talk;
 
 /// Whether the request is upgrading: its `Upgrade`, which a relay passes.
@@ -61,9 +62,7 @@ fn upgrades(head: &Ask) -> bool {
     head.headers.contains_key(UPGRADE)
 }
 
-impl Format for Talk {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Talk {
     type Input = Say;
     type Output = Heard;
 
@@ -139,6 +138,8 @@ impl Format for Talk {
         with_head(head, Box::new(Write))
     }
 }
+
+dialect!(Talk);
 
 /// Decodes one talk message per body or data frame, keeping its bytes; an
 /// empty one says nothing, unless `strict`.
@@ -246,9 +247,6 @@ impl Echo {
 
 #[async_trait]
 impl Transport for Echo {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let (head, body, whole) = (call.head, call.body, !call.streams);
         self.heads
@@ -623,9 +621,6 @@ struct Early(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
 impl Transport for Early {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let mut body = call.body;
         let seen = self.0.clone();
@@ -650,9 +645,6 @@ struct Never;
 
 #[async_trait]
 impl Transport for Never {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         std::future::pending().await
     }
@@ -664,9 +656,6 @@ struct Down;
 
 #[async_trait]
 impl Transport for Down {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         Err(Fault::upstream("unreachable"))
     }
@@ -1029,11 +1018,10 @@ async fn a_streamed_call_goes_without_the_clients_content_encoding() {
 }
 
 /// Talk over plain HTTP: the same kind, whose calls never switch protocols.
+#[derive(Clone)]
 struct TalkHttp;
 
-impl Format for TalkHttp {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for TalkHttp {
     type Input = Say;
     type Output = Heard;
 
@@ -1080,6 +1068,8 @@ impl Format for TalkHttp {
     }
 }
 
+dialect!(TalkHttp);
+
 #[tokio::test]
 async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
     let echo = Echo::default();
@@ -1103,11 +1093,10 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
 
 /// A format of no kind, a kind of one, that relays everything as it came,
 /// its calls with the client's method and headers.
+#[derive(Clone)]
 struct Raw;
 
-impl Format for Raw {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Raw {
     type Input = Sent<Raw>;
     type Output = Got<Raw>;
 
@@ -1154,6 +1143,8 @@ impl Format for Raw {
     }
 }
 
+dialect!(Raw);
+
 #[tokio::test]
 async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
     let echo = Echo::default();
@@ -1184,9 +1175,6 @@ async fn a_101_goes_only_to_a_request_that_asked() {
 
     #[async_trait]
     impl Transport for Switches {
-        type Ask = Ask;
-        type Answer = Answer;
-
         async fn send(&self, _call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let mut resp = Exchange::new(fresh_answer(), futures::stream::empty().boxed());
             resp.head.status = StatusCode::SWITCHING_PROTOCOLS;
@@ -1346,9 +1334,6 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
 
     #[async_trait]
     impl Transport for ReadThenFail {
-        type Ask = Ask;
-        type Answer = Answer;
-
         async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
             let _ = call.body.collect::<Vec<_>>().await;
             Err(Fault::upstream("unreachable after reading"))
@@ -1613,11 +1598,10 @@ async fn r6_on_provider_sees_the_requests_task_locals() {
 }
 
 /// Talk, but an empty message is not talk, as for any JSON format.
+#[derive(Clone)]
 struct Strict;
 
-impl Format for Strict {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Strict {
     type Input = Say;
     type Output = Heard;
     fn name(&self) -> &str {
@@ -1650,6 +1634,8 @@ impl Format for Strict {
         Talk.response_encoder(answer, ask, body, refusal)
     }
 }
+
+dialect!(Strict);
 
 // An input a filter adds at the end is sent.
 #[tokio::test]

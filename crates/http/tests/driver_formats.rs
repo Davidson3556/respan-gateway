@@ -1,24 +1,20 @@
-//! HTTP's driver ([`respan_gateway_http::codec`]) on the real formats:
-//! relay, translation and streams through `Accepted`, `Gateway::open`,
-//! `serve_dialect` and `provider_dialect`, with `dialect!` over thin
-//! wrappers of `OpenAiChat` and `AnthropicMessages` (they implement the
-//! old `Format` until the flip, decision 0020 step 5). The oracle runs each
-//! scenario on the old path and on the driver's and wants the same bytes.
+//! HTTP's driver on the real formats: relay, translation and streams
+//! through `serve`, `Accepted` and `Gateway::handle`, and what each of a
+//! table of scenarios gives the client, sends the providers and ends with.
 #![allow(clippy::unwrap_used)]
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::bytes::Bytes;
+use bytes::Bytes;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, Fault, Format, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
-use respan_gateway_http::codec::{self, Codec, Decoder, Encoder, Exchange};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
-use respan_gateway_http::{Answer, Ask, Body, dialect};
+use respan_gateway_http::{Answer, Ask, Body, Exchange, Transport};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -52,80 +48,16 @@ const OPENAI_WHOLE: &str = r#"{"id":"c1","object":"chat.completion","model":"gpt
 const RATE_LIMITED: &str = r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#;
 const BAD: &str = r#"{"error":{"message":"bad model","type":"invalid_request_error","param":"model","code":null}}"#;
 
-/// An old format as a codec: its methods, its heads HTTP's.
-#[derive(Clone)]
-struct Http<F>(F);
-
-impl<F: Format<Ask = Ask, Answer = Answer> + Clone> Codec for Http<F> {
-    type Input = F::Input;
-    type Output = F::Output;
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn accepts(&self, head: &Ask) -> bool {
-        self.0.accepts(head)
-    }
-
-    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<F::Input>> {
-        self.0.request_decoder(head)
-    }
-
-    fn request_encoder(
-        &self,
-        client: Option<&Ask>,
-        body: &mut Bytes,
-        streams: bool,
-    ) -> Box<dyn Encoder<F::Input, Ask>> {
-        self.0.request_encoder(client, body, streams)
-    }
-
-    fn response_decoder(
-        &self,
-        answer: &Answer,
-        call: &Ask,
-        sent: &Bytes,
-    ) -> Box<dyn Decoder<F::Output>> {
-        self.0.response_decoder(answer, call, sent)
-    }
-
-    fn response_encoder(
-        &self,
-        answer: Option<&Answer>,
-        ask: &Ask,
-        body: &Bytes,
-        refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<F::Output, Answer>> {
-        self.0.response_encoder(answer, ask, body, refusal)
-    }
-
-    fn is_content(&self, output: &F::Output) -> bool {
-        self.0.is_content(output)
-    }
-}
-
-dialect!(Http<OpenAiChat>);
-dialect!(Http<AnthropicMessages>);
-
-/// An old transport as an HTTP one, recording each call's relay mark.
-struct Bridge<T>(T, Marks);
+/// A transport that records each call's relay mark.
+struct Marking<T>(T, Marks);
 
 type Marks = Arc<Mutex<Vec<bool>>>;
 
 #[async_trait]
-impl<T> codec::Transport for Bridge<T>
-where
-    T: respan_gateway_core::Transport<Ask = Ask, Answer = Answer>,
-{
+impl<T: Transport> Transport for Marking<T> {
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         lock(&self.1).push(call.relayed);
-        let mut old = respan_gateway_core::Exchange::new(call.head, call.body);
-        old.extensions = call.extensions;
-        old.relayed = call.relayed;
-        old.streams = call.streams;
-        let resp = self.0.send(old).await?;
-        Ok(Exchange::new(resp.head, resp.body))
+        self.0.send(call).await
     }
 }
 
@@ -163,18 +95,9 @@ impl Plugin for HeadOnly {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Path {
-    /// The old `Format` and `Transport`, through `http::serve`.
-    Legacy,
-    /// The driver: `dialect!` codecs, through `codec::serve`.
-    Driver,
-}
-
 /// A gateway serving both formats, calling `openai` and `anthropic`, which
-/// have no keys of their own, on `path`.
+/// have no keys of their own.
 struct Harness {
-    path: Path,
     gw: Gateway,
     mock: MockTransport,
     outcomes: Outcomes,
@@ -183,37 +106,22 @@ struct Harness {
 }
 
 impl Harness {
-    fn new(path: Path) -> Self {
+    fn new() -> Self {
         let mock = MockTransport::new();
         let (outcomes, head_only, marks) =
             (Outcomes::default(), HeadOnly::default(), Marks::default());
-        let gw = match path {
-            Path::Legacy => Gateway::new()
-                .provider("openai", OpenAiChat, mock.at(OPENAI))
-                .and_then(|g| g.provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC)))
-                .and_then(|g| g.serve(OpenAiChat)?.serve(AnthropicMessages)),
-            Path::Driver => Gateway::new()
-                .provider_dialect(
-                    "openai",
-                    Http(OpenAiChat),
-                    Bridge(mock.at(OPENAI), marks.clone()),
-                )
-                .and_then(|g| {
-                    let bridge = Bridge(mock.at(ANTHROPIC), marks.clone());
-                    g.provider_dialect("anthropic", Http(AnthropicMessages), bridge)
-                })
-                .and_then(|g| {
-                    g.serve_dialect(Http(OpenAiChat))?
-                        .serve_dialect(Http(AnthropicMessages))
-                }),
-        };
+        let openai = Marking(mock.at(OPENAI), marks.clone());
+        let anthropic = Marking(mock.at(ANTHROPIC), marks.clone());
+        let gw = Gateway::new()
+            .provider("openai", OpenAiChat, openai)
+            .and_then(|g| g.provider("anthropic", AnthropicMessages, anthropic))
+            .and_then(|g| g.serve(OpenAiChat)?.serve(AnthropicMessages));
         let gw = gw
             .and_then(|g| g.plugin("outcomes", outcomes.clone()))
             .and_then(|g| g.plugin("head-only", head_only.clone()))
             .and_then(|g| g.plugin("route", Route))
             .unwrap();
         Self {
-            path,
             gw,
             mock,
             outcomes,
@@ -222,12 +130,9 @@ impl Harness {
         }
     }
 
-    /// Hand `req` to the gateway on this path's adapter.
+    /// Hand `req` to the gateway through the HTTP adapter.
     async fn serve(&self, req: http::Request<Body>) -> http::Response<Body> {
-        match self.path {
-            Path::Legacy => respan_gateway_http::serve(&self.gw, req).await.0,
-            Path::Driver => codec::serve(&self.gw, req).await.0,
-        }
+        respan_gateway_http::serve(&self.gw, req).await.0
     }
 
     /// Send `req`, read the whole answer, and wait for the end hooks.
@@ -246,15 +151,6 @@ impl Harness {
             headers,
             body,
         }
-    }
-
-    /// What each provider was sent: method, URL, headers and body.
-    fn sent(&self) -> Vec<String> {
-        let each = |r: &http::Request<Bytes>| {
-            let body = String::from_utf8_lossy(r.body());
-            format!("{} {} {:?} {body}", r.method(), r.uri(), r.headers())
-        };
-        self.mock.sent().iter().map(each).collect()
     }
 
     /// Each session's end, as its code.
@@ -301,12 +197,25 @@ fn limited(body: &str) -> mock::Reply {
     reply
 }
 
-/// A scenario: its name, the client's request, and the providers' replies.
+/// A scenario: its name, the client's request, the providers' replies, and
+/// what it must give.
 type Scenario = (
     &'static str,
     fn() -> http::Request<Body>,
     fn(&MockTransport),
+    Want,
 );
+
+/// What a scenario gives: the client's status and a part of its body, how
+/// each session ended, whether each call was refused at its head, and
+/// whether each call sent was a relay.
+struct Want {
+    status: u16,
+    body: &'static str,
+    ends: &'static [&'static str],
+    head_only: &'static [bool],
+    relayed: &'static [bool],
+}
 
 fn scenarios() -> Vec<Scenario> {
     vec![
@@ -316,12 +225,26 @@ fn scenarios() -> Vec<Scenario> {
             |m| {
                 m.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
             },
+            Want {
+                status: 200,
+                body: UNARY,
+                ends: &["ok"],
+                head_only: &[false],
+                relayed: &[true],
+            },
         ),
         (
             "byte-exact stream relay",
             || post_keyed(CHAT, STREAM_REQ),
             |m| {
                 m.reply(OPENAI, mock::sse(STREAM));
+            },
+            Want {
+                status: 200,
+                body: "data: [DONE]",
+                ends: &["ok"],
+                head_only: &[false],
+                relayed: &[true],
             },
         ),
         (
@@ -330,12 +253,26 @@ fn scenarios() -> Vec<Scenario> {
             |m| {
                 m.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
             },
+            Want {
+                status: 200,
+                body: r#"{"content":"Hello"}"#,
+                ends: &["ok"],
+                head_only: &[false],
+                relayed: &[false],
+            },
         ),
         (
             "anthropic client, whole from openai",
             || post_keyed(MESSAGES, ANTHROPIC_REQ),
             |m| {
                 m.reply(OPENAI, mock::json(StatusCode::OK, OPENAI_WHOLE));
+            },
+            Want {
+                status: 200,
+                body: r#""type":"message""#,
+                ends: &["ok"],
+                head_only: &[false],
+                relayed: &[false],
             },
         ),
         (
@@ -344,12 +281,26 @@ fn scenarios() -> Vec<Scenario> {
             |m| {
                 m.reply(OPENAI, cut(&STREAM[..2]));
             },
+            Want {
+                status: 200,
+                body: r#""code":"upstream""#,
+                ends: &["upstream"],
+                head_only: &[false],
+                relayed: &[true],
+            },
         ),
         (
             "a truncated translated stream",
             || post_keyed(CHAT, CLAUDE_STREAM_REQ),
             |m| {
                 m.reply(ANTHROPIC, mock::sse(&ANTHROPIC_STREAM[..3]));
+            },
+            Want {
+                status: 200,
+                body: r#""code":"truncated""#,
+                ends: &["truncated"],
+                head_only: &[false],
+                relayed: &[false],
             },
         ),
         (
@@ -358,6 +309,13 @@ fn scenarios() -> Vec<Scenario> {
             |m| {
                 m.reply(OPENAI, mock::json(StatusCode::BAD_REQUEST, BAD));
             },
+            Want {
+                status: 400,
+                body: BAD,
+                ends: &["invalid_request_error"],
+                head_only: &[true],
+                relayed: &[true],
+            },
         ),
         (
             "a relayed 429 with Retry-After",
@@ -365,12 +323,26 @@ fn scenarios() -> Vec<Scenario> {
             |m| {
                 m.reply(OPENAI, limited(RATE_LIMITED));
             },
+            Want {
+                status: 429,
+                body: RATE_LIMITED,
+                ends: &["rate_limit_error"],
+                head_only: &[true],
+                relayed: &[true],
+            },
         ),
         (
             "a translated 429 with Retry-After",
             || post_keyed(MESSAGES, ANTHROPIC_REQ),
             |m| {
                 m.reply(OPENAI, limited(RATE_LIMITED));
+            },
+            Want {
+                status: 429,
+                body: r#"{"type":"error""#,
+                ends: &["rate_limit_error"],
+                head_only: &[true],
+                relayed: &[false],
             },
         ),
         (
@@ -380,42 +352,61 @@ fn scenarios() -> Vec<Scenario> {
                 post_keyed(CHAT, tools)
             },
             |_| {},
+            Want {
+                status: 400,
+                body: "cannot be translated",
+                ends: &["bad_request"],
+                head_only: &[false],
+                relayed: &[],
+            },
         ),
         (
             "a provider that does not answer",
             || post_keyed(CHAT, UNARY_REQ),
             |_| {},
+            Want {
+                status: 502,
+                body: "no mock response",
+                ends: &["upstream"],
+                head_only: &[false],
+                relayed: &[true],
+            },
         ),
         (
             "no format accepts the request",
             || post_keyed("/nowhere", "{}"),
             |_| {},
+            Want {
+                status: 404,
+                body: "no format served accepts POST /nowhere",
+                ends: &[],
+                head_only: &[],
+                relayed: &[],
+            },
         ),
     ]
 }
 
-/// The oracle: every scenario gives the client the same status, headers
-/// and bytes, sends the providers the same calls, and ends the same way, on
-/// the old path and through the driver.
+/// Every scenario gives the client its status and bytes, and ends, as it
+/// did on the old path (the oracle of decision 0020's migration).
 #[tokio::test]
-async fn the_driver_writes_what_the_old_path_writes() {
-    for (name, req, script) in scenarios() {
-        let mut runs = Vec::new();
-        for path in [Path::Legacy, Path::Driver] {
-            let h = Harness::new(path);
-            script(&h.mock);
-            let got = h.send(req()).await;
-            runs.push((got, h.sent(), h.ends(), lock(&h.head_only.0).clone()));
-        }
-        let driver = runs.pop().unwrap();
-        let legacy = runs.pop().unwrap();
-        assert_eq!(legacy, driver, "{name}");
+async fn each_scenario_gives_what_it_should() {
+    for (name, req, script, want) in scenarios() {
+        let h = Harness::new();
+        script(&h.mock);
+        let got = h.send(req()).await;
+        assert_eq!(got.status, want.status, "{name}");
+        let body = got.body.unwrap_or_default();
+        assert!(body.contains(want.body), "{name}: {body}");
+        assert_eq!(h.ends(), want.ends, "{name}");
+        assert_eq!(*lock(&h.head_only.0), want.head_only, "{name}");
+        assert_eq!(*lock(&h.marks), want.relayed, "{name}");
     }
 }
 
 #[tokio::test]
 async fn a_relay_is_byte_exact_both_ways() {
-    let h = Harness::new(Path::Driver);
+    let h = Harness::new();
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
     h.mock.reply(OPENAI, mock::sse(STREAM));
     let got = h.send(post_keyed(CHAT, UNARY_REQ)).await;
@@ -430,7 +421,7 @@ async fn a_relay_is_byte_exact_both_ways() {
 
 #[tokio::test]
 async fn a_client_is_answered_in_its_own_format() {
-    let h = Harness::new(Path::Driver);
+    let h = Harness::new();
     h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
     h.mock
         .reply(OPENAI, mock::json(StatusCode::OK, OPENAI_WHOLE));
@@ -448,7 +439,7 @@ async fn a_client_is_answered_in_its_own_format() {
 
 #[tokio::test]
 async fn a_cut_stream_ends_the_session_with_its_failure() {
-    let h = Harness::new(Path::Driver);
+    let h = Harness::new();
     h.mock.reply(OPENAI, cut(&STREAM[..2]));
     let got = h.send(post_keyed(CHAT, STREAM_REQ)).await;
     assert_eq!(got.status, 200, "its head went with its first bytes");
@@ -460,7 +451,7 @@ async fn a_cut_stream_ends_the_session_with_its_failure() {
 
 #[tokio::test]
 async fn a_refusal_is_relayed_as_it_came() {
-    let h = Harness::new(Path::Driver);
+    let h = Harness::new();
     h.mock
         .reply(OPENAI, mock::json(StatusCode::BAD_REQUEST, BAD));
     let got = h.send(post_keyed(CHAT, UNARY_REQ)).await;
@@ -470,7 +461,7 @@ async fn a_refusal_is_relayed_as_it_came() {
 
 #[tokio::test]
 async fn a_429_keeps_its_retry_after_relayed_or_translated() {
-    let h = Harness::new(Path::Driver);
+    let h = Harness::new();
     h.mock.reply(OPENAI, limited(RATE_LIMITED));
     h.mock.reply(OPENAI, limited(RATE_LIMITED));
     let retry = |got: &Got| {
@@ -493,7 +484,7 @@ async fn a_429_keeps_its_retry_after_relayed_or_translated() {
 
 #[tokio::test]
 async fn the_clients_key_reaches_a_provider_on_a_relay_alone() {
-    let h = Harness::new(Path::Driver);
+    let h = Harness::new();
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
     h.mock
         .reply(OPENAI, mock::json(StatusCode::OK, OPENAI_WHOLE));
@@ -512,7 +503,7 @@ async fn the_clients_key_reaches_a_provider_on_a_relay_alone() {
 struct SlowRefusal;
 
 impl SlowRefusal {
-    fn answer() -> (Answer, respan_gateway_core::Body) {
+    fn answer() -> (Answer, respan_gateway_http::Frames) {
         let (mut head, ()) = http::Response::new(()).into_parts();
         head.status = StatusCode::TOO_MANY_REQUESTS;
         head.headers
@@ -526,21 +517,7 @@ impl SlowRefusal {
 }
 
 #[async_trait]
-impl respan_gateway_core::Transport for SlowRefusal {
-    type Ask = Ask;
-    type Answer = Answer;
-
-    async fn send(
-        &self,
-        _: respan_gateway_core::Exchange<Ask>,
-    ) -> Result<respan_gateway_core::Exchange<Answer>, Fault> {
-        let (head, body) = Self::answer();
-        Ok(respan_gateway_core::Exchange::new(head, body))
-    }
-}
-
-#[async_trait]
-impl codec::Transport for SlowRefusal {
+impl Transport for SlowRefusal {
     async fn send(&self, _: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let (head, body) = Self::answer();
         Ok(Exchange::new(head, body))
@@ -549,42 +526,24 @@ impl codec::Transport for SlowRefusal {
 
 /// Rule 3 over a real network: a refusal whose body comes slowly is read
 /// whole before the call resolves, so `is_head_only` says it was refused at
-/// its head. The old path decided on what was ready, and called it open;
-/// the client gets the same bytes either way.
+/// its head, and the client gets it whole.
 #[tokio::test]
-async fn a_slow_refusal_is_head_only_through_the_driver() {
-    let mut runs = Vec::new();
-    for path in [Path::Legacy, Path::Driver] {
-        let head_only = HeadOnly::default();
-        let gw = match path {
-            Path::Legacy => Gateway::new()
-                .provider("openai", OpenAiChat, SlowRefusal)
-                .and_then(|g| g.serve(OpenAiChat)),
-            Path::Driver => Gateway::new()
-                .provider_dialect("openai", Http(OpenAiChat), SlowRefusal)
-                .and_then(|g| g.serve_dialect(Http(OpenAiChat))),
-        };
-        let gw = gw
-            .and_then(|g| g.plugin("head-only", head_only.clone()))
-            .and_then(|g| g.target("openai"))
-            .unwrap();
-        let resp = match path {
-            Path::Legacy => {
-                respan_gateway_http::serve(&gw, post_keyed(CHAT, UNARY_REQ))
-                    .await
-                    .0
-            }
-            Path::Driver => codec::serve(&gw, post_keyed(CHAT, UNARY_REQ)).await.0,
-        };
-        let (status, headers, body) = read_whole(resp).await;
-        gw.idle().await;
-        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path:?}");
-        assert_eq!(
-            headers.get("retry-after").map(|v| v.as_bytes()),
-            Some(&b"7"[..])
-        );
-        assert_eq!(body.unwrap(), RATE_LIMITED.as_bytes(), "{path:?}");
-        runs.push(lock(&head_only.0).clone());
-    }
-    assert_eq!(runs, [vec![false], vec![true]]);
+async fn a_slow_refusal_is_head_only() {
+    let head_only = HeadOnly::default();
+    let gw = Gateway::new()
+        .provider("openai", OpenAiChat, SlowRefusal)
+        .and_then(|g| g.serve(OpenAiChat))
+        .and_then(|g| g.plugin("head-only", head_only.clone()))
+        .and_then(|g| g.target("openai"))
+        .unwrap();
+    let resp = respan_gateway_http::serve(&gw, post_keyed(CHAT, UNARY_REQ)).await;
+    let (status, headers, body) = read_whole(resp.0).await;
+    gw.idle().await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        headers.get("retry-after").map(|v| v.as_bytes()),
+        Some(&b"7"[..])
+    );
+    assert_eq!(body.unwrap(), RATE_LIMITED.as_bytes());
+    assert_eq!(*lock(&head_only.0), [true]);
 }

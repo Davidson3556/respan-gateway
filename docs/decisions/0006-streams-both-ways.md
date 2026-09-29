@@ -1,6 +1,6 @@
 # 0006. Streams both ways
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0020](0020-symmetric-edges.md) (no `Exchange::streams` in the core: a stream is inputs that are not already ended)
 - Date: 2026-09-27
 
 ## Context
@@ -13,12 +13,13 @@ already streams; only a streaming request was missing.
 
 - No separate concept for long-lived exchanges: a request carries inputs,
   a response outputs, and either may stream.
-- A request streams its inputs if the adapter says so
-  (`Exchange::streams` on the request; the HTTP adapter sets it for
-  `Upgrade`): they
-  come after its head, one per data frame. Any other request is whole:
-  its body, even empty, is one input, so a quiet stream such as an MCP
-  `GET` is an ordinary request.
+- A request streams its inputs if its adapter says so
+  (`http::Accepted::new(head, body, streams)`; the HTTP adapter sets it
+  for `Upgrade`): its client edge resolves `accept` at once, and the
+  inputs come after the head, one per data frame, never ended at once
+  (0020, rule 1). Any other request is whole: its body, even empty, is
+  one input in its origin, so a quiet stream such as an MCP `GET` is an
+  ordinary request.
 - `on_client` runs at the head, as waiting for more would deadlock a
   client waiting for its answer. For a streaming request `cx.input` is an
   `INTERNAL` `Err`.
@@ -31,10 +32,11 @@ already streams; only a streaming request was missing.
   and a reader that read no frame gives them back, so a retry gets them.
 - `Call` is `'static`, `Clone` and `Sync`, sent when awaited, so a bridge
   clones one call per message.
-- A call carries the request's inputs; its request encoder is told they
-  stream, and one that cannot carry them fails `Encoder::open` `CONFIG`.
-- A streaming request's head goes at once, and `until_content` returns at
-  once for a call that streams its inputs.
+- A call carries the request's inputs; its `dial` gets them as `later`
+  (for HTTP, the request encoder is told they stream, and one that cannot
+  carry them fails `Encoder::open` `CONFIG`).
+- A streaming request's head goes when the reply resolves, and
+  `until_content` returns at once for a call that streams its inputs.
 - In a streaming request each data frame is one message both ways.
   Message types, close codes, keys and pings belong to the adapter or
   transport.
@@ -60,4 +62,6 @@ already streams; only a streaming request was missing.
 - 0011: `ready` became `until_content`.
 - 0012: the adapter, not `Upgrade`, says whether a request streams; a 101
   is the formats' and the adapter's.
-- 0015: it says so with `Exchange::streams`, not an argument of `handle`.
+- 0015: it said so with `Exchange::streams`, not an argument of `handle`.
+- 0020: the core has no flag: a session's inputs are an `Events` that is
+  ended at once or not (rule 1); `Exchange::streams` is HTTP's.

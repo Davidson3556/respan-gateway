@@ -1,27 +1,32 @@
-//! A panic injected at every point where user code runs, in a plugin, a
-//! filter, a format or a transport, on whole and streaming requests: the
-//! request finishes, every end hook runs once and `idle` resolves. It owns
-//! its process's panic switch, so it is alone in this file.
+//! A panic injected at every point where user code runs in the kernel's
+//! reach: a plugin, a filter, a `Format` method and an edge's stream, on
+//! one-shot and streaming sessions: the session finishes, every end hook
+//! runs once and `idle` resolves. The codec's points are HTTP's driver's
+//! (`crates/http/tests/driver_toy.rs`).
 #![allow(clippy::unwrap_used)]
 
-mod toy;
+mod edge;
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use respan_gateway_core::bytes::Bytes;
+use edge::*;
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::*;
-use toy::*;
+
+/// Points: 1 the client edge's input stream; 5 the provider edge's event
+/// stream; 12 `dial`; 13 `is_content`; 14 `opening`; 17 `accepts`; 18
+/// `accept`; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
+/// dial future; 29 a provider stream's first poll.
+const POINTS: [usize; 19] = [
+    1, 5, 12, 13, 14, 17, 18, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32, 0,
+];
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panic_anywhere_still_ends_everything_once() {
     std::panic::set_hook(Box::new(|_| {}));
     let mut bad = vec![];
-    // 16, 18 and 19 are unused; 22 and 23 panic in the recorder's own end
-    // hooks; 30 is a client output filter's end, 31 the request encoder's
-    // `open`, where a call's head is written.
-    for n in (1..=17usize).chain(20..=32) {
+    for n in POINTS {
         for streams in [false, true] {
             for transport_mode in 0..3 {
                 for script in 0..3 {
@@ -30,7 +35,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                     let transport = fnt(move |c| {
                         async move {
                             if n == 28 {
-                                panic!("p28");
+                                boom(28);
                             }
                             let mut body = c.body;
                             if transport_mode == 1 {
@@ -46,14 +51,15 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                             };
                             let body = match n == 29 {
                                 true => stream::once(async {
+                                    lock(&FIRED).push(29);
                                     panic!("p29");
                                     #[allow(unreachable_code)]
-                                    Ok::<Bytes, Fault>(Bytes::new())
+                                    Ok::<String, Fault>(String::new())
                                 })
                                 .boxed(),
                                 false => slow(chunks),
                             };
-                            Ok(Exchange::new(Ans(200), body))
+                            Ok(answer(200, body))
                         }
                         .boxed()
                     });
@@ -119,6 +125,12 @@ async fn a_panic_anywhere_still_ends_everything_once() {
     }
     PANIC.store(0, Ordering::SeqCst);
     let _ = std::panic::take_hook();
+    let fired = lock(&FIRED).clone();
+    let idle: Vec<_> = POINTS
+        .iter()
+        .filter(|p| **p != 0 && !fired.contains(p))
+        .collect();
+    assert!(idle.is_empty(), "points that never fired: {idle:?}");
     assert!(
         bad.is_empty(),
         "{} problems:\n{}",

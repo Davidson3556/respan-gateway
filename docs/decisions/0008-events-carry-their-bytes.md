@@ -1,6 +1,6 @@
 # 0008. Events carry their bytes
 
-- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md), [0020](0020-symmetric-edges.md) (no head hooks)
+- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md), [0020](0020-symmetric-edges.md) (the client's origin is sealed; `Decoder` and `Encoder` are HTTP's)
 - Date: 2026-09-28
 
 ## Context
@@ -14,16 +14,17 @@ run time.
 ## Decision
 
 - A body is a stream of messages, each decoded into one value of the
-  kind: `Decoder<T>` and `Encoder<T, H>` of the format's `Input` or
-  `Output`. A body's end is `decode`'s or `end`'s `Result`, written by
+  kind: `http::Decoder<T>` and `http::Encoder<T, H>` of the codec's `Input`
+  or `Output`. A body's end is `decode`'s or `end`'s `Result`, written by
   `Encoder::end`. A decoder ends only at the end of its body and says
   whether it was complete (`Fault::truncated()`).
 - Every message decodes to one value, even one the kind cannot read,
   which keeps the bytes it came in (`formats::relayed`). A format writes a
   value as those bytes while it says the same, and writes what changed
   into them. The kernel keeps no value's bytes; the one thing it keeps
-  unread is the client's request body, which it hands only to formats; a
-  plugin reads the bytes an input came in through its origin (0020).
+  unread is the client's origin (its head and whole body), sealed, which it
+  hands only to a format of the client's name, on a relay; a plugin reads
+  the bytes an input came in through the value's origin (0020).
 - A provider's error answer keeps its format's name
   (`Fault::with_answer(format, answer)`, for an error event within a
   response too), as only that format writes it.
@@ -33,7 +34,7 @@ run time.
 - Traffic the gateway does not read is a kind of one format,
   `formats::opaque`, so it relays only to itself, byte for byte.
 - The request encoder gets the client's bytes as the body when the call
-  relays a whole request no plugin changed, which stays unread.
+  relays a whole request no plugin changed, which stays undecoded.
 - In the conversation kind a `Reply` is one message: its start, content,
   finish and usage.
 

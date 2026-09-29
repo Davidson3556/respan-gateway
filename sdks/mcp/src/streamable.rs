@@ -11,15 +11,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::serde_json::{Value, json};
-use respan_gateway_core::{Decoder, Encoder, Fault, Format, codes};
+use respan_gateway_core::{Fault, codes};
 use respan_gateway_formats::{self as formats, relayed::Relayed, sse, whole::Relay};
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::{Answer, Ask, bodiless};
 
 use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, requests};
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 
 /// The header naming an MCP session.
 pub const SESSION: &str = "mcp-session-id";
@@ -55,9 +56,7 @@ fn posted(body: &Bytes) -> (Vec<Value>, bool) {
     (requests(&messages).cloned().collect(), batch)
 }
 
-impl Format for StreamableHttp {
-    type Ask = Ask;
-    type Answer = Answer;
+impl Codec for StreamableHttp {
     type Input = ToServer;
     type Output = ToClient;
 
@@ -172,6 +171,8 @@ impl Format for StreamableHttp {
         !output.messages.is_empty()
     }
 }
+
+dialect!(StreamableHttp);
 
 /// The body of a response with `head` to the client's request `ask` with
 /// `body` ([`StreamableHttp::response_encoder`]).

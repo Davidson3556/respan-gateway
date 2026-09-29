@@ -1192,7 +1192,6 @@ name = "respan-gateway-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "bytes",
  "futures",
  "serde_json",
  "tokio",

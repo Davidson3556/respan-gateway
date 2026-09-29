@@ -8,16 +8,17 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use common::{Metered, with_plugins};
 use http::StatusCode;
+use respan_gateway_core::futures;
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait,
+    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
 use respan_gateway_http::Status;
+use respan_gateway_http::bytes;
 use respan_gateway_http::http;
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -26,9 +27,7 @@ const ANTHROPIC: &str = "http://anthropic.test";
 /// A protocol the gateway relays unread: a kind of its own.
 struct Raw;
 
-impl Format for Raw {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Raw {
     type Input = Sent<Raw>;
     type Output = Got<Raw>;
 
@@ -73,10 +72,12 @@ impl Format for Raw {
     }
 }
 
+dialect!(Raw);
+
 /// A gateway serving `format`, calling `provider` of `format` over `mock`
 /// at `base`, with `plugins`, recording outcomes on both edges.
 fn gateway(
-    format: impl Format<Ask = respan_gateway_http::Ask, Answer = respan_gateway_http::Answer> + Clone,
+    format: impl respan_gateway_core::Format<Dialer = respan_gateway_http::Dialer> + Clone,
     mock: &MockTransport,
     base: &str,
     plugins: Vec<Arc<dyn Plugin>>,
@@ -219,9 +220,7 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
 #[derive(Clone, Default)]
 struct Counted(Arc<AtomicUsize>);
 
-impl Format for Counted {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
+impl Codec for Counted {
     type Input = Conversation;
     type Output = Reply;
 
@@ -269,6 +268,8 @@ impl Format for Counted {
         OpenAiChat.response_encoder(answer, request, body, refusal)
     }
 }
+
+dialect!(Counted);
 
 /// Reads the input that came with the head.
 struct Reads;

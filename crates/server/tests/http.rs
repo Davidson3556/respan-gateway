@@ -3,10 +3,11 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Transport, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, async_trait};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http;
 use respan_gateway_http::{CallHeaders, Credential, credentials};
+use respan_gateway_http::{Exchange, Frames, Transport};
 use respan_gateway_server::{HttpTransport, router};
 use tokio::net::TcpListener;
 
@@ -22,7 +23,7 @@ fn http(base: impl Into<String>) -> HttpTransport {
 fn gateway_to<F, T>(format: F, transport: T) -> Gateway
 where
     F: Format,
-    T: Transport<Ask = F::Ask, Answer = F::Answer>,
+    T: Into<F::Dialer>,
 {
     Gateway::new()
         .provider("local", format, transport)
@@ -167,13 +168,10 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
 
     #[async_trait]
     impl Transport for Note {
-        type Ask = respan_gateway_http::Ask;
-        type Answer = respan_gateway_http::Answer;
-
         async fn send(
             &self,
-            call: respan_gateway_core::Exchange<Self::Ask>,
-        ) -> Result<respan_gateway_core::Exchange<Self::Answer>, Fault> {
+            call: respan_gateway_http::Exchange<respan_gateway_http::Ask>,
+        ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::Answer>, Fault> {
             use respan_gateway_http::http_body_util::{self, BodyExt};
             let (call, _) = respan_gateway_http::call(call);
             let (head, body) = call.into_parts();
@@ -407,9 +405,9 @@ fn exchange(
     head: http::request::Parts,
     ext: respan_gateway_core::Extensions,
     relayed: bool,
-) -> respan_gateway_core::Exchange<http::request::Parts> {
+) -> respan_gateway_http::Exchange<http::request::Parts> {
     let body = respan_gateway_core::futures::stream::empty();
-    let mut call = respan_gateway_core::Exchange::new(head, Box::pin(body));
+    let mut call = respan_gateway_http::Exchange::new(head, Box::pin(body));
     call.extensions = ext;
     call.relayed = relayed;
     call
@@ -618,7 +616,8 @@ async fn it_strips_the_clients_cookies_and_forwarding_headers() {
 #[tokio::test]
 async fn it_sends_a_whole_body_with_its_length_and_streams_one_that_streams() {
     use futures::StreamExt;
-    use respan_gateway_core::{Body, Exchange, Transport, bytes::Bytes, futures};
+    use respan_gateway_core::futures;
+    use respan_gateway_http::bytes::Bytes;
     use respan_gateway_http::http_body_util::BodyExt;
 
     // Echoes the body, prefixed by its `content-length`, or `-` if none.
@@ -633,7 +632,7 @@ async fn it_sends_a_whole_body_with_its_length_and_streams_one_that_streams() {
     let transport = http(&provider);
     // A whole call is one frame of the kernel's body; one that `streams`
     // is sent as it arrives, of unknown size.
-    let call = |body: Body, streams: bool| {
+    let call = |body: Frames, streams: bool| {
         let mut head = respan_gateway_http::fresh_ask();
         head.method = http::Method::POST;
         head.uri = http::Uri::from_static("/echo");

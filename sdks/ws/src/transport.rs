@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_core::futures::{SinkExt, StreamExt, stream};
-use respan_gateway_core::{Body, Exchange, Fault, Transport, async_trait, codes};
+use respan_gateway_core::{Fault, async_trait, codes};
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap};
 use respan_gateway_http::{Answer, Ask, full};
@@ -27,6 +27,7 @@ use tokio_tungstenite::{
 };
 
 use crate::{CLOSE_WAIT, CloseCode, MAX_MESSAGE};
+use respan_gateway_http::{Exchange, Frames, Transport};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -171,9 +172,6 @@ fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
 
 #[async_trait]
 impl Transport for WsTransport {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let mut call = call;
         proxy_call(&mut call.head);
@@ -251,7 +249,7 @@ enum Sent {
 
 /// Pump `body`'s frames to the provider and the provider's to `frames`,
 /// until one side ends and the other has had its say.
-async fn session(socket: Socket, body: Body, frames: Sender<Result<Bytes, Fault>>) {
+async fn session(socket: Socket, body: Frames, frames: Sender<Result<Bytes, Fault>>) {
     let (sink, stream) = socket.split();
     let closing = Arc::new(AtomicBool::new(false));
     // Only the reader holds the answer's sender, so the answer ends when it
@@ -285,7 +283,7 @@ async fn session(socket: Socket, body: Body, frames: Sender<Result<Bytes, Fault>
 /// clean.
 async fn send_frames(
     mut sink: SplitSink<Socket, Message>,
-    mut body: Body,
+    mut body: Frames,
     closing: Arc<AtomicBool>,
 ) -> Sent {
     while let Some(frame) = body.next().await {

@@ -8,12 +8,12 @@ use bytes::{Bytes, BytesMut};
 use futures::{FutureExt, StreamExt, stream};
 use http::StatusCode;
 use http::header::UPGRADE;
-use respan_gateway_core::{Dialed, Encoder, Events, Extensions, Fault, Origin};
+use respan_gateway_core::{Dialed, Events, Extensions, Fault, Origin};
 
+use super::Came;
 use super::reader::{Failure, Reader};
 use super::writer::Writer;
-use super::{Came, Codec, Dialer, Exchange};
-use crate::{Answer, Ask};
+use crate::{Answer, Ask, Codec, Dialer, Encoder, Exchange};
 
 /// Whose content an input is: whose fault it is if it cannot be written.
 #[derive(Clone, Copy)]
@@ -36,14 +36,14 @@ impl Whose {
 }
 
 /// The provider edge of `codec` through `dialer`, as
-/// [`Dialect::dial`](respan_gateway_core::Dialect::dial):
+/// [`Format::dial`](respan_gateway_core::Format::dial):
 ///
 /// - The call is written from the client's head on a relay (`relay`), its
 ///   first input from its value (`opening`), else, on a relay, the
 ///   client's bytes unread; then its later inputs, if any follow, streamed
 ///   ([`Exchange::streams`]), else whole. [`Exchange::relayed`] is set if
 ///   and only if the call was written from the client's origin, so the
-///   transport passes on the client's keys ([`credentials`](super::credentials))
+///   transport passes on the client's keys ([`credentials`](crate::credentials))
 ///   only then.
 /// - The answer is classified at its head (rule 3): a non-2xx answer, but
 ///   a 101 to a call that asked to switch protocols, is read whole before

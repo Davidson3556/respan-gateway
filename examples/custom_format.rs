@@ -1,5 +1,6 @@
 //! Custom format: add a protocol, here OpenAI embeddings, by writing its
-//! kind (`EmbedRequest` in, `Embeddings` out) and its `Format`. Plugins
+//! kind (`EmbedRequest` in, `Embeddings` out) and its `Codec`, which
+//! `dialect!` makes a `Format`. Plugins
 //! then read and edit its values, whatever bytes they came in.
 //!
 //! Each value keeps the bytes it came in (`Relayed`), so a message no one
@@ -9,16 +10,15 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::serde_json::{self, Value, json};
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Format, Gateway, Plugin, ProviderContext, Response,
-    async_trait,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::conversation::units::INPUT_TOKENS;
 use respan_gateway_formats::{self as formats, Usage, relayed::Relayed, whole::Relay};
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{HeaderValue, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{Answer, Ask, Codec, Decoder, Encoder, dialect};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// The kind's input: texts to embed.
@@ -40,11 +40,10 @@ struct Embeddings {
 const NAME: &str = "openai-embeddings";
 
 /// OpenAI's `POST /v1/embeddings`.
+#[derive(Clone)]
 struct OpenAiEmbeddings;
 
-impl Format for OpenAiEmbeddings {
-    type Ask = Ask;
-    type Answer = Answer;
+impl Codec for OpenAiEmbeddings {
     type Input = EmbedRequest;
     type Output = Embeddings;
 
@@ -145,6 +144,8 @@ impl Format for OpenAiEmbeddings {
         formats::with_head(head, Box::new(body))
     }
 }
+
+dialect!(OpenAiEmbeddings);
 
 /// The JSON a value came in, to write its changes into.
 fn origin_json<T: PartialEq>(origin: &Relayed<T>) -> Value {

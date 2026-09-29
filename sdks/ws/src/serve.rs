@@ -10,17 +10,18 @@ use axum::body::Body as AxumBody;
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
-use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::futures::channel::{mpsc, oneshot};
 use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_core::futures::{SinkExt, StreamExt, TryStreamExt};
-use respan_gateway_core::{Body, Fault, Gateway};
+use respan_gateway_core::{Fault, Gateway};
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http::header::{self, HeaderName};
-use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{body_of, http_body, http_body_util};
 
 use crate::{CLOSE_WAIT, CloseCode, MAX_MESSAGE};
+use respan_gateway_http::Frames;
 
 /// A router that serves every request as a WebSocket session
 /// ([`serve_ws`]). A request that is no upgrade is refused by axum. To mix
@@ -74,10 +75,10 @@ pub async fn serve_ws(gateway: &Gateway, ws: WebSocketUpgrade, req: Request) -> 
         http_body_util::StreamBody::new(frames).boxed_unsync()
     });
     let (resp, _ended) = respan_gateway_http::handle(gateway, req, true).await;
-    if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
-        return answer(resp).await;
-    }
     let (head, body) = resp.into_parts();
+    if head.status != StatusCode::SWITCHING_PROTOCOLS {
+        return refusal(head, body).await;
+    }
     let mut ws = ws.max_message_size(MAX_MESSAGE).max_frame_size(MAX_MESSAGE);
     if let Some(chosen) = head.headers.get(header::SEC_WEBSOCKET_PROTOCOL) {
         ws = ws.protocols([chosen.to_str().unwrap_or_default().to_owned()]);
@@ -97,13 +98,14 @@ pub async fn serve_ws(gateway: &Gateway, ws: WebSocketUpgrade, req: Request) -> 
     upgraded
 }
 
-/// An answer that is no upgrade, whole. The gateway sends a streaming
-/// request's head at once, so a provider's refusal of the upgrade (a 401)
-/// arrives as its head with a body that then fails: written as it came, the
-/// client's connection would break. The failure is written as text under its
-/// status instead.
-async fn answer(resp: http::Response<respan_gateway_http::Body>) -> Response {
-    let (head, body) = resp.into_parts();
+/// An answer that is no upgrade, whole and sized. A failed handshake is a
+/// complete answer for clients (tungstenite) that do not decode a chunked
+/// body, which a streamed one would be. A body that fails is written as
+/// text under the fault's status.
+async fn refusal(
+    head: respan_gateway_http::http::response::Parts,
+    body: respan_gateway_http::Body,
+) -> Response {
     match body.collect().await {
         Ok(all) => Response::from_parts(head, AxumBody::from(all.to_bytes())),
         Err(fault) => {
@@ -132,7 +134,7 @@ enum Told {
     Binary,
 }
 
-async fn pump(socket: WebSocket, input: mpsc::Sender<Result<Bytes, Fault>>, output: Body) {
+async fn pump(socket: WebSocket, input: mpsc::Sender<Result<Bytes, Fault>>, output: Frames) {
     let (sink, stream) = socket.split();
     let (tell, told) = oneshot::channel();
     let mut heard = pin!(hear(stream, input, tell));
@@ -193,7 +195,7 @@ async fn hear(
 /// sent, as the connection is closing, and the response is read to its end.
 async fn write(
     mut sink: SplitSink<WebSocket, Message>,
-    mut output: Body,
+    mut output: Frames,
     told: oneshot::Receiver<Told>,
 ) {
     let gone = Arc::new(AtomicBool::new(false));

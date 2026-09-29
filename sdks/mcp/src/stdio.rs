@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use respan_gateway_core::{Exchange, Extensions, Fault, Transport, async_trait};
+use respan_gateway_core::{Extensions, Fault, async_trait};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
@@ -21,6 +21,7 @@ use tokio::process::Command;
 
 use crate::session::Session;
 use crate::{SESSION, lock, read};
+use respan_gateway_http::{Exchange, Transport};
 
 /// Stands for "never": `Duration::MAX` would overflow a deadline.
 const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
@@ -179,9 +180,6 @@ fn no_session() -> Fault {
 
 #[async_trait]
 impl Transport for StdioTransport {
-    type Ask = Ask;
-    type Answer = Answer;
-
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         let (call, extensions) = respan_gateway_http::call(call);
         let resp = self.send_http(call, &extensions).await?;

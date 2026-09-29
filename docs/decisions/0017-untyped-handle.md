@@ -1,6 +1,6 @@
 # 0017. Untyped handle
 
-- Status: accepted
+- Status: superseded by [0020](0020-symmetric-edges.md)
 - Date: 2026-09-28
 
 ## Context
@@ -11,7 +11,14 @@ cannot know which format accepts. The type parameters gave no compile-time
 safety on a boundary that erases immediately, and made the gateway know the
 caller's wire, which is the caller's to know.
 
-## Decision
+## Decision (superseded)
+
+0020 replaced it: `Gateway::handle<W>(wire, extensions)` takes the
+caller's wire, one generic, and returns the future of how the request
+ended; the response goes through the client edge (`Format::accept`), so the
+core holds no `Exchange`, `Head`, `erase` or `downcast`. A served format
+`accepts` the wire it is handed, and a format of another wire type never
+does. The rest of this record is what 0017 decided.
 
 1. **`handle` is not generic**:
    `handle(&self, req: Exchange<Head>) -> (Result<Exchange<Head>, Fault>, BoxFuture<'static, Result<(), Fault>>)`.

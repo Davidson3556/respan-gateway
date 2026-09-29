@@ -8,7 +8,7 @@ use futures::stream;
 use tokio::runtime::Handle;
 
 use crate::call::OpenCalls;
-use crate::dialect::{AnyDialect, AnyInput, Origin, is_input};
+use crate::format::{AnyFormat, AnyInput, Origin, is_input};
 use crate::gateway::Inner;
 use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
@@ -18,8 +18,8 @@ use crate::{Call, Events, Extensions, Fault, Filter, Plugin};
 
 /// One client request, as the client edge's hooks see it.
 pub struct ClientContext {
-    /// The first dialect served that accepted the request.
-    pub(crate) dialect: Arc<dyn AnyDialect>,
+    /// The first format served that accepted the request.
+    pub(crate) format: Arc<dyn AnyFormat>,
     /// What came with the head, sealed: only a relay hands it on.
     pub(crate) origin: Option<Origin>,
     pub(crate) extensions: Extensions,
@@ -48,7 +48,7 @@ pub struct ClientContext {
 impl std::fmt::Debug for ClientContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientContext")
-            .field("format", &self.dialect.name())
+            .field("format", &self.format.name())
             .finish_non_exhaustive()
     }
 }
@@ -74,7 +74,7 @@ impl Edge for ClientContext {
 
 impl ClientContext {
     pub(crate) fn new(
-        dialect: Arc<dyn AnyDialect>,
+        format: Arc<dyn AnyFormat>,
         origin: Option<Origin>,
         later: Later,
         extensions: Extensions,
@@ -82,8 +82,8 @@ impl ClientContext {
     ) -> Self {
         let cut = Arc::default();
         Self {
-            opening: Opening::new(dialect.clone(), origin.clone()),
-            dialect,
+            opening: Opening::new(format.clone(), origin.clone()),
+            format,
             origin,
             extensions,
             target: gateway.target.clone(),
@@ -100,7 +100,7 @@ impl ClientContext {
 
     /// The name of the client's format.
     pub fn format(&self) -> &str {
-        self.dialect.name()
+        self.format.name()
     }
 
     /// The request's extensions, from the adapter, such as the client's
@@ -118,7 +118,7 @@ impl ClientContext {
     /// Whether `T` is the client's format's [`Input`](crate::Format::Input)
     /// or [`Output`](crate::Format::Output), which the typed accessors take.
     pub fn is_kind<T: Any>(&self) -> bool {
-        is_input::<T>(&*self.dialect).is_ok()
+        is_input::<T>(&*self.format).is_ok()
     }
 
     /// The request's one input as `T`, as filters left it. `Err` with
@@ -137,13 +137,13 @@ impl ClientContext {
     /// first, never as if they were complete; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
     /// type or if another reader took them.
     pub fn take_inputs<T: Any + Clone + Send>(&mut self) -> Events<T> {
-        if is_input::<T>(&*self.dialect) != Ok(true) {
+        if is_input::<T>(&*self.format) != Ok(true) {
             return stream::once(async { Err(Fault::wrong_kind::<T>()) }).boxed();
         }
         if self.later.ended {
             return stream::once(ready(self.opening.get::<T>().cloned())).boxed();
         }
-        let items = inputs(self.later.clone(), self.dialect.clone(), None, &self.cut);
+        let items = inputs(self.later.clone(), self.format.clone(), None, &self.cut);
         let typed = |(input, _): (AnyInput, bool)| {
             let typed = input.downcast_ref::<T>().cloned();
             typed.ok_or_else(Fault::wrong_kind::<T>)
@@ -165,7 +165,7 @@ impl ClientContext {
     /// A copy of it as it is now, for a call to keep.
     pub(crate) fn copy(&self) -> Self {
         Self {
-            dialect: self.dialect.clone(),
+            format: self.format.clone(),
             origin: self.origin.clone(),
             extensions: self.extensions.clone(),
             target: self.target.clone(),
@@ -200,7 +200,7 @@ impl ClientContext {
         &mut self,
         filter: impl Filter<T>,
     ) -> Result<(), Fault> {
-        match is_input::<T>(&*self.dialect)? {
+        match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
             true if self.later.ended => self.opening.filter(Filters::of(filter)),
             true => locked(&self.later.filters).add(filter, true),

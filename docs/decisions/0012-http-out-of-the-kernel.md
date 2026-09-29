@@ -1,6 +1,6 @@
 # 0012. HTTP out of the kernel
 
-- Status: accepted, amended by [0013](0013-no-http-in-core.md), [0014](0014-api-trims.md), [0019](0019-status-out-of-the-kernel.md) (the status is a hint)
+- Status: accepted, amended by [0013](0013-no-http-in-core.md), [0014](0014-api-trims.md), [0019](0019-status-out-of-the-kernel.md) (the status is a hint), [0020](0020-symmetric-edges.md) (`streams` and `relayed` are HTTP's; the driver decides head timing)
 - Date: 2026-09-28
 
 ## Context
@@ -24,19 +24,19 @@ text/plain for what no format writes. None is a kernel rule (0001).
    format can as text/plain, and strips what a hop must not carry on the
    way out (`outgoing`); a transport strips what a proxy must not pass on
    (`proxy_call`) and the client origin's headers.
-3. **The adapter says whether a request streams**, with
-   `Exchange::streams` on the request `Gateway::handle` takes (0015); `Err`
-   for what no format can write. `Format::request_encoder` is told
-   `streams`; a protocol that cannot carry streamed inputs fails
-   `Encoder::open`. A decoder refuses a 101 its call did not ask for; an
+3. **The adapter says whether a request streams**, with the `streams`
+   argument of `http::Accepted::new`, the wire `Gateway::handle` takes
+   (0020); `handle`'s end is `Err` for what no format can write.
+   `Codec::request_encoder` is told `streams`; a protocol that cannot carry
+   streamed inputs fails `Encoder::open`. A decoder refuses a 101 its call did not ask for; an
    encoder of a body that has none says so (`Encoder::open` returns
    `Ok(true)`, 0014), and its head goes at once.
 4. **Credentials are an extension.** The adapter lifts `Authorization`,
    `x-api-key` and key query parameters into `http::Credential`; plugins
    read the rest of the head as `http::Asked`. A transport sends
    `CallHeaders`, else its own headers, else the client's `Credential`,
-   the last only on a relay, which the kernel marks with
-   `Exchange::relayed` (0015).
+   the last only on a relay, which the driver marks with
+   `Exchange::relayed` (0020).
 5. stdio MCP returns faults for 404, 409 and 503.
 
 ## Consequences

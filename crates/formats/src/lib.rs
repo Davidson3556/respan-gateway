@@ -19,13 +19,14 @@ pub use anthropic::AnthropicMessages;
 pub use openai::OpenAiChat;
 pub use usage::Usage;
 
-use respan_gateway_core::bytes::{Bytes, BytesMut};
+use respan_gateway_core::Fault;
 use respan_gateway_core::serde_json::{self, Value};
-use respan_gateway_core::{Decoder, Encoder, Fault};
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{
     self, HeaderValue, header::CONTENT_ENCODING, header::CONTENT_TYPE,
 };
 use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{Decoder, Encoder};
 
 /// A provider's message as JSON: a whole body, or an event's `data:`.
 pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
@@ -36,7 +37,7 @@ pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
 }
 
 /// Whether a request is a `POST` to a path ending in `suffix`: the usual
-/// [`Format::accepts`](respan_gateway_core::Format::accepts).
+/// [`Codec::accepts`](respan_gateway_http::Codec::accepts).
 pub fn posts_to(head: &Ask, suffix: &str) -> bool {
     head.method == http::Method::POST && head.uri.path().ends_with(suffix)
 }
@@ -81,7 +82,7 @@ pub fn default_content_type(head: &mut Answer, value: &'static str) {
 
 /// A decoder of one value per body or data frame, made or refused by
 /// `on_message`: the usual
-/// [`Format::request_decoder`](respan_gateway_core::Format::request_decoder).
+/// [`Codec::request_decoder`](respan_gateway_http::Codec::request_decoder).
 pub fn message_decoder<T, F>(on_message: F) -> Box<dyn Decoder<T>>
 where
     T: 'static,

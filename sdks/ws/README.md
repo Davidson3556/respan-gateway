@@ -8,7 +8,7 @@ events; OpenAI Realtime and Gemini Live run through the same code.
 
 ## API
 
-- `WsTransport::new(base_url)`: an outbound `Transport` to a `ws://` or `wss://`
+- `WsTransport::new(base_url)`: an outbound `http::Transport` to a `ws://` or `wss://`
   provider. It strips and keys a call as `HttpTransport` does (`proxy_call`,
   `strip_client_origin_headers`, `credentials`, `CallHeaders`), so a client's
   key passes only on a same-dialect relay. `.with_headers(map)` sets the
@@ -20,7 +20,7 @@ events; OpenAI Realtime and Gemini Live run through the same code.
   ordinary HTTP answer to the handshake, before any upgrade. To mix sessions
   with plain HTTP, route the sessions to `serve_ws` on top of
   `respan_gateway_server::router`.
-- `JsonEvents::new(name, path)`: a `Format` whose kind is one JSON event per
+- `JsonEvents::new(name, path)`: a `Codec` (made a `Format` by `dialect!`) whose kind is one JSON event per
   frame, `ClientEvent` in and `ProviderEvent` out (each has `json: Value`).
   A relay to a format of the same name is byte for byte while an event is
   unedited; an edited one is written from its JSON. Plugins filter events with
@@ -69,39 +69,28 @@ A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
   named in the code because the workspace's dependencies enable both `ring`
   and `aws-lc-rs`, which makes rustls's own choice panic. It is tested for
   building and failing cleanly, not against a real TLS server.
-- A provider's refusal of the upgrade (a 401) reaches the client as its status
-  and message in plain text, not as the provider's own body (see W1 in the
-  design notes). The refusal's body is only what came with its head.
+- A provider's refusal of the upgrade (a 401) is a complete answer: the
+  provider edge reads its body before the gateway answers, and on a relay the
+  client gets the provider's status and body as they came. `serve_ws` writes
+  it whole and sized, not chunked.
 - No reconnection or session resumption.
 
-## Design notes: what an events-only kernel would change
+## Design notes
 
-This SDK works within today's kernel, whose unit is bytes in bodies. Where that
-shows:
+The kernel routes events; this SDK stays on the HTTP wire, a `Codec` and an
+`http::Transport`, so a frame is a body item. Where that shows:
 
 - **Frame kinds.** A body item is bytes, so its frame kind is lost: text only
-  in v1, a binary frame is a fault. An events-only kernel would carry a kind
-  on each event (text, binary), or leave it to the format, so audio could pass.
+  in v1, a binary frame is a fault. A codec that carried a kind on each event
+  (text, binary) could pass audio.
 - **Close mapping.** A close is only a clean end, or an `Err` with a typed
   `CloseCode` hint on the fault. The client's close code and reason, and the
-  provider's reason text, cannot cross. As events, a Close would be an event of
-  the stream in both directions, and the end would be the transport's alone.
-- **The head-at-once rule.** A streaming request's head goes before the
-  provider's answer is read, because the client waits for it before sending.
-  Here it works because `WsTransport::send` connects first, so an unreachable
-  provider fails before any head. But a provider's HTTP refusal of the upgrade
-  arrives as its head with a body that then fails, which an HTTP server writes
-  as a broken response (W1; `serve_ws` reads the body whole to avoid it).
-  An events-only kernel would make opening the session an explicit step,
-  accepted or rejected before the head.
+  provider's reason text, cannot cross.
 - **The Upgrade dance.** The adapter keeps `Upgrade`, `proxy_call` sets
   `Connection: upgrade`, the transport strips `Sec-WebSocket-*`, `serve_ws`
-  copies back the subprotocol and the provider's other headers. With no HTTP
-  in the kernel's idea of a session, the handshake would belong to the two
-  edges alone.
+  copies back the subprotocol and the provider's other headers.
 - **End of input versus end of session.** A client's Close ends the input
   clean, then the response is read to its end and dropped unsent, because a
-  connection that is closing cannot send. A session as one event stream would
-  say that once.
+  connection that is closing cannot send.
 
 Used by: [realtime](../../examples/realtime.rs).

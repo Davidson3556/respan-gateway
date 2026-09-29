@@ -1,14 +1,15 @@
-//! What a gateway counts as in flight, and what a request may be given back.
+//! What a gateway counts as in flight, and what a session may be given back.
+//! On the toy edge, with relay provenance.
 #![allow(clippy::unwrap_used)]
 
-mod toy;
+mod edge;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use edge::*;
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::*;
-use toy::*;
 
 fn gateway_of(rec: &Rec) -> Gateway {
     Gateway::new()
@@ -26,7 +27,8 @@ fn gateway_of(rec: &Rec) -> Gateway {
         .unwrap()
 }
 
-/// B4: a request that is still reading its body is in flight.
+/// B4: a session whose one-shot edge is still reading its body is in
+/// flight (the core enters `InFlight` before `accept`).
 #[tokio::test(flavor = "current_thread")]
 async fn idle_waits_for_a_request_still_reading_its_body() {
     let gw = gateway_of(&Rec::default());
@@ -66,14 +68,10 @@ async fn a_request_whose_body_fails_is_refused_before_any_plugin() {
     );
 }
 
-/// Suspected: building on a gateway while requests run gives it a count of
-/// its own, so its `idle` does not wait for them. It is what `idle` says of
-/// a gateway changed after being cloned, and what a running request, which
-/// holds the gateway's settings, makes of a builder call: await `idle` on
-/// the gateway that took the requests.
+/// Building on a gateway while sessions run gives it a count of its own.
 #[tokio::test(flavor = "current_thread")]
 async fn a_rebuilt_gateway_counts_only_its_own_requests() {
-    let t = fnt(|_| async { Ok(Exchange::new(Ans(200), never())) }.boxed());
+    let t = fnt(|_| async { Ok(answer(200, never())) }.boxed());
     let gw = Gateway::new()
         .serve(Toy)
         .unwrap()
@@ -95,7 +93,7 @@ async fn a_rebuilt_gateway_counts_only_its_own_requests() {
     old.idle().await;
 }
 
-/// A response goes only to its own request.
+/// A response goes only to its own session.
 struct Steal(Arc<Mutex<Option<Response>>>);
 #[async_trait]
 impl Plugin for Steal {
@@ -139,25 +137,55 @@ impl Plugin for TwoCalls {
     }
 }
 
+/// A dialer that notes whether each call it is given relays.
+fn noting(seen: &Arc<Mutex<Vec<bool>>>) -> Dialer {
+    let record = seen.clone();
+    fnt(move |c| {
+        lock(&record).push(c.relayed);
+        async { Ok(ok_resp(vec!["a", "DONE"])) }.boxed()
+    })
+}
+
 /// The kernel alone says a call relays the client's message.
 #[tokio::test(flavor = "current_thread")]
 async fn only_a_call_that_relays_the_clients_message_is_relayed() {
     let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
-    let record = seen.clone();
-    let t = fnt(move |c| {
-        lock(&record).push(c.relayed);
-        async { Ok(ok_resp(vec!["a", "DONE"])) }.boxed()
-    });
     let gw = Gateway::new()
         .serve(Toy)
         .unwrap()
-        .provider("a", Toy, t)
+        .provider("a", Toy, noting(&seen))
         .unwrap()
         .plugin("two", TwoCalls)
         .unwrap();
-    let mut request = req(vec!["q"]);
-    request.relayed = true; // ignored
-    let (res, _) = handle(&gw, request).await;
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
     let _ = read(res).await;
     assert_eq!(*lock(&seen), [false, true]);
+}
+
+/// Sends the client's own value, cloned, as a call's own input.
+struct Cloned;
+#[async_trait]
+impl Plugin for Cloned {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let copy = cx.input::<In>()?.clone();
+        let own = cx.call("a").with_input(copy);
+        Ok(Some(own.await?))
+    }
+}
+
+/// Provenance, not value, decides a relay: a call whose own input is the
+/// client's value cloned gets no client origin (no head, no key).
+#[tokio::test(flavor = "current_thread")]
+async fn a_call_of_the_clients_value_cloned_gets_no_client_origin() {
+    let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let gw = Gateway::new()
+        .serve(Toy)
+        .unwrap()
+        .provider("a", Toy, noting(&seen))
+        .unwrap()
+        .plugin("cloned", Cloned)
+        .unwrap();
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
+    assert_eq!(read(res).await, Ok((200, "a;!".into())));
+    assert_eq!(*lock(&seen), [false]);
 }

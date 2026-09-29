@@ -3,7 +3,7 @@
 // Each test file uses only some helpers.
 #![allow(dead_code)]
 
-use respan_gateway_core::bytes::Bytes;
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -39,7 +39,7 @@ pub type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 pub fn add_provider<F, T>(name: &str, format: F, transport: T) -> AddProvider
 where
     F: respan_gateway_core::Format,
-    T: respan_gateway_core::Transport<Ask = F::Ask, Answer = F::Answer>,
+    T: Into<F::Dialer> + 'static,
 {
     let name = name.to_owned();
     Box::new(move |g| g.provider(name, format, transport))

@@ -1,16 +1,15 @@
 use super::*;
-use respan_gateway_core::{Decoder, Encoder, Format};
 use respan_gateway_formats::conversation::{Message, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::posts_to;
 use respan_gateway_http::{Answer, Ask};
+use respan_gateway_http::{Codec, Decoder, Encoder, dialect};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
+#[derive(Clone)]
 struct Responses;
 
-impl Format for Responses {
-    type Ask = Ask;
-    type Answer = Answer;
+impl Codec for Responses {
     type Input = Sent<Responses>;
     type Output = Got<Responses>;
 
@@ -54,6 +53,8 @@ impl Format for Responses {
         opaque::response_encoder("responses", answer, ask, refusal)
     }
 }
+
+dialect!(Responses);
 
 /// The example's gateway, also serving the Responses API. Its one target
 /// stays OpenAI; the guard refuses Responses traffic before any call.

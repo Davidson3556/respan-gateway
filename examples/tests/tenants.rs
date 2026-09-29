@@ -1,6 +1,6 @@
 use super::*;
 
-fn auth(req: &http::Request<respan_gateway_core::bytes::Bytes>) -> Option<&str> {
+fn auth(req: &http::Request<respan_gateway_http::bytes::Bytes>) -> Option<&str> {
     req.headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

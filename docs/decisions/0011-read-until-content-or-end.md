@@ -1,6 +1,6 @@
 # 0011. Read a response until its content or its end
 
-- Status: accepted, amended by [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md)
+- Status: accepted, amended by [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md), [0020](0020-symmetric-edges.md) (a refusal at the provider's head fails at once)
 - Date: 2026-09-28
 
 ## Context
@@ -13,7 +13,8 @@ for the first complete answer could not hold a response whole.
 
 1. **`Response::until_content`** reads until the first content
    (`Format::is_content`), a failure, or the end, and holds what it read.
-   A provider's error answer is such a failure.
+   A provider's error answer is such a failure, and one refused at its
+   head (`ProviderContext::is_head_only`) fails at once.
 2. **`Response::until_end`** reads to the end and holds every output and
    the end, `Ok` or a failure. Sent, it is delivered as it would have been
    unread. It is `Err` only where `until_content` is; a later failure is

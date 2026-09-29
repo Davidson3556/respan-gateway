@@ -1,4 +1,4 @@
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -7,16 +7,13 @@ use futures::channel::oneshot;
 use futures::future::{BoxFuture, ready};
 use futures::{FutureExt, StreamExt, stream};
 
-use crate::dialect::{AnyDialect, AnyReply, Erased};
 use crate::fault::PANICKED;
+use crate::format::{AnyFormat, AnyReply, Erased};
 use crate::leg::Later;
-use crate::legacy::{self, Legacy};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::session;
-use crate::{
-    ClientContext, Dialect, Exchange, Extensions, Fault, Format, Head, Plugin, Response, Transport,
-};
+use crate::{ClientContext, Extensions, Fault, Format, Plugin, Response};
 
 /// A registered plugin and its name.
 #[derive(Clone)]
@@ -27,8 +24,8 @@ pub(crate) struct Registered {
 
 #[derive(Clone, Default)]
 pub(crate) struct Inner {
-    /// The dialects served to clients, in the order they are tried.
-    served: Vec<Arc<dyn AnyDialect>>,
+    /// The formats served to clients, in the order they are tried.
+    served: Vec<Arc<dyn AnyFormat>>,
     /// In registration order, which is the order their hooks run, on both
     /// edges.
     pub(crate) plugins: Vec<Registered>,
@@ -65,49 +62,26 @@ impl Gateway {
         Gateway::default()
     }
 
-    /// Add provider `name`, speaking `format` over `transport`, which shares
-    /// its heads. `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the
-    /// name is taken or the format breaks [`Gateway::serve`]'s rules.
-    pub fn provider<F, T>(
+    /// Add provider `name`, speaking `format`, reached through `dialer`.
+    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the name is
+    /// taken or the format breaks [`Gateway::serve`]'s rules.
+    pub fn provider<F: Format>(
         self,
         name: impl Into<String>,
         format: F,
-        transport: T,
-    ) -> Result<Gateway, Fault>
-    where
-        F: Format,
-        T: Transport<Ask = F::Ask, Answer = F::Answer>,
-    {
-        let transport: legacy::Dialer<F> = Arc::new(transport);
-        self.add_provider(name.into(), legacy_dialect(format), Arc::new(transport))
-    }
-
-    /// Serve clients of `format`: a request goes to the first format served
-    /// on its wire that [`accepts`](Format::accepts) it. `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) if its input and output types
-    /// are one, or a format of its name has another kind or wire.
-    pub fn serve(self, format: impl Format) -> Result<Gateway, Fault> {
-        self.add_served(legacy_dialect(format))
-    }
-
-    /// Add provider `name`, speaking `dialect`, reached through `dialer`: as
-    /// [`Gateway::provider`], on the edge contract ([`Dialect`], a temporary
-    /// name, decision 0020).
-    pub fn provider_dialect<D: Dialect>(
-        self,
-        name: impl Into<String>,
-        dialect: D,
-        dialer: impl Into<D::Dialer>,
+        dialer: impl Into<F::Dialer>,
     ) -> Result<Gateway, Fault> {
         let dialer: Arc<dyn Any + Send + Sync> = Arc::new(dialer.into());
-        self.add_provider(name.into(), Arc::new(Erased::new(dialect)), dialer)
+        self.add_provider(name.into(), Arc::new(Erased::new(format)), dialer)
     }
 
-    /// Serve clients of `dialect`: a wire handed to [`Gateway::open`] goes
-    /// to the first dialect served that accepts it. As [`Gateway::serve`],
-    /// on the edge contract ([`Dialect`], a temporary name, decision 0020).
-    pub fn serve_dialect<D: Dialect>(self, dialect: D) -> Result<Gateway, Fault> {
-        self.add_served(Arc::new(Erased::new(dialect)))
+    /// Serve clients of `format`: a wire handed to [`Gateway::handle`] goes
+    /// to the first format served that [`accepts`](Format::accepts) it.
+    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if its input and
+    /// output types are one, or a format of its name has another kind, wire
+    /// or dialer.
+    pub fn serve<F: Format>(self, format: F) -> Result<Gateway, Fault> {
+        self.add_served(Arc::new(Erased::new(format)))
     }
 
     /// Register `plugin` as `name`; its hooks run on every request and call,
@@ -154,70 +128,33 @@ impl Gateway {
         self.inner.in_flight.idle().await;
     }
 
-    /// Run `req` in the first format served that [`accepts`](Format::accepts)
-    /// its head. The caller knows its wire and does the typing: it
-    /// [`erase`](Exchange::erase)s its request's head and
-    /// [`downcast`](Exchange::downcast)s the response's to its own, and the
-    /// kernel checks neither. The adapter owns the wire's rules: it takes
-    /// out what no plugin or format should see, such as the gateway's own
-    /// keys, before, and what a hop must not carry after.
+    /// Serve `wire` in the first format served ([`Gateway::serve`]) that
+    /// [`accepts`](Format::accepts) it: resolves once its client edge has
+    /// its reply, with a future of how the session ended, as
+    /// [`Plugin::on_client_end`] gets it, resolved once the answer's end is
+    /// out, before end hooks finish. The caller built `wire`, so it knows
+    /// its type; a format of another wire type never accepts it.
     ///
-    /// If `req.streams`, the body's data frames are inputs as they arrive and
-    /// the response's head goes out at once, as the client waits for it.
-    /// Else the body is read in full, so the caller bounds it; one that
-    /// fails while read is refused. `req.relayed` is ignored.
-    ///
-    /// `Err` for what no format can write, for the adapter to write plainly:
-    /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no format accepts
-    /// the request; [`codes::INTERNAL`](crate::codes::INTERNAL) if the one
-    /// that does panicked or could not write a refusal. A response head of
-    /// another wire than the request's shows as `INTERNAL` at the caller's
-    /// downcast.
-    ///
-    /// With it comes a future of how the request ended, as
-    /// [`Plugin::on_client_end`] gets it, resolved once the response ends,
-    /// before end hooks finish. Call it on a tokio
-    /// runtime, which runs the end hooks; it panics outside one.
-    pub async fn handle(
-        &self,
-        req: Exchange<Head>,
-    ) -> (
-        Result<Exchange<Head>, Fault>,
-        BoxFuture<'static, Result<(), Fault>>,
-    ) {
-        legacy::handle(self, req).await
-    }
-
-    /// Serve `wire` in the first dialect served
-    /// ([`Gateway::serve_dialect`]) that accepts it: resolves once its
-    /// client edge has its reply, with a future of how the session ended,
-    /// as [`Plugin::on_client_end`] gets it. If no dialect accepts it, the
-    /// wire is dropped, unanswered, and the end is `Err` with
+    /// If no format accepts it, the wire is dropped, unanswered, and the end
+    /// is `Err`, for the adapter to write plainly:
     /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND), or
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if one panicked, for the
-    /// adapter to write plainly. The session counts for [`Gateway::idle`]
-    /// from this call on. Call it on a tokio runtime, which runs the end
-    /// hooks. The edge contract ([`Dialect`], a temporary name, decision
-    /// 0020).
-    pub async fn open<W: Send + 'static>(
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if one panicked. The
+    /// adapter owns the wire's rules: it takes out what no plugin or format
+    /// should see, such as the gateway's own keys, before, and what a hop
+    /// must not carry after. The session counts for [`Gateway::idle`] from
+    /// this call on. Call it on a tokio runtime, which runs the end hooks;
+    /// it panics outside one.
+    pub async fn handle<W: Send + 'static>(
         &self,
         wire: W,
         extensions: Extensions,
     ) -> BoxFuture<'static, Result<(), Fault>> {
-        self.open_any(Box::new(wire), extensions).await
-    }
-
-    /// [`Gateway::open`], its wire erased.
-    pub(crate) async fn open_any(
-        &self,
-        wire: Box<dyn Any + Send>,
-        extensions: Extensions,
-    ) -> BoxFuture<'static, Result<(), Fault>> {
-        // A dialect that panics in `accepts` is the adapter's to write.
+        let wire: Box<dyn Any + Send> = Box::new(wire);
+        // A format that panics in `accepts` is the adapter's to write.
         let served = &self.inner.served;
         let accepts = || served.iter().find(|d| d.accepts(&*wire)).cloned();
-        let dialect = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
-            Ok(Some(dialect)) => dialect,
+        let format = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
+            Ok(Some(format)) => format,
             Ok(None) => {
                 let text = "no format served accepts this request";
                 return unwritten(Fault::not_found(text));
@@ -228,7 +165,7 @@ impl Gateway {
         let reading = InFlight::enter(&self.inner.in_flight);
         let (tx, rx) = oneshot::channel::<AnyReply>();
         let reply = rx.map(|reply| reply.unwrap_or_else(|_| abandoned()));
-        let accept = AssertUnwindSafe(|| dialect.accept(wire, reply.boxed()));
+        let accept = AssertUnwindSafe(|| format.accept(wire, reply.boxed()));
         let Ok(accepting) = std::panic::catch_unwind(accept) else {
             return unwritten(Fault::internal(PANICKED));
         };
@@ -239,7 +176,7 @@ impl Gateway {
             Err(fault) => (Later::new(stream::empty().boxed()), Some(fault)),
         };
         let inner = self.inner.clone();
-        let cx = ClientContext::new(dialect.clone(), origin, later, extensions, inner);
+        let cx = ClientContext::new(format.clone(), origin, later, extensions, inner);
         let (outcome, ended) = oneshot::channel();
         let settling = cx.settling.clone();
         let mut hooks = EndHooks::new(&self.inner.in_flight, cx, Some(outcome));
@@ -252,7 +189,7 @@ impl Gateway {
                 // A plugin panic is refused like a failure.
                 let ran = AssertUnwindSafe(run(&self.inner, &mut hooks)).catch_unwind();
                 let answer = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-                session::reply(&dialect, answer, hooks).await
+                session::reply(&format, answer, hooks).await
             }
         };
         // An edge that dropped its reply ends the session abandoned.
@@ -275,37 +212,37 @@ impl Gateway {
     fn add_provider(
         mut self,
         name: String,
-        dialect: Arc<dyn AnyDialect>,
+        format: Arc<dyn AnyFormat>,
         dialer: Arc<dyn Any + Send + Sync>,
     ) -> Result<Gateway, Fault> {
-        self.check(&*dialect)?;
+        self.check(&*format)?;
         if self.inner.providers.contains_key(&name) {
             return Err(Fault::config(format!("provider '{name}' is defined twice")));
         }
-        let provider = Provider { dialect, dialer };
+        let provider = Provider { format, dialer };
         self.inner_mut().providers.insert(name, provider);
         Ok(self)
     }
 
-    fn add_served(mut self, dialect: Arc<dyn AnyDialect>) -> Result<Gateway, Fault> {
-        self.check(&*dialect)?;
-        self.inner_mut().served.push(dialect);
+    fn add_served(mut self, format: Arc<dyn AnyFormat>) -> Result<Gateway, Fault> {
+        self.check(&*format)?;
+        self.inner_mut().served.push(format);
         Ok(self)
     }
 
-    /// `Ok` if `dialect`'s two types differ and dialects of its name share
+    /// `Ok` if `format`'s two types differ and formats of its name share
     /// its kind and wire.
-    fn check(&self, dialect: &dyn AnyDialect) -> Result<(), Fault> {
-        let (name, kind) = (dialect.name(), dialect.kind());
+    fn check(&self, format: &dyn AnyFormat) -> Result<(), Fault> {
+        let (name, kind) = (format.name(), format.kind());
         let inner = &self.inner;
-        let providers = inner.providers.values().map(|p| &*p.dialect);
+        let providers = inner.providers.values().map(|p| &*p.format);
         let known = inner.served.iter().map(|d| &**d).chain(providers);
         let named: Vec<_> = known.filter(|d| d.name() == name).collect();
         let fault = if kind.0 == kind.1 {
             format!("the kind of format {name} has one type for both directions")
         } else if named.iter().any(|d| d.kind() != kind) {
             format!("two formats named {name} are of different kinds")
-        } else if named.iter().any(|d| d.wire() != dialect.wire()) {
+        } else if named.iter().any(|d| d.wire() != format.wire()) {
             format!("two formats named {name} are on different wires")
         } else {
             return Ok(());
@@ -314,13 +251,7 @@ impl Gateway {
     }
 }
 
-/// An old `format`, as a dialect on its pair of head types.
-fn legacy_dialect<F: Format>(format: F) -> Arc<dyn AnyDialect> {
-    let wire = (TypeId::of::<F::Ask>(), TypeId::of::<F::Answer>());
-    Arc::new(Erased::on(Legacy::new(format), wire))
-}
-
-/// An end for a wire no dialect took, for the adapter to write plainly.
+/// An end for a wire no format took, for the adapter to write plainly.
 fn unwritten(fault: Fault) -> BoxFuture<'static, Result<(), Fault>> {
     ready(Err(fault)).boxed()
 }
@@ -346,10 +277,9 @@ async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Res
     }
 }
 
-/// Servers spawn `handle` and `open`, so they must be `Send`.
+/// Servers spawn `handle`, so it must be `Send`.
 #[cfg(test)]
-fn _handle_is_send(g: &Gateway, req: Exchange<Head>) {
+fn _handle_is_send(g: &Gateway) {
     fn send<T: Send>(_: T) {}
-    send(g.handle(req));
-    send(g.open(0u8, Extensions::new()));
+    send(g.handle(0u8, Extensions::new()));
 }

@@ -48,50 +48,35 @@ not: `https://api.anthropic.com`.
 ## Glossary
 
 A client sends a request, plugins look at it, the gateway sends it on to a
-provider, and the response streams back through the plugins. A request
-carries inputs, its response outputs. A streaming request, such as a
-WebSocket (the HTTP adapter makes one of a request asking to switch
-protocols), has its inputs stream after its head (`Exchange::streams`); any
-other is whole: its body, even empty, is its one input. The kernel has no HTTP: the adapter,
-transports and formats own its rules and heads
-([0013](docs/decisions/0013-no-http-in-core.md)).
+provider, and the response streams back through the plugins. The kernel
+routes events and never sees a byte, a head or a key: the client edge and
+the provider edge, each a format, own them
+([architecture](docs/ARCHITECTURE.md),
+[0020](docs/decisions/0020-symmetric-edges.md)).
 
-- **Call**: what the gateway sends a provider on a request's behalf
-  (`cx.call`): the request's inputs, or its own (`with_input`). The
-  target is the provider called when every plugin passes: the one
-  `set_target` names, else the gateway's (`Gateway::target`).
-- **Edge**: where hooks run: the client edge once per request
-  (`on_client`), the provider edge once per call (`on_provider`). Each
-  edge's end hook (`on_client_end`, `on_provider_end`) runs once after it
-  ends, with how it ended (`&Result<(), Fault>`); a fact about a call, such
-  as `is_sent`, is a method of its context. `on_client` passes (`Ok(None)`), answers, skipping the plugins
-  after it, or refuses.
+- **Gateway**: what you build and hand requests to: providers, formats
+  served, plugins and a default target, each registered by value.
+- **Plugin**: four hooks, `on_client` and `on_client_end` once per
+  request, `on_provider` and `on_provider_end` once per call, in
+  registration order. `on_client` passes (`Ok(None)`), answers or refuses.
 - **Filter**: edits a request's inputs or a response's outputs as they
-  stream; its type says which. Filters see every message, keep-alives and
-  usage alone included.
-- **Format**: one protocol's codec, such as OpenAI Chat: it recognises
-  its requests, and reads and writes its requests and responses.
-- **Kind**: a format's two types, `Input` and `Output`. Formats of one
-  kind translate into each other; traffic the gateway does not read is a
-  kind of one format (`formats::opaque`).
-- **Message**: one message of a body, such as an SSE event, a WebSocket
-  frame or a whole body, decoded into one value of the kind, which keeps
-  the bytes it came in.
-- **Refusal**: a failure before the response head goes out, sent in the
-  client's format with the fault's status (`Status` hint, else its
-  code's default) and retry; a provider's error
-  answer (`Fault::answer`) goes as it came to a client of its format.
-- **Relay**: a format's promise to write each message as the bytes it
-  came in while it says the same, an edit written into them. A whole
-  request no plugin changed goes as the client's bytes, unread. A call
-  that sends the client's own message to a provider of its format's name
-  is `relayed` (`Exchange::relayed`, set by the kernel alone): only a
-  relay carries the client's credential.
-- **Usage**: not the kernel's
-  ([0010](docs/decisions/0010-usage-out-of-core.md)). The chat kind
-  reports it in `Reply.usage` (`formats::Usage`); a plugin meters a call
-  with a provider-edge filter and reads the sum in `on_provider_end`
-  (`examples/billing.rs`, `sdks/ledger`).
+  stream; its type says which. It sees every message.
+- **Format**: one protocol's view of a kind, such as OpenAI Chat, and the
+  two edges that speak it: it accepts a client's connection and dials a
+  provider's. Its `Input` and `Output` types are its kind: formats of one
+  name relay each message as the bytes it came in, formats of one kind
+  translate. An HTTP format is a **Codec** (`crates/http`), one
+  protocol's decoders and encoders, made a `Format` by `dialect!`; it
+  reaches a provider through a **Transport** (`http::Transport`), which
+  owns the URL, the keys and the connection.
+- **Call**: what the gateway sends a provider on a request's behalf
+  (`cx.call`): the request's inputs, or its own (`with_input`). Only a call
+  of the request's inputs to a provider of the client's format name is a
+  relay, and carries the client's origin and key.
+- **Response**: what a call, or `Response::stream`, gives back: read
+  (`outputs`), held (`until_content`, `until_end`) or sent.
+- **Fault**: the one error: a code that says whose fault it is, a message,
+  a retry and typed hints such as HTTP's `Status`.
 
 ## Roadmap
 
@@ -115,14 +100,14 @@ test when its milestone lands. The kernel API is frozen after M2.
 
 | Path | What it is |
 |---|---|
-| `crates/core` | The kernel: plugins, calls, filters; no HTTP, config or kinds. |
-| `crates/http` | HTTP at the edges: its head types, the adapter, credentials, what a transport strips. |
+| `crates/core` | The kernel: ten types, events only; no bytes, heads, HTTP or kinds. |
+| `crates/http` | HTTP's wire: `Codec`, `Transport`, the driver, the adapter, credentials. |
 | `crates/formats` | The chat kind, OpenAI Chat and Anthropic Messages. |
 | `crates/plugins` | First-party plugins, such as the model router. |
 | `crates/server` | The axum router and the HTTP transport. |
-| `crates/testkit` | A mock transport and the kernel's tests. |
+| `crates/testkit` | A mock transport and tests through the real formats. |
 | `crates/respan-gateway` | The binary: YAML config and `check`. |
-| `sdks/` | Building blocks for plugins: `routing`, `text`, `ledger`, `mcp`. |
+| `sdks/` | Building blocks for plugins: `routing`, `text`, `ledger`, `mcp`, `ws`. |
 | `examples/` | Runnable, tested examples of the [use cases](examples/README.md). |
 
 ## Development

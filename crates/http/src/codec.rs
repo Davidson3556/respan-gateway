@@ -1,53 +1,53 @@
+//! One protocol's bytes on HTTP: a [`Codec`], and the [`Decoder`]s and
+//! [`Encoder`]s it makes for each body.
+
 use bytes::{Bytes, BytesMut};
+use respan_gateway_core::Fault;
 
-use crate::Fault;
+use crate::{Answer, Ask};
 
-/// One protocol's codec, stateless and shared: each body, either way, gets
-/// its own [`Decoder`] or [`Encoder`], which keeps that stream's state. The
-/// factories never fail: a failure travels in the stream.
+/// One protocol's codec on HTTP, stateless and shared: each body, either
+/// way, gets its own [`Decoder`] or [`Encoder`], which keeps that stream's
+/// state. The factories never fail: a failure travels in the stream.
+/// [`dialect!`](crate::dialect) makes it a
+/// [`Format`](respan_gateway_core::Format), which HTTP's driver runs.
 ///
 /// A body is a stream of messages, each decoded into one value of the kind,
-/// even one the kind cannot read, which keeps its bytes: the kernel keeps
-/// none of a value's, so a relay loses nothing only if the format writes a
+/// even one the kind cannot read, which keeps its bytes: the gateway keeps
+/// none of a value's, so a relay loses nothing only if the codec writes a
 /// value as the bytes it came in while it says the same.
 ///
-/// Its wire is its pair of head types, [`Format::Ask`] and
-/// [`Format::Answer`], which the kernel never reads and hands only to a
-/// format of the name it came in. A request's inputs stream, one per data
-/// frame, if the adapter sets [`Exchange::streams`](crate::Exchange::streams)
-/// on it ([`Gateway::handle`](crate::Gateway::handle)); else its body is its
-/// one input, even empty.
+/// A request's inputs stream, one per data frame, if its adapter says it
+/// streams ([`Accepted::new`](crate::Accepted::new)); else its body is its
+/// one input, even empty. Heads reach only a codec of the name they came
+/// in: the client's to a call that relays the client's message, the
+/// provider's to the answer to such a call.
 ///
-/// Its kind is its pair of value types, through which formats of one kind
+/// Its kind is its pair of value types, through which codecs of one kind
 /// translate. They must differ, as the type names the direction, and should
 /// belong to the kind alone: a shared type such as `serde_json::Value` lets
 /// a plugin for one kind read another's traffic.
-pub trait Format: Send + Sync + 'static {
-    /// The head of a request on this format's wire.
-    type Ask: Clone + Send + Sync + 'static;
-
-    /// The head of a response on this format's wire.
-    type Answer: Send + Sync + 'static;
-
+pub trait Codec: Send + Sync + 'static {
     /// What a request carries, one or a stream.
     type Input: Clone + PartialEq + Send + Sync + 'static;
 
     /// What a response carries, one or a stream.
     type Output: Clone + PartialEq + Send + Sync + 'static;
 
-    /// The protocol's identity. Formats of one name relay rather than
-    /// translate, and share a kind and a wire.
+    /// The protocol's identity. Codecs of one name relay rather than
+    /// translate, and share a kind.
     fn name(&self) -> &str;
 
-    /// Whether a request with `head` is in this protocol; the first format
-    /// served ([`Gateway::serve`](crate::Gateway::serve)) that accepts takes it.
-    fn accepts(&self, head: &Self::Ask) -> bool;
+    /// Whether a request with `head` is in this protocol; the first served
+    /// that accepts takes it.
+    fn accepts(&self, head: &Ask) -> bool;
 
     /// Decodes the client's request with `head`: its body when first read,
     /// or a streaming request's frames as they pass. `Err` with
-    /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) for bytes not in
-    /// this protocol; what the kind has no place for stays in the input.
-    fn request_decoder(&self, head: &Self::Ask) -> Box<dyn Decoder<Self::Input>>;
+    /// [`codes::BAD_REQUEST`](respan_gateway_core::codes::BAD_REQUEST) for
+    /// bytes not in this protocol; what the kind has no place for stays in
+    /// the input.
+    fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Self::Input>>;
 
     /// Encodes a call. `client` is the client's head if the call relays the
     /// client's message; `body` its first bytes, the client's when relayed
@@ -55,55 +55,60 @@ pub trait Format: Send + Sync + 'static {
     /// ([`Encoder::head`]), then any inputs written from their values.
     /// `streams`: a streaming request's inputs follow, one per frame; a
     /// protocol that cannot carry them fails [`Encoder::open`] with
-    /// [`codes::CONFIG`](crate::codes::CONFIG).
+    /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG).
     ///
     /// What this protocol cannot say is an `Err` of the encode it concerns,
-    /// never dropped: the kernel makes it
-    /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) if the input is the
-    /// client's as decoded, else [`codes::CONFIG`](crate::codes::CONFIG).
+    /// never dropped: the driver makes it
+    /// [`codes::BAD_REQUEST`](respan_gateway_core::codes::BAD_REQUEST) if
+    /// the input is the client's as decoded, else
+    /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG)
+    /// ([`Fault::of_input`]).
     fn request_encoder(
         &self,
-        client: Option<&Self::Ask>,
+        client: Option<&Ask>,
         body: &mut Bytes,
         streams: bool,
-    ) -> Box<dyn Encoder<Self::Input, Self::Ask>>;
+    ) -> Box<dyn Encoder<Self::Input, Ask>>;
 
-    /// Decodes a response with head `answer` to the call with head `call` and
-    /// first bytes `sent`. A provider's error answer ends `Err` with its
-    /// status as a hint ([`Fault::with`]), [`Fault::with_retry_after`] and
-    /// [`Fault::with_answer`]; a body not in this protocol with
-    /// [`codes::UPSTREAM`](crate::codes::UPSTREAM); one cut short with
-    /// [`Fault::truncated`]. Hold an output that shows nothing yet, such as a
-    /// start, until the next, so a failure first can still be refused.
+    /// Decodes a response with head `answer` to the call with head `call`
+    /// and first bytes `sent`. A provider's error answer ends `Err` with its
+    /// status as a hint ([`Status`](crate::Status)),
+    /// [`Fault::with_retry_after`] and [`Fault::with_answer`]; a body not in
+    /// this protocol with
+    /// [`codes::UPSTREAM`](respan_gateway_core::codes::UPSTREAM); one cut
+    /// short with [`Fault::truncated`]. Hold an output that shows nothing
+    /// yet, such as a start, until the next, so a failure first can still
+    /// be refused.
     fn response_decoder(
         &self,
-        answer: &Self::Answer,
-        call: &Self::Ask,
+        answer: &Answer,
+        call: &Ask,
         sent: &Bytes,
     ) -> Box<dyn Decoder<Self::Output>>;
 
     /// Encodes a response to the client's request with head `ask` and body
-    /// `body` (empty if streaming). `answer` is the provider's head for a
-    /// response in this format, to start the head from. A `refusal` is the
-    /// response's one failure, before any byte: write its answer as it came
-    /// if this format read it ([`Fault::answer`]), else the fault in this
-    /// protocol's words. Each output to a streaming request is its own frame.
+    /// `body` (empty if streaming). `answer` is the provider's head on a
+    /// relay, to start the head from. A `refusal` is the response's one
+    /// failure, before any byte: write its answer as it came if this codec
+    /// read it ([`Fault::answer`], [`answered`](crate::answered)), else the
+    /// fault in this protocol's words. Each output to a streaming request is
+    /// its own frame.
     ///
     /// Write an output as its bytes while it says the same, else from its
     /// value; what this protocol cannot write is an `Err`. The end always
     /// comes: write a failure in this protocol's framing.
     fn response_encoder(
         &self,
-        answer: Option<&Self::Answer>,
-        ask: &Self::Ask,
+        answer: Option<&Answer>,
+        ask: &Ask,
         body: &Bytes,
         refusal: Option<&Fault>,
-    ) -> Box<dyn Encoder<Self::Output, Self::Answer>>;
+    ) -> Box<dyn Encoder<Self::Output, Answer>>;
 
     /// Whether `output` is content, what
-    /// [`Response::until_content`](crate::Response::until_content) stops at;
-    /// a value that says nothing yet, such as a keep-alive, is not. By
-    /// default, true.
+    /// [`Response::until_content`](respan_gateway_core::Response::until_content)
+    /// stops at; a value that says nothing yet, such as a keep-alive, is
+    /// not. By default, true.
     fn is_content(&self, _output: &Self::Output) -> bool {
         true
     }
@@ -154,7 +159,8 @@ pub trait Encoder<T, H>: Send + 'static {
     ///
     /// A call's request body ends with the failure it has, and `end` is
     /// told it, never `Ok` after one: the client's body broke, the inputs
-    /// were cut off ([`codes::ABANDONED`](crate::codes::ABANDONED)) or an
+    /// were cut off
+    /// ([`codes::ABANDONED`](respan_gateway_core::codes::ABANDONED)) or an
     /// input could not be written. What it writes for one goes before the
     /// `Err` the transport's body then ends with; nothing follows that.
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault>;

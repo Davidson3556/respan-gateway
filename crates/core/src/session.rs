@@ -6,8 +6,8 @@ use std::sync::Arc;
 use futures::FutureExt;
 
 use crate::call::SharedCall;
-use crate::dialect::{AnyDialect, AnyReply};
 use crate::fault::PANICKED;
+use crate::format::{AnyFormat, AnyReply};
 use crate::leg::{Outgoing, cut, locked};
 use crate::lifecycle::EndHooks;
 use crate::{ClientContext, Ended, Extensions, Fault, Response};
@@ -15,7 +15,7 @@ use crate::{ClientContext, Ended, Extensions, Fault, Response};
 /// The reply to `answer`: a refusal, or the response's origin (on a relay)
 /// and outputs; with [`Ended`], which owns the session's end hooks.
 pub(crate) async fn reply(
-    dialect: &Arc<dyn AnyDialect>,
+    format: &Arc<dyn AnyFormat>,
     answer: Result<Response, Fault>,
     mut hooks: EndHooks<ClientContext>,
 ) -> AnyReply {
@@ -27,7 +27,7 @@ pub(crate) async fn reply(
         Some(c) if !cx.open.holds(c) => {
             Err(Fault::internal("a response to another request was sent"))
         }
-        _ if resp.output.is_some_and(|o| o != dialect.kind().1) => Err(Fault::another_kind(
+        _ if resp.output.is_some_and(|o| o != format.kind().1) => Err(Fault::another_kind(
             "a response of another kind was sent".into(),
         )),
         _ => Ok(resp),

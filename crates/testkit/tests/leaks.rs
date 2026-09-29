@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{StreamExt, TryStreamExt, stream};
 use http::StatusCode;
-use respan_gateway_core::{
-    Body, ClientContext, Exchange, Fault, Gateway, Plugin, Response, Transport,
-};
-use respan_gateway_core::{async_trait, bytes::Bytes, futures};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response};
+use respan_gateway_core::{async_trait, futures};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Finish, Reply};
+use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
+use respan_gateway_http::{Exchange, Frames, Transport};
 use respan_gateway_testkit::{mock, post, read_whole, serve};
 
 const CHAT: &str = "/v1/chat/completions";
@@ -93,7 +93,7 @@ impl Plugin for Probing {
 }
 
 /// Scripted chunks as a body.
-fn body(chunks: Vec<Result<Bytes, Fault>>) -> Body {
+fn body(chunks: Vec<Result<Bytes, Fault>>) -> Frames {
     stream::iter(chunks).boxed()
 }
 
@@ -114,10 +114,10 @@ struct Scripted {
 
 #[async_trait]
 impl Transport for Scripted {
-    type Ask = respan_gateway_http::Ask;
-    type Answer = respan_gateway_http::Answer;
-
-    async fn send(&self, call: Exchange<Self::Ask>) -> Result<Exchange<Self::Answer>, Fault> {
+    async fn send(
+        &self,
+        call: Exchange<respan_gateway_http::Ask>,
+    ) -> Result<Exchange<respan_gateway_http::Answer>, Fault> {
         let _: Vec<Bytes> = call.body.try_collect().await?;
         let (head, chunks) = reply(self.whole).into_parts();
         Ok(Exchange::new(head, body(chunks)))

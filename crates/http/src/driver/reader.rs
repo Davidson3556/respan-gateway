@@ -8,9 +8,9 @@ use std::task::{Context, Poll, ready};
 use bytes::Bytes;
 use futures::stream::{self, Stream};
 use futures::{FutureExt, StreamExt};
-use respan_gateway_core::{Decoder, Fault};
+use respan_gateway_core::Fault;
 
-use super::Frames;
+use crate::{Decoder, Frames};
 
 /// Where a streamed call's request encoder panicked, if it did: the
 /// transport may read the call's body where nothing unwinds to the call, so

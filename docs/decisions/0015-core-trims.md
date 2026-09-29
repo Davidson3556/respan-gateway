@@ -1,6 +1,6 @@
 # 0015. Core trims
 
-- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped), [0020](0020-symmetric-edges.md) (no head hooks)
+- Status: accepted, amended by [0020](0020-symmetric-edges.md) (`Exchange`, `relayed` and `streams` are HTTP's; the core derives both facts)
 - Date: 2026-09-28
 
 ## Context
@@ -15,21 +15,22 @@ missing beside its writer. Two public types go.
 
 1. **`ProviderContext::extensions()`** reads the call's own map, the one
    `extensions_mut()` writes (amends 0009, 0014).
-2. **`Exchange::relayed: bool` replaces `Relayed`** (0012, 0013). The
-   kernel sets it on a call, and only when the call sends the client's
-   inputs, not its own, to a provider whose format has the client
-   format's name; it is false on a request, response and a translated or
-   own-input call. No plugin can set it: `Call::with_extension` and
-   `on_provider` reach extensions, not the flag, and no plugin reaches a
-   head (0020). `http::credentials(&mut Exchange<Ask>, &HeaderMap)` reads it, so
-   a plugin removing `Credential` still stops pass-through, and
-   `Extensions` are read by no one in the kernel.
+2. **`Exchange::relayed: bool` replaces `Relayed`** (0012, 0013), on
+   HTTP's `Exchange` (0020). It is set only when the call is written from
+   the client's origin, which the core hands over only when the call sends
+   the client's inputs, not its own, to a provider whose format has the
+   client format's name; it is false on a request, response and a
+   translated or own-input call. No plugin can set it: `Call::with_extension`
+   and `on_provider` reach extensions, not the flag, and no plugin
+   reaches a head. `http::credentials(&mut Exchange<Ask>, &HeaderMap)`
+   reads it, so a plugin removing `Credential` still stops pass-through.
 3. **`Exchange::streams: bool` replaces `handle`'s `streaming`**
-   (amends 0012). It means later frames follow the head. The adapter sets
-   it on a request; the kernel sets it on a call that streams the
-   client's inputs. `Gateway::handle(req)` takes it from the request.
-   `HttpTransport` sends a call whole or streamed by it, not by its body's
-   size hint. (0017: `handle` takes and gives erased heads.)
+   (amends 0012), on HTTP's `Exchange`. It means later frames follow the
+   head. The adapter says it of a request (`Accepted::new`); the driver
+   sets it on a call whose inputs are still flowing. The core has no such
+   flag: it asks whether a session's inputs are already ended (0020,
+   rule 1). `HttpTransport` sends a call whole or streamed by it, not by
+   its body's size hint.
 4. **`Fault` loses `in_place`, `is_answer` and `answered`** (amends 0008,
    0011, 0012, 0014). `with_answer(format, answer)` and `answer(format)`
    stay: a same-format refusal relays the provider's bytes. Whether a
