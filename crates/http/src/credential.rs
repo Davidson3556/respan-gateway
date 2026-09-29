@@ -49,7 +49,7 @@ impl Credential {
             }
             head.headers.remove(&name);
         }
-        if let Some(keys) = take_protocol_keys(&mut head.headers) {
+        if let Some(keys) = take_protocol_keys(&mut head.headers, false) {
             credential.headers.append(SEC_WEBSOCKET_PROTOCOL, keys);
         }
         credential.query = take_query(&mut head.uri, is_credential);
@@ -156,43 +156,57 @@ pub(crate) fn take_query(uri: &mut http::Uri, is: impl Fn(&str) -> bool) -> Vec<
     taken
 }
 
+/// The bare `Sec-WebSocket-Protocol` entries after which a browser puts a key,
+/// where it can set no header: Deepgram's `token, <key>` for an API key and
+/// `bearer, <jwt>` for a temporary token. An explicit list, as a name that
+/// only ends in a credential word (`v1.x-auth`) marks nothing: the entry
+/// after it is a protocol.
+const PROTOCOL_MARKERS: [&str; 2] = ["token", "bearer"];
+
 /// Take the entries of `Sec-WebSocket-Protocol` that carry a key out of
 /// `headers`, joined, if any; empty entries go (RFC 6455 4.1 has none). An
 /// entry carries one as `name.value` with a credential `name`
-/// (`openai-insecure-api-key.<key>`), or as the entry after a bare credential
-/// name, which is how a browser sends a key where it can set no header
-/// (Deepgram's `token, <key>`). That name stays: it is no secret, it names
-/// the protocol, and it is what a server answers with.
-pub(crate) fn take_protocol_keys(headers: &mut HeaderMap) -> Option<HeaderValue> {
-    let all: Vec<&str> = headers
+/// (`openai-insecure-api-key.<key>`), or as the entry after a bare
+/// [`PROTOCOL_MARKERS`] name. That marker stays if `markers` is false: it is
+/// no secret, it names the protocol, and it is what a server answers with.
+/// It goes if `markers` is true, for a caller that puts other keys where
+/// these were: a marker with no key after it makes a provider refuse.
+pub(crate) fn take_protocol_keys(headers: &mut HeaderMap, markers: bool) -> Option<HeaderValue> {
+    let all: Vec<String> = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(',').map(str::trim))
         .filter(|e| !e.is_empty())
+        .map(str::to_owned)
         .collect();
     let (mut keys, mut kept) = (Vec::new(), Vec::new());
     let mut named = false;
+    let mut found = false;
     for entry in all {
         let dotted = entry
             .split_once('.')
             .is_some_and(|(name, _)| is_credential(name));
+        let lower = entry.to_ascii_lowercase();
+        let marker = !dotted && !named && PROTOCOL_MARKERS.contains(&lower.as_str());
         if dotted || named {
-            keys.push(entry);
-        } else {
-            kept.push(entry);
+            keys.push(entry.clone());
+        } else if !(marker && markers) {
+            kept.push(entry.clone());
         }
-        named = !dotted && !named && is_credential(entry);
+        found |= marker;
+        named = marker;
     }
-    if keys.is_empty() {
+    if keys.is_empty() && !(found && markers) {
         return None;
     }
-    let keys = HeaderValue::from_str(&keys.join(", ")).ok()?;
     match HeaderValue::from_str(&kept.join(", ")) {
         Ok(kept) if !kept.is_empty() => headers.insert(SEC_WEBSOCKET_PROTOCOL, kept),
         _ => headers.remove(SEC_WEBSOCKET_PROTOCOL),
     };
-    Some(keys)
+    HeaderValue::from_str(&keys.join(", "))
+        .ok()
+        .filter(|k| !k.is_empty())
 }
 
 /// Whether a header or query parameter `name` names a credential.
@@ -337,5 +351,34 @@ mod tests {
     fn a_head_without_credentials_lifts_none() {
         let mut parts = head("/v1/x?alt=sse", &[("x-custom", "c")]);
         assert_eq!(Credential::lift(&mut parts), None);
+    }
+
+    #[test]
+    fn only_a_marker_name_has_the_next_entry_lifted() {
+        // Deepgram's temporary token: `bearer, <jwt>`.
+        let mut parts = head("/", &[("sec-websocket-protocol", "bearer, eyJ.jwt.sig")]);
+        assert!(Credential::lift(&mut parts).is_some());
+        assert_eq!(parts.headers["sec-websocket-protocol"], "bearer");
+        // A name that merely ends in a credential word marks nothing.
+        let mut parts = head("/", &[("sec-websocket-protocol", "v1.x-auth, realtime")]);
+        assert!(Credential::lift(&mut parts).is_none());
+        assert_eq!(
+            parts.headers["sec-websocket-protocol"],
+            "v1.x-auth, realtime"
+        );
+        // A marker at the end has no key to lift.
+        let mut parts = head("/", &[("sec-websocket-protocol", "realtime, token")]);
+        assert!(Credential::lift(&mut parts).is_none());
+        assert_eq!(parts.headers["sec-websocket-protocol"], "realtime, token");
+        // The key on the next header line.
+        let mut parts = head(
+            "/",
+            &[
+                ("sec-websocket-protocol", "token"),
+                ("sec-websocket-protocol", "dg-secret"),
+            ],
+        );
+        assert!(Credential::lift(&mut parts).is_some());
+        assert_eq!(parts.headers["sec-websocket-protocol"], "token");
     }
 }

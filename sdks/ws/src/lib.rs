@@ -22,13 +22,14 @@
 //! | The end | Input stream (client to provider) | Output stream (provider to client) |
 //! |---|---|---|
 //! | Client sends Close | ends clean | the provider is sent Close 1000; its end, however it comes, is clean |
-//! | Client drops without Close | ends `Err(bad_request)` | dropped, so calls and request end `abandoned` |
-//! | Client sends a binary frame | ends `Err(bad_request)` | the client is sent Close 1003 |
+//! | Client drops without Close | ends `Err(abandoned)` | dropped, so calls and request end `abandoned` |
+//! | Client sends a binary frame | ends `Err(abandoned)` | the client is sent Close 1003 |
 //! | Provider sends Close 1000, or none | drop | ends clean; the client is sent Close 1000 |
 //! | Provider sends Close with another code | drop | ends `Err(upstream)` with a [`CloseCode`]; the client is sent that code |
 //! | Provider drops without Close | drop | ends `Err(truncated)`; the client is sent Close 1011 |
 //! | Provider sends a binary frame | drop | ends `Err(upstream)`; the client is sent Close 1011 |
 //! | `serve_ws_until`'s future completes | drop | dropped; the client is sent Close 1001 with the future's reason |
+//! | A filter or plugin refuses an input | ends `Err(fault)` | ends with that fault; the client is sent Close 1011 (or its [`CloseCode`]) with its code as reason |
 //! | A fault ends the response | cut, `abandoned` | the client is sent Close 1011 (or the fault's [`CloseCode`]) with the fault's code as reason |
 //!
 //! A fault's message is never sent to the client, only its code.

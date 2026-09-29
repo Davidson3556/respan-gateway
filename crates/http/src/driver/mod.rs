@@ -40,7 +40,6 @@ use respan_gateway_core::Gateway;
 
 pub use accept::{accept, opening};
 pub use dial::dial;
-pub(crate) use reader::ERROR_BODY_CAP;
 
 use crate::{Body, Frames, RequestHead};
 #[cfg(doc)]

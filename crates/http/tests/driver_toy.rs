@@ -931,3 +931,135 @@ async fn a_complete_bodiless_answer_ends_ok() {
         "client read {got:?}"
     );
 }
+
+/// A complete bodiless answer whose ready body is far past any bound on
+/// bytes (a plugin or in-process dialer answering a HEAD with its whole
+/// content) still ends `ok`: its end was ready, and is read through.
+#[tokio::test]
+async fn a_complete_bodiless_answer_with_a_large_ready_body_ends_ok() {
+    let transport = fnt(|_| {
+        let big = "a".repeat(4 << 20);
+        let body = stream::iter([Ok(Bytes::from(big)), Ok(Bytes::from("DONE"))]).boxed();
+        future::ready(Ok(answer(200, body))).boxed()
+    });
+    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
+    let req = http::Request::builder()
+        .method(http::Method::HEAD)
+        .uri("/x");
+    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    assert_eq!(resp.status(), 200);
+    let _ = read(Some(resp)).await;
+    let end = ended.await;
+    gw.idle().await;
+    assert_eq!(
+        (code(&end), codes(calls.all()), codes(outcomes.all())),
+        (
+            "ok".to_string(),
+            vec!["ok".to_string()],
+            vec!["ok".to_string()]
+        )
+    );
+}
+
+/// A HEAD answer whose body only ever yields, or is always ready and never
+/// ends, still has its head sent: the drain is bounded, on the thread that
+/// runs it.
+#[test]
+fn a_bodiless_answer_whose_body_never_settles_does_not_hold_the_adapter() {
+    type Never = stream::BoxStream<'static, Result<Bytes, Fault>>;
+    let yielding = || -> Never {
+        stream::poll_fn(|cx| {
+            cx.waker().wake_by_ref();
+            Poll::<Option<Result<Bytes, Fault>>>::Pending
+        })
+        .boxed()
+    };
+    let endless = || -> Never { stream::repeat_with(|| Ok(Bytes::from("a"))).boxed() };
+    for (which, body) in ["yielding", "endless"]
+        .into_iter()
+        .zip([yielding as fn() -> Never, endless])
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let status = rt.block_on(async {
+                let transport = fnt(move |_| future::ready(Ok(answer(200, body()))).boxed());
+                let (gw, _, _) = gateway_of(Toy::default(), transport);
+                // Streaming, so the head goes before any frame, as a yielding body has none.
+                let req = http::Request::builder()
+                    .method(http::Method::HEAD)
+                    .uri("/x")
+                    .header("upgrade", "websocket");
+                let req = req.body(respan_gateway_http::full("q")).unwrap();
+                let (resp, _ended) = respan_gateway_http::serve(&gw, req).await;
+                resp.status()
+            });
+            let _ = tx.send(status);
+            // A runtime that hung would block its drop.
+            std::mem::forget(rt);
+        });
+        let status = rx.recv_timeout(Duration::from_secs(10));
+        assert_eq!(
+            status,
+            Ok(StatusCode::OK),
+            "the HEAD's head never left ({which})"
+        );
+    }
+}
+
+/// A job handed to the gateway through the HTTP adapter (as
+/// `examples/jobs_background.rs` does) from an end hook: `serve` is called
+/// in the hook and its future awaited in the job's task. `idle` waits for
+/// the job's request, however the task is scheduled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
+    #[derive(Clone)]
+    struct Job;
+    struct Detach(Arc<AtomicUsize>);
+    #[async_trait]
+    impl respan_gateway_core::Plugin for Detach {
+        async fn on_client_end(
+            &self,
+            cx: &respan_gateway_core::ClientContext,
+            _end: &Result<(), Fault>,
+        ) {
+            if cx.extensions().get::<Job>().is_some() {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                return;
+            }
+            let mut job = http::Request::post("/x")
+                .body(respan_gateway_http::full("job"))
+                .unwrap();
+            let mut marked = Extensions::new();
+            marked.insert(Job);
+            job.extensions_mut().insert(marked);
+            // Called here, so the request counts from here.
+            let serving = respan_gateway_http::serve(&cx.gateway(), job);
+            tokio::spawn(async move {
+                let (resp, ended) = serving.await;
+                let _ = resp.into_body().collect().await;
+                let _ = ended.await;
+            });
+        }
+    }
+    for round in 0..300 {
+        let done = Arc::new(AtomicUsize::new(0));
+        let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "DONE"])))).boxed());
+        let (gw, _, _) = gateway_of(Toy::default(), transport);
+        let gw = gw.plugin("detach", Detach(done.clone())).unwrap();
+        let req = http::Request::post("/x")
+            .body(respan_gateway_http::full("q"))
+            .unwrap();
+        let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+        let _ = resp.into_body().collect().await;
+        let _ = ended.await;
+        tokio::time::timeout(Duration::from_secs(2), gw.idle())
+            .await
+            .unwrap();
+        assert_eq!(done.load(Ordering::SeqCst), 1, "round {round}");
+    }
+}
