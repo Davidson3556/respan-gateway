@@ -153,21 +153,29 @@ fn object(raw: &[u8]) -> Result<Map<String, Value>, Fault> {
     }
 }
 
+/// Refuses fields in a format other than `W` (see
+/// [`Conversation::unsupported_in`]): they cannot be sent as `W`. What a
+/// plugin removed from `unsupported`, it chose to lose. Parts are checked as
+/// they are written.
+fn refuse_foreign<W: Wire>(chat: &Conversation) -> Result<(), Fault> {
+    if chat.unsupported_in.as_deref() == Some(W::NAME) {
+        return Ok(());
+    }
+    if let Some(key) = chat.unsupported.keys().next() {
+        return Err(untranslatable(&format!("'{key}' in the request")));
+    }
+    let plain = |m: &Message| !matches!(m.role, Role::Other(_)) && m.unsupported.is_empty();
+    if !chat.messages.iter().all(plain) {
+        return Err(untranslatable(
+            "messages with fields the kind has no place for",
+        ));
+    }
+    Ok(())
+}
+
 /// A conversation as a new request, if nothing is lost.
 pub(crate) fn write_request<W: Wire>(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
-    // Fields in another format cannot be sent; what a plugin removed from
-    // `unsupported`, it chose to lose. Parts are checked as they are written.
-    if chat.unsupported_in.as_deref() != Some(W::NAME) {
-        if let Some(key) = chat.unsupported.keys().next() {
-            return Err(untranslatable(&format!("'{key}' in the request")));
-        }
-        let plain = |m: &Message| !matches!(m.role, Role::Other(_)) && m.unsupported.is_empty();
-        if !chat.messages.iter().all(plain) {
-            return Err(untranslatable(
-                "messages with fields the kind has no place for",
-            ));
-        }
-    }
+    refuse_foreign::<W>(chat)?;
     let mut v = match W::write(chat)? {
         Value::Object(v) => v,
         _ => Map::new(),
@@ -184,6 +192,7 @@ pub(crate) fn patch_request<W: Wire>(
     before: &Conversation,
     chat: &Conversation,
 ) -> Result<Map<String, Value>, Fault> {
+    refuse_foreign::<W>(chat)?;
     let mut v = object(raw)?;
     // `stream_options` is only valid with a stream.
     if before.stream != chat.stream {
@@ -196,11 +205,6 @@ pub(crate) fn patch_request<W: Wire>(
         set(&mut v, "model", chat.model.clone().map(Into::into));
     }
     W::patch(&mut v, before, chat)?;
-    // What a plugin changed among the unsupported fields: fields it moved
-    // to another format (`unsupported_in`) cannot be sent.
-    if before.unsupported != chat.unsupported && before.unsupported_in != chat.unsupported_in {
-        return Err(untranslatable("changed fields in another format"));
-    }
     patch_fields(&mut v, &before.unsupported, &chat.unsupported);
     Ok(v)
 }

@@ -146,6 +146,7 @@ impl Wire for OpenAiChat {
             },
             user: v["user"].as_str().map(Into::into),
             unsupported: unsupported_fields(v, KNOWN, INERT),
+            unsupported_in: Some(OPENAI.into()),
             ..Conversation::default()
         };
         if chat.user.is_some() {
@@ -1214,11 +1215,12 @@ mod tests {
             Some(&json!("alice"))
         );
         // To another format it is refused; to OpenAI it is kept.
-        let err = write_request::<OpenAiChat>(&chat).err();
+        let err = write_request::<crate::anthropic::AnthropicMessages>(&chat).err();
         assert_eq!(
             err.map(|e| respan_gateway_http::status(&e).as_u16()),
             Some(400)
         );
+        assert!(write_request::<OpenAiChat>(&chat).is_ok());
         assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body));
         // With the unsupported cleared and only plain messages, it is
         // sent.
@@ -1545,8 +1547,8 @@ mod tests {
     fn fields_in_another_format_are_not_patched_into_the_clients_request() {
         let raw: Bytes = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.into();
         let v: Value = serde_json::from_slice(&raw).unwrap_or_default();
-        let mut before = OpenAiChat::read(&v);
-        before.unsupported_in = Some(OpenAiChat::NAME.into());
+        let before = OpenAiChat::read(&v);
+        assert_eq!(before.unsupported_in.as_deref(), Some(OpenAiChat::NAME));
         let mut after = before.clone();
         after.unsupported_in = Some("anthropic-messages".into());
         after
@@ -1562,6 +1564,30 @@ mod tests {
             patched.map(|v| v["thinking"].clone()).ok(),
             Some(json!({ "type": "enabled" }))
         );
+    }
+
+    /// A message's fields tagged as another format's are refused in a
+    /// patched request too, changed message or new one.
+    #[test]
+    fn a_messages_fields_in_another_format_are_not_patched_in() {
+        let raw: Bytes = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.into();
+        let v: Value = serde_json::from_slice(&raw).unwrap_or_default();
+        let before = OpenAiChat::read(&v);
+        let mut changed = before.clone();
+        changed.unsupported_in = Some("anthropic-messages".into());
+        changed.messages[0]
+            .unsupported
+            .insert("cache_control".into(), json!({ "type": "ephemeral" }));
+        let mut added = before.clone();
+        added.unsupported_in = Some("anthropic-messages".into());
+        let mut message = Message::new(Role::User, "more");
+        message.unsupported.insert("x".into(), json!(1));
+        added.messages.push(message);
+        for chat in [changed, added] {
+            assert!(write_request::<OpenAiChat>(&chat).is_err());
+            let patched = patch_request::<OpenAiChat>(&raw, &before, &chat);
+            assert!(patched.is_err(), "sent: {:?}", patched.map(Value::from));
+        }
     }
 
     #[test]
