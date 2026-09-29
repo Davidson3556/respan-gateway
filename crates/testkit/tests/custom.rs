@@ -34,7 +34,7 @@ fn serving(
     plugins: Vec<Arc<dyn Plugin>>,
     target: Option<&str>,
 ) -> Result<Gateway, Fault> {
-    let gw = with_plugins(providers(list)?.serve(format)?, plugins)?;
+    let gw = with_plugins(providers(list)?.client(format)?, plugins)?;
     match target {
         Some(t) => gw.target(t),
         None => Ok(gw),
@@ -441,7 +441,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
             mock.at("http://o.test"),
         );
         providers([openai, add_provider("v2", V2, mock.at("http://v2.test"))])
-            .and_then(|gw| gw.serve(V1)?.serve(respan_gateway_formats::OpenAiChat))
+            .and_then(|gw| gw.client(V1)?.client(respan_gateway_formats::OpenAiChat))
             .and_then(|gw| {
                 plugins
                     .into_iter()
@@ -482,7 +482,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
 // A format of no kind is a kind of one, so serving it needs no provider.
 #[tokio::test]
 async fn a_format_of_no_kind_is_served_like_any_other() {
-    assert!(providers([]).and_then(|gw| gw.serve(Anywhere)).is_ok());
+    assert!(providers([]).and_then(|gw| gw.client(Anywhere)).is_ok());
 }
 
 #[tokio::test]
@@ -1474,8 +1474,8 @@ impl Plugin for NoteFormat {
 #[tokio::test]
 async fn the_first_format_served_that_accepts_a_request_serves_it() {
     let serving_by = |gw: Gateway, anywhere_first: bool| match anywhere_first {
-        true => gw.serve(Anywhere)?.serve(V1),
-        false => gw.serve(V1)?.serve(V2)?.serve(Anywhere),
+        true => gw.client(Anywhere)?.client(V1),
+        false => gw.client(V1)?.client(V2)?.client(Anywhere),
     };
     let served = async |anywhere_first: bool| {
         let note = NoteFormat::default();
@@ -1570,7 +1570,7 @@ async fn a_plugin_for_one_kind_lets_other_traffic_pass_when_it_says_so() {
         add_provider("any", Anywhere, mock.at("http://any.test")),
     ])
     .and_then(|gw| {
-        let gw = gw.serve(V2)?.serve(Anywhere)?;
+        let gw = gw.client(V2)?.client(Anywhere)?;
         gw.plugin("to", ToHeader)?.plugin("polite", PoliteJev)
     })
     .unwrap_or_else(|e| panic!("{e}"));
@@ -1720,8 +1720,8 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
     let any = add_provider("any", Anywhere, mock.at("http://any.test"));
     let gw = providers([any])
         .and_then(|gw| {
-            gw.serve(V1)?
-                .serve(Anywhere)?
+            gw.client(V1)?
+                .client(Anywhere)?
                 .plugin("kinds", kinds.clone())
         })
         .unwrap_or_else(|e| panic!("{e}"));

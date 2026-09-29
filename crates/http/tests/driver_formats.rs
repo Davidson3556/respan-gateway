@@ -115,7 +115,7 @@ impl Harness {
         let gw = Gateway::new()
             .provider("openai", OpenAiChat, openai)
             .and_then(|g| g.provider("anthropic", AnthropicMessages, anthropic))
-            .and_then(|g| g.serve(OpenAiChat)?.serve(AnthropicMessages));
+            .and_then(|g| g.client(OpenAiChat)?.client(AnthropicMessages));
         let gw = gw
             .and_then(|g| g.plugin("outcomes", outcomes.clone()))
             .and_then(|g| g.plugin("head-only", head_only.clone()))
@@ -532,7 +532,7 @@ async fn a_slow_refusal_is_refused() {
     let head_only = HeadOnly::default();
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, SlowRefusal)
-        .and_then(|g| g.serve(OpenAiChat))
+        .and_then(|g| g.client(OpenAiChat))
         .and_then(|g| g.plugin("head-only", head_only.clone()))
         .and_then(|g| g.target("openai"))
         .unwrap();
@@ -572,7 +572,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let outcomes = Outcomes::default();
         let gw = Gateway::new()
             .provider("openai", OpenAiChat, HugeRefusal)
-            .and_then(|g| g.serve(OpenAiChat))
+            .and_then(|g| g.client(OpenAiChat))
             .and_then(|g| g.plugin("outcomes", outcomes.clone()))
             .and_then(|g| g.plugin("head-only", head_only.clone()))
             .and_then(|g| g.target("openai"))

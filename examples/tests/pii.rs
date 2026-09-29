@@ -372,7 +372,7 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
     );
     let gw = Gateway::new()
         .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("pii", Pii)?
         .plugin("pii-input", PiiInput)?
         .target("anthropic")?;

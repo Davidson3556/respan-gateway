@@ -21,7 +21,7 @@ what the client sends and gets, whatever the format.
   are one.
 - A request carries one input or a stream of them, a response one output
   or a stream ([0006](0006-streams-both-ways.md)).
-- `Gateway::provider` and `Gateway::serve` take any `Format` by value and
+- `Gateway::provider` and `Gateway::client` take any `Format` by value and
   erase its types; a binary picks formats by name.
 
 ### Two edges

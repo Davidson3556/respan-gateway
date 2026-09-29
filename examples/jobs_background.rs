@@ -358,7 +358,7 @@ const WEST: &str = "http://west.test";
 
 fn gateway(east: impl Transport, west: impl Transport, jobs: &Jobs) -> Result<Gateway, Fault> {
     Gateway::new()
-        .serve(RESPONSES)?
+        .client(RESPONSES)?
         .provider("east", RESPONSES, east)?
         .provider("west", RESPONSES, west)?
         .plugin("jobs", jobs.clone())

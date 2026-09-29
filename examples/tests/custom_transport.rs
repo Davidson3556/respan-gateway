@@ -34,7 +34,7 @@ async fn the_same_model_answers_in_anthropics_format() -> Result<(), Fault> {
     let model: Model = Arc::new(echo);
     let gw = Gateway::new()
         .provider("local", Local, model)?
-        .serve(AnthropicMessages)?
+        .client(AnthropicMessages)?
         .target("local")?;
     let req = r#"{"model":"echo","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
     let (_, _, body) = read_whole(serve(&gw, post("/v1/messages", req)).await.0).await;

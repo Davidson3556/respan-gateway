@@ -28,7 +28,7 @@ const OPENAI: &str = "http://openai.test/v1";
 fn gateway(mock: &MockTransport, tally: Meter) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("tally", tally)?
         .target("openai")
 }

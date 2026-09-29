@@ -176,7 +176,7 @@ struct Harness {
 fn harness(plan: Plan) -> Harness {
     let (mock, record) = (MockTransport::new(), Record::default());
     let gw = Gateway::new()
-        .serve(OpenAiChat)
+        .client(OpenAiChat)
         .and_then(|g| g.provider("a", OpenAiChat, mock.at(A)))
         .and_then(|g| g.provider("b", OpenAiChat, mock.at(B)))
         .and_then(|g| g.provider("slow", OpenAiChat, Slow(mock.at(A), secs(5))))

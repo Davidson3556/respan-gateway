@@ -47,7 +47,7 @@ impl Format for Local {
         _extensions: Extensions,
         _relay: Option<&Origin>,
         input: Option<&Conversation>,
-        _later: Option<Events<Conversation>>,
+        _inputs: Option<Events<Conversation>>,
     ) -> Result<BoxFuture<'static, Result<Headed<Reply>, Fault>>, Fault> {
         let chat = input.ok_or_else(|| Fault::bad_request("no conversation"))?;
         let answer = model(chat)?;
@@ -74,7 +74,7 @@ fn gateway() -> Result<Gateway, Fault> {
     let model: Model = Arc::new(echo);
     Gateway::new()
         .provider("local", Local, model)?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .target("local")
 }
 

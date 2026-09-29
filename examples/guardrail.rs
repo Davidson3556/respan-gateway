@@ -127,8 +127,8 @@ impl Plugin for Cache {
 fn base(mock: &MockTransport) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
-        .serve(AnthropicMessages)
+        .client(OpenAiChat)?
+        .client(AnthropicMessages)
 }
 
 /// `guard` first, `guard-input` last, and `middle` between them.

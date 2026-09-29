@@ -139,7 +139,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, Scripted { whole })
         .and_then(|g| g.provider("backup", OpenAiChat, Scripted { whole }))
-        .and_then(|g| g.serve(OpenAiChat))
+        .and_then(|g| g.client(OpenAiChat))
         .and_then(|g| g.plugin("probing", probing))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|f| panic!("{f}"));

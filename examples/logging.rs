@@ -180,7 +180,7 @@ fn gateway(mock: &MockTransport, sink: impl Sink) -> Result<Gateway, Fault> {
     };
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("tenancy", Tenancy(&["zdr-bank"]))?
         .plugin("log", log)?
         .target("openai")

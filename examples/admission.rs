@@ -163,7 +163,7 @@ fn gateway(mock: &MockTransport, slots: &Slots, free: Duration) -> Result<Gatewa
     };
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("admission", admission)?
         .target("openai")
 }

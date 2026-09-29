@@ -653,7 +653,7 @@ fn gateway(
     longest: Duration,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .serve(realtime())?
+        .client(realtime())?
         .provider("openai", realtime(), WsTransport::new(provider)?)?
         .target("openai")?
         .plugin("ends", ends.clone())?

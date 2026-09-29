@@ -16,7 +16,7 @@ use respan_gateway_core::*;
 
 fn gateway_of(seen: &Seen, wait: bool, answer: fn() -> Text) -> Gateway {
     Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, seen.transport(wait, answer))
         .unwrap()
@@ -106,7 +106,7 @@ impl Plugin for Tap {
 async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {
     let taps = Arc::default();
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .plugin("tap", Tap(Arc::clone(&taps)))
         .unwrap();
@@ -221,7 +221,7 @@ async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
     }
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, reads_then_refuses_first(bodies.clone()))
         .unwrap()

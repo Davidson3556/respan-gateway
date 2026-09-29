@@ -112,7 +112,7 @@ impl Harness {
             add_provider("openai", OpenAiChat, mock.at(OPENAI)),
             add_provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC)),
         ])
-        .and_then(|gw| gw.serve(OpenAiChat)?.serve(AnthropicMessages))
+        .and_then(|gw| gw.client(OpenAiChat)?.client(AnthropicMessages))
         .and_then(|gw| with_plugins(gw, plugins))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
         Self {
@@ -223,7 +223,7 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
         add_provider("openai", OpenAiChat, at(OPENAI)),
         add_provider("anthropic", AnthropicMessages, at(ANTHROPIC)),
     ])
-    .and_then(|gw| gw.serve(OpenAiChat))
+    .and_then(|gw| gw.client(OpenAiChat))
     .and_then(|gw| {
         let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
         let plugins: Vec<Arc<dyn Plugin>> = vec![

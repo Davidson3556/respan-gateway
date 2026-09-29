@@ -231,7 +231,7 @@ impl Transport for Echo {
 fn msg(echo: &Echo, plugin: impl Plugin) -> Gateway {
     Gateway::new()
         .provider("msg", Msg, echo.clone())
-        .and_then(|g| g.serve(Msg)?.target("msg")?.plugin("p", plugin))
+        .and_then(|g| g.client(Msg)?.target("msg")?.plugin("p", plugin))
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -368,7 +368,7 @@ async fn o11_1_a_head_to_an_endless_plugin_stream_ends_at_its_head() {
 
     let log = Outcomes::default();
     let gw = Gateway::new()
-        .serve(Msg)
+        .client(Msg)
         .and_then(|g| g.plugin("log", log.clone())?.plugin("endless", Endless))
         .unwrap_or_else(|e| panic!("{e}"));
     let mut head = post("/msg", "");
@@ -412,8 +412,8 @@ fn chat(mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, mock.at("http://openai.test/v1"))
         .and_then(|g| {
-            g.serve(OpenAiChat)?
-                .serve(AnthropicMessages)?
+            g.client(OpenAiChat)?
+                .client(AnthropicMessages)?
                 .target("openai")
         });
     let mut named = plugins.into_iter().enumerate();
@@ -489,7 +489,7 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
     let keeps = Keeps::default();
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, keeps.clone())
-        .and_then(|g| g.serve(OpenAiChat)?.target("openai"))
+        .and_then(|g| g.client(OpenAiChat)?.target("openai"))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = read_whole(
         serve(&gw, with_headers("/v1/chat/completions", CHAT))
@@ -673,7 +673,7 @@ async fn r2_an_encoder_gets_another_formats_replies_with_their_origin() {
                 mock.at("http://anthropic.test"),
             )
             .and_then(|g| g.provider("openai", OpenAiChat, mock.at("http://openai.test")))
-            .and_then(|g| g.serve(noting.clone())?.target(provider))
+            .and_then(|g| g.client(noting.clone())?.target(provider))
             .unwrap_or_else(|e| panic!("{e}"));
         match provider {
             "anthropic" => mock.reply("http://anthropic.test", mock::sse(&stream)),

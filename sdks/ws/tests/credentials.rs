@@ -83,7 +83,7 @@ async fn a_transport_with_its_own_key_hides_the_clients() {
         .with_headers(own)
         .unwrap();
     let gateway = Gateway::new()
-        .serve(Raw)
+        .client(Raw)
         .unwrap()
         .provider("p", Raw, transport)
         .unwrap()
@@ -110,7 +110,7 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
     let client_side = JsonEvents::new("one-name", "/v1/realtime");
     let provider_side = JsonEvents::new("another-name", "/other");
     let gateway = Gateway::new()
-        .serve(client_side)
+        .client(client_side)
         .unwrap()
         .provider("p", provider_side, WsTransport::new(probe.base()).unwrap())
         .unwrap()
@@ -160,7 +160,7 @@ impl Plugin for Tenant {
 async fn a_key_set_for_the_call_replaces_the_clients() {
     let probe = Probe::start().await;
     let gateway = Gateway::new()
-        .serve(Raw)
+        .client(Raw)
         .unwrap()
         .provider("p", Raw, WsTransport::new(probe.base()).unwrap())
         .unwrap()

@@ -88,7 +88,7 @@ fn gateway(
     let gw = Gateway::new()
         .provider("p", format.clone(), mock.at(base))
         .and_then(|g| {
-            g.serve(format)?
+            g.client(format)?
                 .plugin("log", log.clone())?
                 .plugin("calls", calls.clone())
         });

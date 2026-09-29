@@ -80,7 +80,7 @@ impl KnownFormat {
         Self {
             name: F::default().name().to_owned(),
             provider: |gateway, name, dialer| gateway.provider(name, F::default(), dialer),
-            serve: |gateway| gateway.serve(F::default()),
+            serve: |gateway| gateway.client(F::default()),
         }
     }
 }

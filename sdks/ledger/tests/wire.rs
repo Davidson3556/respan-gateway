@@ -74,7 +74,7 @@ impl Format for Pipe {
         _extensions: Extensions,
         relay: Option<&Origin>,
         input: Option<&Question>,
-        _later: Option<Events<Question>>,
+        _inputs: Option<Events<Question>>,
     ) -> Result<BoxFuture<'static, Result<Headed<Reply>, Fault>>, Fault> {
         let relayed = relay.and_then(|o| o.downcast_ref::<Question>());
         let question = input.or(relayed);
@@ -146,7 +146,7 @@ async fn accounting_settles_on_a_wire_of_its_own() {
         ledger.open("key", None, 1000);
         let transport = Scripted(Mutex::new(vec![reply]));
         let accounting = Accounting::new(ledger.clone(), quote);
-        let gw = Gateway::new().serve(Pipe);
+        let gw = Gateway::new().client(Pipe);
         let gw = gw.and_then(|g| g.provider("p", Pipe, transport));
         let gw = gw.and_then(|g| g.target("p"));
         let gw = gw.and_then(|g| g.plugin("accounting", accounting));

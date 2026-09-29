@@ -51,7 +51,7 @@ async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<
     let prices = HashMap::from([("small", Price::new(150_000, 600_000))]);
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("refuses", Refuses)?
         .plugin(
             "billing",

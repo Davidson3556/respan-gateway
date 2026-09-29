@@ -76,7 +76,7 @@ earlier plugins, outputs before them.
 
 | Type | Why it exists |
 |---|---|
-| `Gateway` | Built by value (`provider`, `serve`, `plugin`, `target`); `handle` and `idle` are its runtime. |
+| `Gateway` | Built by value (`provider`, `client`, `plugin`, `target`); `handle` and `idle` are its runtime. |
 | `Plugin` | Four hooks: `on_client`, `on_client_end`, `on_provider`, `on_provider_end`. |
 | `Filter<T>` | The one way to edit inputs or outputs as they stream. |
 | `ClientContext` | What `on_client` and its end hook see: the request, its extensions, its filters and wraps, `call`, `take_inputs`, and `gateway` for a job that outlives the request. |
@@ -109,7 +109,7 @@ trait Format { type Input; type Output; type Wire; type Dialer;
       -> BoxFuture<Result<(Option<Origin>, Option<Events<Input>>), Fault>>; // refuses
   fn input(&self, origin: &Origin) -> Option<Result<Input, Fault>> { None }
   fn dial(&self, dialer: &Dialer, extensions: Extensions, relay: Option<&Origin>,
-          input: Option<&Input>, later: Option<Events<Input>>)
+          input: Option<&Input>, inputs: Option<Events<Input>>)
       -> Result<BoxFuture<Result<Headed<Output>, Fault>>, Fault>; }
 // Events<T>   = BoxStream<Result<T, Fault>>
 // Origin      = Arc<dyn Any>: what came with a head, sealed
@@ -124,7 +124,7 @@ The rules, in full in the rustdoc of `Format`:
    adapter awaits `handle`, then that slot (a compiled example,
    both edges and the adapter, is in `Format`'s rustdoc). Its inputs are `Some(events)` if any follow the
    head (a session) and `None` if none do (a one-shot request); `dial` is
-   told the same with `later: None`. `input` gives the input that came
+   told the same with `inputs: None`. `input` gives the input that came
    with the head, only for a request whose inputs are `None`; the gateway
    calls it only when a value is needed, never on an unchanged relay.
 2. **A provider edge classifies its answer at its head.** `dial` returns
@@ -233,6 +233,10 @@ call, so wraps compose with each other and with filters, a call still
 relays and the provider's head still reaches the client. A wrap is pulled
 as its reader reads and cut `abandoned` at the request's end, never with a
 clean end; inputs that fail end the call, and the reply, with that fault.
+`take_until` ends the stream cleanly, so the call ends `abandoned`, as
+if the client had left. To end it with a reason, cut with a fault
+instead: a last item `Err(Fault::new("max_length", ..))`, as
+`MaxLength` in `examples/realtime.rs` does.
 A whole request's one input has no stream to wrap: a plugin awaits in
 `on_client` and edits it with a filter. Filters stay synchronous, so a
 batch stays whole to them.

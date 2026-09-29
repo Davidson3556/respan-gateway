@@ -14,7 +14,7 @@ use respan_gateway_core::*;
 
 fn gateway_of(rec: &Rec) -> Gateway {
     Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider(
             "a",
@@ -74,7 +74,7 @@ async fn a_request_whose_body_fails_is_refused_before_any_plugin() {
 async fn a_rebuilt_gateway_counts_only_its_own_requests() {
     let t = fnt(|_| async { Ok(answer(200, never())) }.boxed());
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, t)
         .unwrap()
@@ -152,7 +152,7 @@ fn noting(seen: &Arc<Mutex<Vec<bool>>>) -> Dialer {
 async fn only_a_call_that_relays_the_clients_message_is_relayed() {
     let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, noting(&seen))
         .unwrap()
@@ -180,7 +180,7 @@ impl Plugin for Cloned {
 async fn a_call_of_the_clients_value_cloned_gets_no_client_origin() {
     let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, noting(&seen))
         .unwrap()

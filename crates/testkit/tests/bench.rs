@@ -46,7 +46,7 @@ async fn time(name: &str, stream: bool, reply: &str, content_type: &'static str)
             OpenAiChat,
             Canned(Bytes::from(reply.to_owned()), content_type),
         )
-        .and_then(|g| g.serve(OpenAiChat))
+        .and_then(|g| g.client(OpenAiChat))
         .and_then(|g| g.target("p"))
         .unwrap_or_else(|f| panic!("{f}"));
     let body = request(stream);

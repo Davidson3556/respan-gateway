@@ -134,7 +134,7 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, slow)?
         .provider("openai-eu", OpenAiChat, mock.at(EU))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("hedge", Hedge)?
         .plugin("accounting", accounting)?;
     mock.reply(EU, answer());

@@ -90,7 +90,7 @@ fn gateway(mock: &MockTransport, egress: Egress) -> Result<Gateway, Fault> {
         .provider("judge", OpenAiChat, mock.at(JUDGE))?
         .provider("cheap", OpenAiChat, mock.at(CHEAP))?
         .provider("strong", OpenAiChat, mock.at(STRONG))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("egress", egress)?
         .plugin("judge", Judge)?
         .target("cheap")

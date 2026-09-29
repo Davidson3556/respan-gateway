@@ -14,7 +14,7 @@ use respan_gateway_core::*;
 
 fn gateway_of(rec: &Rec, dialer: Dialer) -> Gateway {
     Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, dialer)
         .unwrap()
@@ -183,7 +183,7 @@ async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
             async move { Ok(answer(200, slow(chunks))) }.boxed()
         });
         let gw = Gateway::new()
-            .serve(Toy)
+            .client(Toy)
             .unwrap()
             .provider("a", Toy, t)
             .unwrap()
@@ -224,7 +224,7 @@ async fn outputs_end_abandoned_once_the_edge_drops_ended() {
     for streams in [false, true] {
         let rec = Rec::default();
         let gw = Gateway::new()
-            .serve(Toy)
+            .client(Toy)
             .unwrap()
             .plugin("rec", rec.clone())
             .unwrap()

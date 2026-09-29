@@ -816,7 +816,7 @@ async fn remote_session(
         lag: Duration::from_millis(lag),
     };
     let gw = Gateway::new()
-        .serve(realtime())?
+        .client(realtime())?
         .provider(
             "openai",
             realtime(),
@@ -912,7 +912,7 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .serve(realtime())?
+        .client(realtime())?
         .provider(
             "openai",
             realtime(),
@@ -1142,7 +1142,7 @@ async fn l6_a_refused_turn_being_released_as_the_client_left_is_settled() -> Res
         lag: Duration::from_millis(300),
     };
     let gw = Gateway::new()
-        .serve(realtime())?
+        .client(realtime())?
         .provider(
             "openai",
             realtime(),
@@ -1222,7 +1222,7 @@ async fn l6_leave_during_a_wrap(
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .serve(realtime())?
+        .client(realtime())?
         .provider(
             "openai",
             realtime(),

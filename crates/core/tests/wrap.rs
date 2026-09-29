@@ -131,7 +131,7 @@ impl Plugin for Deadline {
 
 fn gateway(body: &Body, read: usize, checked: &Arc<AtomicUsize>, plugin: impl Plugin) -> Gateway {
     Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, body.provider(read))
         .unwrap()
@@ -168,7 +168,7 @@ async fn rest(mut body: BoxStream<'static, Result<String, Fault>>) -> String {
 async fn a_flagged_input_is_refused_and_ends_the_call_with_that_fault() {
     let (body, checked, rec) = (Body::default(), Arc::default(), Rec::default());
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, body.provider(10))
         .unwrap()
@@ -373,7 +373,7 @@ async fn a_panicking_stream_is_a_failure_and_hooks_end_once() {
     }
     let (seen, rec) = (Seen::default(), Rec::default());
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, seen.transport(true, done))
         .unwrap()
@@ -437,7 +437,7 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
     let body = Body::default();
     let refuses = fnt(|_| async { Ok(answer(503, chunks(vec![]))) }.boxed());
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("refuses", Toy, refuses)
         .unwrap()
@@ -493,7 +493,7 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
     }
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, reads_then_refuses_first(bodies.clone()))
         .unwrap()
@@ -517,7 +517,7 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
 async fn a_gate_and_a_deadline_compose_and_the_relay_is_kept() {
     let (body, checked, rec) = (Body::default(), Arc::default(), Rec::default());
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, body.provider(10))
         .unwrap()
@@ -572,7 +572,7 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
     }
     let (body, rec) = (Body::default(), Rec::default());
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, body.provider(10))
         .unwrap()
@@ -628,7 +628,7 @@ async fn l5_a_refusal_before_the_providers_head_is_the_refusal() {
         .boxed()
     });
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, dialer)
         .unwrap()
@@ -706,7 +706,7 @@ async fn wraps_and_filters_apply_in_plugin_order() {
     }
     let seen = Seen::default();
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, seen.transport(true, done))
         .unwrap()
@@ -739,7 +739,7 @@ async fn a_wrap_that_panics_fails_the_reply_internal() {
     }
     let (seen, rec) = (Seen::default(), Rec::default());
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, seen.transport(false, done))
         .unwrap()
@@ -775,7 +775,7 @@ async fn wrapped_requests_end_once_when_dropped_at_every_await() {
             let (rec, seen) = (Rec::default(), Seen::default());
             let c = classifier.0.clone();
             let gw = Gateway::new()
-                .serve(Toy)
+                .client(Toy)
                 .unwrap()
                 // Answers once it read the body, so the drops land while
                 // checked inputs flow.

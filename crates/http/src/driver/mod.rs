@@ -148,7 +148,7 @@ struct Came {
 ///     // ...
 /// }
 /// respan_gateway_http::impl_format!(Echo);
-/// let gateway = respan_gateway_core::Gateway::new().serve(Echo);
+/// let gateway = respan_gateway_core::Gateway::new().client(Echo);
 /// assert!(gateway.is_ok());
 /// ```
 #[macro_export]
@@ -207,7 +207,7 @@ macro_rules! impl_format {
                 extensions: $crate::__private::Extensions,
                 relay: ::core::option::Option<&$crate::__private::Origin>,
                 input: ::core::option::Option<&Self::Input>,
-                later: ::core::option::Option<$crate::__private::Events<Self::Input>>,
+                inputs: ::core::option::Option<$crate::__private::Events<Self::Input>>,
             ) -> ::core::result::Result<
                 $crate::__private::BoxFuture<
                     'static,
@@ -218,7 +218,7 @@ macro_rules! impl_format {
                 >,
                 $crate::__private::Fault,
             > {
-                $crate::__private::dial(self, dialer, extensions, relay, input, later)
+                $crate::__private::dial(self, dialer, extensions, relay, input, inputs)
             }
         }
     };

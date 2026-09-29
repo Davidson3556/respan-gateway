@@ -190,7 +190,7 @@ impl Format for Toy {
         extensions: Extensions,
         relay: Option<&Origin>,
         input: Option<&In>,
-        later: Option<Events<In>>,
+        inputs: Option<Events<In>>,
     ) -> Result<BoxFuture<'static, Result<Headed<Out>, Fault>>, Fault> {
         boom(12);
         if extensions.get::<Unsendable>().is_some() {
@@ -202,10 +202,10 @@ impl Format for Toy {
             (None, Some(origin)) => origin.body.clone(),
             (None, None) => None,
         };
-        let streams = later.is_some();
-        let body = match later {
+        let streams = inputs.is_some();
+        let body = match inputs {
             None => stream::iter([Ok(format!("{}<END>", text.unwrap_or_default()))]).boxed(),
-            Some(later) => stream::iter(text.map(Ok)).chain(written(later)).boxed(),
+            Some(inputs) => stream::iter(text.map(Ok)).chain(written(inputs)).boxed(),
         };
         let call = ToyCall {
             relayed: relay.is_some(),
@@ -249,13 +249,13 @@ fn inputs(frames: Text) -> Events<In> {
         .boxed()
 }
 
-/// A call's later inputs as text frames: each its text, then `<END>` if
+/// A call's inputs inputs as text frames: each its text, then `<END>` if
 /// they ended cleanly, else the failure.
-fn written(later: Events<In>) -> Text {
-    stream::unfold(Some(later), |later| async move {
-        let mut later = later?;
-        match later.next().await {
-            Some(Ok(input)) => Some((Ok(input.0), Some(later))),
+fn written(inputs: Events<In>) -> Text {
+    stream::unfold(Some(inputs), |inputs| async move {
+        let mut inputs = inputs?;
+        match inputs.next().await {
+            Some(Ok(input)) => Some((Ok(input.0), Some(inputs))),
             Some(Err(fault)) => Some((Err(fault), None)),
             None => Some((Ok("<END>".into()), None)),
         }
@@ -769,7 +769,7 @@ pub fn gateway(scenario: usize, rec: &Rec) -> Gateway {
         }
         .boxed()
     });
-    let gw = Gateway::new().serve(Toy).unwrap();
+    let gw = Gateway::new().client(Toy).unwrap();
     let gw = match scenario {
         0 => gw.provider("a", Toy, slow_ok).unwrap().target("a").unwrap(),
         1 => gw

@@ -53,7 +53,7 @@ fn gw(mark: &Arc<()>, how: u8, body: fn() -> Text, dialer: Option<Dialer>) -> Ga
     let dialer =
         dialer.unwrap_or_else(|| fnt(move |_| async move { Ok(answer(200, body())) }.boxed()));
     Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, dialer)
         .unwrap()

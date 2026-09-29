@@ -25,7 +25,7 @@ done"#;
 
 fn gateway(transport: impl Transport, plugin: Option<Touch>) -> Gateway {
     let gw = Gateway::new().provider("mcp", StreamableHttp::default(), transport);
-    let gw = gw.and_then(|g| g.serve(StreamableHttp::default()));
+    let gw = gw.and_then(|g| g.client(StreamableHttp::default()));
     let gw = match plugin {
         Some(p) => gw.and_then(|g| g.plugin("touch", p)),
         None => gw,
@@ -486,7 +486,7 @@ async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
             StreamableHttp::default(),
             StdioTransport::new("sh", ["-c", ECHO]),
         )?
-        .serve(StreamableHttp::default())?
+        .client(StreamableHttp::default())?
         .plugin("auth", Authenticates)?
         .target("mcp")?;
     let session = init(&gw, &[("authorization", "Bearer alice")]).await;

@@ -115,7 +115,7 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     let (head, idle) = (Duration::from_secs(2), Duration::from_secs(1));
     let openai = Watchdog::new(Slow(mock.at(OPENAI), delay), head, idle);
     let gw = Gateway::new()
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .provider("openai", OpenAiChat, openai)?
         .provider("openai-eu", OpenAiChat, mock.at(OPENAI_EU))?
         .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))?

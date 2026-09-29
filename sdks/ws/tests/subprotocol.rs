@@ -20,7 +20,7 @@ fn keyed(probe: &Probe) -> Gateway {
         .with_headers(own)
         .unwrap();
     Gateway::new()
-        .serve(Raw)
+        .client(Raw)
         .unwrap()
         .provider("p", Raw, transport)
         .unwrap()

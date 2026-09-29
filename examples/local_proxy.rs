@@ -25,7 +25,7 @@ const ANTHROPIC: &str = "https://api.anthropic.com";
 fn gateway(transport: impl Transport) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("anthropic", AnthropicMessages, transport)?
-        .serve(AnthropicMessages)?
+        .client(AnthropicMessages)?
         .target("anthropic")
 }
 

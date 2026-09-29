@@ -321,7 +321,7 @@ fn gateway(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault>
         .provider("text-only", OpenAiChat, mock.at(TEXT))?
         .provider("reads-pdf", OpenAiChat, mock.at(PDF))?
         .provider("files", FILES, mock.at(STORE))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)
 }
@@ -346,7 +346,7 @@ fn gateway_claude(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway,
         .provider("text-only", OpenAiChat, mock.at(TEXT))?
         .provider("reads-pdf", AnthropicMessages, mock.at(PDF))?
         .provider("files", FILES, mock.at(STORE))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)
 }

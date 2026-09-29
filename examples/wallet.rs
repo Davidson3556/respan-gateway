@@ -83,7 +83,7 @@ fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault>
     let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         // Register it last, so it prices the call as other plugins left it.
         .plugin("accounting", accounting)?
         .target("openai")

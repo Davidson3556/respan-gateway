@@ -126,7 +126,7 @@ fn gateway(mock: &MockTransport, store: Memory) -> Result<Gateway, Fault> {
     ]);
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         // Last, so its filter sees each reply first.
         .plugin("billing", Billing { prices, store })?
         .target("openai")

@@ -156,7 +156,7 @@ async fn spawned_calls_end_with_their_request() {
             .boxed()
         });
         let gw = Gateway::new()
-            .serve(Toy)
+            .client(Toy)
             .unwrap()
             .provider("a", Toy, t)
             .unwrap()

@@ -60,7 +60,7 @@ impl_format!(Responses);
 fn gateway_with_responses(mock: &MockTransport) -> Result<Gateway, Fault> {
     gateway(mock)?
         .provider("responses", Responses, mock.at(OPENAI))?
-        .serve(Responses)
+        .client(Responses)
 }
 
 #[tokio::test]

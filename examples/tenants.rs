@@ -97,7 +97,7 @@ fn gateway(mock: &MockTransport, tenants: Tenants) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .provider("azure", OpenAiChat, mock.at(AZURE))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("tenants", tenants)
 }
 

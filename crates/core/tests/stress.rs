@@ -104,7 +104,7 @@ async fn a_big_body_relays_whole() {
     });
     let decodes = Arc::new(AtomicUsize::new(0));
     let gw = Gateway::new()
-        .serve(Counted(decodes.clone()))
+        .client(Counted(decodes.clone()))
         .unwrap()
         .provider("a", Toy, t)
         .unwrap()
@@ -162,7 +162,7 @@ async fn wrapped_sessions_dropped_at_random_end_once() {
     for round in 0..400u64 {
         let (rec, seen) = (Rec::default(), Seen::default());
         let gw = Gateway::new()
-            .serve(Toy)
+            .client(Toy)
             .unwrap()
             .provider("p", Toy, seen.transport(false, endless))
             .unwrap()

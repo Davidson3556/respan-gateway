@@ -426,7 +426,7 @@ impl Plugin for Log {
 fn gateway(script: Script, log: &Log, plugin: impl Plugin) -> Gateway {
     Gateway::new()
         .provider("p", Line, script)
-        .and_then(|g| g.serve(Line))
+        .and_then(|g| g.client(Line))
         .and_then(|g| g.target("p"))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("x", plugin))
@@ -536,7 +536,7 @@ async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
     let mock = MockTransport::new();
     let gw = Gateway::new()
         .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))
-        .and_then(|g| g.serve(OpenAiChat))
+        .and_then(|g| g.client(OpenAiChat))
         .and_then(|g| g.target("anthropic"))
         .unwrap_or_else(|e| panic!("{e}"));
     let empty = http::Response::builder().status(StatusCode::NO_CONTENT);
@@ -1420,7 +1420,7 @@ impl Plugin for Model {
 fn pathed(paths: &Paths, model: Option<&'static str>) -> Gateway {
     Gateway::new()
         .provider("pathed", Pathed, paths.clone())
-        .and_then(|g| g.serve(Line))
+        .and_then(|g| g.client(Line))
         .and_then(|g| g.target("pathed"))
         .and_then(|g| g.plugin("model", Model(model)))
         .unwrap_or_else(|e| panic!("{e}"))
@@ -1472,7 +1472,7 @@ async fn v9_1_untranslatable_content_is_the_clients_fault_only_as_decoded() {
 
     let gw = Gateway::new()
         .provider("pathed", Pathed, paths.clone())
-        .and_then(|g| g.serve(Line))
+        .and_then(|g| g.client(Line))
         .and_then(|g| g.target("pathed"))
         .and_then(|g| g.plugin("tag", Tag))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1639,7 +1639,7 @@ async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
     let script = Script::default().then(StatusCode::OK, vec!["x:boom\n"]);
     let gw = Gateway::new()
         .provider("posted", Posted, script.clone())
-        .and_then(|g| g.serve(Line))
+        .and_then(|g| g.client(Line))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("x", Fallback(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1706,7 +1706,7 @@ async fn r10_6_first_is_an_item_only_for_an_input_not_the_clients() {
         let script = Script::default().then(StatusCode::OK, vec!["i:ok\ne\n"]);
         let gw = Gateway::new()
             .provider("p", Seen(seen.clone()), script)
-            .and_then(|g| g.serve(Line))
+            .and_then(|g| g.client(Line))
             .and_then(|g| g.target("p"))
             .and_then(|g| g.plugin("x", Touch(to)))
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1769,7 +1769,7 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let script = Script::default().then(StatusCode::OK, vec!["i:hi\n", "u:5\ne\n"]);
     let gw = Gateway::new()
         .provider("posted", Posted, script)
-        .and_then(|g| g.serve(Line))
+        .and_then(|g| g.client(Line))
         .and_then(|g| g.target("posted"))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("meter", Meter(log.clone())))
@@ -1864,7 +1864,7 @@ async fn r11_first_is_a_changed_input_even_with_the_clients_bytes() {
     let script = Script::default().then(StatusCode::OK, vec!["i:ok\ne\n"]);
     let gw = Gateway::new()
         .provider("p", InPath(seen.clone()), script)
-        .and_then(|g| g.serve(Line))
+        .and_then(|g| g.client(Line))
         .and_then(|g| g.target("p"))
         .and_then(|g| g.plugin("x", Change))
         .unwrap_or_else(|e| panic!("{e}"));

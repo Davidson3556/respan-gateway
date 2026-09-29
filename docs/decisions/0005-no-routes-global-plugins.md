@@ -16,7 +16,7 @@ chain per route lets a guardrail run on one endpoint and not the next
 
 - `Format::accepts(&self, wire)` decides from the wire it is handed; for an
   HTTP format (`Codec::accepts`) that is the request head.
-- `Gateway::serve(format)` adds a format clients speak; a wire goes to
+- `Gateway::client(format)` adds a format clients speak; a wire goes to
   the first that accepts it. One none accepts is an `Err(not_found)` in
   `handle`'s end, which the adapter writes as a plain 404.
 - First-party formats match method and path suffix (`formats::posts_to`):
@@ -63,7 +63,7 @@ chain per route lets a guardrail run on one endpoint and not the next
   ```rust
   let gw = Gateway::new()
       .provider("openai", OpenAiChat, HttpTransport::new(url)?)?
-      .serve(OpenAiChat)?
+      .client(OpenAiChat)?
       .plugin("guard", NoSecrets)?
       .plugin("pii", Pii)?
       .target("openai")?;

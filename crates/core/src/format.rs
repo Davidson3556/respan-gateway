@@ -27,7 +27,7 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 
 /// A format: one protocol's view of a kind, and its two edges, which the
 /// gateway routes events between. Serve one to clients with
-/// [`Gateway::serve`](crate::Gateway::serve), call a provider in one with
+/// [`Gateway::client`](crate::Gateway::client), call a provider in one with
 /// [`Gateway::provider`](crate::Gateway::provider), and hand the gateway a
 /// client's connection with [`Gateway::handle`](crate::Gateway::handle).
 /// HTTP's formats implement it through `respan_gateway_http::impl_format!`
@@ -155,7 +155,7 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 ///
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> Result<(), Fault> {
-/// let gw = Gateway::new().serve(Echo)?.provider("echo", Echo, ())?.target("echo")?;
+/// let gw = Gateway::new().client(Echo)?.provider("echo", Echo, ())?.target("echo")?;
 ///
 /// // The adapter: hand over the wire with a slot and await `handle`, then
 /// // write what the slot holds and call `Ended` once its end is out.
@@ -233,7 +233,7 @@ pub trait Format: Send + Sync + 'static {
     /// - `relay`: the client's origin, only on a relay.
     /// - `input`: the first input, to write from its value; `None` on a
     ///   relay means the origin's own, as it came.
-    /// - `later`: the inputs that follow; `None` if none do.
+    /// - `inputs`: the inputs that follow; `None` if none do.
     ///
     /// An input this format cannot write fails with whose fault it is:
     /// [`codes::BAD_REQUEST`](crate::codes::BAD_REQUEST) if it says what the
@@ -252,7 +252,7 @@ pub trait Format: Send + Sync + 'static {
         extensions: Extensions,
         relay: Option<&Origin>,
         input: Option<&Self::Input>,
-        later: Option<Events<Self::Input>>,
+        inputs: Option<Events<Self::Input>>,
     ) -> Result<BoxFuture<'static, Result<Headed<Self::Output>, Fault>>, Fault>;
 }
 
@@ -297,7 +297,7 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
         extensions: Extensions,
         relay: Option<&Origin>,
         input: Option<&AnyInput>,
-        later: Option<AnyInputs>,
+        inputs: Option<AnyInputs>,
     ) -> Result<AnyDialed, Fault>;
     /// Whether any of `outputs` is content.
     fn any_content(&self, outputs: &Values) -> bool;
@@ -397,7 +397,7 @@ impl<F: Format> AnyFormat for Erased<F> {
         extensions: Extensions,
         relay: Option<&Origin>,
         input: Option<&AnyInput>,
-        later: Option<AnyInputs>,
+        inputs: Option<AnyInputs>,
     ) -> Result<AnyDialed, Fault> {
         let dialer = dialer
             .downcast_ref()
@@ -409,8 +409,8 @@ impl<F: Format> AnyFormat for Erased<F> {
                     .ok_or_else(Fault::wrong_kind::<F::Input>)
             })
             .transpose()?;
-        let later = later.map(|later| later.map(|item| item.and_then(owned)).boxed());
-        let dialed = self.format.dial(dialer, extensions, relay, input, later)?;
+        let inputs = inputs.map(|inputs| inputs.map(|item| item.and_then(owned)).boxed());
+        let dialed = self.format.dial(dialer, extensions, relay, input, inputs)?;
         Ok(dialed
             .map_ok(|(origin, events)| (origin, events.map(erase)))
             .boxed())

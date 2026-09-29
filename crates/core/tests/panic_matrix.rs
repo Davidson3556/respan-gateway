@@ -64,7 +64,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                         .boxed()
                     });
                     let gw = Gateway::new()
-                        .serve(Toy)
+                        .client(Toy)
                         .unwrap()
                         .provider("a", Toy, transport)
                         .unwrap()

@@ -50,7 +50,7 @@ impl Plugin for OutWrap {
 
 fn gw(body: fn() -> Text, wrap: OutWrap, meter: &Meter, rec: &Rec) -> Gateway {
     Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider(
             "p",
@@ -265,7 +265,7 @@ async fn l5_a_retry_after_part_of_a_wrapped_session_was_read() {
         .boxed()
     });
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, dialer)
         .unwrap()
@@ -314,7 +314,7 @@ async fn l5_a_fallback_mid_check_gets_each_input_once() {
     }
     let seen = Seen::default();
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("p", Toy, {
             // The first dial waits on its body before answering (so it

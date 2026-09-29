@@ -39,7 +39,7 @@ fn is_done(text: &str) -> bool {
 fn gateway_of(base: &str, plugins: Vec<(&str, Arc<dyn Plugin>)>) -> (Gateway, Outcomes, Calls) {
     let (ends, calls) = (Outcomes::default(), Calls::default());
     let mut gateway = Gateway::new()
-        .serve(events())
+        .client(events())
         .unwrap()
         .provider("p", events(), WsTransport::new(base).unwrap())
         .unwrap()

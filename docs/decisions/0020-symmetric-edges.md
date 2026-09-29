@@ -199,3 +199,9 @@ Loop 5: `Half` is `Headed`, the rename loop 3 deferred, as no other branch
 rewrites the formats now. `Format::opening` is `Format::input` and
 `Gateway::handle` resolves `Result<(), Fault>`; the reasons are in 0023's
 history.
+
+Loop 6: `Gateway::serve(format)` is `Gateway::client(format)`, the pair of
+`provider(name, format, dialer)`: one method per edge. It frees `serve` for
+the HTTP adapter's `http::serve`. `Format::dial`'s streamed inputs are
+`inputs`, as in `accept`. The binary's config key stays `serve:`, the
+server's list of formats.

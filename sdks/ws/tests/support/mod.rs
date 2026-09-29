@@ -592,7 +592,7 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
     let (ends, calls) = (Outcomes::default(), Calls::default());
     let transport = WsTransport::new(base).unwrap();
     let gateway = Gateway::new()
-        .serve(Raw)
+        .client(Raw)
         .unwrap()
         .provider("p", Raw, transport)
         .unwrap()

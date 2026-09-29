@@ -38,7 +38,7 @@ pub(crate) struct Inner {
 
 /// The gateway. It has no server: an adapter or embedder hands it requests
 /// and owns their wire's rules. Built by value, each setting checked as
-/// given: `Gateway::new().provider(..)?.serve(..)?.plugin(..)?.target(..)?`.
+/// given: `Gateway::new().provider(..)?.client(..)?.plugin(..)?.target(..)?`.
 #[derive(Clone, Default)]
 pub struct Gateway {
     pub(crate) inner: Arc<Inner>,
@@ -64,7 +64,7 @@ impl Gateway {
 
     /// Add provider `name`, speaking `format`, reached through `dialer`.
     /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the name is
-    /// taken or the format breaks [`Gateway::serve`]'s rules.
+    /// taken or the format breaks [`Gateway::client`]'s rules.
     pub fn provider<F: Format>(
         self,
         name: impl Into<String>,
@@ -75,12 +75,12 @@ impl Gateway {
         self.add_provider(name.into(), Arc::new(Erased::new(format)), dialer)
     }
 
-    /// Serve clients of `format`: a wire handed to [`Gateway::handle`] goes
+    /// Accept clients that speak `format`: a wire handed to [`Gateway::handle`] goes
     /// to the first format served that [`accepts`](Format::accepts) it.
     /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if its input and
     /// output types are one, or a format of its name has another kind, wire
     /// or dialer.
-    pub fn serve<F: Format>(self, format: F) -> Result<Gateway, Fault> {
+    pub fn client<F: Format>(self, format: F) -> Result<Gateway, Fault> {
         self.add_served(Arc::new(Erased::new(format)))
     }
 
@@ -128,7 +128,7 @@ impl Gateway {
         self.inner.in_flight.idle().await;
     }
 
-    /// Serve `wire` in the first format served ([`Gateway::serve`]) that
+    /// Serve `wire` in the first format served ([`Gateway::client`]) that
     /// [`accepts`](Format::accepts) it: resolves `Ok` once its client edge
     /// has its reply, whose end the edge tells with [`Ended`](crate::Ended).
     /// The caller built `wire`, so it knows its type; a format of another

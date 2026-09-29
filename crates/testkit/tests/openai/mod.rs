@@ -86,7 +86,7 @@ pub fn gateway(
     plugins: Vec<Arc<dyn Plugin>>,
     target: Option<&str>,
 ) -> Result<Gateway, Fault> {
-    let gw = with_plugins(providers(list)?.serve(OpenAiChat)?, plugins)?;
+    let gw = with_plugins(providers(list)?.client(OpenAiChat)?, plugins)?;
     match target {
         Some(t) => gw.target(t),
         None => Ok(gw),

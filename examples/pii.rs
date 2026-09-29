@@ -130,7 +130,7 @@ fn gateway_with(
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("pii", Pii)?;
     middle(gw)?.plugin("pii-input", PiiInput)?.target("openai")
 }

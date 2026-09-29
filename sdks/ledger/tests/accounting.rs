@@ -65,7 +65,7 @@ fn wallet(limit: Amount) -> MemoryLedger {
 /// `first`, then accounting over `ledger`, calling provider `p` on `mock`.
 fn gateway(mock: &MockTransport, first: impl Plugin, ledger: impl Ledger) -> Gateway {
     let accounting = Accounting::new(ledger, quote).ttl(Duration::from_millis(200));
-    let gw = Gateway::new().serve(OpenAiChat);
+    let gw = Gateway::new().client(OpenAiChat);
     let gw = gw.and_then(|g| g.provider("p", OpenAiChat, mock.at(P)));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.and_then(|g| g.plugin("first", first));
@@ -309,7 +309,7 @@ impl Transport for NoHead {
 async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     let ledger = wallet(1000);
     let accounting = Accounting::new(ledger.clone(), quote);
-    let gw = Gateway::new().serve(OpenAiChat);
+    let gw = Gateway::new().client(OpenAiChat);
     let gw = gw.and_then(|g| g.provider("p", OpenAiChat, NoHead));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.and_then(|g| g.plugin("accounting", accounting));

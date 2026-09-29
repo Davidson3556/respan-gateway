@@ -27,7 +27,7 @@ where
 {
     Gateway::new()
         .provider("local", format, transport)
-        .and_then(|g| g.serve(OpenAiChat))
+        .and_then(|g| g.client(OpenAiChat))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -522,7 +522,7 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     let log = Log::default();
     let gateway = Gateway::new()
         .provider("local", OpenAiChat, http(format!("{provider}/v1")))
-        .and_then(|g| g.serve(OpenAiChat))
+        .and_then(|g| g.client(OpenAiChat))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
@@ -718,7 +718,7 @@ async fn l6_bodiless(with_304: bool) {
     let ends = L6Ends::default();
     let gateway = Gateway::new()
         .provider("any", Passthrough, http(provider.clone()))
-        .and_then(|g| g.serve(Passthrough))
+        .and_then(|g| g.client(Passthrough))
         .and_then(|g| g.plugin("ends", ends.clone()))
         .and_then(|g| g.target("any"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));

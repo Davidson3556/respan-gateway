@@ -648,7 +648,7 @@ async fn plugins_run_in_registration_order_on_both_edges() {
     let mock = MockTransport::new();
     // Registered d, b, a, c, and they run in that order.
     let gw = providers([provider(&mock, "openai", OPENAI, None)])
-        .and_then(|g| g.serve(OpenAiChat)?.target("openai"))
+        .and_then(|g| g.client(OpenAiChat)?.target("openai"))
         .and_then(|g| {
             let g = g.plugin("d", named("d"))?.plugin("b", named("b"))?;
             g.plugin("a", named("a"))?.plugin("c", named("c"))
@@ -1973,7 +1973,7 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mock = MockTransport::new();
     let gw = providers([provider(&mock, "openai", OPENAI, Some("Bearer sk-test"))])
-        .and_then(|g| g.serve(OpenAiChat)?.serve(AnthropicMessages))
+        .and_then(|g| g.client(OpenAiChat)?.client(AnthropicMessages))
         .and_then(|g| g.plugin("seen", Seen(seen.clone()))?.target("openai"))
         .expect("builds");
     let messages = r#"{"model":"gpt-x","max_tokens":10,"messages":[]}"#;
@@ -3868,7 +3868,7 @@ impl Encoder<Reply, ResponseHead> for Garbling {
 /// through `openai`.
 fn fragile(mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
     let list = [provider(mock, "openai", OPENAI, None)];
-    let gw = providers(list).and_then(|g| g.serve(Fragile));
+    let gw = providers(list).and_then(|g| g.client(Fragile));
     let gw = gw.and_then(|g| with_plugins(g, plugins)?.target("openai"));
     gw.unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -4039,7 +4039,7 @@ async fn a_translated_304_is_a_bad_gateway() {
     const ANTHROPIC: &str = "http://anthropic.test";
     let mock = MockTransport::new();
     let p = add_provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC));
-    let gw = providers([p]).and_then(|g| g.serve(OpenAiChat)?.target("anthropic"));
+    let gw = providers([p]).and_then(|g| g.client(OpenAiChat)?.target("anthropic"));
     let gw = gw.unwrap_or_else(|e| panic!("gateway: {e}"));
     let not_modified = http::Response::builder().status(StatusCode::NOT_MODIFIED);
     mock.reply(ANTHROPIC, not_modified.body(Vec::new()).unwrap_or_default());
@@ -5129,7 +5129,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
         Arc::new(meter.clone()),
     ];
     let gw = providers([provider(&mock, "openai", OPENAI, None)])
-        .and_then(|g| g.serve(tally.clone()))
+        .and_then(|g| g.client(tally.clone()))
         .and_then(|g| with_plugins(g, chain))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));

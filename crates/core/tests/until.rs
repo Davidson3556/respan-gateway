@@ -36,7 +36,7 @@ async fn run(
         .boxed()
     });
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, t)
         .unwrap()
@@ -119,7 +119,7 @@ async fn time_of(mode: u8, lead: &'static str, n: usize) -> Duration {
         .boxed()
     });
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, t)
         .unwrap()
@@ -178,7 +178,7 @@ async fn until_content_holds_a_response_without_content_to_its_end() {
         }
     }
     let gw = Gateway::new()
-        .serve(Toy)
+        .client(Toy)
         .unwrap()
         .provider("a", Toy, t)
         .unwrap()

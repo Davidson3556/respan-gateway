@@ -372,8 +372,8 @@ fn gateway(mock: &MockTransport, target: &str, plugin: impl Plugin) -> Result<Ga
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))?
-        .serve(OpenAiChat)?
-        .serve(AnthropicMessages)?
+        .client(OpenAiChat)?
+        .client(AnthropicMessages)?
         .plugin("guard", plugin)?
         .target(target)
 }

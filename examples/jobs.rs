@@ -170,7 +170,7 @@ const OPENAI: &str = "http://openai.test/v1";
 fn gateway(mock: &MockTransport, store: &Arc<Memory>) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("idempotent", Idempotent(store.clone()))?
         .target("openai")
 }

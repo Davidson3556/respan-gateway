@@ -329,7 +329,7 @@ impl Seen {
 fn gateway_of(codec: Toy, transport: Fnt) -> (Gateway, Calls, Outcomes) {
     let (calls, outcomes) = (Calls::default(), Outcomes::default());
     let gw = Gateway::new()
-        .serve(Toy::default())
+        .client(Toy::default())
         .unwrap()
         .provider("a", codec, transport)
         .unwrap()
@@ -674,7 +674,7 @@ async fn a_refusal_no_codec_can_write_keeps_its_body_even_to_a_head() {
         ..Toy::default()
     };
     // No target: every request is refused.
-    let gw = Gateway::new().serve(toy).unwrap();
+    let gw = Gateway::new().client(toy).unwrap();
     for method in [http::Method::POST, http::Method::HEAD] {
         let req = http::Request::builder().method(method.clone()).uri("/x");
         let req = req.body(respan_gateway_http::full("q")).unwrap();
@@ -813,7 +813,7 @@ async fn a_client_that_leaves_ends_the_request_before_its_call() {
     let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "b", "DONE"])))).boxed());
     let calls = Calls::default();
     let gw = Gateway::new()
-        .serve(Toy::default())
+        .client(Toy::default())
         .unwrap()
         .provider("a", Toy::default(), transport)
         .unwrap()
@@ -885,7 +885,7 @@ async fn provider_saw(plugin: impl respan_gateway_core::Plugin) -> Vec<(bool, St
         })
     };
     let gw = Gateway::new()
-        .serve(Toy::default())
+        .client(Toy::default())
         .unwrap()
         .provider("a", Toy::default(), noting)
         .unwrap()

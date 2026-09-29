@@ -284,7 +284,7 @@ fn talk(echo: &Echo, mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> (Ga
         add_provider("echo", Talk, echo.clone()),
         add_provider("openai", OpenAiChat, mock.at(OPENAI)),
     ];
-    let gw = providers(list).and_then(|g| g.serve(Talk));
+    let gw = providers(list).and_then(|g| g.client(Talk));
     let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
     let gw = gw.and_then(|g| with_plugins(g, plugins));
     let gw = gw.and_then(|g| g.target("echo"));
@@ -611,7 +611,7 @@ fn heard(reply: &Reply) -> Option<Heard> {
 /// recording every call, with no target.
 fn talk_to(list: Vec<common::AddProvider>, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Calls) {
     let calls = Calls::default();
-    let gw = providers(list).and_then(|g| g.serve(Talk));
+    let gw = providers(list).and_then(|g| g.client(Talk));
     let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
     let gw = gw.and_then(|g| with_plugins(g, plugins));
     (gw.unwrap_or_else(|e| panic!("{e}")), calls)
@@ -1167,7 +1167,7 @@ impl_format!(Raw);
 async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
     let echo = Echo::default();
     let gw = providers([add_provider("raw", Raw, echo.clone())])
-        .and_then(|g| g.serve(Raw)?.target("raw"))
+        .and_then(|g| g.client(Raw)?.target("raw"))
         .unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
 
@@ -1474,7 +1474,7 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
     const RAW: &str = "http://raw.test";
     let (mock, calls) = (MockTransport::new(), Calls::default());
     let gw = providers([add_provider("raw", Raw, mock.at(RAW))])
-        .and_then(|g| g.serve(Raw)?.target("raw")?.plugin("calls", calls.clone()))
+        .and_then(|g| g.client(Raw)?.target("raw")?.plugin("calls", calls.clone()))
         .unwrap_or_else(|e| panic!("{e}"));
     let empty = http::Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1703,7 +1703,7 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
     let echo = Echo::default();
     let gw = Gateway::new()
         .provider("echo", Strict, echo.clone())
-        .and_then(|g| g.serve(Strict))
+        .and_then(|g| g.client(Strict))
         .and_then(|g| g.plugin("p", P))
         .and_then(|g| g.target("echo"))
         .unwrap_or_else(|e| panic!("{e}"));

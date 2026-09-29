@@ -150,7 +150,7 @@ fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault>
     let accounting = Accounting::new(ledger, quote);
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .serve(OpenAiChat)?
+        .client(OpenAiChat)?
         .plugin("cap", Cap)? // before accounting
         .plugin("accounting", accounting)?
         .target("openai")
