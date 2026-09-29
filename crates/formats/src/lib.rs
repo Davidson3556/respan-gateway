@@ -49,12 +49,27 @@ pub fn posts_to(head: &RequestHead, suffix: &str) -> bool {
     head.method == http::Method::POST && path_ends_with(head, suffix)
 }
 
-/// Whether a request's path ends in `suffix`, however it is spelled: percent
-/// escapes decoded and trailing `/`s dropped, so `/v1/chat/completions/` and
-/// `/v1/chat/completions%2F` match as the plain one does.
+/// A path as every front end reads it: percent escapes decoded, `;`
+/// parameters dropped, dot-segments removed (RFC 3986 5.2.4) and empty
+/// segments collapsed, so `/v1/chat/./completions`, `/v1//chat/completions`
+/// and `/x/../v1/chat/completions/` all spell `/v1/chat/completions`.
+pub fn clean_path(path: &str) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for segment in respan_gateway_http::percent_decode(path).split('/') {
+        let segment = segment.split(';').next().unwrap_or_default();
+        match segment {
+            "" | "." => {}
+            ".." => drop(kept.pop()),
+            _ => kept.push(segment.to_owned()),
+        }
+    }
+    kept.iter().fold(String::new(), |out, s| out + "/" + s)
+}
+
+/// Whether a request's path ends in `suffix`, however it is spelled (see
+/// [`clean_path`]).
 pub fn path_ends_with(head: &RequestHead, suffix: &str) -> bool {
-    let path = respan_gateway_http::percent_decode(head.uri.path());
-    path.trim_end_matches('/').ends_with(suffix)
+    clean_path(head.uri.path()).ends_with(&clean_path(suffix))
 }
 
 /// Set a call's path, relative to the transport, keeping its query.
@@ -195,6 +210,28 @@ mod tests {
             let head = head(http::Method::POST, path);
             assert!(posts_to(&head, "/chat/completions"), "{path}");
         }
+        // What a front end would resolve to the chat path is chat, or a
+        // passthrough served after it would relay the call past chat plugins.
+        for path in [
+            "/v1/chat//completions",
+            "/v1/chat/./completions",
+            "/v1/chat/x/../completions",
+            "/x/../v1/chat/completions",
+            "/v1/chat/completions/.",
+            "/v1/chat/%2e/completions",
+            "/v1/chat/completions;jsessionid=1",
+            "/v1/chat/x/..;/completions",
+            "/../../v1/chat/completions",
+        ] {
+            let head = head(http::Method::POST, path);
+            assert!(posts_to(&head, "/chat/completions"), "{path}");
+        }
+        let other = head(http::Method::POST, "/v1/chat/completionsx");
+        assert!(!posts_to(&other, "/chat/completions"));
+        let other = head(http::Method::POST, "/v1/chat/x/completions");
+        assert!(!posts_to(&other, "/chat/completions"));
+        let other = head(http::Method::POST, "/v1/chat/completions/../x");
+        assert!(!posts_to(&other, "/chat/completions"));
         let other = head(http::Method::POST, "/v1/chat/completionsx");
         assert!(!posts_to(&other, "/chat/completions"));
         let get = head(http::Method::GET, "/v1/chat/completions");

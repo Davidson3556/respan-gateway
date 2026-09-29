@@ -84,8 +84,8 @@ impl Conversation {
     }
 
     /// The body it was decoded from, if `format` decoded it.
-    pub fn origin(&self, format: &str) -> Option<&Came<Conversation>> {
-        self.origin.origin(format)
+    pub fn came_in(&self, format: &str) -> Option<&Came<Conversation>> {
+        self.origin.came_in(format)
     }
 }
 
@@ -365,8 +365,8 @@ impl Reply {
     }
 
     /// The message it was decoded from, if `format` decoded it.
-    pub fn origin(&self, format: &str) -> Option<&Came<Reply>> {
-        self.origin.origin(format)
+    pub fn came_in(&self, format: &str) -> Option<&Came<Reply>> {
+        self.origin.came_in(format)
     }
 }
 

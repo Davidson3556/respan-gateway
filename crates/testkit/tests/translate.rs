@@ -507,10 +507,10 @@ async fn a_request_that_cannot_be_translated_is_refused() {
     assert!(h.mock.sent().is_empty());
 }
 
-// The same request, edited by a plugin, is the plugin's fault: a 500, as
-// the conversation no longer says what the client's bytes said.
+// The same request, edited by a plugin whose edit does not cause the
+// failure, is still the client's fault: its own request fails the same way.
 #[tokio::test]
-async fn an_edited_request_that_cannot_be_translated_is_the_gateways_fault() {
+async fn an_edit_that_does_not_cause_the_failure_leaves_it_the_clients_fault() {
     /// Edits every conversation.
     struct Edit;
 
@@ -528,6 +528,34 @@ async fn an_edited_request_that_cannot_be_translated_is_the_gateways_fault() {
     let h = Harness::new(vec![Arc::new(Edit)]);
     let format = json!({ "type": "json_object" });
     let body = json!({ "model": "claude-x", "messages": [], "response_format": format });
+
+    let (status, _) = h.text(call(CHAT, body.to_string())).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::BAD_REQUEST));
+}
+
+// An edit that itself makes the request untranslatable is the plugin's
+// fault: the client's own request translates.
+#[tokio::test]
+async fn an_edit_that_causes_the_failure_is_the_gateways_fault() {
+    /// Adds a field Anthropic has no place for.
+    struct Break;
+
+    #[async_trait]
+    impl Plugin for Break {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(|chat: &mut Conversation| {
+                let format = json!({ "type": "json_object" });
+                chat.unsupported.insert("response_format".into(), format);
+                Ok(())
+            })?;
+            Ok(None)
+        }
+    }
+
+    let h = Harness::new(vec![Arc::new(Break)]);
+    let body = json!({ "model": "claude-x", "max_tokens": 9, "messages": [{ "role": "user", "content": "hi" }] });
 
     let (status, _) = h.text(call(CHAT, body.to_string())).await;
 
@@ -2498,5 +2526,257 @@ async fn an_error_in_a_success_goes_as_it_came_only_to_its_format() {
     assert_eq!(
         (&v["type"], &v["error"]["message"]),
         (&json!("error"), &json!("boom"))
+    );
+}
+
+/// Aliases the model, as a tenant or routing plugin does; touches nothing else.
+struct Alias;
+
+#[async_trait]
+impl Plugin for Alias {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.filter(|chat: &mut Conversation| {
+            chat.model = Some("claude-sonnet-x".into());
+            Ok(())
+        })?;
+        Ok(None)
+    }
+}
+
+/// The client's own untranslatable field, unchanged by the plugin (which only
+/// aliased the model), is still the client's fault: a 400, as it is without
+/// the plugin.
+#[tokio::test]
+async fn an_untranslatable_client_field_stays_the_clients_fault_when_a_plugin_only_aliases_the_model()
+ {
+    let h = Harness::new(vec![Arc::new(Alias)]);
+    let format = json!({ "type": "json_object" });
+    let body = json!({ "model": "claude-x", "messages": [{ "role": "user", "content": "hi" }], "response_format": format });
+    let (status, text) = h.text(call(CHAT, body.to_string())).await;
+    let code = match h.log.only() {
+        Err(f) => f.code().to_owned(),
+        Ok(()) => "ok".into(),
+    };
+    assert_eq!(
+        (status, code.as_str()),
+        (StatusCode::BAD_REQUEST, codes::BAD_REQUEST),
+        "{text}"
+    );
+}
+
+const OPENAI_PARALLEL_STREAM: &[&str] = &[
+    // Both calls start in one chunk, then their arguments come by index.
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}]}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"b\\\"}\"}}]}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: [DONE]\n\n",
+];
+
+/// OpenAI names each tool call's fragment by `index`; the Anthropic client
+/// must get each call's arguments in its own block.
+#[tokio::test]
+async fn parallel_openai_tool_calls_keep_their_arguments_for_an_anthropic_client() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(OPENAI_PARALLEL_STREAM));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    let sent = events(&out);
+    let mut by_block: std::collections::BTreeMap<u64, (String, String)> = Default::default();
+    for (_, d) in &sent {
+        let i = d["index"].as_u64().unwrap_or(99);
+        if d["type"] == "content_block_start" {
+            by_block.entry(i).or_default().0 =
+                d["content_block"]["id"].as_str().unwrap_or("").into();
+        }
+        if let Some(p) = d["delta"]["partial_json"].as_str() {
+            by_block.entry(i).or_default().1.push_str(p);
+        }
+    }
+    let got: Vec<(String, String)> = by_block.into_values().collect();
+    assert_eq!(
+        got,
+        vec![
+            ("call_a".into(), r#"{"path":"a"}"#.into()),
+            ("call_b".into(), r#"{"path":"b"}"#.into())
+        ],
+        "{out}"
+    );
+}
+
+/// The same calls read whole (the plugin asks the provider for a stream, the
+/// client asked for a whole answer): each call keeps its own arguments.
+#[tokio::test]
+async fn parallel_openai_tool_calls_keep_their_arguments_in_a_whole_anthropic_answer() {
+    struct Streamed;
+    #[async_trait]
+    impl Plugin for Streamed {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(|chat: &mut Conversation| {
+                chat.stream = true;
+                Ok(())
+            })?;
+            Ok(None)
+        }
+    }
+    let h = Harness::new(vec![Arc::new(Streamed)]);
+    h.mock.reply(OPENAI, mock::sse(OPENAI_PARALLEL_STREAM));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    let v: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(
+        v["content"],
+        json!([
+            { "type": "tool_use", "id": "call_a", "name": "read", "input": { "path": "a" } },
+            { "type": "tool_use", "id": "call_b", "name": "read", "input": { "path": "b" } },
+        ]),
+        "{out}"
+    );
+}
+
+/// Anthropic's `is_error` on a tool result says the tool failed; sent to
+/// OpenAI it must be kept (in the text) or refused, not dropped.
+#[tokio::test]
+async fn a_failed_tool_result_is_not_silently_turned_into_a_success() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::json(StatusCode::OK, r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#));
+    let body = json!({
+        "model": "gpt-x", "max_tokens": 100,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [
+            { "role": "user", "content": "open a.rs" },
+            { "role": "assistant", "content": [{ "type": "tool_use", "id": "t1", "name": "read", "input": {} }] },
+            { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "is_error": true, "content": "ENOENT" }] },
+        ],
+    });
+    let (status, text) = h.text(call(MESSAGES, body.to_string())).await;
+    if status == StatusCode::OK {
+        let sent = h.sent_json(0);
+        panic!("is_error dropped: sent {}", sent["messages"]);
+    }
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+}
+
+/// OpenAI's `strict` on a function asks for schema-exact arguments; sent to
+/// Anthropic it must be kept or refused, not dropped.
+#[tokio::test]
+async fn a_strict_function_is_not_silently_loosened() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let tool = json!({ "type": "function", "function": { "name": "read", "strict": true,
+        "parameters": { "type": "object", "properties": {}, "additionalProperties": false } } });
+    let body = json!({ "model": "claude-x", "tools": [tool], "messages": [{ "role": "user", "content": "hi" }] });
+    let (status, _) = h.text(call(CHAT, body.to_string())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// Extra fields on Anthropic's tool, call and result have no place in
+/// OpenAI's: refused, never dropped.
+#[tokio::test]
+async fn an_extra_tool_field_is_refused_not_dropped() {
+    let cached = json!({ "type": "ephemeral" });
+    let tool =
+        json!({ "name": "read", "input_schema": { "type": "object" }, "cache_control": cached });
+    let use_block = json!({ "type": "tool_use", "id": "t1", "name": "read", "input": {} });
+    let result = json!({ "type": "tool_result", "tool_use_id": "t1", "content": "x", "cache_control": cached });
+    let ask = json!({ "role": "user", "content": "go" });
+    let call_made = json!({ "role": "assistant", "content": [use_block] });
+    let answer = json!({ "role": "user", "content": [result] });
+    for body in [
+        json!({ "model": "gpt-x", "max_tokens": 9, "tools": [tool], "messages": [ask] }),
+        json!({ "model": "gpt-x", "max_tokens": 9, "messages": [ask, call_made, answer] }),
+    ] {
+        let h = Harness::new(Vec::new());
+        let (status, text) = h.text(call(MESSAGES, body.to_string())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(h.mock.sent().is_empty());
+    }
+}
+
+/// A repeated id on every delta of one call, as some providers send, is
+/// one call.
+#[tokio::test]
+async fn a_provider_repeating_a_calls_start_on_every_delta_makes_one_call() {
+    const REPEATED: &[&str] = &[
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\\\"a\\\"}\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(REPEATED));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    let sent = events(&out);
+    let starts = sent
+        .iter()
+        .filter(|(_, d)| d["type"] == "content_block_start")
+        .count();
+    let json: String = sent
+        .iter()
+        .filter_map(|(_, d)| d["delta"]["partial_json"].as_str())
+        .collect();
+    assert_eq!((starts, json.as_str()), (1, r#"{"path":"a"}"#), "{out}");
+}
+
+/// A whole OpenAI answer cut by the token limit has arguments that do not
+/// parse; the Anthropic client must not be told the call had no input.
+#[tokio::test]
+async fn cut_off_tool_arguments_are_not_replaced_by_an_empty_input() {
+    let h = Harness::new(Vec::new());
+    let answer = json!({ "id": "c", "model": "g", "choices": [{ "index": 0, "finish_reason": "length",
+        "message": { "role": "assistant", "content": null, "tool_calls": [
+            { "id": "c1", "type": "function", "function": { "name": "rm", "arguments": "{\"path\":\"/tmp/a\",\"recursive\":tr" } }] } }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 } });
+    h.mock
+        .reply(OPENAI, mock::json(StatusCode::OK, &answer.to_string()));
+    let body = json!({ "model": "gpt-x", "max_tokens": 9, "messages": [{ "role": "user", "content": "hi" }],
+        "tools": [{ "name": "rm", "input_schema": { "type": "object" } }] });
+    let (status, out) = h.text(call(MESSAGES, body.to_string())).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "cut arguments became input: {out}"
+    );
+}
+
+/// Control: OpenAI's own order (each call's start, then its arguments) works.
+#[tokio::test]
+async fn control_sequential_openai_tool_calls_reach_an_anthropic_client() {
+    const SEQ: &[&str] = &[
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"b\\\"}\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(SEQ));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    let args: Vec<String> = events(&out)
+        .iter()
+        .filter_map(|(_, d)| {
+            d["delta"]["partial_json"]
+                .as_str()
+                .map(|s| format!("{}:{s}", d["index"]))
+        })
+        .collect();
+    assert_eq!(
+        args,
+        vec![
+            r#"0:{"path":"a"}"#.to_owned(),
+            r#"1:{"path":"b"}"#.to_owned()
+        ],
+        "{out}"
     );
 }

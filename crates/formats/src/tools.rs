@@ -8,10 +8,10 @@
 use std::borrow::Cow;
 
 use respan_gateway_core::Fault;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::anthropic::ANTHROPIC;
-use crate::common::{refuse_leftovers, says, untranslatable};
+use crate::common::{refuse_leftovers, says, untranslatable, unwritable_content};
 use crate::conversation::{Content, Conversation, Message, Role};
 use crate::openai::{INERT_CHOICE, OPENAI};
 
@@ -105,8 +105,24 @@ fn to_openai(chat: &mut Conversation) -> Result<(), Fault> {
     map_messages(chat, openai_message)
 }
 
+/// `object` if it has only the fields `known` (`null`s aside): what has no
+/// equivalent in the other format is refused, not dropped.
+fn known_fields<'a>(object: &'a Value, known: &[&str], what: &str) -> Result<&'a Value, Fault> {
+    let unknown = object.as_object().into_iter().flatten();
+    let mut unknown = unknown.filter(|(k, v)| !v.is_null() && !known.contains(&k.as_str()));
+    match unknown.next() {
+        None => Ok(object),
+        Some((key, _)) => Err(untranslatable(&format!("{what}'s '{key}'"))),
+    }
+}
+
 fn anthropic_tool(tool: &Value) -> Result<Value, Fault> {
-    let function = &tool["function"];
+    let tool = known_fields(tool, &["type", "function"], "a tool")?;
+    let function = known_fields(
+        &tool["function"],
+        &["name", "description", "parameters"],
+        "a tool's function",
+    )?;
     let (true, Some(name)) = (tool["type"] == "function", function["name"].as_str()) else {
         return Err(untranslatable("a tool that is not a function"));
     };
@@ -123,6 +139,8 @@ fn anthropic_tool(tool: &Value) -> Result<Value, Fault> {
 }
 
 fn openai_tool(tool: &Value) -> Result<Value, Fault> {
+    let known = ["type", "name", "description", "input_schema"];
+    let tool = known_fields(tool, &known, "a tool")?;
     let custom = tool["type"].is_null() || tool["type"] == "custom";
     let (true, Some(name)) = (custom, tool["name"].as_str()) else {
         return Err(untranslatable("a tool that Anthropic runs"));
@@ -199,7 +217,8 @@ fn anthropic_message(mut m: Message) -> Result<Vec<Message>, Fault> {
         let empty = |c: &Content| matches!(c, Content::Text { text } if text.is_empty());
         m.content.retain(|c| !empty(c));
         for call in calls.as_array().into_iter().flatten() {
-            let function = &call["function"];
+            let call = known_fields(call, &["id", "type", "function"], "a tool call")?;
+            let function = known_fields(&call["function"], &["name", "arguments"], "a call")?;
             let (Some(id), Some(name)) = (call["id"].as_str(), function["name"].as_str()) else {
                 return Err(untranslatable("a tool call that is not a function"));
             };
@@ -240,12 +259,21 @@ fn openai_message(mut m: Message) -> Result<Vec<Message>, Fault> {
             _ => None,
         };
         match block.as_ref().and_then(|b| Some((b, b["type"].as_str()?))) {
-            Some((b, "tool_use")) => calls.push(json!({
-                "id": b["id"],
-                "type": "function",
-                "function": { "name": b["name"], "arguments": b["input"].to_string() },
-            })),
+            Some((b, "tool_use")) => {
+                let b = known_fields(b, &["type", "id", "name", "input"], "a tool call")?;
+                calls.push(json!({
+                    "id": b["id"],
+                    "type": "function",
+                    "function": { "name": b["name"], "arguments": b["input"].to_string() },
+                }))
+            }
             Some((b, "tool_result")) => {
+                let known = ["type", "tool_use_id", "content", "is_error"];
+                let b = known_fields(b, &known, "a tool result")?;
+                // OpenAI's tool messages cannot say the call failed.
+                if b["is_error"] == true {
+                    return Err(untranslatable("a tool result that is an error"));
+                }
                 let mut result =
                     Message::new(Role::Other("tool".into()), result_text(&b["content"])?);
                 result
@@ -269,8 +297,26 @@ fn openai_message(mut m: Message) -> Result<Vec<Message>, Fault> {
 /// call's start (its id and name), and its arguments, whole or a part.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Fragment {
+    /// Which call, if the format numbers them (OpenAI does, and streams
+    /// parallel calls interleaved); else it is the last one.
+    pub(crate) index: Option<usize>,
     pub(crate) start: Option<(String, String)>,
     pub(crate) arguments: String,
+}
+
+impl Fragment {
+    /// The place, among calls of these `keys`, of the call it continues: the
+    /// call it numbers, else the last if it is no start. A start that
+    /// numbers a known call is a repeat of it, as some providers send.
+    pub(crate) fn continues(
+        &self,
+        mut keys: impl ExactSizeIterator<Item = usize>,
+    ) -> Option<usize> {
+        match self.index {
+            Some(key) => keys.position(|k| k == key),
+            None => keys.len().checked_sub(1).filter(|_| self.start.is_none()),
+        }
+    }
 }
 
 /// The tool calls a provider's content says, if it says nothing else:
@@ -312,6 +358,7 @@ fn openai_fragments(choices: &Value) -> Option<Vec<Fragment>> {
         let function = &call["function"];
         let start = call["id"].as_str().zip(function["name"].as_str());
         all.push(Fragment {
+            index: call["index"].as_u64().and_then(|i| usize::try_from(i).ok()),
             start: start.map(|(id, name)| (id.into(), name.into())),
             arguments: function["arguments"].as_str().unwrap_or_default().into(),
         });
@@ -329,11 +376,13 @@ fn anthropic_fragment(raw: &Value) -> Option<Fragment> {
             Some(Fragment {
                 start: Some(start),
                 arguments: arguments.unwrap_or_default(),
+                ..Fragment::default()
             })
         }
         "input_json_delta" => Some(Fragment {
             start: None,
             arguments: raw["partial_json"].as_str()?.into(),
+            ..Fragment::default()
         }),
         _ => None,
     }
@@ -342,14 +391,30 @@ fn anthropic_fragment(raw: &Value) -> Option<Fragment> {
 /// Tool calls of a whole response as they are written: id, name, and
 /// arguments in JSON text.
 #[derive(Debug, Default)]
-pub(crate) struct Calls(Vec<(String, String, String)>);
+pub(crate) struct Calls(Vec<Pending>);
+
+#[derive(Debug)]
+struct Pending {
+    /// The provider's number of the call, else its place.
+    key: usize,
+    id: String,
+    name: String,
+    arguments: String,
+}
 
 impl Calls {
-    /// Add a fragment: a start makes a call; arguments go to the last.
+    /// Add a fragment: a start makes a call, arguments go to the call they
+    /// continue ([`Fragment::continues`]).
     pub(crate) fn add(&mut self, fragment: Fragment) {
-        match (fragment.start, self.0.last_mut()) {
-            (Some((id, name)), _) => self.0.push((id, name, fragment.arguments)),
-            (None, Some(last)) => last.2.push_str(&fragment.arguments),
+        let at = fragment.continues(self.0.iter().map(|c| c.key));
+        match (fragment.start, at) {
+            (Some((id, name)), None) => self.0.push(Pending {
+                key: fragment.index.unwrap_or(self.0.len()),
+                id,
+                name,
+                arguments: fragment.arguments,
+            }),
+            (_, Some(at)) => self.0[at].arguments.push_str(&fragment.arguments),
             (None, None) => {}
         }
     }
@@ -360,23 +425,23 @@ impl Calls {
 
     /// As OpenAI's `tool_calls`.
     pub(crate) fn openai(&self) -> Vec<Value> {
-        let call = |(id, name, arguments): &(String, String, String)| {
-            let arguments = if arguments.is_empty() {
+        let call = |c: &Pending| {
+            let arguments = if c.arguments.is_empty() {
                 "{}"
             } else {
-                arguments
+                &c.arguments
             };
-            let function = json!({ "name": name, "arguments": arguments });
-            json!({ "id": id, "type": "function", "function": function })
+            let function = json!({ "name": c.name, "arguments": arguments });
+            json!({ "id": c.id, "type": "function", "function": function })
         };
         self.0.iter().map(call).collect()
     }
 
-    /// As Anthropic's `tool_use` blocks.
-    pub(crate) fn anthropic(&self) -> Vec<Value> {
-        let block = |(id, name, arguments): &(String, String, String)| {
-            let input = arguments_json(arguments).unwrap_or_else(|_| Value::Object(Map::new()));
-            json!({ "type": "tool_use", "id": id, "name": name, "input": input })
+    /// As Anthropic's `tool_use` blocks; arguments cut off are no input.
+    pub(crate) fn anthropic(&self) -> Result<Vec<Value>, Fault> {
+        let block = |c: &Pending| {
+            let input = arguments_json(&c.arguments).map_err(|_| unwritable_content())?;
+            Ok(json!({ "type": "tool_use", "id": c.id, "name": c.name, "input": input }))
         };
         self.0.iter().map(block).collect()
     }
