@@ -439,6 +439,9 @@ struct Turns {
     /// The holds whose `response.create` has not yet left `before`: the
     /// provider cannot have read it.
     unsent: Vec<HoldId>,
+    /// The holds of turns begun (a `response.created`) and not done, in the
+    /// order they began: a `response.done` settles the first.
+    begun: VecDeque<HoldId>,
 }
 
 impl<L: Ledger> Wallet<L> {
@@ -508,15 +511,17 @@ impl<L: Ledger> Wallet<L> {
     /// A turn the client did not ask for (the provider's voice detection
     /// starts them) is held when it begins, and cut if the wallet cannot
     /// cover it. What the provider says is counted. A `response.done`
-    /// settles the oldest hold at what the turn used; the hold leaves the
+    /// settles the hold of the oldest begun turn at what it used; the hold leaves the
     /// list only once settled, so a client that leaves meanwhile settles it.
     async fn after(self: Arc<Self>, event: ProviderEvent) -> Result<ProviderEvent, Fault> {
         let kind = event.json["type"].as_str().unwrap_or_default();
         if kind == "response.created" {
-            let asked = lock(&self.turns).unbegun.pop_front().is_some();
-            if !asked {
-                self.hold(false).await?;
-            }
+            let asked = lock(&self.turns).unbegun.pop_front();
+            let hold = match asked {
+                Some((_, hold)) => hold,
+                None => self.hold(false).await?,
+            };
+            lock(&self.turns).begun.push_back(hold);
         } else if kind == "error" {
             // A `response.create` the provider refused never ran: its hold
             // is released, not charged at the session's end.
@@ -535,11 +540,17 @@ impl<L: Ledger> Wallet<L> {
                 turns.holds.retain(|(held, _)| *held != hold);
             }
         } else if kind == "response.done" {
-            let front = lock(&self.turns).holds.front().cloned();
-            if let Some((hold, amount)) = front {
+            let done = {
+                let turns = lock(&self.turns);
+                let begun = turns.begun.front().copied();
+                begun.and_then(|b| turns.holds.iter().find(|(h, _)| *h == b).copied())
+            };
+            if let Some((hold, amount)) = done {
                 let used = event.json["response"]["usage"]["total_tokens"].as_i64();
                 self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
-                lock(&self.turns).holds.pop_front();
+                let mut turns = lock(&self.turns);
+                turns.begun.pop_front();
+                turns.holds.retain(|(h, _)| *h != hold);
             }
         }
         if !kind.ends_with("audio.delta") {
@@ -557,6 +568,7 @@ impl<L: Ledger> Wallet<L> {
         let (cut, unsent) = {
             let mut turns = lock(&self.turns);
             turns.unbegun.clear();
+            turns.begun.clear();
             (
                 turns.holds.drain(..).collect::<Vec<_>>(),
                 std::mem::take(&mut turns.unsent),

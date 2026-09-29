@@ -1660,3 +1660,78 @@ async fn provider_content_in_a_non_delta_event_is_held() {
     gw.idle().await;
     assert_eq!(wallets.spent("sk-demo"), 30);
 }
+
+// ===== loop 8 audit =====
+
+/// A ledger across a network whose first `reserve` lands `slow` late (a
+/// retried request, jitter); later ones land at once. A settle lands at once.
+#[derive(Clone)]
+struct Jitter {
+    books: MemoryLedger,
+    slow: Duration,
+    first: Arc<AtomicUsize>,
+}
+
+#[respan_gateway_core::async_trait]
+impl Ledger for Jitter {
+    async fn reserve(
+        &self,
+        id: &HoldId,
+        accounts: &[String],
+        amount: Amount,
+        ttl: Duration,
+    ) -> Result<(), Fault> {
+        if self.first.fetch_add(1, Ordering::SeqCst) == 0 {
+            tokio::time::sleep(self.slow).await;
+        }
+        self.books.reserve(id, accounts, amount, ttl).await
+    }
+
+    async fn settle(&self, id: &HoldId, spent: Amount) -> Result<(), Fault> {
+        self.books.settle(id, spent).await
+    }
+}
+
+/// The client says an item (the provider's voice detection starts a turn on
+/// it 50 ms later) and a `response.create`, whose reserve lands late. The
+/// provider's turn is held and done while the client's reserve is in flight.
+/// `response.done` settles the oldest hold, which is the client's, not the
+/// turn's: that settle lands before its reserve (a no-op), the reserve then
+/// lands and is never settled again, and outlives the session for `HOUR`.
+#[tokio::test(flavor = "multi_thread")]
+async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<(), Fault> {
+    let at = starts_turns(Duration::from_millis(50)).await;
+    let books = MemoryLedger::new();
+    books.open("sk-demo", None, 100_000);
+    let jitter = Jitter {
+        books: books.clone(),
+        slow: Duration::from_millis(400),
+        first: Arc::new(AtomicUsize::new(0)),
+    };
+    let gw = Gateway::new()
+        .client(realtime())?
+        .provider(
+            "openai",
+            realtime(),
+            WsTransport::new(format!("ws://{at}"))?,
+        )?
+        .target("openai")?
+        .plugin("reserve", Reserve(jitter))?;
+    let addr = listen(&gw).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let item = json!({ "type": "conversation.item.create", "item": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] } });
+    say(&mut ws, item).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    close(&mut ws).await;
+    gw.idle().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (spent, left) = (books.spent("sk-demo"), books.available("sk-demo"));
+    assert_eq!(
+        spent + left,
+        100_000,
+        "a hold outlived its session: spent {spent}, available {left}"
+    );
+    Ok(())
+}
