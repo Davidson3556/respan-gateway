@@ -418,10 +418,11 @@ async fn a_capped_session_keeps_the_subprotocol_the_provider_chose() -> Result<(
 // Use case 9: a turn is held on the client's wallet before the provider sees
 // it, and settled at what it used. Eight sessions ask at once of a wallet
 // that holds three turns: three are answered, and the wallet never goes
-// negative.
+// negative at any moment, sampled, not only at the end.
 #[tokio::test(flavor = "multi_thread")]
 async fn parallel_sessions_cannot_overspend_one_wallet() -> Result<(), Fault> {
     let s = start_with(HOUR, 3 * TURN).await?;
+    let sampler = sample(&s.wallets);
     for _ in 0..8 {
         let slow = Answer::events(script(&["ok"], usage(40, 9))).delay_first(300);
         s.openai.answer(slow);
@@ -457,6 +458,8 @@ async fn parallel_sessions_cannot_overspend_one_wallet() -> Result<(), Fault> {
     // Each answered turn settled at the 49 tokens it used.
     assert_eq!(s.wallets.spent("sk-demo"), 3 * 49);
     assert_eq!(s.wallets.available("sk-demo"), 3 * TURN - 3 * 49);
+    let min = sampler.finish().await;
+    assert!(min >= 0, "went negative: {min}");
     Ok(())
 }
 
@@ -510,4 +513,247 @@ async fn a_flagged_input_never_reaches_the_provider_and_closes_the_session() -> 
         Err("flagged".into())
     );
     Ok(())
+}
+
+/// The events a raw provider read.
+#[derive(Clone, Default)]
+struct Raw {
+    read: Arc<Mutex<Vec<Value>>>,
+}
+
+/// A provider that keeps to `max_output_tokens`, unlike a script: a
+/// `response.create` is answered with a turn that would say `wants` tokens,
+/// cut at the cap. An `input_audio_buffer.commit` starts a turn of `wants`
+/// tokens by itself, as server voice detection does. A turn's usage is
+/// its output tokens alone.
+async fn raw_provider(raw: Raw, wants: u64) -> std::net::SocketAddr {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    let app = axum::Router::new().route(
+        "/v1/realtime",
+        axum::routing::get(move |ws: WebSocketUpgrade| {
+            let raw = raw.clone();
+            async move {
+                ws.protocols(["realtime"])
+                    .on_upgrade(move |mut socket| async move {
+                        let hello = json!({ "type": "session.created" }).to_string();
+                        let _ = socket.send(Message::Text(hello.into())).await;
+                        while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                            let event: Value = serde_json::from_str(&text).unwrap_or_default();
+                            lock(&raw.read).push(event.clone());
+                            let cap = event["response"]["max_output_tokens"].as_u64();
+                            let tokens = match event["type"].as_str() {
+                                Some("response.create") => wants.min(cap.unwrap_or(u64::MAX)),
+                                Some("input_audio_buffer.commit") => wants,
+                                _ => continue,
+                            };
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            for event in script(&["ok"], usage(0, tokens)) {
+                                let _ = socket.send(Message::Text(event.to_string().into())).await;
+                            }
+                        }
+                    })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    at
+}
+
+/// The example's gateway in front of a raw provider, with a wallet of `tokens`.
+async fn raw_session(
+    wants: u64,
+    tokens: Amount,
+) -> (Raw, Gateway, Meter, MemoryLedger, std::net::SocketAddr) {
+    let raw = Raw::default();
+    let at = raw_provider(raw.clone(), wants).await;
+    let (meter, ends) = (Meter::default(), Outcomes::default());
+    let wallets = MemoryLedger::new();
+    wallets.open("sk-demo", None, tokens);
+    let provider = format!("ws://{at}");
+    let gateway = gateway(&provider, &meter, &ends, &wallets, HOUR).expect("a gateway");
+    let addr = listen(&gateway).await;
+    (raw, gateway, meter, wallets, addr)
+}
+
+/// Every turn asked for is capped and held, whatever the client asks: with
+/// three sessions of turns that would say 2,500 tokens against a wallet of
+/// three caps, the balance is never below zero, and all three are answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn turns_that_would_say_more_than_the_cap_cannot_overdraw_the_wallet() {
+    let (raw, gw, _meter, wallets, addr) = raw_session(2_500, 3 * TURN).await;
+    let sampler = sample(&wallets);
+    let mut sessions = Vec::new();
+    for _ in 0..3 {
+        sessions.push(tokio::spawn(async move {
+            let mut ws = client(addr).await;
+            hear(&mut ws).await;
+            say(&mut ws, json!({ "type": "response.create" })).await;
+            let events = turn(&mut ws).await;
+            close(&mut ws).await;
+            last(&events)["response"]["usage"]["total_tokens"].clone()
+        }));
+    }
+    for session in sessions {
+        assert_eq!(session.await.expect("a session"), TURN);
+    }
+    gw.idle().await;
+    assert_eq!(wallets.spent("sk-demo"), 3 * TURN);
+    let min = sampler.finish().await;
+    assert!(min >= 0, "went negative: {min}");
+    let asked: Vec<_> = lock(&raw.read)
+        .iter()
+        .map(|e| e["response"].clone())
+        .collect();
+    assert_eq!(asked, vec![json!({ "max_output_tokens": TURN }); 3]);
+}
+
+/// A client's own smaller cap stays; a larger one, or none at all
+/// (`"inf"`), becomes the cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_response_create_asks_for_at_most_the_cap() {
+    let (raw, gw, _meter, _wallets, addr) = raw_session(5, 100_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let caps = [json!(200), json!(5_000), json!("inf"), json!(null)];
+    for cap in caps {
+        let response = json!({ "max_output_tokens": cap, "instructions": "brief" });
+        say(
+            &mut ws,
+            json!({ "type": "response.create", "response": response }),
+        )
+        .await;
+        turn(&mut ws).await;
+    }
+    close(&mut ws).await;
+    gw.idle().await;
+    let asked: Vec<_> = lock(&raw.read)
+        .iter()
+        .map(|e| e["response"]["max_output_tokens"].clone())
+        .collect();
+    assert_eq!(asked, [json!(200), json!(TURN), json!(TURN), json!(TURN)]);
+    let all = lock(&raw.read);
+    assert_eq!(all[0]["response"]["instructions"], "brief");
+}
+
+/// A turn holds what the session has said so far, plus the cap: a wallet
+/// that covers only the cap refuses it once the session has a context.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_holds_what_the_session_has_said_plus_the_cap() {
+    let (raw, gw, _meter, wallets, addr) = raw_session(5, TURN + 100).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    turn(&mut ws).await;
+    let long = "a long question ".repeat(20);
+    say(&mut ws, user_says(&long)).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    assert_eq!(
+        closed(&mut ws).await,
+        Some((1008, "insufficient_funds".into()))
+    );
+    gw.idle().await;
+    assert_eq!(lock(&raw.read).len(), 2, "the second turn never reached it");
+    assert_eq!(wallets.spent("sk-demo"), 5);
+}
+
+/// A turn the provider starts on its own is held when it begins: a funded
+/// wallet is charged what it used, an empty one is cut with 1008 before
+/// it hears the turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_the_provider_starts_is_held_and_charged() {
+    let (_raw, gw, meter, wallets, addr) = raw_session(49, 3 * TURN).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    for _ in 0..3 {
+        say(&mut ws, json!({ "type": "input_audio_buffer.commit" })).await;
+        assert_eq!(last(&turn(&mut ws).await)["type"], "response.done");
+    }
+    close(&mut ws).await;
+    gw.idle().await;
+    assert_eq!(meter.turns().len(), 3);
+    assert_eq!(wallets.spent("sk-demo"), 3 * 49);
+    assert_eq!(wallets.available("sk-demo"), 3 * TURN - 3 * 49);
+
+    let (_raw, gw, _meter, wallets, addr) = raw_session(49, 0).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "input_audio_buffer.commit" })).await;
+    assert_eq!(
+        closed(&mut ws).await,
+        Some((1008, "insufficient_funds".into()))
+    );
+    gw.idle().await;
+    assert_eq!(wallets.spent("sk-demo"), 0);
+}
+
+/// The key is read from whatever credential the client sends: a browser
+/// puts it in the subprotocol, a script in the query; none is a 401.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wallet_is_found_by_any_credential_form() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let (_raw, gw, _meter, wallets, addr) = raw_session(7, 3 * TURN).await;
+    let forms = [
+        (
+            "/v1/realtime",
+            Some("realtime, openai-insecure-api-key.sk-demo"),
+        ),
+        ("/v1/realtime?api_key=sk-demo", Some("realtime")),
+    ];
+    for (path, protocol) in forms {
+        let mut req = format!("ws://{addr}{path}")
+            .into_client_request()
+            .expect("a request");
+        if let Some(protocol) = protocol {
+            req.headers_mut()
+                .insert("sec-websocket-protocol", protocol.parse().expect("a value"));
+        }
+        let (mut ws, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("a session");
+        hear(&mut ws).await;
+        say(&mut ws, json!({ "type": "response.create" })).await;
+        assert_eq!(last(&turn(&mut ws).await)["type"], "response.done");
+        close(&mut ws).await;
+    }
+    gw.idle().await;
+    assert_eq!(wallets.spent("sk-demo"), 2 * 7);
+
+    let req = format!("ws://{addr}/v1/realtime")
+        .into_client_request()
+        .expect("a request");
+    assert!(
+        tokio_tungstenite::connect_async(req).await.is_err(),
+        "no key, no session"
+    );
+}
+
+/// The balance of `wallets`' account, sampled until finished.
+struct Sampler(Arc<AtomicBool>, tokio::task::JoinHandle<Amount>);
+
+fn sample(wallets: &MemoryLedger) -> Sampler {
+    let (wallets, stop) = (wallets.clone(), Arc::new(AtomicBool::new(false)));
+    let stopped = stop.clone();
+    Sampler(
+        stop,
+        tokio::spawn(async move {
+            let mut min = Amount::MAX;
+            while !stopped.load(Ordering::SeqCst) {
+                min = min.min(wallets.available("sk-demo"));
+                tokio::time::sleep(Duration::from_micros(200)).await;
+            }
+            min
+        }),
+    )
+}
+
+impl Sampler {
+    /// The lowest balance seen.
+    async fn finish(self) -> Amount {
+        self.0.store(true, Ordering::SeqCst);
+        self.1.await.expect("a sampler")
+    }
 }

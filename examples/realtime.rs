@@ -12,11 +12,18 @@
 //!   metered. It wraps the provider's events (`ClientContext::wrap`), so it
 //!   makes no call: the relay, and the provider's head with its subprotocol,
 //!   stay, and it composes with every other plugin.
-//! - `Reserve` (use case 9): before each `response.create` reaches the
-//!   provider, a turn's worst case is held on the client's wallet (the ledger
-//!   SDK), and the turn is refused, closing the client with 1008, when the
-//!   wallet cannot cover it; its `response.done` settles what it cost. Turns
-//!   of parallel sessions cannot overspend one wallet.
+//! - `Reserve` (use case 9): every turn is bounded, held and settled on the
+//!   client's wallet (the ledger SDK). A `response.create` is rewritten to
+//!   ask for at most `TURN` output tokens, and holds what the session has
+//!   said so far plus that cap; it is refused, closing the client with 1008,
+//!   when the wallet cannot cover it, and its `response.done` settles what
+//!   it cost. A turn the provider starts on its own (server voice
+//!   detection) is held when its `response.created` passes, and cut with
+//!   1008 if the wallet cannot cover it. So parallel sessions cannot
+//!   overspend one wallet, as long as the provider keeps to the cap (a
+//!   turn the provider starts itself has none, and settles at what it used)
+//!   and the text is what it costs (audio and the provider's own defaults
+//!   are not counted). The key may come in any credential form.
 //! - `Vet` (use case 3 on a session): a remote classifier judges each thing
 //!   the client says before the provider reads it; a refusal closes the
 //!   session with the fault's close code. Both are input wraps: async work
@@ -33,7 +40,7 @@
 //! event per text frame. Everything about Realtime's events is here, none in
 //! the SDK.
 //!
-//! Covered: text events both ways; a wallet held per turn; a classifier per input; a placeholder split across deltas; usage per
+//! Covered: text events both ways; a wallet that caps, holds and settles each turn; a classifier per input; a placeholder split across deltas; usage per
 //! turn; the session's end recorded as `ok`, `abandoned` (the client left),
 //! `truncated` (the provider's connection broke) or `upstream`.
 //!
@@ -403,41 +410,89 @@ impl Plugin for MaxLength {
     }
 }
 
-/// The most a turn can cost, in tokens: held before it starts.
+/// The most a turn may say, in output tokens: a `response.create` that asks
+/// for more, or for no limit, is rewritten to it. A plan would set it per
+/// tenant.
 const TURN: Amount = 1_000;
 
-/// A session's wallet: the client's key names its account in the ledger, and
-/// the holds of turns asked for and not yet done wait in order.
+/// A session's wallet: the client's key names its account in the ledger.
 struct Wallet<L> {
     ledger: L,
     key: String,
-    holds: Mutex<VecDeque<HoldId>>,
+    turns: Mutex<Turns>,
+}
+
+#[derive(Default)]
+struct Turns {
+    /// Bytes of text in the session so far, both ways. A token is at least
+    /// a byte, so this bounds the tokens a turn reads when it reads it all.
+    bytes: Amount,
+    /// Holds of turns not yet done, oldest first, with what each holds.
+    holds: VecDeque<(HoldId, Amount)>,
+    /// How many of them have not begun (no `response.created` yet).
+    unbegun: usize,
 }
 
 impl<L: Ledger> Wallet<L> {
-    /// A `response.create` holds a turn's worst case first, or is refused.
-    async fn before(&self, event: ClientEvent) -> Result<ClientEvent, Fault> {
+    /// Holds a turn's worst case: what it reads (all the session so far) and
+    /// the most it may say. Refused, closing the client, if the wallet cannot
+    /// cover it.
+    async fn hold(&self) -> Result<(), Fault> {
+        let amount = lock(&self.turns).bytes + TURN;
+        let hold = HoldId::new();
+        let key = [self.key.clone()];
+        let held = self.ledger.reserve(&hold, &key, amount, HOUR).await;
+        held.map_err(|fault| fault.with(CloseCode(1008)))?;
+        lock(&self.turns).holds.push_back((hold, amount));
+        Ok(())
+    }
+
+    /// What the client says is counted; a `response.create` is capped at
+    /// `TURN` output tokens and holds a turn first.
+    async fn before(&self, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
+        let mut said = 0;
+        edit_texts(&mut event.json, SAID, &mut |text| said += text.len());
+        lock(&self.turns).bytes += Amount::try_from(said).unwrap_or_default();
         if event.json["type"] == "response.create" {
-            let hold = HoldId::new();
-            let key = [self.key.clone()];
-            let held = self.ledger.reserve(&hold, &key, TURN, HOUR).await;
-            held.map_err(|fault| fault.with(CloseCode(1008)))?;
-            lock(&self.holds).push_back(hold);
+            let response = &mut event.json["response"];
+            if !response.is_object() {
+                *response = json!({});
+            }
+            let cap = &mut response["max_output_tokens"];
+            if cap.as_i64().is_none_or(|n| n > TURN) {
+                *cap = TURN.into();
+            }
+            self.hold().await?;
+            lock(&self.turns).unbegun += 1;
         }
         Ok(event)
     }
 
-    /// A `response.done` settles the oldest hold at what the turn used.
+    /// A turn the client did not ask for (the provider's voice detection
+    /// starts them) is held when it begins, and cut if the wallet cannot
+    /// cover it. What the provider says is counted. A `response.done`
+    /// settles the oldest hold at what the turn used.
     async fn after(&self, event: ProviderEvent) -> Result<ProviderEvent, Fault> {
-        let hold = match event.json["type"] == "response.done" {
-            true => lock(&self.holds).pop_front(),
-            false => None,
-        };
-        if let Some(hold) = hold {
-            let used = &event.json["response"]["usage"]["total_tokens"];
-            self.ledger
-                .settle(&hold, used.as_i64().unwrap_or(TURN))
-                .await?;
+        let kind = event.json["type"].as_str().unwrap_or_default();
+        if kind == "response.created" {
+            let asked = {
+                let mut turns = lock(&self.turns);
+                let asked = turns.unbegun > 0;
+                turns.unbegun = turns.unbegun.saturating_sub(1);
+                asked
+            };
+            if !asked {
+                self.hold().await?;
+            }
+        } else if kind.ends_with(".delta") {
+            let delta = event.json["delta"].as_str().unwrap_or_default().len();
+            lock(&self.turns).bytes += Amount::try_from(delta).unwrap_or_default();
+        } else if kind == "response.done" {
+            let hold = lock(&self.turns).holds.pop_front();
+            if let Some((hold, amount)) = hold {
+                let used = event.json["response"]["usage"]["total_tokens"].as_i64();
+                self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
+            }
         }
         Ok(event)
     }
@@ -445,28 +500,42 @@ impl<L: Ledger> Wallet<L> {
     /// A turn cut before its `response.done` may have cost all it was
     /// held for: it is charged that, never $0.
     async fn end(&self) {
-        let cut: Vec<HoldId> = lock(&self.holds).drain(..).collect();
-        for hold in cut {
-            let _ = self.ledger.settle(&hold, TURN).await;
+        let cut: Vec<_> = lock(&self.turns).holds.drain(..).collect();
+        for (hold, amount) in cut {
+            let _ = self.ledger.settle(&hold, amount).await;
         }
     }
 }
 
-/// Holds each turn on the client's wallet before the provider sees it.
+/// The account a credential names: the token of a bearer, of a key in the
+/// query (`api_key=sk-..`) or of a subprotocol (`openai-insecure-api-key.sk-..`);
+/// a real one looks the key up. `Sec-WebSocket-Key` is the handshake's nonce,
+/// which the adapter lifts as a "key", so it is skipped.
+fn account(credential: &Credential) -> Option<String> {
+    let headers = credential.headers().iter();
+    let headers = headers.filter(|(name, _)| *name != "sec-websocket-key");
+    let values = headers.filter_map(|(_, value)| value.to_str().ok());
+    let value = values.chain(credential.query()).next()?;
+    let token = value.rsplit([' ', '.', '=']).next();
+    Some(token.unwrap_or(value).to_owned())
+}
+
+/// Holds each turn on the client's wallet before the provider sees it. The
+/// hold reads the whole session, so a turn cannot cost more than its hold
+/// as long as the provider keeps to the cap and the gateway saw all the text
+/// (audio and what the provider adds on its own, such as instructions, are
+/// not counted).
 struct Reserve<L>(L);
 
 #[async_trait]
 impl<L: Ledger + Clone> Plugin for Reserve<L> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let key = cx
-            .extensions()
-            .get::<Credential>()
-            .and_then(Credential::bearer);
+        let key = cx.extensions().get::<Credential>().and_then(account);
         let key = key.ok_or_else(|| Fault::new("no_key", "no key").with(Status(401)))?;
         let wallet = Arc::new(Wallet {
             ledger: self.0.clone(),
-            key: key.to_owned(),
-            holds: Mutex::default(),
+            key,
+            turns: Mutex::default(),
         });
         let asks = wallet.clone();
         cx.wrap(move |events: Events<ClientEvent>| {

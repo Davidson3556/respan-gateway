@@ -12,20 +12,32 @@
 //!   The job's run is marked [`Job`], and a marked request is never started
 //!   as a job again, so a job cannot recurse; a tenant marked `NoContent`
 //!   (zero retention, as in `logging.rs`) is refused background mode, since
-//!   a job's answer must be kept until it is polled.
+//!   a job's answer must be kept until it is polled. The run is a plain
+//!   foreground request: `background` is taken out of its body, or a
+//!   provider that honours it would answer `queued` and the job would never
+//!   finish.
 //! - **Signed ids.** The client never sees a provider's id, on a post or a poll: it gets one that
 //!   names the deployment (`resp_{deployment}{key}{tag}`, 38 characters, under
 //!   Azure's 64) and is signed together with the tenant (a hash of all its
 //!   credentials, `x-api-key` included), so a later `GET` goes to the deployment the id names, with
 //!   the provider's own id in its path. A forged id, or another tenant's, is
-//!   a 404 before any call. Here the tag is a hash; use an HMAC.
+//!   a 404 before any call. Here the tag is a hash; use an HMAC. An id is
+//!   mapped wherever a client puts one: a `previous_response_id` in a body
+//!   (which also picks the deployment the chained turn goes to) and every
+//!   `/v1/responses/{id}...` path (`GET`, `DELETE`, `/cancel`,
+//!   `/input_items`), with the provider's id in what goes out and the
+//!   signed one in what comes back.
 //!
 //! The format is `rest`'s: its input carries the method and path, so what a
 //! plugin changes in it, the encoder writes.
 //!
 //! **Not built:** a durable store (this one is in memory, and forgets
-//! nothing), a webhook when a job finishes, and holding the tenant's budget
-//! for a job for as long as it runs.
+//! nothing), a webhook when a job finishes, holding the tenant's budget
+//! for a job for as long as it runs, and ids of a job still running: the
+//! provider has not named it yet, so its `/cancel` and a
+//! `previous_response_id` of it are refused with 404. Ids in other places
+//! of a body (a `conversation`, a tool's `response_id`) and the list
+//! endpoints are not mapped either.
 //!
 //! `cargo run -p respan-gateway-examples --example jobs_background`
 
@@ -93,14 +105,11 @@ fn verify(id: &str, tenant: u64) -> Option<usize> {
     (deployment < DEPLOYMENTS.len() && sign(deployment, key, tenant) == id).then_some(deployment)
 }
 
-/// What the plugin knows of an id it issued.
+/// What the plugin knows of a background job.
 #[derive(Clone)]
 enum Entry {
-    /// A relayed response: the provider's id.
-    Native(String),
-    /// A background job, running.
     Running,
-    /// A background job's answer, as the client would have got it.
+    /// The job's answer, as the client would have got it.
     Done(Bytes),
 }
 
@@ -117,6 +126,8 @@ struct NoContent;
 struct Shared {
     /// A durable store (SQL, Redis) with a TTL in production.
     entries: Mutex<HashMap<String, Entry>>,
+    /// The provider's id for each signed one, of a job once it has answered.
+    natives: Mutex<HashMap<String, String>>,
     keys: AtomicU64,
 }
 
@@ -145,46 +156,74 @@ fn not_found() -> Fault {
     Fault::not_found("no such response")
 }
 
+/// The signed id at the start of a path `/v1/responses/{id}...`, and the rest
+/// of the path (`/cancel`, `?stream=true`, or nothing).
+fn split(path: &str) -> Option<(&str, &str)> {
+    let path = path.strip_prefix("/v1/responses/")?;
+    Some(path.split_at(path.find(['/', '?']).unwrap_or(path.len())))
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Jobs {
-    fn entries(&self) -> MutexGuard<'_, HashMap<String, Entry>> {
-        self.0
-            .entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+    /// The provider's id for a signed one, if it has named it.
+    fn native(&self, id: &str) -> Option<String> {
+        lock(&self.0.natives).get(id).cloned()
     }
 
-    /// The job's own run, re-entered: route it to the deployment its id names.
-    /// Its answer is kept as the client would have got it: with the signed id.
-    fn rerun(&self, cx: &mut ClientContext, Job(id): &Job) -> Result<Option<Response>, Fault> {
-        let deployment = verify(id, tenant(cx)).ok_or_else(|| Fault::internal("bad job id"))?;
-        self.relay(cx, id.clone(), deployment)
+    /// A `previous_response_id` in `body` goes to the provider as its own id,
+    /// and the request to the deployment that id lives at, which is returned.
+    /// An id that is not the tenant's, or not named yet, is a 404.
+    fn chain(&self, cx: &mut ClientContext, body: &Value) -> Result<Option<usize>, Fault> {
+        let Some(signed) = body["previous_response_id"].as_str() else {
+            return Ok(None);
+        };
+        let deployment = verify(signed, tenant(cx)).ok_or_else(not_found)?;
+        let native = self.native(signed).ok_or_else(not_found)?;
+        let mut body = body.clone();
+        body["previous_response_id"] = native.into();
+        let body = Bytes::from(body.to_string());
+        cx.filter(move |ask: &mut Ask| {
+            ask.body.clone_from(&body);
+            Ok(())
+        })?;
+        Ok(Some(deployment))
     }
 
-    /// A poll: a job's state, or the response at the deployment the id names.
-    fn poll(&self, cx: &mut ClientContext, path: &str) -> Result<Option<Response>, Fault> {
-        let id = path.rsplit('/').next().unwrap_or_default();
+    /// A request about an id (`GET` it, `DELETE` it, `/cancel`, `/input_items`):
+    /// a job's state is answered from the store, anything else goes to the
+    /// deployment the id names, with the provider's id in its path.
+    fn route(
+        &self,
+        cx: &mut ClientContext,
+        ask: &Ask,
+        id: &str,
+        rest: &str,
+    ) -> Result<Option<Response>, Fault> {
         let deployment = verify(id, tenant(cx)).ok_or_else(not_found)?;
-        match self.entries().get(id).cloned().ok_or_else(not_found)? {
-            Entry::Done(body) => Ok(answer(body)),
-            Entry::Running => Ok(answer(
-                json!({ "id": id, "status": "in_progress" }).to_string(),
-            )),
-            Entry::Native(native) => {
-                cx.set_target(DEPLOYMENTS[deployment]);
-                let path = format!("/v1/responses/{native}");
-                cx.filter(move |ask: &mut Ask| {
-                    ask.path.clone_from(&path);
-                    Ok(())
-                })?;
-                let id = id.to_owned();
-                cx.filter(move |got: &mut Got<Rest>| show(got, &id).map(drop))?;
-                Ok(None)
-            }
+        let job = lock(&self.0.entries).get(id).cloned();
+        if let (Some(job), true) = (job, ask.method == Method::GET && rest.is_empty()) {
+            return Ok(match job {
+                Entry::Done(body) => answer(body),
+                Entry::Running => answer(json!({ "id": id, "status": "in_progress" }).to_string()),
+            });
         }
+        let native = self.native(id).ok_or_else(not_found)?;
+        cx.set_target(DEPLOYMENTS[deployment]);
+        let path = format!("/v1/responses/{native}{rest}");
+        cx.filter(move |ask: &mut Ask| {
+            ask.path.clone_from(&path);
+            Ok(())
+        })?;
+        let id = id.to_owned();
+        cx.filter(move |got: &mut Got<Rest>| show(got, &id).map(drop))?;
+        Ok(None)
     }
 
-    /// A relayed request: the client sees the signed id for the provider's.
-    /// A job's entry is already there, and stays.
+    /// A relayed request: the client sees the signed id for the provider's,
+    /// which is kept.
     fn relay(
         &self,
         cx: &mut ClientContext,
@@ -192,25 +231,31 @@ impl Jobs {
         deployment: usize,
     ) -> Result<Option<Response>, Fault> {
         cx.set_target(DEPLOYMENTS[deployment]);
-        let shared = self.clone();
+        let jobs = self.clone();
         cx.filter(move |got: &mut Got<Rest>| {
             if let Some(native) = show(got, &id)? {
-                shared
-                    .entries()
-                    .entry(id.clone())
-                    .or_insert(Entry::Native(native));
+                lock(&jobs.0.natives).insert(id.clone(), native);
             }
             Ok(())
         })?;
         Ok(None)
     }
 
-    /// A background job: answer now; run it as a request of the gateway's own.
-    fn start(&self, cx: &ClientContext, ask: &Ask, id: String) -> Result<Option<Response>, Fault> {
+    /// A background job: answer now; run it as a foreground request of the
+    /// gateway's own, which is `body` without `background`.
+    fn start(
+        &self,
+        cx: &ClientContext,
+        mut body: Value,
+        id: String,
+    ) -> Result<Option<Response>, Fault> {
         if cx.extensions().get::<NoContent>().is_some() {
             return Err(Fault::bad_request(
                 "background mode keeps output: not for this tenant",
             ));
+        }
+        if let Some(fields) = body.as_object_mut() {
+            fields.remove("background");
         }
         // Moved into the job, not kept in the plugin: the gateway holds it.
         let gateway = cx.gateway();
@@ -225,10 +270,10 @@ impl Jobs {
             .get::<Asked>()
             .map_or_else(|| "/v1/responses".into(), |a| a.uri.to_string());
         let mut req = http::Request::post(uri)
-            .body(full(ask.body.clone()))
+            .body(full(body.to_string()))
             .map_err(built_wrong)?;
         req.extensions_mut().insert(extensions);
-        self.entries().insert(id.clone(), Entry::Running);
+        lock(&self.0.entries).insert(id.clone(), Entry::Running);
         let jobs = self.clone();
         let queued = json!({ "id": id, "status": "queued" }).to_string();
         tokio::spawn(async move {
@@ -241,7 +286,7 @@ impl Jobs {
                     Entry::Done(failed.to_string().into())
                 }
             };
-            jobs.entries().insert(id, done);
+            lock(&jobs.0.entries).insert(id, done);
         });
         Ok(answer(queued))
     }
@@ -253,18 +298,23 @@ impl Plugin for Jobs {
         let Ok(ask) = cx.input::<Ask>().cloned() else {
             return Ok(None);
         };
-        if let Some(job) = cx.extensions().get::<Job>().cloned() {
-            return self.rerun(cx, &job);
+        let body: Value = serde_json::from_slice(&ask.body).unwrap_or_default();
+        // The job's own run, re-entered: route it to the deployment its id names.
+        if let Some(Job(id)) = cx.extensions().get::<Job>().cloned() {
+            let deployment =
+                verify(&id, tenant(cx)).ok_or_else(|| Fault::internal("bad job id"))?;
+            self.chain(cx, &body)?;
+            return self.relay(cx, id, deployment);
         }
-        if ask.method == Method::GET {
-            return self.poll(cx, &ask.path);
+        if let Some((id, rest)) = split(&ask.path) {
+            return self.route(cx, &ask, id, rest);
         }
+        let deployment = self.chain(cx, &body)?.unwrap_or(DEFAULT);
         let key = self.0.keys.fetch_add(1, Ordering::Relaxed) + 1;
-        let id = sign(DEFAULT, key, tenant(cx));
-        let background = String::from_utf8_lossy(&ask.body).contains(r#""background":true"#);
-        match background {
-            true => self.start(cx, &ask, id),
-            false => self.relay(cx, id, DEFAULT),
+        let id = sign(deployment, key, tenant(cx));
+        match body["background"] == true {
+            true => self.start(cx, body, id),
+            false => self.relay(cx, id, deployment),
         }
     }
 }

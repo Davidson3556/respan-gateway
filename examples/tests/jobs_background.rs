@@ -230,3 +230,138 @@ async fn tenants_with_other_credential_headers_do_not_share_ids() -> Result<(), 
     assert_eq!(alice["output"], "secret");
     Ok(())
 }
+
+/// The body of the `n`th request that reached a provider.
+fn body_of(mock: &MockTransport, n: usize) -> Value {
+    serde_json::from_slice(mock.sent()[n].body()).unwrap_or_default()
+}
+
+// The job's own run is a plain foreground request: a provider that honours
+// `background` would answer `queued`, and the job would never finish.
+#[tokio::test(start_paused = true)]
+async fn a_jobs_own_run_is_not_a_background_request() -> Result<(), Fault> {
+    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let done = r#"{"id":"native-1","status":"completed","output":"done"}"#;
+    mock.reply(WEST, mock::json(StatusCode::OK, done));
+    let gateway = slow_west(&mock, &seen)?;
+    let post = r#"{"background":true,"input":"hi"}"#;
+    let job = send(&gateway, request("POST", "/v1/responses", post)).await?;
+    gateway.idle().await;
+    let sent = body_of(&mock, 0);
+    assert_eq!(sent, json!({ "input": "hi" }), "sent: {sent}");
+    let polled = send(&gateway, get(job["id"].as_str().unwrap_or_default())).await?;
+    assert_eq!(polled["status"], "completed");
+    Ok(())
+}
+
+// A turn chained with `previous_response_id` goes to the deployment that
+// response lives at, with the provider's id, for a relayed response and for
+// a finished job; the id of another tenant's, or a forged one, is a 404.
+#[tokio::test(start_paused = true)]
+async fn a_previous_response_id_reaches_the_provider_as_its_own() -> Result<(), Fault> {
+    let (mock, seen) = (MockTransport::new(), Seen::default());
+    for n in 1..=4 {
+        let reply = format!(r#"{{"id":"native-{n}"}}"#);
+        mock.reply(WEST, mock::json(StatusCode::OK, &reply));
+    }
+    let gateway = slow_west(&mock, &seen)?;
+    let first = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
+    let chain = |id: &Value| json!({ "previous_response_id": id, "input": "more" }).to_string();
+    let second = send(
+        &gateway,
+        request("POST", "/v1/responses", &chain(&first["id"])),
+    )
+    .await?;
+    assert_eq!(body_of(&mock, 1)["previous_response_id"], "native-1");
+    assert_eq!(body_of(&mock, 1)["input"], "more");
+    assert_ne!(second["id"], "native-2", "the client sees a signed id");
+
+    // A finished job can be chained on too, after its provider id is known.
+    let job = request("POST", "/v1/responses", r#"{"background":true}"#);
+    let job = send(&gateway, job).await?;
+    gateway.idle().await;
+    let third = request("POST", "/v1/responses", &chain(&job["id"]));
+    send(&gateway, third).await?;
+    assert_eq!(body_of(&mock, 3)["previous_response_id"], "native-3");
+
+    for forged in [json!("resp_1deadbeef"), first["id"].clone()] {
+        let req = request("POST", "/v1/responses", &chain(&forged));
+        let req = if forged == first["id"] {
+            as_other(req)
+        } else {
+            req
+        };
+        let (status, ..) = read_whole(serve(&gateway, req).await.0).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{forged}");
+    }
+    assert_eq!(mock.sent().len(), 4, "no call for a refused id");
+    Ok(())
+}
+
+// `/cancel`, `/input_items` and `DELETE` of a signed id reach the provider
+// with its own id; the answer says the signed one.
+#[tokio::test(start_paused = true)]
+async fn the_paths_under_a_signed_id_reach_the_provider_with_its_own() -> Result<(), Fault> {
+    let (mock, seen) = (MockTransport::new(), Seen::default());
+    mock.reply(WEST, mock::json(StatusCode::OK, r#"{"id":"native-9"}"#));
+    for reply in [
+        r#"{"id":"native-9","status":"cancelled"}"#,
+        r#"{"object":"list","data":[]}"#,
+        r#"{"id":"native-9","deleted":true}"#,
+    ] {
+        mock.reply(WEST, mock::json(StatusCode::OK, reply));
+    }
+    let gateway = slow_west(&mock, &seen)?;
+    let first = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
+    let id = first["id"].as_str().unwrap_or_default();
+
+    let cancel = format!("/v1/responses/{id}/cancel");
+    let cancelled = send(&gateway, request("POST", &cancel, "")).await?;
+    assert_eq!(cancelled["id"], first["id"]);
+    assert_eq!(cancelled["status"], "cancelled");
+    let items = format!("/v1/responses/{id}/input_items?limit=5");
+    let listed = send(&gateway, request("GET", &items, "")).await?;
+    assert_eq!(listed["object"], "list");
+    let deleted = send(
+        &gateway,
+        request("DELETE", &format!("/v1/responses/{id}"), ""),
+    )
+    .await?;
+    assert_eq!(deleted["id"], first["id"]);
+
+    let sent = mock.sent();
+    let seen: Vec<(String, String)> = sent[1..]
+        .iter()
+        .map(|r| (r.method().to_string(), r.uri().to_string()))
+        .collect();
+    let west = |path: &str| format!("http://west.test{path}");
+    assert_eq!(
+        seen,
+        [
+            ("POST".into(), west("/v1/responses/native-9/cancel")),
+            (
+                "GET".into(),
+                west("/v1/responses/native-9/input_items?limit=5")
+            ),
+            ("DELETE".into(), west("/v1/responses/native-9")),
+        ]
+    );
+
+    // Another tenant's, and a job still running (no provider id yet), are 404.
+    let (status, ..) = read_whole(
+        serve(&gateway, as_other(request("POST", &cancel, "")))
+            .await
+            .0,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let job = request("POST", "/v1/responses", r#"{"background":true}"#);
+    let job = send(&gateway, job).await?;
+    let cancel = format!(
+        "/v1/responses/{}/cancel",
+        job["id"].as_str().unwrap_or_default()
+    );
+    let (status, ..) = read_whole(serve(&gateway, request("POST", &cancel, "")).await.0).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
