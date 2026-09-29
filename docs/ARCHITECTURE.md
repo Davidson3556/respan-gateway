@@ -73,7 +73,7 @@ outputs before them.
 | `Gateway` | Built by value (`provider`, `serve`, `plugin`, `target`); `handle` and `idle` are its runtime. |
 | `Plugin` | Four hooks: `on_client`, `on_client_end`, `on_provider`, `on_provider_end`. |
 | `Filter<T>` | The one way to edit inputs or outputs as they stream. |
-| `ClientContext` | What `on_client` and its end hook see: the request, its extensions, its filters, `call`, `take_inputs`. |
+| `ClientContext` | What `on_client` and its end hook see: the request, its extensions, its filters, `call`, `take_inputs`, and `gateway` for a job that outlives the request. |
 | `ProviderContext` | What a call's hooks see: the provider, format, first input, extensions, filters, `is_sent`, `is_refused`; the request by `&`, so it cannot `call`. |
 | `Call` | A `'static`, `Clone`, `Sync` future, sent when awaited; `with_input` and `with_extension` shape it. |
 | `Response` | A call's answer, or `Response::stream` of a plugin's own; held (`until_content`, `until_end`), read (`outputs`) or sent. |

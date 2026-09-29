@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use edge::*;
 use respan_gateway_core::futures::FutureExt;
+use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::*;
 
 fn gateway_of(rec: &Rec) -> Gateway {
@@ -188,4 +189,51 @@ async fn a_call_of_the_clients_value_cloned_gets_no_client_origin() {
     let (res, _) = handle(&gw, req(vec!["q"])).await;
     assert_eq!(read(res).await, Ok((200, "a;!".into())));
     assert_eq!(*lock(&seen), [false]);
+}
+
+/// A job that outlives its request reaches the gateway through the
+/// request's context and hands it a request of its own, which runs every
+/// plugin; `idle` waits for it once handed.
+#[tokio::test(flavor = "current_thread")]
+async fn a_job_hands_its_gateway_a_request_of_its_own() {
+    #[derive(Clone)]
+    struct Mark;
+
+    /// Starts a job for each request that is not a job's, and says when the
+    /// job's request was handed over.
+    struct Detach(Mutex<Option<oneshot::Sender<()>>>);
+
+    #[async_trait]
+    impl Plugin for Detach {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            if cx.extensions().get::<Mark>().is_some() {
+                return Ok(None);
+            }
+            let (gw, handed) = (cx.gateway(), lock(&self.0).take());
+            tokio::spawn(async move {
+                let (wire, reply) = ToyWire::new(req(vec!["job"]));
+                let mut marked = Extensions::new();
+                marked.insert(Mark);
+                let _end = gw.handle(wire, marked).await;
+                handed.map(|h| h.send(()));
+                let _ = read(reply.await.ok_or_else(|| Fault::internal("none"))).await;
+            });
+            Ok(None)
+        }
+    }
+
+    let (tx, handed) = oneshot::channel();
+    let rec = Rec::default();
+    let gw = gateway_of(&rec)
+        .plugin("detach", Detach(Mutex::new(Some(tx))))
+        .unwrap();
+    let (res, _end) = handle(&gw, req(vec!["hi"])).await;
+    assert_eq!(read(res).await.map(|(s, _)| s), Ok(200));
+    handed.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), gw.idle())
+        .await
+        .expect("idle once the job ended");
+    let log = rec.log();
+    assert_eq!(log.client_start, 2);
+    assert_eq!(log.client_codes(), ["ok", "ok"]);
 }

@@ -170,3 +170,7 @@ Loop 2 (simplicity and use cases), one pass:
 - `Dialed` is inlined, as it differed from `Dialer` by one letter: `dial`
   returns `Result<BoxFuture<Result<Half<Output>, Fault>>, Fault>`, which
   spells out "not sent" and "sent, not answered" (now 4 aliases).
+- `ClientContext::gateway()` hands a plugin its gateway, for a job that
+  outlives the request (use case 8), in place of a slot set after the
+  gateway is built. The job keeps it, not the plugin: the gateway holds its
+  plugins.

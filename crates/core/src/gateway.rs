@@ -41,7 +41,7 @@ pub(crate) struct Inner {
 /// given: `Gateway::new().provider(..)?.serve(..)?.plugin(..)?.target(..)?`.
 #[derive(Clone, Default)]
 pub struct Gateway {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl std::fmt::Debug for Gateway {

@@ -14,7 +14,7 @@ use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::opening::Opening;
 use crate::plugin::Filters;
-use crate::{Call, Events, Extensions, Fault, Filter, Plugin};
+use crate::{Call, Events, Extensions, Fault, Filter, Gateway, Plugin};
 
 /// One client request, as the client edge's hooks see it.
 pub struct ClientContext {
@@ -160,6 +160,16 @@ impl ClientContext {
     /// Call `provider` if every plugin passes, so later plugins still run.
     pub fn set_target(&mut self, provider: impl Into<String>) {
         self.target = Some(provider.into());
+    }
+
+    /// The gateway this request came to, such as for a job that outlives
+    /// the request to hand it requests of its own; [`Gateway::idle`] waits
+    /// for them. Move it into that job, not into the plugin: the gateway
+    /// holds its plugins, so a plugin that keeps it frees neither.
+    pub fn gateway(&self) -> Gateway {
+        Gateway {
+            inner: self.gateway.clone(),
+        }
     }
 
     /// A copy of it as it is now, for a call to keep.
