@@ -194,3 +194,8 @@ Loop 3 (simplicity, use cases and correctness), one pass:
   rename touches every hand-written `Format` in five crates, being changed
   in parallel at the time, for no change in meaning. `Answer` would collide
   with `Fault::answer`. Revisit when those branches have merged.
+
+Loop 5: `Half` is `Headed`, the rename loop 3 deferred, as no other branch
+rewrites the formats now. `Format::opening` is `Format::input` and
+`Gateway::handle` resolves `Result<(), Fault>`; the reasons are in 0023's
+history.

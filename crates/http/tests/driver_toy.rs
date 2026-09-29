@@ -14,7 +14,7 @@ use bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::future::{self, BoxFuture};
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::{Extensions, Fault, Gateway, Half, async_trait};
+use respan_gateway_core::{Extensions, Fault, Gateway, Headed, async_trait};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
@@ -544,7 +544,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
 }
 
 /// Dial the toy through `transport`, with one input and none to follow.
-fn dial(codec: &Toy, transport: Fnt) -> BoxFuture<'static, Result<Half<Out>, Fault>> {
+fn dial(codec: &Toy, transport: Fnt) -> BoxFuture<'static, Result<Headed<Out>, Fault>> {
     let dialer = Dialer::from(transport);
     let input = In("q".into());
     respan_gateway_http::__private::dial(

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::{Events, Extensions, Fault, Format, Gateway, Half, Origin};
+use respan_gateway_core::{Events, Extensions, Fault, Format, Gateway, Headed, Origin};
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
 use respan_gateway_testkit::{post, read_whole, serve};
@@ -48,7 +48,7 @@ impl Format for Local {
         _relay: Option<&Origin>,
         input: Option<&Conversation>,
         _later: Option<Events<Conversation>>,
-    ) -> Result<BoxFuture<'static, Result<Half<Reply>, Fault>>, Fault> {
+    ) -> Result<BoxFuture<'static, Result<Headed<Reply>, Fault>>, Fault> {
         let chat = input.ok_or_else(|| Fault::bad_request("no conversation"))?;
         let answer = model(chat)?;
 

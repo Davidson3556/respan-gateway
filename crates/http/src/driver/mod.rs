@@ -177,7 +177,7 @@ macro_rules! impl_format {
                 wire: $crate::Accepted,
                 reply: $crate::__private::BoxFuture<
                     'static,
-                    ($crate::__private::Half<Self::Output>, $crate::__private::Ended),
+                    ($crate::__private::Headed<Self::Output>, $crate::__private::Ended),
                 >,
             ) -> $crate::__private::BoxFuture<
                 'static,
@@ -212,7 +212,7 @@ macro_rules! impl_format {
                 $crate::__private::BoxFuture<
                     'static,
                     ::core::result::Result<
-                        $crate::__private::Half<Self::Output>,
+                        $crate::__private::Headed<Self::Output>,
                         $crate::__private::Fault,
                     >,
                 >,

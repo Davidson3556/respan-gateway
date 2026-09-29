@@ -160,7 +160,7 @@ async fn a_sweep_of_cuts_in_the_middle_of_a_response_ends_every_hook_once() {
         let after = (next(&mut state) % 8) as usize;
         cuts.push(after);
         let answer = Answer::text("one two three four");
-        // Half the responses are cut by the provider, without a close frame.
+        // Headed the responses are cut by the provider, without a close frame.
         openai.answer(if i % 2 == 0 {
             answer.cut_after(after + 2)
         } else {

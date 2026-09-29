@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use respan_gateway_core::futures::future::{BoxFuture, ready};
 use respan_gateway_core::futures::{FutureExt, StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{
-    Ended, Events, Extensions, Fault, Format, Gateway, Half, Origin, ProviderContext,
+    Ended, Events, Extensions, Fault, Format, Gateway, Headed, Origin, ProviderContext,
 };
 use respan_gateway_http::Status;
 use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote, Tally};
@@ -50,7 +50,7 @@ impl Format for Pipe {
     fn accept(
         &self,
         wire: Question,
-        reply: BoxFuture<'static, (Half<Reply>, Ended)>,
+        reply: BoxFuture<'static, (Headed<Reply>, Ended)>,
     ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<Question>>), Fault>> {
         tokio::spawn(async move {
             let ((_, outputs), ended) = reply.await;
@@ -75,7 +75,7 @@ impl Format for Pipe {
         relay: Option<&Origin>,
         input: Option<&Question>,
         _later: Option<Events<Question>>,
-    ) -> Result<BoxFuture<'static, Result<Half<Reply>, Fault>>, Fault> {
+    ) -> Result<BoxFuture<'static, Result<Headed<Reply>, Fault>>, Fault> {
         let relayed = relay.and_then(|o| o.downcast_ref::<Question>());
         let question = input.or(relayed);
         if question.is_some_and(|q| q.0 == "unwritable") {

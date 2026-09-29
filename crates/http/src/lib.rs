@@ -521,7 +521,7 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
 pub mod __private {
     pub use crate::driver::{accept, dial, input};
     pub use respan_gateway_core::futures::future::BoxFuture;
-    pub use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Half, Origin};
+    pub use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Headed, Origin};
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
 use http::StatusCode;
 use http::header::UPGRADE;
-use respan_gateway_core::{Events, Extensions, Fault, Half, Origin};
+use respan_gateway_core::{Events, Extensions, Fault, Headed, Origin};
 
 use super::Came;
 use super::reader::{Failure, Reader};
@@ -44,7 +44,7 @@ pub fn dial<C: Codec + Clone>(
     relay: Option<&Origin>,
     input: Option<&C::Input>,
     later: Option<Events<C::Input>>,
-) -> Result<BoxFuture<'static, Result<Half<C::Output>, Fault>>, Fault> {
+) -> Result<BoxFuture<'static, Result<Headed<C::Output>, Fault>>, Fault> {
     let came = relay.and_then(|o| o.downcast_ref::<Came>());
     let (head, first, encoder, done) = first_frame(codec, input, came, later.is_some())?;
     // A body done as it opens has no later inputs.

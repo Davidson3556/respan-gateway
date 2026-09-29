@@ -8,7 +8,7 @@ use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::{Ended, Events, Fault, Half, Origin};
+use respan_gateway_core::{Ended, Events, Fault, Headed, Origin};
 
 use super::reader::Reader;
 use super::writer::Writer;
@@ -30,7 +30,7 @@ type Handed = Result<(ResponseHead, Frames), Fault>;
 pub fn accept<C: Codec + Clone>(
     codec: &C,
     wire: Accepted,
-    reply: BoxFuture<'static, (Half<C::Output>, Ended)>,
+    reply: BoxFuture<'static, (Headed<C::Output>, Ended)>,
 ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<C::Input>>), Fault>> {
     let codec = codec.clone();
     async move {
@@ -103,7 +103,7 @@ async fn read_whole(mut body: Frames) -> Result<Bytes, Fault> {
 /// can write as plain text; and how it ended, as this edge told [`Ended`].
 async fn written<C: Codec>(
     codec: C,
-    reply: BoxFuture<'static, (Half<C::Output>, Ended)>,
+    reply: BoxFuture<'static, (Headed<C::Output>, Ended)>,
     ask: Arc<RequestHead>,
     body: Bytes,
     streaming: bool,

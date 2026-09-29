@@ -135,7 +135,7 @@ impl Format for Toy {
     fn accept(
         &self,
         wire: ToyWire,
-        reply: BoxFuture<'static, (Half<Out>, Ended)>,
+        reply: BoxFuture<'static, (Headed<Out>, Ended)>,
     ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<In>>), Fault>> {
         boom(18);
         let ToyWire {
@@ -191,7 +191,7 @@ impl Format for Toy {
         relay: Option<&Origin>,
         input: Option<&In>,
         later: Option<Events<In>>,
-    ) -> Result<BoxFuture<'static, Result<Half<Out>, Fault>>, Fault> {
+    ) -> Result<BoxFuture<'static, Result<Headed<Out>, Fault>>, Fault> {
         boom(12);
         if extensions.get::<Unsendable>().is_some() {
             return Err(Fault::config("the toy cannot send this call"));
@@ -293,7 +293,7 @@ fn events(body: Text) -> Events<Out> {
 /// answer's head at once if it streams, else with its first bytes, a
 /// failure before any refused.
 async fn write(
-    reply: BoxFuture<'static, (Half<Out>, Ended)>,
+    reply: BoxFuture<'static, (Headed<Out>, Ended)>,
     streams: bool,
     quirk: Quirk,
 ) -> (ToyReply, End) {

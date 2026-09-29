@@ -271,8 +271,8 @@ impl Gateway {
 
 /// The reply an edge gets if the gateway dropped the request first.
 fn abandoned() -> AnyReply {
-    let half = (None, Err(Fault::abandoned()));
-    (half, Box::new(|_| {}))
+    let headed = (None, Err(Fault::abandoned()));
+    (headed, Box::new(|_| {}))
 }
 
 async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response, Fault> {

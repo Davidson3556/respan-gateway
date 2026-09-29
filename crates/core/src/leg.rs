@@ -385,7 +385,7 @@ mod tests {
     use crate::format::Erased;
     use futures::future::BoxFuture;
 
-    use crate::{Events, Extensions, Format, Half, Origin};
+    use crate::{Events, Extensions, Format, Headed, Origin};
 
     struct Nil;
 
@@ -406,7 +406,7 @@ mod tests {
             _: Option<&Origin>,
             _: Option<&String>,
             _: Option<Events<String>>,
-        ) -> Result<BoxFuture<'static, Result<Half<String>, Fault>>, Fault> {
+        ) -> Result<BoxFuture<'static, Result<Headed<String>, Fault>>, Fault> {
             Err(Fault::internal("unused"))
         }
     }

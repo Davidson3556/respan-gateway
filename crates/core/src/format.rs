@@ -18,7 +18,7 @@ pub type Origin = Arc<dyn Any + Send + Sync>;
 /// Outputs under a head: its origin, and the outputs or why there are none.
 /// A provider edge's answer ([`Format::dial`]), and the reply a client edge
 /// writes ([`Format::accept`]).
-pub type Half<T> = (Option<Origin>, Result<Events<T>, Fault>);
+pub type Headed<T> = (Option<Origin>, Result<Events<T>, Fault>);
 
 /// Called by a client edge once its reply's end is out, with how it ended;
 /// dropped uncalled, the request ends
@@ -92,14 +92,14 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 /// # use respan_gateway_core::futures::channel::oneshot;
 /// # use respan_gateway_core::futures::future::BoxFuture;
 /// # use respan_gateway_core::futures::{FutureExt, StreamExt, TryStreamExt, stream};
-/// # use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Gateway, Half, Origin};
+/// # use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Gateway, Headed, Origin};
 /// #[derive(Clone)]
 /// struct Ask(String);
 /// #[derive(Clone)]
 /// struct Say(String);
 ///
 /// /// What the edge writes, handed to the adapter.
-/// type Reply = BoxFuture<'static, (Half<Say>, Ended)>;
+/// type Reply = BoxFuture<'static, (Headed<Say>, Ended)>;
 ///
 /// /// A client's connection: its line, and the adapter's slot.
 /// struct Line(String, oneshot::Sender<Reply>);
@@ -144,7 +144,7 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 ///         relay: Option<&Origin>,
 ///         input: Option<&Ask>,
 ///         _: Option<Events<Ask>>,
-///     ) -> Result<BoxFuture<'static, Result<Half<Say>, Fault>>, Fault> {
+///     ) -> Result<BoxFuture<'static, Result<Headed<Say>, Fault>>, Fault> {
 ///         // On a relay of it unchanged, the line is the origin's own.
 ///         let relayed = relay.and_then(|o| self.input(o)?.ok());
 ///         let Ask(line) = input.cloned().or(relayed).unwrap_or(Ask(String::new()));
@@ -215,7 +215,7 @@ pub trait Format: Send + Sync + 'static {
     fn accept(
         &self,
         _wire: Self::Wire,
-        _reply: BoxFuture<'static, (Half<Self::Output>, Ended)>,
+        _reply: BoxFuture<'static, (Headed<Self::Output>, Ended)>,
     ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<Self::Input>>), Fault>> {
         ready(Err(Fault::not_found("this format only calls providers"))).boxed()
     }
@@ -253,7 +253,7 @@ pub trait Format: Send + Sync + 'static {
         relay: Option<&Origin>,
         input: Option<&Self::Input>,
         later: Option<Events<Self::Input>>,
-    ) -> Result<BoxFuture<'static, Result<Half<Self::Output>, Fault>>, Fault>;
+    ) -> Result<BoxFuture<'static, Result<Headed<Self::Output>, Fault>>, Fault>;
 }
 
 /// An input, erased and shared.
@@ -265,9 +265,9 @@ pub(crate) type Values = Box<dyn Any + Send>;
 /// Events erased: each item a `Vec<T>`.
 pub(crate) type AnyEvents = BoxStream<'static, Result<Values, Fault>>;
 
-pub(crate) type AnyHalf = (Option<Origin>, Result<AnyEvents, Fault>);
+pub(crate) type AnyHeaded = (Option<Origin>, Result<AnyEvents, Fault>);
 
-pub(crate) type AnyReply = (AnyHalf, Ended);
+pub(crate) type AnyReply = (AnyHeaded, Ended);
 
 /// A client edge's accepted request: its origin, and its inputs if any follow.
 pub(crate) type AnyAccepted = Result<(Option<Origin>, Option<AnyEvents>), Fault>;
@@ -275,7 +275,7 @@ pub(crate) type AnyAccepted = Result<(Option<Origin>, Option<AnyEvents>), Fault>
 /// Inputs going to a provider.
 pub(crate) type AnyInputs = BoxStream<'static, Result<AnyInput, Fault>>;
 
-pub(crate) type AnyDialed = BoxFuture<'static, Result<AnyHalf, Fault>>;
+pub(crate) type AnyDialed = BoxFuture<'static, Result<AnyHeaded, Fault>>;
 
 /// A [`Format`] with its types erased, as the gateway keeps it.
 pub(crate) trait AnyFormat: Send + Sync + 'static {
