@@ -172,13 +172,13 @@ macro_rules! impl_format {
                 >,
             ) -> $crate::__private::BoxFuture<
                 'static,
-                (
-                    ::core::option::Option<$crate::__private::Origin>,
-                    ::core::result::Result<
+                ::core::result::Result<
+                    (
+                        ::core::option::Option<$crate::__private::Origin>,
                         ::core::option::Option<$crate::__private::Events<Self::Input>>,
-                        $crate::__private::Fault,
-                    >,
-                ),
+                    ),
+                    $crate::__private::Fault,
+                >,
             > {
                 $crate::accept(self, wire, reply)
             }

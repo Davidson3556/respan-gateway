@@ -169,12 +169,12 @@ impl Gateway {
         let Ok(accepting) = std::panic::catch_unwind(accept) else {
             return unwritten(Fault::internal(PANICKED));
         };
-        let half = AssertUnwindSafe(accepting).catch_unwind().await;
-        let panicked = half.is_err();
-        let (origin, later) = half.unwrap_or_else(|_| (None, Err(Fault::internal(PANICKED))));
-        let (later, broken) = match later {
-            Ok(later) => (Later::new(later), None),
-            Err(fault) => (Later::new(None), Some(fault)),
+        let accepted = AssertUnwindSafe(accepting).catch_unwind().await;
+        let panicked = accepted.is_err();
+        let accepted = accepted.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+        let (origin, later, broken) = match accepted {
+            Ok((origin, later)) => (origin, Later::new(later), None),
+            Err(fault) => (None, Later::new(None), Some(fault)),
         };
         let inner = self.inner.clone();
         let cx = ClientContext::new(format.clone(), origin, later, extensions, inner);

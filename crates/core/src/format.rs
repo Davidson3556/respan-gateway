@@ -127,9 +127,8 @@ pub trait Format: Send + Sync + 'static {
         &self,
         _wire: Self::Wire,
         _reply: BoxFuture<'static, (Half<Self::Output>, Ended)>,
-    ) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<Self::Input>>, Fault>)> {
-        let fault = Fault::not_found("this format only calls providers");
-        ready((None, Err(fault))).boxed()
+    ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<Self::Input>>), Fault>> {
+        ready(Err(Fault::not_found("this format only calls providers"))).boxed()
     }
 
     /// The input that came with a client's head, read from its origin: `Some`
@@ -179,7 +178,7 @@ pub(crate) type AnyHalf = (Option<Origin>, Result<AnyEvents, Fault>);
 pub(crate) type AnyReply = (AnyHalf, Ended);
 
 /// A client edge's accepted request: its origin, and its inputs if any follow.
-pub(crate) type AnyAccepted = (Option<Origin>, Result<Option<AnyEvents>, Fault>);
+pub(crate) type AnyAccepted = Result<(Option<Origin>, Option<AnyEvents>), Fault>;
 
 /// Inputs going to a provider, each with whether it is the client's.
 pub(crate) type AnyInputs = BoxStream<'static, Result<(AnyInput, bool), Fault>>;
@@ -287,13 +286,13 @@ impl<F: Format> AnyFormat for Erased<F> {
     ) -> BoxFuture<'static, AnyAccepted> {
         let Ok(wire) = wire.downcast::<F::Wire>() else {
             let fault = Fault::internal("a wire of another type than its format's");
-            return ready((None, Err(fault))).boxed();
+            return ready(Err(fault)).boxed();
         };
         let reply = reply
             .map(|((origin, events), ended)| ((origin, events.map(typed::<F::Output>)), ended));
         let accepted = self.format.accept(*wire, reply.boxed());
         accepted
-            .map(|(origin, events)| (origin, events.map(|e| e.map(erase))))
+            .map_ok(|(origin, events)| (origin, events.map(erase)))
             .boxed()
     }
 

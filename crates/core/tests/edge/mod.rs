@@ -133,7 +133,7 @@ impl Format for Toy {
         &self,
         wire: ToyWire,
         reply: BoxFuture<'static, (Half<Out>, Ended)>,
-    ) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<In>>, Fault>)> {
+    ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<In>>), Fault>> {
         boom(18);
         let ToyWire {
             frames,
@@ -160,17 +160,14 @@ impl Format for Toy {
                 }) as Origin)
             };
             if streams {
-                return (origin(None), Ok(Some(inputs(frames))));
+                return Ok((origin(None), Some(inputs(frames))));
             }
             // One-shot: the request is in once its body is.
             let (mut frames, mut all) = (frames, String::new());
             while let Some(frame) = frames.next().await {
-                match frame {
-                    Ok(text) => all.push_str(&text),
-                    Err(fault) => return (origin(None), Err(fault)),
-                }
+                all.push_str(&frame?);
             }
-            (origin(Some(all)), Ok(None))
+            Ok((origin(Some(all)), None))
         }
         .boxed()
     }

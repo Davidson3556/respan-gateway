@@ -100,7 +100,7 @@ trait Format { type Input; type Output; type Wire; type Dialer;
   fn accepts(&self, wire: &Wire) -> bool { false }
   fn is_content(&self, output: &Output) -> bool { true }
   fn accept(&self, wire: Wire, reply: BoxFuture<(Half<Output>, Ended)>)
-      -> BoxFuture<(Option<Origin>, Result<Option<Events<Input>>, Fault>)>; // refuses
+      -> BoxFuture<Result<(Option<Origin>, Option<Events<Input>>), Fault>>; // refuses
   fn opening(&self, origin: &Origin) -> Option<Result<Input, Fault>> { None }
   fn dial(&self, dialer: &Dialer, extensions: Extensions, relay: Option<&Origin>,
           opening: Option<(&Input, bool)>, later: Option<Events<(Input, bool)>>)

@@ -30,7 +30,7 @@ pub fn accept<C: Codec + Clone>(
     codec: &C,
     wire: Accepted,
     reply: BoxFuture<'static, (Half<C::Output>, Ended)>,
-) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<C::Input>>, Fault>)> {
+) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<C::Input>>), Fault>> {
     let codec = codec.clone();
     async move {
         let Accepted {
@@ -49,23 +49,19 @@ pub fn accept<C: Codec + Clone>(
             };
             let make = Box::new(move || codec.request_decoder(&head));
             let inputs = Reader::inputs(frames, make);
-            return (Some(Arc::new(came) as Origin), Ok(Some(inputs.boxed())));
+            return Ok((Some(Arc::new(came) as Origin), Some(inputs.boxed())));
         }
         // One that fails while read is refused.
-        let (raw, broken) = match read_whole(frames).await {
-            Ok(bytes) => (bytes, None),
-            Err(fault) => (Bytes::new(), Some(fault)),
-        };
+        let read = read_whole(frames).await;
+        let raw = read.as_ref().cloned().unwrap_or_default();
         let writer = written(codec, reply, head.clone(), raw.clone(), false);
         let _ = slot.send(writer.boxed());
-        let came = Arc::new(Came {
+        read?;
+        let came = Came {
             head,
             body: Some(raw),
-        }) as Origin;
-        match broken {
-            None => (Some(came), Ok(None)),
-            Some(fault) => (Some(came), Err(fault)),
-        }
+        };
+        Ok((Some(Arc::new(came) as Origin), None))
     }
     .boxed()
 }

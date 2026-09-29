@@ -51,7 +51,7 @@ impl Format for Pipe {
         &self,
         wire: Question,
         reply: BoxFuture<'static, (Half<Reply>, Ended)>,
-    ) -> BoxFuture<'static, (Option<Origin>, Result<Option<Events<Question>>, Fault>)> {
+    ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<Question>>), Fault>> {
         tokio::spawn(async move {
             let ((_, outputs), ended) = reply.await;
             let end = match outputs {
@@ -61,7 +61,7 @@ impl Format for Pipe {
             ended(end);
         });
         let origin = Arc::new(wire) as Origin;
-        ready((Some(origin), Ok(None))).boxed()
+        ready(Ok((Some(origin), None))).boxed()
     }
 
     fn opening(&self, origin: &Origin) -> Option<Result<Question, Fault>> {
