@@ -49,9 +49,10 @@ async fn a_transport_with_its_own_key_hides_a_subprotocol_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_key_after_a_bare_credential_name_is_hidden_too() {
-    let sent = offered_to_provider("token, dg-client-secret-0123456789").await;
-    assert_eq!(sent.as_deref(), Some("token"));
+async fn a_key_after_a_bare_credential_name_is_hidden_with_its_name() {
+    // The provider is keyed: a marker with no key after it would be refused.
+    let sent = offered_to_provider("realtime, token, dg-client-secret-0123456789").await;
+    assert_eq!(sent.as_deref(), Some("realtime"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

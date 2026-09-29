@@ -8,7 +8,7 @@ use std::time::Duration;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_core::futures::{SinkExt, StreamExt, stream};
-use respan_gateway_core::{Fault, async_trait, codes};
+use respan_gateway_core::{Fault, async_trait};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap};
@@ -63,8 +63,10 @@ fn is_handshake(name: &HeaderName) -> bool {
 ///
 /// - The call's body ends clean: Close 1000 is sent, and the provider's
 ///   end, however it comes within [`CLOSE_WAIT`], ends the answer clean.
-/// - It ends `Err` (the client broke or left): the connection is dropped
-///   with no Close, and the answer ends `Err(abandoned)`.
+/// - It ends `Err` (the client broke or left, or a filter or plugin refused
+///   an input): the connection is dropped with no Close, and the answer ends
+///   with that fault, so what the client is told is the fault's own (an
+///   edge that reports its client's leaving says `abandoned`).
 /// - The provider sends Close with no code or 1000: the answer ends clean.
 ///   With another code: `Err(upstream)` with that [`CloseCode`].
 /// - The provider's connection breaks with no Close: `Err(truncated)`.
@@ -239,8 +241,9 @@ impl Transport for WsTransport {
 enum Sent {
     /// The call's body ended clean, and Close was sent.
     Closed,
-    /// The body ended `Err`: the client is gone.
-    Gone,
+    /// The body ended `Err`: the session is over, and the answer ends with
+    /// its fault.
+    Gone(Fault),
     /// The connection broke while sending; the reader says how.
     Lost,
     /// A frame that cannot be sent.
@@ -266,8 +269,8 @@ async fn session(socket: Socket, body: Frames, frames: Sender<Result<Bytes, Faul
             Sent::Closed => {
                 let _ = tokio::time::timeout(CLOSE_WAIT, read).await;
             }
-            Sent::Gone => {
-                let _ = abort.send(Fault::new(codes::ABANDONED, "the client is gone"));
+            Sent::Gone(fault) => {
+                let _ = abort.send(fault);
                 read.await;
             }
             Sent::Failed(fault) => {
@@ -287,8 +290,9 @@ async fn send_frames(
     closing: Arc<AtomicBool>,
 ) -> Sent {
     while let Some(frame) = body.next().await {
-        let Ok(bytes) = frame else {
-            return Sent::Gone;
+        let bytes = match frame {
+            Ok(bytes) => bytes,
+            Err(fault) => return Sent::Gone(fault),
         };
         let Ok(text) = String::from_utf8(bytes.into()) else {
             let text = "a frame of a call is not text: only text frames are carried";

@@ -303,7 +303,7 @@ async fn a_frame_that_is_not_json_fails_the_session() {
     say(&mut ws, "not json either").await;
     assert_eq!(
         hear(&mut ws).await,
-        Heard::Closed(Some((1011, "abandoned".into())))
+        Heard::Closed(Some((1011, "bad_request".into())))
     );
     idle(&server.gateway).await;
     // Nothing that is not JSON reached the provider.
@@ -369,4 +369,30 @@ async fn a_plugin_can_refuse_a_session_before_the_upgrade() {
     assert_eq!(code(&ends.only()), "over_limit");
     assert!(calls.all().is_empty());
     assert_eq!(probe.total.load(Ordering::SeqCst), 0);
+}
+
+// A filter that refuses a client's input ends the session as it ends any
+// other: the client is closed with the fault's `CloseCode` and its code, and
+// the hooks are told that code, not that the client left.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filter_refusing_an_input_closes_the_client_with_its_code() {
+    let openai = FakeOpenAi::start().await;
+    let policy = OnClient(|cx: &mut ClientContext| {
+        cx.filter(|e: &mut ClientEvent| match e.json["type"] == "forbidden" {
+            true => Err(Fault::new("policy", "the input is refused").with(CloseCode(1008))),
+            false => Ok(()),
+        })
+    });
+    let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![("policy", Arc::new(policy))]);
+    let server = serve(gateway).await;
+    let mut ws = connect(server.addr, PATH, KEY).await.unwrap();
+    heard_text(&mut ws).await;
+    say(&mut ws, r#"{"type":"forbidden"}"#).await;
+    assert_eq!(
+        hear(&mut ws).await,
+        Heard::Closed(Some((1008, "policy".into())))
+    );
+    idle(&server.gateway).await;
+    assert_eq!(code(&ends.only()), "policy");
+    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["policy"]);
 }
