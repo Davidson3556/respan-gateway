@@ -146,3 +146,43 @@ async fn a_provider_that_refuses_the_upgrade_is_refused_under_its_status() {
     assert_eq!(code(&ends.only()), "invalid_request_error");
     assert_eq!(calls.all().len(), 1);
 }
+
+// A 3xx to the handshake is no switch: the session the call asked for did
+// not open, so the call is refused, as a 401 is (a fallback may try another
+// provider), and the client gets the provider's 3xx as it came, to follow
+// if it will (RFC 6455 4.1). To a request that is no upgrade a 3xx is an
+// answer, relayed (`crates/respan-gateway/tests/l7_redirect.rs`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redirect_to_the_upgrade_is_a_refusal_the_client_gets_as_it_came() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let (mut buf, mut got) = (vec![0u8; 4096], Vec::new());
+            while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+            let answer = "HTTP/1.1 302 Found\r\nlocation: ws://elsewhere/v1/realtime\r\n\
+                          content-length: 5\r\n\r\nmoved";
+            let _ = sock.write_all(answer.as_bytes()).await;
+        }
+    });
+    let (gateway, ends, calls) = relay(&format!("ws://{addr}"));
+    let server = serve(gateway).await;
+    let refused = connect(server.addr, REALTIME, &[]).await;
+    let Err(tokio_tungstenite::tungstenite::Error::Http(resp)) = refused else {
+        panic!("expected an HTTP answer to the handshake")
+    };
+    assert_eq!(resp.status(), 302);
+    assert_eq!(resp.headers()["location"], "ws://elsewhere/v1/realtime");
+    assert_eq!(resp.body().as_deref(), Some(&b"moved"[..]));
+    idle(&server.gateway).await;
+    let (end, call) = (ends.only(), calls.all());
+    assert_ne!(code(&end), "ok", "the request is refused");
+    assert_eq!(call.len(), 1);
+    assert_ne!(code(&call[0]), "ok", "the call is refused");
+}

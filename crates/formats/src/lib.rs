@@ -97,6 +97,19 @@ pub(crate) fn forwarded_path(path: &str) -> String {
     }
 }
 
+/// Whether every reader reads a path one way: percent-decoded once, it
+/// holds no `;`, `\` or `%`, and no segment is `.` or `..`. Readers differ
+/// only in what they do with those: a servlet container cuts `;params`
+/// before it decodes, the URL standard reads a `\` as a slash and resolves
+/// dot-segments before it decodes, nginx decodes first, and a reader that
+/// decodes twice reads a `%25` escape again. Without them, each reads the
+/// same names, as an escaped `/` splits a name without moving it: what
+/// [`clean_path`] reads.
+pub(crate) fn reads_one_way(path: &str) -> bool {
+    let decoded = respan_gateway_http::percent_decode(path);
+    !decoded.contains([';', '\\', '%']) && decoded.split('/').all(|s| s != "." && s != "..")
+}
+
 /// Whether a request's path ends in `suffix`, however it is spelled (see
 /// [`clean_path`]).
 pub fn path_ends_with(head: &RequestHead, suffix: &str) -> bool {
@@ -283,46 +296,152 @@ mod tests {
     }
 }
 
-// ===== loop 6 audit: appended to crates/formats/src/lib.rs =====
+/// The passthrough forwards a path it never read, so every reader of what
+/// it forwards must read what matching read: else a vendor, or a front end
+/// before it, could read a chat endpoint where the chat format read none,
+/// and a chat call would pass the chat format and its plugins.
 #[cfg(test)]
-mod l6_audit {
-    use super::{clean_path, forwarded_path};
+mod path_readers {
+    use super::{clean_path, forwarded_path, reads_one_way};
+    use respan_gateway_http::percent_decode;
 
-    /// The doc of `forwarded_path` claims the provider never gets a
-    /// structure matching did not look at: matching the forwarded path must
-    /// read what matching the client's path read. Every path of up to four
-    /// segments from a small alphabet of the spellings that matter.
+    fn dots(segments: impl Iterator<Item = String>) -> String {
+        let mut kept: Vec<String> = Vec::new();
+        for s in segments {
+            match s.as_str() {
+                "" | "." => {}
+                ".." => drop(kept.pop()),
+                _ => kept.push(s),
+            }
+        }
+        kept.iter().fold(String::new(), |out, s| out + "/" + s)
+    }
+
+    /// The URL standard: split raw on `/` and `\`, a dot-segment however
+    /// escaped, the rest left escaped.
+    fn url_standard(p: &str) -> String {
+        dots(
+            p.split(['/', '\\'])
+                .map(|s| match percent_decode(s).as_str() {
+                    d @ ("." | "..") => d.to_owned(),
+                    _ => s.to_owned(),
+                }),
+        )
+    }
+
+    /// Servlet containers (Tomcat, Jetty, Spring): `;params` cut from each
+    /// raw segment, then decoded; an escaped `/` stays in its segment.
+    fn servlet(p: &str) -> String {
+        dots(
+            p.split('/')
+                .map(|s| percent_decode(s.split(';').next().unwrap_or_default())),
+        )
+    }
+
+    /// A front end that decodes first, then resolves dots (nginx's `$uri`).
+    fn decode_first(p: &str) -> String {
+        dots(percent_decode(p).split('/').map(str::to_owned))
+    }
+
+    /// Every path of up to three more segments after a chat prefix, from
+    /// the spellings readers differ on: for each one passthrough accepts,
+    /// each reader of the forwarded path reads what matching read, so none
+    /// reads a path a client format accepts that matching did not.
     #[test]
-    fn l6_matching_the_forwarded_path_reads_what_matching_read() {
+    fn every_reader_of_a_forwarded_path_reads_what_matching_read() {
         let parts = [
-            "a", "..", ".", "", "x%2Fy", "x%5Cy", "%2E%2E", "..;p", "..%3Bp", "a;p", "%2F..",
+            "completions",
+            "x",
+            "..",
+            ".",
+            "",
+            "%2E%2E",
+            "%2e",
+            ".%2e",
+            "x%2Fy",
+            "x%5C..",
+            "..;p",
+            "..%3Bp",
+            "completions;x%2F..",
+            "completions;%2F..",
+            "completions;p",
+            "c;p%2F..",
+            "%2F..",
             "..%2F",
+            "x;%2F",
+            "%3B",
+            "%252F..",
+            "%25",
+            "a%2F%2E%2E",
+            "chat%2Fcompletions",
+            "arn%3Aaws%2Fp",
+            "m:generate",
+            "%FF",
         ];
-        let mut bad = Vec::new();
-        let mut paths = vec![String::new()];
-        for _ in 0..4 {
-            let mut next = Vec::new();
+        let (mut bad, mut accepted, mut n) = (Vec::new(), 0, 0);
+        for prefix in ["/v1/chat", "/v1/chat/completions"] {
+            let mut paths = vec![prefix.to_owned()];
+            let mut frontier = paths.clone();
+            for _ in 0..3 {
+                let next: Vec<String> = frontier
+                    .iter()
+                    .flat_map(|p| parts.iter().map(move |s| format!("{p}/{s}")))
+                    .collect();
+                paths.extend(next.iter().cloned());
+                frontier = next;
+            }
             for p in &paths {
-                for s in parts {
-                    next.push(format!("{p}/{s}"));
+                n += 1;
+                if !reads_one_way(p) {
+                    continue;
+                }
+                accepted += 1;
+                let (matched, sent) = (clean_path(p), forwarded_path(p));
+                for (who, read) in [
+                    ("URL-standard", url_standard(&sent)),
+                    ("servlet", servlet(&sent)),
+                    ("decode-first", decode_first(&sent)),
+                ] {
+                    if clean_path(&read) != matched {
+                        bad.push(format!(
+                            "{p}: matched {matched:?}; sent {sent}; a {who} reader reads {read:?}"
+                        ));
+                        break;
+                    }
                 }
             }
-            paths.extend(next);
         }
-        for p in &paths {
-            let (direct, forwarded) = (clean_path(p), clean_path(&forwarded_path(p)));
-            if direct != forwarded {
-                bad.push(format!(
-                    "{p}: matched {direct:?}, provider reads {forwarded:?}"
-                ));
-            }
-        }
+        assert!(accepted > 1_000, "only {accepted} of {n} paths accepted");
         assert!(
             bad.is_empty(),
-            "{} of {} paths, e.g.\n{}",
+            "{} of {n}:\n{}",
             bad.len(),
-            paths.len(),
-            bad[..bad.len().min(8)].join("\n")
+            bad[..bad.len().min(12)].join("\n")
         );
+    }
+
+    #[test]
+    fn a_path_readers_differ_on_is_refused_and_a_vendors_path_is_not() {
+        for path in [
+            "/v1/chat/completions/%3B/%2F..",
+            "/v1/chat/completions/x%5C../%2F..",
+            "/v1/chat/completions;x%2F..",
+            "/v1/chat/completions;x%2Fy",
+            "/v1/chat%252Fcompletions",
+            "/v1/./models",
+            "/v1/x/%2e%2E/models",
+            "/v1\\models",
+        ] {
+            assert!(!reads_one_way(path), "{path}");
+        }
+        for path in [
+            "/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A1%3Aapplication-inference-profile%2Fabc/invoke",
+            "/v1beta/models/gemini-2.0-flash:generateContent",
+            "/v1/models/claude@2024:rawPredict",
+            "/v1//files/%FF/",
+            "/",
+        ] {
+            assert!(reads_one_way(path), "{path}");
+        }
     }
 }

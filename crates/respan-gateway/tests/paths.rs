@@ -114,8 +114,9 @@ target: p
     );
 }
 
-/// Passthrough forwards the segments it matched, as spelled, and the query as it
-/// came: whatever the spelling, the vendor gets one path.
+/// Passthrough forwards a path's segments as spelled, and the query as it
+/// came; a path readers could read two ways (a dot-segment, `;`, `\` or a
+/// `%25`, raw or escaped) is no format's, a 404 that reaches no vendor.
 #[tokio::test]
 async fn passthrough_forwards_the_matched_segments() {
     let (base, seen) = recorder().await;
@@ -130,19 +131,29 @@ target: p
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     for (sent, forwarded) in [
-        ("/v1\\models", "/pt/v1/models"),
-        ("/v1/./models", "/pt/v1/models"),
-        ("/v1/x/../models?a=1", "/pt/v1/models?a=1"),
         ("/v1/%6Dodels", "/pt/v1/%6Dodels"),
         ("/v1/files/file-1?limit=2", "/pt/v1/files/file-1?limit=2"),
         ("/v1/a%20b", "/pt/v1/a%20b"),
-        ("/v1/%2e%2e/models", "/pt/models"),
-        ("/v1/a/%2E%2e/%2e/b;x=1//c", "/pt/v1/b;x=1/c"),
-        ("/v1/.;x/models", "/pt/v1/models"),
+        ("/v1//files/?a=../b;c", "/pt/v1/files?a=../b;c"),
     ] {
         seen.lock().unwrap().clear();
         send_raw(&addr, sent).await;
         let got = seen.lock().unwrap().clone();
         assert_eq!(got, [format!("POST {forwarded} HTTP/1.1")], "sent {sent}");
+    }
+    for sent in [
+        "/v1\\models",
+        "/v1/./models",
+        "/v1/x/../models?a=1",
+        "/v1/%2e%2e/models",
+        "/v1/a/%2E%2e/%2e/b;x=1//c",
+        "/v1/.;x/models",
+        "/v1/x%5Cy",
+        "/v1/100%25",
+    ] {
+        seen.lock().unwrap().clear();
+        let status = send_raw(&addr, sent).await;
+        assert!(status.contains(" 404 "), "sent {sent}: {status}");
+        assert!(seen.lock().unwrap().is_empty(), "sent {sent}");
     }
 }

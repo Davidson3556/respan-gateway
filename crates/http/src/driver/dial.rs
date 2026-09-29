@@ -29,13 +29,15 @@ use crate::{Codec, Dialer, Encoder, Exchange, RequestHead, ResponseHead};
 ///   transport passes on the client's keys
 ///   ([`credentials`](crate::credentials)) only then.
 /// - The answer is classified at its head (rule 2): a non-2xx answer, but
-///   a 101 to a call that asked to switch protocols, is read whole before
-///   this resolves, so its codec's failure before any output resolves
-///   `Ok((origin, Err(fault)))`. It is read up to `ERROR_BODY_CAP` bytes
-///   (1 MiB): past it the body ends after the frames read, as a shorter
-///   body would, so the answer keeps its verdict, a body up to it is
-///   relayed byte for byte and a huge one cannot exhaust memory. For another, what is ready of it when the
-///   transport returns is read, waiting for nothing.
+///   a 101 to a call that asked to switch protocols, is read before this
+///   resolves until its codec decides, so its codec's failure before any
+///   output resolves `Ok((origin, Err(fault)))`, and its first output (an
+///   answer the codec relays as it came, such as a redirect) opens it, to
+///   stream from that frame on. While nothing is decided it is read up to
+///   `ERROR_BODY_CAP` bytes (1 MiB): past it the codec is given the end,
+///   as a shorter body would give it, so a refusal keeps its verdict and a
+///   huge one cannot exhaust memory. For another, what is ready of it when
+///   the transport returns is read, waiting for nothing.
 #[allow(clippy::type_complexity)]
 pub fn dial<C: Codec + Clone>(
     codec: &C,
@@ -75,8 +77,8 @@ pub fn dial<C: Codec + Clone>(
         let answer = Arc::new(head);
         let decoder = codec.response_decoder(&answer, &sent, &first);
         let mut read = Reader::outputs(body, decoder, failed);
-        if is_whole(&answer, &sent) {
-            read.buffer().await;
+        if !is_open(&answer, &sent) {
+            read.decide().await;
         }
         let origin = Some(answer as Origin);
         Ok(match read.refused() {
@@ -87,15 +89,14 @@ pub fn dial<C: Codec + Clone>(
     .boxed())
 }
 
-/// Whether `answer` to the call `sent` is read whole before it is
-/// classified: a non-2xx, but a 101 to a call that asked to switch.
-fn is_whole(answer: &ResponseHead, sent: &RequestHead) -> bool {
-    let asked = sent.headers.contains_key(UPGRADE);
-    let open = match answer.status {
-        StatusCode::SWITCHING_PROTOCOLS => asked,
+/// Whether `answer` to the call `sent` is open at its head: a 2xx, or a
+/// 101 to a call that asked to switch. Any other is read until its codec
+/// decides.
+fn is_open(answer: &ResponseHead, sent: &RequestHead) -> bool {
+    match answer.status {
+        StatusCode::SWITCHING_PROTOCOLS => sent.headers.contains_key(UPGRADE),
         status => status.is_success(),
-    };
-    !open
+    }
 }
 
 /// The call's head as its codec writes it, from the client's head if it

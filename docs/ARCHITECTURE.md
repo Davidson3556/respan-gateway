@@ -160,9 +160,10 @@ format's.
 HTTP's client edge writes a one-shot request's head with its first bytes, so
 a failure before any is still a refusal; `Encoder::open` opens a quiet
 stream at once; an upgrade's head goes when `reply` resolves. HTTP's
-provider edge reads a non-2xx answer whole before `dial` resolves (a 101 to
-a call that asked to switch is open), so a refusal is known as one however
-slowly its body comes.
+provider edge reads a non-2xx answer until its codec decides before `dial`
+resolves (a 101 to a call that asked to switch is open), so a refusal is
+known as one however slowly its body comes, and an answer the codec relays,
+such as a passthrough's redirect, streams from its first output.
 
 **A fault says whose it is:** `bad_request` the client's, `config` the
 gateway's, `upstream` and `truncated` a provider's, `internal` a bug,

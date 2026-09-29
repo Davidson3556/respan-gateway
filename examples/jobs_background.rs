@@ -4,7 +4,7 @@
 //!
 //! - **Background jobs.** A request with `"background": true` is answered at
 //!   once with a signed id. The plugin runs the job as a request of its own,
-//!   through the gateway's own `serve` in a spawned task, so it outlives the
+//!   through `http::serve` in a spawned task, so it outlives the
 //!   client: every later plugin runs over it again, with the client's
 //!   [`Credential`], and the provider gets the tenant's key. A poll is
 //!   answered from the plugin's store: `in_progress`, then the finished body.

@@ -102,17 +102,23 @@ pub fn request_encoder<F: 'static>(
 }
 
 /// The response decoder of `format` for a response with `head` to the call
-/// with head `call`: a success's or a redirect's (a 304 too) bytes, or a 101's if the call asked to
-/// switch protocols, one message per frame; none for a response with no
-/// body; any other answer read whole ([`whole::answer`](crate::whole::answer)).
+/// with head `call`: a success's bytes, a redirect's (a 304 too) unless the
+/// call asked to switch protocols, or a 101's if it did, one message per
+/// frame; none for a response with no body; any other answer read whole
+/// ([`whole::answer`](crate::whole::answer)), a refusal.
 pub fn response_decoder<F: 'static>(
     format: &str,
     head: &ResponseHead,
     call: &RequestHead,
 ) -> Box<dyn Decoder<Got<F>>> {
-    let switched = head.status == StatusCode::SWITCHING_PROTOCOLS && asked_to_switch(call);
-    // A redirect or a 304 is an answer to relay as it came, not a refusal.
-    let relayed = head.status.is_success() || head.status.is_redirection();
+    let asked = asked_to_switch(call);
+    let switched = head.status == StatusCode::SWITCHING_PROTOCOLS && asked;
+    // A redirect or a 304 answers a request: relayed as it came, not a
+    // refusal. To a call that asked to switch it is no switch: the session
+    // it asked for did not open, as with a 401 or a 503 to the handshake,
+    // so it refuses the call, and a fallback may try another provider. The
+    // client still gets it as it came, a refusal of this format's name.
+    let relayed = head.status.is_success() || (head.status.is_redirection() && !asked);
     match relayed || switched {
         _ if relayed && bodiless(&call.method, head.status) => crate::whole::nothing(),
         false => crate::whole::decoder(format, head, |_, _| Ok(())),
@@ -149,6 +155,16 @@ pub fn response_encoder<F: 'static>(
 /// this format at the vendor's origin, as the client's path is relayed as it
 /// is. Named `passthrough`, so a client's key goes only to a provider of
 /// this format.
+///
+/// It forwards what it never read, so it takes only a path that every
+/// reader reads one way: percent-decoded once, no `;`, `\` or `%`, and no
+/// `.` or `..` segment. Any other path is no format's, a 404: a format
+/// before it matched it by one reading, and a vendor, or a front end before
+/// it, may read another, such as its chat endpoint, which would carry a
+/// chat call past the chat format and its plugins. This refuses paths with
+/// matrix parameters (`;v=1`), a literal `%` (`%25`), a backslash, or a
+/// dot-segment, which no vendor API this relays is known to need; an
+/// escaped `/` (a Bedrock ARN's `%2F`), a `:` or an `@` still pass.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Passthrough;
 
@@ -160,8 +176,8 @@ impl Codec for Passthrough {
         "passthrough"
     }
 
-    fn accepts(&self, _head: &RequestHead) -> bool {
-        true
+    fn accepts(&self, head: &RequestHead) -> bool {
+        crate::reads_one_way(head.uri.path())
     }
 
     fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Sent<Passthrough>>> {
