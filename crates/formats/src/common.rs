@@ -9,7 +9,7 @@ use respan_gateway_core::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_core::serde_json::{self, Map, Value, json};
 use respan_gateway_core::{Decoder, Encoder, Fault};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{Answer, Ask, bodiless};
+use respan_gateway_http::{Answer, Ask, Status, bodiless};
 
 use crate::Usage;
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
@@ -848,7 +848,7 @@ pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
         true => status,
         false => StatusCode::BAD_GATEWAY,
     };
-    let fault = Fault::new(to, code.to_owned(), message);
+    let fault = Fault::new(code.to_owned(), message).with(Status(to.as_u16()));
     let Some(fields) = fields else { return fault };
     let mut details = fields.clone();
     // Fields at the top are the error's, not its null `error`.
@@ -928,11 +928,8 @@ pub(crate) fn untranslatable(what: &str) -> Fault {
 
 /// A 502 for content the client's format cannot write anew, such as a tool call.
 pub(crate) fn unwritable_content() -> Fault {
-    Fault::new(
-        StatusCode::BAD_GATEWAY,
-        "untranslatable",
-        "the response holds content that cannot yet be written anew in this format",
-    )
+    let message = "the response holds content that cannot yet be written anew in this format";
+    Fault::new("untranslatable", message).with(Status(502))
 }
 
 /// A stream event that is not its format's JSON, as other content, so
@@ -1169,7 +1166,9 @@ mod tests {
     #[test]
     fn a_plugins_fault_takes_one_shape_on_every_path() {
         let details = json!({"message": "x", "type": 5, "code": 7, "param": 3, "category": "pii"});
-        let fault = Fault::new(StatusCode::FORBIDDEN, "blocked", "pii").with_details(details);
+        let fault = Fault::new("blocked", "pii")
+            .with(Status(403))
+            .with_details(details);
         let body = crate::OpenAiChat::error_body(&fault);
         // OpenAI's `code` and `param` are strings: a number is not kept.
         let kept = json!({"message": "pii", "type": "blocked", "param": null, "code": "blocked", "category": "pii"});

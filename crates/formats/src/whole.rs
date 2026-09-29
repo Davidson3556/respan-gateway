@@ -123,7 +123,7 @@ pub(crate) fn refusal<T: 'static>(
             answered(head);
             body
         }
-        None if !is_error(fault.status()) => return unwritable(),
+        None if !is_error(respan_gateway_http::status(fault).as_u16()) => return unwritable(),
         None => words(head),
     };
     match bodiless(&ask.method, head.status) {

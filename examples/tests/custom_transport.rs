@@ -2,6 +2,7 @@ use super::*;
 use respan_gateway_core::{Plugin, ProviderContext, serde_json};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::AnthropicMessages;
+use respan_gateway_http::Status;
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
     let (status, headers, body) =
@@ -55,11 +56,7 @@ struct Closed;
 impl Plugin for Closed {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         if px.provider() == "local" {
-            return Err(Fault::new(
-                http::StatusCode::TOO_MANY_REQUESTS,
-                "limit",
-                "closed",
-            ));
+            return Err(Fault::new("limit", "closed").with(Status(429)));
         }
         Ok(())
     }

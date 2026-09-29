@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use respan_gateway_core::{Exchange, Extensions, Fault, Transport, async_trait};
+use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::{BodyExt, Full};
@@ -130,8 +131,8 @@ impl StdioTransport {
             let owned = sessions.keys().filter(|(_, o)| *o == owner).count();
             if owned >= self.max_sessions || sessions.len() >= self.max_total {
                 let full = "too many sessions";
-                let status = StatusCode::SERVICE_UNAVAILABLE;
-                return Err(Fault::new(status, TOO_MANY_SESSIONS, full));
+                let fault = Fault::new(TOO_MANY_SESSIONS, full);
+                return Err(fault.with(Status(503)));
             }
             sessions.insert(key.clone(), None);
         }
@@ -173,7 +174,7 @@ pub(crate) fn reply(status: StatusCode) -> Reply {
 
 /// A session that is not there, or not the caller's: 404.
 fn no_session() -> Fault {
-    Fault::new(StatusCode::NOT_FOUND, NO_SESSION, "no such session")
+    Fault::new(NO_SESSION, "no such session").with(Status(404))
 }
 
 #[async_trait]
@@ -223,7 +224,7 @@ impl StdioTransport {
             },
             Method::GET => session.listen().ok_or_else(|| {
                 let open = "the stream is already open";
-                Fault::new(StatusCode::CONFLICT, BUSY, open)
+                Fault::new(BUSY, open).with(Status(409))
             }),
             Method::DELETE => {
                 lock(&self.sessions).remove(&key);

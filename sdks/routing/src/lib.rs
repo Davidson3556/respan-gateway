@@ -57,7 +57,7 @@ impl Backoff {
         let backoff = self.base.saturating_mul(doubled).min(self.max);
         match answer {
             None => Some(backoff),
-            Some(answer) if !retryable(answer.status()) => None,
+            Some(answer) if !retryable(respan_gateway_http::status(answer).as_u16()) => None,
             Some(answer) => match answer.retry_after() {
                 Some(asked) if asked > self.max => None,
                 Some(asked) => Some(asked),
@@ -307,12 +307,15 @@ mod tests {
     use std::time::Duration;
 
     use respan_gateway_core::Fault;
+    use respan_gateway_http::Status;
     use respan_gateway_http::http::StatusCode;
 
     use super::Backoff;
 
     fn answer(status: StatusCode, retry_after: Option<u64>) -> Fault {
-        let fault = Fault::new(status, "x", "x").with_answer("f", ());
+        let fault = Fault::new("x", "x")
+            .with(Status(status.as_u16()))
+            .with_answer("f", ());
         match retry_after {
             Some(secs) => fault.with_retry_after(Duration::from_secs(secs)),
             None => fault,

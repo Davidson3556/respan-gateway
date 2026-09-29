@@ -18,6 +18,7 @@ use std::time::Duration;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::Asked;
+use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::sync::oneshot;
@@ -113,7 +114,7 @@ impl Plugin for Admission {
         let (priority, wait) = if paid { (1, self.paid) } else { (0, self.free) };
         let Some(slot) = self.slots.acquire(priority, Instant::now() + wait).await else {
             let busy = "every slot is busy; retry later";
-            let fault = Fault::new(StatusCode::TOO_MANY_REQUESTS, "busy", busy);
+            let fault = Fault::new("busy", busy).with(Status(429));
             return Err(fault.with_retry_after(Duration::from_secs(1)));
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));

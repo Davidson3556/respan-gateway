@@ -11,6 +11,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::Reply;
+use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util;
 use respan_gateway_http::{Asked, CallHeaders, Credential};
@@ -335,7 +336,7 @@ async fn a_plugin_removes_the_gateways_own_credential() {
             let credential = cx.extensions_mut().remove::<Credential>();
             match credential.as_ref().and_then(|c| c.get("x-gateway-auth")) {
                 Some(key) if key == "secret" => Ok(None),
-                _ => Err(Fault::new(StatusCode::UNAUTHORIZED, "unauthorized", "no")),
+                _ => Err(Fault::new("unauthorized", "no").with(Status(401))),
             }
         }
     }

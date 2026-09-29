@@ -52,7 +52,7 @@ async fn run(
         ends.into_iter()
             .map(|e| {
                 e.as_ref()
-                    .map_err(|f| (f.code().to_string(), f.status()))
+                    .map_err(|f| (f.code().to_string(), toy::number(f)))
                     .map_or_else(|e| format!("{e:?}"), |()| "ok".into())
             })
             .collect()

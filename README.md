@@ -78,7 +78,8 @@ transports and formats own its rules and heads
   frame or a whole body, decoded into one value of the kind, which keeps
   the bytes it came in.
 - **Refusal**: a failure before the response head goes out, sent in the
-  client's format with the fault's status and retry; a provider's error
+  client's format with the fault's status (`Status` hint, else its
+  code's default) and retry; a provider's error
   answer (`Fault::answer`) goes as it came to a client of its format.
 - **Relay**: a format's promise to write each message as the bytes it
   came in while it says the same, an edit written into them. A whole

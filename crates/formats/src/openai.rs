@@ -1207,7 +1207,10 @@ mod tests {
         );
         // To another format it is refused; to OpenAI it is kept.
         let err = write_request::<OpenAiChat>(&chat).err();
-        assert_eq!(err.map(|e| e.status()), Some(400));
+        assert_eq!(
+            err.map(|e| respan_gateway_http::status(&e).as_u16()),
+            Some(400)
+        );
         assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body));
         // With the unsupported cleared and only plain messages, it is
         // sent.

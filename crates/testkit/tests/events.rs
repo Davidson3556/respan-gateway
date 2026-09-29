@@ -16,6 +16,7 @@ use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat, Usage};
+use respan_gateway_http::Status;
 use respan_gateway_http::http;
 use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
 
@@ -314,11 +315,7 @@ impl Plugin for Cap {
         px.filter(move |reply: &mut Reply| {
             spent += reply.usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
             match spent > cap {
-                true => Err(Fault::new(
-                    StatusCode::PAYMENT_REQUIRED,
-                    "cap",
-                    "over the cap",
-                )),
+                true => Err(Fault::new("cap", "over the cap").with(Status(402))),
                 false => Ok(()),
             }
         })
@@ -427,7 +424,7 @@ struct Refuses;
 
 impl Filter<Reply> for Refuses {
     fn edit(&mut self, _reply: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-        Err(Fault::new(StatusCode::FORBIDDEN, "blocked", "no"))
+        Err(Fault::new("blocked", "no").with(Status(403)))
     }
 }
 

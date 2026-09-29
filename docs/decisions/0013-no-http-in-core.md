@@ -1,6 +1,6 @@
 # 0013. No HTTP in the core
 
-- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped)
+- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped), [0019](0019-status-out-of-the-kernel.md) (`Fault` has no status)
 - Date: 2026-09-28
 
 ## Context
@@ -33,8 +33,9 @@ HTTP.
    request's `http::Extensions`.
 5. **HTTP lives in `crates/http`**: `Ask`/`Answer`
    (`http::request::Parts`, `http::response::Parts`), the adapter, the
-   body, and conversions (`ask`, `answer`, `call`). `Fault::status` is a
-   `u16` in HTTP's numbering; `Fault::new` takes `impl Into<u16>`.
+   body, and conversions (`ask`, `answer`, `call`). `Fault::status` was a
+   `u16` in HTTP's numbering; `Fault::new` took `impl Into<u16>`
+   (amended by 0019: neither exists).
 6. **Head hooks are generic**: `edit_call::<H>`, `edit_response_head::<H>`
    and `relay::<H>` fail `INTERNAL` for a head of another wire.
 7. stdio MCP stays on the HTTP wire for now.

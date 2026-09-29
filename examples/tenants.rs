@@ -19,6 +19,7 @@ use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
@@ -67,7 +68,7 @@ impl Plugin for Tenants {
         // The gateway key is ours: take it off before anything is sent.
         let credential = cx.extensions_mut().remove::<Credential>();
         let key = credential.as_ref().and_then(Credential::bearer);
-        let unknown = || Fault::new(StatusCode::UNAUTHORIZED, "unauthorized", "unknown key");
+        let unknown = || Fault::new("unauthorized", "unknown key").with(Status(401));
         let tenant = self.get(key.unwrap_or_default()).ok_or_else(unknown)?;
         cx.set_target(tenant.target.clone());
         cx.extensions_mut().insert(tenant);
@@ -81,9 +82,9 @@ impl Plugin for Tenants {
             .get::<Arc<Tenant>>()
             .and_then(|t| t.keys.get(px.provider()));
         // No key, no call: never fall back to someone else's credentials.
-        let keys = keys.cloned().ok_or_else(|| {
-            Fault::new(StatusCode::FORBIDDEN, "no_key", "no key for this provider")
-        })?;
+        let keys = keys
+            .cloned()
+            .ok_or_else(|| Fault::new("no_key", "no key for this provider").with(Status(403)))?;
         px.extensions_mut().insert(CallHeaders(keys));
         Ok(())
     }

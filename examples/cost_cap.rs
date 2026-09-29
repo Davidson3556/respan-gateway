@@ -27,7 +27,7 @@ use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::conversation::{Conversation, Piece, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
-use respan_gateway_http::http::StatusCode;
+use respan_gateway_http::Status;
 use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -86,7 +86,7 @@ impl Plugin for Cap {
             }
             seen.cut.store(true, Ordering::Relaxed);
             let msg = "the answer ran past its cap";
-            Err(Fault::new(StatusCode::PAYMENT_REQUIRED, "cost_cap", msg))
+            Err(Fault::new("cost_cap", msg).with(Status(402)))
         })
     }
 }

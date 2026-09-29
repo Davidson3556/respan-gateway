@@ -14,6 +14,7 @@ use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
 use respan_gateway_http::Credential;
+use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
@@ -37,7 +38,7 @@ fn quote(
         .extensions()
         .get::<Credential>()
         .and_then(Credential::bearer);
-    let key = key.ok_or_else(|| Fault::new(StatusCode::UNAUTHORIZED, "no_key", "no key"))?;
+    let key = key.ok_or_else(|| Fault::new("no_key", "no key").with(Status(401)))?;
     let chat = px.input::<Conversation>()?;
     let model = chat.model.as_deref().unwrap_or_default();
     let Some(&price) = prices.get(model) else {

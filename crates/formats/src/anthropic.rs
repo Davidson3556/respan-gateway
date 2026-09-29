@@ -983,7 +983,7 @@ mod tests {
             ..Conversation::default()
         };
         let refused = AnthropicMessages::write(&chat);
-        assert!(refused.is_err_and(|f| f.status() == 400));
+        assert!(refused.is_err_and(|f| respan_gateway_http::status(&f).as_u16() == 400));
         chat.temperature = Some(1.0);
         let body = AnthropicMessages::write(&chat).ok();
         assert_eq!(body.map(|v| v["temperature"].clone()), Some(json!(1.0)));

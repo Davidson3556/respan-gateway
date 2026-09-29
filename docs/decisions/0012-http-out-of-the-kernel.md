@@ -1,6 +1,6 @@
 # 0012. HTTP out of the kernel
 
-- Status: accepted, amended by [0013](0013-no-http-in-core.md), [0014](0014-api-trims.md)
+- Status: accepted, amended by [0013](0013-no-http-in-core.md), [0014](0014-api-trims.md), [0019](0019-status-out-of-the-kernel.md) (the status is a hint)
 - Date: 2026-09-28
 
 ## Context

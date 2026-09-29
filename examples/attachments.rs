@@ -34,6 +34,7 @@ use respan_gateway_core::{
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Content, Conversation};
 use respan_gateway_http::Asked;
+use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
@@ -110,7 +111,7 @@ impl PdfToText {
         until: Instant,
         keep: bool,
     ) -> Result<Arc<str>, Fault> {
-        let large = Fault::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "PDF too large");
+        let large = Fault::new("too_large", "PDF too large").with(Status(413));
         if base64.len() > self.max {
             return Err(large);
         }
@@ -121,7 +122,7 @@ impl PdfToText {
         let convert = self.convert;
         let work = tokio::task::spawn_blocking(move || convert(&base64));
         let slow = "the PDF took too long to read";
-        let slow = |_| Fault::new(StatusCode::GATEWAY_TIMEOUT, "conversion_timeout", slow);
+        let slow = |_| Fault::new("conversion_timeout", slow).with(Status(504));
         let panicked = |e| Fault::internal("the PDF converter panicked").with_source(e);
         let text = tokio::time::timeout_at(until, work).await;
         let text: Arc<str> = text.map_err(slow)?.map_err(panicked)??.into();

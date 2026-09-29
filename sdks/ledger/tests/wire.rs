@@ -2,6 +2,7 @@
 //! with heads of their own. The ledger reads no head, so it settles here
 //! by the same rules as over HTTP.
 
+use respan_gateway_http::Status;
 use std::sync::Mutex;
 
 use respan_gateway_core::bytes::{Bytes, BytesMut};
@@ -143,7 +144,9 @@ impl Decoder<Reply> for Replies {
     fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
         match self.ok {
             true => Ok(()),
-            false => Err(Fault::new(429u16, "busy", "busy").with_answer(PIPE, ())),
+            false => Err(Fault::new("busy", "busy")
+                .with(Status(429))
+                .with_answer(PIPE, ())),
         }
     }
 }

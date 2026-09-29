@@ -16,6 +16,7 @@ use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::whole::Relay;
 use respan_gateway_formats::{self as formats, default_content_type, sse};
 use respan_gateway_http::Asked;
+use respan_gateway_http::Status;
 use respan_gateway_http::http;
 use respan_gateway_http::{Answer as Head, Ask};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve};
@@ -805,11 +806,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     #[async_trait]
     impl Plugin for Limit {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Err(Fault::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "limited",
-                "slow down",
-            ))
+            Err(Fault::new("limited", "slow down").with(Status(429)))
         }
     }
 
@@ -891,7 +888,9 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(&b"busy"[..]));
-    let end = ended.await.map_err(|f| f.status());
+    let end = ended
+        .await
+        .map_err(|f| respan_gateway_http::status(&f).as_u16());
     assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE.as_u16()));
 
     // A body cut short upstream is cut short for the client.
@@ -973,7 +972,7 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
     #[async_trait]
     impl Plugin for Deny {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Err(Fault::new(StatusCode::FORBIDDEN, "denied", "no"))
+            Err(Fault::new("denied", "no").with(Status(403)))
         }
     }
 
@@ -1199,7 +1198,8 @@ async fn a_redirect_is_passed_on_as_it_came_not_read_as_an_answer() {
     // carries the provider's answer, 301 and all.
     let end = ended.await.err();
     assert_eq!(
-        end.as_ref().map(Fault::status),
+        end.as_ref()
+            .map(|f| respan_gateway_http::status(f).as_u16()),
         Some(StatusCode::BAD_GATEWAY.as_u16())
     );
     let answer = end
@@ -1489,7 +1489,7 @@ impl Plugin for NoteFormat {
             .lock()
             .map(|mut n| n.push(cx.format().to_owned()))
             .ok();
-        Err(Fault::new(StatusCode::FORBIDDEN, "noted", "noted"))
+        Err(Fault::new("noted", "noted").with(Status(403)))
     }
 }
 
@@ -1734,7 +1734,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
                 cx.is_kind::<Answer>(),
             );
             self.0.lock().map(|mut k| k.push(kinds)).ok();
-            Err(Fault::new(StatusCode::FORBIDDEN, "noted", "noted"))
+            Err(Fault::new("noted", "noted").with(Status(403)))
         }
     }
 
@@ -1765,7 +1765,7 @@ async fn a_refusal_goes_out_with_its_faults_status_even_a_success() {
     #[async_trait]
     impl Plugin for Rpc {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Err(Fault::new(StatusCode::OK, "rpc_error", "no"))
+            Err(Fault::new("rpc_error", "no").with(Status(200)))
         }
     }
 

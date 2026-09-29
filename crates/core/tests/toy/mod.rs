@@ -19,6 +19,23 @@ use respan_gateway_core::*;
 pub struct Ask(pub String);
 #[derive(Debug)]
 pub struct Ans(pub u16);
+
+/// A toy transport's own hint, as HTTP's status is for the HTTP one.
+#[derive(Clone)]
+pub struct Wire(pub u16);
+
+/// The number the toy wire writes for `fault`: its hint, else its code's.
+pub fn number(fault: &Fault) -> u16 {
+    fault.get::<Wire>().map_or_else(
+        || match fault.code() {
+            "bad_request" => 400,
+            "not_found" => 404,
+            "upstream" | "truncated" => 502,
+            _ => 500,
+        },
+        |w| w.0,
+    )
+}
 #[derive(Clone, PartialEq, Debug)]
 pub struct In(pub String);
 #[derive(Clone, PartialEq, Debug)]
@@ -80,7 +97,7 @@ impl Format for Toy {
     ) -> Box<dyn Encoder<Out, Ans>> {
         boom(11);
         Box::new(RespEnc {
-            status: refusal.map_or(200, |f| f.status()),
+            status: refusal.map_or(200, number),
         })
     }
 }
@@ -186,7 +203,9 @@ impl Decoder<Out> for RespDec {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<Out>) -> Result<(), Fault> {
         boom(5);
         if self.status != 200 {
-            return Err(Fault::new(self.status, "x", "x").with_answer("toy", ()));
+            return Err(Fault::new("x", "x")
+                .with(Wire(self.status))
+                .with_answer("toy", ()));
         }
         let s = String::from_utf8_lossy(&bytes).to_string();
         match s.as_str() {

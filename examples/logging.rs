@@ -92,7 +92,10 @@ impl Record {
         Self {
             request: ext.get::<RequestId>().map_or(0, |id| id.0),
             call: call.map(Into::into),
-            status: end.as_ref().err().map(|f| f.status()),
+            status: end
+                .as_ref()
+                .err()
+                .map(|f| respan_gateway_http::status(f).as_u16()),
             end: end
                 .as_ref()
                 .map_or_else(|f| f.code().into(), |()| "ok".into()),

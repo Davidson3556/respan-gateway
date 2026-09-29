@@ -20,6 +20,7 @@ use respan_gateway_core::{
 use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::Usage;
 use respan_gateway_http::Body;
+use respan_gateway_http::Status;
 use respan_gateway_http::bodiless;
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::serve;
@@ -1257,11 +1258,7 @@ async fn r9_6_released_values_are_sent_though_a_later_filters_end_fails() {
 /// A filter over budget at the line `hi`.
 fn over_budget(o: &mut LOut) -> Result<(), Fault> {
     match o.0 == "hi" {
-        true => Err(Fault::new(
-            StatusCode::PAYMENT_REQUIRED,
-            "budget",
-            "over budget",
-        )),
+        true => Err(Fault::new("budget", "over budget").with(Status(402))),
         false => Ok(()),
     }
 }
@@ -1321,7 +1318,7 @@ async fn a_failing_head_edit_refuses_with_its_fault() {
     impl Plugin for P {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.edit_response_head(|_: &mut respan_gateway_http::Answer| {
-                Err(Fault::new(StatusCode::FORBIDDEN, "denied", "no"))
+                Err(Fault::new("denied", "no").with(Status(403)))
             });
             Ok(None)
         }

@@ -14,7 +14,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{Exchange, Fault, Gateway, Transport, async_trait};
-use respan_gateway_http::{Answer, Ask, http, http_body_util};
+use respan_gateway_http::{Answer, Ask, Status, http, http_body_util};
 use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
@@ -75,11 +75,8 @@ fn ignore_upgrade(headers: &mut HeaderMap) {
 /// Why a client's body did not arrive whole.
 fn body_fault(e: axum::BoxError) -> Fault {
     match e.is::<http_body_util::LengthLimitError>() {
-        true => Fault::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "too_large",
-            "request body too large",
-        ),
+        true => Fault::new("too_large", "request body too large")
+            .with(Status(StatusCode::PAYLOAD_TOO_LARGE.as_u16())),
         false => Fault::bad_request("the request body broke off"),
     }
 }

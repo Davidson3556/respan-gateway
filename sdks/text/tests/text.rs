@@ -5,6 +5,7 @@ use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role,
 };
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
+use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, run_filter as run, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
@@ -22,7 +23,7 @@ impl Rewrite for Terms {
 
     fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
         if text.contains("bomb") {
-            return Err(Fault::new(StatusCode::BAD_REQUEST, "blocked", "blocked"));
+            return Err(Fault::new("blocked", "blocked").with(Status(400)));
         }
         Ok(text.to_owned())
     }

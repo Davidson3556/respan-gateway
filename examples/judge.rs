@@ -18,6 +18,7 @@ use respan_gateway_core::{
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_http::Asked;
+use respan_gateway_http::Status;
 use respan_gateway_http::http;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -72,11 +73,7 @@ impl Plugin for Egress {
         self.seen().push(px.provider().to_owned());
         let asked = px.extensions().get::<Asked>();
         if asked.is_some_and(|a| a.headers.contains_key("x-blocked")) {
-            return Err(Fault::new(
-                http::StatusCode::FORBIDDEN,
-                "egress",
-                "no calls for you",
-            ));
+            return Err(Fault::new("egress", "no calls for you").with(Status(403)));
         }
         Ok(())
     }

@@ -2025,7 +2025,10 @@ async fn a_translated_failure_labelled_as_a_stream_is_still_a_failure() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["type"], "error", "{body}");
-    let end = h.log.only().map_err(|f| f.status());
+    let end = h
+        .log
+        .only()
+        .map_err(|f| respan_gateway_http::status(&f).as_u16());
     assert_eq!(end, Err(503));
 }
 

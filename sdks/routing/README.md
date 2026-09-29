@@ -7,7 +7,7 @@ stopping point before it is judged: its `Head`, its first `Content`
 (`Response::until_end`, held whole, to race for completion; a success
 that failed on the way, as the end it returns says, does not count). A success
 counts only once read that far; nothing is retried after that. A
-provider's error answer is a fault with its status and `Retry-After`,
+provider's error answer is a fault with its `Status` hint and `Retry-After`,
 which decide a retry, as does any failure of a response the call got; at
 its `Head`, unread, it cannot be told from a success.
 

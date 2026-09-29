@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::Extensions;
+
 pub(crate) const PANICKED: &str = "a plugin or format panicked";
 
 /// `f`, with a panic an internal fault.
@@ -36,39 +38,37 @@ pub mod codes {
     pub const INTERNAL: &str = "internal";
 }
 
-/// The one error type: a status, code, message and details for the client,
-/// a retry delay, a source for logs, and a provider's answer, which the
-/// client's format writes and the kernel never reads. Implement
+/// The one error type: a code, message and details for the client, a retry
+/// delay, a source for logs, typed hints a transport reads (an HTTP status is
+/// one, [`Fault::with`]), and a provider's answer, which the client's format
+/// writes and the kernel never reads. Implement
 /// `From<YourError> for Fault` so `?` works in hooks.
 #[derive(Clone)]
 pub struct Fault(Box<Inner>);
 
 #[derive(Clone)]
 struct Inner {
-    status: u16,
     code: Cow<'static, str>,
     message: String,
     details: Option<Value>,
     retry_after: Option<Duration>,
     source: Option<Arc<dyn Error + Send + Sync>>,
+    /// Hints for the edges, which the kernel never reads.
+    hints: Extensions,
     /// A provider's own words for it, and the format that read them.
     answer: Option<(Arc<str>, Arc<dyn Any + Send + Sync>)>,
 }
 
 impl Fault {
-    /// A fault of this status, code and message.
-    pub fn new(
-        status: impl Into<u16>,
-        code: impl Into<Cow<'static, str>>,
-        message: impl Into<String>,
-    ) -> Self {
+    /// A fault of this code and message.
+    pub fn new(code: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Self {
         Self(Box::new(Inner {
-            status: status.into(),
             code: code.into(),
             message: message.into(),
             details: None,
             retry_after: None,
             source: None,
+            hints: Extensions::new(),
             answer: None,
         }))
     }
@@ -89,6 +89,18 @@ impl Fault {
     pub fn with_retry_after(mut self, wait: Duration) -> Self {
         self.0.retry_after = Some(wait);
         self
+    }
+
+    /// A hint for the edges, such as the status a transport writes; the
+    /// kernel never reads one. A value of the same type replaces the last.
+    pub fn with<T: Clone + Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.0.hints.insert(value);
+        self
+    }
+
+    /// The hint of type `T`, if any ([`Fault::with`]).
+    pub fn get<T: 'static>(&self) -> Option<&T> {
+        self.0.hints.get()
     }
 
     /// How long to wait before trying again, if said.
@@ -126,16 +138,12 @@ impl Fault {
         self
     }
 
-    /// The same fault under `code`, with `status`.
-    pub(crate) fn recoded(mut self, status: u16, code: &'static str) -> Self {
-        self.0.status = status;
+    /// The same fault under `code`, without its hints, which were of
+    /// another cause.
+    pub(crate) fn recoded(mut self, code: &'static str) -> Self {
+        self.0.hints = Extensions::new();
         self.0.code = code.into();
         self
-    }
-
-    /// Its status, in HTTP's numbering, which another protocol maps.
-    pub fn status(&self) -> u16 {
-        self.0.status
     }
 
     /// The machine-readable code, one of [`codes`] or the plugin's own.
@@ -153,39 +161,39 @@ impl Fault {
         self.0.details.as_ref()
     }
 
-    /// The client's mistake: a 400.
+    /// The client's mistake.
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(400u16, codes::BAD_REQUEST, message)
+        Self::new(codes::BAD_REQUEST, message)
     }
 
-    /// Nothing takes the request: a 404.
+    /// Nothing takes the request.
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(404u16, codes::NOT_FOUND, message)
+        Self::new(codes::NOT_FOUND, message)
     }
 
-    /// A provider's failure: a 502.
+    /// A provider's failure.
     pub fn upstream(message: impl Into<String>) -> Self {
-        Self::new(502u16, codes::UPSTREAM, message)
+        Self::new(codes::UPSTREAM, message)
     }
 
-    /// A stream that ended unfinished: a 502 [`codes::TRUNCATED`].
+    /// A stream that ended unfinished: [`codes::TRUNCATED`].
     pub fn truncated() -> Self {
-        Self::new(502u16, codes::TRUNCATED, "stream ended before completion")
+        Self::new(codes::TRUNCATED, "stream ended before completion")
     }
 
-    /// Its status is never written: no one waits for it.
+    /// No one waits for it.
     pub(crate) fn abandoned() -> Self {
-        Self::new(499u16, codes::ABANDONED, "abandoned")
+        Self::new(codes::ABANDONED, "abandoned")
     }
 
-    /// A setup that cannot work: a 500.
+    /// A setup that cannot work.
     pub fn config(message: impl Into<String>) -> Self {
-        Self::new(500u16, codes::CONFIG, message)
+        Self::new(codes::CONFIG, message)
     }
 
-    /// A bug: a 500.
+    /// A bug.
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(500u16, codes::INTERNAL, message)
+        Self::new(codes::INTERNAL, message)
     }
 
     /// Something asked for `T`, not of the client's kind: a bug.
@@ -203,7 +211,6 @@ impl Fault {
 impl fmt::Debug for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Fault")
-            .field("status", &self.0.status)
             .field("code", &self.0.code)
             .field("message", &self.0.message)
             .field("details", &self.0.details)
@@ -236,12 +243,12 @@ impl Error for Fault {
     }
 }
 
-/// Equal when the client would read them alike: source and answer ignored.
+/// Equal when the client would read them alike: source, hints and answer
+/// ignored.
 impl PartialEq for Fault {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);
-        a.status == b.status
-            && a.code == b.code
+        a.code == b.code
             && a.message == b.message
             && a.details == b.details
             && a.retry_after == b.retry_after
@@ -269,7 +276,7 @@ mod tests {
 
     impl From<PluginError> for Fault {
         fn from(e: PluginError) -> Self {
-            Fault::new(429u16, "over_limit", e.to_string())
+            Fault::new("over_limit", e.to_string())
                 .with_details(serde_json::json!({ "limit": e.limit }))
                 .with_source(e)
         }
@@ -296,6 +303,16 @@ mod tests {
         assert_eq!(f.answer::<u8>("f"), Some(&7));
         assert_eq!(f.answer::<u8>("g"), None);
         assert_eq!(f.answer::<u16>("f"), None);
+    }
+
+    #[test]
+    fn a_hint_is_read_by_its_type() {
+        let f = Fault::new("x", "x").with(7_u8).with("s");
+        assert_eq!((f.get::<u8>(), f.get::<&str>()), (Some(&7), Some(&"s")));
+        assert_eq!(f.get::<u16>(), None);
+        let g = f.clone().with(8_u8);
+        assert_eq!((f.get::<u8>(), g.get::<u8>()), (Some(&7), Some(&8)));
+        assert_eq!(f.recoded("y").get::<u8>(), None);
     }
 
     #[test]

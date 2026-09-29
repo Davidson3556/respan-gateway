@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use respan_gateway_core::serde_json::json;
 use respan_gateway_core::{Fault, async_trait};
+use respan_gateway_http::Status;
 use tokio::time::Instant;
 
 use crate::{INSUFFICIENT_FUNDS, UNKNOWN_ACCOUNT};
@@ -154,7 +155,7 @@ impl Books {
             while let Some(name) = at.filter(|n| !chain.contains(n)) {
                 let a = self.accounts.get(name).ok_or_else(|| {
                     let msg = format!("unknown account '{name}'");
-                    Fault::new(401u16, UNKNOWN_ACCOUNT, msg)
+                    Fault::new(UNKNOWN_ACCOUNT, msg).with(Status(401))
                 })?;
                 chain.push(name.clone());
                 at = a.parent.as_ref();
@@ -197,7 +198,7 @@ impl Ledger for MemoryLedger {
             if available < amount {
                 let msg = format!("account '{name}' cannot cover this call");
                 let details = json!({ "account": name, "available": available });
-                let fault = Fault::new(402u16, INSUFFICIENT_FUNDS, msg);
+                let fault = Fault::new(INSUFFICIENT_FUNDS, msg).with(Status(402));
                 return Err(fault.with_details(details));
             }
         }

@@ -1,5 +1,6 @@
 use super::*;
 use respan_gateway_core::serde_json;
+use respan_gateway_http::http::StatusCode;
 
 #[tokio::test]
 async fn every_call_asks_for_at_most_cap_tokens() -> Result<(), Fault> {

@@ -73,11 +73,11 @@ pub trait Format: Send + Sync + 'static {
 
     /// Decodes a response with head `answer` to the call with head `call` and
     /// first bytes `sent`. A provider's error answer ends `Err` with its
-    /// status, [`Fault::with_retry_after`] and [`Fault::with_answer`]; a body
-    /// not in this protocol with [`codes::UPSTREAM`](crate::codes::UPSTREAM);
-    /// one cut short with [`Fault::truncated`]. Hold an output that shows
-    /// nothing yet, such as a start, until the next, so a failure first can
-    /// still be refused.
+    /// status as a hint ([`Fault::with`]), [`Fault::with_retry_after`] and
+    /// [`Fault::with_answer`]; a body not in this protocol with
+    /// [`codes::UPSTREAM`](crate::codes::UPSTREAM); one cut short with
+    /// [`Fault::truncated`]. Hold an output that shows nothing yet, such as a
+    /// start, until the next, so a failure first can still be refused.
     fn response_decoder(
         &self,
         answer: &Self::Answer,

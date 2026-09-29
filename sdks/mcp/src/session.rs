@@ -10,6 +10,7 @@ use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::serde_json::{self, Value};
 use respan_gateway_formats::sse;
 use respan_gateway_http::Body;
+use respan_gateway_http::Status;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::http_body::Frame;
@@ -204,7 +205,7 @@ fn route(routes: &mut Routes, v: Value) {
 /// The fault of a POST the child did not take or answer in time.
 fn late() -> Fault {
     let msg = "the MCP server did not answer in time";
-    Fault::new(StatusCode::GATEWAY_TIMEOUT, TIMED_OUT, msg)
+    Fault::new(TIMED_OUT, msg).with(Status(504))
 }
 
 /// An event stream of what `rx` receives, until it closes, or failing at

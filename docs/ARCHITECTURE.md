@@ -25,6 +25,7 @@ and call once. Tests state its promises; the
 | [0014](decisions/0014-api-trims.md) | API trims: one way to say each thing |
 | [0015](decisions/0015-core-trims.md) | Core trims: `relayed` and `streams` on `Exchange`, no `Outcome`, `is_head_only` |
 | [0016](decisions/0016-core-fixes.md) | Core fixes: a cut request body never looks complete; open's bytes first; linear reads |
+| [0019](decisions/0019-status-out-of-the-kernel.md) | HTTP status numbers out of the kernel: a typed hint on `Fault`, read by `crates/http` |
 
 ## Two edges
 
@@ -122,7 +123,7 @@ the client's bytes, which its request encoder may edit; a streaming
 request's frames are decoded as they pass. The adapter says whether
 inputs stream (`Exchange::streams`), and the kernel says it of a call. A
 provider's error answer is a `Fault` carrying its
-status, retry and the answer, which the client's format writes as it came
+status (an `http::Status` hint), retry and the answer, which the client's format writes as it came
 if it read it, else in its own words. The model belongs to the kind
 (`Conversation.model`); its place on the wire is the format's.
 
@@ -143,7 +144,9 @@ tokio runtime, which runs end hooks detached. The core depends on no
   sent when awaited.
 - `Filter<T>` edits inputs (the only way) or outputs; `Response` is a call's, `cx.relay`'s or
   `Response::stream`'s, held with `until_content` or `until_end`, or read
-  with `outputs`; `Fault` is the one error type.
+  with `outputs`; `Fault` is the one error type: a code and message, retry, and typed hints (`with`, `get`) that
+  an edge reads; the kernel knows no HTTP status, `crates/http` maps code and `Status` hint to one
+  ([0019](decisions/0019-status-out-of-the-kernel.md)).
 - `Format`, `Decoder<T>`, `Encoder<T, H>`: a protocol's codec.
 
 ## The response pipeline
@@ -222,7 +225,7 @@ streaming requests route by the adapter's view of their head
 | Crate | What it is |
 |---|---|
 | `core` | The kernel: no HTTP, config or kinds; heads of any wire, unread. |
-| `http` | HTTP at the edges: `Ask`, `Answer`, the adapter (`serve`, `handle`), `Credential`, `Asked`, a transport's rules (`proxy_call`, `strip_client_origin_headers`, `credentials`, `CallHeaders`), conversions (`ask`, `answer`, `call`), and helpers for HTTP formats (`error_head`, `answered`, `bodiless`). |
+| `http` | HTTP at the edges: `Ask`, `Answer`, the adapter (`serve`, `handle`), `Credential`, `Asked`, a transport's rules (`proxy_call`, `strip_client_origin_headers`, `credentials`, `CallHeaders`), conversions (`ask`, `answer`, `call`), and `Status` and `status` (a fault's HTTP status), and helpers for HTTP formats (`error_head`, `answered`, `bodiless`). |
 | `formats` | The `conversation` kind, `Usage`, `OpenAiChat`, `AnthropicMessages`, `relayed`, `opaque`, `sse`, `whole`, helpers such as `with_head`. |
 | `plugins` | `ModelRouter<I>`, given an accessor for the kind's model. |
 | `server` | `router` (axum; bodies up to 32 MiB, no upgrades) and `HttpTransport` (its own keys, else the client's `Credential` on a relay). |

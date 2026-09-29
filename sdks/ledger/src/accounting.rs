@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait, codes};
+use respan_gateway_http::Status;
 
 use crate::{Amount, HoldId, Ledger, NO_ACCOUNT};
 
@@ -145,7 +146,7 @@ impl<L: Ledger> Plugin for Accounting<L> {
         let Quote { accounts, reserve } = (self.quote)(px, tally.clone())?;
         if accounts.is_empty() {
             let msg = "no account to charge";
-            return Err(Fault::new(401u16, NO_ACCOUNT, msg));
+            return Err(Fault::new(NO_ACCOUNT, msg).with(Status(401)));
         }
         let hold = Arc::new(Hold {
             id: HoldId::new(),

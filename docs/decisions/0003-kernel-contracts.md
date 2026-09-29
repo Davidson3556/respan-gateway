@@ -1,6 +1,6 @@
 # 0003. Kernel contracts: minimal, typed by kind, grown without breaking
 
-- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0018](0018-plugin-order-is-registration-order.md)
+- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0018](0018-plugin-order-is-registration-order.md), [0019](0019-status-out-of-the-kernel.md) (`Fault` has no status)
 - Date: 2026-09-25
 
 ## Context

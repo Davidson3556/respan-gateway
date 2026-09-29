@@ -28,6 +28,7 @@ use respan_gateway_core::{
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::Body;
+use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable};
@@ -70,11 +71,7 @@ struct PiiInput;
 const UNCOVERED: &str = "pii_uncovered";
 
 fn uncovered() -> Fault {
-    Fault::new(
-        StatusCode::FORBIDDEN,
-        UNCOVERED,
-        "no redaction reads this kind",
-    )
+    Fault::new(UNCOVERED, "no redaction reads this kind").with(Status(403))
 }
 
 /// `Err` for a streamed call of several choices, whose placeholders the
@@ -82,11 +79,7 @@ fn uncovered() -> Fault {
 fn one_streamed_choice(chat: &Conversation) -> Result<(), Fault> {
     if chat.stream && chat.unsupported.get("n").is_some_and(|n| *n != json!(1)) {
         let message = "placeholders cannot be restored in several streamed choices";
-        return Err(Fault::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            UNCOVERED,
-            message,
-        ));
+        return Err(Fault::new(UNCOVERED, message).with(Status(422)));
     }
     Ok(())
 }

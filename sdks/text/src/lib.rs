@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use respan_gateway_core::serde_json::{self, Map, Value};
 use respan_gateway_core::{Fault, Filter};
 use respan_gateway_formats::conversation::{Content, Conversation, Piece, Reply};
+use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
 
 /// The code of a refusal of content that cannot be read.
@@ -22,7 +23,7 @@ pub const UNREADABLE: &str = "unreadable_content";
 
 fn unreadable(what: &str) -> Fault {
     let message = format!("the gateway cannot read {what}, so it refuses it");
-    Fault::new(StatusCode::UNPROCESSABLE_ENTITY, UNREADABLE, message)
+    Fault::new(UNREADABLE, message).with(Status(StatusCode::UNPROCESSABLE_ENTITY.as_u16()))
 }
 
 /// An edit of one text.

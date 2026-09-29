@@ -51,8 +51,8 @@ impl Whose {
     /// `fault`, of content that cannot be written, as whose it is.
     pub(crate) fn fault(self, fault: Fault) -> Fault {
         match self {
-            Whose::Client => fault.recoded(400, codes::BAD_REQUEST),
-            Whose::Plugin => fault.recoded(500, codes::CONFIG),
+            Whose::Client => fault.recoded(codes::BAD_REQUEST),
+            Whose::Plugin => fault.recoded(codes::CONFIG),
             Whose::Format => fault,
         }
     }

@@ -124,9 +124,29 @@ pub fn built_wrong(e: http::Error) -> Fault {
     Fault::internal("an HTTP request or response was built wrong").with_source(e)
 }
 
-/// The status of `fault` as HTTP's, a 500 for a number that is none.
+/// The HTTP status a fault asks for, as a hint ([`Fault::with`]): a plugin's
+/// `Fault::new("over_limit", msg).with(Status(429))`, a provider's answer's.
+/// The kernel names codes only; this is where they get numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Status(pub u16);
+
+/// The status of `fault` as HTTP's: its [`Status`] hint, else its code's
+/// default (a 400 for [`codes::BAD_REQUEST`], a 404 for `NOT_FOUND`, a 502
+/// for `UPSTREAM` and `TRUNCATED`, a 499 for `ABANDONED`, a 500 for `CONFIG`,
+/// `INTERNAL` and a code that is none of these), a 500 for a number that is
+/// no status.
 pub fn status(fault: &Fault) -> StatusCode {
-    StatusCode::from_u16(fault.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+    let number = match fault.get::<Status>() {
+        Some(Status(number)) => *number,
+        None => match fault.code() {
+            codes::BAD_REQUEST => 400,
+            codes::NOT_FOUND => 404,
+            codes::UPSTREAM | codes::TRUNCATED => 502,
+            codes::ABANDONED => 499,
+            _ => 500,
+        },
+    };
+    StatusCode::from_u16(number).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// The client's request head, without its [`Credential`] or extensions: a
@@ -397,7 +417,8 @@ mod tests {
     #[test]
     fn a_fault_writes_its_status_and_retry_after() {
         let (mut head, ()) = http::Response::new(()).into_parts();
-        let fault = Fault::new(StatusCode::TOO_MANY_REQUESTS, "slow", "slow down")
+        let fault = Fault::new("slow", "slow down")
+            .with(Status(429))
             .with_retry_after(Duration::from_millis(1500));
         error_head(&mut head, &fault);
         assert_eq!(head.status, StatusCode::TOO_MANY_REQUESTS);
@@ -406,10 +427,36 @@ mod tests {
     }
 
     #[test]
+    fn a_code_has_a_default_status_and_a_hint_overrides_it() {
+        let of = |f: Fault| status(&f).as_u16();
+        for (fault, want) in [
+            (Fault::bad_request("x"), 400),
+            (Fault::not_found("x"), 404),
+            (Fault::upstream("x"), 502),
+            (Fault::truncated(), 502),
+            (Fault::new(codes::ABANDONED, "x"), 499),
+            (Fault::config("x"), 500),
+            (Fault::internal("x"), 500),
+            (Fault::new("plugin_own", "x"), 500),
+        ] {
+            let code = fault.code().to_owned();
+            assert_eq!(of(fault.clone()), want, "{code}");
+            assert_eq!(of(fault.with(Status(429))), 429, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_number_that_is_no_status_is_a_500() {
+        let fault = Fault::bad_request("x").with(Status(1000));
+        assert_eq!(status(&fault), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
     fn an_answer_replaces_the_head_only_in_its_format() {
         let mut answer = http::Response::new(Bytes::from_static(b"busy"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-        let fault = Fault::new(StatusCode::TOO_MANY_REQUESTS, "busy", "busy")
+        let fault = Fault::new("busy", "busy")
+            .with(Status(429))
             .with_answer("f", answer)
             .with_retry_after(Duration::from_secs(3));
         let (mut head, ()) = http::Response::new(()).into_parts();
