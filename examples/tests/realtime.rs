@@ -1118,3 +1118,80 @@ async fn audio_deltas_are_not_counted_as_text() {
     gw.idle().await;
     assert_eq!(wallets.spent("sk-demo"), 2 * 30);
 }
+
+// ===== loop 6 audit, on 8b0c012 =====
+
+/// A `response.create` the provider refuses, whose release (`settle(0)`)
+/// takes the ledger a while, and a client that leaves meanwhile: the
+/// `error` branch of `Wallet::after` removes the hold from `holds` before
+/// awaiting `settle`, so when the client's leaving drops that await,
+/// `Wallet::end` no longer sees the hold: it stays held for `HOUR` (loop 5's
+/// bug 2, back in the new branch). Fix: settle, then remove.
+#[tokio::test(flavor = "multi_thread")]
+async fn l6_a_refused_turn_being_released_as_the_client_left_is_settled() -> Result<(), Fault> {
+    let at = answering(|create| {
+        vec![json!({ "type": "error", "error": {
+            "type": "invalid_request_error", "event_id": create["event_id"] } })]
+    })
+    .await;
+    let books = MemoryLedger::new();
+    books.open("sk-demo", None, 100_000);
+    let remote = Remote {
+        books: books.clone(),
+        ack: Duration::from_millis(0),
+        lag: Duration::from_millis(300),
+    };
+    let gw = Gateway::new()
+        .serve(realtime())?
+        .provider(
+            "openai",
+            realtime(),
+            WsTransport::new(format!("ws://{at}"))?,
+        )?
+        .target("openai")?
+        .plugin("reserve", Reserve(remote))?;
+    let addr = listen(&gw).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    // The provider's `error` is being released when the client leaves.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(ws);
+    gw.idle().await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let (spent, left) = (books.spent("sk-demo"), books.available("sk-demo"));
+    assert_eq!(
+        spent + left,
+        100_000,
+        "a hold outlived its session: spent {spent}, available {left}"
+    );
+    Ok(())
+}
+
+/// A client that leaves while its turn's hold is being acknowledged: the
+/// hold landed, but the `response.create` never reached the provider, so
+/// the turn cost nothing. `Wallet::end` settles every hold left at all it
+/// held, so the wallet is charged a full turn (1000) for it. The module doc
+/// says a turn "cut before its response.done may have cost all it was held
+/// for"; this one provably cost nothing. Low: a billing policy of the
+/// example, shown by a test.
+#[tokio::test(flavor = "multi_thread")]
+async fn l6_a_turn_the_provider_never_saw_is_not_charged() -> Result<(), Fault> {
+    let (openai, gw, books, addr) = remote_session(300, 0).await?;
+    openai.answer(Answer::events(script(&["ok"], usage(40, 9))));
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(ws);
+    gw.idle().await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let read = read_by_provider(&openai);
+    assert!(read.is_empty(), "the provider read {read:?}");
+    assert_eq!(
+        books.spent("sk-demo"),
+        0,
+        "a turn the provider never saw was charged"
+    );
+    Ok(())
+}

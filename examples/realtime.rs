@@ -444,13 +444,19 @@ struct Turns {
 impl<L: Ledger> Wallet<L> {
     /// Holds a turn's worst case: what it reads (all the session so far) and
     /// the most it may say. Refused, closing the client, if the wallet cannot
-    /// cover it. The hold is recorded before the ledger is asked, so a client
-    /// that leaves during the wait still has it settled (to no effect if it
-    /// never landed).
-    async fn hold(&self) -> Result<HoldId, Fault> {
+    /// cover it. The hold is recorded before the ledger is asked (a client's
+    /// with its event's id, as not begun), so a client that leaves during the
+    /// wait still has it settled (to no effect if it never landed).
+    async fn hold(&self, asked: Option<String>) -> Result<HoldId, Fault> {
         let amount = lock(&self.turns).bytes + TURN;
         let hold = HoldId::new();
-        lock(&self.turns).holds.push_back((hold, amount));
+        {
+            let mut turns = lock(&self.turns);
+            turns.holds.push_back((hold, amount));
+            if let Some(id) = asked {
+                turns.unbegun.push_back((id, hold));
+            }
+        }
         let held = self
             .ledger
             .reserve(&hold, std::slice::from_ref(&self.key), amount, HOUR)
@@ -481,8 +487,7 @@ impl<L: Ledger> Wallet<L> {
                 None => format!("reserve_{}", HoldId::new()),
             };
             event.json["event_id"] = id.clone().into();
-            let hold = self.hold().await?;
-            lock(&self.turns).unbegun.push_back((id, hold));
+            self.hold(Some(id)).await?;
         } else if event.json["type"] == "session.update" {
             // The cap of the turns the provider starts on its own.
             let cap = &mut event.json["session"]["max_output_tokens"];
@@ -503,23 +508,24 @@ impl<L: Ledger> Wallet<L> {
         if kind == "response.created" {
             let asked = lock(&self.turns).unbegun.pop_front().is_some();
             if !asked {
-                self.hold().await?;
+                self.hold(None).await?;
             }
         } else if kind == "error" {
             // A `response.create` the provider refused never ran: its hold
             // is released, not charged at the session's end.
             let id = event.json["error"]["event_id"].as_str().unwrap_or_default();
-            let refused = {
-                let mut turns = lock(&self.turns);
-                let at = turns.unbegun.iter().position(|(asked, _)| asked == id);
-                let refused = at.and_then(|at| turns.unbegun.remove(at));
-                if let Some((_, hold)) = &refused {
-                    turns.holds.retain(|(held, _)| held != hold);
-                }
-                refused
-            };
+            let refused = lock(&self.turns)
+                .unbegun
+                .iter()
+                .find(|(asked, _)| asked == id)
+                .cloned();
             if let Some((_, hold)) = refused {
+                // Settled before it leaves the lists: a client that leaves
+                // meanwhile still has it settled by `end`.
                 self.ledger.settle(&hold, 0).await?;
+                let mut turns = lock(&self.turns);
+                turns.unbegun.retain(|(_, held)| *held != hold);
+                turns.holds.retain(|(held, _)| *held != hold);
             }
         } else if kind.ends_with(".delta") && !kind.ends_with("audio.delta") {
             let delta = event.json["delta"].as_str().unwrap_or_default().len();
@@ -536,12 +542,18 @@ impl<L: Ledger> Wallet<L> {
     }
 
     /// A turn cut before its `response.done` may have cost all it was
-    /// held for: it is charged that, never $0. A hold already settled is
-    /// settled again to no effect.
+    /// held for: it is charged that, never $0. One whose `response.create`
+    /// the provider never began cost nothing: it is settled at 0. A hold
+    /// already settled is settled again to no effect.
     async fn end(&self) {
-        let cut: Vec<_> = lock(&self.turns).holds.drain(..).collect();
+        let (cut, unbegun) = {
+            let mut turns = lock(&self.turns);
+            let unbegun: Vec<_> = turns.unbegun.drain(..).map(|(_, hold)| hold).collect();
+            (turns.holds.drain(..).collect::<Vec<_>>(), unbegun)
+        };
         for (hold, amount) in cut {
-            let _ = self.ledger.settle(&hold, amount).await;
+            let owed = if unbegun.contains(&hold) { 0 } else { amount };
+            let _ = self.ledger.settle(&hold, owed).await;
         }
     }
 }
