@@ -1337,3 +1337,219 @@ async fn a_session_whose_cap_is_refused_is_closed() {
     assert_eq!(close.0, 1011);
     gw.idle().await;
 }
+
+// ===== loop 7 audit =====
+
+/// A provider that begins each `response.create` it reads (it is billed
+/// from then on) but tells `response.created` only `late` after, then runs
+/// the turn to its `response.done`. `read` counts the creates it read.
+async fn slow_to_tell(late: Duration, read: Arc<AtomicUsize>) -> std::net::SocketAddr {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    let app = axum::Router::new().route(
+        "/v1/realtime",
+        axum::routing::get(move |ws: WebSocketUpgrade| async move {
+            ws.protocols(["realtime"])
+                .on_upgrade(move |mut socket| async move {
+                    let hello = json!({ "type": "session.created" }).to_string();
+                    let _ = socket.send(Message::Text(hello.into())).await;
+                    while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                        let event: Value = serde_json::from_str(&text).unwrap_or_default();
+                        if event["type"] == "response.create" {
+                            read.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(late).await;
+                            for reply in [
+                                json!({ "type": "response.created", "response": { "id": "r" } }),
+                                json!({ "type": "response.output_text.delta", "delta": "ok" }),
+                                json!({ "type": "response.done", "response": { "usage": usage(40, 9) } }),
+                            ] {
+                                let _ = socket.send(Message::Text(reply.to_string().into())).await;
+                            }
+                        }
+                    }
+                })
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    at
+}
+
+/// A client says `response.create` and leaves once the provider has read
+/// it, before the provider's `response.created` comes back. The provider
+/// began (and bills) the turn; `Wallet::end` counts it "not begun" because
+/// no `response.created` was seen, and settles its hold at 0: the turn is
+/// free, and a client can repeat it at will.
+#[tokio::test(flavor = "multi_thread")]
+async fn l7_a_turn_the_provider_read_is_not_free_when_the_client_leaves() -> Result<(), Fault> {
+    let read = Arc::new(AtomicUsize::new(0));
+    let at = slow_to_tell(Duration::from_millis(300), read.clone()).await;
+    let (gw, books, addr) = front(at, 100_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    let start = std::time::Instant::now();
+    while read.load(Ordering::SeqCst) == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the provider never read it"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(ws);
+    gw.idle().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (spent, left) = (books.spent("sk-demo"), books.available("sk-demo"));
+    assert_eq!(spent + left, 100_000, "a hold outlived its session");
+    assert!(
+        spent > 0,
+        "the provider read and began a turn, and it cost the wallet {spent}"
+    );
+    Ok(())
+}
+
+/// A provider with voice detection: each `conversation.item.create` it
+/// reads starts a turn of its own `after` later (`response.created`, a
+/// delta, `response.done`).
+async fn starts_turns(after: Duration) -> std::net::SocketAddr {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    use futures::{SinkExt as _, StreamExt as _};
+    let app = axum::Router::new().route(
+        "/v1/realtime",
+        axum::routing::get(move |ws: WebSocketUpgrade| async move {
+            ws.protocols(["realtime"])
+                .on_upgrade(move |socket| async move {
+                    let (mut tx, mut rx) = socket.split();
+                    let hello = json!({ "type": "session.created" }).to_string();
+                    let _ = tx.send(Message::Text(hello.into())).await;
+                    let (go, mut went) = tokio::sync::mpsc::unbounded_channel::<()>();
+                    tokio::spawn(async move {
+                        while went.recv().await.is_some() {
+                            tokio::time::sleep(after).await;
+                            for reply in [
+                                json!({ "type": "response.created", "response": { "id": "vad" } }),
+                                json!({ "type": "response.output_text.delta", "delta": "free" }),
+                                json!({ "type": "response.done", "response": { "usage": usage(40, 9) } }),
+                            ] {
+                                if tx.send(Message::Text(reply.to_string().into())).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    });
+                    while let Some(Ok(Message::Text(text))) = rx.next().await {
+                        let event: Value = serde_json::from_str(&text).unwrap_or_default();
+                        if event["type"] == "conversation.item.create" {
+                            let _ = go.send(());
+                        }
+                    }
+                })
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    at
+}
+
+/// A wallet that cannot cover a turn. The client says an item (the
+/// provider's voice detection starts a turn on it) and a `response.create`,
+/// whose reserve is being acknowledged when the provider's turn begins.
+/// That turn must be held (and refused, as the wallet cannot cover it): the
+/// client's own turn is not begun-able until its reserve succeeds, so the
+/// provider's `response.created` cannot take it.
+#[tokio::test(flavor = "multi_thread")]
+async fn l7_a_turn_the_provider_starts_during_a_reserve_is_still_held() -> Result<(), Fault> {
+    let at = starts_turns(Duration::from_millis(50)).await;
+    let books = MemoryLedger::new();
+    books.open("sk-demo", None, 500);
+    let remote = Remote {
+        books: books.clone(),
+        ack: Duration::from_millis(300),
+        lag: Duration::from_millis(0),
+    };
+    let gw = Gateway::new()
+        .client(realtime())?
+        .provider(
+            "openai",
+            realtime(),
+            WsTransport::new(format!("ws://{at}"))?,
+        )?
+        .target("openai")?
+        .plugin("reserve", Reserve(remote))?;
+    let addr = listen(&gw).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let item = json!({ "type": "conversation.item.create", "item": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] } });
+    say(&mut ws, item).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    let mut heard_kinds = Vec::new();
+    while let Some(event) = hear(&mut ws).await {
+        heard_kinds.push(event["type"].as_str().unwrap_or_default().to_owned());
+    }
+    gw.idle().await;
+    assert!(
+        !heard_kinds
+            .iter()
+            .any(|k| k == "response.output_text.delta"),
+        "the client heard a turn its wallet (500) cannot cover: {heard_kinds:?}; spent {}",
+        books.spent("sk-demo")
+    );
+    Ok(())
+}
+
+/// Drops at every moment of a turn against a slow ledger (acks and settles
+/// 60 ms late): every hold is settled, none outlives its session, and the
+/// wallet never goes below 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn l7_a_client_that_leaves_at_any_moment_leaves_no_hold() -> Result<(), Fault> {
+    let mut bad = Vec::new();
+    for at_ms in (0..400).step_by(15) {
+        for refused in [false, true] {
+            let openai = FakeOpenAi::start().await;
+            let provider = openai.base_url().replace("http://", "ws://");
+            let books = MemoryLedger::new();
+            books.open("sk-demo", None, 100_000);
+            let remote = Remote {
+                books: books.clone(),
+                ack: Duration::from_millis(60),
+                lag: Duration::from_millis(60),
+            };
+            let gw = Gateway::new()
+                .client(realtime())?
+                .provider(
+                    "openai",
+                    realtime(),
+                    WsTransport::new(provider.trim_end_matches("/v1"))?,
+                )?
+                .target("openai")?
+                .plugin("reserve", Reserve(remote))?;
+            let addr = listen(&gw).await;
+            openai.answer(Answer::events(script(&["a", "b", "c"], usage(40, 9))));
+            let sampler = sample(&books);
+            let mut ws = client(addr).await;
+            hear(&mut ws).await;
+            say(&mut ws, json!({ "type": "response.create" })).await;
+            if !refused {
+                say(&mut ws, json!({ "type": "response.create" })).await;
+            }
+            tokio::time::sleep(Duration::from_millis(at_ms)).await;
+            drop(ws);
+            gw.idle().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let low = sampler.finish().await;
+            let (spent, left) = (books.spent("sk-demo"), books.available("sk-demo"));
+            if spent + left != 100_000 || low < 0 {
+                bad.push(format!(
+                    "drop at {at_ms} ms: spent {spent} available {left} lowest {low}"
+                ));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    Ok(())
+}

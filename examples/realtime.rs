@@ -440,22 +440,25 @@ struct Turns {
     /// The holds of `response.create`s that have not begun (no
     /// `response.created` yet), oldest first, by the event's id.
     unbegun: VecDeque<(String, HoldId)>,
+    /// The holds whose `response.create` has not yet left `before`: the
+    /// provider cannot have read it.
+    unsent: Vec<HoldId>,
 }
 
 impl<L: Ledger> Wallet<L> {
     /// Holds a turn's worst case: what it reads (all the session so far) and
     /// the most it may say. Refused, closing the client, if the wallet cannot
     /// cover it. The hold is recorded before the ledger is asked (a client's
-    /// with its event's id, as not begun), so a client that leaves during the
-    /// wait still has it settled (to no effect if it never landed).
-    async fn hold(&self, asked: Option<String>) -> Result<HoldId, Fault> {
+    /// as unsent), so a client that leaves during the wait still has it
+    /// settled (to no effect if it never landed).
+    async fn hold(&self, asked: bool) -> Result<HoldId, Fault> {
         let amount = lock(&self.turns).bytes + TURN;
         let hold = HoldId::new();
         {
             let mut turns = lock(&self.turns);
             turns.holds.push_back((hold, amount));
-            if let Some(id) = asked {
-                turns.unbegun.push_back((id, hold));
+            if asked {
+                turns.unsent.push(hold);
             }
         }
         let held = self
@@ -495,7 +498,12 @@ impl<L: Ledger> Wallet<L> {
                 None => format!("reserve_{}", HoldId::new()),
             };
             event.json["event_id"] = id.clone().into();
-            self.hold(Some(id)).await?;
+            let hold = self.hold(true).await?;
+            // Begun-able only once held: a turn the provider starts itself
+            // meanwhile must not take this entry.
+            let mut turns = lock(&self.turns);
+            turns.unsent.retain(|held| *held != hold);
+            turns.unbegun.push_back((id, hold));
         } else if event.json["type"] == "session.update" {
             // The cap of the turns the provider starts on its own.
             let cap = &mut event.json["session"]["max_output_tokens"];
@@ -516,7 +524,7 @@ impl<L: Ledger> Wallet<L> {
         if kind == "response.created" {
             let asked = lock(&self.turns).unbegun.pop_front().is_some();
             if !asked {
-                self.hold(None).await?;
+                self.hold(false).await?;
             }
         } else if kind == "error" {
             // A `response.create` the provider refused never ran: its hold
@@ -551,16 +559,19 @@ impl<L: Ledger> Wallet<L> {
 
     /// A turn cut before its `response.done` may have cost all it was
     /// held for: it is charged that, never $0. One whose `response.create`
-    /// the provider never began cost nothing: it is settled at 0. A hold
+    /// never left `before` cost nothing: it is settled at 0. A hold
     /// already settled is settled again to no effect.
     async fn end(&self) {
-        let (cut, unbegun) = {
+        let (cut, unsent) = {
             let mut turns = lock(&self.turns);
-            let unbegun: Vec<_> = turns.unbegun.drain(..).map(|(_, hold)| hold).collect();
-            (turns.holds.drain(..).collect::<Vec<_>>(), unbegun)
+            turns.unbegun.clear();
+            (
+                turns.holds.drain(..).collect::<Vec<_>>(),
+                std::mem::take(&mut turns.unsent),
+            )
         };
         for (hold, amount) in cut {
-            let owed = if unbegun.contains(&hold) { 0 } else { amount };
+            let owed = if unsent.contains(&hold) { 0 } else { amount };
             let _ = self.ledger.settle(&hold, owed).await;
         }
     }
