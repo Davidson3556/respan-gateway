@@ -8,9 +8,9 @@
 //! **Order matters.** A filter sees a reply only if no filter before it
 //! failed on it or held it back, and a call's output filters run the last
 //! added first. So register billing after every plugin that filters
-//! outputs (last, or `Gateway::after`): its filter then sees each reply
-//! first. A failure still ends the stream, and usage the provider would
-//! have reported later is never seen: bill such a call from an estimate,
+//! outputs (last): its filter then sees each reply first. A failure still
+//! ends the stream, and usage the provider would have reported later is
+//! never seen: bill such a call from an estimate,
 //! or hold before it as `wallet` does.
 //!
 //! `cargo run -p respan-gateway-examples --example billing`

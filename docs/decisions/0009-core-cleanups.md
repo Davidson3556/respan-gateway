@@ -30,7 +30,7 @@ rules, each a job that plugins, extensions or transports already do.
    (`Response::stream`) is content. *Instead:* filter out what says
    nothing before `Response::stream`.
 
-`px.extensions()` stays beside `px.client().extensions()`.
+`px.extensions()` reads a call's own map, beside `px.extensions_mut()`.
 
 ## Consequences
 
@@ -44,8 +44,6 @@ rules, each a job that plugins, extensions or transports already do.
 - 0010: the usage rules here (only a provider's response counts,
   `Response::with_usage` gone) became "the kernel counts no usage".
 - 0012: `TE` stripping and bodiless responses moved to `crates/http` and
-  the formats (`Encoder::done`); the header helpers moved from the server
-  crate to `crates/http`.
-- 0014: `px.extensions()` went; a call's are read as
-  `px.client().extensions()` and written with `px.extensions_mut()`.
-- 0015: `px.extensions()` is back, beside `px.extensions_mut()`.
+  the formats (a body done as it opens: `Encoder::open` is `Ok(true)`); the
+  header helpers moved from the server crate to `crates/http`.
+- 0014, 0015: `px.extensions()` went, then came back.

@@ -5,10 +5,9 @@
 
 ## Context
 
-`Response::ready` read to the first content and held it, so a plugin could
-still decide or fall back. The name said nothing about where it stops, and
-a plugin racing calls for the first complete answer could not hold a
-response whole.
+A read to the first content, held, let a plugin still decide or fall
+back. Its name said nothing about where it stops, and a plugin racing calls
+for the first complete answer could not hold a response whole.
 
 ## Decision
 
@@ -30,13 +29,13 @@ response whole.
 
 - `until_end` keeps a whole response in memory until it is sent or
   dropped.
-- `Response::end` says how a response read to its end ended, so with
-  `Until::End` a success that fails after its content does not win.
+- `until_end` returns how the response ended, so with `Until::End` a
+  success that fails after its content does not win.
 
 ## History
 
 - 0012: an error answer became a failure; `Head` stopped telling it apart.
-- 0014: `until_end` returns the end with the response; `Response::end`
-  went.
-- 0015: `Fault::is_answer` went; routing retries by whether the call got
-  a response.
+- 0014: `until_end` returns the end with the response, in place of a
+  separate accessor.
+- 0015: routing retries by whether the call got a response, not by a flag
+  on the fault.

@@ -1,6 +1,6 @@
 # 0004. Two edges, typed formats
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0015](0015-core-trims.md)
 - Date: 2026-09-26
 
 ## Context
@@ -28,7 +28,7 @@ what the client sends and gets, whatever the format.
 
 - The client edge: `on_client(&mut ClientContext)` runs once per request,
   for each plugin in order, and may pass, answer or refuse.
-  `on_client_end(&ClientContext, &Outcome)` runs once, at the end, for
+  `on_client_end(&ClientContext, &Result<(), Fault>)` runs once, at the end, for
   each plugin whose `on_client` started.
 - The provider edge: `on_provider(&mut ProviderContext)` runs before
   every call, for each plugin in order until one fails the call, without
@@ -44,13 +44,13 @@ what the client sends and gets, whatever the format.
   after the client edge's input filters, and filter its outputs before
   the client edge's.
 - The provider edge sees its response as decoded, whoever reads it.
-- `on_provider_end(&ProviderContext, &Outcome)` runs once per call whose
+- `on_provider_end(&ProviderContext, &Result<(), Fault>)` runs once per call whose
   `on_provider` started: when the call fails before a response, its body
   ends, or its reader stops at a failure. Dropped, cut off, or open when
   its request ends, it ends `abandoned`, before the request's
   `on_client_end`, which waits for it.
-- An `Outcome` is how the edge ended (`end`). A provider's error answer is
-  a fault (`Fault::is_answer`).
+- The end is how the edge ended, `Ok` or a `Fault`. A provider's error
+  answer is a fault.
 - Client-edge filters end with the request, even when the client leaves.
 
 ### Providers
@@ -63,7 +63,7 @@ what the client sends and gets, whatever the format.
   A relay's call starts from the client's head, so the transport strips
   what its protocol forbids a proxy to pass on (`http::proxy_call`). Its
   body carries the inputs, one per data frame; its extensions are the
-  call's, with `Relayed` on a relay alone.
+  call's, with `Exchange::relayed` set on a relay alone.
 - The transport decides whose keys reach the provider. `HttpTransport`
   sends `CallHeaders`, else its own headers, else the client's
   `Credential`, the last only on a relay. It strips the client origin's
@@ -88,3 +88,4 @@ what the client sends and gets, whatever the format.
 - 0012: `Outcome.head` went; the kernel stopped filling calls;
   credentials became an extension.
 - 0013: `Transport::send` takes an `Exchange` of its wire's heads.
+- 0015: the end is a plain `Result<(), Fault>`; `relayed` is a field.

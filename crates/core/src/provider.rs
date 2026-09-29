@@ -132,19 +132,20 @@ impl ProviderContext {
     }
 
     /// Whether the call was handed to its transport, so it may have reached
-    /// the provider: `false` in `on_provider`, and for a call that failed
-    /// before, such as by a hook, an edit or an input it could not write.
+    /// the provider. `false` in `on_provider`, and for a call that failed
+    /// before that: by a hook, an edit or an input it could not write.
     pub fn is_sent(&self) -> bool {
         self.sent
     }
 
-    /// Whether the provider's response head arrived and its body then
-    /// decoded no value, though it did not break off: at a call's end, `Err`
-    /// means the provider failed the response as a whole before it began,
-    /// such as by refusing it. It is false in `on_provider`; for a call
-    /// whose transport failed, before a head or in its body; and once a
-    /// value was decoded. A fault alone cannot say which of these it is, as
-    /// a provider's refusal and a response cut off look alike.
+    /// Whether the provider's head arrived and its body began no value: the
+    /// transport returned a response, and its body has decoded nothing, though
+    /// it did not break off. At a call's end, `Err` then means the response
+    /// failed as a whole before it began, such as by a refusal. It is false in
+    /// `on_provider`; for a call whose transport failed, before a head or in
+    /// its body; and once a value was decoded. A fault alone cannot say which
+    /// of these it is, as a provider's refusal and a response cut off look
+    /// alike.
     pub fn is_head_only(&self) -> bool {
         self.answered && !self.began
     }

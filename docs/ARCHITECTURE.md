@@ -1,9 +1,15 @@
 # Architecture
 
 The kernel (`crates/core`) relays requests, translates them between
-formats of one kind, runs every plugin in registration order, and ends each request
-and call once. Tests state its promises; the
-[README](../README.md#glossary) defines its terms.
+formats of one kind, runs every plugin in registration order, and ends each
+request and call once. The [README](../README.md#glossary) defines its terms.
+Tests state its promises. The kernel alone, on a toy format and its public
+API, is tested in `crates/core/tests`: `cancellation` (a drop at every await),
+`panic_matrix` and `panics` (a panic at every place user code runs), `upload`
+(a cut request body), `until` (`until_content` and `until_end`), `lifecycle`
+(what is in flight) and `stress`. The rest run through the real formats in
+`crates/testkit/tests` (`relay`, `translate`, `streams`, `line`, `events`,
+`codec`, `leaks`, `custom`); HTTP's rules are in `crates/http/tests/rules.rs`.
 
 ## Decisions
 
@@ -23,8 +29,10 @@ and call once. Tests state its promises; the
 | [0012](decisions/0012-http-out-of-the-kernel.md) | HTTP's rules live in the adapter, transports and formats |
 | [0013](decisions/0013-no-http-in-core.md) | No `http` types in the core: a wire is a pair of head types |
 | [0014](decisions/0014-api-trims.md) | API trims: one way to say each thing |
-| [0015](decisions/0015-core-trims.md) | Core trims: `relayed` and `streams` on `Exchange`, no `Outcome`, `is_head_only` |
+| [0015](decisions/0015-core-trims.md) | Core trims: `relayed` and `streams` on `Exchange`; an end hook takes the end itself; `is_head_only` |
 | [0016](decisions/0016-core-fixes.md) | Core fixes: a cut request body never looks complete; open's bytes first; linear reads |
+| [0017](decisions/0017-untyped-handle.md) | `Gateway::handle` is untyped: the adapter erases and downcasts its wire's heads |
+| [0018](decisions/0018-plugin-order-is-registration-order.md) | Plugin order is registration order; no ordering solver in the kernel |
 | [0019](decisions/0019-status-out-of-the-kernel.md) | HTTP status numbers out of the kernel: a typed hint on `Fault`, read by `crates/http` |
 
 ## Two edges
@@ -46,36 +54,69 @@ answers skips those registered after it. Only `on_client` may `call` or `take_in
 
 ## The request path
 
-```
- adapter (crates/http): strip connection headers, lift the Credential,
-   add Asked; Upgrade? streams; http::Request ─▶ Exchange<Ask>
-                  ▼
- Gateway::handle(req.erase()) ─▶ first format that accepts
-   (none: Err, the adapter's plain 404; the adapter downcasts the answer)
-   whole: body read in full, its one input; streaming: one input per frame
-                  ▼
- on_client, each plugin ─Some─▶ own response ─────┐
-                  │ all pass  └─Err─▶ refusal ────┤
- cx.call(target) ─▶ on_provider ─Err─▶ refusal ───┤
-                  ▼                               │
- input filters ─▶ request encoder writes the head │
-   (a relay's from the client's) ─▶ edit_call ─▶  │
-   Transport::send (strips what a proxy must)     │
-                  ▼                               │
- response decoder (an error answer: a Fault) ─▶   │
-   provider-edge filters                          │
-                  ▼                               │
- client-edge filters ◀────────────────────────────┘
-                  ▼
- response encoder (a refusal: its answer or its words): head,
-   edit_response_head; the head goes with the first byte, or at once
-   for a streaming request or a body done before it began
-                  ▼ adapter: strip hop-by-hop headers
-                  ▼ at the end
- on_provider_end, each call ─▶ on_client_end; the end future resolves
+1. The adapter (`crates/http`) strips connection headers, lifts the
+   `Credential`, adds `Asked`, sets `streams` for an `Upgrade`, and calls
+   `Gateway::handle(Exchange<Head>)` with the head erased. `handle` gives the
+   request to the first served format that `accepts` its head; none is
+   `Err(not_found)` for the adapter to write plainly.
+2. The body: whole, it is read in full and is the one input, decoded by
+   `request_decoder` when first read; streaming, each frame is one input as it
+   arrives. A body that breaks is refused. The result is a `ClientContext`.
+3. Each plugin's `on_client`, in registration order: pass, answer (the rest
+   are skipped) or refuse. A plugin may add filters, `set_target`, edit the
+   response head, `call` and `take_inputs`.
+4. If all pass, `cx.call(target)`: each plugin's `on_provider` (an `Err` fails
+   the call), then `send_call`. A relay's call starts from the client's head
+   and unread bytes; a translated one is written from the inputs' values.
+   `request_encoder` writes the head (`head`), then `open` and the inputs
+   (`encode`); the plugins' `edit_call` follow; `Transport::send` returns the
+   provider's `Exchange<Answer>`. A streaming request's later frames pass
+   input filters and the encoder as the transport reads the body.
+5. `response_decoder` turns the answer's bytes into values (an error answer
+   ends `Err`), and the call's provider-edge filters edit each. A plugin now
+   holds it (`until_content`, `until_end`), reads it (`outputs`), or sends it.
+6. `deliver`: `response_encoder` writes the head (`head`, then
+   `edit_response_head`), `open`, and each value that the client-edge filters
+   left (`encode`); the head goes with the first byte. At the end, `end`.
+7. The end hooks: open calls end `abandoned`, each call's `on_provider_end`
+   runs, then `on_client_end`; `handle`'s end future resolves.
+
+```text
+trait Format { type Ask; type Answer; type Input; type Output;   // Ask/Answer: the wire's heads
+  fn name(&self) -> &str;   fn accepts(&self, head: &Ask) -> bool;
+  fn request_decoder(&self, head: &Ask) -> Box<dyn Decoder<Input>>;
+  fn request_encoder(&self, client: Option<&Ask>, body: &mut Bytes, streams: bool)
+      -> Box<dyn Encoder<Input, Ask>>;
+  fn response_decoder(&self, answer: &Answer, call: &Ask, sent: &Bytes)
+      -> Box<dyn Decoder<Output>>;
+  fn response_encoder(&self, answer: Option<&Answer>, ask: &Ask, body: &Bytes,
+      refusal: Option<&Fault>) -> Box<dyn Encoder<Output, Answer>>;
+  fn is_content(&self, output: &Output) -> bool { true } }
+trait Decoder<T> { fn decode(&mut self, bytes: Bytes, out: &mut Vec<T>) -> Result<(), Fault>;
+                   fn end(&mut self, out: &mut Vec<T>) -> Result<(), Fault>; }
+trait Encoder<T, H> { fn head(&mut self, first: Option<&T>) -> H;
+  fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault>;   // Ok(true): body done
+  fn encode(&mut self, value: &T, out: &mut BytesMut) -> Result<(), Fault>;
+  fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault>; }
+trait Transport { type Ask; type Answer;
+  async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault>; }
+trait Plugin { async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault>;
+  async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>);
+  async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault>;
+  async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>); }
+trait Filter<T> { fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<(), Fault>;
+                  fn end(&mut self, end: &Result<(), Fault>, out: &mut Vec<T>) -> Result<(), Fault>; }
 ```
 
-Four flows:
+- Two edges: `on_client` once per request, `on_provider` once per call.
+- Plugins see values of a kind, not bytes; only a format reads bytes.
+- `until_content` is the commit point: before it a failure is still a refusal
+  or a fallback; after it the head and bytes are out.
+- A fault says whose fault it is: `bad_request` the client's, `config` the
+  gateway's, `upstream` and `truncated` a provider's, `internal` a bug,
+  `abandoned` that no one waits.
+
+Flows:
 
 ```
  chat POST    1 input, maybe empty ─▶ call(target) ─▶ SSE
@@ -102,8 +143,10 @@ gateway does not read is a kind of one (`formats::opaque`).
 
 A wire is a pair of head types, `Format::Ask` and `Format::Answer`, that a
 format and its transport share; HTTP's live in `crates/http`
-([0013](decisions/0013-no-http-in-core.md)). The kernel reads no head.
-It hands a head, like bytes, only to a format of the name
+([0013](decisions/0013-no-http-in-core.md)). The kernel reads no head and
+keeps no value's bytes; it keeps only the client's request body, unread
+(`ClientContext::body()`, public), for a relay to send as it came. It hands
+a head, like bytes, only to a format of the name
 it came in, and only for a relay: a relay's call starts from the client's
 head and a relayed response's head is the provider's; a translated one
 starts anew. `Gateway::handle` is untyped: the caller knows its wire,
@@ -141,7 +184,13 @@ tokio runtime, which runs end hooks detached. The core depends on no
   `ProviderContext` (a call), and an end, `&Result<(), Fault>`; a fact
   about a call, such as `is_sent` or `is_head_only`, is a method of its
   context; `Call`, a `'static`, `Clone`, `Sync` future,
-  sent when awaited.
+  sent when awaited. A call is a slot its request can empty (`Sending`,
+  `OpenCalls` in `call.rs`), not a future driven in place: a call polled once
+  and then parked, never polled again, must still end `abandoned` when its
+  request ends, so the request needs a synchronous handle to drop the future.
+  Driving `Call::poll` with `take_until` cannot; it was tried and reverted,
+  and `a_pending_call_left_unpolled_still_ends_with_its_request`
+  (`crates/testkit/tests/streams.rs`) pins it.
 - `Filter<T>` edits inputs (the only way) or outputs; `Response` is a call's, `cx.relay`'s or
   `Response::stream`'s, held with `until_content` or `until_end`, or read
   with `outputs`; `Fault` is the one error type: a code and message, retry, and typed hints (`with`, `get`) that
@@ -169,19 +218,23 @@ tokio runtime, which runs end hooks detached. The core depends on no
    edge.
 4. **Edit.** Output filters run provider edge first, the last added
    first; input filters the first added first: a plugin sees inputs after
-   earlier plugins, outputs before. Filters see every value, keep-alives
-   and usage alone included, and pass on at once what they have no reason
-   to hold. An `Err` stops writing; a failed filter releases nothing.
+   earlier plugins, outputs before. Filters see every value, one that
+   says nothing yet, such as a keep-alive, included, and pass on at once
+   what they have no reason to hold. An `Err` stops writing; a failed
+   filter releases nothing (`plugin.rs` unit tests, `line.rs`).
 5. **End.** A body ends at the end of its bytes; one cut short ends
    `Err(truncated)`. Every filter gets one end, even after a failure,
    drop or panic elsewhere. A filter's panic is an internal fault, written
-   in the client's format even after bytes are out.
+   in the client's format even after bytes are out (`panic_matrix`,
+   `panics`).
 6. **Close.** A request closes when its last bytes are out or the client
    leaves, ending its open calls `abandoned` first; a call when it fails,
    its body ends, or its reader stops. Open filters cannot change the end.
    A request counts as in flight for `Gateway::idle` from `handle`, while
    its body is read. Every user-code call, a request encoder's later
-   frames included, is guarded: a panic ends its call `internal`.
+   frames included, is guarded: a panic ends its call `internal`. Dropping
+   a request or response at any await still ends everything once
+   (`cancellation`, `stress`, `leaks`).
 
 ## Routing
 
@@ -189,9 +242,10 @@ A router sets the target and passes. A fallback answers with the first
 success read to its content, else the last failure, so a client sees the
 last 429 as it came, or in its own words with its retry. `until_content`
 reads until the first content (`Format::is_content`, before filters, so
-neither a keep-alive nor usage alone; or any output a plugin made), a
-failure or the end, and holds what it read, unsent; it is `Err` for a
-response that fails first, a provider's error answer included:
+not a value that says nothing yet, such as a keep-alive; any output a
+plugin made is content), a failure or the end, and holds what it read,
+unsent; it is `Err` for a response that fails first, a provider's error
+answer included (`crates/core/tests/until.rs`):
 
 ```rust
 let mut last = Err(Fault::upstream("no provider to try"));

@@ -39,8 +39,8 @@ impl CallUsage {
 ///
 /// The kernel counts no usage: this filter sees a reply only if no filter
 /// before it failed on it or held it back. Output filters run the last
-/// added first, so meter from the plugin that runs last (register it last,
-/// or `Gateway::after` every plugin that filters outputs).
+/// added first, so meter from the plugin that runs last: register it after
+/// every plugin that filters outputs.
 pub fn meter(px: &mut ProviderContext) -> Result<(), Fault> {
     if !px.is_kind::<Conversation>() || px.extensions().get::<CallUsage>().is_some() {
         return Ok(());

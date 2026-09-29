@@ -115,6 +115,15 @@ impl Future for Call {
 }
 
 /// A sent call until it resolves, and who awaits it.
+///
+/// Why a call is a slot its request can empty, not a future driven in place:
+/// a call polled once and then parked, never polled again, must still end
+/// abandoned when its request ends. Only the request's end runs then, so it
+/// needs a synchronous handle to drop the future ([`Open::abandon`]); wrapping
+/// `Call::poll` in `take_until` cannot, as that runs only when polled. It was
+/// tried and reverted; the test
+/// `a_pending_call_left_unpolled_still_ends_with_its_request`
+/// (`crates/testkit/tests/streams.rs`) pins it.
 type Sending = Mutex<(
     Option<BoxFuture<'static, Result<Response, Fault>>>,
     Option<Waker>,
@@ -395,6 +404,8 @@ pub(crate) type CallEdge = EndHooks<ProviderContext>;
 pub(crate) type SharedCall = Arc<Mutex<CallEdge>>;
 
 /// What a request ends when it ends: a call being sent, or an open response.
+/// The request holds each weakly in [`OpenCalls`] and ends them by `&self`, so
+/// no one has to poll them (see [`Sending`]).
 trait Open: Send + Sync {
     fn abandon(&self);
 }
@@ -417,6 +428,7 @@ impl Open for Mutex<CallEdge> {
 }
 
 /// A request's calls being sent or with a response open; `None` once it ended.
+/// Its `abandon` is the synchronous handle [`Sending`] explains.
 pub(crate) struct OpenCalls(Mutex<Option<Vec<Weak<dyn Open>>>>);
 
 impl Default for OpenCalls {

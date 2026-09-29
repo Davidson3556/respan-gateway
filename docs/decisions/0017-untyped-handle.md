@@ -31,5 +31,5 @@ caller's wire, which is the caller's to know.
 
 - Amends 0013 (`handle::<Ask, Answer>`) and 0015 (`Answer` as a type
   parameter).
-- 14 public types; `Head` is an alias.
+- No new public type; `Head` is an alias.
 - `Format`, `Decoder`, `Encoder` and `Transport` are unchanged.

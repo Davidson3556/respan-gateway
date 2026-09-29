@@ -12,14 +12,15 @@ use crate::transport::Head;
 ///
 /// A body is a stream of messages, each decoded into one value of the kind,
 /// even one the kind cannot read, which keeps its bytes: the kernel keeps
-/// none, so a relay loses nothing only if the format writes a value as the
-/// bytes it came in while it says the same.
+/// none of a value's, so a relay loses nothing only if the format writes a
+/// value as the bytes it came in while it says the same.
 ///
 /// Its wire is its pair of head types, [`Format::Ask`] and
 /// [`Format::Answer`], which the kernel never reads and hands only to a
 /// format of the name it came in. A request's inputs stream, one per data
-/// frame, if the adapter says so ([`Gateway::handle`](crate::Gateway::handle));
-/// else its body is its one input, even empty.
+/// frame, if the adapter sets [`Exchange::streams`](crate::Exchange::streams)
+/// on it ([`Gateway::handle`](crate::Gateway::handle)); else its body is its
+/// one input, even empty.
 ///
 /// Its kind is its pair of value types, through which formats of one kind
 /// translate. They must differ, as the type names the direction, and should
@@ -105,7 +106,8 @@ pub trait Format: Send + Sync + 'static {
 
     /// Whether `output` is content, what
     /// [`Response::until_content`](crate::Response::until_content) stops at;
-    /// a keep-alive or usage alone is not. By default, true.
+    /// a value that says nothing yet, such as a keep-alive, is not. By
+    /// default, true.
     fn is_content(&self, _output: &Self::Output) -> bool {
         true
     }

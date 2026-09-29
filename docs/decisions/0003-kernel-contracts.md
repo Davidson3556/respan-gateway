@@ -21,7 +21,8 @@ pair of formats grow with the square of the formats.
   Filters edit inputs and outputs as they stream, and are the one way to
   edit inputs.
 - `Gateway::handle` is the only entry point. It returns the response and
-  a future of its `Outcome`; the tokio runtime runs end hooks detached.
+  a future of how the request ended (`Result<(), Fault>`); the tokio
+  runtime runs end hooks detached.
   `Gateway::idle` waits for every open response and end hook.
 - A response head goes out with its body's first byte, so a failure
   before it is still a refusal. `Encoder::open` writes opening bytes that
@@ -32,15 +33,14 @@ pair of formats grow with the square of the formats.
 - Every filter gets exactly one end, even after a failure, drop or panic
   elsewhere. A list remembers its end, so a filter added later sees it at
   once. A failing input filter ends them all. A filter still open at close
-  is told the end and cannot change it, nor can a panic, so the `Outcome`
-  is true.
+  is told the end and cannot change it, nor can a panic, so the end is true.
 - A filter's panic is an internal fault, like its `Err`, written in the
   client's format even after bytes are out. A decoder's or encoder's
   panic aborts the body, as the framing is lost.
 - Content that cannot be written is whose it is: `BAD_REQUEST` for the
   client's, even if a router changed the model; `CONFIG` for what a
   plugin changed or brought.
-- The seven `codes` say whose fault a failure is; a plugin may add its own.
+- The `codes` say whose fault a failure is; a plugin may add its own.
 
 ### Kinds
 
@@ -112,5 +112,5 @@ plugins, keys to transports, deadlines and draining to the embedder.
   formats and transports; `head_mut` and `with_status` went.
 - 0013: the promise of a call with its own `http::Request` went; no
   `http` types remain.
-- 0015: `Outcome` went; end hooks and `handle`'s future take a
-  `Result<(), Fault>`.
+- 0015: end hooks and `handle`'s future take a `Result<(), Fault>`, in place
+  of a bundle.

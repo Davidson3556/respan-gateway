@@ -21,10 +21,11 @@ run time.
 - Every message decodes to one value, even one the kind cannot read,
   which keeps the bytes it came in (`formats::relayed`). A format writes a
   value as those bytes while it says the same, and writes what changed
-  into them. The kernel keeps, strips and compares no bytes.
+  into them. The kernel keeps no value's bytes; the one thing it keeps
+  unread is the client's request body (`ClientContext::body()`).
 - A provider's error answer keeps its format's name
-  (`Fault::with_answer(format, answer)`, or `with_words` for an error
-  within a response), as only that format writes it.
+  (`Fault::with_answer(format, answer)`, for an error event within a
+  response too), as only that format writes it.
 - `Format::is_content` decides only what `until_content` commits on.
 - An input, first or later, that cannot be written is the client's fault
   (`BAD_REQUEST`) if filters left it equal to its decoding, else `CONFIG`.
@@ -52,11 +53,9 @@ run time.
 ## History
 
 - 0009: `Response::with_usage` went; `outputs` yields every value.
-- 0010: usage left the kernel (`Format::usage`, `Outcome.usage`); `says`
-  became `is_content`, and filters see every value.
+- 0010: usage left the kernel; `says` became `is_content`, and filters
+  see every value.
 - 0011: `ready` became `until_content`.
-- 0012: `with_raw` became `with_answer` and `with_words`; encoders are
-  told a call streams.
-- 0014: `with_words` became `with_answer(.., false)`.
-- 0015: `with_answer(.., false)` lost its flag: `with_answer(format,
-  answer)`.
+- 0012: encoders are told a call streams.
+- 0012-0015: an error answer or event is `with_answer(format, answer)`;
+  `with_raw`, `with_words` and the `in_place` flag came and went.

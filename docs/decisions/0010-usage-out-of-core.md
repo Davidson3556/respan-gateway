@@ -5,7 +5,7 @@
 
 ## Context
 
-The kernel counted usage per message and summed it into `Outcome.usage`.
+The kernel counted usage per message and summed it per call.
 But not every kind has usage, and kinds measure it differently: tokens,
 bytes, dollars. Counting it was a feature in the core (0001).
 
@@ -18,8 +18,8 @@ bytes, dollars. Counting it was a feature in the core (0001).
    filter passes on at once what it has no reason to hold, so a
    keep-alive still reaches a same-format client in place.
 3. **`Format::is_content`** (and `Reply::is_content`) decides only what
-   `until_content` commits on; neither a keep-alive nor usage alone is
-   content.
+   `until_content` commits on; a value that says nothing yet, such as a
+   keep-alive, is not content (the chat kind counts usage alone as none).
 4. **Metering is a plugin's.** A plugin meters a call with a provider-edge
    filter of its kind and reads the sum in `on_provider_end`. Output
    filters run the last added first, so it is registered after the
@@ -45,4 +45,4 @@ bytes, dollars. Counting it was a feature in the core (0001).
 ## History
 
 - 0011: `ready` became `until_content`.
-- 0012: `Outcome` kept only `end`.
+- 0012, 0015: what a call's end carried shrank to the end itself.

@@ -14,7 +14,8 @@ already streams; only a streaming request was missing.
 - No separate concept for long-lived exchanges: a request carries inputs,
   a response outputs, and either may stream.
 - A request streams its inputs if the adapter says so
-  (`handle(req, streaming)`; the HTTP adapter does for `Upgrade`): they
+  (`Exchange::streams` on the request; the HTTP adapter sets it for
+  `Upgrade`): they
   come after its head, one per data frame. Any other request is whole:
   its body, even empty, is one input, so a quiet stream such as an MCP
   `GET` is an ordinary request.
@@ -59,3 +60,4 @@ already streams; only a streaming request was missing.
 - 0011: `ready` became `until_content`.
 - 0012: the adapter, not `Upgrade`, says whether a request streams; a 101
   is the formats' and the adapter's.
+- 0015: it says so with `Exchange::streams`, not an argument of `handle`.
