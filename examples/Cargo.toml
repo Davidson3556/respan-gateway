@@ -19,12 +19,12 @@ path = "src/lib.rs"
 [dependencies]
 respan-gateway-core.workspace = true
 respan-gateway-formats.workspace = true
+respan-gateway-http.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 respan-gateway-plugins.workspace = true
 respan-gateway-server.workspace = true
-respan-gateway-http.workspace = true
 respan-gateway-testkit.workspace = true
 respan-gateway-routing.workspace = true
 respan-gateway-text.workspace = true
@@ -34,6 +34,7 @@ respan-gateway-ws.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 async-trait.workspace = true
+base64 = "0.22"
 axum.workspace = true
 bytes.workspace = true
 futures.workspace = true
@@ -140,4 +141,9 @@ test = true
 [[example]]
 name = "models_merge"
 path = "models_merge.rs"
+test = true
+
+[[example]]
+name = "jobs_background"
+path = "jobs_background.rs"
 test = true
