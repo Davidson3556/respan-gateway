@@ -1,6 +1,6 @@
 # 0020. Symmetric edges
 
-- Status: accepted; amended by 0021
+- Status: accepted; amended by 0021 and 0022
 - Date: 2026-09-29
 
 ## Context

@@ -19,8 +19,8 @@ pub struct Response {
     /// The provider's origin, only on a relay; none for one made.
     pub(crate) origin: Option<Origin>,
     pub(crate) body: Source,
-    /// Whether its call carries the session's inputs still flowing, so its
-    /// events flow only once it is sent.
+    /// Whether its call streams inputs, so its events flow only once it is
+    /// sent.
     pub(crate) streams: bool,
     /// What [`Response::until_content`] or [`Response::until_end`] read,
     /// to be read again first.
@@ -144,8 +144,9 @@ impl Response {
     /// Read it until its first content
     /// ([`Format::is_content`](crate::Format::is_content), before filters),
     /// a failure or its end, and hold what was read, unsent, to decide on
-    /// it or fall back. One whose call streams the request's inputs returns
-    /// at once. `Err` if it fails first, such as with a provider's error
+    /// it or fall back. One whose call streams inputs, the request's or its
+    /// own, returns at once, as waiting could deadlock a peer that waits for
+    /// them. `Err` if it fails first, such as with a provider's error
     /// answer, which a refusal sends as it came; one the provider refused
     /// at its head fails at once.
     ///
@@ -160,8 +161,8 @@ impl Response {
 
     /// Read it to its end and hold it all, a later failure too, such as to
     /// race calls for completion; sent, it goes as it would have unread.
-    /// Returned with how it ended, `Ok` for one whose call streams the
-    /// request's inputs, unread. Otherwise as
+    /// Returned with how it ended, `Ok` for one whose call streams inputs,
+    /// unread. Otherwise as
     /// [`until_content`](Response::until_content), a panic included: the
     /// awaiting plugin unwinds, and the request is refused
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) as any plugin panic is,

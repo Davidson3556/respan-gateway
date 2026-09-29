@@ -228,7 +228,8 @@ impl ClientContext {
     /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if `provider` is
     /// unknown or cannot take the inputs; with
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) for a
-    /// [`Call::with_input`] of another kind or once the request ended; with
+    /// [`Call::with_input`] or [`Call::with_inputs`] of another kind or once
+    /// the request ended; with
     /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the request ends
     /// while it is pending; or the `Err` of a hook, the codec or the
     /// transport.

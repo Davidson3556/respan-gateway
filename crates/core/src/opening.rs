@@ -14,7 +14,7 @@ struct Base {
     decoded: OnceLock<Option<Result<AnyInput, Fault>>>,
 }
 
-/// The input that came with a session's head, and the holder's changed
+/// The input that came with a request's head, and the holder's changed
 /// copy; or a call's own.
 #[derive(Clone)]
 pub(crate) struct Opening {
@@ -22,8 +22,8 @@ pub(crate) struct Opening {
     /// Set once a filter ran over it or a call brings its own; a filter's
     /// failure is kept.
     changed: Option<Result<AnyInput, Fault>>,
-    /// The format of a call's own input, which `changed` then has.
-    pub(crate) own: Option<Arc<dyn AnyFormat>>,
+    /// Whether it is a call's own, none of the client's.
+    pub(crate) own: bool,
 }
 
 impl Opening {
@@ -36,19 +36,23 @@ impl Opening {
         Self {
             base: Arc::new(base),
             changed: None,
-            own: None,
+            own: false,
         }
     }
 
-    /// Bring `input`, a call's own, of `format`'s kind.
-    pub(crate) fn bring(&mut self, format: Arc<dyn AnyFormat>, input: AnyInput) {
-        self.changed = Some(Ok(input));
-        self.own = Some(format);
+    /// A call's own opening, of `format`'s kind: `input`, or none for a
+    /// call whose own inputs stream.
+    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: Option<AnyInput>) -> Self {
+        Self {
+            changed: input.map(Ok),
+            own: true,
+            ..Self::new(format, None)
+        }
     }
 
     /// The format whose kind it is of.
     fn format(&self) -> &Arc<dyn AnyFormat> {
-        self.own.as_ref().unwrap_or(&self.base.format)
+        &self.base.format
     }
 
     /// The client's opening, decoded once; `None` if none came.

@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::future::{Future, ready};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -6,13 +6,14 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
 use futures::future::BoxFuture;
-use futures::{FutureExt, StreamExt, stream};
+use futures::{FutureExt, Stream, StreamExt, stream};
 
 use crate::fault::{PANICKED, guarded};
-use crate::format::{AnyEvents, AnyInput, Origin};
+use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin, erase};
 use crate::gateway::Registered;
-use crate::leg::{self, inputs, locked};
+use crate::leg::{self, Later, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
+use crate::opening::Opening;
 use crate::provider::Provider;
 use crate::response::Batch;
 use crate::{ClientContext, Extensions, Fault, ProviderContext, Response};
@@ -23,8 +24,8 @@ use crate::{ClientContext, Extensions, Fault, ProviderContext, Response};
 pub struct Call {
     request: Arc<ClientContext>,
     provider: String,
-    /// Its own input.
-    input: Option<AnyInput>,
+    /// Its own input or inputs, if any.
+    own: Option<Own>,
     extensions: Extensions,
     /// The call once sent, shared with its request, which drops it at its end.
     sent: Option<Arc<Sending>>,
@@ -38,13 +39,22 @@ impl std::fmt::Debug for Call {
     }
 }
 
+/// A call's own input ([`Call::with_input`]) or inputs
+/// ([`Call::with_inputs`]), of the provider's input type.
+#[derive(Clone)]
+enum Own {
+    Input(AnyInput),
+    /// The type, and the inputs, read once as a session's are.
+    Inputs(TypeId, Arc<Later>),
+}
+
 /// An unsent copy.
 impl Clone for Call {
     fn clone(&self) -> Self {
         Self {
             request: self.request.clone(),
             provider: self.provider.clone(),
-            input: self.input.clone(),
+            own: self.own.clone(),
             extensions: self.extensions.clone(),
             sent: None,
         }
@@ -56,7 +66,7 @@ impl Call {
         Self {
             request,
             provider,
-            input: None,
+            own: None,
             extensions: Extensions::new(),
             sent: None,
         }
@@ -66,7 +76,28 @@ impl Call {
     /// must be the provider's input type, of any kind, or the call fails
     /// with [`codes::INTERNAL`](crate::codes::INTERNAL).
     pub fn with_input<T: Any + Send + Sync>(mut self, input: T) -> Self {
-        self.input = Some(Arc::new(input));
+        self.own = Some(Own::Input(Arc::new(input)));
+        self
+    }
+
+    /// Stream `inputs` in place of the client's, as a session's inputs
+    /// stream: pulled as the provider edge reads, through this call's input
+    /// filters, their end or first `Err` the end of what the call sends. A
+    /// plugin makes them, typically from
+    /// [`take_inputs`](ClientContext::take_inputs) with async work on each,
+    /// such as a remote check. Like [`with_input`](Call::with_input), they
+    /// are none of the client's: the call never relays. They must be the
+    /// provider's input type, or the call fails with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL). A clone shares them:
+    /// the first sent reads them, and gives them back if it read none, as a
+    /// retry of a session's call does.
+    pub fn with_inputs<T, S>(mut self, inputs: S) -> Self
+    where
+        T: Any + Send + Sync,
+        S: Stream<Item = Result<T, Fault>> + Send + 'static,
+    {
+        let later = Later::new(Some(erase(inputs.boxed())));
+        self.own = Some(Own::Inputs(TypeId::of::<T>(), Arc::new(later)));
         self
     }
 
@@ -87,7 +118,7 @@ impl Future for Call {
             let sent = send(
                 call.request.clone(),
                 call.provider.clone(),
-                call.input.clone(),
+                call.own.clone(),
                 call.extensions.clone(),
             );
             let sent = Arc::new(Mutex::new((Some(sent.boxed()), None)));
@@ -128,10 +159,10 @@ type Sending = Mutex<(
 async fn send(
     cx: Arc<ClientContext>,
     provider: String,
-    own: Option<AnyInput>,
+    own: Option<Own>,
     extensions: Extensions,
 ) -> Result<Response, Fault> {
-    // An own input sends nothing of the client's, so only its type must
+    // Own inputs send nothing of the client's, so only their type must
     // match; provider details go to logs.
     let p = match cx.gateway.providers.get(&provider) {
         None => Err(format!("unknown provider '{provider}'")),
@@ -152,15 +183,24 @@ async fn send(
     let p = p.map_err(|e| {
         Fault::config("a provider this request cannot use was called").with_source(e)
     })?;
-    let mut opening = cx.opening.clone();
-    if let Some(own) = own {
-        if p.format.kind().0 != (*own).type_id() {
-            return Err(Fault::another_kind(format!(
-                "a call's own input is not the input type of provider '{provider}'"
-            )));
+    let (opening, later) = match own {
+        None => {
+            let later = (!cx.later.ended).then(|| (cx.later.clone(), cx.format.clone()));
+            (cx.opening.clone(), later)
         }
-        opening.bring(p.format.clone(), own);
-    }
+        Some(own) => {
+            let (ty, input, later) = match own {
+                Own::Input(input) => ((*input).type_id(), Some(input), None),
+                Own::Inputs(ty, later) => (ty, None, Some((later, p.format.clone()))),
+            };
+            if p.format.kind().0 != ty {
+                return Err(Fault::another_kind(format!(
+                    "a call's own input is not the input type of provider '{provider}'"
+                )));
+            }
+            (Opening::own(p.format.clone(), input), later)
+        }
+    };
     let mut client = cx.copy();
     client.extensions.extend(extensions);
     let cut = Arc::default();
@@ -168,8 +208,7 @@ async fn send(
         client,
         format: p.format.clone(),
         provider,
-        // A call's own input is none of the client's: nothing follows it.
-        flowing: opening.own.is_none() && !cx.later.ended,
+        flowing: later.is_some(),
         opening,
         outputs: Arc::default(),
         inputs: Arc::default(),
@@ -181,7 +220,7 @@ async fn send(
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
     let sent = async {
         edge.start().await?;
-        dial(&cx, p, &mut edge).await
+        dial(&cx, p, later, &mut edge).await
     };
     // A panic ends this call as internal before unwinding, so the drop
     // during unwinding does not end it abandoned.
@@ -199,27 +238,32 @@ async fn send(
 }
 
 /// The one way a client's origin reaches a provider: a call that carries
-/// the session's own inputs (no input of its own, which no plugin can
-/// forge) to a format of the client's name.
+/// the request's own inputs (none of its own, which no plugin can forge) to
+/// a format of the client's name.
 fn relay_origin(cx: &ClientContext, own: bool, p: &Provider) -> Option<Origin> {
     (!own && cx.format.name() == p.format.name())
         .then(|| cx.origin.clone())
         .flatten()
 }
 
-/// Dial `p` with the call's opening and later inputs: the provider's origin
-/// (on a relay alone) and events, a refusal at the head as one `Err`.
+/// Where a call's later inputs come from: the request's or its own, and
+/// the format whose kind they are of.
+type Flowing = Option<(Arc<Later>, Arc<dyn AnyFormat>)>;
+
+/// Dial `p` with the call's opening and `later` inputs: the provider's
+/// origin (on a relay alone) and events, a refusal at the head as one `Err`.
 async fn dial(
     cx: &ClientContext,
     p: &Provider,
+    later: Flowing,
     edge: &mut CallEdge,
 ) -> Result<(Option<Origin>, AnyEvents), Fault> {
     let px = edge.cx();
-    let relay = relay_origin(cx, px.opening.own.is_some(), p);
+    let relay = relay_origin(cx, px.opening.own, p);
     let opening = px.opening.sent(relay.is_some())?;
-    let later = px.flowing.then(|| {
+    let later = later.map(|(later, format)| {
         let call = Some(px.inputs.clone());
-        inputs(cx.later.clone(), cx.format.clone(), call, &px.cut)
+        inputs(later, format, call, &px.cut)
     });
     let (dialer, ext) = (&*p.dialer, px.client.extensions.clone());
     let dialed = guarded(|| {

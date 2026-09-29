@@ -233,7 +233,7 @@ impl<F: Format> Erased<F> {
 }
 
 /// Typed events erased, one value per item.
-fn erase<T: Send + 'static>(events: Events<T>) -> AnyEvents {
+pub(crate) fn erase<T: Send + 'static>(events: Events<T>) -> AnyEvents {
     events
         .map(|e| e.map(|v| Box::new(vec![v]) as Values))
         .boxed()
