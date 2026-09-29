@@ -17,7 +17,7 @@ use crate::{Call, Events, Extensions, Fault, Filter, Gateway, Plugin};
 
 /// One client request, as the client edge's hooks see it.
 pub struct ClientContext {
-    /// The first format served that accepted the request.
+    /// The first client format that accepted the request.
     pub(crate) format: Arc<dyn AnyFormat>,
     /// What came with the head, sealed: only a relay hands it on.
     pub(crate) origin: Option<Origin>,

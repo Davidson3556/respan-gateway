@@ -24,8 +24,8 @@ pub(crate) struct Registered {
 
 #[derive(Clone, Default)]
 pub(crate) struct Inner {
-    /// The formats served to clients, in the order they are tried.
-    served: Vec<Arc<dyn AnyFormat>>,
+    /// The client formats, in the order they are tried.
+    clients: Vec<Arc<dyn AnyFormat>>,
     /// In registration order, which is the order their hooks run, on both
     /// edges.
     pub(crate) plugins: Vec<Registered>,
@@ -48,7 +48,7 @@ impl std::fmt::Debug for Gateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.inner.plugins.iter().map(|p| &*p.name).collect();
         f.debug_struct("Gateway")
-            .field("formats", &self.inner.served.len())
+            .field("formats", &self.inner.clients.len())
             .field("plugins", &names)
             .field("providers", &self.inner.providers.len())
             .field("target", &self.inner.target)
@@ -76,12 +76,12 @@ impl Gateway {
     }
 
     /// Accept clients that speak `format`: a wire handed to [`Gateway::handle`] goes
-    /// to the first format served that [`accepts`](Format::accepts) it.
+    /// to the first client format that [`accepts`](Format::accepts) it.
     /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if its input and
     /// output types are one, or a format of its name has another kind, wire
     /// or dialer.
     pub fn client<F: Format>(self, format: F) -> Result<Gateway, Fault> {
-        self.add_served(Arc::new(Erased::new(format)))
+        self.add_client(Arc::new(Erased::new(format)))
     }
 
     /// Register `plugin` as `name`; its hooks run on every request and call,
@@ -128,7 +128,7 @@ impl Gateway {
         self.inner.in_flight.idle().await;
     }
 
-    /// Serve `wire` in the first format served ([`Gateway::client`]) that
+    /// Serve `wire` in the first client format ([`Gateway::client`]) that
     /// [`accepts`](Format::accepts) it: resolves `Ok` once its client edge
     /// has its reply, whose end the edge tells with [`Ended`](crate::Ended).
     /// The caller built `wire`, so it knows its type; a format of another
@@ -156,11 +156,11 @@ impl Gateway {
     ) -> impl Future<Output = Result<(), Fault>> + Send + 'static {
         let wire: Box<dyn Any + Send> = Box::new(wire);
         // A format that panics in `accepts` is the adapter's to write.
-        let served = &self.inner.served;
-        let accepts = || served.iter().find(|d| d.accepts(&*wire)).cloned();
+        let clients = &self.inner.clients;
+        let accepts = || clients.iter().find(|d| d.accepts(&*wire)).cloned();
         let format = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
             Ok(Some(format)) => Ok(format),
-            Ok(None) => Err(Fault::not_found("no format served accepts this request")),
+            Ok(None) => Err(Fault::not_found("no client format accepts this request")),
             Err(_) => Err(Fault::internal(PANICKED)),
         };
         // In flight from this call on, while the request comes in too, so
@@ -242,9 +242,9 @@ impl Gateway {
         Ok(self)
     }
 
-    fn add_served(mut self, format: Arc<dyn AnyFormat>) -> Result<Gateway, Fault> {
+    fn add_client(mut self, format: Arc<dyn AnyFormat>) -> Result<Gateway, Fault> {
         self.check(&*format)?;
-        self.inner_mut().served.push(format);
+        self.inner_mut().clients.push(format);
         Ok(self)
     }
 
@@ -254,7 +254,7 @@ impl Gateway {
         let (name, kind) = (format.name(), format.kind());
         let inner = &self.inner;
         let providers = inner.providers.values().map(|p| &*p.format);
-        let known = inner.served.iter().map(|d| &**d).chain(providers);
+        let known = inner.clients.iter().map(|d| &**d).chain(providers);
         let named: Vec<_> = known.filter(|d| d.name() == name).collect();
         let fault = if kind.0 == kind.1 {
             format!("the kind of format {name} has one type for both directions")

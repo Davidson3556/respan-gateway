@@ -65,8 +65,8 @@ the provider edge, each a format, own them
 ([architecture](docs/ARCHITECTURE.md),
 [0020](docs/decisions/0020-symmetric-edges.md)).
 
-- **Gateway**: what you build and hand requests to: providers, formats
-  served, plugins and a default target, each registered by value.
+- **Gateway**: what you build and hand requests to: providers, client
+  formats, plugins and a default target, each registered by value.
 - **Plugin**: four hooks, `on_client` and `on_client_end` once per
   request, `on_provider` and `on_provider_end` once per call, in
   registration order. `on_client` passes (`Ok(None)`), replies or refuses.

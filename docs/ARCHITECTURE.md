@@ -38,7 +38,7 @@ connection: the client edge is accepted, the provider edge is dialed.
    connection headers, lifts its credentials into a `Credential` extension,
    adds an `Asked` view of its head, and hands an `Accepted` wire to
    `Gateway::handle(wire, extensions)`, which takes the caller's wire type.
-2. `handle` gives the wire to the first served format whose `accepts` says
+2. `handle` gives the wire to the first client format whose `accepts` says
    yes. None: the wire is dropped and `handle` resolves `Err(not_found)`
    (or `internal` if a format panicked), for the adapter to write plainly.
    The request is in flight from the call on, before its future is polled,

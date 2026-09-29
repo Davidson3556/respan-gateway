@@ -191,7 +191,7 @@ pub trait Format: Send + Sync + 'static {
     /// translate, and share a kind, a wire and a dialer.
     fn name(&self) -> &str;
 
-    /// Whether this format speaks on `wire`; the first served that does
+    /// Whether this format speaks on `wire`; the first client format that does
     /// takes it. It may look inside; the gateway does not. By default,
     /// false: a format that keeps the client edge's defaults is dial-only.
     fn accepts(&self, _wire: &Self::Wire) -> bool {
