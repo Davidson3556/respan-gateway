@@ -1,7 +1,7 @@
 //! The layer engine: a stream pulled through filter layers, each ended once
 //! with what it kept back flowing on through the layers after it; a cut
 //! gives `Err(abandoned)`, never a clean end; every poll of an edge's stream
-//! is guarded. Session inputs to a call, a provider's events to a
+//! is guarded. A session's inputs or a call's own to the call, a provider's events to a
 //! [`Response`](crate::Response), and a response to the client run on it.
 
 use std::collections::VecDeque;
@@ -75,8 +75,9 @@ pub(crate) fn cut<T: Send + 'static>(
     .boxed()
 }
 
-/// A session's inputs after its opening, if any follow: read once, and the
-/// session's input filters.
+/// The inputs after an opening, if any follow, a session's or a call's own:
+/// read once, and their first input filters (the client edge's, for a
+/// session's).
 pub(crate) struct Later {
     events: Mutex<Option<AnyEvents>>,
     /// Whether none follow the opening.
@@ -93,7 +94,7 @@ impl Later {
         }
     }
 
-    /// The session ended: its filters end `end`, if they have not, and the
+    /// The request ended: its filters end `end`, if they have not, and the
     /// events go, so nothing that outlives it keeps the client's connection.
     pub(crate) fn end(&self, end: Result<(), Fault>) {
         locked(&self.events).take();
@@ -101,7 +102,7 @@ impl Later {
     }
 }
 
-/// `later`'s inputs through the session's input filters, then `call`'s;
+/// `later`'s inputs through its input filters, then `call`'s;
 /// cut, when `until` is
 /// idle or either layer ended, with `Err(abandoned)`. Taken on the first
 /// poll; given back if none was read.
@@ -157,7 +158,7 @@ impl Reading {
                     None => {
                         self.ended = true;
                         // Filters ended and no events: the inputs ended as the
-                        // filters did, a cut by the session too.
+                        // filters did, a cut by the request's end too.
                         return match locked(&self.later.filters).outcome() {
                             Some(Ok(())) => None,
                             Some(Err(fault)) => Some(Err(fault)),
@@ -201,7 +202,7 @@ impl Reading {
         Ok(())
     }
 
-    /// The inputs end `end`: each layer once, the session's first, and what
+    /// The inputs end `end`: each layer once, `later`'s first, and what
     /// they kept back follows, unless the end is a failure.
     fn end(&mut self, end: Result<(), Fault>) -> Result<(), Fault> {
         self.ended = true;
@@ -367,8 +368,8 @@ mod tests {
         }
     }
 
-    /// B1: inputs cut by the session's end end `Err(abandoned)`, however
-    /// the end and the first poll are ordered: here the session has ended
+    /// B1: inputs cut by the request's end end `Err(abandoned)`, however
+    /// the end and the first poll are ordered: here the request has ended
     /// but its cut is not yet idle, as when the end lands in the middle of
     /// a poll that already saw the cut open.
     #[tokio::test]

@@ -100,7 +100,7 @@ impl Plugin for Tap {
     }
 }
 
-/// B1: inputs cut by the session's end, with the upload still open, end
+/// B1: inputs cut by the request's end, with the upload still open, end
 /// with an `Err`.
 #[tokio::test(flavor = "multi_thread")]
 async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {

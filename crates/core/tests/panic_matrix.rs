@@ -1,6 +1,6 @@
 //! A panic injected at every point where user code runs in the kernel's
 //! reach: a plugin, a filter, a `Format` method and an edge's stream, on
-//! one-shot and streaming sessions: the session finishes, every end hook
+//! one-shot and streaming requests: the request finishes, every end hook
 //! runs once and `idle` resolves. The codec's points are HTTP's driver's
 //! (`crates/http/tests/driver_toy.rs`).
 #![allow(clippy::unwrap_used)]

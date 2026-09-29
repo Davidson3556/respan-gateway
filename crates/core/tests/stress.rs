@@ -1,4 +1,4 @@
-//! Many sessions on many threads, cut at random: nothing leaks or hangs.
+//! Many requests on many threads, cut at random: nothing leaks or hangs.
 #![allow(clippy::unwrap_used)]
 
 mod edge;
@@ -84,7 +84,7 @@ impl Format for Counted {
     }
 }
 
-/// A big body goes through a one-shot session to the provider intact, as
+/// A big body goes through a one-shot request to the provider intact, as
 /// the origin's own, never decoded.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_big_body_relays_whole() {

@@ -81,7 +81,8 @@ the provider edge, each a format, own them
   reaches a provider through a **Transport** (`http::Transport`), which
   owns the URL, the keys and the connection.
 - **Call**: what the gateway sends a provider on a request's behalf
-  (`cx.call`): the request's inputs, or its own (`with_input`). Only a call
+  (`cx.call`): the request's inputs, or its own (`with_input`, or a stream
+  with `with_inputs`). Only a call
   of the request's inputs to a provider of the client's format name is a
   relay, and carries the client's origin and key.
 - **Response**: what a call, or `Response::stream`, gives back: read

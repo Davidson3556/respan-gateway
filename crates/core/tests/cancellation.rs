@@ -1,4 +1,4 @@
-//! Dropping a session or its reply at every await point: every hook and
+//! Dropping a request or its reply at every await point: every hook and
 //! filter still ends once, `idle` resolves and the end future resolves.
 //! On the toy edge, the sweeps add the client edge's quirks (see `edge::Quirk`), as the edge
 //! owns `Ended`.
@@ -119,7 +119,7 @@ async fn filters_end_once_when_dropped_at_every_await() {
     );
 }
 
-/// A call kept by a spawned task ends with its session, however far it got.
+/// A call kept by a spawned task ends with its request, however far it got.
 type Tasks = std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<Result<(), Fault>>>>>;
 struct Spawner(Tasks);
 #[async_trait]

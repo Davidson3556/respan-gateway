@@ -21,7 +21,7 @@ pub type Origin = Arc<dyn Any + Send + Sync>;
 pub type Half<T> = (Option<Origin>, Result<Events<T>, Fault>);
 
 /// Called by a client edge once its reply's end is out, with how it ended;
-/// dropped uncalled, the session ends
+/// dropped uncalled, the request ends
 /// [`codes::ABANDONED`](crate::codes::ABANDONED).
 pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 
@@ -67,7 +67,7 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 /// 4. The client edge calls [`Ended`] exactly when its reply's end is out,
 ///    or drops it. `Ended(Err(fault))` also ends the reply's call with
 ///    `fault`. Outputs dropped unread end their call as their end, if it is
-///    ready, says, else abandoned. `Ended` dropped first ends the session
+///    ready, says, else abandoned. `Ended` dropped first ends the request
 ///    abandoned, and the outputs then end `Err` abandoned.
 /// 5. What a provider edge's outputs have ready at once is one batch: the
 ///    call's filters see all of it before the client's see its first, as a

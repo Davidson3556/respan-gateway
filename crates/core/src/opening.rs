@@ -90,7 +90,7 @@ impl Opening {
             .ok_or_else(Fault::wrong_kind::<T>)
     }
 
-    /// Run the one input of a session or call whose inputs ended through
+    /// Run the one input of a request or call whose inputs ended through
     /// `filters`, and end them: it stays one input.
     pub(crate) fn filter(&mut self, mut filters: Filters) -> Result<(), Fault> {
         let format = self.format().clone();

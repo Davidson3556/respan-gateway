@@ -1,4 +1,4 @@
-//! What a gateway counts as in flight, and what a session may be given back.
+//! What a gateway counts as in flight, and what a request may be given back.
 //! On the toy edge, with relay provenance.
 #![allow(clippy::unwrap_used)]
 
@@ -28,7 +28,7 @@ fn gateway_of(rec: &Rec) -> Gateway {
         .unwrap()
 }
 
-/// B4: a session whose one-shot edge is still reading its body is in
+/// B4: a request whose one-shot edge is still reading its body is in
 /// flight (the core enters `InFlight` before `accept`).
 #[tokio::test(flavor = "current_thread")]
 async fn idle_waits_for_a_request_still_reading_its_body() {
@@ -69,7 +69,7 @@ async fn a_request_whose_body_fails_is_refused_before_any_plugin() {
     );
 }
 
-/// Building on a gateway while sessions run gives it a count of its own.
+/// Building on a gateway while requests run gives it a count of its own.
 #[tokio::test(flavor = "current_thread")]
 async fn a_rebuilt_gateway_counts_only_its_own_requests() {
     let t = fnt(|_| async { Ok(answer(200, never())) }.boxed());
@@ -94,7 +94,7 @@ async fn a_rebuilt_gateway_counts_only_its_own_requests() {
     old.idle().await;
 }
 
-/// A response goes only to its own session.
+/// A response goes only to its own request.
 struct Steal(Arc<Mutex<Option<Response>>>);
 #[async_trait]
 impl Plugin for Steal {

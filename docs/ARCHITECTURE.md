@@ -1,7 +1,7 @@
 # Architecture
 
 The kernel (`crates/core`) is an event router. It runs every plugin in
-registration order, routes a session's events between a client edge and
+registration order, routes a request's events between a client edge and
 provider edges, and ends each request and call once. It never sees a byte,
 a head or a key: those belong to the edges, which are formats. The
 [README](../README.md#glossary) defines the terms; the
@@ -22,9 +22,12 @@ record.
                      sealed          events only    sealed
 ```
 
-Every session and every call is a two-way stream of one kind's events:
-inputs toward the provider, outputs back. Filters wrap those streams (the
-data plane). Plugins decide where a session goes (the control plane). An
+Every request and every call is a two-way stream of one kind's events:
+inputs toward the provider, outputs back. A request is the whole exchange
+with one client; a *session* is a request whose inputs stream after its
+head, such as a WebSocket, and a one-shot request has one input. Filters
+wrap those streams (the data plane). Plugins decide where a request goes
+(the control plane). An
 edge is a [`Format`](../crates/core/src/format.rs) speaking over a
 connection: the client edge is accepted, the provider edge is dialed.
 
@@ -126,7 +129,7 @@ The rules, in full in the rustdoc of `Format`:
    `is_refused` reports) or `Ok((origin, Ok(outputs)))` (open).
 3. **The client edge owns its head timing**; see below.
 4. **The client edge calls `Ended` exactly when its reply's end is out**,
-   or drops it: dropped, the session ends `abandoned`. `Ended(Err(f))` also
+   or drops it: dropped, the request ends `abandoned`. `Ended(Err(f))` also
    ends the reply's call with `f`. Outputs dropped unread end their call as
    its end, if ready, says, else `abandoned`.
 5. **What a provider edge's outputs have ready at once is one batch**: the
@@ -192,7 +195,7 @@ head.
 
 The client's key rides along the same way. The adapter lifts it into a
 `Credential` extension, which the core carries unopened. The driver sets
-`Exchange::relayed` if and only if the call carries the session's own
+`Exchange::relayed` if and only if the call carries the request's own
 inputs to a same-name format, even as filters edited them (a call with
 `with_input` or `with_inputs` does not), and
 `http::credentials` restores the client's key only then, after the call's
@@ -274,7 +277,7 @@ Every crate but `core` uses only the public API of the crates below it.
 | A parked call ends `abandoned` with its request | `call.rs` (`Sending`, `OpenCalls`) | core `cancellation`; testkit `streams` |
 | `until_content`, `until_end`; a call ends when its end is read | `Response`, `Batch` | core `until`; `sdks/routing/tests` |
 | A cut or broken upload never looks complete, a call's own streamed inputs too | events: `leg.rs`; bytes: the driver's writer | core `upload`, `own_inputs`; `crates/http/tests/driver_toy.rs` |
-| Edge contract: refusal at the head, outputs dropped unread | `call.rs`, `session.rs` | core `contract`; `sdks/ws/tests/kernel.rs` |
+| Edge contract: refusal at the head, outputs dropped unread | `call.rs`, `reply.rs` | core `contract`; `sdks/ws/tests/kernel.rs` |
 | The fault split | the kind (`Relayed::whose`), where the format writes an input | testkit `codec`, `line`, `custom`, `translate` |
 | Lazy decode; a big body relays unread | `opening.rs` | core `stress`; e2e |
 | Byte-exact relay; a key only on a same-name relay | `relay_origin`; the driver; `http::credentials` | testkit `relay`, `translate`; `crates/http/tests/rules.rs`; e2e; `sdks/ws/tests` (`passthrough`, `credentials`) |

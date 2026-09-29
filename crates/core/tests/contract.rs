@@ -90,7 +90,7 @@ async fn a_failure_after_the_head_ends_the_body() {
 
 /// Rule 4: an edge that writes a head alone and drops the outputs unread
 /// (a bodiless answer) ends their call `Ok` if its end was ready, else
-/// abandoned; the session ends as the edge says.
+/// abandoned; the request ends as the edge says.
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_dropped_unread_end_their_call_as_ready() {
     for (body, want) in [(vec!["DONE"], "ok"), (vec!["a", "DONE"], "abandoned")] {
@@ -172,7 +172,7 @@ async fn a_call_is_sent_only_once_handed_to_its_transport() {
 
 /// A panic in the provider edge's stream while `until_end` or
 /// `until_content` reads unwinds through the plugin that awaits it, so the
-/// session is refused `internal`, and the call ends `internal`, as a
+/// request is refused `internal`, and the call ends `internal`, as a
 /// decoder's panic does in HTTP's driver.
 #[tokio::test(flavor = "current_thread")]
 async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
@@ -217,7 +217,7 @@ impl Plugin for Endless {
     }
 }
 
-/// Rule 4: an edge that drops `Ended` first ends the session abandoned, and
+/// Rule 4: an edge that drops `Ended` first ends the request abandoned, and
 /// its outputs then end `Err(abandoned)`, however much the answer had left.
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_end_abandoned_once_the_edge_drops_ended() {

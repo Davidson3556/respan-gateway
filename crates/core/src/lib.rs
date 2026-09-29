@@ -18,8 +18,8 @@ mod lifecycle;
 mod opening;
 mod plugin;
 mod provider;
+mod reply;
 mod response;
-mod session;
 
 pub use call::Call;
 pub use context::ClientContext;

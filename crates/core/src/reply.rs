@@ -1,4 +1,4 @@
-//! Turns a session's response into its client edge's reply.
+//! Turns a request's response into its client edge's reply.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use crate::lifecycle::EndHooks;
 use crate::{ClientContext, Ended, Fault, Response};
 
 /// The reply of `resp`: a refusal, or the response's origin (on a relay)
-/// and outputs; with [`Ended`], which owns the session's end hooks.
+/// and outputs; with [`Ended`], which owns the request's end hooks.
 pub(crate) async fn reply(
     format: &Arc<dyn AnyFormat>,
     resp: Result<Response, Fault>,
@@ -62,7 +62,7 @@ pub(crate) async fn reply(
         ..
     } = resp;
     let outgoing = Outgoing::new(ahead, body, outputs, origin.is_some());
-    // Once the session ended, as when its edge dropped `Ended`, its outputs
+    // Once the request ended, as when its edge dropped `Ended`, its outputs
     // are cut.
     let events = cut(outgoing.events(), &until);
     ((origin, Ok(events)), ended(hooks, call))
@@ -73,9 +73,9 @@ pub(crate) fn refusal(fault: Fault, hooks: EndHooks<ClientContext>) -> AnyReply 
     ((None, Err(fault)), ended(hooks, None))
 }
 
-/// Ends the session once its edge wrote the end, and on a failure its
+/// Ends the request once its edge wrote the end, and on a failure its
 /// reply's call too, if its outputs are still held (dropped, they ended
-/// it); dropped uncalled, the session ends abandoned.
+/// it); dropped uncalled, the request ends abandoned.
 fn ended(hooks: EndHooks<ClientContext>, call: Option<SharedCall>) -> Ended {
     let call = call.as_ref().map(Arc::downgrade);
     Box::new(move |end| {

@@ -14,13 +14,15 @@ should never hold a head.
 
 ## Decision
 
-**The core is events-only.** Every session and every call is a two-way
+**The core is events-only.** Every request and every call is a two-way
 stream of one kind's events: inputs toward the provider, outputs back. An
 edge is a format speaking over a connection: the client edge is accepted,
 the provider edge is dialed. The core has ten public types (`Call`,
 `ClientContext`, `Extensions`, `Fault`, `Filter`, `Format`, `Gateway`,
-`Plugin`, `ProviderContext`, `Response`) and aliases (`Dialed`, `Ended`,
-`Events`, `Half`, `Origin`). It depends on no `http` crate and its
+`Plugin`, `ProviderContext`, `Response`) and four aliases (`Ended`,
+`Events`, `Half`, `Origin`; a fifth, `Dialed`, was inlined in loop 2). A
+request is the whole exchange with one client; a session is a request
+whose inputs stream after its head. It depends on no `http` crate and its
 contracts carry no head or body.
 
 **`Format` is one protocol's view of a kind and the edge contract.** Associated types `Input`
@@ -41,7 +43,7 @@ a kind, wire and dialer. Its rules, in the rustdoc of `Format`:
 3. The client edge owns its head timing: a refusal is written as one; an
    open answer's head when the edge decides.
 4. The client edge calls `Ended` exactly when its answer's end is out, or
-   drops it (the session ends `abandoned`); `Ended(Err(f))` also ends the
+   drops it (the request ends `abandoned`); `Ended(Err(f))` also ends the
    answer's call with `f`; outputs dropped unread end their call as its end,
    if ready, says, else `abandoned`.
 5. What a provider edge's outputs have ready at once is one batch: the
@@ -61,7 +63,7 @@ the core.
 **Heads travel as sealed origins.** An `Origin` is what came with a head
 (for a client, the head and a whole body), opened only by a format of the
 name it came in. The core hands the client's origin to a provider edge in
-one case: the call carries the session's own inputs (it has no
+one case: the call carries the request's own inputs (it has no
 `with_input`) to a format of the same name (`relay_origin` in
 `call.rs`). So a byte-exact relay, and the client's key, ride along only
 then. A provider's origin returns to the client edge only on a relay.
@@ -75,7 +77,7 @@ a fresh head. A plugin that needs the bytes an input came in reads the
 value's origin (`Conversation::origin`).
 
 **`Gateway::handle<W>(wire, extensions)` takes the caller's wire**, one
-generic, and returns the future of how the session ended. A format of
+generic, and returns the future of how the request ended. A format of
 another wire type never accepts it.
 
 **HTTP's bytes live in `crates/http`.** An HTTP format implements `Codec`
@@ -90,7 +92,7 @@ events through a `Decoder`) and a writer (events to frames through an
 (a non-2xx answer, but a 101 to a call that asked to switch, is read whole
 before `dial` resolves), framing, batches and the byte guarantees. The
 driver sets `Exchange::relayed` if and only if the call carries the
-session's own inputs to a format of the same name (it wrote from an
+request's own inputs to a format of the same name (it wrote from an
 origin), as the plugins' filters left them: a filter-edited input still
 relays, so a redactor keeps a subscription passthrough working; a call with
 `Call::with_input` does not, so a plugin bills its own prompt to itself.
@@ -134,7 +136,7 @@ Six steps, each green:
 6. Clean-up: the documentation and the decision records.
 
 The design, with the reasoning and the costs, is
-[target-architecture.md](../target-architecture.md).
+[target-architecture.md](../target-architecture.md), now historical.
 
 Loop 1 (a review of the contract's simplicity and naming), one pass:
 
@@ -174,3 +176,20 @@ Loop 2 (simplicity and use cases), one pass:
   outlives the request (use case 8), in place of a slot set after the
   gateway is built. The job keeps it, not the plugin: the gateway holds its
   plugins.
+
+Loop 3 (simplicity, use cases and correctness), one pass:
+
+- `Gateway::handle` is a plain `fn` that returns a `'static` future: a
+  request counts for `idle` from the call, so a job handed from an end hook
+  is never missed.
+- A call may carry a stream of its own inputs (`Call::with_inputs`, 0022),
+  so async work on each input of a session is a plugin, not a wrapped
+  `Format`.
+- Words: "request" is the whole exchange everywhere, "session" only a
+  request whose inputs stream. The internal `session.rs` is `reply.rs`, as
+  it turns a response into the client edge's reply.
+- The adapter's part of rule 1 is a compiled example in `Format`'s rustdoc.
+- Kept, not changed: the name `Half`. `Headed<T>` reads better, but the
+  rename touches every hand-written `Format` in five crates, being changed
+  in parallel at the time, for no change in meaning. `Answer` would collide
+  with `Fault::answer`. Revisit when those branches have merged.

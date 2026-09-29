@@ -13,7 +13,7 @@ use crate::format::{AnyFormat, AnyReply, Erased};
 use crate::leg::Later;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
-use crate::session;
+use crate::reply;
 use crate::{ClientContext, Extensions, Fault, Format, Plugin, Response};
 
 /// A registered plugin and its name.
@@ -200,12 +200,12 @@ impl Gateway {
             // The request's end hooks run after its calls'.
             hooks.after = Some(settling);
             let reply = match broken {
-                Some(fault) => session::refusal(fault, hooks),
+                Some(fault) => reply::refusal(fault, hooks),
                 None => {
                     // A plugin panic is refused like a failure.
                     let ran = AssertUnwindSafe(run(&inner, &mut hooks)).catch_unwind();
                     let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-                    session::reply(&format, resp, hooks).await
+                    reply::reply(&format, resp, hooks).await
                 }
             };
             // An edge that dropped its reply ends the request abandoned, but
@@ -279,7 +279,7 @@ fn unwritten(fault: Fault) -> BoxFuture<'static, Result<(), Fault>> {
     ready(Err(fault)).boxed()
 }
 
-/// The reply an edge gets if the gateway dropped the session first.
+/// The reply an edge gets if the gateway dropped the request first.
 fn abandoned() -> AnyReply {
     let half = (None, Err(Fault::abandoned()));
     (half, Box::new(|_| {}))
