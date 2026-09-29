@@ -195,37 +195,92 @@ async fn pump(
     }
 }
 
+/// How the client's side ended, before it is told.
+enum Ended {
+    Closed,
+    Binary,
+    /// The connection dropped with no Close.
+    Gone,
+}
+
+/// A message of the client's: a text frame, one to skip, or its end.
+enum Step {
+    Text(Bytes),
+    Skip,
+    Ended(Ended),
+}
+
+fn step(message: Option<Result<Message, axum::Error>>) -> Step {
+    match message {
+        Some(Ok(Message::Text(text))) => Step::Text(Bytes::copy_from_slice(text.as_bytes())),
+        Some(Ok(Message::Close(_))) => Step::Ended(Ended::Closed),
+        Some(Ok(Message::Binary(_))) => Step::Ended(Ended::Binary),
+        Some(Ok(_)) => Step::Skip,
+        Some(Err(_)) | None => Step::Ended(Ended::Gone),
+    }
+}
+
 /// The client's text frames into `input`, then how the client's side ended.
 ///
 /// What the client did is told to the writer (`tell`) before the input
 /// ends with it, as the writer must say why the response fails.
+///
+/// While a frame waits to be sent (the gateway reads `input` as slowly as
+/// its wraps do), the socket is still read, so a client that leaves is seen
+/// at once, not after the frames before it: one more text frame is held as
+/// look-ahead, and a Close or binary frame is acted on once the frames
+/// heard are sent, as it came after them.
 async fn hear(
     mut stream: SplitStream<WebSocket>,
     mut input: mpsc::Sender<Result<Bytes, Fault>>,
     tell: oneshot::Sender<Told>,
 ) -> Heard {
+    // Ends the input while a send holds `input`.
+    let ender = input.clone();
+    let finish = |ended: Ended, tell: oneshot::Sender<Told>| match ended {
+        Ended::Closed => {
+            let _ = tell.send(Told::Closed);
+            Heard::Closed
+        }
+        Ended::Binary => {
+            let _ = tell.send(Told::Binary);
+            // The client's own end, which no one waits for: 1003 says why.
+            end_input(&ender);
+            Heard::Binary
+        }
+        Ended::Gone => {
+            end_input(&ender);
+            Heard::Dropped
+        }
+    };
+    let (mut held, mut ended) = (None, None);
     loop {
-        match stream.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let frame = Bytes::copy_from_slice(text.as_bytes());
-                if input.send(Ok(frame)).await.is_err() {
-                    return Heard::Ignored;
+        let frame = match held.take() {
+            Some(frame) => frame,
+            None => match ended.take() {
+                Some(ended) => return finish(ended, tell),
+                None => match step(stream.next().await) {
+                    Step::Text(frame) => frame,
+                    Step::Skip => continue,
+                    Step::Ended(ended) => return finish(ended, tell),
+                },
+            },
+        };
+        let mut send = pin!(input.send(Ok(frame)));
+        loop {
+            tokio::select! {
+                sent = &mut send => match sent {
+                    Ok(()) => break,
+                    Err(_) => return Heard::Ignored,
+                },
+                message = stream.next(), if held.is_none() && ended.is_none() => {
+                    match step(message) {
+                        Step::Text(frame) => held = Some(frame),
+                        Step::Skip => {}
+                        Step::Ended(Ended::Gone) => return finish(Ended::Gone, tell),
+                        Step::Ended(other) => ended = Some(other),
+                    }
                 }
-            }
-            Some(Ok(Message::Close(_))) => {
-                let _ = tell.send(Told::Closed);
-                return Heard::Closed;
-            }
-            Some(Ok(Message::Binary(_))) => {
-                let _ = tell.send(Told::Binary);
-                // The client's own end, which no one waits for: 1003 says why.
-                end_input(&input);
-                return Heard::Binary;
-            }
-            Some(Ok(_)) => {}
-            Some(Err(_)) | None => {
-                end_input(&input);
-                return Heard::Dropped;
             }
         }
     }

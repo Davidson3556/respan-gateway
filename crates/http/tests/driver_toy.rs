@@ -1136,3 +1136,42 @@ async fn a_bodiless_answer_of_frames_sent_apart_ends_abandoned() {
         )
     );
 }
+
+// ===== loop 6 audit =====
+
+/// `drain_ready` bounds its work by tokio's cooperative budget alone. Under
+/// `tokio::task::unconstrained` (a public tokio API an embedder may wrap a
+/// request's future in) the budget is never spent, so a bodiless answer
+/// whose body is always ready and never ends (an in-process dialer's
+/// endless stream) holds the thread forever: `serve` never returns.
+/// The doc says such a body "cannot hold the thread".
+#[test]
+fn l6_an_endless_ready_bodiless_answer_never_holds_the_thread() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Its own thread and runtime, leaked if it spins.
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let transport = fnt(|_| {
+                let body = stream::repeat_with(|| Ok(Bytes::from("a"))).boxed();
+                future::ready(Ok(answer(200, body))).boxed()
+            });
+            let (gw, _calls, _outcomes) = gateway_of(Toy::default(), transport);
+            let req = http::Request::builder()
+                .method(http::Method::HEAD)
+                .uri("/x");
+            let req = req.body(respan_gateway_http::full("q")).unwrap();
+            let (resp, _ended) =
+                tokio::task::unconstrained(respan_gateway_http::serve(&gw, req)).await;
+            let _ = tx.send(resp.status());
+        });
+    });
+    let got = rx.recv_timeout(Duration::from_secs(3));
+    assert!(
+        got.is_ok(),
+        "serve of a HEAD did not return in 3 s: the drain spins"
+    );
+}

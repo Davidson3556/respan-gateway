@@ -663,3 +663,109 @@ async fn it_sends_a_whole_body_with_its_length_and_streams_one_that_streams() {
         "- ab"
     );
 }
+
+// ===== loop 6 audit: real bodiless answers over hyper =====
+
+/// Records how each request and each call ended.
+#[derive(Clone, Default)]
+struct L6Ends(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl Plugin for L6Ends {
+    async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
+        let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
+        self.0
+            .lock()
+            .map(|mut l| l.push(format!("request {code}")))
+            .ok();
+    }
+    async fn on_provider_end(
+        &self,
+        _px: &respan_gateway_core::ProviderContext,
+        end: &Result<(), Fault>,
+    ) {
+        let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
+        self.0
+            .lock()
+            .map(|mut l| l.push(format!("call {code}")))
+            .ok();
+    }
+}
+
+/// HEADs and 204s (and 304s if `with_304`) relayed through passthrough over real HTTP (axum
+/// upstream, `HttpTransport`, `router`), many times, many at once: each is
+/// complete, so each request and call ends `ok`, never `abandoned`.
+async fn l6_bodiless(with_304: bool) {
+    use axum::routing::get;
+    use respan_gateway_formats::opaque::Passthrough;
+    let big = "x".repeat(1 << 20);
+    let provider = spawn(
+        Router::new()
+            .route(
+                "/x",
+                get(move || {
+                    let big = big.clone();
+                    async move { big }
+                }),
+            )
+            .route(
+                "/nm",
+                get(|| async { (http::StatusCode::NOT_MODIFIED, [("etag", "\"1\"")]) }),
+            )
+            .route("/nc", get(|| async { http::StatusCode::NO_CONTENT })),
+    )
+    .await;
+    let ends = L6Ends::default();
+    let gateway = Gateway::new()
+        .provider("any", Passthrough, http(provider.clone()))
+        .and_then(|g| g.serve(Passthrough))
+        .and_then(|g| g.plugin("ends", ends.clone()))
+        .and_then(|g| g.target("any"))
+        .unwrap_or_else(|e| panic!("gateway: {e}"));
+    let base = spawn(router(gateway.clone())).await;
+    let client = reqwest::Client::new();
+    let mut tasks = Vec::new();
+    for i in 0..300 {
+        let (client, base) = (client.clone(), base.clone());
+        tasks.push(tokio::spawn(async move {
+            let resp = match i % 3 {
+                0 => client.head(format!("{base}/x")).send().await,
+                1 if with_304 => client.get(format!("{base}/nm")).send().await,
+                _ => client.get(format!("{base}/nc")).send().await,
+            }
+            .unwrap_or_else(|e| panic!("send: {e}"));
+            let status = resp.status().as_u16();
+            let _ = resp.bytes().await;
+            status
+        }));
+    }
+    for t in tasks {
+        let status = t.await.unwrap_or_default();
+        assert!([200, 304, 204].contains(&status), "{status}");
+    }
+    gateway.idle().await;
+    let all = ends.0.lock().map(|l| l.clone()).unwrap_or_default();
+    let bad: Vec<_> = all.iter().filter(|e| !e.ends_with(" ok")).collect();
+    assert_eq!(all.len(), 600);
+    assert!(
+        bad.is_empty(),
+        "{} of {} ended badly: {:?}",
+        bad.len(),
+        all.len(),
+        &bad[..bad.len().min(6)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn l6_real_heads_and_204s_end_ok() {
+    l6_bodiless(false).await;
+}
+
+/// A 304 to a conditional GET is non-2xx, so HTTP's provider edge takes it
+/// for a refusal: the client gets its 304 as it came, but the request and
+/// call end `upstream` ("the provider returned 304"), and a fallback would
+/// try the next provider. Shown as a design question, not claimed a bug.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn l6_a_real_304_ends_ok() {
+    l6_bodiless(true).await;
+}
