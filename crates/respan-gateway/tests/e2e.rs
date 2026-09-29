@@ -6,9 +6,8 @@
 //! by the provider's own rules and answer in its exact framing, streams and
 //! breaks included. Clients speak real HTTP to the real axum server.
 //!
-//! A byte-exact relay is checked against the same request sent straight to
-//! the fake: the two answers must be equal byte for byte but for what the
-//! fake makes fresh per request (see [`fixed`]).
+//! A byte-exact relay is checked against exact scripted bytes
+//! (`Answer::raw`, or verbatim SSE events): the client gets them unchanged.
 //!
 //! Run: `cargo test -p respan-gateway --test e2e`. Calls to real providers
 //! are in `tests/real_providers.rs`, ignored unless asked for.
@@ -17,9 +16,7 @@
 
 mod support;
 
-use mockllm::{
-    Answer, Ctx, Endpoint, FakeAnthropic, FakeOpenAi, Mock, Out, Provider, Rejection, Request,
-};
+use mockllm::{Answer, FakeAnthropic, FakeOpenAi, Mock, Provider, Request};
 use serde_json::{Value, json};
 use support::{Gateway, client, closed_port, json, read_all};
 
@@ -87,34 +84,36 @@ async fn post(url: String, headers: &[(&str, &str)], body: impl Into<String>) ->
     req.send().await.unwrap()
 }
 
-/// The status and body of `body` sent straight to a fake at `url`: the
-/// answer a byte-exact relay must match. The body is what arrived before
-/// any break.
-async fn direct(url: String, headers: &[(&str, &str)], body: impl Into<String>) -> (u16, String) {
-    let resp = post(url, headers, body).await;
-    let status = resp.status().as_u16();
-    (status, read_all(resp).await.0)
+/// A stream of `events`, each a whole SSE event sent verbatim.
+fn script(events: &[&str]) -> Answer {
+    Answer::events(events.iter().map(|e| json!(e)).collect())
 }
 
-/// `text` with what a fake makes fresh per request fixed: its request
-/// number (`fake<n>` in ids) and its clock (`"created":<secs>`).
-fn fixed(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    loop {
-        let next = ["fake", "\"created\":"]
-            .into_iter()
-            .filter_map(|m| rest.find(m).map(|i| (i, m)))
-            .min();
-        let Some((i, m)) = next else {
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..i + m.len()]);
-        out.push('0');
-        rest = rest[i + m.len()..].trim_start_matches(|c: char| c.is_ascii_digit());
-    }
+/// The bytes `script(events)` sends.
+fn sse(events: &[&str]) -> String {
+    events.iter().map(|e| format!("{e}\n\n")).collect()
 }
+
+/// An OpenAI stream of "hel lo", with a field the gateway has no place for.
+const OPENAI_STREAM: [&str; 5] = [
+    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}],"x_new":1}"#,
+    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"content":"hel"},"finish_reason":null}],"x_new":1}"#,
+    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"content":" lo"},"finish_reason":null}],"x_new":1}"#,
+    r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"x_new":1}"#,
+    "data: [DONE]",
+];
+
+/// An Anthropic stream of "hel lo", pinged before its content.
+const ANTHROPIC_STREAM: [&str; 8] = [
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}",
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+    "event: ping\ndata: {\"type\": \"ping\"}",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hel\"}}",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" lo\"}}",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+];
 
 fn header<'a>(headers: &'a reqwest::header::HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
@@ -149,17 +148,14 @@ async fn openai_whole_relay_is_byte_exact_and_passes_the_clients_key() {
         ("content-type", "application/json"),
     ];
 
-    openai.answer(Answer::text("hello"));
+    // Odd spacing and a field the gateway has no place for.
+    let answer = r#"{ "id":"chatcmpl-1", "object":"chat.completion","created":1,"model":"gpt-4.1-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"x_new":1 }"#;
+    openai.answer(Answer::raw(answer).header("x-request-id", "req_1"));
     let resp = post(gw.url(CHAT), &headers, OPENAI_REQUEST).await;
 
     assert_eq!(resp.status(), 200);
-    let request_id = header(resp.headers(), "x-request-id").unwrap().to_owned();
-    let text = resp.text().await.unwrap();
-    assert_eq!(
-        json(&text)["id"],
-        request_id.replace("req_", "chatcmpl-"),
-        "the provider's own x-request-id: {text}"
-    );
+    assert_eq!(header(resp.headers(), "x-request-id"), Some("req_1"));
+    assert_eq!(resp.text().await.unwrap(), answer);
     let got = &openai.requests()[0];
     assert_eq!(got.path, CHAT);
     assert_eq!(
@@ -169,15 +165,6 @@ async fn openai_whole_relay_is_byte_exact_and_passes_the_clients_key() {
     );
     assert_eq!(got.header("authorization"), Some("Bearer sk-client"));
     assert_eq!(got.header("openai-beta"), Some("assistants=v9"));
-
-    openai.answer(Answer::text("hello"));
-    let (_, want) = direct(
-        openai.base_url() + "/chat/completions",
-        &headers,
-        OPENAI_REQUEST,
-    )
-    .await;
-    assert_eq!(fixed(&text), fixed(&want));
 }
 
 #[tokio::test]
@@ -188,7 +175,7 @@ async fn openai_stream_relay_is_byte_exact_and_passes_the_clients_key() {
         r#","stream":true,"stream_options":{"include_usage":true},"metadata":{"kept":"yes"}"#,
     );
 
-    openai.answer(Answer::text("hel lo").pace(20));
+    openai.answer(script(&OPENAI_STREAM).pace(20));
     let resp = post(gw.url(CHAT), &[OPENAI_KEY], request.clone()).await;
 
     assert_eq!(resp.status(), 200);
@@ -202,16 +189,7 @@ async fn openai_stream_relay_is_byte_exact_and_passes_the_clients_key() {
     assert_eq!(got.path, CHAT);
     assert_eq!(got.raw, request.as_bytes());
     assert_eq!(got.header("authorization"), Some("Bearer sk-client"));
-
-    openai.answer(Answer::text("hel lo"));
-    let (_, want) = direct(
-        openai.base_url() + "/chat/completions",
-        &[OPENAI_KEY],
-        request,
-    )
-    .await;
-    assert_eq!(fixed(&body), fixed(&want));
-    assert_eq!(openai_stream_text(&body), ("hel lo".into(), true));
+    assert_eq!(body, sse(&OPENAI_STREAM));
 }
 
 #[tokio::test]
@@ -219,8 +197,21 @@ async fn usage_the_client_did_not_ask_for_is_asked_for_and_hidden() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
     let request = openai_request(r#","stream":true,"metadata":{"kept":"yes"}"#);
+    // What the provider sends when asked for usage: `"usage":null` on each
+    // chunk, then a chunk of usage alone.
+    let with_usage: Vec<String> = OPENAI_STREAM[..4]
+        .iter()
+        .map(|e| e.replace(r#","x_new":1}"#, r#","x_new":1,"usage":null}"#))
+        .chain([
+            r#"data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"gpt-4.1-mini","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}"#.into(),
+            OPENAI_STREAM[4].into(),
+        ])
+        .collect();
 
-    let resp = post(gw.url(CHAT), &[OPENAI_KEY], request.clone()).await;
+    openai.answer(script(
+        &with_usage.iter().map(String::as_str).collect::<Vec<_>>(),
+    ));
+    let resp = post(gw.url(CHAT), &[OPENAI_KEY], request).await;
 
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
@@ -228,14 +219,7 @@ async fn usage_the_client_did_not_ask_for_is_asked_for_and_hidden() {
     assert_eq!(seen["stream_options"]["include_usage"], true);
     assert_eq!(seen["metadata"]["kept"], "yes");
     // What the provider sends a client that did not ask for usage.
-    let (_, want) = direct(
-        openai.base_url() + "/chat/completions",
-        &[OPENAI_KEY],
-        request,
-    )
-    .await;
-    assert!(!want.contains("\"usage\""), "{want}");
-    assert_eq!(fixed(&body), fixed(&want), "the usage is hidden");
+    assert_eq!(body, sse(&OPENAI_STREAM), "the usage is hidden");
 }
 
 fn body_of<P: Provider>(mock: &Mock<P>, i: usize) -> Value {
@@ -278,7 +262,7 @@ async fn anthropic_stream_relay_is_byte_exact_and_passes_the_clients_key() {
     let mut headers = ANTHROPIC_KEY.to_vec();
     headers.push(("anthropic-beta", "some-future-beta-2099-01-01"));
 
-    anthropic.answer(Answer::text("hel lo").pace(20));
+    anthropic.answer(script(&ANTHROPIC_STREAM).pace(20));
     let resp = post(gw.url(MESSAGES), &headers, request.clone()).await;
 
     assert_eq!(resp.status(), 200);
@@ -293,11 +277,7 @@ async fn anthropic_stream_relay_is_byte_exact_and_passes_the_clients_key() {
         got.header("anthropic-beta"),
         Some("some-future-beta-2099-01-01")
     );
-
-    anthropic.answer(Answer::text("hel lo"));
-    let (_, want) = direct(anthropic.base_url() + MESSAGES, &headers, request).await;
-    assert_eq!(fixed(&body), fixed(&want));
-    assert!(body.contains("event: ping\n"), "{body}");
+    assert_eq!(body, sse(&ANTHROPIC_STREAM));
 }
 
 #[tokio::test]
@@ -306,6 +286,8 @@ async fn anthropic_whole_relay_is_byte_exact_and_sends_a_default_version() {
     let gw = Gateway::start(&one_provider("anthropic-messages", &anthropic.base_url())).await;
     let request = claude_request(r#","metadata":{"user_id":"u1"}"#);
 
+    let answer = r#"{"id":"msg_1", "type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+    anthropic.answer(Answer::raw(answer));
     // The client names no version; Anthropic refuses a call without one.
     let resp = post(
         gw.url(MESSAGES),
@@ -315,14 +297,11 @@ async fn anthropic_whole_relay_is_byte_exact_and_sends_a_default_version() {
     .await;
 
     assert_eq!(resp.status(), 200);
-    let text = resp.text().await.unwrap();
+    assert_eq!(resp.text().await.unwrap(), answer);
     let got = &anthropic.requests()[0];
     assert_eq!(got.raw, request.as_bytes());
     assert_eq!(got.header("x-api-key"), Some("sk-ant-client"));
     assert_eq!(got.header("anthropic-version"), Some("2023-06-01"));
-
-    let (_, want) = direct(anthropic.base_url() + MESSAGES, &ANTHROPIC_KEY, request).await;
-    assert_eq!(fixed(&text), fixed(&want));
 }
 
 // 3. Translation: each client format to the other provider.
@@ -546,21 +525,18 @@ async fn a_relayed_529_passes_through_byte_exact() {
     let anthropic = FakeAnthropic::start().await;
     let gw = Gateway::start(&one_provider("anthropic-messages", &anthropic.base_url())).await;
 
-    anthropic.answer(Answer::error(529));
+    anthropic.answer(Answer::error(529).message("Overloaded, try later"));
     let resp = post(gw.url(MESSAGES), &ANTHROPIC_KEY, claude_request("")).await;
 
     assert_eq!(resp.status(), 529);
-    let text = resp.text().await.unwrap();
-    anthropic.answer(Answer::error(529));
-    let (status, want) = direct(
-        anthropic.base_url() + MESSAGES,
-        &ANTHROPIC_KEY,
-        claude_request(""),
-    )
-    .await;
-    assert_eq!(status, 529);
-    assert_eq!(fixed(&text), fixed(&want));
-    assert_eq!(json(&text)["error"]["type"], "overloaded_error");
+    // The fake numbers its requests across the process; the header names it.
+    let id = header(resp.headers(), "request-id").unwrap().to_owned();
+    assert_eq!(
+        resp.text().await.unwrap(),
+        format!(
+            r#"{{"type":"error","error":{{"type":"overloaded_error","message":"Overloaded, try later"}},"request_id":"{id}"}}"#
+        )
+    );
 }
 
 #[tokio::test]
@@ -573,19 +549,11 @@ async fn a_request_the_provider_refuses_is_relayed_as_it_refused() {
     let resp = post(gw.url(CHAT), &[OPENAI_KEY], request.clone()).await;
 
     assert_eq!(resp.status(), 400);
-    let text = resp.text().await.unwrap();
-    assert_eq!(openai.requests()[0].raw, request.as_bytes());
-    let (_, want) = direct(
-        openai.base_url() + "/chat/completions",
-        &[OPENAI_KEY],
-        request,
-    )
-    .await;
-    assert_eq!(text, want);
     assert_eq!(
-        json(&text)["error"]["code"],
-        "unrecognized_request_argument"
+        resp.text().await.unwrap(),
+        r#"{"error":{"message":"Unrecognized request argument supplied: x_new_field","type":"invalid_request_error","param":null,"code":"unrecognized_request_argument"}}"#
     );
+    assert_eq!(openai.requests()[0].raw, request.as_bytes());
 }
 
 #[tokio::test]
@@ -610,27 +578,17 @@ async fn a_relayed_stream_cut_mid_body_ends_truncated_without_a_hang() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
     let request = openai_request(r#","stream":true"#);
-
     // The role chunk and "hel", then the connection drops.
-    openai.answer(Answer::text("hel lo").cut_after(2));
-    let resp = post(gw.url(CHAT), &[OPENAI_KEY], request.clone()).await;
+    openai.answer(script(&OPENAI_STREAM).cut_after(2));
+    let resp = post(gw.url(CHAT), &[OPENAI_KEY], request).await;
 
     assert_eq!(resp.status(), 200);
     let (body, ended) = read_all(resp).await;
     // The client's stream ends cleanly with an error event in its format.
     assert_eq!(ended, Ok(()));
-    openai.answer(Answer::text("hel lo").cut_after(2));
-    let (_, sent) = direct(
-        openai.base_url() + "/chat/completions",
-        &[OPENAI_KEY],
-        request,
-    )
-    .await;
-    let (body, sent) = (fixed(&body), fixed(&sent));
     let tail = body
-        .strip_prefix(sent.as_str())
+        .strip_prefix(&sse(&OPENAI_STREAM[..2]))
         .unwrap_or_else(|| panic!("{body}"));
-    assert_eq!(openai_stream_text(&body), ("hel".into(), false), "{body}");
     let data = tail.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
     let error = &json(data)["error"];
     assert_eq!(error["code"], "upstream", "{tail}");
@@ -644,17 +602,14 @@ async fn an_anthropic_stream_cut_after_content_ends_with_an_anthropic_error_even
     let request = claude_request(r#","stream":true"#);
 
     // message_start, content_block_start, ping, "hel", then a drop.
-    anthropic.answer(Answer::text("hel lo").cut_after(4));
-    let resp = post(gw.url(MESSAGES), &ANTHROPIC_KEY, request.clone()).await;
+    anthropic.answer(script(&ANTHROPIC_STREAM).cut_after(4));
+    let resp = post(gw.url(MESSAGES), &ANTHROPIC_KEY, request).await;
 
     assert_eq!(resp.status(), 200);
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
-    anthropic.answer(Answer::text("hel lo").cut_after(4));
-    let (_, sent) = direct(anthropic.base_url() + MESSAGES, &ANTHROPIC_KEY, request).await;
-    let (body, sent) = (fixed(&body), fixed(&sent));
     let tail = body
-        .strip_prefix(sent.as_str())
+        .strip_prefix(&sse(&ANTHROPIC_STREAM[..4]))
         .unwrap_or_else(|| panic!("{body}"));
     assert!(tail.starts_with("event: error\n"), "{tail}");
     let data = tail.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
@@ -743,20 +698,13 @@ async fn a_slow_first_byte_is_waited_for() {
     let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
     let request = openai_request(r#","stream":true"#);
 
-    openai.answer(Answer::text("hel lo").delay_first(700));
-    let resp = post(gw.url(CHAT), &[OPENAI_KEY], request.clone()).await;
+    openai.answer(script(&OPENAI_STREAM).delay_first(700));
+    let resp = post(gw.url(CHAT), &[OPENAI_KEY], request).await;
 
     assert_eq!(resp.status(), 200);
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
-    openai.answer(Answer::text("hel lo"));
-    let (_, want) = direct(
-        openai.base_url() + "/chat/completions",
-        &[OPENAI_KEY],
-        request,
-    )
-    .await;
-    assert_eq!(fixed(&body), fixed(&want));
+    assert_eq!(body, sse(&OPENAI_STREAM));
 }
 
 // 5. Model routing (the binary has no fallback; see README).
@@ -834,19 +782,11 @@ async fn an_empty_openai_assistant_turn_is_not_sent_to_anthropic() {
 
 #[tokio::test]
 async fn a_system_only_openai_request_is_not_sent_to_anthropic_without_messages() {
-    // mockllm accepts `messages: []` (the real API does not), so this looks
-    // at what was sent rather than at the answer.
-    let (openai, anthropic) = (FakeOpenAi::start().await, FakeAnthropic::start().await);
-    let gw = Gateway::start(&both(&openai.base_url(), &anthropic.base_url())).await;
-
-    let request =
-        format!(r#"{{"model":"{CLAUDE}","messages":[{{"role":"system","content":"hi"}}]}}"#);
-    drop(post(gw.url(CHAT), &[], request).await);
-
-    for sent in anthropic.requests() {
-        let messages = sent.body["messages"].as_array().unwrap();
-        assert!(!messages.is_empty(), "sent {}", sent.body);
-    }
+    // Anthropic refuses `messages: []`.
+    anthropic_accepts_the_translation_of(&format!(
+        r#"{{"model":"{CLAUDE}","messages":[{{"role":"system","content":"hi"}}]}}"#
+    ))
+    .await;
 }
 
 // 7. The server's own behaviour.
@@ -929,65 +869,18 @@ async fn cookies_and_forwarding_headers_do_not_reach_the_provider() {
     assert_eq!(got.header("x-custom"), Some("kept"));
 }
 
-/// An OpenAI-compatible provider behind a CDN that sets cookies, HSTS and
-/// Alt-Svc on every answer; mockllm's own providers set only request ids.
-#[derive(Debug)]
-struct Cookied;
-
-impl Provider for Cookied {
-    const BASE_PATH: &'static str = "/v1";
-
-    fn endpoints() -> Vec<Box<dyn Endpoint<Self>>> {
-        vec![Box::new(CookiedChat)]
-    }
-
-    fn authorize(&self, _: &Request) -> Result<(), Rejection> {
-        Ok(())
-    }
-
-    fn error(&self, r: &Rejection, _: u64) -> Value {
-        json!({ "error": { "message": r.message } })
-    }
-
-    fn scripted(&self, status: u16) -> Rejection {
-        Rejection::new(status, "scripted")
-    }
-
-    fn headers(&self, _: u64) -> Vec<(&'static str, String)> {
-        vec![
-            ("set-cookie", "p=1".into()),
-            ("strict-transport-security", "max-age=1".into()),
-            ("alt-svc", "h3=\":443\"".into()),
-        ]
-    }
-}
-
-struct CookiedChat;
-
-impl Endpoint<Cookied> for CookiedChat {
-    fn route(&self) -> (&'static str, &'static str) {
-        ("POST", CHAT)
-    }
-
-    fn validate(&self, _: &Cookied, _: &Request) -> Result<(), Rejection> {
-        Ok(())
-    }
-
-    fn respond(&self, _: &Cookied, _: &Request, _: &Answer, _: &Ctx) -> Out {
-        let message = json!({ "role": "assistant", "content": "hello" });
-        let choice = json!({ "index": 0, "message": message, "finish_reason": "stop" });
-        Out::Json(
-            200,
-            json!({ "id": "c1", "object": "chat.completion", "created": 1, "model": GPT, "choices": [choice] }),
-        )
-    }
-}
-
 #[tokio::test]
 async fn set_cookie_and_hsts_do_not_reach_the_client() {
-    let provider = Mock::serve(Cookied).await;
-    let gw = Gateway::start(&one_provider("openai-chat", &provider.base_url())).await;
+    // A provider behind a CDN that sets cookies, HSTS and Alt-Svc.
+    let openai = FakeOpenAi::start().await;
+    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
 
+    openai.answer(
+        Answer::text("hello")
+            .header("set-cookie", "p=1")
+            .header("strict-transport-security", "max-age=1")
+            .header("alt-svc", "h3=\":443\""),
+    );
     let resp = post(gw.url(CHAT), &[OPENAI_KEY], OPENAI_REQUEST).await;
 
     assert_eq!(resp.status(), 200);
