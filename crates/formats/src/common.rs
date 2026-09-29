@@ -42,7 +42,7 @@ pub(crate) trait Wire: Send + Sync + 'static {
     /// Usage as this format reports it.
     fn usage_body(u: &Usage) -> Value;
     /// A whole response from the replies of another format, or a plugin.
-    fn render(so_far: &SoFar) -> Value;
+    fn render(so_far: &SoFar) -> Result<Value, Fault>;
     /// Put an edited reply back into a whole response of this format.
     fn put(v: &mut Value, reply: &Reply);
     /// `content` in the order this format reads it back.
@@ -118,9 +118,15 @@ struct RequestEncoder<W>(PhantomData<W>);
 impl<W: Wire> Encoder<Conversation, ()> for RequestEncoder<W> {
     fn head(&mut self, _first: Option<&Conversation>) {}
 
-    /// What cannot be written is the client's fault only as decoded.
+    /// What cannot be written is the client's fault if its own request
+    /// cannot be written either; else an edit caused it, a plugin's.
     fn encode(&mut self, chat: &Conversation, out: &mut BytesMut) -> Result<(), Fault> {
-        let bytes = request_bytes::<W>(chat).map_err(|f| chat.origin.whose(chat, f))?;
+        let clients = |said: &&Conversation| request_bytes::<W>(said).is_err();
+        let bytes =
+            request_bytes::<W>(chat).map_err(|f| match chat.origin.said().filter(clients) {
+                Some(_) => Fault::bad_request(f.message()).with_source(f),
+                None => chat.origin.whose(chat, f),
+            })?;
         out.extend_from_slice(&bytes);
         Ok(())
     }
@@ -133,7 +139,7 @@ impl<W: Wire> Encoder<Conversation, ()> for RequestEncoder<W> {
 /// `chat` as a request of this format: the client's bytes, with changes
 /// written in, or anew; then what the format adds ([`Wire::finish`]).
 fn request_bytes<W: Wire>(chat: &Conversation) -> Result<Bytes, Fault> {
-    let mut v = match chat.origin(W::NAME) {
+    let mut v = match chat.came_in(W::NAME) {
         Some(o) if o.said == *chat && !W::unfinished(&o.bytes) => return Ok(o.bytes.clone()),
         Some(o) if o.said == *chat => object(&o.bytes)?,
         Some(o) => patch_request::<W>(&o.bytes, &o.said, chat)?,
@@ -378,7 +384,7 @@ impl<W: Wire> Encoder<Reply, ()> for UnaryEncoder<W> {
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         end.clone()?;
         let replies = std::mem::take(&mut self.replies);
-        let own = replies.iter().find_map(|r| r.origin(W::NAME));
+        let own = replies.iter().find_map(|r| r.came_in(W::NAME));
         let body = match own.filter(|_| self.relayed) {
             Some(o) if replies.len() == 1 && o.said == replies[0] => o.bytes.clone(),
             Some(o) => rebuild_whole::<W>(&o.bytes, &o.said, &merged(&replies))?,
@@ -387,7 +393,7 @@ impl<W: Wire> Encoder<Reply, ()> for UnaryEncoder<W> {
                 for reply in &replies {
                     so_far.add(reply)?;
                 }
-                W::render(&so_far).to_string().into()
+                W::render(&so_far)?.to_string().into()
             }
         };
         out.extend_from_slice(&body);

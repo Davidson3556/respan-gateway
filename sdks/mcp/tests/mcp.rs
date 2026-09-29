@@ -651,3 +651,32 @@ async fn a_session_whose_initialize_is_never_answered_idles_out() {
         "never reaped: {body}"
     );
 }
+
+// MCP is matched however its path is spelled, so what is served after it
+// never takes a call that reaches it.
+#[test]
+fn mcp_is_matched_however_its_path_is_spelled() {
+    use respan_gateway_http::Codec;
+    let mcp = StreamableHttp::default();
+    let head = |method: Method, uri: &str| {
+        let req = http::Request::builder().method(method).uri(uri).body(());
+        req.unwrap_or_default().into_parts().0
+    };
+    let same = [
+        "/mcp",
+        "/mcp/",
+        "/mc%70",
+        "/mcp%2F",
+        "//mcp",
+        "/./mcp",
+        "/x/../mcp",
+        "/mcp/.",
+    ];
+    for path in same {
+        assert!(mcp.accepts(&head(Method::POST, path)), "{path}");
+    }
+    for path in ["/mcpx", "/x/mcp", "/mcp/x"] {
+        assert!(!mcp.accepts(&head(Method::POST, path)), "{path}");
+    }
+    assert!(!mcp.accepts(&head(Method::PUT, "/mcp")));
+}

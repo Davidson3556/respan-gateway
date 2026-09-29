@@ -633,8 +633,8 @@ impl Encoder<Reply, ()> for Noting {
 
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
         let noted = match (
-            reply.origin(AnthropicMessages.name()),
-            reply.origin(OpenAiChat.name()),
+            reply.came_in(AnthropicMessages.name()),
+            reply.came_in(OpenAiChat.name()),
         ) {
             (Some(_), _) => "own",
             (_, Some(_)) => "openai",

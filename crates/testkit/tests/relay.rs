@@ -971,7 +971,7 @@ async fn plugins_see_the_request_and_change_its_model() {
             assert_eq!(asked, Some(http::Method::POST));
             // The client's bytes, as they came, are its input's origin.
             let chat = cx.input::<Conversation>()?;
-            let came = chat.origin(cx.format()).map(|o| &o.bytes);
+            let came = chat.came_in(cx.format()).map(|o| &o.bytes);
             assert_eq!(came.map(|b| &b[..]), Some(STREAM_REQ.as_bytes()));
             let said = chat.messages[0].text();
             cx.extensions_mut()

@@ -169,7 +169,7 @@ impl Encoder<Say, ()> for Says {
     fn head(&mut self, _first: Option<&Say>) {}
 
     fn encode(&mut self, say: &Say, out: &mut BytesMut) -> Result<(), Fault> {
-        let origin = say.1.origin(self.0);
+        let origin = say.1.came_in(self.0);
         if let Some(bytes) = say.1.bytes(self.0, say) {
             out.extend_from_slice(bytes);
             return Ok(());

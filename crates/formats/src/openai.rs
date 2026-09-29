@@ -268,7 +268,7 @@ impl Wire for OpenAiChat {
         body
     }
 
-    fn render(so_far: &SoFar) -> Value {
+    fn render(so_far: &SoFar) -> Result<Value, Fault> {
         let text: String = so_far.text.values().map(String::as_str).collect();
         let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
         let (id, model) = so_far.start.clone().unwrap_or_default();
@@ -279,7 +279,7 @@ impl Wire for OpenAiChat {
                 message["content"] = Value::Null;
             }
         }
-        json!({
+        Ok(json!({
             "id": id,
             "object": "chat.completion",
             "created": unix_now(),
@@ -290,7 +290,7 @@ impl Wire for OpenAiChat {
                 "finish_reason": FINISH.reason(finish),
             }],
             "usage": Self::usage_body(&so_far.usage),
-        })
+        }))
     }
 
     /// One text of every block, then other content.
@@ -583,8 +583,9 @@ struct Chunks {
     held: Option<BytesMut>,
     /// A written finish, kept back to the end and sent before those chunks.
     finish: Option<BytesMut>,
-    /// The tool calls written so far, and whether the last has no arguments yet.
-    calls: u32,
+    /// The tool calls written so far, by the number their maker gave them,
+    /// and whether the last has no arguments yet.
+    calls: Vec<usize>,
     bare: bool,
 }
 
@@ -622,31 +623,34 @@ impl Chunks {
     }
 
     /// Write a piece of a tool call another format made: its start opens
-    /// the next call, arguments go to the last.
-    fn call(&mut self, fragment: Fragment, out: &mut BytesMut) {
+    /// the next call, arguments go to the call they continue.
+    fn call(&mut self, fragment: Fragment, out: &mut BytesMut) -> Result<(), Fault> {
+        let at = fragment.continues(self.calls.iter().copied());
         let arguments = &fragment.arguments;
-        let call = match fragment.start {
-            Some((id, name)) => {
+        let call = match (fragment.start, at) {
+            (Some((id, name)), None) => {
                 self.end_call(out);
-                self.calls += 1;
+                let at = self.calls.len();
+                self.calls.push(fragment.index.unwrap_or(at));
                 self.bare = arguments.is_empty();
                 let function = json!({ "name": name, "arguments": arguments });
-                let call = json!({ "index": self.calls - 1, "id": id, "type": "function", "function": function });
-                return self.choice(out, json!({ "tool_calls": [call] }));
+                json!({ "index": at, "id": id, "type": "function", "function": function })
             }
-            None => {
-                json!({ "index": self.calls.saturating_sub(1), "function": { "arguments": arguments } })
+            (_, Some(at)) => {
+                self.bare &= arguments.is_empty() || at + 1 < self.calls.len();
+                json!({ "index": at, "function": { "arguments": arguments } })
             }
+            (None, None) => return Err(unwritable_content()),
         };
-        self.bare &= arguments.is_empty();
         self.choice(out, json!({ "tool_calls": [call] }));
+        Ok(())
     }
 
     /// Ends the last tool call: one that had no arguments has none, as JSON.
     fn end_call(&mut self, out: &mut BytesMut) {
         if std::mem::take(&mut self.bare) {
             let function = json!({ "arguments": "{}" });
-            let call = json!({ "index": self.calls - 1, "function": function });
+            let call = json!({ "index": self.calls.len() - 1, "function": function });
             self.choice(out, json!({ "tool_calls": [call] }));
         }
     }
@@ -708,7 +712,7 @@ impl Chunks {
                     }
                 }
                 Piece::Other { format, raw } => match fragments(format, raw) {
-                    Some(calls) => calls.into_iter().for_each(|f| self.call(f, &mut all)),
+                    Some(calls) => calls.into_iter().try_for_each(|f| self.call(f, &mut all))?,
                     None => return Err(unwritable_content()),
                 },
             }
@@ -730,7 +734,7 @@ impl Encoder<Reply, ()> for Chunks {
 
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
         self.so_far.note(reply);
-        let own = reply.origin(OPENAI).filter(|_| self.so_far.relayed);
+        let own = reply.came_in(OPENAI).filter(|_| self.so_far.relayed);
         let Some(own) = own else {
             return self.write(reply, out);
         };
@@ -844,7 +848,7 @@ mod tests {
         // The start, the ping held behind it, and the text, each as it came.
         let kinds: Vec<bool> = content[2].0.iter().map(Reply::is_content).collect();
         assert_eq!(kinds, [true, false, true]);
-        assert!(content[2].0.iter().all(|r| r.origin(OPENAI).is_some()));
+        assert!(content[2].0.iter().all(|r| r.came_in(OPENAI).is_some()));
         // A failure first leaves only the usage held, saying nothing.
         let failed = batches(&[role, error]);
         assert!(failed[1].1);
@@ -905,7 +909,7 @@ mod tests {
             ]
         );
         // Each chunk is one reply that keeps its bytes.
-        assert!(out.iter().all(|r| r.origin(OPENAI).is_some()));
+        assert!(out.iter().all(|r| r.came_in(OPENAI).is_some()));
     }
 
     #[test]
@@ -967,7 +971,7 @@ mod tests {
         hi.content = vec![Piece::text(0, "hi")];
         hi.finish = Some(Finish::Stop);
         assert_eq!(chunk, &hi);
-        assert!(chunk.origin(OPENAI).is_some());
+        assert!(chunk.came_in(OPENAI).is_some());
     }
 
     // N5: a decoder ends only at the end of its body, so what follows the

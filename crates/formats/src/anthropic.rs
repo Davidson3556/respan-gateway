@@ -356,16 +356,16 @@ impl Wire for AnthropicMessages {
         body
     }
 
-    fn render(so_far: &SoFar) -> Value {
+    fn render(so_far: &SoFar) -> Result<Value, Fault> {
         let mut content: Vec<Value> = so_far
             .text
             .values()
             .map(|t| json!({ "type": "text", "text": t }))
             .collect();
-        content.extend(so_far.calls.anthropic());
+        content.extend(so_far.calls.anthropic()?);
         let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
         let (id, model) = so_far.start.clone().unwrap_or_default();
-        json!({
+        Ok(json!({
             "id": id,
             "type": "message",
             "role": "assistant",
@@ -374,7 +374,7 @@ impl Wire for AnthropicMessages {
             "stop_reason": FINISH.reason(finish),
             "stop_sequence": null,
             "usage": Self::usage_body(&so_far.usage),
-        })
+        }))
     }
 
     /// Rebuilds the content, one block per piece: the provider's text block
@@ -548,6 +548,9 @@ struct EventStream {
     /// number of its text, none for a tool call.
     open: Option<(Option<u32>, u32)>,
     opened: u32,
+    /// The tool call blocks not yet stopped, by the number their maker
+    /// gave the call.
+    tools: Vec<(usize, u32)>,
     /// The provider's open text block and its stop, kept back until the
     /// next event so released text can still go in.
     provider_open: Option<(u32, Option<Bytes>)>,
@@ -610,8 +613,15 @@ impl EventStream {
         }
     }
 
+    /// Stops the open text block and every open tool block.
     fn close_block(&mut self, out: &mut BytesMut) {
-        if let Some((_, index)) = self.open.take() {
+        let text = self.open.take().filter(|(block, _)| block.is_some());
+        let tools = std::mem::take(&mut self.tools);
+        let all = text
+            .into_iter()
+            .map(|(_, i)| i)
+            .chain(tools.iter().map(|t| t.1));
+        for index in all {
             emit(out, json!({ "type": "content_block_stop", "index": index }));
         }
     }
@@ -638,21 +648,27 @@ impl EventStream {
     }
 
     /// Write a piece of a tool call another format made: its start opens a
-    /// block, arguments go to it.
+    /// block, which stays open for the arguments of parallel calls that
+    /// follow; arguments go to the call they continue.
     fn call(&mut self, fragment: Fragment, out: &mut BytesMut) -> Result<(), Fault> {
-        let index = match (fragment.start, self.open) {
-            (Some((id, name)), _) => {
-                self.close_block(out);
+        let at = fragment.continues(self.tools.iter().map(|t| t.0));
+        let index = match (fragment.start, at) {
+            (Some((id, name)), None) => {
+                if matches!(self.open, Some((Some(_), _))) {
+                    self.close_block(out);
+                }
                 let index = self.opened;
                 self.opened += 1;
                 self.open = Some((None, index));
+                self.tools
+                    .push((fragment.index.unwrap_or(index as usize), index));
                 let block = json!({ "type": "tool_use", "id": id, "name": name, "input": {} });
                 let start = json!({ "type": "content_block_start", "index": index, "content_block": block });
                 emit(out, start);
                 index
             }
-            (None, Some((None, index))) => index,
-            (None, _) => return Err(unwritable_content()),
+            (_, Some(at)) => self.tools[at].1,
+            (None, None) => return Err(unwritable_content()),
         };
         if !fragment.arguments.is_empty() {
             let delta = json!({ "type": "input_json_delta", "partial_json": fragment.arguments });
@@ -823,7 +839,7 @@ impl Encoder<Reply, ()> for EventStream {
 
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
         self.so_far.note(reply);
-        let own = reply.origin(ANTHROPIC).filter(|_| self.so_far.relayed);
+        let own = reply.came_in(ANTHROPIC).filter(|_| self.so_far.relayed);
         let Some(own) = own else {
             return self.write(reply, out);
         };
@@ -992,7 +1008,7 @@ mod tests {
         assert!(
             out[2..]
                 .iter()
-                .all(|r| !r.is_content() && r.origin(ANTHROPIC).is_some())
+                .all(|r| !r.is_content() && r.came_in(ANTHROPIC).is_some())
         );
     }
 
@@ -1349,7 +1365,7 @@ mod tests {
         empty.content = vec![Piece::text(0, "")];
         empty.finish = Some(Finish::Length);
         assert!(whole.add(&empty).is_ok());
-        let v = AnthropicMessages::render(&whole);
+        let v = AnthropicMessages::render(&whole).unwrap_or_default();
         assert_eq!(v["content"], json!([]));
     }
 
