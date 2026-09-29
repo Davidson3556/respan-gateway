@@ -11,7 +11,7 @@ mod edge;
 use std::sync::{Arc, Mutex};
 
 use edge::*;
-use respan_gateway_core::futures::StreamExt;
+use respan_gateway_core::futures::{FutureExt, StreamExt};
 use respan_gateway_core::*;
 
 fn gateway_of(seen: &Seen, wait: bool, answer: fn() -> Text) -> Gateway {
@@ -183,4 +183,57 @@ async fn an_empty_frame_is_still_a_frame() {
     let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
     assert_eq!(seen.frames(), frames(&[Ok("one"), Ok(""), Ok("<END>")]));
+}
+
+/// A provider that reads the whole call body, records it, and refuses the
+/// first call at its head, after reading it; later calls answer `a`.
+fn reads_then_refuses_first(bodies: Arc<Mutex<Vec<Frames>>>) -> Dialer {
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fnt(move |c| {
+        let (bodies, n) = (bodies.clone(), n.clone());
+        async move {
+            let frames = c.body.map(|f| f.map_err(|e| e.code().to_string()));
+            let frames: Frames = frames.collect().await;
+            lock(&bodies).push(frames);
+            match n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => Ok(answer(503, chunks(vec![]))),
+                _ => Ok(answer(200, chunks(vec!["a", "DONE"]))),
+            }
+        }
+        .boxed()
+    })
+}
+
+/// B1: a retry after the first call read every input is not sent an empty
+/// upload that looks complete: the inputs are gone, which is an `Err`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
+    struct Retry;
+    #[async_trait]
+    impl Plugin for Retry {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            let call = cx.call("a");
+            match call.clone().await?.until_content().await {
+                Ok(resp) => Ok(Some(resp)),
+                Err(_) => Ok(Some(call.await?)),
+            }
+        }
+    }
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let gw = Gateway::new()
+        .serve(Toy)
+        .unwrap()
+        .provider("a", Toy, reads_then_refuses_first(bodies.clone()))
+        .unwrap()
+        .plugin("retry", Retry)
+        .unwrap();
+    let (tx, req) = upload();
+    send(&tx, "x");
+    send(&tx, "y");
+    drop(tx);
+    let (res, _end) = handle(&gw, req).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read(res)).await;
+    let bodies = lock(&bodies).clone();
+    assert_eq!(bodies[0], frames(&[Ok("x"), Ok("y"), Ok("<END>")]));
+    assert_eq!(bodies[1], frames(&[Err("internal")]));
 }

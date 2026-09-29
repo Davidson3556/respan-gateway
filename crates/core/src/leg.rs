@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::future::ready;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::stream::{self, BoxStream};
@@ -80,6 +81,8 @@ pub(crate) fn cut<T: Send + 'static>(
 /// session's).
 pub(crate) struct Later {
     events: Mutex<Option<AnyEvents>>,
+    /// Whether a reader read an input.
+    read: AtomicBool,
     /// Whether none follow the opening.
     pub(crate) ended: bool,
     pub(crate) filters: Layer,
@@ -90,6 +93,7 @@ impl Later {
         Self {
             ended: events.is_none(),
             events: Mutex::new(events),
+            read: AtomicBool::new(false),
             filters: Layer::default(),
         }
     }
@@ -117,7 +121,6 @@ pub(crate) fn inputs(
     let reading = Reading {
         later,
         events: None,
-        read: false,
         format,
         layers,
         ready: VecDeque::new(),
@@ -134,8 +137,6 @@ struct Reading {
     later: Arc<Later>,
     /// Taken from `later` on the first poll.
     events: Option<AnyEvents>,
-    /// Whether it read an input.
-    read: bool,
     format: Arc<dyn AnyFormat>,
     layers: Vec<Layer>,
     ready: VecDeque<Result<AnyInput, Fault>>,
@@ -156,14 +157,17 @@ impl Reading {
                 None => match locked(&self.later.events).take() {
                     Some(events) => self.events.insert(events),
                     None => {
+                        // No events: they failed, as when the request's end
+                        // cut them; they were none, and ended; or another
+                        // reader took them, or read them, which this one
+                        // cannot send again.
                         self.ended = true;
-                        // Filters ended and no events: the inputs ended as the
-                        // filters did, a cut by the request's end too.
+                        let read = self.later.read.load(Ordering::SeqCst);
                         return match locked(&self.later.filters).outcome() {
-                            Some(Ok(())) => None,
                             Some(Err(fault)) => Some(Err(fault)),
-                            None => {
-                                let taken = "the request's inputs were taken by another reader";
+                            Some(Ok(())) if !read => None,
+                            _ => {
+                                let taken = "another reader took the request's inputs";
                                 Some(Err(Fault::internal(taken)))
                             }
                         };
@@ -172,7 +176,9 @@ impl Reading {
             };
             let item = AssertUnwindSafe(events.next()).catch_unwind().await;
             let item = item.unwrap_or_else(|_| Some(Err(Fault::internal(PANICKED))));
-            self.read |= matches!(item, Some(Ok(_)));
+            if matches!(item, Some(Ok(_))) {
+                self.later.read.store(true, Ordering::SeqCst);
+            }
             // A failure ends the inputs, and every filter with it.
             let step = guarded(|| match item {
                 Some(Ok(values)) => self.filter(values).or_else(|f| self.end(Err(f))),
@@ -222,7 +228,8 @@ impl Reading {
 impl Drop for Reading {
     fn drop(&mut self) {
         let live = !locked(&self.later.filters).ended();
-        if let Some(events) = self.events.take().filter(|_| !self.read && live) {
+        let read = self.later.read.load(Ordering::SeqCst);
+        if let Some(events) = self.events.take().filter(|_| !read && live) {
             *locked(&self.later.events) = Some(events);
         }
     }
