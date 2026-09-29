@@ -9,9 +9,10 @@
 //!   `Holdback` filters the chat kind, so a session holds its own).
 //! - `Meter`: each turn is metered when its `response.done` passes, not when
 //!   the session ends, so a session of hours is billed as it goes; a turn cut
-//!   before its `response.done` is metered from an estimate of the text it
-//!   sent (use case 9: a cut is never billed as $0); the session's end is
-//!   recorded once.
+//!   before its `response.done` (or before its first event) is metered from
+//!   an estimate of the session's text, both ways, and never for less than
+//!   `HOLD` output tokens (use case 9: a cut is never billed as $0); the
+//!   session's end is recorded once.
 //!
 //! The SDK (`respan-gateway-ws`) carries the session: `WsTransport` to the
 //! provider, `serve_ws` for the client, `JsonEvents` as the format, one JSON
@@ -23,9 +24,7 @@
 //! `truncated` (the provider's connection broke) or `upstream`.
 //!
 //! Not covered: audio (`input_audio_buffer.append` events are text, and pass
-//! unread, but the placeholders and the meter read text turns only); the
-//! estimate of a cut turn counts output text only, its input is not estimated;
-//! draining sessions at shutdown and a maximum session length (the SDK's
+//! unread, but the placeholders and the meter read text turns only); draining sessions at shutdown and a maximum session length (the SDK's
 //! `serve_ws_until` does both, given a future per session); Gemini Live and
 //! Responses over WebSocket, which only need another `JsonEvents` and plugins
 //! that know their events; PII other than e-mail addresses (see `pii`).
@@ -33,7 +32,7 @@
 //! `cargo run -p respan-gateway-examples --example realtime`
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::{
@@ -229,13 +228,27 @@ impl Meter {
     }
 }
 
+/// The output tokens a cut turn is charged at least: it may have been
+/// thinking, and cost all it was allowed, before it said a word.
+const HOLD: u64 = 256;
+
+/// What a session's client has said, for its input estimate.
+#[derive(Default)]
+struct Said {
+    /// Bytes of text. Every turn reads the whole context, so this only grows.
+    bytes: AtomicU64,
+    /// A `response.create` is waiting for its `response.done`.
+    asked: AtomicBool,
+}
+
 /// Meters one session's turns: each at its `response.done`, and a turn cut
-/// before it (the session ended first) from an estimate of the text it sent,
-/// so a cut is never billed as $0.
+/// before it (the session ended first) from an estimate, so a cut is never
+/// billed as $0.
 struct TurnMeter {
     session: u64,
     count: Arc<AtomicUsize>,
     turns: Arc<Mutex<Vec<Turn>>>,
+    said: Arc<Said>,
     /// The output tokens estimated so far in the open turn, if one is open.
     open: Option<u64>,
 }
@@ -265,6 +278,7 @@ impl Filter<ProviderEvent> for TurnMeter {
             *estimate += delta.len() as u64 / 4 + 1;
         } else if kind == "response.done" {
             self.open = None;
+            self.said.asked.store(false, Ordering::SeqCst);
             let response = &event.json["response"];
             let used = |name: &str| response["usage"][name].as_u64().unwrap_or_default();
             let status = response["status"].as_str().unwrap_or_default();
@@ -279,8 +293,11 @@ impl Filter<ProviderEvent> for TurnMeter {
         _end: &Result<(), Fault>,
         _out: &mut Vec<ProviderEvent>,
     ) -> Result<(), Fault> {
-        if let Some(estimate) = self.open.take() {
-            self.record("cut", 0, estimate);
+        // A turn asked for and not done is cut, even before its first event.
+        let asked = self.said.asked.swap(false, Ordering::SeqCst);
+        if let Some(estimate) = self.open.take().or(asked.then_some(0)) {
+            let input = self.said.bytes.load(Ordering::SeqCst) / 4 + 1;
+            self.record("cut", input, estimate.max(HOLD));
         }
         Ok(())
     }
@@ -296,10 +313,22 @@ impl Plugin for Meter {
         let session = self.began.fetch_add(1, Ordering::SeqCst) + 1;
         let count = Arc::new(AtomicUsize::new(0));
         px.extensions_mut().insert(Metered(session, count.clone()));
+        let said = Arc::new(Said::default());
+        let heard = said.clone();
+        px.filter(move |event: &mut ClientEvent| {
+            let mut bytes = 0;
+            edit_texts(&mut event.json, SAID, &mut |text| bytes += text.len());
+            heard.bytes.fetch_add(bytes as u64, Ordering::SeqCst);
+            if event.json["type"] == "response.create" {
+                heard.asked.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        })?;
         px.filter(TurnMeter {
             session,
             count,
             turns: self.turns.clone(),
+            said,
             open: None,
         })
     }
