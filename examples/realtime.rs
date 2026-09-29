@@ -378,9 +378,9 @@ impl Plugin for Meter {
 /// `on_client`, so a plugin decides per session (a tenant's plan, a drain
 /// signal: any future works). The client gets Close 1000 with the reason
 /// `max_length`, and the request's end (`on_client_end`) says `max_length`,
-/// where a client that left says `abandoned`. The call's own end (a
-/// plugin's `on_provider_end`, as `Meter`'s) still says `abandoned`: the
-/// call is dropped unread when its outputs are cut.
+/// where a client that left says `abandoned`; so does the call's own end
+/// (a plugin's `on_provider_end`, as `Meter`'s), which the cut's fault
+/// ends too.
 struct MaxLength(Duration);
 
 /// `events` until `limit` has passed, then a fault that closes normally.

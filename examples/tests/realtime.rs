@@ -346,8 +346,8 @@ async fn a_session_is_closed_at_its_maximum_length() -> Result<(), Fault> {
     );
     s.gateway.idle().await;
     assert_eq!(s.meter.turns().len(), 1);
-    // The call's end is `abandoned`, as for a client that left; the request's
-    // end is what tells the cut apart.
+    // The cut's fault ends the call too, so the meter tells it apart from a
+    // client that left.
     assert_eq!(
         s.meter.ended(),
         [Ended {
