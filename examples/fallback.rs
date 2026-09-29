@@ -67,7 +67,7 @@ struct Log(Arc<Mutex<Vec<String>>>);
 #[async_trait]
 impl Plugin for Log {
     async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let Some(attempt) = px.extensions().get::<Attempt>() else {
+        let Some(attempt) = px.client().extensions().get::<Attempt>() else {
             return;
         };
         let (index, role) = (attempt.index(), attempt.role());

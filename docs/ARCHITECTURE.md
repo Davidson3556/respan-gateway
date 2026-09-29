@@ -22,6 +22,7 @@ and call once. Tests state its promises; the
 | [0011](decisions/0011-read-until-content-or-end.md) | Read a response `until_content` or `until_end`, held unsent |
 | [0012](decisions/0012-http-out-of-the-kernel.md) | HTTP's rules live in the adapter, transports and formats |
 | [0013](decisions/0013-no-http-in-core.md) | No `http` types in the core: a wire is a pair of head types |
+| [0014](decisions/0014-api-trims.md) | API trims: one way to say each thing |
 
 ## Two edges
 
@@ -138,9 +139,9 @@ tokio runtime, which runs end hooks detached. The core depends on no
 2. **First byte.** A head waits for its body's first byte, so a response
    failing before any is refused; `Encoder::open` opens a quiet stream at
    once. A streaming request's head goes at once. A body done before it
-   began (`Encoder::done`, as HTTP formats say of a `HEAD`, 204, 205 or
-   304) goes at once and nothing more is read: its call ends `Ok` if its
-   decoder says the body is complete, else `abandoned`.
+   began (`Encoder::open` is `Ok(true)`, as HTTP formats say of a `HEAD`,
+   204, 205 or 304) goes at once and nothing more is read: its call ends
+   `Ok` if its decoder says the body is complete, else `abandoned`.
 3. **Decode.** Each message is one value, run through its call's
    provider-edge filters as decoded, whoever reads it. The kernel counts
    no usage ([0010](decisions/0010-usage-out-of-core.md)): a plugin
@@ -183,8 +184,8 @@ for name in &self.0 {
 last.map(Some)
 ```
 
-`until_end` reads to the end and holds it all; sent, it goes out as it
-would have unread, and `Response::end` says how it ended. Either way the
+`until_end` reads to the end and holds it all, returned with how it
+ended; sent, it goes out as it would have unread. Either way the
 call ends when the batch holding its end is sent, read or dropped
 ([0011](decisions/0011-read-until-content-or-end.md)). `sdks/routing`
 takes the stopping point as `Until { Head, Content, End }`.

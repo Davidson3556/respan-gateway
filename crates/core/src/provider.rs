@@ -74,8 +74,10 @@ impl Edge for ProviderContext {
 }
 
 impl ProviderContext {
-    /// The request as it was when this call was made, its extensions this
-    /// call's ([`ProviderContext::extensions`]).
+    /// The request as it was when this call was made. Its
+    /// [`extensions`](ClientContext::extensions) are this call's: the
+    /// request's, its own ([`Call::with_extension`](crate::Call::with_extension)),
+    /// and what its hooks set. The transport gets them with the call.
     pub fn client(&self) -> &ClientContext {
         &self.client
     }
@@ -128,15 +130,9 @@ impl ProviderContext {
         self.sent
     }
 
-    /// This call's extensions, [`ProviderContext::client`]'s: the
-    /// request's, its own ([`Call::with_extension`](crate::Call::with_extension)),
-    /// and what its hooks set. The transport gets them with the call.
-    pub fn extensions(&self) -> &Extensions {
-        &self.client.extensions
-    }
-
-    /// Like [`ProviderContext::extensions`], to change, such as to hand a
-    /// tenant's key to the transport.
+    /// This call's extensions, read as `px.client().extensions()`, to
+    /// change, such as to hand a tenant's key to the transport or keep a
+    /// tally for the call's end hook. Changes reach this call alone.
     pub fn extensions_mut(&mut self) -> &mut Extensions {
         &mut self.client.extensions
     }

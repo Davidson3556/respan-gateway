@@ -97,10 +97,10 @@ impl Encoder<Question, Ask> for Questions {
         Ask
     }
 
-    fn open(&mut self, _out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, _out: &mut BytesMut) -> Result<bool, Fault> {
         match self.0 {
             true => Err(Fault::bad_request("unwritable")),
-            false => Ok(()),
+            false => Ok(false),
         }
     }
 
@@ -143,7 +143,7 @@ impl Decoder<Reply> for Replies {
     fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
         match self.ok {
             true => Ok(()),
-            false => Err(Fault::new(429u16, "busy", "busy").with_answer(PIPE, ())),
+            false => Err(Fault::new(429u16, "busy", "busy").with_answer(PIPE, (), true)),
         }
     }
 }

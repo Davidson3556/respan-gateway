@@ -154,7 +154,7 @@ impl<L: Ledger> Plugin for Accounting<L> {
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let Some(hold) = px.extensions().get::<Arc<Hold>>().cloned() else {
+        let Some(hold) = px.client().extensions().get::<Arc<Hold>>().cloned() else {
             return;
         };
         if hold.settled.swap(true, Ordering::Relaxed) {

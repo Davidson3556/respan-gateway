@@ -36,12 +36,6 @@ impl<H> Exchange<H> {
             extensions: Extensions::new(),
         }
     }
-
-    /// The same exchange with `extensions`.
-    pub fn with_extensions(mut self, extensions: Extensions) -> Self {
-        self.extensions = extensions;
-        self
-    }
 }
 
 /// A head of any wire, erased.
@@ -148,21 +142,6 @@ impl Extensions {
     /// Put in every value of `other`, replacing those of its types.
     pub fn extend(&mut self, other: Extensions) {
         self.0.extend(other.0);
-    }
-
-    /// Whether it holds none.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// How many it holds.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Take out every value.
-    pub fn clear(&mut self) {
-        self.0.clear();
     }
 }
 

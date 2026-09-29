@@ -3524,7 +3524,7 @@ impl Format for Keyed {
 async fn extensions_set_in_on_provider_reach_a_call_edit_of_its_head() {
     let key = OnProvider(|px| {
         px.extensions_mut().insert(TenantKey("k1"));
-        let key = px.extensions().get::<TenantKey>().map(|k| k.0);
+        let key = px.client().extensions().get::<TenantKey>().map(|k| k.0);
         let key = key.unwrap_or_default();
         px.edit_call(move |head: &mut Ask, _: &mut bytes::Bytes| {
             let key = HeaderValue::from_static(key);
@@ -5299,7 +5299,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
         }
 
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            if px.extensions().get::<Mark>().is_none() {
+            if px.client().extensions().get::<Mark>().is_none() {
                 return Ok(());
             }
             let (seen, mut count) = (self.0.clone(), 0);
@@ -6017,7 +6017,8 @@ struct ToEnd;
 #[async_trait]
 impl Plugin for ToEnd {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.call("openai").await?.until_end().await.map(Some)
+        let (resp, _) = cx.call("openai").await?.until_end().await?;
+        Ok(Some(resp))
     }
 }
 
@@ -6085,22 +6086,16 @@ async fn until_end_holds_a_failure_and_it_is_delivered_as_it_would_have_been() {
 }
 
 #[tokio::test]
-async fn end_says_how_a_response_read_to_its_end_ended_and_changes_nothing() {
-    /// Records `end()` before and after `until_end`, and answers with it.
+async fn until_end_says_how_a_response_ended_and_changes_nothing() {
+    /// Records the end `until_end` returns, and answers with the response.
     struct Ending(Arc<Mutex<Vec<String>>>);
 
     #[async_trait]
     impl Plugin for Ending {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let show = |end: Option<&Result<(), Fault>>| match end {
-                None => "none".to_owned(),
-                Some(end) => end.as_ref().err().map_or("ok", |f| f.code()).to_owned(),
-            };
-            let resp = cx.call("openai").await?;
-            let before = show(resp.end());
-            let resp = resp.until_end().await?;
-            let after = show(resp.end());
-            self.0.lock().map(|mut e| e.extend([before, after])).ok();
+            let (resp, end) = cx.call("openai").await?.until_end().await?;
+            let seen = end.as_ref().err().map_or("ok", |f| f.code()).to_owned();
+            self.0.lock().map(|mut e| e.push(seen)).ok();
             Ok(Some(resp))
         }
     }
@@ -6130,7 +6125,7 @@ async fn end_says_how_a_response_read_to_its_end_ended_and_changes_nothing() {
         let read = text(h.send(chat()).await);
 
         let seen_ends = seen_ends.lock().map(|e| e.clone()).unwrap_or_default();
-        assert_eq!(seen_ends, ["none", seen]);
+        assert_eq!(seen_ends, [seen]);
         // Asking settled nothing: the call ends as its end is sent, as it came.
         assert_eq!(read, relayed);
         assert_eq!(ends.all(), [format!("openai {seen}"), "client".into()]);
@@ -6180,7 +6175,7 @@ async fn a_response_read_to_its_end_and_kept_past_its_request_ends_abandoned() {
     #[async_trait]
     impl Plugin for Stash {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let read = cx.call("backup").await?.until_end().await?;
+            let (read, _) = cx.call("backup").await?.until_end().await?;
             cx.extensions_mut()
                 .insert(Kept(Arc::new(Mutex::new(Some(read)))));
             Ok(None)
@@ -6244,7 +6239,7 @@ async fn a_race_by_completion_picks_the_provider_that_finishes_first() {
                 Box::pin(async move {
                     let resp = call.await?;
                     match to_end {
-                        true => resp.until_end().await,
+                        true => resp.until_end().await.map(|(resp, _)| resp),
                         false => resp.until_content().await,
                     }
                 })

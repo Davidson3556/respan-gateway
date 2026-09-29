@@ -1,6 +1,6 @@
 # 0008. Events carry their bytes
 
-- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
+- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md)
 - Date: 2026-09-28
 
 ## Context
@@ -57,3 +57,4 @@ run time.
 - 0011: `ready` became `until_content`.
 - 0012: `with_raw` became `with_answer` and `with_words`; encoders are
   told a call streams.
+- 0014: `with_words` became `with_answer(.., false)`.

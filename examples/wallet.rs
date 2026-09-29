@@ -33,6 +33,7 @@ fn quote(
     prices: &HashMap<String, Price>,
 ) -> Result<Quote, Fault> {
     let key = px
+        .client()
         .extensions()
         .get::<Credential>()
         .and_then(Credential::bearer);

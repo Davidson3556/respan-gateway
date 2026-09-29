@@ -59,7 +59,7 @@ impl Default for Outcome {
 ///     })
 /// });
 /// let (resp, _) = futures::future::select_ok(race).await?;
-/// // In on_provider_end: px.extensions().get::<Won>()
+/// // In on_provider_end: px.client().extensions().get::<Won>()
 /// ```
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {

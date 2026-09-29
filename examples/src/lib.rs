@@ -26,7 +26,10 @@ impl CallUsage {
     /// The usage of the call `px`, if [`meter`] ran for it; read it in
     /// `on_provider_end`, once the call's filters have ended.
     pub fn of(px: &ProviderContext) -> Option<Usage> {
-        px.extensions().get::<CallUsage>().map(CallUsage::get)
+        px.client()
+            .extensions()
+            .get::<CallUsage>()
+            .map(CallUsage::get)
     }
 }
 
@@ -39,7 +42,7 @@ impl CallUsage {
 /// added first, so meter from the plugin that runs last (register it last,
 /// or `Gateway::after` every plugin that filters outputs).
 pub fn meter(px: &mut ProviderContext) -> Result<(), Fault> {
-    if !px.is_kind::<Conversation>() || px.extensions().get::<CallUsage>().is_some() {
+    if !px.is_kind::<Conversation>() || px.client().extensions().get::<CallUsage>().is_some() {
         return Ok(());
     }
     let usage = CallUsage::default();

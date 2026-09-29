@@ -129,7 +129,7 @@ impl<S: Sink> Plugin for Log<S> {
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let mut record = Record::new(px.extensions(), Some(px.provider()), outcome);
+        let mut record = Record::new(px.client().extensions(), Some(px.provider()), outcome);
         record.usage = CallUsage::of(px).unwrap_or_default();
         self.sink.write(record).await;
     }

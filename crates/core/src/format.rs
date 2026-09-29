@@ -131,10 +131,13 @@ pub trait Encoder<T, H>: Send + 'static {
 
     /// Write the body's opening bytes, such as an SSE comment for a stream
     /// that may be quiet, which take a response's head out with them; not
-    /// for a refusal. `Err` if this body cannot be written: a call fails, a
-    /// response is refused.
-    fn open(&mut self, _out: &mut BytesMut) -> Result<(), Fault> {
-        Ok(())
+    /// for a refusal. `Ok(true)` if a response's body is done before it
+    /// began, as its head says: its head goes at once and nothing more is
+    /// read, its call ending `Ok` if its decoder, told the body ended, says
+    /// it is complete, else abandoned. `Err` if this body cannot be
+    /// written: a call fails, a response is refused.
+    fn open(&mut self, _out: &mut BytesMut) -> Result<bool, Fault> {
+        Ok(false)
     }
 
     /// Write `value`. On `Err` its partial output is dropped and the body
@@ -144,14 +147,6 @@ pub trait Encoder<T, H>: Send + 'static {
     /// Write how the body ends. On `Err` it is written again as that
     /// failure; if that fails too, the body is aborted.
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault>;
-
-    /// Whether a response's body is done before it began, as its head says
-    /// (asked after [`Encoder::open`]). Its head then goes at once and
-    /// nothing more is read: its call ends `Ok` if its decoder, told the
-    /// body ended, says it is complete, else abandoned.
-    fn done(&self) -> bool {
-        false
-    }
 }
 
 /// A head shared, such as the client's.
@@ -174,13 +169,12 @@ pub(crate) trait AnyDecoder: Send {
 pub(crate) trait AnyEncoder: Send {
     /// The head, with the first input if it is written from its value.
     fn head(&mut self, first: Option<&AnyInput>) -> Head;
-    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault>;
+    fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault>;
     /// Write each of `values` apart, handing each one's bytes to `each`,
     /// until the first failure.
     fn encode(&mut self, values: &Values, each: &mut dyn FnMut(BytesMut)) -> Result<(), Fault>;
     fn input(&mut self, input: &AnyInput, out: &mut BytesMut) -> Result<(), Fault>;
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault>;
-    fn done(&self) -> bool;
 }
 
 impl<T: Send + 'static> AnyDecoder for Box<dyn Decoder<T>> {
@@ -202,7 +196,7 @@ impl<T: Send + 'static, H: Send + Sync + 'static> AnyEncoder for Box<dyn Encoder
         ))
     }
 
-    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
         Encoder::open(&mut **self, out)
     }
 
@@ -223,10 +217,6 @@ impl<T: Send + 'static, H: Send + Sync + 'static> AnyEncoder for Box<dyn Encoder
 
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         Encoder::end(&mut **self, end, out)
-    }
-
-    fn done(&self) -> bool {
-        Encoder::done(&**self)
     }
 }
 

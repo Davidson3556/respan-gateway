@@ -90,7 +90,7 @@ impl Record {
 #[async_trait]
 impl Plugin for Record {
     async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let Some(a) = px.extensions().get::<Attempt>() else {
+        let Some(a) = px.client().extensions().get::<Attempt>() else {
             return;
         };
         let end = outcome

@@ -70,7 +70,7 @@ struct Egress(Arc<Mutex<Vec<String>>>);
 impl Plugin for Egress {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         self.seen().push(px.provider().to_owned());
-        let asked = px.extensions().get::<Asked>();
+        let asked = px.client().extensions().get::<Asked>();
         if asked.is_some_and(|a| a.headers.contains_key("x-blocked")) {
             return Err(Fault::new(
                 http::StatusCode::FORBIDDEN,

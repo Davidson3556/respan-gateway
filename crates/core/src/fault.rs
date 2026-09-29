@@ -99,33 +99,31 @@ impl Fault {
         self.0.retry_after
     }
 
-    /// The provider answered with this failure in place of a response, as
-    /// `format` read it, which that format writes as it came.
-    pub fn with_answer<A: Any + Send + Sync>(self, format: &str, answer: A) -> Self {
-        self.answered(format, answer, true)
-    }
-
-    /// Like [`Fault::with_answer`], for a failure within a response the
-    /// provider began, such as an error event: no answer, but its words.
-    pub fn with_words<A: Any + Send + Sync>(self, format: &str, words: A) -> Self {
-        self.answered(format, words, false)
-    }
-
-    fn answered<A: Any + Send + Sync>(mut self, format: &str, value: A, whole: bool) -> Self {
-        self.0.answer = Some((Arc::from(format), Arc::new(value)));
-        self.0.answered = whole;
+    /// The provider's own words for this failure, as `format` read them,
+    /// which that format writes as they came. `in_place`: the provider
+    /// answered with them in place of a response ([`Fault::is_answer`]);
+    /// else they are a failure within a response it began, such as an error
+    /// event.
+    pub fn with_answer<A: Any + Send + Sync>(
+        mut self,
+        format: &str,
+        answer: A,
+        in_place: bool,
+    ) -> Self {
+        self.0.answer = Some((Arc::from(format), Arc::new(answer)));
+        self.0.answered = in_place;
         self
     }
 
-    /// The provider's answer or words as `A`, if they came in `format`
-    /// ([`Fault::with_answer`], [`Fault::with_words`]).
+    /// The provider's words as `A`, if they came in `format`
+    /// ([`Fault::with_answer`]).
     pub fn answer<A: Any>(&self, format: &str) -> Option<&A> {
         let (_, answer) = self.0.answer.as_ref().filter(|(of, _)| **of == *format)?;
         answer.downcast_ref()
     }
 
-    /// Whether a provider answered with this failure in place of a response
-    /// ([`Fault::with_answer`]), beginning none.
+    /// Whether a provider answered with this failure in place of a response,
+    /// beginning none ([`Fault::with_answer`] `in_place`).
     pub fn is_answer(&self) -> bool {
         self.0.answered
     }
@@ -314,12 +312,12 @@ mod tests {
 
     #[test]
     fn an_answer_is_read_only_by_its_format_and_as_its_type() {
-        let f = Fault::upstream("x").with_answer("f", 7_u8);
+        let f = Fault::upstream("x").with_answer("f", 7_u8, true);
         assert_eq!(f.answer::<u8>("f"), Some(&7));
         assert_eq!(f.answer::<u8>("g"), None);
         assert_eq!(f.answer::<u16>("f"), None);
         assert!(f.is_answer());
-        let words = Fault::upstream("x").with_words("f", 7_u8);
+        let words = Fault::upstream("x").with_answer("f", 7_u8, false);
         assert!(!words.is_answer() && words.answer::<u8>("f").is_some());
     }
 

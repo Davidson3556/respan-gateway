@@ -76,6 +76,7 @@ impl Plugin for Tenants {
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         let keys = px
+            .client()
             .extensions()
             .get::<Arc<Tenant>>()
             .and_then(|t| t.keys.get(px.provider()));

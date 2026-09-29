@@ -1,6 +1,6 @@
 # 0012. HTTP out of the kernel
 
-- Status: accepted, amended by [0013](0013-no-http-in-core.md)
+- Status: accepted, amended by [0013](0013-no-http-in-core.md), [0014](0014-api-trims.md)
 - Date: 2026-09-28
 
 ## Context
@@ -51,3 +51,5 @@ text/plain for what no format writes. None is a kernel rule (0001).
 ## History
 
 - 0013: the `http` types left the core too; head hooks became generic.
+- 0014: `with_words` became `with_answer(.., false)`; `Encoder::done`
+  became `Encoder::open`'s `Ok(true)`.

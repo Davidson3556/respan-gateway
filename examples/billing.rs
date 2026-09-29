@@ -98,7 +98,7 @@ impl<S: UsageStore> Plugin for Billing<S> {
             return;
         };
         // Who pays: here a header an auth plugin vouched for.
-        let asked = px.extensions().get::<Asked>();
+        let asked = px.client().extensions().get::<Asked>();
         let header = asked.and_then(|a| a.headers.get("x-account")?.to_str().ok());
         let account = header.unwrap_or("anonymous");
         // The model this call asked for, as every plugin left it.

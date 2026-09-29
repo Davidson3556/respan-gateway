@@ -119,7 +119,7 @@ impl Plugin for Metered {
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
-        if let Some(CallUsage(usage)) = px.extensions().get::<CallUsage>() {
+        if let Some(CallUsage(usage)) = px.client().extensions().get::<CallUsage>() {
             let usage = usage.lock().unwrap_or_else(PoisonError::into_inner).clone();
             let model = px
                 .input::<Conversation>()

@@ -41,11 +41,11 @@ pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault 
         Some(wait) => fault.with_retry_after(wait),
         None => fault,
     };
-    fault.with_answer(format, http::Response::from_parts(head.clone(), body))
+    fault.with_answer(format, http::Response::from_parts(head.clone(), body), true)
 }
 
 /// A decoder of nothing, for a response with no body
-/// ([`bodiless`](respan_gateway_http::bodiless)): it ends at once, whatever
+/// ([`bodiless`]): it ends at once, whatever
 /// bytes came.
 pub fn nothing<T: 'static>() -> Box<dyn Decoder<T>> {
     Box::new(Nothing)
@@ -75,8 +75,8 @@ pub fn unstreamable<T: 'static>(format: &str) -> Box<dyn Encoder<T, ()>> {
 }
 
 /// An encoder of a response with no body
-/// ([`bodiless`](respan_gateway_http::bodiless)): its head goes at once and
-/// nothing more is read ([`Encoder::done`]).
+/// ([`bodiless`]): its head goes at once and
+/// nothing more is read ([`Encoder::open`]).
 pub fn no_body<T: 'static>() -> Box<dyn Encoder<T, ()>> {
     Box::new(Plain {
         done: true,
@@ -145,10 +145,10 @@ struct Plain {
 impl<T> Encoder<T, ()> for Plain {
     fn head(&mut self, _first: Option<&T>) {}
 
-    fn open(&mut self, _out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, _out: &mut BytesMut) -> Result<bool, Fault> {
         match &self.unopenable {
             Some(message) => Err(Fault::config(message.clone())),
-            None => Ok(()),
+            None => Ok(self.done),
         }
     }
 
@@ -162,10 +162,6 @@ impl<T> Encoder<T, ()> for Plain {
         }
         out.extend_from_slice(&std::mem::take(&mut self.body));
         Ok(())
-    }
-
-    fn done(&self) -> bool {
-        self.done
     }
 }
 
@@ -248,9 +244,9 @@ where
 {
     fn head(&mut self, _first: Option<&T>) {}
 
-    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
         out.extend_from_slice(&self.open);
-        Ok(())
+        Ok(false)
     }
 
     fn encode(&mut self, value: &T, out: &mut BytesMut) -> Result<(), Fault> {

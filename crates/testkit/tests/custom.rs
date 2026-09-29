@@ -160,7 +160,7 @@ impl Format for JevFormat {
             let v = formats::json(&raw);
             // An error inside a success is the provider's, relayed.
             if let Some(message) = v.as_ref().and_then(|v| v["error"]["message"].as_str()) {
-                return Err(Fault::upstream(message).with_words(&name, raw));
+                return Err(Fault::upstream(message).with_answer(&name, raw, false));
             }
             let text = v.as_ref().and_then(|v| v[answer].as_str());
             let text = text.ok_or_else(|| Fault::upstream("not a jev answer"))?;
@@ -312,7 +312,7 @@ impl<T: 'static, F: Fn(&mut Head) + Send + 'static> Encoder<T, Head> for EditedH
         head
     }
 
-    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
         self.0.open(out)
     }
 
@@ -322,10 +322,6 @@ impl<T: 'static, F: Fn(&mut Head) + Send + 'static> Encoder<T, Head> for EditedH
 
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         self.0.end(end, out)
-    }
-
-    fn done(&self) -> bool {
-        self.0.done()
     }
 }
 

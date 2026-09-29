@@ -233,7 +233,11 @@ async fn send_call(
             first_frame.chain(later_frames(frames, encoder)).boxed()
         }
     };
-    let call = Exchange::new(head, body).with_extensions(extensions);
+    let call = Exchange {
+        head,
+        body,
+        extensions,
+    };
     px.sent = true;
     let resp = p.transport.send(call).await?;
     Ok(Response::decoded(

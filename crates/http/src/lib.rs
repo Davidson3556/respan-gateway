@@ -97,7 +97,9 @@ where
     let (mut head, body) = req.into_parts();
     let extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
     head.extensions = http::Extensions::new();
-    Exchange::new(head, body_of(body)).with_extensions(extensions)
+    let mut req = Exchange::new(head, body_of(body));
+    req.extensions = extensions;
+    req
 }
 
 /// An HTTP response as an exchange, such as a transport's, or a plugin's to
@@ -184,7 +186,8 @@ where
         extensions.insert(credential);
     }
     extensions.insert(Asked(Arc::new(head.clone())));
-    let req = Exchange::new(head, body).with_extensions(extensions);
+    let mut req = Exchange::new(head, body);
+    req.extensions = extensions;
     let (resp, outcome) = gateway.handle::<Ask, Answer>(req, streaming).await;
     let resp = match resp {
         Err(fault) if fault.code() == codes::NOT_FOUND => {
@@ -389,7 +392,7 @@ mod tests {
         let mut answer = http::Response::new(Bytes::from_static(b"busy"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         let fault = Fault::new(StatusCode::TOO_MANY_REQUESTS, "busy", "busy")
-            .with_answer("f", answer)
+            .with_answer("f", answer, true)
             .with_retry_after(Duration::from_secs(3));
         let (mut head, ()) = http::Response::new(()).into_parts();
         assert_eq!(

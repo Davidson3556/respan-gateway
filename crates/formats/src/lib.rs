@@ -133,7 +133,7 @@ where
         head(first)
     }
 
-    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
         self.body.open(out)
     }
 
@@ -143,10 +143,6 @@ where
 
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         self.body.end(end, out)
-    }
-
-    fn done(&self) -> bool {
-        self.body.done()
     }
 }
 

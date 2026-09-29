@@ -180,7 +180,7 @@ mod tests {
         assert_eq!((head.status.as_u16(), &out[..]), (404, &b"gone"[..]));
         let mut answer = http::Response::new(Bytes::from_static(b"{}"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-        let fault = Fault::upstream("x").with_answer("raw", answer);
+        let fault = Fault::upstream("x").with_answer("raw", answer, true);
         let mut encoder = response_encoder::<Raw>("raw", None, &ask, Some(&fault));
         let head = encoder.head(None);
         let mut out = BytesMut::new();

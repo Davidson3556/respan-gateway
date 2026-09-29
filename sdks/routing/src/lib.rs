@@ -74,7 +74,7 @@ fn retryable(status: u16) -> bool {
 }
 
 /// Put on every call [`first_success`] and [`race`] send
-/// ([`ProviderContext::extensions`](respan_gateway_core::ProviderContext::extensions)),
+/// (read as `px.client().extensions()`),
 /// so provider-edge hooks can tell attempts apart.
 #[derive(Debug, Clone)]
 pub struct Attempt {
@@ -131,43 +131,39 @@ pub enum Until {
     Content,
     /// Its end ([`Response::until_end`]), held whole until sent: the first
     /// to finish cleanly wins. A success failing after its first content
-    /// ([`Response::end`]) does not count as one.
+    /// does not count as one.
     End,
 }
 
-/// An attempt and its answer, read [`Until`] a point.
-type Answer = (Attempt, Result<Response, Fault>);
+/// An attempt, its answer read [`Until`] a point, and, read to its end,
+/// the failure a success ended with.
+type Answer = (Attempt, Result<Response, Fault>, Option<Fault>);
 
 /// Send `call` as `attempt` and read it `until` a point.
 async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
-    let answer = match call.with_extension(attempt.clone()).await {
+    let (answer, late) = match call.with_extension(attempt.clone()).await {
         Ok(resp) => match until {
-            Until::Head => Ok(resp),
-            Until::Content => resp.until_content().await,
-            Until::End => resp.until_end().await,
+            Until::Head => (Ok(resp), None),
+            Until::Content => (resp.until_content().await, None),
+            Until::End => match resp.until_end().await {
+                Ok((resp, end)) => (Ok(resp), end.err()),
+                Err(fault) => (Err(fault), None),
+            },
         },
-        Err(fault) => Err(fault),
+        Err(fault) => (Err(fault), None),
     };
-    (attempt, answer)
+    (attempt, answer, late)
 }
 
 /// How `answer` failed, if it did: its fault, or, read to its end, the
 /// failure a success ended with.
-fn failure(answer: &Result<Response, Fault>, until: Until) -> Option<&Fault> {
-    match answer {
-        Err(fault) => Some(fault),
-        Ok(resp) if until == Until::End => resp.end().and_then(|end| end.as_ref().err()),
-        Ok(_) => None,
-    }
-}
-
-fn is_success(answer: &Result<Response, Fault>, until: Until) -> bool {
-    answer.is_ok() && failure(answer, until).is_none()
+fn failure((_, answer, late): &Answer) -> Option<&Fault> {
+    answer.as_ref().err().or(late.as_ref())
 }
 
 /// Return `answer`, promoting its attempt if it is a response. A fault
 /// stays a loser: its call already ended, with nothing to commit.
-fn win((attempt, answer): Answer) -> Result<Response, Fault> {
+fn win((attempt, answer, _): Answer) -> Result<Response, Fault> {
     if answer.is_ok() {
         attempt.won.store(true, Ordering::SeqCst);
     }
@@ -195,12 +191,10 @@ pub async fn first_success(
     let (mut previous, mut index) = (None, 0);
     for call in calls {
         for tries in 1.. {
-            let (attempt, answer) = send(call.clone(), Attempt::new(index), until).await;
+            let answer = send(call.clone(), Attempt::new(index), until).await;
             index += 1;
-            if is_success(&answer, until) {
-                return win((attempt, answer));
-            }
-            let wait = match failure(&answer, until) {
+            let wait = match failure(&answer) {
+                None => return win(answer),
                 Some(f) if f.is_answer() => backoff.wait(tries, Some(f)),
                 Some(f) if f.code() == codes::UPSTREAM || f.code() == codes::TRUNCATED => {
                     backoff.wait(tries, None)
@@ -208,7 +202,7 @@ pub async fn first_success(
                 _ => None,
             };
             let Some(wait) = wait else {
-                previous = Some((attempt, answer));
+                previous = Some(answer);
                 break;
             };
             tokio::time::sleep(wait).await;
@@ -235,11 +229,11 @@ pub async fn race(
     tokio::pin!(next);
     loop {
         tokio::select! {
-            Some((attempt, answer)) = running.next() => {
-                if is_success(&answer, until) {
-                    return win((attempt, answer));
+            Some(answer) = running.next() => {
+                if failure(&answer).is_none() {
+                    return win(answer);
                 }
-                previous = Some((attempt, answer));
+                previous = Some(answer);
                 if running.is_empty() {
                     next.as_mut().reset(tokio::time::Instant::now());
                 }
@@ -285,7 +279,7 @@ impl<T: Transport> Transport for Watchdog<T> {
     async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
         let stalled = |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
         let resp = tokio::time::timeout(self.head, self.inner.send(call)).await;
-        let resp = resp.map_err(|_| stalled(self.head))??;
+        let mut resp = resp.map_err(|_| stalled(self.head))??;
         let (frames, idle) = (Some(resp.body), self.idle);
         let bounded = stream::unfold(frames, move |frames| async move {
             let mut frames = frames?;
@@ -294,8 +288,8 @@ impl<T: Transport> Transport for Watchdog<T> {
                 Err(_) => Some((Err(stalled(idle)), None)),
             }
         });
-        let bounded = Exchange::new(resp.head, bounded.boxed());
-        Ok(bounded.with_extensions(resp.extensions))
+        resp.body = bounded.boxed();
+        Ok(resp)
     }
 }
 
@@ -309,7 +303,7 @@ mod tests {
     use super::Backoff;
 
     fn answer(status: StatusCode, retry_after: Option<u64>) -> Fault {
-        let fault = Fault::new(status, "x", "x").with_answer("f", ());
+        let fault = Fault::new(status, "x", "x").with_answer("f", (), true);
         match retry_after {
             Some(secs) => fault.with_retry_after(Duration::from_secs(secs)),
             None => fault,

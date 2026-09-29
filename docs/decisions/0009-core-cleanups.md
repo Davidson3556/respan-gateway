@@ -1,6 +1,6 @@
 # 0009. Core cleanups
 
-- Status: accepted, amended by [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md)
+- Status: accepted, amended by [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md)
 - Date: 2026-09-28
 
 ## Context
@@ -46,3 +46,5 @@ rules, each a job that plugins, extensions or transports already do.
 - 0012: `TE` stripping and bodiless responses moved to `crates/http` and
   the formats (`Encoder::done`); the header helpers moved from the server
   crate to `crates/http`.
+- 0014: `px.extensions()` went; a call's are read as
+  `px.client().extensions()` and written with `px.extensions_mut()`.

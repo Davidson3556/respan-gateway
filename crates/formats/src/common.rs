@@ -309,7 +309,7 @@ fn unary_decoder<W: Wire>(head: &Answer) -> Box<dyn Decoder<Reply>> {
         }
         // An error in a success goes as it came to a client of this format.
         Err(match crate::sse::failure_json(&raw).filter(says_error) {
-            Some(v) => provider_error(status, &v).with_words(W::NAME, raw),
+            Some(v) => provider_error(status, &v).with_answer(W::NAME, raw, false),
             None => Fault::upstream("the provider's success is not a response of its format"),
         })
     })
@@ -948,7 +948,7 @@ pub(crate) fn unreadable_event(name: &Arc<str>, raw: Bytes) -> Reply {
 /// to a client of this format.
 pub(crate) fn error_event(name: &Arc<str>, raw: &[u8], v: &Value) -> Fault {
     let data = Bytes::from(event_data(raw).unwrap_or_default());
-    provider_error(StatusCode::OK, v).with_words(name, data)
+    provider_error(StatusCode::OK, v).with_answer(name, data, false)
 }
 
 /// Whether a JSON value says anything: not null or empty.

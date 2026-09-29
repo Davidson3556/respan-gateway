@@ -5,7 +5,7 @@ race, a stall bound, and each attempt's role. Each answer is read `Until` a
 stopping point before it is judged: its `Head`, its first `Content`
 (`Response::until_content`, the default), or its `End`
 (`Response::until_end`, held whole, to race for completion; a success
-that failed on the way, `Response::end`, does not count). A success
+that failed on the way, as the end it returns says, does not count). A success
 counts only once read that far; nothing is retried after that. A
 provider's error answer is a fault (`Fault::is_answer`) with its status
 and `Retry-After`, which decide a retry; at its `Head`, unread, it cannot

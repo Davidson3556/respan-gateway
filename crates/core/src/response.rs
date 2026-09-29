@@ -150,9 +150,13 @@ impl Response {
 
     /// Read it to its end and hold it all, a later failure too, such as to
     /// race calls for completion; sent, it goes as it would have unread.
-    /// Otherwise as [`until_content`](Response::until_content).
-    pub async fn until_end(self) -> Result<Response, Fault> {
-        self.read_until(true).await
+    /// Returned with how it ended, `Ok` for one whose call streams the
+    /// request's inputs, unread. Otherwise as
+    /// [`until_content`](Response::until_content).
+    pub async fn until_end(self) -> Result<(Response, Result<(), Fault>), Fault> {
+        let resp = self.read_until(true).await?;
+        let end = resp.end().cloned().unwrap_or(Ok(()));
+        Ok((resp, end))
     }
 
     /// Read until its first content, or its end if `to_end`, into `ahead`.
@@ -175,9 +179,8 @@ impl Response {
         }
     }
 
-    /// How the response ended, once it has been read to its end
-    /// ([`Response::until_end`]); `None` before that.
-    pub fn end(&self) -> Option<&Result<(), Fault>> {
+    /// How it ended, if read to its end.
+    fn end(&self) -> Option<&Result<(), Fault>> {
         self.ahead.iter().find_map(|batch| batch.end.as_ref())
     }
 

@@ -138,7 +138,7 @@ where
         head
     }
 
-    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
         self.0.open(out)
     }
 
@@ -266,11 +266,11 @@ impl LineEncoder {
 impl Encoder<LOut, ()> for LineEncoder {
     fn head(&mut self, _first: Option<&LOut>) {}
 
-    fn open(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+    fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
         if self.0 {
             out.extend_from_slice(respan_gateway_formats::sse::comment("open").as_bytes());
         }
-        Ok(())
+        Ok(false)
     }
 
     fn encode(&mut self, o: &LOut, out: &mut BytesMut) -> Result<(), Fault> {
@@ -382,7 +382,7 @@ impl Plugin for Meter {
     }
 
     async fn on_provider_end(&self, px: &ProviderContext, _o: &Outcome) {
-        if let Some(LineUsage(usage)) = px.extensions().get::<LineUsage>() {
+        if let Some(LineUsage(usage)) = px.client().extensions().get::<LineUsage>() {
             let usage = lock(usage).clone();
             lock(&self.0.3).push(usage);
         }
@@ -721,7 +721,11 @@ async fn y1_a_calls_extensions_are_read_on_its_provider_edge() {
         }
 
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            let tag = px.extensions().get::<Tag>().map_or("none", |t| t.0);
+            let tag = px
+                .client()
+                .extensions()
+                .get::<Tag>()
+                .map_or("none", |t| t.0);
             self.0.note(tag);
             Ok(())
         }
@@ -1011,7 +1015,7 @@ async fn r9_2_a_call_filter_before_a_failing_one_gets_its_end() {
         }
 
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            if px.extensions().get::<Mark>().is_some() {
+            if px.client().extensions().get::<Mark>().is_some() {
                 px.filter(noting::<LOut>(&self.0, "first"))?;
                 px.filter(|_: &mut u32| Ok(()))?;
             }

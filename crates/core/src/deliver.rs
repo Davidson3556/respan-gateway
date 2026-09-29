@@ -71,14 +71,16 @@ pub(crate) async fn deliver(
         let mut encoder = encoder.ok_or_else(|| Fault::internal("a request of another wire"))?;
         let head = encoder.head(None);
         let mut opening = BytesMut::new();
-        let opened = match refused {
-            true => Ok(()),
+        // A body done before it began reads nothing, and its head goes at once.
+        let done = match refused {
+            true => Ok(false),
             false => encoder.open(&mut opening),
         };
-        opened.map(|()| (encoder, head, opening))
+        done.map(|done| (encoder, head, opening, done))
     };
     // A format that panics building its encoder cannot write a refusal.
-    let (encoder, mut head, opening) = match std::panic::catch_unwind(AssertUnwindSafe(build)) {
+    let (encoder, mut head, opening, done) = match std::panic::catch_unwind(AssertUnwindSafe(build))
+    {
         Ok(Ok(built)) => built,
         Ok(Err(fault)) if refused => return unwritable(hooks, fault),
         Ok(Err(fault)) => {
@@ -87,8 +89,6 @@ pub(crate) async fn deliver(
         }
         Err(_) => return unwritable(hooks, Fault::internal(PANICKED)),
     };
-    // A body done before it began reads nothing, and its head goes at once.
-    let done = !refused && encoder.done();
     let mut pipe = Pipe {
         source,
         refusal: refused,

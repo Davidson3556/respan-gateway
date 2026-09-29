@@ -1,6 +1,6 @@
 # 0011. Read a response until its content or its end
 
-- Status: accepted, amended by [0012](0012-http-out-of-the-kernel.md)
+- Status: accepted, amended by [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md)
 - Date: 2026-09-28
 
 ## Context
@@ -36,3 +36,5 @@ response whole.
 ## History
 
 - 0012: an error answer became a failure; `Head` stopped telling it apart.
+- 0014: `until_end` returns the end with the response; `Response::end`
+  went.
