@@ -29,6 +29,7 @@ mod driver;
 mod transport;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -49,6 +50,24 @@ pub use {bytes, http, http_body, http_body_util};
 
 pub use codec::{Codec, Decoder, Encoder};
 pub use credential::Credential;
+
+/// `s` with its `%XX` escapes decoded, a bad UTF-8 sequence replaced: how a
+/// path or a parameter's name is compared, so a spelling cannot dodge a match.
+pub fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        let escaped = match bytes[i..] {
+            [b'%', hi, lo, ..] => hex(hi).zip(hex(lo)).map(|(h, l)| (h * 16 + l) as u8),
+            _ => None,
+        };
+        out.push(escaped.unwrap_or(bytes[i]));
+        i += if escaped.is_some() { 3 } else { 1 };
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 pub use driver::{Accepted, accept, dial, opening};
 pub use transport::{
     CallHeaders, Dialer, Exchange, Frames, Transport, credentials, is_connection_header,
@@ -293,17 +312,49 @@ pub(crate) fn depart(
         }
         Ok(resp) => {
             let (mut head, mut body) = resp.into_parts();
+            let length = head.headers.get(CONTENT_LENGTH).cloned();
             outgoing(&mut head);
             if bodiless(&to.method, head.status) {
+                // A HEAD's or a 304's `Content-Length` is the provider's
+                // for the body it would send (RFC 9110 8.6); a 204 has none.
+                let kept = to.method == Method::HEAD || head.status == StatusCode::NOT_MODIFIED;
+                if let Some(length) = length.filter(|_| kept) {
+                    head.headers.insert(CONTENT_LENGTH, length);
+                }
                 // A hop drops a bodiless answer's body once its head is out, so
                 // that is when the client leaves. Read what is ready now, so a
                 // refusal's end is told, then drop the rest: the session ends
                 // with its client (rule 4), never when a provider's stream
                 // does.
-                while let Some(Some(_)) = body.frame().now_or_never() {}
+                drain_ready(&mut body);
                 body = full(Bytes::new());
             }
             http::Response::from_parts(head, body)
+        }
+    }
+}
+
+/// Read `body`'s frames until it ends or waits on something. An output says
+/// `Pending` between the frames it sent apart (rule 5) but wakes itself at
+/// once, as a yield does, so a `Pending` that was woken during its poll is
+/// ready, and one that was not is waiting.
+fn drain_ready(body: &mut Body) {
+    struct Woken(AtomicBool);
+    impl futures::task::ArcWake for Woken {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let woken = Arc::new(Woken(AtomicBool::new(false)));
+    let waker = futures::task::waker(woken.clone());
+    let mut cx = std::task::Context::from_waker(&waker);
+    loop {
+        woken.0.store(false, Ordering::SeqCst);
+        match http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), &mut cx) {
+            std::task::Poll::Ready(Some(_)) => {}
+            std::task::Poll::Ready(None) => break,
+            std::task::Poll::Pending if woken.0.load(Ordering::SeqCst) => {}
+            std::task::Poll::Pending => break,
         }
     }
 }

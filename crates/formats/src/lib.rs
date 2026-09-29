@@ -13,6 +13,7 @@ pub mod whole;
 mod anthropic;
 pub mod conversation;
 mod openai;
+mod tools;
 mod usage;
 
 pub use anthropic::AnthropicMessages;
@@ -45,7 +46,15 @@ pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
 /// Whether a request is a `POST` to a path ending in `suffix`: the usual
 /// [`Codec::accepts`](respan_gateway_http::Codec::accepts).
 pub fn posts_to(head: &RequestHead, suffix: &str) -> bool {
-    head.method == http::Method::POST && head.uri.path().ends_with(suffix)
+    head.method == http::Method::POST && path_ends_with(head, suffix)
+}
+
+/// Whether a request's path ends in `suffix`, however it is spelled: percent
+/// escapes decoded and trailing `/`s dropped, so `/v1/chat/completions/` and
+/// `/v1/chat/completions%2F` match as the plain one does.
+pub fn path_ends_with(head: &RequestHead, suffix: &str) -> bool {
+    let path = respan_gateway_http::percent_decode(head.uri.path());
+    path.trim_end_matches('/').ends_with(suffix)
 }
 
 /// Set a call's path, relative to the transport, keeping its query.
@@ -161,5 +170,34 @@ impl<T, F: FnMut(Bytes) -> Result<T, Fault> + Send + 'static> Decoder<T> for Mes
 
     fn end(&mut self, _out: &mut Vec<T>) -> Result<(), Fault> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn head(method: http::Method, uri: &str) -> RequestHead {
+        let req = http::Request::builder().method(method).uri(uri).body(());
+        req.unwrap_or_default().into_parts().0
+    }
+
+    #[test]
+    fn a_path_is_matched_however_it_is_spelled() {
+        for path in [
+            "/v1/chat/completions",
+            "/v1/chat/completions/",
+            "/v1/chat/completions//?x=1",
+            "/v1/chat/completions%2F",
+            "/v1/chat/%63ompletions",
+            "/v1%2Fchat/completions",
+        ] {
+            let head = head(http::Method::POST, path);
+            assert!(posts_to(&head, "/chat/completions"), "{path}");
+        }
+        let other = head(http::Method::POST, "/v1/chat/completionsx");
+        assert!(!posts_to(&other, "/chat/completions"));
+        let get = head(http::Method::GET, "/v1/chat/completions");
+        assert!(!posts_to(&get, "/chat/completions"));
     }
 }

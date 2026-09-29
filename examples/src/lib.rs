@@ -3,6 +3,8 @@
 //! `cargo run -p respan-gateway-examples --example <name>`. Each has tests that
 //! `cargo test` runs; see `examples/README.md` for the list.
 
+pub mod rest;
+
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};

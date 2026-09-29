@@ -494,14 +494,14 @@ async fn a_provider_error_reaches_the_client_in_its_format() {
 #[tokio::test]
 async fn a_request_that_cannot_be_translated_is_refused() {
     let h = Harness::new(Vec::new());
-    let tools = json!([{ "type": "function", "function": { "name": "f" } }]);
-    let body = json!({ "model": "claude-x", "messages": [], "tools": tools });
+    let format = json!({ "type": "json_object" });
+    let body = json!({ "model": "claude-x", "messages": [], "response_format": format });
 
     let (status, body) = h.text(call(CHAT, body.to_string())).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(
-        body.contains("'tools' in the request cannot be translated"),
+        body.contains("'response_format' in the request cannot be translated"),
         "{body}"
     );
     assert!(h.mock.sent().is_empty());
@@ -526,13 +526,272 @@ async fn an_edited_request_that_cannot_be_translated_is_the_gateways_fault() {
     }
 
     let h = Harness::new(vec![Arc::new(Edit)]);
-    let tools = json!([{ "type": "function", "function": { "name": "f" } }]);
-    let body = json!({ "model": "claude-x", "messages": [], "tools": tools });
+    let format = json!({ "type": "json_object" });
+    let body = json!({ "model": "claude-x", "messages": [], "response_format": format });
 
     let (status, _) = h.text(call(CHAT, body.to_string())).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(matches!(h.log.only(), Err(f) if f.code() == codes::CONFIG));
+}
+
+/// An agent's turn in OpenAI's words: tools, a call made, its result, and
+/// a question after it.
+fn openai_agent() -> Call {
+    let tool = json!({ "type": "function", "function": {
+        "name": "read", "description": "read a file", "parameters": { "type": "object" } } });
+    let call_made = json!({ "id": "call_1", "type": "function",
+        "function": { "name": "read", "arguments": "{\"path\":\"a.rs\"}" } });
+    let body = json!({
+        "model": "claude-x",
+        "tools": [tool],
+        "tool_choice": { "type": "function", "function": { "name": "read" } },
+        "parallel_tool_calls": false,
+        "messages": [
+            { "role": "user", "content": "open a.rs" },
+            { "role": "assistant", "content": "", "tool_calls": [call_made] },
+            { "role": "tool", "tool_call_id": "call_1", "content": "fn main() {}" },
+            { "role": "user", "content": "now what?" },
+        ],
+    });
+    call(CHAT, body.to_string())
+}
+
+/// The same turn in Anthropic's words.
+fn anthropic_agent() -> Call {
+    let tool = json!({ "name": "read", "description": "read a file",
+        "input_schema": { "type": "object" } });
+    let body = json!({
+        "model": "gpt-x",
+        "max_tokens": 100,
+        "tools": [tool],
+        "tool_choice": { "type": "tool", "name": "read", "disable_parallel_tool_use": true },
+        "messages": [
+            { "role": "user", "content": "open a.rs" },
+            { "role": "assistant", "content": [
+                { "type": "text", "text": "Reading." },
+                { "type": "tool_use", "id": "call_1", "name": "read", "input": { "path": "a.rs" } },
+            ] },
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "call_1", "content": "fn main() {}" },
+                { "type": "text", "text": "now what?" },
+            ] },
+        ],
+    });
+    call(MESSAGES, body.to_string())
+}
+
+const ANTHROPIC_TOOL_STREAM: &[&str] = &[
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Reading.\"}}\n\n",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read\",\"input\":{}}}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"a.rs\\\"}\"}}\n\n",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":9}}\n\n",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+];
+
+const OPENAI_TOOL_STREAM: &[&str] = &[
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"a.rs\\\"}\"}}]}}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":9,\"total_tokens\":14}}\n\n",
+    "data: [DONE]\n\n",
+];
+
+#[tokio::test]
+async fn an_openai_agent_request_reaches_anthropic_with_its_tools_and_calls() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_STREAM));
+    let (status, _) = h.text(openai_agent()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = h.sent_json(0);
+    let tool = json!({ "name": "read", "description": "read a file",
+        "input_schema": { "type": "object" } });
+    assert_eq!(sent["tools"], json!([tool]));
+    let choice = json!({ "type": "tool", "name": "read", "disable_parallel_tool_use": true });
+    assert_eq!(sent["tool_choice"], choice);
+    assert!(sent["parallel_tool_calls"].is_null());
+    let call_made = json!({ "type": "tool_use", "id": "call_1", "name": "read",
+        "input": { "path": "a.rs" } });
+    let result =
+        json!({ "type": "tool_result", "tool_use_id": "call_1", "content": "fn main() {}" });
+    assert_eq!(
+        sent["messages"],
+        json!([
+            { "role": "user", "content": "open a.rs" },
+            { "role": "assistant", "content": [call_made] },
+            { "role": "user", "content": [result] },
+            { "role": "user", "content": "now what?" },
+        ])
+    );
+}
+
+#[tokio::test]
+async fn an_anthropic_agent_request_reaches_openai_with_its_tools_and_calls() {
+    let h = Harness::new(Vec::new());
+    h.mock
+        .reply(OPENAI, mock::json(StatusCode::OK, r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#));
+    let (status, _) = h.text(anthropic_agent()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let sent = h.sent_json(0);
+    let function = json!({ "name": "read", "description": "read a file",
+        "parameters": { "type": "object" } });
+    assert_eq!(
+        sent["tools"],
+        json!([{ "type": "function", "function": function }])
+    );
+    assert_eq!(
+        sent["tool_choice"],
+        json!({ "type": "function", "function": { "name": "read" } })
+    );
+    assert_eq!(sent["parallel_tool_calls"], false);
+    let call_made = json!({ "id": "call_1", "type": "function",
+        "function": { "name": "read", "arguments": "{\"path\":\"a.rs\"}" } });
+    assert_eq!(
+        sent["messages"],
+        json!([
+            { "role": "user", "content": "open a.rs" },
+            { "role": "assistant", "content": "Reading.", "tool_calls": [call_made] },
+            { "role": "tool", "tool_call_id": "call_1", "content": "fn main() {}" },
+            { "role": "user", "content": "now what?" },
+        ])
+    );
+}
+
+#[tokio::test]
+async fn a_streamed_anthropic_tool_call_reaches_an_openai_client() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(ANTHROPIC, mock::sse(ANTHROPIC_TOOL_STREAM));
+    // Streamed, with usage.
+    let body = json!({ "model": "claude-x", "stream": true, "stream_options": { "include_usage": true },
+        "tools": [{ "type": "function", "function": { "name": "read" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let req = call(CHAT, body.to_string());
+    let (_, out) = h.text(req).await;
+
+    let chunks = events(&out);
+    let deltas: Vec<&Value> = chunks
+        .iter()
+        .map(|(_, d)| &d["choices"][0]["delta"])
+        .collect();
+    let text: String = deltas
+        .iter()
+        .filter_map(|d| d["content"].as_str())
+        .collect();
+    assert_eq!(text, "Reading.");
+    let calls: Vec<&Value> = deltas
+        .iter()
+        .flat_map(|d| d["tool_calls"].as_array())
+        .flatten()
+        .collect();
+    assert_eq!(calls[0]["id"], "toolu_1");
+    assert_eq!(calls[0]["function"]["name"], "read");
+    assert_eq!(calls[0]["index"], 0);
+    let args: String = calls
+        .iter()
+        .filter_map(|c| c["function"]["arguments"].as_str())
+        .collect();
+    assert_eq!(args, r#"{"path":"a.rs"}"#);
+    let finish = chunks
+        .iter()
+        .find_map(|(_, d)| d["choices"][0]["finish_reason"].as_str());
+    assert_eq!(finish, Some("tool_calls"));
+    assert!(out.ends_with("data: [DONE]\n\n"), "{out}");
+}
+
+#[tokio::test]
+async fn a_streamed_openai_tool_call_reaches_an_anthropic_client() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(OPENAI_TOOL_STREAM));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+
+    let sent = events(&out);
+    let kinds: Vec<&str> = sent
+        .iter()
+        .filter_map(|(_, d)| d["type"].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+    );
+    let start = &sent[1].1;
+    assert_eq!(
+        start["content_block"],
+        json!({ "type": "tool_use", "id": "call_1", "name": "read", "input": {} })
+    );
+    let args: String = sent
+        .iter()
+        .filter_map(|(_, d)| d["delta"]["partial_json"].as_str())
+        .collect();
+    assert_eq!(args, r#"{"path":"a.rs"}"#);
+    assert_eq!(sent[5].1["delta"]["stop_reason"], "tool_use");
+}
+
+#[tokio::test]
+async fn a_whole_tool_call_crosses_formats_both_ways() {
+    // Anthropic's answer to an OpenAI client.
+    let h = Harness::new(Vec::new());
+    let answer = json!({ "id": "m", "type": "message", "role": "assistant", "model": "c",
+        "content": [{ "type": "tool_use", "id": "t1", "name": "read", "input": { "path": "a" } }],
+        "stop_reason": "tool_use", "usage": { "input_tokens": 1, "output_tokens": 1 } });
+    h.mock
+        .reply(ANTHROPIC, mock::json(StatusCode::OK, &answer.to_string()));
+    let body = json!({ "model": "claude-x", "messages": [{ "role": "user", "content": "hi" }],
+        "tools": [{ "type": "function", "function": { "name": "read" } }] });
+    let (_, out) = h.text(call(CHAT, body.to_string())).await;
+    let v: Value = serde_json::from_str(&out).unwrap_or_default();
+    let message = &v["choices"][0]["message"];
+    assert!(message["content"].is_null(), "{out}");
+    assert_eq!(
+        message["tool_calls"][0]["function"]["arguments"],
+        r#"{"path":"a"}"#
+    );
+    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+
+    // OpenAI's answer to an Anthropic client.
+    let h = Harness::new(Vec::new());
+    let answer = json!({ "id": "c", "model": "g", "choices": [{ "index": 0, "finish_reason": "tool_calls",
+        "message": { "role": "assistant", "content": null, "tool_calls": [
+            { "id": "c1", "type": "function", "function": { "name": "read", "arguments": "{\"path\":\"a\"}" } }] } }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 } });
+    h.mock
+        .reply(OPENAI, mock::json(StatusCode::OK, &answer.to_string()));
+    let body = json!({ "model": "gpt-x", "max_tokens": 9, "messages": [{ "role": "user", "content": "hi" }],
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    let v: Value = serde_json::from_str(&out).unwrap_or_default();
+    assert_eq!(
+        v["content"],
+        json!([{ "type": "tool_use", "id": "c1", "name": "read", "input": { "path": "a" } }])
+    );
+    assert_eq!(v["stop_reason"], "tool_use");
+}
+
+#[tokio::test]
+async fn a_tool_that_anthropic_runs_cannot_be_sent_to_openai() {
+    let h = Harness::new(Vec::new());
+    let body = json!({ "model": "gpt-x", "max_tokens": 9, "messages": [{ "role": "user", "content": "hi" }],
+        "tools": [{ "type": "web_search_20250305", "name": "web_search" }] });
+    let (status, out) = h.text(call(MESSAGES, body.to_string())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{out}");
     assert!(h.mock.sent().is_empty());
 }
 
@@ -601,14 +860,14 @@ async fn a_translated_stream_that_starts_with_what_cannot_be_translated_is_refus
 #[tokio::test]
 async fn a_translated_chunk_that_fails_partway_is_refused_whole() {
     let h = Harness::new(Vec::new());
-    let chunk = r#"data: {"id":"c","model":"gpt-x","choices":[{"index":0,"delta":{"content":"hi","tool_calls":[{"index":0,"id":"t","function":{"name":"f","arguments":"{}"}}]}}]}
+    let chunk = r#"data: {"id":"c","model":"gpt-x","choices":[{"index":0,"delta":{"content":"hi","refusal":"no"}}]}
 
 "#;
     h.mock.reply(OPENAI, mock::sse(&[chunk]));
 
     let (status, body) = h.text(anthropic_request(true)).await;
 
-    // Its text was not sent before its tool call failed.
+    // Its text was not sent before its refusal failed.
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(!body.contains("message_start"), "{body}");
 }

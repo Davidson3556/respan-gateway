@@ -348,8 +348,8 @@ fn scenarios() -> Vec<Scenario> {
         (
             "a request that cannot be translated",
             || {
-                let tools = r#"{"model":"claude-x","messages":[],"tools":[{"type":"function","function":{"name":"f"}}]}"#;
-                post_keyed(CHAT, tools)
+                let body = r#"{"model":"claude-x","messages":[],"response_format":{"type":"json_object"}}"#;
+                post_keyed(CHAT, body)
             },
             |_| {},
             Want {
@@ -546,4 +546,50 @@ async fn a_slow_refusal_is_refused() {
     );
     assert_eq!(body.unwrap(), RATE_LIMITED.as_bytes());
     assert_eq!(*lock(&head_only.0), [true]);
+}
+
+/// A provider that refuses 503 with a body past the error-body cap (2 MiB
+/// of HTML in 64 KiB frames, as a misbehaving proxy's error page).
+#[derive(Clone)]
+struct HugeRefusal;
+
+#[async_trait]
+impl Transport for HugeRefusal {
+    async fn send(&self, _: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+        let (mut head, ()) = http::Response::new(()).into_parts();
+        head.status = StatusCode::SERVICE_UNAVAILABLE;
+        let frames = (0..32).map(|_| Ok(Bytes::from(vec![b'x'; 64 * 1024])));
+        Ok(Exchange::new(head, stream::iter(frames).boxed()))
+    }
+}
+
+/// L2: an error answer past the cap is still a refusal at its head (rule
+/// 2): `is_refused`, and the client told the provider refused.
+#[tokio::test]
+async fn an_error_answer_past_the_cap_is_still_refused() {
+    for req in [post_keyed(CHAT, UNARY_REQ), post_keyed(CHAT, STREAM_REQ)] {
+        let head_only = HeadOnly::default();
+        let outcomes = Outcomes::default();
+        let gw = Gateway::new()
+            .provider("openai", OpenAiChat, HugeRefusal)
+            .and_then(|g| g.serve(OpenAiChat))
+            .and_then(|g| g.plugin("outcomes", outcomes.clone()))
+            .and_then(|g| g.plugin("head-only", head_only.clone()))
+            .and_then(|g| g.target("openai"))
+            .unwrap();
+        let resp = respan_gateway_http::serve(&gw, req).await;
+        let (status, _, body) = read_whole(resp.0).await;
+        gw.idle().await;
+        let body = body.map(|b| String::from_utf8_lossy(&b[..b.len().min(120)]).into_owned());
+        let ends: Vec<_> = outcomes
+            .all()
+            .into_iter()
+            .map(|e| e.map_err(|f| f.code().to_owned()))
+            .collect();
+        assert_eq!(
+            (status.as_u16(), lock(&head_only.0).clone()),
+            (503, vec![true]),
+            "body {body:?}, ends {ends:?}"
+        );
+    }
 }

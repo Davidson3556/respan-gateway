@@ -21,6 +21,7 @@ use crate::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
 };
 use crate::sse::{Events, SseDecoder, event, event_json, is_stream};
+use crate::tools::{Fragment, fragments};
 use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 
 /// The API version sent when the client names none.
@@ -38,7 +39,7 @@ const FINISH: Names<Finish> = Names(&[
     ("refusal", Finish::Filtered),
 ]);
 
-const ANTHROPIC: &str = "anthropic-messages";
+pub(crate) const ANTHROPIC: &str = "anthropic-messages";
 
 /// Anthropic Messages, named `anthropic-messages`: a `POST` to any path
 /// ending in `/v1/messages`. The provider's base URL leaves out the
@@ -223,6 +224,7 @@ impl Wire for AnthropicMessages {
                 .collect(),
             user: v["metadata"]["user_id"].as_str().map(Into::into),
             unsupported: unsupported_fields(v, KNOWN, &[]),
+            unsupported_in: Some(ANTHROPIC.into()),
             ..Conversation::default()
         };
         if says(&v["system"]) {
@@ -355,11 +357,12 @@ impl Wire for AnthropicMessages {
     }
 
     fn render(so_far: &SoFar) -> Value {
-        let content: Vec<Value> = so_far
+        let mut content: Vec<Value> = so_far
             .text
             .values()
             .map(|t| json!({ "type": "text", "text": t }))
             .collect();
+        content.extend(so_far.calls.anthropic());
         let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
         let (id, model) = so_far.start.clone().unwrap_or_default();
         json!({
@@ -541,8 +544,9 @@ struct EventStream {
     so_far: SoFar,
     /// Whether `message_start` is written, at the first content.
     started: bool,
-    /// The open block and its index, numbered in the order blocks open.
-    open: Option<(u32, u32)>,
+    /// The open block and its index, numbered in the order blocks open: the
+    /// number of its text, none for a tool call.
+    open: Option<(Option<u32>, u32)>,
     opened: u32,
     /// The provider's open text block and its stop, kept back until the
     /// next event so released text can still go in.
@@ -615,12 +619,12 @@ impl EventStream {
     /// Text of `block`, opening a new block at the next index if needed.
     fn text(&mut self, block: u32, text: &str, out: &mut BytesMut) {
         let index = match self.open {
-            Some((open, index)) if open == block => index,
+            Some((open, index)) if open == Some(block) => index,
             _ => {
                 self.close_block(out);
                 let index = self.opened;
                 self.opened += 1;
-                self.open = Some((block, index));
+                self.open = Some((Some(block), index));
                 let start = json!({
                     "type": "content_block_start",
                     "index": index,
@@ -631,6 +635,33 @@ impl EventStream {
             }
         };
         delta(index, text, out);
+    }
+
+    /// Write a piece of a tool call another format made: its start opens a
+    /// block, arguments go to it.
+    fn call(&mut self, fragment: Fragment, out: &mut BytesMut) -> Result<(), Fault> {
+        let index = match (fragment.start, self.open) {
+            (Some((id, name)), _) => {
+                self.close_block(out);
+                let index = self.opened;
+                self.opened += 1;
+                self.open = Some((None, index));
+                let block = json!({ "type": "tool_use", "id": id, "name": name, "input": {} });
+                let start = json!({ "type": "content_block_start", "index": index, "content_block": block });
+                emit(out, start);
+                index
+            }
+            (None, Some((None, index))) => index,
+            (None, _) => return Err(unwritable_content()),
+        };
+        if !fragment.arguments.is_empty() {
+            let delta = json!({ "type": "input_json_delta", "partial_json": fragment.arguments });
+            emit(
+                out,
+                json!({ "type": "content_block_delta", "index": index, "delta": delta }),
+            );
+        }
+        Ok(())
     }
 
     /// Relay the provider's event `raw`.
@@ -726,7 +757,15 @@ impl EventStream {
                         "Anthropic's own blocks other than text cannot be held",
                     ));
                 }
-                Piece::Other { .. } => return Err(unwritable_content()),
+                Piece::Other { format, raw } => match fragments(format, raw) {
+                    Some(calls) => {
+                        self.open(out);
+                        for call in calls {
+                            self.call(call, out)?;
+                        }
+                    }
+                    None => return Err(unwritable_content()),
+                },
             }
         }
         Ok(())

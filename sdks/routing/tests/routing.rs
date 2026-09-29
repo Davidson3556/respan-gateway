@@ -313,6 +313,22 @@ async fn with_no_success_the_client_gets_the_last_429_and_its_retry_after() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_fallback_that_cannot_be_made_does_not_hide_the_providers_answer() {
+    for plan in [
+        Plan::First(vec!["a", "missing"], Backoff::once(), Until::Content),
+        Plan::Race(vec!["a", "missing"], secs(1), Until::Content),
+    ] {
+        let h = harness(plan);
+        h.mock
+            .reply(A, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+
+        let (status, ..) = h.send().await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_config_error_on_one_target_moves_on_to_the_next() {
     let h = harness(Plan::First(
         vec!["missing", "b"],

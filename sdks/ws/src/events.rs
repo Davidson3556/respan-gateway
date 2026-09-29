@@ -134,7 +134,7 @@ impl Codec for JsonEvents {
     }
 
     fn accepts(&self, head: &RequestHead) -> bool {
-        head.method == Method::GET && upgrades(head) && head.uri.path().ends_with(&self.path)
+        head.method == Method::GET && upgrades(head) && formats::path_ends_with(head, &self.path)
     }
 
     fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<ClientEvent>> {

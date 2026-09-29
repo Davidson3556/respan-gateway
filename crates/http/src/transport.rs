@@ -9,7 +9,7 @@ use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue};
 use respan_gateway_core::{Extensions, Fault, async_trait};
 
-use crate::credential::{Credential, is_credential, take_query};
+use crate::credential::{Credential, is_credential, take_protocol_keys, take_query};
 use crate::{HOP_BY_HOP, RequestHead, ResponseHead, remove_if, strip_named};
 
 /// A body, its bytes one item per data frame, ending with an `Err` if it
@@ -217,6 +217,7 @@ pub(crate) fn keys(
         return;
     }
     remove_if(&mut head.headers, |n| is_credential(n.as_str()));
+    take_protocol_keys(&mut head.headers);
     take_query(&mut head.uri, is_credential);
     for name in own.keys() {
         head.headers.remove(name);

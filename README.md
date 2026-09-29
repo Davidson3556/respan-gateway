@@ -5,7 +5,7 @@ for LLM traffic what Nginx is for HTTP: a small, fast, predictable core, with
 everything else built as modules on one public API.
 
 > **Status: pre-alpha.** Relays OpenAI and Anthropic chat traffic and
-> translates text between them; tools and images come in M5. APIs will
+> translates text and tools between them; images come in M5. APIs will
 > change.
 
 ## Ground rules
