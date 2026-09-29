@@ -177,9 +177,19 @@ fn last(answer: Option<Answer>) -> Result<Response, Fault> {
     win(answer.ok_or_else(|| Fault::upstream("no provider to try"))?)
 }
 
+/// Remember `answer` as the one to give if none succeeds: the latest, but
+/// what a provider answered is not replaced by a call that was never sent
+/// (a fallback that cannot be made says nothing of the request).
+fn keep(previous: &mut Option<Answer>, answer: Answer) {
+    if answer.3 || previous.as_ref().is_none_or(|p| !p.3) {
+        *previous = Some(answer);
+    }
+}
+
 /// Each call in turn, retried as `backoff` says, until one's response is a
 /// success read `until` its stopping point; else the last answer, so the
-/// client sees the last 429 and its `Retry-After`. A failure of the
+/// client sees the last 429 and its `Retry-After`, or, if the last call
+/// could not be made, the last that a provider answered. A failure of the
 /// provider's response, a refusal included, is retried if its status may
 /// be answered otherwise, as long as its `Retry-After` says; a call that cannot be
 /// made, such as with a `config` fault, moves on at once; an unreachable
@@ -206,7 +216,7 @@ pub async fn first_success(
                 _ => None,
             };
             let Some(wait) = wait else {
-                previous = Some(answer);
+                keep(&mut previous, answer);
                 break;
             };
             tokio::time::sleep(wait).await;
@@ -243,7 +253,7 @@ pub async fn race(
                 if failure(&answer).is_none() {
                     return win(answer);
                 }
-                previous = Some(answer);
+                keep(&mut previous, answer);
                 if running.is_empty() {
                     next.as_mut().reset(tokio::time::Instant::now());
                 }
