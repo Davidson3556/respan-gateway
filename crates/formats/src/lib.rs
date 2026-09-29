@@ -133,7 +133,15 @@ pub(crate) fn reads_one_way(path: &str) -> bool {
 /// Whether a request's path ends in `suffix`, however it is spelled (see
 /// [`clean_path`]).
 pub fn path_ends_with(head: &RequestHead, suffix: &str) -> bool {
-    clean_path(head.uri.path()).ends_with(&clean_path(suffix))
+    let (path, suffix) = (clean_path(head.uri.path()), clean_path(suffix));
+    // Suffix-pattern routers (Spring MVC's `useSuffixPatternMatch`, Rails'
+    // `(.:format)`) read `/chat/completions.json` as `/chat/completions`.
+    let (dir, last) = path.rsplit_once('/').unwrap_or_default();
+    let bare = match last.split_once('.') {
+        Some((name, _)) => format!("{dir}/{name}"),
+        None => path.clone(),
+    };
+    path.ends_with(&suffix) || bare.ends_with(&suffix)
 }
 
 /// Set a call's path, relative to the transport, keeping its query.
