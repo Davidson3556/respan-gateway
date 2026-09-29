@@ -122,3 +122,101 @@ async fn a_big_body_relays_whole() {
     assert_eq!(len.load(Ordering::SeqCst), 8 * 1024 * 1024 + "<END>".len());
     assert_eq!(decodes.load(Ordering::SeqCst), 0, "a relay decodes nothing");
 }
+
+/// Wrapped sessions on many threads, each dropped at a different point: an
+/// input wrap that swallows the cut and an output wrap, both yielding on
+/// every item. Every hook ends once, the end and `idle` resolve, and the
+/// provider never sees a clean end of an upload that was never finished
+/// (B1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn wrapped_sessions_dropped_at_random_end_once() {
+    struct Both;
+    #[async_trait]
+    impl Plugin for Both {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.wrap(|inputs: Events<In>| {
+                inputs
+                    .take_while(|i| std::future::ready(i.is_ok()))
+                    .then(|i| async move {
+                        tokio::task::yield_now().await;
+                        i
+                    })
+            })?;
+            cx.wrap(|outputs: Events<Out>| {
+                outputs.then(|o| async move {
+                    tokio::task::yield_now().await;
+                    o
+                })
+            })?;
+            Ok(None)
+        }
+    }
+    fn endless() -> Text {
+        let a = |()| async {
+            tokio::task::yield_now().await;
+            Some((Ok("a".to_string()), ()))
+        };
+        futures::stream::unfold((), a).boxed()
+    }
+    let mut failures = vec![];
+    for round in 0..400u64 {
+        let (rec, seen) = (Rec::default(), Seen::default());
+        let gw = Gateway::new()
+            .serve(Toy)
+            .unwrap()
+            .provider("p", Toy, seen.transport(false, endless))
+            .unwrap()
+            .plugin("rec", rec.clone())
+            .unwrap()
+            .plugin("both", Both)
+            .unwrap()
+            .target("p")
+            .unwrap();
+        let (tx, req) = upload();
+        let sender = tokio::spawn(async move {
+            for _ in 0..20 {
+                if tx.unbounded_send(Ok("i".into())).is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            // Never finished: the upload stays open.
+            std::future::pending::<()>().await;
+        });
+        let (res, end) = handle(&gw, req).await;
+        let mut body = res.unwrap().body;
+        for _ in 0..round % 7 {
+            let _ = body.next().await;
+        }
+        for _ in 0..round % 5 {
+            tokio::task::yield_now().await;
+        }
+        drop(body);
+        let end = tokio::time::timeout(Duration::from_millis(500), end).await;
+        let idle = tokio::time::timeout(Duration::from_millis(500), gw.idle()).await;
+        sender.abort();
+        let (c0, c1, p0, p1) = {
+            let l = rec.log();
+            (
+                l.client_start,
+                l.client_end.len(),
+                l.prov_start,
+                l.prov_end.len(),
+            )
+        };
+        if end.is_err() || idle.is_err() || c0 != c1 || p0 != p1 {
+            let end = end.map(|e| code(&e));
+            let idle = idle.is_ok();
+            failures.push(format!(
+                "round {round}: end {end:?} idle {idle} hooks {c0}/{c1} {p0}/{p1}"
+            ));
+        }
+        // Time for the provider to read what the cut left.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let frames = seen.frames();
+        if frames.contains(&Ok("<END>".to_string())) {
+            failures.push(format!("round {round}: a clean end {frames:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

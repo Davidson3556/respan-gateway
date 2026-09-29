@@ -245,9 +245,23 @@ impl ClientContext {
     /// a [filter](ClientContext::filter) cannot do, as it waits, such as a
     /// remote check of each input or a deadline that cuts the outputs.
     ///
-    /// ```ignore
-    /// cx.wrap(|turns: Events<Turn>| turns.and_then(check))?;
-    /// cx.wrap(|events: Events<Event>| events.take_until(sleep(limit)))?;
+    /// ```
+    /// # use respan_gateway_core::futures::{StreamExt, TryStreamExt};
+    /// # use respan_gateway_core::{ClientContext, Events, Fault};
+    /// # use tokio::time::{Duration, sleep};
+    /// # #[derive(Clone)]
+    /// # struct Turn;
+    /// # #[derive(Clone)]
+    /// # struct Event;
+    /// /// A remote check of one input, such as a classifier's call.
+    /// async fn check(turn: Turn) -> Result<Turn, Fault> {
+    ///     Ok(turn)
+    /// }
+    ///
+    /// fn on_client(cx: &mut ClientContext, limit: Duration) -> Result<(), Fault> {
+    ///     cx.wrap(|turns: Events<Turn>| turns.and_then(check))?;
+    ///     cx.wrap(move |events: Events<Event>| events.take_until(sleep(limit)))
+    /// }
     /// ```
     ///
     /// The stream takes the place of the one it wraps, and the request stays
