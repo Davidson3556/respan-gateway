@@ -21,6 +21,12 @@ async fn start_for(longest: Duration) -> Result<Session, Fault> {
     start_with(longest, 100_000).await
 }
 
+/// A wallet that covers `turns` turns of a short session: a turn holds the
+/// cap plus the bytes seen so far (the scripts here send under 1,000).
+fn wallet_of(turns: Amount) -> Amount {
+    turns * (TURN + 1_000)
+}
+
 /// A session that may last `longest`, for a wallet of `tokens`.
 async fn start_with(longest: Duration, tokens: Amount) -> Result<Session, Fault> {
     let openai = FakeOpenAi::start().await;
@@ -422,7 +428,7 @@ async fn a_capped_session_keeps_the_subprotocol_the_provider_chose() -> Result<(
 // negative at any moment, sampled, not only at the end.
 #[tokio::test(flavor = "multi_thread")]
 async fn parallel_sessions_cannot_overspend_one_wallet() -> Result<(), Fault> {
-    let s = start_with(HOUR, 3 * TURN).await?;
+    let s = start_with(HOUR, wallet_of(3)).await?;
     let sampler = sample(&s.wallets);
     for _ in 0..8 {
         let slow = Answer::events(script(&["ok"], usage(40, 9))).delay_first(300);
@@ -458,7 +464,7 @@ async fn parallel_sessions_cannot_overspend_one_wallet() -> Result<(), Fault> {
     s.gateway.idle().await;
     // Each answered turn settled at the 49 tokens it used.
     assert_eq!(s.wallets.spent("sk-demo"), 3 * 49);
-    assert_eq!(s.wallets.available("sk-demo"), 3 * TURN - 3 * 49);
+    assert_eq!(s.wallets.available("sk-demo"), wallet_of(3) - 3 * 49);
     let min = sampler.finish().await;
     assert!(min >= 0, "went negative: {min}");
     Ok(())
@@ -482,7 +488,7 @@ async fn a_turn_the_wallet_cannot_cover_closes_the_session_with_1008() -> Result
 // A turn cut before its `response.done` is charged its whole hold.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cut_turn_is_charged_what_it_held() -> Result<(), Fault> {
-    let s = start_with(HOUR, 3 * TURN).await?;
+    let s = start_with(HOUR, wallet_of(3)).await?;
     let cut = Answer::events(script(&["one", "two"], usage(10, 2))).cut_after(3);
     s.openai.answer(cut);
     let mut ws = client(s.addr).await;
@@ -490,7 +496,9 @@ async fn a_cut_turn_is_charged_what_it_held() -> Result<(), Fault> {
     say(&mut ws, json!({ "type": "response.create" })).await;
     while hear(&mut ws).await.is_some() {}
     s.gateway.idle().await;
-    assert_eq!(s.wallets.spent("sk-demo"), TURN);
+    // The cap, plus the bytes of the events the session had seen.
+    let spent = s.wallets.spent("sk-demo");
+    assert!((TURN..TURN + 1_000).contains(&spent), "spent {spent}");
     Ok(())
 }
 
@@ -598,7 +606,7 @@ async fn raw_session(
 /// three caps, the balance is never below zero, and all three are answered.
 #[tokio::test(flavor = "multi_thread")]
 async fn turns_that_would_say_more_than_the_cap_cannot_overdraw_the_wallet() {
-    let (raw, gw, _meter, wallets, addr) = raw_session(2_500, 3 * TURN).await;
+    let (raw, gw, _meter, wallets, addr) = raw_session(2_500, wallet_of(3)).await;
     let sampler = sample(&wallets);
     let mut sessions = Vec::new();
     for _ in 0..3 {
@@ -657,12 +665,12 @@ async fn a_response_create_asks_for_at_most_the_cap() {
 /// that covers only the cap refuses it once the session has a context.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_holds_what_the_session_has_said_plus_the_cap() {
-    let (raw, gw, _meter, wallets, addr) = raw_session(5, TURN + 100).await;
+    let (raw, gw, _meter, wallets, addr) = raw_session(5, TURN + 1_500).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
     say(&mut ws, json!({ "type": "response.create" })).await;
     turn(&mut ws).await;
-    let long = "a long question ".repeat(20);
+    let long = "a long question ".repeat(200);
     say(&mut ws, user_says(&long)).await;
     say(&mut ws, json!({ "type": "response.create" })).await;
     assert_eq!(
@@ -679,7 +687,7 @@ async fn a_turn_holds_what_the_session_has_said_plus_the_cap() {
 /// it hears the turn.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_the_provider_starts_is_held_and_charged() {
-    let (_raw, gw, meter, wallets, addr) = raw_session(49, 3 * TURN).await;
+    let (_raw, gw, meter, wallets, addr) = raw_session(49, wallet_of(3)).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
     for _ in 0..3 {
@@ -690,7 +698,7 @@ async fn a_turn_the_provider_starts_is_held_and_charged() {
     gw.idle().await;
     assert_eq!(meter.turns().len(), 3);
     assert_eq!(wallets.spent("sk-demo"), 3 * 49);
-    assert_eq!(wallets.available("sk-demo"), 3 * TURN - 3 * 49);
+    assert_eq!(wallets.available("sk-demo"), wallet_of(3) - 3 * 49);
 
     let (_raw, gw, _meter, wallets, addr) = raw_session(49, 0).await;
     let mut ws = client(addr).await;
@@ -709,7 +717,7 @@ async fn a_turn_the_provider_starts_is_held_and_charged() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wallet_is_found_by_any_credential_form() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let (_raw, gw, _meter, wallets, addr) = raw_session(7, 3 * TURN).await;
+    let (_raw, gw, _meter, wallets, addr) = raw_session(7, wallet_of(3)).await;
     let forms = [
         (
             "/v1/realtime",
@@ -1006,7 +1014,7 @@ fn session_caps(raw: &Raw) -> Vec<Value> {
 /// provider's `session.updated` for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn turns_the_provider_starts_cannot_overdraw_the_wallet() {
-    let (raw, gw, _meter, wallets, addr) = raw_session(2_500, 3 * TURN).await;
+    let (raw, gw, _meter, wallets, addr) = raw_session(2_500, wallet_of(3)).await;
     let sampler = sample(&wallets);
     let mut sessions = Vec::new();
     for _ in 0..3 {
@@ -1074,7 +1082,7 @@ async fn a_response_create_the_provider_refuses_is_not_charged() {
 /// turn that reads it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tool_output_is_held_like_text() {
-    let (raw, gw, _meter, wallets, addr) = raw_session(5, 2 * TURN).await;
+    let (raw, gw, _meter, wallets, addr) = raw_session(5, wallet_of(2)).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
     let output = "x".repeat(40_000);
@@ -1271,7 +1279,7 @@ async fn l6_a_client_that_says_two_things_and_leaves_during_a_wrap_ends_then() -
 /// 40 KB description in a wallet of two caps is refused, and never read.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tool_definition_is_held_like_text() {
-    let (raw, gw, _meter, wallets, addr) = raw_session(5, 2 * TURN).await;
+    let (raw, gw, _meter, wallets, addr) = raw_session(5, wallet_of(2)).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
     let tool = json!({ "type": "function", "name": "lookup",
@@ -1552,4 +1560,103 @@ async fn l7_a_client_that_leaves_at_any_moment_leaves_no_hold() -> Result<(), Fa
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
     Ok(())
+}
+
+// ===== loop 8 audit =====
+
+/// A provider that bills each image the conversation holds at 765 input
+/// tokens (a 1024x1024 image at high detail, OpenAI's tile rule), whatever
+/// its bytes, plus 5 output tokens, on each `response.create`.
+async fn bills_images() -> std::net::SocketAddr {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    let app = axum::Router::new().route(
+        "/v1/realtime",
+        axum::routing::get(|ws: WebSocketUpgrade| async move {
+            ws.protocols(["realtime"])
+                .on_upgrade(|mut socket| async move {
+                    let hello = json!({ "type": "session.created" }).to_string();
+                    let _ = socket.send(Message::Text(hello.into())).await;
+                    let mut images = 0u64;
+                    while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                        let event: Value = serde_json::from_str(&text).unwrap_or_default();
+                        match event["type"].as_str() {
+                            Some("session.update") => {
+                                let ack = json!({ "type": "session.updated" }).to_string();
+                                let _ = socket.send(Message::Text(ack.into())).await;
+                            }
+                            Some("conversation.item.create") => {
+                                let parts = event["item"]["content"].as_array();
+                                let parts = parts.map_or(&[][..], |parts| &parts[..]);
+                                let seen = parts.iter().filter(|p| p["type"] == "input_image");
+                                images += seen.count() as u64;
+                            }
+                            Some("response.create") => {
+                                for e in script(&["ok"], usage(765 * images, 5)) {
+                                    let _ = socket.send(Message::Text(e.to_string().into())).await;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    at
+}
+
+/// L8-R5: an image the client sends enters every later turn's context. The
+/// hold counts every event but audio, so four images (billed 765 tokens each
+/// by the provider) on a wallet of 2,000 never take it below zero: the
+/// turn is refused, not overspent.
+#[tokio::test(flavor = "multi_thread")]
+async fn l8_an_image_the_client_sends_is_held() {
+    let at = bills_images().await;
+    let (gw, wallets, addr) = front(at, 2 * TURN).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    // A small PNG's data URL: a few hundred bytes.
+    let png = format!("data:image/png;base64,{}", "iVBORw0KGgo".repeat(20));
+    let parts: Vec<Value> = (0..4)
+        .map(|_| json!({ "type": "input_image", "image_url": png }))
+        .collect();
+    let item = json!({ "type": "message", "role": "user", "content": parts });
+    let create = json!({ "type": "conversation.item.create", "item": item });
+    say(&mut ws, create).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    while hear(&mut ws).await.is_some() {}
+    gw.idle().await;
+    let balance = wallets.available("sk-demo");
+    assert!(balance >= 0, "the wallet overspent: balance {balance}");
+}
+
+/// Content the provider adds in an event that is not a delta (an
+/// `mcp_call`'s output in an item event) is context too: after one of 40 KB,
+/// a wallet that covered the first turn refuses the second.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_content_in_a_non_delta_event_is_held() {
+    let at = answering(|_| {
+        let output = "x".repeat(40_000);
+        let item = json!({ "type": "mcp_call", "name": "search", "output": output });
+        vec![
+            json!({ "type": "response.created", "response": { "id": "r" } }),
+            json!({ "type": "conversation.item.done", "item": item }),
+            json!({ "type": "response.done", "response": { "usage": usage(20, 10) } }),
+        ]
+    })
+    .await;
+    let (gw, wallets, addr) = front(at, 5_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    assert_eq!(last(&turn(&mut ws).await)["type"], "response.done");
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    let refused = closed(&mut ws).await;
+    assert_eq!(refused, Some((1008, "insufficient_funds".into())));
+    gw.idle().await;
+    assert_eq!(wallets.spent("sk-demo"), 30);
 }

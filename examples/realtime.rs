@@ -17,10 +17,8 @@
 //!   client says anything (an input wrap opens it with a `session.update`
 //!   of `max_output_tokens`, and caps the client's own), and a
 //!   `response.create` is rewritten to ask for at most `TURN` output tokens.
-//!   A turn holds what the session has said so far (every string that enters
-//!   its context, a tool's `output` and `arguments` and its definitions
-//!   included, but not audio)
-//!   plus that cap; it is refused, closing the client with 1008, when the
+//!   A turn holds everything the session sends or receives except audio,
+//!   counted in bytes (a token is at least a byte), plus that cap; it is refused, closing the client with 1008, when the
 //!   wallet cannot cover it, and its `response.done` settles what it cost. A
 //!   turn the provider starts on its own (server voice detection) is held
 //!   when its `response.created` passes, and cut with 1008 if the wallet
@@ -28,7 +26,7 @@
 //!   `error` is released. So parallel sessions cannot overspend one wallet,
 //!   provided the provider honours `max_output_tokens` and the gateway saw
 //!   the context (what the provider adds on its own, such as default
-//!   instructions, and the tokens of audio it reads, are not counted). The
+//!   instructions, and audio, are not counted). The
 //!   key may come in any credential form.
 //! - `Vet` (use case 3 on a session): a remote classifier judges each thing
 //!   the client says before the provider reads it; a refusal closes the
@@ -123,8 +121,6 @@ fn edit_texts(event: &mut Value, keys: &[&str], edit: &mut dyn FnMut(&mut String
 const SAID: &[&str] = &["text", "instructions"];
 /// What the provider says whole, and what it says in tool arguments.
 const WRITTEN: &[&str] = &["text", "transcript", "arguments", "instructions"];
-/// Every string that enters a session's context, either way: what a hold counts.
-const CONTEXT: &[&str] = &["text", "transcript", "arguments", "instructions", "output"];
 
 /// Restores placeholders in the provider's events. A delta is held back where
 /// a placeholder may begin, per item; a `*.done` event, or the end, releases
@@ -432,8 +428,8 @@ struct Wallet<L> {
 
 #[derive(Default)]
 struct Turns {
-    /// Bytes of text in the session so far, both ways. A token is at least
-    /// a byte, so this bounds the tokens a turn reads when it reads it all.
+    /// Bytes of everything the session sent or received except audio. A token
+    /// is at least a byte, so this bounds the tokens a turn reads.
     bytes: Amount,
     /// Holds of turns not yet done, oldest first, with what each holds.
     holds: VecDeque<(HoldId, Amount)>,
@@ -469,20 +465,15 @@ impl<L: Ledger> Wallet<L> {
         Ok(hold)
     }
 
-    /// What the client says is counted; a `response.create` is capped at
-    /// `TURN` output tokens and holds a turn first; a `session.update` is
-    /// capped the same, for the turns the provider starts.
+    /// What the client says (audio aside) is counted; a `response.create` is
+    /// capped at `TURN` output tokens and holds a turn first; a
+    /// `session.update` is capped the same, for the turns the provider starts.
     async fn before(self: Arc<Self>, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
-        let mut said = 0;
-        edit_texts(&mut event.json, CONTEXT, &mut |text| said += text.len());
-        // Tool definitions (name, description, parameters) are read by every turn.
-        for tools in [
-            &event.json["session"]["tools"],
-            &event.json["response"]["tools"],
-        ] {
-            said += tools.as_array().map_or(0, |_| tools.to_string().len());
+        // Everything but audio is counted, so a new kind of context is too.
+        if event.json["type"] != "input_audio_buffer.append" {
+            let said = event.json.to_string().len();
+            lock(&self.turns).bytes += Amount::try_from(said).unwrap_or_default();
         }
-        lock(&self.turns).bytes += Amount::try_from(said).unwrap_or_default();
         if event.json["type"] == "response.create" {
             let response = &mut event.json["response"];
             if !response.is_object() {
@@ -543,9 +534,6 @@ impl<L: Ledger> Wallet<L> {
                 turns.unbegun.retain(|(_, held)| *held != hold);
                 turns.holds.retain(|(held, _)| *held != hold);
             }
-        } else if kind.ends_with(".delta") && !kind.ends_with("audio.delta") {
-            let delta = event.json["delta"].as_str().unwrap_or_default().len();
-            lock(&self.turns).bytes += Amount::try_from(delta).unwrap_or_default();
         } else if kind == "response.done" {
             let front = lock(&self.turns).holds.front().cloned();
             if let Some((hold, amount)) = front {
@@ -553,6 +541,10 @@ impl<L: Ledger> Wallet<L> {
                 self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
                 lock(&self.turns).holds.pop_front();
             }
+        }
+        if !kind.ends_with("audio.delta") {
+            let seen = event.json.to_string().len();
+            lock(&self.turns).bytes += Amount::try_from(seen).unwrap_or_default();
         }
         Ok(event)
     }
@@ -590,9 +582,8 @@ fn account(credential: &Credential) -> Option<String> {
 
 /// Holds each turn on the client's wallet before the provider sees it. The
 /// hold reads the whole session, so a turn cannot cost more than its hold
-/// as long as the provider keeps to the cap and the gateway saw all the text
-/// (audio and what the provider adds on its own, such as instructions, are
-/// not counted).
+/// as long as the provider keeps to the cap and the gateway saw the context
+/// (audio, and what the provider adds on its own, are not counted).
 struct Reserve<L>(L);
 
 #[async_trait]
