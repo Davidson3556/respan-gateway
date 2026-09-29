@@ -24,7 +24,7 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     /// The formats served to clients, by name, tried in order.
     pub serve: Vec<String>,
-    /// Compiled-in plugins, in order unless `after` says otherwise.
+    /// Compiled-in plugins, in the order listed unless `after` says otherwise.
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
     /// The provider that answers when no plugin sets one.
@@ -117,7 +117,7 @@ impl Config {
         for name in &self.serve {
             gateway = (format(name, "serve")?.serve)(gateway)?;
         }
-        for p in &self.plugins {
+        for p in ordered(&self.plugins)? {
             let bad = |e: Fault| Fault::config(format!("plugin '{}': {}", p.name, e.message()));
             let Some(models) = &p.models else {
                 return Err(bad(Fault::config(
@@ -138,9 +138,6 @@ impl Config {
             });
             gateway = gateway.plugin(p.name.clone(), router)?;
         }
-        for p in &self.plugins {
-            gateway = gateway.after(&p.name, &p.after)?;
-        }
         match &self.target {
             Some(target) => gateway
                 .target(target.as_str())
@@ -148,6 +145,42 @@ impl Config {
             None => Ok(gateway),
         }
     }
+}
+
+/// The plugins in the order they run: next is the earliest listed plugin
+/// whose `after` plugins are all placed. `Err` for an unknown name or a
+/// cycle.
+fn ordered(plugins: &[PluginConfig]) -> Result<Vec<&PluginConfig>, Fault> {
+    let index = |name: &str| plugins.iter().position(|p| p.name == name);
+    for p in plugins {
+        if let Some(first) = p.after.iter().find(|a| index(a).is_none()) {
+            return Err(Fault::config(format!(
+                "plugin '{}' runs after unknown plugin '{first}'",
+                p.name
+            )));
+        }
+    }
+    let mut placed = vec![false; plugins.len()];
+    let mut order = Vec::with_capacity(plugins.len());
+    while order.len() < plugins.len() {
+        let ready = (0..plugins.len()).find(|&i| {
+            let after = |a: &String| index(a).is_some_and(|a| placed[a]);
+            !placed[i] && plugins[i].after.iter().all(after)
+        });
+        let Some(i) = ready else {
+            let stuck: Vec<_> = (0..plugins.len())
+                .filter(|&i| !placed[i])
+                .map(|i| format!("'{}'", plugins[i].name))
+                .collect();
+            return Err(Fault::config(format!(
+                "plugins run after each other in a cycle: {}",
+                stuck.join(", ")
+            )));
+        };
+        placed[i] = true;
+        order.push(&plugins[i]);
+    }
+    Ok(order)
 }
 
 /// `env:NAME` reads the environment variable; anything else is literal.
@@ -348,6 +381,25 @@ plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
         );
     }
 
+    /// The names of the plugins in `yaml`'s list, in the order they run.
+    fn order_of(yaml: &str) -> Vec<String> {
+        let config = Config::parse(&format!("serve: []\nplugins: {yaml}"));
+        let config = config.unwrap_or_else(|e| panic!("{}", e.message()));
+        let order = ordered(&config.plugins).unwrap_or_else(|e| panic!("{}", e.message()));
+        order.iter().map(|p| p.name.clone()).collect()
+    }
+
+    #[test]
+    fn after_moves_a_plugin_only_as_far_as_it_needs() {
+        // Listed d, c, b, a; c after a, b after d. The earliest ready one
+        // goes next, so: d, b, a, c.
+        let list = "[{name: d}, {name: c, after: [a]}, {name: b, after: [d]}, {name: a}]";
+        assert_eq!(order_of(list), ["d", "b", "a", "c"]);
+        // Listed a, b, c with a after c: b, c, a.
+        let list = "[{name: a, after: [c]}, {name: b}, {name: c}]";
+        assert_eq!(order_of(list), ["b", "c", "a"]);
+    }
+
     #[test]
     fn a_bad_plugin_order_or_target_is_an_error() {
         let router = "models: [{ prefix: c, provider: a }]";
@@ -360,7 +412,11 @@ plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
                 format!(
                     "plugins: [{{ name: x, after: [y], {router} }}, {{ name: y, after: [x], {router} }}]"
                 ),
-                "plugin 'y' cannot run after 'x', which runs after it",
+                "plugins run after each other in a cycle: 'x', 'y'",
+            ),
+            (
+                format!("plugins: [{{ name: x, after: [x], {router} }}, {{ name: z, {router} }}]"),
+                "plugins run after each other in a cycle: 'x'",
             ),
             (
                 format!("plugins: [{{ name: x, {router} }}, {{ name: x, {router} }}]"),

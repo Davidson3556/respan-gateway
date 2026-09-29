@@ -8,8 +8,8 @@ use crate::format::Values;
 use crate::{ClientContext, Fault, ProviderContext, Response};
 
 /// The extension point, on two edges: the client edge once per request, the
-/// provider edge once per call. Every plugin sees all traffic, in one order
-/// on both edges, and works on a kind through its types whatever the
+/// provider edge once per call. Every plugin sees all traffic, in the order
+/// registered on both edges ([`Gateway::plugin`](crate::Gateway::plugin)), and works on a kind through its types whatever the
 /// format; one for one kind lets other traffic pass, or refuses it:
 ///
 /// ```ignore

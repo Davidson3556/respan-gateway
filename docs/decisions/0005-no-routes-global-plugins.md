@@ -1,6 +1,6 @@
 # 0005. No routes: formats recognise requests, plugins are global
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0018](0018-plugin-order-is-registration-order.md)
 - Date: 2026-09-26
 
 ## Context
@@ -27,11 +27,9 @@ chain per route lets a guardrail run on one endpoint and not the next
 
 ### One plugin registry
 
-- `Gateway::plugin(name, plugin)` registers a plugin under a unique name;
-  `Gateway::after(name, before)` makes it run after each of `before`.
-- One order for both edges: next is the earliest registered plugin whose
-  `after` plugins have all run. Registered `a`, `b`, `c` with `a` after
-  `c`, they run `b`, `c`, `a`. Hooks run one at a time, end hooks too.
+- `Gateway::plugin(name, plugin)` registers a plugin under a unique name.
+- One order for both edges: registration order (amended by 0018, which
+  removed `Gateway::after`). Hooks run one at a time, end hooks too.
 - A plugin's filters wrap those of the plugins after it. A plugin that
   answers skips those after it, so it goes after every plugin that must
   see each request.
@@ -57,7 +55,7 @@ chain per route lets a guardrail run on one endpoint and not the next
 - `Gateway::new()` starts empty; each setting is a by-value method
   returning `Result<Gateway, Fault>`, failing `CONFIG` as it is given: a
   duplicate name, a format whose kind or wire breaks a rule, an unknown
-  plugin or provider, or an `after` that closes a cycle.
+  plugin or provider, (0018: no `after`).
 
   ```rust
   let gw = Gateway::new()
@@ -65,7 +63,6 @@ chain per route lets a guardrail run on one endpoint and not the next
       .serve(OpenAiChat)?
       .plugin("guard", NoSecrets)?
       .plugin("pii", Pii)?
-      .after("pii", ["guard"])?
       .target("openai")?;
   ```
 
@@ -79,7 +76,7 @@ chain per route lets a guardrail run on one endpoint and not the next
 
 ## Consequences
 
-- A binary's config lists the formats served, the plugins with `after`,
+- A binary's config lists the formats served, the plugins (0018: with `after`, sorted by the binary),
   and a default `target`.
 - A plugin for one kind says how it treats the others.
 
@@ -90,3 +87,4 @@ chain per route lets a guardrail run on one endpoint and not the next
 - 0012: `handle` takes whether the request streams, and returns `Err` for
   what no format can write.
 - 0013: formats are served per wire.
+- 0018: registration order is the plugin order; `after` left the kernel.

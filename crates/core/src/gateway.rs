@@ -17,22 +17,20 @@ use crate::provider::Provider;
 use crate::transport::{AnyTransport, Erased, Head};
 use crate::{ClientContext, Exchange, Fault, Format, Plugin, Response, Transport};
 
-/// A registered plugin and the plugins it runs after, by index.
+/// A registered plugin and its name.
 #[derive(Clone)]
-struct Registered {
+pub(crate) struct Registered {
     name: String,
-    plugin: Arc<dyn Plugin>,
-    after: Vec<usize>,
+    pub(crate) plugin: Arc<dyn Plugin>,
 }
 
 #[derive(Clone, Default)]
 pub(crate) struct Inner {
     /// The formats served to clients, in the order they are tried.
     formats: Vec<Arc<dyn AnyFormat>>,
-    /// In registration order.
-    plugins: Vec<Registered>,
-    /// The plugins in the order their hooks run, on both edges.
-    pub(crate) chain: Vec<Arc<dyn Plugin>>,
+    /// In registration order, which is the order their hooks run, on both
+    /// edges.
+    pub(crate) plugins: Vec<Registered>,
     pub(crate) providers: HashMap<String, Provider>,
     /// The provider called if no plugin sets a target.
     pub(crate) target: Option<String>,
@@ -101,57 +99,24 @@ impl Gateway {
         Ok(self)
     }
 
-    /// Register `plugin` as `name`, its hooks run on every request and call.
-    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
+    /// Register `plugin` as `name`; its hooks run on every request and call,
+    /// after those of the plugins registered before it, on both edges. A
+    /// plugin that answers skips the ones after it, so register it after
+    /// every plugin that must see each request. `Err` with
+    /// [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
     pub fn plugin(
         mut self,
         name: impl Into<String>,
         plugin: impl Plugin,
     ) -> Result<Gateway, Fault> {
         let name = name.into();
-        if self.index(&name).is_ok() {
+        if self.inner.plugins.iter().any(|p| p.name == name) {
             return Err(Fault::config(format!(
                 "plugin '{name}' is registered twice"
             )));
         }
-        let inner = self.inner_mut();
         let plugin = Arc::new(plugin);
-        inner.plugins.push(Registered {
-            name,
-            plugin,
-            after: Vec::new(),
-        });
-        inner.order();
-        Ok(self)
-    }
-
-    /// Run plugin `name` after each of `before`, on both edges. Next is
-    /// always the earliest registered plugin whose `after` plugins have run:
-    /// `a`, `b`, `c` with `a` after `c` run `b`, `c`, `a`. `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) for an unknown name or a cycle.
-    pub fn after<S: AsRef<str>>(
-        mut self,
-        name: &str,
-        before: impl IntoIterator<Item = S>,
-    ) -> Result<Gateway, Fault> {
-        let at = self.index(name)?;
-        for first in before {
-            let first = first.as_ref();
-            let first = self.index(first).map_err(|_| {
-                Fault::config(format!(
-                    "plugin '{name}' runs after unknown plugin '{first}'"
-                ))
-            })?;
-            let plugins = &self.inner.plugins;
-            if first == at || runs_after(plugins, first, at) {
-                return Err(Fault::config(format!(
-                    "plugin '{name}' cannot run after '{}', which runs after it",
-                    plugins[first].name
-                )));
-            }
-            self.inner_mut().plugins[at].after.push(first);
-        }
-        self.inner_mut().order();
+        self.inner_mut().plugins.push(Registered { name, plugin });
         Ok(self)
     }
 
@@ -282,15 +247,6 @@ impl Gateway {
         Arc::make_mut(&mut self.inner)
     }
 
-    /// The registration index of plugin `name`.
-    fn index(&self, name: &str) -> Result<usize, Fault> {
-        let plugins = &self.inner.plugins;
-        plugins
-            .iter()
-            .position(|p| p.name == name)
-            .ok_or_else(|| Fault::config(format!("unknown plugin '{name}'")))
-    }
-
     /// `Ok` if `format`'s two types differ and formats of its name share its
     /// kind and wire.
     fn check_format(&self, format: &dyn AnyFormat) -> Result<(), Fault> {
@@ -312,39 +268,6 @@ impl Gateway {
     }
 }
 
-impl Inner {
-    /// Derive the chain: at each step, the earliest registered plugin whose
-    /// `after` plugins are placed.
-    fn order(&mut self) {
-        let plugins = &self.plugins;
-        let mut placed = vec![false; plugins.len()];
-        let mut chain = Vec::with_capacity(plugins.len());
-        while chain.len() < plugins.len() {
-            let ready = (0..plugins.len())
-                .find(|&i| !placed[i] && plugins[i].after.iter().all(|&a| placed[a]));
-            let Some(i) = ready else { break };
-            placed[i] = true;
-            chain.push(plugins[i].plugin.clone());
-        }
-        self.chain = chain;
-    }
-}
-
-/// Whether plugin `later` must run after plugin `first`, directly or not.
-fn runs_after(plugins: &[Registered], later: usize, first: usize) -> bool {
-    let mut stack = vec![later];
-    let mut seen = vec![false; plugins.len()];
-    while let Some(i) = stack.pop() {
-        if i == first {
-            return true;
-        }
-        if !std::mem::replace(&mut seen[i], true) {
-            stack.extend(&plugins[i].after);
-        }
-    }
-    false
-}
-
 /// `fault` for the adapter to write, for a request no format took.
 fn unwritten(fault: Fault) -> (Handed, BoxFuture<'static, Result<(), Fault>>) {
     let end = Err(fault.clone());
@@ -352,7 +275,7 @@ fn unwritten(fault: Fault) -> (Handed, BoxFuture<'static, Result<(), Fault>>) {
 }
 
 async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response, Fault> {
-    for plugin in &gateway.chain {
+    for Registered { plugin, .. } in &gateway.plugins {
         hooks.ran += 1;
         if let Some(resp) = plugin.on_client(hooks.cx()).await? {
             return Ok(resp);

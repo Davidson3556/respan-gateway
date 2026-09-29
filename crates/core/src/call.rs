@@ -13,6 +13,7 @@ use futures::{FutureExt, StreamExt, stream};
 use crate::context::unlocked;
 use crate::fault::PANICKED;
 use crate::format::{AnyEncoder, AnyInput};
+use crate::gateway::Registered;
 use crate::input::{Frame as InputFrame, Input, locked, stream as inputs};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
@@ -468,7 +469,7 @@ impl CallEdge {
     /// Run each plugin's `on_provider` until one refuses.
     pub(crate) async fn start(&mut self) -> Result<(), Fault> {
         let gateway = self.cx().client.gateway.clone();
-        for plugin in &gateway.chain {
+        for Registered { plugin, .. } in &gateway.plugins {
             self.ran += 1;
             plugin.on_provider(self.cx()).await?;
         }

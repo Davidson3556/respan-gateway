@@ -13,10 +13,10 @@
 //! several choices (`n` other than 1) is refused: choices after the first
 //! come as other content, which the restore cannot hold per choice.
 //!
-//! So it is two plugins: `pii` registered first restores every response the
-//! client gets, whoever answers; `pii-input` registered last redacts, as
-//! input filters run in plugin order. A plugin registered later that adds
-//! to the input goes before it, `.after("pii-input", [name])`; plugins in
+//! So it is two plugins, and order is registration order: `pii` registered
+//! first restores every response the client gets, whoever answers;
+//! `pii-input` registered last redacts. Register any plugin that adds to the
+//! input BEFORE `pii-input`, or its text goes out unredacted; plugins in
 //! between see the input before redaction and responses before restoring.
 //!
 //! `cargo run -p respan-gateway-examples --example pii`
@@ -126,15 +126,22 @@ impl Plugin for PiiInput {
     }
 }
 
-/// `pii` first, `pii-input` last. For real use, the transport is
+/// `pii` first, `pii-input` last, and `middle` between them. For real use,
+/// the transport is
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
-fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
-    Gateway::new()
+fn gateway_with(
+    mock: &MockTransport,
+    middle: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
+) -> Result<Gateway, Fault> {
+    let gw = Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .serve(OpenAiChat)?
-        .plugin("pii", Pii)?
-        .plugin("pii-input", PiiInput)?
-        .target("openai")
+        .plugin("pii", Pii)?;
+    middle(gw)?.plugin("pii-input", PiiInput)?.target("openai")
+}
+
+fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
+    gateway_with(mock, Ok)
 }
 
 /// A streamed chat of one user message, with `more` fields.

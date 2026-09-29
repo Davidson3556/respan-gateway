@@ -16,6 +16,10 @@ refuse what cannot be read.
 JSON inside a string, such as a tool call's arguments, is read string by
 string, its numbers and keys too, so an edit may rename a key.
 
+Order: input filters run in registration order, so register any plugin
+that adds to the input BEFORE the plugin that checks or redacts it, or
+its text goes unchecked.
+
 Not handled: a match split across streamed tool-argument fragments, or
 across two text blocks (Anthropic's citations make many); an edit of a
 bare number in a streamed tool-argument fragment, which is written

@@ -637,28 +637,6 @@ async fn a_gateway_that_cannot_work_fails_as_it_is_built() {
             providers([]).and_then(|g| g.plugin("log", log())?.plugin("log", log())),
             "plugin 'log' is registered twice",
         ),
-        (
-            providers([]).and_then(|g| g.plugin("a", log())?.after("b", ["a"])),
-            "unknown plugin 'b'",
-        ),
-        (
-            providers([]).and_then(|g| g.plugin("a", log())?.after("a", ["b"])),
-            "plugin 'a' runs after unknown plugin 'b'",
-        ),
-        (
-            providers([]).and_then(|g| g.plugin("a", log())?.after("a", ["a"])),
-            "plugin 'a' cannot run after 'a', which runs after it",
-        ),
-        (
-            providers([]).and_then(|g| {
-                let g = g
-                    .plugin("a", log())?
-                    .plugin("b", log())?
-                    .plugin("c", log())?;
-                g.after("b", ["a"])?.after("c", ["b"])?.after("a", ["c"])
-            }),
-            "plugin 'a' cannot run after 'c', which runs after it",
-        ),
     ];
     for (gw, expected) in cases {
         let expected = Some((codes::CONFIG.to_owned(), expected.to_owned()));
@@ -721,18 +699,16 @@ impl Plugin for Named {
 }
 
 #[tokio::test]
-async fn plugins_run_in_registration_order_moved_only_as_after_needs() {
+async fn plugins_run_in_registration_order_on_both_edges() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let named = |name| Named(name, log.clone());
     let mock = MockTransport::new();
-    // Registered d, c, b, a; c must run after a, b after d. Ties keep
-    // registration order, so: d, b, a, c.
+    // Registered d, b, a, c, and they run in that order.
     let gw = providers([provider(&mock, "openai", OPENAI, None)])
         .and_then(|g| g.serve(OpenAiChat)?.target("openai"))
         .and_then(|g| {
-            let g = g.plugin("d", named("d"))?.plugin("c", named("c"))?;
-            let g = g.plugin("b", named("b"))?.plugin("a", named("a"))?;
-            g.after("c", ["a"])?.after("b", ["d"])
+            let g = g.plugin("d", named("d"))?.plugin("b", named("b"))?;
+            g.plugin("a", named("a"))?.plugin("c", named("c"))
         })
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
@@ -4430,23 +4406,6 @@ async fn a_gateway_changed_after_cloning_waits_only_for_its_own_requests() {
     let other = tokio::time::timeout(Duration::from_millis(50), changed.idle()).await;
     assert!(own.is_err() && other.is_ok());
     pending.abort();
-}
-
-#[tokio::test]
-async fn plugins_run_in_the_order_after_gives() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let named = |name| Named(name, log.clone());
-    let mock = MockTransport::new();
-    let gw = providers([provider(&mock, "openai", OPENAI, None)])
-        .and_then(|g| g.serve(OpenAiChat)?.plugin("a", named("a")))
-        .and_then(|g| g.plugin("b", named("b"))?.plugin("c", named("c")))
-        .and_then(|g| g.after("a", ["c"]))
-        .unwrap_or_else(|e| panic!("gateway: {e}"));
-
-    let _ = read_whole(serve(&gw, unary_chat()).await.0).await;
-
-    let log = log.lock().map(|l| l.clone()).unwrap_or_default();
-    assert_eq!(log, ["b client", "c client", "a client"]);
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 # Architecture
 
 The kernel (`crates/core`) relays requests, translates them between
-formats of one kind, runs every plugin in one order, and ends each request
+formats of one kind, runs every plugin in registration order, and ends each request
 and call once. Tests state its promises; the
 [README](../README.md#glossary) defines its terms.
 
@@ -13,7 +13,7 @@ and call once. Tests state its promises; the
 | [0002](decisions/0002-no-dynamic-plugin-loading.md) | Plugins are compiled in |
 | [0003](decisions/0003-kernel-contracts.md) | A minimal kernel typed by kind, grown without breaking |
 | [0004](decisions/0004-two-edges-typed-formats.md) | Two edges; typed formats; a provider is a name, format and transport |
-| [0005](decisions/0005-no-routes-global-plugins.md) | Formats recognise requests; one plugin order; one default target |
+| [0005](decisions/0005-no-routes-global-plugins.md) | Formats recognise requests; plugins in registration order; one default target |
 | [0006](decisions/0006-streams-both-ways.md) | Inputs and outputs may both stream |
 | [0007](decisions/0007-format-is-a-codec.md) | A format is one protocol's codec |
 | [0008](decisions/0008-events-carry-their-bytes.md) | Each message is one value that keeps its bytes |
@@ -39,8 +39,9 @@ and call once. Tests state its promises; the
 `on_provider` runs before every call, so a check there covers them all.
 It waits for no earlier call's end hooks, so a limit reserves there and
 settles in `on_provider_end`. Each hook that started gets its end hook
-once, a request's calls first. Order is explicit (`after`); a plugin that
-answers skips those after it. Only `on_client` may `call` or `take_inputs`.
+once, a request's calls first. Order is registration order on both edges
+([0018](decisions/0018-plugin-order-is-registration-order.md)); a plugin that
+answers skips those registered after it. Only `on_client` may `call` or `take_inputs`.
 
 ## The request path
 

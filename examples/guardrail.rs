@@ -8,10 +8,11 @@
 //! also serves Anthropic clients, which the guard reads. Traffic of another
 //! kind is refused (see tests).
 //!
-//! So it is two plugins. A plugin that answers skips the plugins after it,
-//! so `guard` is registered first. Input filters run in plugin order, so
-//! `guard-input` runs last: a plugin registered later that edits the input
-//! goes before it, `.after("guard-input", [name])`. Tests pin both.
+//! So it is two plugins, and order is registration order. A plugin that
+//! answers skips the plugins after it, so `guard` is registered first.
+//! Input filters run in that order too, so `guard-input` is registered
+//! last: register any plugin that adds to the input BEFORE it, or its text
+//! goes unchecked. Tests pin both.
 //!
 //! `cargo run -p respan-gateway-examples --example guardrail`
 
@@ -123,18 +124,38 @@ impl Plugin for Cache {
     }
 }
 
-/// `guard` first, `guard-input` last. For real use, the transport is
+/// The providers and formats, before any plugin. For real use, the
+/// transport is
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
-fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
-    let terms = Terms(vec!["bomb", "launch code"]);
+fn base(mock: &MockTransport) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider("openai", OpenAiChat, mock.at(OPENAI))?
         .serve(OpenAiChat)?
-        .serve(AnthropicMessages)?
-        .plugin("guard", Guard(terms.clone()))?
-        .plugin("cache", Cache)?
+        .serve(AnthropicMessages)
+}
+
+/// `guard` first, `guard-input` last, and `middle` between them.
+fn guarded(
+    gw: Gateway,
+    middle: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
+) -> Result<Gateway, Fault> {
+    let terms = Terms(vec!["bomb", "launch code"]);
+    middle(gw.plugin("guard", Guard(terms.clone()))?)?
         .plugin("guard-input", GuardInput(terms))?
         .target("openai")
+}
+
+/// The guard around a cache, and `extra` registered after the cache and
+/// before `guard-input`.
+fn gateway_with(
+    mock: &MockTransport,
+    extra: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
+) -> Result<Gateway, Fault> {
+    guarded(base(mock)?, |gw| extra(gw.plugin("cache", Cache)?))
+}
+
+fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
+    gateway_with(mock, Ok)
 }
 
 /// A streamed OpenAI chat of one user message.

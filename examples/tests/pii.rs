@@ -48,7 +48,7 @@ async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
     Ok(())
 }
 
-/// A plugin registered later that adds to each call's input, as a RAG
+/// A plugin registered before `pii-input` that adds to each call's input, as a RAG
 /// or memory plugin does.
 struct Rag;
 
@@ -64,12 +64,10 @@ impl Plugin for Rag {
 }
 
 #[tokio::test]
-async fn what_a_later_plugin_adds_is_redacted_too() -> Result<(), Fault> {
+async fn what_an_earlier_plugin_adds_is_redacted_too() -> Result<(), Fault> {
     let mock = MockTransport::new();
     mock.reply(OPENAI, deltas(&["ok"]));
-    let gw = gateway(&mock)?
-        .plugin("rag", Rag)?
-        .after("pii-input", ["rag"])?;
+    let gw = gateway_with(&mock, |gw| gw.plugin("rag", Rag))?;
     let (status, _, sent) = ask_via(&gw, &mock, chat("hi".into(), json!({}))).await?;
     assert_eq!(status, StatusCode::OK);
     assert!(

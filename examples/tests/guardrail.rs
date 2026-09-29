@@ -122,13 +122,13 @@ async fn the_guard_is_registered_first() -> Result<(), Fault> {
     let mock = MockTransport::new();
     let (status, body) = send(&gateway(&mock)?, chat("cached", "hi".into())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    let late = gateway(&mock)?.after("guard", ["cache"])?;
+    let late = guarded(base(&mock)?.plugin("cache", Cache)?, Ok)?;
     let (status, body) = send(&late, chat("cached", "hi".into())).await;
     assert!(status == StatusCode::OK && body.contains("bomb"), "{body}");
     Ok(())
 }
 
-/// A plugin registered later that adds to each call's input, as a RAG
+/// A plugin that adds to each call's input, as a RAG
 /// or memory plugin does.
 struct Rag;
 
@@ -143,13 +143,13 @@ impl Plugin for Rag {
     }
 }
 
-// Input filters run in plugin order: after it, the guard sees what the
-// later plugin adds; before it, what it adds reaches the provider.
+// Input filters run in registration order: a plugin registered before
+// `guard-input` has what it adds checked; one registered after it does not.
 #[tokio::test]
-async fn the_input_check_runs_after_a_later_plugin_adds_text() -> Result<(), Fault> {
+async fn the_input_check_sees_what_an_earlier_plugin_adds() -> Result<(), Fault> {
     let mock = MockTransport::new();
-    let gw = gateway(&mock)?.plugin("rag", Rag)?;
-    let (status, body) = send(&gw.after("guard-input", ["rag"])?, chat("gpt", "hi".into())).await;
+    let gw = gateway_with(&mock, |gw| gw.plugin("rag", Rag))?;
+    let (status, body) = send(&gw, chat("gpt", "hi".into())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(mock.sent().is_empty());
     mock.reply(OPENAI, deltas(&["ok"]));
