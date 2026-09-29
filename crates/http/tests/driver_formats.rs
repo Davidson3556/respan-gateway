@@ -348,8 +348,8 @@ fn scenarios() -> Vec<Scenario> {
         (
             "a request that cannot be translated",
             || {
-                let tools = r#"{"model":"claude-x","messages":[],"tools":[{"type":"function","function":{"name":"f"}}]}"#;
-                post_keyed(CHAT, tools)
+                let body = r#"{"model":"claude-x","messages":[],"response_format":{"type":"json_object"}}"#;
+                post_keyed(CHAT, body)
             },
             |_| {},
             Want {

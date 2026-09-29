@@ -148,3 +148,20 @@ async fn a_zero_retention_pdf_is_converted_but_never_remembered() -> Result<(), 
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn an_agent_request_with_tools_and_a_pdf_falls_back_to_claude() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+    mock.reply(PDF, mock::json(StatusCode::OK, CLAUDE_OK));
+    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"])))?;
+    let tool = r#"{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}"#;
+    let body = REQUEST.replace(r#"{"model""#, &format!(r#"{{"tools":[{tool}],"model""#));
+    assert_eq!(send(&gw, "acme", &body).await, StatusCode::OK);
+    let sent: serde_json::Value =
+        serde_json::from_slice(mock.sent()[1].body()).map_err(|_| Fault::internal("json"))?;
+    assert_eq!(sent["tools"][0]["name"], "read");
+    assert_eq!(sent["tools"][0]["input_schema"]["type"], "object");
+    assert_eq!(sent["messages"][0]["content"][1]["type"], "document");
+    Ok(())
+}
