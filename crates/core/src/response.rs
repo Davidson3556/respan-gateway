@@ -146,6 +146,12 @@ impl Response {
     /// it or fall back. One whose call streams the request's inputs returns
     /// at once. `Err` if it fails first, such as with a provider's error
     /// answer, which a refusal sends as it came.
+    ///
+    /// A response with no content is read, and held, to its end, so bound
+    /// one that may never end. A decoder that panics ends its call
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) and unwinds through this
+    /// future, so a plugin's own task or a race that swallows the panic
+    /// loses it.
     pub async fn until_content(self) -> Result<Response, Fault> {
         self.read_until(false).await
     }
@@ -154,7 +160,10 @@ impl Response {
     /// race calls for completion; sent, it goes as it would have unread.
     /// Returned with how it ended, `Ok` for one whose call streams the
     /// request's inputs, unread. Otherwise as
-    /// [`until_content`](Response::until_content).
+    /// [`until_content`](Response::until_content), a panic included: the
+    /// awaiting plugin unwinds, and the request is refused
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) as any plugin panic is,
+    /// where a response read as it is sent aborts after its first bytes.
     pub async fn until_end(self) -> Result<(Response, Result<(), Fault>), Fault> {
         let resp = self.read_until(true).await?;
         let end = resp.end().cloned().unwrap_or(Ok(()));
@@ -165,14 +174,17 @@ impl Response {
     async fn read_until(mut self, to_end: bool) -> Result<Response, Fault> {
         // What is ahead was judged by an earlier read.
         let mut content = self.streams || !self.ahead.is_empty();
+        // Noted as a batch is read, not found again by scanning them all.
+        let mut end = self.end().cloned();
         loop {
-            match self.end() {
+            match &end {
                 Some(Err(fault)) if !content => return Err(fault.clone()),
                 Some(_) => return Ok(self),
                 None if self.streams || (content && !to_end) => return Ok(self),
                 None => {
                     let (batch, read) = self.body.next().await;
                     content |= read;
+                    end = batch.end.clone();
                     if !batch.is_empty() {
                         self.ahead.push_back(batch);
                     }
@@ -321,7 +333,11 @@ impl Source {
                 return (batch, content);
             }
         };
-        let frame = body.next().await;
+        let mut frame = body.next().await;
+        // A request encoder that panicked, unseen by the transport, fails it.
+        if let Some(fault) = call.as_ref().and_then(|c| locked(c).failure()) {
+            frame = Some(Err(fault));
+        }
         let is_broken = matches!(frame, Some(Err(_)));
         let mut batch = Batch::default();
         let mut content = false;

@@ -170,7 +170,10 @@ impl Gateway {
 
     /// Resolves once every request handed to this gateway and every end hook
     /// has finished: await it on shutdown, under a deadline of your own. A
-    /// gateway changed after being cloned is a new one with its own requests.
+    /// request counts from the moment `handle` is called, while its body is
+    /// still being read too. A gateway changed after being cloned, or while
+    /// requests run, is a new one with its own requests: await the one that
+    /// took them.
     pub async fn idle(&self) {
         self.inner.in_flight.idle().await;
     }
@@ -251,6 +254,8 @@ impl Gateway {
             let other = "the format that accepts this request answers with other heads";
             return unwritten(Fault::internal(other));
         }
+        // In flight while its body is read, so `idle` waits for it.
+        let reading = InFlight::enter(&self.inner.in_flight);
         let (body, later, broken) = match streams {
             true => (None, Some(Later::new(body)), None),
             false => match read_whole(body).await {
@@ -272,6 +277,7 @@ impl Gateway {
         let (outcome, ended) = oneshot::channel();
         let settling = cx.settling.clone();
         let mut hooks = EndHooks::new(&self.inner.in_flight, cx, Some(outcome));
+        drop(reading);
         // The request's end hooks run after its calls'.
         hooks.after = Some(settling);
         let resp = match broken {

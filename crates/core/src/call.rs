@@ -1,8 +1,8 @@
 use std::any::Any;
-use std::future::{Future, ready};
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Poll, Waker};
 
 use bytes::{Bytes, BytesMut};
@@ -173,6 +173,7 @@ async fn send(
         sent: false,
         answered: false,
         began: false,
+        failed: Arc::default(),
     };
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
     let sent = async {
@@ -205,7 +206,9 @@ async fn send_call(
     // A streaming request's later inputs follow, unless the call has its own.
     let later = cx.later.as_ref().filter(|_| px.input.own_format.is_none());
     let client = relay.then(|| &*px.client.head as &dyn Any);
-    let (mut head, mut first, encoder) = first_frame(&px.input, p, client, later.is_some())?;
+    let (mut head, mut first, encoder, done) = first_frame(&px.input, p, client, later.is_some())?;
+    // A body done as it opens has no later inputs.
+    let later = later.filter(|_| !done);
     for edit in std::mem::take(unlocked(&mut px.call_edits)) {
         edit(&mut head, &mut first)?;
     }
@@ -222,7 +225,8 @@ async fn send_call(
         Some(later) => {
             let (input, filters) = (px.input.clone(), px.inputs.clone());
             let frames = inputs(later.clone(), input, filters, &px.cut);
-            first_frame.chain(later_frames(frames, encoder)).boxed()
+            let rest = later_frames(frames, encoder, px.failed.clone());
+            first_frame.chain(rest).boxed()
         }
     };
     let mut call = Exchange::new(head, body);
@@ -243,22 +247,26 @@ async fn send_call(
 }
 
 /// The call's head as its format writes it, from the `client`'s head if it
-/// relays the client's message, its first frame (the client's bytes if
-/// relayed unread, else the encoder's opening bytes, the input, and the end
-/// unless it `streams`), and the encoder. Content that cannot be written is
-/// whose it is (`Whose`).
+/// relays the client's message; its first frame: the encoder's opening bytes,
+/// then the client's bytes if relayed unread, else the input written from
+/// its value, then the end unless it `streams`; the encoder; and whether the
+/// body is done as it opens, when the first frame is the opening bytes
+/// alone. Content that cannot be written is whose it is (`Whose`).
 fn first_frame(
     input: &Input,
     p: &Provider,
     client: Option<&dyn Any>,
     streams: bool,
-) -> Result<(Head, Bytes, Box<dyn AnyEncoder>), Fault> {
+) -> Result<(Head, Bytes, Box<dyn AnyEncoder>, bool), Fault> {
     let ((mut body, first), whose) = input.sent(client.is_some())?;
     let mut encoder = p.format.request_encoder(client, &mut body, streams);
     let head = encoder.head(first.as_ref());
     // What cannot be opened is the format's to say, whoever's input it is.
+    let mut opening = BytesMut::new();
+    if encoder.open(&mut opening)? {
+        return Ok((head, opening.freeze(), encoder, true));
+    }
     let mut more = BytesMut::new();
-    encoder.open(&mut more)?;
     let mut write = || {
         if let Some(first) = &first {
             encoder.input(first, &mut more)?;
@@ -269,36 +277,114 @@ fn first_frame(
         }
     };
     write().map_err(|fault| whose.fault(fault))?;
-    if !more.is_empty() {
-        body = [&body[..], &more[..]].concat().into();
+    if !opening.is_empty() || !more.is_empty() {
+        body = [&opening[..], &body[..], &more[..]].concat().into();
     }
-    Ok((head, body, encoder))
+    Ok((head, body, encoder, false))
 }
 
-/// A streamed call's frames after its first: each of `frames` written by
-/// `encoder`, then the end, if it has bytes. A frame that cannot be written
-/// is whose it is (`Whose`); a failure aborts the body.
+/// Where a streamed call's request encoder panicked, if it did.
+type Failure = Arc<OnceLock<Fault>>;
+
+/// A streamed call's frames after its first, as its body: each of `frames`
+/// written by `encoder`, then, if it has bytes, the end. A frame that cannot
+/// be written is whose it is (`Whose`).
+///
+/// The body ends with the first failure, its own or the frames' (the
+/// client's body breaking, or the inputs cut off: `abandoned`), as an
+/// `Err`, and only after the encoder was told that failure as its end, so
+/// no clean end follows one. A panic in the encoder ends it `internal`, in
+/// the body and, as the transport may read the body where nothing unwinds
+/// to the call, in `failed`.
 fn later_frames(
     frames: BoxStream<'static, Result<InputFrame, Fault>>,
-    mut encoder: Box<dyn AnyEncoder>,
+    encoder: Box<dyn AnyEncoder>,
+    failed: Failure,
 ) -> impl Stream<Item = Result<Bytes, Fault>> {
-    let frames = frames.map(|frame| frame.map(Some));
-    let end = stream::iter([Ok(None)]);
-    frames.chain(end).filter_map(move |frame| {
-        let mut out = BytesMut::new();
-        let written = frame.and_then(|frame| match frame {
-            Some(frame) => {
-                let written = encoder.input(&frame.input, &mut out);
-                written.map_err(|f| frame.whose.fault(f))?;
-                Ok(Some(out.freeze()))
+    let writing = Writing {
+        frames,
+        encoder,
+        failed,
+        done: false,
+        abort: None,
+    };
+    stream::unfold(
+        writing,
+        |mut w| async move { w.next().await.map(|b| (b, w)) },
+    )
+}
+
+struct Writing {
+    frames: BoxStream<'static, Result<InputFrame, Fault>>,
+    encoder: Box<dyn AnyEncoder>,
+    failed: Failure,
+    /// Whether the frames ended, or the body failed.
+    done: bool,
+    /// The failure to end the body with, once its last bytes are out.
+    abort: Option<Fault>,
+}
+
+impl Writing {
+    async fn next(&mut self) -> Option<Result<Bytes, Fault>> {
+        loop {
+            if let Some(fault) = self.abort.take() {
+                return Some(Err(fault));
             }
-            None => {
-                encoder.end(&Ok(()), &mut out)?;
-                Ok((!out.is_empty()).then(|| out.freeze()))
+            if self.done {
+                return None;
             }
-        });
-        ready(written.transpose())
-    })
+            let frame = self.frames.next().await;
+            let mut out = BytesMut::new();
+            let encoder = &mut self.encoder;
+            let step = std::panic::catch_unwind(AssertUnwindSafe(|| match &frame {
+                Some(Ok(frame)) => {
+                    let written = encoder.input(&frame.input, &mut out);
+                    written.map_err(|f| frame.whose.fault(f)).map(|()| true)
+                }
+                None => encoder.end(&Ok(()), &mut out).map(|()| false),
+                Some(Err(fault)) => Err(fault.clone()),
+            }));
+            match step {
+                Err(_) => return Some(Err(self.panicked())),
+                Ok(Ok(more)) => {
+                    self.done = !more;
+                    // A frame is one, an empty one too; the end, if it has bytes.
+                    if more || !out.is_empty() {
+                        return Some(Ok(out.freeze()));
+                    }
+                }
+                Ok(Err(fault)) => {
+                    self.done = true;
+                    // Its partial output is dropped; a failed end was told.
+                    out.clear();
+                    if frame.is_some() {
+                        let ended =
+                            AssertUnwindSafe(|| self.encoder.end(&Err(fault.clone()), &mut out));
+                        match std::panic::catch_unwind(ended) {
+                            Ok(Ok(())) => {}
+                            Ok(Err(_)) => out.clear(),
+                            Err(_) => {
+                                self.panicked();
+                                out.clear();
+                            }
+                        }
+                    }
+                    self.abort = Some(fault);
+                    if !out.is_empty() {
+                        return Some(Ok(out.freeze()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The encoder panicked: the body and the call end `internal`.
+    fn panicked(&mut self) -> Fault {
+        self.done = true;
+        let fault = Fault::internal(PANICKED);
+        let _ = self.failed.set(fault.clone());
+        fault
+    }
 }
 
 /// One call's provider edge, whose end hooks run exactly once.
@@ -387,6 +473,15 @@ impl CallEdge {
             plugin.on_provider(self.cx()).await?;
         }
         Ok(())
+    }
+
+    /// How the request encoder failed, if it panicked and the call has not
+    /// ended.
+    pub(crate) fn failure(&mut self) -> Option<Fault> {
+        match self.is_finished() {
+            true => None,
+            false => self.cx().failed.get().cloned(),
+        }
     }
 
     /// Turn `batch` of this call's response into what its reader gets, as

@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
 use std::collections::VecDeque;
+use std::future::ready;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use bytes::Bytes;
@@ -235,7 +236,8 @@ pub(crate) struct Frame {
 
 /// `later`'s inputs as they arrive, decoded as they pass, through the
 /// client edge's input filters, then `call`'s. The body is taken on the
-/// first poll. It stops when `cut` is.
+/// first poll. Cut off, when `cut` is idle, before the inputs ended, it ends
+/// `Err(abandoned)`: only the inputs' own end is a clean one.
 pub(crate) fn stream(
     later: Arc<Later>,
     like: Input,
@@ -252,11 +254,21 @@ pub(crate) fn stream(
         ready: VecDeque::new(),
         ended: false,
     };
-    let frames = stream::unfold(
-        reading,
-        |mut r| async move { r.next().await.map(|i| (i, r)) },
-    );
-    frames.take_until(cut.idle()).boxed()
+    let frames = stream::unfold(reading, |mut r| async move {
+        r.next().await.map(|i| (Some(i), r))
+    });
+    // `None` marks the inputs' own end, which the cut must not pass for.
+    let frames = frames.chain(stream::once(ready(None)));
+    let cut = frames.take_until(cut.idle());
+    stream::unfold(Some(cut.boxed()), |cut| async move {
+        let mut cut = cut?;
+        match cut.next().await {
+            Some(Some(frame)) => Some((frame, Some(cut))),
+            Some(None) => None,
+            None => Some((Err(Fault::abandoned()), None)),
+        }
+    })
+    .boxed()
 }
 
 /// A body being read into frames.
@@ -303,32 +315,35 @@ impl Reading {
             let bytes = body.next().await.transpose();
             self.read |= matches!(bytes, Ok(Some(_)));
             // A failure ends the inputs, and every filter with it.
-            let read = guarded(|| self.frames(bytes?)).or_else(|f| guarded(|| self.end(Err(f))));
-            match read {
-                Ok(frames) => self.ready.extend(frames.into_iter().map(Ok)),
-                Err(fault) => {
-                    self.ended = true;
-                    self.ready.push_back(Err(fault));
-                }
+            let mut read = guarded(|| self.frames(bytes?));
+            if let Err(fault) = read {
+                let tail = guarded(|| self.end(Err(fault)));
+                read = tail.map(|tail| self.ready.extend(tail.into_iter().map(Ok)));
+            }
+            if let Err(fault) = read {
+                self.ended = true;
+                self.ready.push_back(Err(fault));
             }
         }
     }
 
     /// The frames of `bytes`, or of the body's end (`None`), through the
-    /// filters, then at the end what they kept back.
-    fn frames(&mut self, bytes: Option<Bytes>) -> Result<Vec<Frame>, Fault> {
+    /// filters, then at the end what they kept back, made `ready`. What was
+    /// decoded before an `Err` is `ready` before it, as a response's is.
+    fn frames(&mut self, bytes: Option<Bytes>) -> Result<(), Fault> {
         let base = &self.like.base;
         let decoder =
             (self.decoder).get_or_insert_with(|| base.format.request_decoder(&*base.head));
         let (values, end) = decoder.decode(bytes);
-        let mut frames = match values {
-            Some(values) => self.filter(values)?,
-            None => Vec::new(),
-        };
-        if let Some(end) = end {
-            frames.extend(self.end(end)?);
+        if let Some(values) = values {
+            let frames = self.filter(values)?;
+            self.ready.extend(frames.into_iter().map(Ok));
         }
-        Ok(frames)
+        if let Some(end) = end {
+            let tail = self.end(end)?;
+            self.ready.extend(tail.into_iter().map(Ok));
+        }
+        Ok(())
     }
 
     /// Run `values` through the client edge's filters, then the call's;

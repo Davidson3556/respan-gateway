@@ -131,11 +131,18 @@ pub trait Encoder<T, H>: Send + 'static {
 
     /// Write the body's opening bytes, such as an SSE comment for a stream
     /// that may be quiet, which take a response's head out with them; not
-    /// for a refusal. `Ok(true)` if a response's body is done before it
-    /// began, as its head says: its head goes at once and nothing more is
-    /// read, its call ending `Ok` if its decoder, told the body ended, says
-    /// it is complete, else abandoned. `Err` if this body cannot be
-    /// written: a call fails, a response is refused.
+    /// for a refusal. `Ok(true)` if the body is done before it began, and
+    /// nothing more follows. `Err` if this body cannot be written: a call
+    /// fails, a response is refused.
+    ///
+    /// The same on either side. The opening bytes come first: on a call,
+    /// before the client's bytes or the input written, whatever the call
+    /// relays. Done, on a response, its head goes at once and nothing more
+    /// is read, its call ending `Ok` if its decoder, told the body ended,
+    /// says it is complete, else abandoned. Done, on a call, its body is the
+    /// opening bytes alone: neither the client's bytes, nor an input, nor
+    /// the end is written, and a streaming request's later inputs are not
+    /// read.
     fn open(&mut self, _out: &mut BytesMut) -> Result<bool, Fault> {
         Ok(false)
     }
@@ -146,6 +153,12 @@ pub trait Encoder<T, H>: Send + 'static {
 
     /// Write how the body ends. On `Err` it is written again as that
     /// failure; if that fails too, the body is aborted.
+    ///
+    /// A call's request body ends with the failure it has, and `end` is
+    /// told it, never `Ok` after one: the client's body broke, the inputs
+    /// were cut off ([`codes::ABANDONED`](crate::codes::ABANDONED)) or an
+    /// input could not be written. What it writes for one goes before the
+    /// `Err` the transport's body then ends with; nothing follows that.
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault>;
 }
 

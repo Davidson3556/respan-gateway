@@ -24,6 +24,7 @@ and call once. Tests state its promises; the
 | [0013](decisions/0013-no-http-in-core.md) | No `http` types in the core: a wire is a pair of head types |
 | [0014](decisions/0014-api-trims.md) | API trims: one way to say each thing |
 | [0015](decisions/0015-core-trims.md) | Core trims: `relayed` and `streams` on `Exchange`, no `Outcome`, `is_head_only` |
+| [0016](decisions/0016-core-fixes.md) | Core fixes: a cut request body never looks complete; open's bytes first; linear reads |
 
 ## Two edges
 
@@ -106,6 +107,12 @@ head and a relayed response's head is the provider's; a translated one
 starts anew. The encoder writes the head (`Encoder::head`) once, before
 any bytes.
 
+A call's request body ends `Err`, never clean, if the client's body broke,
+an input could not be written, or the call or request ended first, and its
+encoder's `end` is told that failure, not `Ok`
+([0016](decisions/0016-core-fixes.md)). `Encoder::open`'s bytes come first
+on either side, and `Ok(true)` means nothing more follows.
+
 A whole body is decoded only when read, so a plain relay's call carries
 the client's bytes, which its request encoder may edit; a streaming
 request's frames are decoded as they pass. The adapter says whether
@@ -165,6 +172,9 @@ tokio runtime, which runs end hooks detached. The core depends on no
 6. **Close.** A request closes when its last bytes are out or the client
    leaves, ending its open calls `abandoned` first; a call when it fails,
    its body ends, or its reader stops. Open filters cannot change the end.
+   A request counts as in flight for `Gateway::idle` from `handle`, while
+   its body is read. Every user-code call, a request encoder's later
+   frames included, is guarded: a panic ends its call `internal`.
 
 ## Routing
 
@@ -188,7 +198,8 @@ for name in &self.0 {
 last.map(Some)
 ```
 
-`until_end` reads to the end and holds it all, returned with how it
+A response with no content is read, and held, to its end. `until_end` reads
+to the end and holds it all, returned with how it
 ended; sent, it goes out as it would have unread. Either way the
 call ends when the batch holding its end is sent, read or dropped
 ([0011](decisions/0011-read-until-content-or-end.md)). `sdks/routing`

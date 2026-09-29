@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -48,6 +48,10 @@ pub struct ProviderContext {
     pub(crate) answered: bool,
     /// Set once the response decoded its first value or its body broke off.
     pub(crate) began: bool,
+    /// Set if the request encoder panicked on a later frame, which the
+    /// transport may be reading where nothing unwinds to the call: its
+    /// response then ends with it.
+    pub(crate) failed: Arc<OnceLock<Fault>>,
 }
 
 impl std::fmt::Debug for ProviderContext {

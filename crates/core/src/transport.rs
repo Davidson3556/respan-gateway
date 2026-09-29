@@ -190,7 +190,9 @@ pub trait Transport: Send + Sync + 'static {
     /// client's head, so strip what the protocol forbids a proxy to pass
     /// on. Its body carries the inputs, one per data frame: a whole call's
     /// at once, its size exact; a call that `streams` has them as they
-    /// arrive, so send its body as it comes. The transport decides whose
+    /// arrive, so send its body as it comes; a body that breaks off or is cut
+    /// ends with an `Err`, never as a complete one, so abort the message
+    /// then. The transport decides whose
     /// keys reach the provider. Its extensions are the call's; the kernel
     /// sets `call.relayed` on a relay alone.
     ///

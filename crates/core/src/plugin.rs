@@ -73,9 +73,11 @@ pub trait Plugin: Send + Sync + 'static {
 
     /// Once per call whose `on_provider` started: when it fails, its
     /// response's end is read, or it is dropped or cut off (abandoned). Runs
-    /// like `on_client_end`, before it, with the call's `end`. What else is
-    /// known of a call is on its context, such as
-    /// [`is_sent`](ProviderContext::is_sent).
+    /// like `on_client_end`, before it, with the call's `end`. A call whose
+    /// request encoder panicked on a later frame ends
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL), wherever its transport
+    /// read the body. What else is known of a call is on its context, such
+    /// as [`is_sent`](ProviderContext::is_sent).
     async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {}
 }
 

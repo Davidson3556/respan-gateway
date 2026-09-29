@@ -159,8 +159,9 @@ impl ClientContext {
     /// The request's inputs as `T`, as filters left them: a copy of a whole
     /// request's one; a streaming request's as they arrive, read once, so no
     /// call gets them, taken when first awaited and given back if none was
-    /// read. Ends with the client's inputs, `Err` if the body broke; one
-    /// `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
+    /// read. Ends with the client's inputs, `Err` if the body broke, and
+    /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the request ended
+    /// first, never as if they were complete; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
     /// type or if another reader took them.
     pub fn take_inputs<T: Any + Clone + Send>(&mut self) -> BoxStream<'static, Result<T, Fault>> {
         if is_input::<T>(&*self.format) != Ok(true) {
