@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 
 /// How long anything in these tests may take before it counts as a hang.
@@ -83,11 +82,14 @@ pub fn client() -> reqwest::Client {
         .unwrap_or_else(|e| panic!("client: {e}"))
 }
 
-/// An address nothing listens on: a port the OS gave, then closed.
+/// An address nothing listens on: a port bound but never listened on, and
+/// kept bound for the rest of the process so no other test can take it.
+/// A connection to it is refused.
 pub async fn closed_port() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    std::mem::forget(socket);
     format!("http://{addr}")
 }
 
