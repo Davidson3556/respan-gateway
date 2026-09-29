@@ -864,3 +864,72 @@ async fn l5_a_turn_being_settled_as_the_client_left_is_settled() -> Result<(), F
     );
     Ok(())
 }
+/// When a request ends, for timing.
+#[derive(Clone, Default)]
+struct EndAt(Arc<Mutex<Vec<(std::time::Instant, String)>>>);
+
+#[respan_gateway_core::async_trait]
+impl Plugin for EndAt {
+    async fn on_client_end(&self, _: &ClientContext, end: &Result<(), Fault>) {
+        let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
+        lock(&self.0).push((std::time::Instant::now(), code));
+    }
+}
+
+/// A client that leaves while an input wrap waits (a remote check, a
+/// hold): the session must end when the client leaves, and the input it
+/// waited on must not reach the provider afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result<(), Fault> {
+    struct Slow;
+    #[respan_gateway_core::async_trait]
+    impl Plugin for Slow {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.wrap(|events: Events<ClientEvent>| {
+                events.and_then(|e| async move {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    Ok(e)
+                })
+            })?;
+            Ok(None)
+        }
+    }
+    let openai = FakeOpenAi::start().await;
+    let provider = openai.base_url().replace("http://", "ws://");
+    let at = EndAt::default();
+    let gw = Gateway::new()
+        .serve(realtime())?
+        .provider(
+            "openai",
+            realtime(),
+            WsTransport::new(provider.trim_end_matches("/v1"))?,
+        )?
+        .target("openai")?
+        .plugin("at", at.clone())?
+        .plugin("slow", Slow)?;
+    let addr = listen(&gw).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let left = std::time::Instant::now();
+    drop(ws);
+    gw.idle().await;
+    let ended = lock(&at.0).clone();
+    let after = ended
+        .first()
+        .map(|(t, c)| (t.duration_since(left).as_millis(), c.clone()));
+    eprintln!(
+        "ended {after:?}; provider read {:?}",
+        read_by_provider(&openai)
+    );
+    assert!(
+        read_by_provider(&openai).is_empty(),
+        "the provider was sent a turn after its client left"
+    );
+    assert!(
+        after.as_ref().is_some_and(|(ms, _)| *ms < 200),
+        "the session ended {after:?} after the client left"
+    );
+    Ok(())
+}
