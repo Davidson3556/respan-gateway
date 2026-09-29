@@ -177,7 +177,10 @@ impl Codec for Passthrough {
     }
 
     fn accepts(&self, head: &RequestHead) -> bool {
-        crate::reads_one_way(head.uri.path())
+        // A method is case-sensitive, but some readers (ASP.NET) compare it
+        // without case: `post` must not pass a format that matches `POST`.
+        !head.method.as_str().bytes().any(|b| b.is_ascii_lowercase())
+            && crate::reads_one_way(head.uri.path())
     }
 
     fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Sent<Passthrough>>> {

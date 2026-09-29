@@ -137,6 +137,9 @@ fn passes(name: &HeaderName) -> bool {
             | "range"
             | "x-http-method-override"
             | "x-method-override"
+            | "x-http-method"
+            | "x-original-url"
+            | "x-rewrite-url"
             | "accept-encoding"
     );
     !hop && !denied && !name.starts_with("if-")
@@ -257,6 +260,9 @@ mod tests {
             ("range", "bytes=0-1"),
             ("accept-encoding", "gzip"),
             ("x-http-method-override", "GET"),
+            ("x-http-method", "GET"),
+            ("x-original-url", "/v1/chat/completions"),
+            ("x-rewrite-url", "/v1/chat/completions"),
             ("te", "trailers"),
             ("upgrade", "websocket"),
             ("openai-beta", "v9"),

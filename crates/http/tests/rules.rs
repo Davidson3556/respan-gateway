@@ -286,6 +286,9 @@ async fn a_relay_passes_the_clients_end_to_end_headers() {
         "x-forwarded-host",
         "x-http-method-override",
         "x-method-override",
+        "x-http-method",
+        "x-original-url",
+        "x-rewrite-url",
         "if-none-match",
         "range",
     ];

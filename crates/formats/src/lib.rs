@@ -70,7 +70,11 @@ pub fn clean_path(path: &str) -> String {
             _ => kept.push(segment.to_owned()),
         }
     }
-    kept.iter().fold(String::new(), |out, s| out + "/" + s)
+    // Case-insensitive routers (ASP.NET Core, Express) read `/V1/Chat` as
+    // `/v1/chat`: matching is the liberal reading.
+    kept.iter()
+        .fold(String::new(), |out, s| out + "/" + s)
+        .to_ascii_lowercase()
 }
 
 /// A request's path as a relay sends it on: the segments of the path
@@ -107,7 +111,11 @@ pub(crate) fn forwarded_path(path: &str) -> String {
 /// [`clean_path`] reads.
 pub(crate) fn reads_one_way(path: &str) -> bool {
     let decoded = respan_gateway_http::percent_decode(path);
-    !decoded.contains([';', '\\', '%']) && decoded.split('/').all(|s| s != "." && s != "..")
+    !decoded.contains([';', '\\', '%'])
+        && !decoded.chars().any(|c| c.is_ascii_control())
+        && decoded
+            .split('/')
+            .all(|s| s != "." && s != ".." && !s.ends_with(['.', ' ']))
 }
 
 /// Whether a request's path ends in `suffix`, however it is spelled (see
@@ -343,6 +351,33 @@ mod path_readers {
         dots(percent_decode(p).split('/').map(str::to_owned))
     }
 
+    /// A C reader: the decoded path ends at its first NUL.
+    fn nul_cut(p: &str) -> String {
+        let decoded = percent_decode(p);
+        dots(
+            decoded
+                .split('\0')
+                .next()
+                .unwrap_or_default()
+                .split('/')
+                .map(str::to_owned),
+        )
+    }
+
+    /// Windows/IIS: trailing dots and spaces cut from each segment.
+    fn trailing(p: &str) -> String {
+        dots(
+            percent_decode(p)
+                .split('/')
+                .map(|s| s.trim_end_matches(['.', ' ']).to_owned()),
+        )
+    }
+
+    /// Case-insensitive routing (ASP.NET Core, Express by default).
+    fn case_insensitive(p: &str) -> String {
+        decode_first(p).to_ascii_lowercase()
+    }
+
     /// Every path of up to three more segments after a chat prefix, from
     /// the spellings readers differ on: for each one passthrough accepts,
     /// each reader of the forwarded path reads what matching read, so none
@@ -377,6 +412,14 @@ mod path_readers {
             "arn%3Aaws%2Fp",
             "m:generate",
             "%FF",
+            "Completions",
+            "COMPLETIONS",
+            "Chat",
+            "completions%00",
+            "%00",
+            "completions.",
+            "completions%20",
+            "completions%2e",
         ];
         let (mut bad, mut accepted, mut n) = (Vec::new(), 0, 0);
         for prefix in ["/v1/chat", "/v1/chat/completions"] {
@@ -401,6 +444,9 @@ mod path_readers {
                     ("URL-standard", url_standard(&sent)),
                     ("servlet", servlet(&sent)),
                     ("decode-first", decode_first(&sent)),
+                    ("NUL-cut", nul_cut(&sent)),
+                    ("trailing-dot", trailing(&sent)),
+                    ("case-insensitive", case_insensitive(&sent)),
                 ] {
                     if clean_path(&read) != matched {
                         bad.push(format!(
