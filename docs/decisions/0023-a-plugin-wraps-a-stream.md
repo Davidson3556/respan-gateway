@@ -156,3 +156,35 @@ Loop 5 (simplicity and correctness), one pass:
   every open call before its own end hooks start, and `Ended` dropped
   drops the call with the request, so no call outlives it and no cycle
   forms (`Ended` is held by the edge, never by the call).
+- **An input refused before the provider's head is the refusal.** A
+  transport that fails its send when its body breaks (reqwest does) turned
+  a wrap's `bad_request` into `upstream`. When `dial`'s future fails after
+  the inputs failed, the call and the reply end with the inputs' fault, as
+  0023's failure rule says.
+- **`Gateway::handle` resolves `Result<(), Fault>`**, `Ok` once the client
+  edge has its reply, `Err` when no edge will write one (`not_found`,
+  `internal`, `abandoned`), in place of a future of a future. The edge
+  already knows when the reply's end is out, as it calls `Ended` then, so
+  the second future repeated it; HTTP's edge hands its adapter that end
+  with the response, so `http::serve` still returns it. A request still
+  counts for `idle` from the call.
+- **Names.** `Format::opening` is `Format::input`, and `dial`'s first input
+  is `input`: the one input that came with a head had two names. `Half` is
+  `Headed` (0020).
+- **Kept, not changed:**
+  - `ClientContext`'s output stages stay two fields, `outputs` and
+    `wrapped`. A response to the client runs through one more filter
+    stage than it has wraps (the filters added after the last wrap run
+    first); one list would need a first stage with no wrap, an invariant
+    the types no longer carry, and a branch for it where the reply is
+    built.
+  - `ProviderContext::extensions` stays beside `extensions_mut`, though
+    `px.client().extensions()` returns the same map. The pair reads and
+    writes the call's extensions under one name; without it, a hook would
+    read a call's own mark (`Call::with_extension`) through `client()` and
+    write it through `px`.
+- Pinned by `wrap.rs` (`a_cut_with_a_fault_of_its_own_ends_the_call_with_it`,
+  `l5_a_refusal_before_the_providers_head_is_the_refusal`), `l5_wrap.rs`
+  (output wraps that end early, never read, panic or outlive their
+  source), `stress.rs` (`wrapped_sessions_dropped_at_random_end_once`) and
+  `wrap`'s compiled rustdoc example.
