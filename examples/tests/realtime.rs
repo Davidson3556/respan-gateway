@@ -1609,31 +1609,6 @@ async fn bills_images() -> std::net::SocketAddr {
     at
 }
 
-/// L8-R5: an image the client sends enters every later turn's context. The
-/// hold counts every event but audio, so four images (billed 765 tokens each
-/// by the provider) on a wallet of 2,000 never take it below zero: the
-/// turn is refused, not overspent.
-#[tokio::test(flavor = "multi_thread")]
-async fn l8_an_image_the_client_sends_is_held() {
-    let at = bills_images().await;
-    let (gw, wallets, addr) = front(at, 2 * TURN).await;
-    let mut ws = client(addr).await;
-    hear(&mut ws).await;
-    // A small PNG's data URL: a few hundred bytes.
-    let png = format!("data:image/png;base64,{}", "iVBORw0KGgo".repeat(20));
-    let parts: Vec<Value> = (0..4)
-        .map(|_| json!({ "type": "input_image", "image_url": png }))
-        .collect();
-    let item = json!({ "type": "message", "role": "user", "content": parts });
-    let create = json!({ "type": "conversation.item.create", "item": item });
-    say(&mut ws, create).await;
-    say(&mut ws, json!({ "type": "response.create" })).await;
-    while hear(&mut ws).await.is_some() {}
-    gw.idle().await;
-    let balance = wallets.available("sk-demo");
-    assert!(balance >= 0, "the wallet overspent: balance {balance}");
-}
-
 /// Content the provider adds in an event that is not a delta (an
 /// `mcp_call`'s output in an item event) is context too: after one of 40 KB,
 /// a wallet that covered the first turn refuses the second.
@@ -1734,4 +1709,89 @@ async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<
         "a hold outlived its session: spent {spent}, available {left}"
     );
     Ok(())
+}
+
+/// The doc says a hold counts "everything the session sends or receives
+/// except audio". Audio the client sends inside an item (an `input_audio`
+/// part of a `conversation.item.create`, which the Realtime API takes) is
+/// counted byte for byte: 60 KB of base64 audio (under 2 s of 24 kHz PCM)
+/// makes a wallet of 5,000 refuse a turn that costs 30.
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_the_client_sends_in_an_item_is_not_counted() {
+    let at = answering(|_| script(&["ok"], usage(20, 10))).await;
+    let (gw, wallets, addr) = front(at, 5_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let audio = "A".repeat(60_000);
+    let part = json!({ "type": "input_audio", "audio": audio });
+    let item = json!({ "type": "message", "role": "user", "content": [part] });
+    say(
+        &mut ws,
+        json!({ "type": "conversation.item.create", "item": item }),
+    )
+    .await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    let outcome = done_or_closed(&mut ws).await;
+    if outcome.is_ok() {
+        close(&mut ws).await;
+    }
+    gw.idle().await;
+    assert_eq!(
+        outcome,
+        Ok(()),
+        "a turn costing 30 was refused on a wallet of 5,000; spent {}",
+        wallets.spent("sk-demo")
+    );
+}
+
+/// "A token is at least a byte" does not hold for images: providers bill an
+/// image by its size in pixels, not its bytes. A 2048x768 black-and-white
+/// PNG is 270 bytes (360 in base64), and OpenAI's tile rule bills it
+/// 1,445 tokens (the mock here bills 765). Eight of them fit a hold on a
+/// wallet of 5,000, and the turn spends 6,125: the wallet is overspent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_small_image_billed_more_than_its_bytes_cannot_overspend() {
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAACAAAAAMAAQAAAACY27pnAAAA1UlEQVR42u3BAQ0AAADCoPdP7ewBFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANwMtAAGZvVjvAAAAAElFTkSuQmCC";
+    let at = bills_images().await;
+    let (gw, wallets, addr) = front(at, 5_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let url = format!("data:image/png;base64,{PNG}");
+    let parts: Vec<Value> = (0..8)
+        .map(|_| json!({ "type": "input_image", "image_url": url }))
+        .collect();
+    let item = json!({ "type": "message", "role": "user", "content": parts });
+    say(
+        &mut ws,
+        json!({ "type": "conversation.item.create", "item": item }),
+    )
+    .await;
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    if done_or_closed(&mut ws).await.is_ok() {
+        close(&mut ws).await;
+    }
+    gw.idle().await;
+    let balance = wallets.available("sk-demo");
+    assert!(
+        balance >= 0,
+        "the wallet overspent: balance {balance}, spent {}",
+        wallets.spent("sk-demo")
+    );
+}
+
+/// `Ok` at a `response.done`, or the Close the session ended with.
+async fn done_or_closed(ws: &mut Client) -> Result<(), Option<(u16, String)>> {
+    use respan_gateway_core::futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        let next = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        match next.expect("an event in time") {
+            Some(Ok(Message::Text(text))) if text.contains("\"response.done\"") => return Ok(()),
+            Some(Ok(Message::Close(frame))) => {
+                return Err(frame.map(|f| (f.code.into(), f.reason.to_string())));
+            }
+            Some(Ok(_)) => {}
+            _ => return Err(None),
+        }
+    }
 }

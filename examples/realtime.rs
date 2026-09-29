@@ -17,8 +17,11 @@
 //!   client says anything (an input wrap opens it with a `session.update`
 //!   of `max_output_tokens`, and caps the client's own), and a
 //!   `response.create` is rewritten to ask for at most `TURN` output tokens.
-//!   A turn holds everything the session sends or receives except audio,
-//!   counted in bytes (a token is at least a byte), plus that cap; it is refused, closing the client with 1008, when the
+//!   A turn holds everything the session sends or receives except audio
+//!   (the `audio` strings of `input_audio` parts too), counted in bytes (a
+//!   token of text is at least a byte) and `IMAGE` tokens per `input_image`
+//!   (an image is billed by pixels, not bytes), plus that cap; it is
+//!   refused, closing the client with 1008, when the
 //!   wallet cannot cover it, and its `response.done` settles what it cost. A
 //!   turn the provider starts on its own (server voice detection) is held
 //!   when its `response.created` passes, and cut with 1008 if the wallet
@@ -428,8 +431,8 @@ struct Wallet<L> {
 
 #[derive(Default)]
 struct Turns {
-    /// Bytes of everything the session sent or received except audio. A token
-    /// is at least a byte, so this bounds the tokens a turn reads.
+    /// Bound on the tokens of everything the session sent or received
+    /// except audio: see `context`.
     bytes: Amount,
     /// Holds of turns not yet done, oldest first, with what each holds.
     holds: VecDeque<(HoldId, Amount)>,
@@ -474,8 +477,8 @@ impl<L: Ledger> Wallet<L> {
     async fn before(self: Arc<Self>, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
         // Everything but audio is counted, so a new kind of context is too.
         if event.json["type"] != "input_audio_buffer.append" {
-            let said = event.json.to_string().len();
-            lock(&self.turns).bytes += Amount::try_from(said).unwrap_or_default();
+            let said = context(&event.json);
+            lock(&self.turns).bytes += said;
         }
         if event.json["type"] == "response.create" {
             let response = &mut event.json["response"];
@@ -554,8 +557,8 @@ impl<L: Ledger> Wallet<L> {
             }
         }
         if !kind.ends_with("audio.delta") {
-            let seen = event.json.to_string().len();
-            lock(&self.turns).bytes += Amount::try_from(seen).unwrap_or_default();
+            let seen = context(&event.json);
+            lock(&self.turns).bytes += seen;
         }
         Ok(event)
     }
@@ -590,6 +593,35 @@ fn account(credential: &Credential) -> Option<String> {
     let value = values.chain(credential.query()).next()?;
     let token = value.rsplit([' ', '.', '=']).next();
     Some(token.unwrap_or(value).to_owned())
+}
+
+/// The most tokens a provider bills for one image, whatever its bytes:
+/// OpenAI's tile rule at its largest (2048x768 at high detail, 8 tiles).
+/// A model on another rule (patches) can bill more, so a real deployment
+/// sets this per model.
+const IMAGE: Amount = 1_445;
+
+/// What an event adds to the context, as a bound on its tokens: its bytes
+/// (a token of text is at least a byte) without its audio (base64 in an
+/// `audio` string), and `IMAGE` for each image.
+fn context(event: &Value) -> Amount {
+    fn strip(v: &mut Value, images: &mut Amount) {
+        match v {
+            Value::Object(fields) => {
+                if fields.get("audio").is_some_and(Value::is_string) {
+                    fields.remove("audio");
+                }
+                *images += Amount::from(fields.get("type").is_some_and(|t| t == "input_image"));
+                fields.values_mut().for_each(|v| strip(v, images));
+            }
+            Value::Array(items) => items.iter_mut().for_each(|v| strip(v, images)),
+            _ => {}
+        }
+    }
+    let (mut event, mut images) = (event.clone(), 0);
+    strip(&mut event, &mut images);
+    let bytes = Amount::try_from(event.to_string().len()).unwrap_or(Amount::MAX);
+    bytes.saturating_add(images.saturating_mul(IMAGE))
 }
 
 /// Holds each turn on the client's wallet before the provider sees it. The
