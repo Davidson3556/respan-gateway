@@ -1,6 +1,6 @@
 # 0013. No HTTP in the core
 
-- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped), [0019](0019-status-out-of-the-kernel.md) (`Fault` has no status)
+- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped), [0019](0019-status-out-of-the-kernel.md) (`Fault` has no status), [0020](0020-symmetric-edges.md) (no head hooks)
 - Date: 2026-09-28
 
 ## Context
@@ -35,8 +35,9 @@ HTTP.
    (`http::request::Parts`, `http::response::Parts`), the adapter, the
    body, and conversions (`ask`, `answer`, `call`). A fault's HTTP status
    is a hint defined there (0019).
-6. **Head hooks are generic**: `edit_call::<H>`, `edit_response_head::<H>`
-   and `relay::<H>` fail `INTERNAL` for a head of another wire.
+6. **No plugin touches a head.** The head hooks `edit_call`,
+   `edit_response_head` and `relay` were generic over the wire's head
+   type; 0020 removed them.
 7. stdio MCP stays on the HTTP wire for now.
 
 ## Consequences

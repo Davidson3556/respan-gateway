@@ -1,6 +1,6 @@
 # 0007. A format is one protocol's codec
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0020](0020-symmetric-edges.md) (no head hooks)
 - Date: 2026-09-27
 
 ## Context
@@ -34,7 +34,7 @@ two places wrote a call's body.
 - Content that cannot be written is whose it is, one rule for every
   input: `BAD_REQUEST` if filters left it equal to its decoding, else
   `CONFIG`, as is a call's own input.
-- Bodies are `Bytes` (`cx.body()`, `edit_call`), as the kernel does not
+- Bodies are `Bytes`, which only formats read, as the kernel does not
   know JSON.
 
 ## Consequences
@@ -45,7 +45,8 @@ two places wrote a call's body.
 - A relayed WebSocket is decoded as it passes, so a frame its format
   refuses aborts the call.
 - A translated call carries none of the client's headers; one the
-  provider needs is the format's to set, or `edit_call`'s.
+  provider needs is the format's to set, or the transport's from the
+  call's extensions.
 
 ## History
 

@@ -677,33 +677,27 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
     );
 }
 
-// A 101 to a whole request is refused whoever set it, here a call edit.
-// The adapter refuses it ([`respan_gateway_http::handle`]), so the
-// provider's body must be one this format reads for its head to get there.
+// A 101 to a whole request is refused, though its provider sent it. The
+// adapter refuses it ([`respan_gateway_http::handle`]), so the provider's
+// body must be one this format reads for its relayed head to get there;
+// the standard formats fail an unasked 101 as they decode it.
 
 #[tokio::test]
-async fn f9_a_101_to_a_whole_request_is_refused_whoever_asked() {
-    struct Upgrade;
-
-    #[async_trait]
-    impl Plugin for Upgrade {
-        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            px.edit_call(|call: &mut respan_gateway_http::Ask, _: &mut Bytes| {
-                let websocket = http::HeaderValue::from_static("websocket");
-                call.headers.insert(http::header::UPGRADE, websocket);
-                Ok(())
-            });
-            Ok(())
-        }
-    }
-
+async fn f9_a_101_to_a_whole_request_is_refused_whoever_sent_it() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::SWITCHING_PROTOCOLS, vec!["e\n"]);
-    let gw = gateway(script, &log, Upgrade);
+    let gw = gateway(script, &log, Log::default());
     let (status, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert!(body.contains("did not ask to switch protocols"), "{body}");
+    // The adapter drops the gateway's response, so the request ends
+    // abandoned.
+    let end = log.clients()[0].clone();
+    assert_eq!(
+        end.err().map(|f| f.code().to_owned()).as_deref(),
+        Some("abandoned")
+    );
 }
 
 // A call's extensions are read on its provider edge as they are written.
@@ -812,16 +806,16 @@ async fn r8_1_an_input_filter_added_after_a_failed_one_still_gets_its_end() {
     assert_eq!(log.notes(), ["end second"]);
 }
 
-// A panicking head edit refuses the request internal and ends the call
-// internal.
+// A client-edge filter panicking before the head refuses the request
+// internal and ends the call internal.
 #[tokio::test]
-async fn r8_3_a_panicking_head_edit_ends_the_call_internal_not_abandoned() {
+async fn r8_3_a_panic_before_the_head_ends_the_call_internal_not_abandoned() {
     struct Boom;
 
     #[async_trait]
     impl Plugin for Boom {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|_: &mut respan_gateway_http::Answer| panic!("boom"));
+            cx.filter(|_: &mut LOut| -> Result<(), Fault> { panic!("boom") })?;
             Ok(None)
         }
     }
@@ -1285,20 +1279,20 @@ async fn k9_7_what_follows_a_call_filters_failure_is_unwritten() {
     assert_eq!(t(&log.metered()[0]), None);
 }
 
-// A client filter's failure stops a plugin's own bytes; they pass no
+// A client filter's failure stops a plugin's own outputs; they pass no
 // provider edge, so no meter (0009).
 #[tokio::test]
-async fn k9_7_a_client_filter_fails_a_plugins_own_bytes_which_count_nothing() {
+async fn k9_7_a_client_filter_fails_a_plugins_own_outputs_which_count_nothing() {
     struct P;
 
     #[async_trait]
     impl Plugin for P {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(over_budget)?;
-            let frames = futures::stream::iter(["i:ok\n", "i:hi\nu:5\n", "e\n"])
-                .map(|f| Ok::<_, Fault>(Frame::data(Bytes::from_static(f.as_bytes()))));
-            let resp = http::Response::new(StreamBody::new(frames));
-            Ok(Some(cx.relay(respan_gateway_http::answer(resp))))
+            let mut usage = out("");
+            usage.1.add("t", 5.0);
+            let own = [out("ok"), out("hi"), usage].map(Ok::<_, Fault>);
+            Ok(Some(Response::stream(futures::stream::iter(own))))
         }
     }
 
@@ -1307,29 +1301,6 @@ async fn k9_7_a_client_filter_fails_a_plugins_own_bytes_which_count_nothing() {
     let (_, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(&body.unwrap_or_default()[..], b"i:ok\nx:over budget\n");
     assert!(log.metered().is_empty());
-}
-
-// An `edit_response_head` `Err` refuses the request with that fault.
-#[tokio::test]
-async fn a_failing_head_edit_refuses_with_its_fault() {
-    struct P;
-
-    #[async_trait]
-    impl Plugin for P {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|_: &mut respan_gateway_http::Answer| {
-                Err(Fault::new("denied", "no").with(Status(403)))
-            });
-            Ok(None)
-        }
-    }
-
-    let log = Log::default();
-    let script = Script::default().then(StatusCode::OK, vec!["i:hi\ne\n"]);
-    let gw = gateway(script, &log, P);
-    let (status, body) = run(&gw, req(http::Method::POST)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(&body.unwrap_or_default()[..], b"x:no\n");
 }
 
 /// Line's kind under another name, so calls to it translate: it puts the

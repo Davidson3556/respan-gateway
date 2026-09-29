@@ -736,38 +736,21 @@ async fn r13_a_request_decoders_two_inputs_of_one_frame_go_as_two() {
 // transport strips ([`respan_gateway_http::proxy_call`]); this one does not.
 #[tokio::test]
 async fn r13_the_format_sets_what_the_kernel_never_passes() {
-    struct Named(Option<&'static str>);
+    struct Pass;
+    impl Plugin for Pass {}
 
-    #[async_trait]
-    impl Plugin for Named {
-        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            if let Some(host) = self.0 {
-                px.edit_call(move |head: &mut respan_gateway_http::Ask, _: &mut Bytes| {
-                    head.headers.insert(HOST, HeaderValue::from_static(host));
-                    Ok(())
-                });
-            }
-            Ok(())
-        }
-    }
-
-    for (named, seen) in [
-        (None, Some("host=gateway.example")),
-        (Some("msg.example"), Some("host=msg.example")),
-    ] {
-        let echo = Echo::default();
-        let mut req = post("/msg", "a");
-        req.headers_mut()
-            .insert(HOST, HeaderValue::from_static("gateway.example"));
-        let _ = read_whole(serve(&msg(&echo, Named(named)), req).await.0).await;
-        let host = echo.seen().into_iter().find(|s| s.starts_with("host="));
-        assert_eq!(host.as_deref(), seen);
-    }
+    let echo = Echo::default();
+    let mut req = post("/msg", "a");
+    req.headers_mut()
+        .insert(HOST, HeaderValue::from_static("gateway.example"));
+    let _ = read_whole(serve(&msg(&echo, Pass), req).await.0).await;
+    let host = echo.seen().into_iter().find(|s| s.starts_with("host="));
+    assert_eq!(host.as_deref(), Some("host=gateway.example"));
 }
 
 /// Whether a call was handed to its transport is the kernel's to say, on
 /// any wire: not yet in `on_provider`; at its end, yes once handed over,
-/// answered or not, and no for a call that failed before, as by an edit.
+/// answered or not, and no for a call that failed before, as by a hook.
 #[tokio::test]
 async fn a_call_says_whether_it_was_handed_to_its_transport() {
     #[derive(Clone, Default)]
@@ -778,12 +761,10 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             let before = px.is_sent();
             self.0.lock().map(|mut s| s.push((before, false))).ok();
-            if self.1 {
-                px.edit_call(|_: &mut respan_gateway_http::Ask, _: &mut Bytes| {
-                    Err(Fault::bad_request("refused by an edit"))
-                });
+            match self.1 {
+                true => Err(Fault::bad_request("refused by a hook")),
+                false => Ok(()),
             }
-            Ok(())
         }
 
         async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
@@ -795,18 +776,18 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
         }
     }
 
-    // (case, the provider answers, an edit fails the call, sent)
+    // (case, the provider answers, a hook fails the call, sent)
     let cases = [
         ("answered", true, false, true),
         ("transport failed", false, false, true),
-        ("an edit failed", true, true, false),
+        ("a hook failed", true, true, false),
     ];
-    for (case, answers, edit_fails, sent) in cases {
+    for (case, answers, hook_fails, sent) in cases {
         let mock = MockTransport::new();
         if answers {
             mock.reply("http://openai.test/v1", mock::json(StatusCode::OK, UNARY));
         }
-        let plugin = Sent(Arc::default(), edit_fails);
+        let plugin = Sent(Arc::default(), hook_fails);
         let gw = chat(&mock, vec![Arc::new(plugin.clone())]);
         let _ = read_whole(serve(&gw, post("/v1/chat/completions", CHAT)).await.0).await;
         gw.idle().await;

@@ -75,7 +75,8 @@ async fn a_decoder_panic_while_until_end_reads_refuses_the_request_internal() {
     }
 }
 
-/// Fails a call in its hooks or its edit, before it is sent.
+/// Fails a call before it is sent: in its hooks, or by an input filter
+/// whose failure the hook ignores, so writing the input fails.
 struct Fails(u8);
 #[async_trait]
 impl Plugin for Fails {
@@ -83,7 +84,7 @@ impl Plugin for Fails {
         match self.0 {
             1 => Err(Fault::internal("hook fails")),
             2 => {
-                px.edit_call(|_: &mut Ask, _| Err(Fault::internal("edit fails")));
+                let _ = px.filter(|_: &mut In| Err(Fault::internal("filter fails")));
                 Ok(())
             }
             _ => Ok(()),

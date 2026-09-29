@@ -1,6 +1,6 @@
 # 0015. Core trims
 
-- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped)
+- Status: accepted, amended by [0017](0017-untyped-handle.md) (`handle` is untyped), [0020](0020-symmetric-edges.md) (no head hooks)
 - Date: 2026-09-28
 
 ## Context
@@ -19,9 +19,9 @@ missing beside its writer. Two public types go.
    kernel sets it on a call, and only when the call sends the client's
    inputs, not its own, to a provider whose format has the client
    format's name; it is false on a request, response and a translated or
-   own-input call. No plugin can set it: `Call::with_extension`,
-   `edit_call` and `on_provider` reach extensions and heads, not the
-   flag. `http::credentials(&mut Exchange<Ask>, &HeaderMap)` reads it, so
+   own-input call. No plugin can set it: `Call::with_extension` and
+   `on_provider` reach extensions, not the flag, and no plugin reaches a
+   head (0020). `http::credentials(&mut Exchange<Ask>, &HeaderMap)` reads it, so
    a plugin removing `Credential` still stops pass-through, and
    `Extensions` are read by no one in the kernel.
 3. **`Exchange::streams: bool` replaces `handle`'s `streaming`**

@@ -133,10 +133,13 @@ impl<S: Store> Plugin for Idempotent<S> {
             return Ok(None);
         };
         let tenant = cx.extensions().get::<Credential>();
+        // The body as it came: the bytes the client's conversation came in.
+        let chat = cx.input::<Conversation>()?;
+        let body = chat.origin(cx.format()).map_or(&[][..], |o| &o.bytes);
         let key = (
             hash(tenant.and_then(|c| c.get(AUTHORIZATION.as_str()))),
             key.to_owned(),
-            hash(cx.body()),
+            hash(body),
         );
         if let Claim::Done(replies) = self.0.claim(&key).await {
             let replies = Arc::unwrap_or_clone(replies).into_iter().map(Ok);

@@ -1,6 +1,6 @@
 # 0003. Kernel contracts: minimal, typed by kind, grown without breaking
 
-- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0018](0018-plugin-order-is-registration-order.md), [0019](0019-status-out-of-the-kernel.md) (`Fault` has no status)
+- Status: accepted, amended by [0006](0006-streams-both-ways.md), [0007](0007-format-is-a-codec.md), [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0018](0018-plugin-order-is-registration-order.md), [0019](0019-status-out-of-the-kernel.md) (`Fault` has no status), [0020](0020-symmetric-edges.md) (no head hooks)
 - Date: 2026-09-25
 
 ## Context
@@ -16,10 +16,9 @@ pair of formats grow with the square of the formats.
 
 - Four hooks ([0004](0004-two-edges-typed-formats.md)) and one response
   pipeline. A new hook needs a use case and a test: each is kept forever.
-- `on_client` changes the target and extensions; a call's head is edited
-  with `edit_call`, the client's response head with `edit_response_head`.
-  Filters edit inputs and outputs as they stream, and are the one way to
-  edit inputs.
+- `on_client` changes the target and extensions. Filters edit inputs and
+  outputs as they stream, and are the one way to edit inputs. No plugin
+  edits a head: heads are the formats' to write (0020).
 - `Gateway::handle` is the only entry point. It returns the response and
   a future of how the request ended (`Result<(), Fault>`); the tokio
   runtime runs end hooks detached.
@@ -27,7 +26,6 @@ pair of formats grow with the square of the formats.
 - A response head goes out with its body's first byte, so a failure
   before it is still a refusal. `Encoder::open` writes opening bytes that
   take the head with them, so a quiet stream opens at once.
-- A head edit's `Err` or panic refuses with no edits.
 - A `Call` runs in the task awaiting it; its request ends it, before its
   own end hooks.
 - Every filter gets exactly one end, even after a failure, drop or panic
@@ -66,8 +64,8 @@ pair of formats grow with the square of the formats.
   reads it from the first input.
 - Routing by model reads the input, so a streaming request routes by the
   adapter's view of its head (`http::Asked`), and opaque traffic by its
-  body (`cx.body()`). A router may ignore an `input` `Err`; a plugin that
-  vets input refuses on it.
+  input's bytes. A router may ignore an `input` `Err`; a plugin that vets
+  input refuses on it.
 
 ### Growing without breaking
 

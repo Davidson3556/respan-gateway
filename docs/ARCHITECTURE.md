@@ -34,6 +34,7 @@ API, is tested in `crates/core/tests`: `cancellation` (a drop at every await),
 | [0017](decisions/0017-untyped-handle.md) | `Gateway::handle` is untyped: the adapter erases and downcasts its wire's heads |
 | [0018](decisions/0018-plugin-order-is-registration-order.md) | Plugin order is registration order; no ordering solver in the kernel |
 | [0019](decisions/0019-status-out-of-the-kernel.md) | HTTP status numbers out of the kernel: a typed hint on `Fault`, read by `crates/http` |
+| [0020](decisions/0020-symmetric-edges.md) | In progress: symmetric edges, a core that sees no byte, head or key; no plugin touches a head |
 
 ## Two edges
 
@@ -63,21 +64,21 @@ answers skips those registered after it. Only `on_client` may `call` or `take_in
    `request_decoder` when first read; streaming, each frame is one input as it
    arrives. A body that breaks is refused. The result is a `ClientContext`.
 3. Each plugin's `on_client`, in registration order: pass, answer (the rest
-   are skipped) or refuse. A plugin may add filters, `set_target`, edit the
-   response head, `call` and `take_inputs`.
+   are skipped) or refuse. A plugin may add filters, `set_target`, `call`
+   and `take_inputs`; no plugin touches a head.
 4. If all pass, `cx.call(target)`: each plugin's `on_provider` (an `Err` fails
    the call), then `send_call`. A relay's call starts from the client's head
    and unread bytes; a translated one is written from the inputs' values.
    `request_encoder` writes the head (`head`), then `open` and the inputs
-   (`encode`); the plugins' `edit_call` follow; `Transport::send` returns the
+   (`encode`); `Transport::send` returns the
    provider's `Exchange<Answer>`. A streaming request's later frames pass
    input filters and the encoder as the transport reads the body.
 5. `response_decoder` turns the answer's bytes into values (an error answer
    ends `Err`), and the call's provider-edge filters edit each. A plugin now
    holds it (`until_content`, `until_end`), reads it (`outputs`), or sends it.
-6. `deliver`: `response_encoder` writes the head (`head`, then
-   `edit_response_head`), `open`, and each value that the client-edge filters
-   left (`encode`); the head goes with the first byte. At the end, `end`.
+6. `deliver`: `response_encoder` writes the head (`head`), `open`, and each
+   value that the client-edge filters left (`encode`); the head goes with the
+   first byte. At the end, `end`.
 7. The end hooks: open calls end `abandoned`, each call's `on_provider_end`
    runs, then `on_client_end`; `handle`'s end future resolves.
 
@@ -145,7 +146,8 @@ A wire is a pair of head types, `Format::Ask` and `Format::Answer`, that a
 format and its transport share; HTTP's live in `crates/http`
 ([0013](decisions/0013-no-http-in-core.md)). The kernel reads no head and
 keeps no value's bytes; it keeps only the client's request body, unread
-(`ClientContext::body()`, public), for a relay to send as it came. It hands
+and private, for a relay to send as it came; a plugin reads the bytes an
+input came in through its origin (`Conversation::origin`). It hands
 a head, like bytes, only to a format of the name
 it came in, and only for a relay: a relay's call starts from the client's
 head and a relayed response's head is the provider's; a translated one
@@ -191,7 +193,7 @@ tokio runtime, which runs end hooks detached. The core depends on no
   Driving `Call::poll` with `take_until` cannot; it was tried and reverted,
   and `a_pending_call_left_unpolled_still_ends_with_its_request`
   (`crates/testkit/tests/streams.rs`) pins it.
-- `Filter<T>` edits inputs (the only way) or outputs; `Response` is a call's, `cx.relay`'s or
+- `Filter<T>` edits inputs (the only way) or outputs; `Response` is a call's or
   `Response::stream`'s, held with `until_content` or `until_end`, or read
   with `outputs`; `Fault` is the one error type: a code and message, retry, and typed hints (`with`, `get`) that
   an edge reads; the kernel knows no HTTP status, `crates/http` maps code and `Status` hint to one
@@ -214,7 +216,7 @@ tokio runtime, which runs end hooks detached. The core depends on no
    no usage ([0010](decisions/0010-usage-out-of-core.md)): a plugin
    meters a call with a provider-edge filter of its kind and reads the sum
    in `on_provider_end`, registered after the plugins whose filters may
-   fail. A plugin's own bytes (`cx.relay`) or outputs reach no provider
+   fail. A plugin's own outputs (`Response::stream`) reach no provider
    edge.
 4. **Edit.** Output filters run provider edge first, the last added
    first; input filters the first added first: a plugin sees inputs after

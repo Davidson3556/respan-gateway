@@ -191,8 +191,7 @@ pub trait Transport: Send + Sync + 'static {
     /// Send `call` and return the provider's response, whatever it says,
     /// once its head arrives; return redirects rather than follow them.
     /// `call` is as its format
-    /// ([`Format::request_encoder`](crate::Format::request_encoder)) and
-    /// [`ProviderContext::edit_call`](crate::ProviderContext::edit_call) left
+    /// ([`Format::request_encoder`](crate::Format::request_encoder)) wrote
     /// it, its address relative to this transport. A relay's starts from the
     /// client's head, so strip what the protocol forbids a proxy to pass
     /// on. Its body carries the inputs, one per data frame: a whole call's

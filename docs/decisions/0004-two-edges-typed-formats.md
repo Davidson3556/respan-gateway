@@ -1,6 +1,6 @@
 # 0004. Two edges, typed formats
 
-- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0015](0015-core-trims.md)
+- Status: accepted, amended by [0008](0008-events-carry-their-bytes.md), [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0012](0012-http-out-of-the-kernel.md), [0013](0013-no-http-in-core.md), [0015](0015-core-trims.md), [0020](0020-symmetric-edges.md) (no head hooks)
 - Date: 2026-09-26
 
 ## Context
@@ -39,10 +39,10 @@ what the client sends and gets, whatever the format.
   so `call` and `take_inputs`, which take `&mut`, do not compile there.
   End hooks get `&` too.
 - The provider hook sees the call's provider, format, kind, first input
-  and extensions (the request's plus its own); it may fail the call, edit
-  its head after its format writes it (`px.edit_call`), filter its inputs
-  after the client edge's input filters, and filter its outputs before
-  the client edge's.
+  and extensions (the request's plus its own); it may fail the call,
+  change its extensions, filter its inputs after the client edge's input
+  filters, and filter its outputs before the client edge's. The call's
+  head is its format's to write (0020).
 - The provider edge sees its response as decoded, whoever reads it.
 - `on_provider_end(&ProviderContext, &Result<(), Fault>)` runs once per call whose
   `on_provider` started: when the call fails before a response, its body
@@ -59,7 +59,7 @@ what the client sends and gets, whatever the format.
   `Gateway::provider(name, format, transport)`, with no type of its own.
 - The transport owns where and how: a URL and credentials, a process, a
   socket, or in-process code. It may keep state its calls share.
-- `Transport::send` gets the call as its format and `edit_call` left it.
+- `Transport::send` gets the call as its format wrote it.
   A relay's call starts from the client's head, so the transport strips
   what its protocol forbids a proxy to pass on (`http::proxy_call`). Its
   body carries the inputs, one per data frame; its extensions are the
@@ -69,8 +69,7 @@ what the client sends and gets, whatever the format.
   `Credential`, the last only on a relay. It strips the client origin's
   headers from a call and the provider origin's (`set-cookie`) from a
   response.
-- A per-call key is a value in the call's extensions for the transport;
-  `edit_call` is not for credentials.
+- A per-call key is a value in the call's extensions for the transport.
 
 ## Consequences
 

@@ -177,8 +177,8 @@ async fn only_a_relay_carries_the_clients_anthropic_version() {
 struct Relayed;
 
 /// Sends every request to OpenAI, and in `on_provider` does all it can to
-/// make every call look like a relay: a marker in its extensions and an
-/// edit of the call. Neither sets `Exchange::relayed`.
+/// make every call look like a relay: a marker in its extensions, which
+/// does not set `Exchange::relayed`.
 struct Forges;
 
 #[async_trait]
@@ -190,7 +190,6 @@ impl Plugin for Forges {
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         px.extensions_mut().insert(Relayed);
-        px.edit_call::<respan_gateway_http::Ask>(|_, _| Ok(()));
         Ok(())
     }
 }

@@ -11,6 +11,7 @@ use respan_gateway_core::{
 };
 use respan_gateway_core::{async_trait, bytes::Bytes, futures};
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_formats::conversation::{Finish, Reply};
 use respan_gateway_http::http;
 use respan_gateway_testkit::{mock, post, read_whole, serve};
 
@@ -51,8 +52,8 @@ enum Answer {
     Target,
     /// Calls `openai`, drops its response read to its content, and falls back to `backup`.
     Fallback,
-    /// Relays its own response.
-    Relay,
+    /// Answers with outputs of its own.
+    Own,
 }
 
 /// Puts a probe in each request's extensions and answers as told; its own
@@ -61,7 +62,6 @@ struct Probing {
     request: Drops,
     plugin: Drops,
     answer: Answer,
-    whole: bool,
 }
 
 impl Drop for Probing {
@@ -82,9 +82,11 @@ impl Plugin for Probing {
                 drop(first);
                 Ok(Some(cx.call("backup").await?.until_content().await?))
             }
-            Answer::Relay => {
-                let (head, chunks) = reply(self.whole).into_parts();
-                Ok(Some(cx.relay(Exchange::new(head, body(chunks)))))
+            Answer::Own => {
+                let own = [Reply::text(0, "hi"), Reply::finished(Finish::Stop)];
+                Ok(Some(Response::stream(stream::iter(
+                    own.map(Ok::<_, Fault>),
+                ))))
             }
         }
     }
@@ -133,7 +135,6 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         request: request.clone(),
         plugin: plugin.clone(),
         answer,
-        whole,
     };
     let gw = Gateway::new()
         .provider("openai", OpenAiChat, Scripted { whole })
@@ -161,7 +162,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
 
 /// Every answer, whole or streamed, read or dropped unread.
 async fn check_all() {
-    for answer in [Answer::Target, Answer::Fallback, Answer::Relay] {
+    for answer in [Answer::Target, Answer::Fallback, Answer::Own] {
         for (whole, read) in [(true, true), (false, true), (true, false), (false, false)] {
             check(answer, whole, read).await;
         }
@@ -196,9 +197,9 @@ async fn a_fallback_drops_its_request_and_the_call_it_dropped() {
 }
 
 #[tokio::test]
-async fn a_relay_drops_its_request() {
+async fn a_plugins_own_answer_drops_its_request() {
     for (whole, read) in [(true, true), (false, true), (true, false), (false, false)] {
-        check(Answer::Relay, whole, read).await;
+        check(Answer::Own, whole, read).await;
     }
 }
 

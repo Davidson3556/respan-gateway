@@ -18,7 +18,9 @@ use toy::*;
 async fn a_panic_anywhere_still_ends_everything_once() {
     std::panic::set_hook(Box::new(|_| {}));
     let mut bad = vec![];
-    // 18 and 19 are unused; 22 and 23 panic in the recorder's own end hooks.
+    // 16, 18 and 19 are unused; 22 and 23 panic in the recorder's own end
+    // hooks; 30 is a client output filter's end, 31 the request encoder's
+    // `open`, where a call's head is written.
     for n in (1..=17usize).chain(20..=32) {
         for streams in [false, true] {
             for transport_mode in 0..3 {

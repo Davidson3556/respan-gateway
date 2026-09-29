@@ -168,6 +168,7 @@ struct ReqEnc {
 }
 impl Encoder<In, Ask> for ReqEnc {
     fn open(&mut self, out: &mut BytesMut) -> Result<bool, Fault> {
+        boom(31);
         let Some((bytes, done)) = self.open else {
             return Ok(false);
         };
@@ -462,6 +463,18 @@ impl Log {
     }
 }
 
+/// Passes every output, and panics at its end with its message.
+struct PanicsAtEnd(&'static str);
+impl Filter<Out> for PanicsAtEnd {
+    fn edit(&mut self, v: Out, o: &mut Vec<Out>) -> Result<(), Fault> {
+        o.push(v);
+        Ok(())
+    }
+    fn end(&mut self, _: &Result<(), Fault>, _: &mut Vec<Out>) -> Result<(), Fault> {
+        panic!("{}", self.0)
+    }
+}
+
 /// Records every hook, and panics in the plugin points of the matrix.
 #[derive(Clone, Default)]
 pub struct Rec(pub Arc<Mutex<Log>>);
@@ -484,7 +497,7 @@ impl Plugin for Rec {
             cx.filter(|_: &mut In| -> Result<(), Fault> { panic!("p27") })?;
         }
         if n == 30 {
-            cx.edit_response_head(|_: &mut Ans| -> Result<(), Fault> { panic!("p30") });
+            cx.filter(PanicsAtEnd("p30"))?;
         }
         Ok(None)
     }
@@ -501,20 +514,7 @@ impl Plugin for Rec {
             px.filter(|_: &mut Out| -> Result<(), Fault> { panic!("p24") })?;
         }
         if n == 25 {
-            struct F;
-            impl Filter<Out> for F {
-                fn edit(&mut self, v: Out, o: &mut Vec<Out>) -> Result<(), Fault> {
-                    o.push(v);
-                    Ok(())
-                }
-                fn end(&mut self, _: &Result<(), Fault>, _: &mut Vec<Out>) -> Result<(), Fault> {
-                    panic!("p25")
-                }
-            }
-            px.filter(F)?;
-        }
-        if n == 31 {
-            px.edit_call(|_: &mut Ask, _| -> Result<(), Fault> { panic!("p31") });
+            px.filter(PanicsAtEnd("p25"))?;
         }
         if n == 32 {
             px.filter(|_: &mut In| -> Result<(), Fault> { panic!("p32") })?;

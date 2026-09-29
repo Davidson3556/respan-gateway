@@ -3,10 +3,7 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_core::{
-    ClientContext, Fault, Format, Gateway, Plugin, Response, Transport, async_trait,
-};
-use respan_gateway_formats::conversation::Reply;
+use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Transport, async_trait};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http;
 use respan_gateway_http::{CallHeaders, Credential, credentials};
@@ -517,26 +514,18 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
         }
     }
 
-    /// Answers 204, from outputs its format writes as a body.
-    struct NoContent;
-
-    #[async_trait]
-    impl Plugin for NoContent {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head: &mut respan_gateway_http::Answer| {
-                head.status = http::StatusCode::NO_CONTENT;
-                Ok(())
-            });
-            let outputs = [Ok(Reply::text(0, "hi"))];
-            Ok(Some(Response::stream(futures::stream::iter(outputs))))
-        }
-    }
-
+    // A provider that answers 204, relayed as it came.
+    let provider = spawn(Router::new().route(
+        "/v1/chat/completions",
+        post(|| async { http::StatusCode::NO_CONTENT }),
+    ))
+    .await;
     let log = Log::default();
     let gateway = Gateway::new()
-        .serve(OpenAiChat)
+        .provider("local", OpenAiChat, http(format!("{provider}/v1")))
+        .and_then(|g| g.serve(OpenAiChat))
         .and_then(|g| g.plugin("log", log.clone()))
-        .and_then(|g| g.plugin("no-content", NoContent))
+        .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     let base = spawn(router(gateway.clone())).await;
 

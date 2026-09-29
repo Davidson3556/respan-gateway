@@ -6,11 +6,8 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::{
-    ClientContext, Fault, Plugin, Response, Transport, async_trait, bytes, futures,
-};
+use respan_gateway_core::{ClientContext, Fault, Plugin, Response, Transport, async_trait, bytes};
 use respan_gateway_formats::OpenAiChat;
-use respan_gateway_formats::conversation::Reply;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util;
@@ -371,23 +368,10 @@ async fn a_clients_connection_header_names_only_its_own_headers() {
 
 #[tokio::test]
 async fn a_bodiless_response_ends_as_its_head_goes_out() {
-    /// Answers 204 with a stream, which the client's format writes as a
-    /// whole body that no host sends.
-    struct NoContent;
-
-    #[async_trait]
-    impl Plugin for NoContent {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head: &mut respan_gateway_http::Answer| {
-                head.status = StatusCode::NO_CONTENT;
-                Ok(())
-            });
-            let outputs = [Ok(Reply::text(0, "hi"))];
-            Ok(Some(Response::stream(futures::stream::iter(outputs))))
-        }
-    }
-
-    let h = Harness::new(vec![Arc::new(NoContent)], None);
+    let h = relay();
+    // A provider that writes a body under a 204 anyway, which no host sends.
+    h.mock
+        .reply(OPENAI, mock::json(StatusCode::NO_CONTENT, UNARY));
 
     let (resp, _) = serve(&h.gw, unary_chat()).await;
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -395,7 +379,7 @@ async fn a_bodiless_response_ends_as_its_head_goes_out() {
     drop(resp);
     h.gw.idle().await;
 
-    // The adapter reads the body it does not send to its end.
+    // The request ends complete, its call too, though nothing read on.
     assert_eq!(h.log.only(), Ok(()));
 }
 

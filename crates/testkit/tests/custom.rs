@@ -1371,37 +1371,25 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         }
     }
 
-    /// Reads the input, and edits the header on the call.
+    /// Reads the input.
     #[derive(Clone, Default)]
-    struct Edit(std::sync::Arc<std::sync::Mutex<String>>);
+    struct Read(std::sync::Arc<std::sync::Mutex<String>>);
 
     #[async_trait]
-    impl Plugin for Edit {
+    impl Plugin for Read {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let prompt = cx.input::<Jev>()?.prompt.clone();
             self.0.lock().map(|mut seen| *seen = prompt).ok();
             Ok(None)
         }
-
-        async fn on_provider(
-            &self,
-            px: &mut respan_gateway_core::ProviderContext,
-        ) -> Result<(), Fault> {
-            px.edit_call(|call: &mut Ask, _: &mut Bytes| {
-                let edited = HeaderValue::from_static("edited");
-                call.headers.insert("x-prompt", edited);
-                Ok(())
-            });
-            Ok(())
-        }
     }
 
-    let edit = Edit::default();
+    let read = Read::default();
     let mock = MockTransport::new();
     let gw = serving(
         Headed,
         [add_provider("h", Headed, mock.at("http://h.test"))],
-        vec![Arc::new(edit.clone())],
+        vec![Arc::new(read.clone())],
         Some("h"),
     )
     .unwrap_or_else(|e| panic!("{e}"));
@@ -1415,11 +1403,11 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 
     assert_eq!(read_whole(serve(&gw, req).await.0).await.0, StatusCode::OK);
 
-    let seen = edit.0.lock().map(|s| s.clone()).unwrap_or_default();
+    let seen = read.0.lock().map(|s| s.clone()).unwrap_or_default();
     assert_eq!(seen, "arrived");
-    // A relay passes the head as edited; the body goes as it came.
+    // A relay passes the head and the body as they came.
     let sent = mock.sent();
-    assert_eq!(sent[0].headers()["x-prompt"], "edited");
+    assert_eq!(sent[0].headers()["x-prompt"], "arrived");
     assert_eq!(sent[0].body(), &br#"{"model":"j1"}"#[..]);
 }
 

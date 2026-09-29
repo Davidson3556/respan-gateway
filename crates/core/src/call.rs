@@ -177,7 +177,6 @@ async fn send(
         input,
         outputs: Mutex::default(),
         inputs: Arc::default(),
-        call_edits: Mutex::default(),
         running: InFlight::enter(&cut),
         cut,
         sent: false,
@@ -216,12 +215,9 @@ async fn send_call(
     // A streaming request's later inputs follow, unless the call has its own.
     let later = cx.later.as_ref().filter(|_| px.input.own_format.is_none());
     let client = relay.then(|| &*px.client.head as &dyn Any);
-    let (mut head, mut first, encoder, done) = first_frame(&px.input, p, client, later.is_some())?;
+    let (head, first, encoder, done) = first_frame(&px.input, p, client, later.is_some())?;
     // A body done as it opens has no later inputs.
     let later = later.filter(|_| !done);
-    for edit in std::mem::take(unlocked(&mut px.call_edits)) {
-        edit(&mut head, &mut first)?;
-    }
     let extensions = px.client.extensions.clone();
     // The decoder reads the provider's head as it came, for the call as sent.
     let sent = p

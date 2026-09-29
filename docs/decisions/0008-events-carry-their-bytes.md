@@ -1,6 +1,6 @@
 # 0008. Events carry their bytes
 
-- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md)
+- Status: accepted, amended by [0009](0009-core-cleanups.md), [0010](0010-usage-out-of-core.md), [0011](0011-read-until-content-or-end.md), [0012](0012-http-out-of-the-kernel.md), [0014](0014-api-trims.md), [0020](0020-symmetric-edges.md) (no head hooks)
 - Date: 2026-09-28
 
 ## Context
@@ -22,7 +22,8 @@ run time.
   which keeps the bytes it came in (`formats::relayed`). A format writes a
   value as those bytes while it says the same, and writes what changed
   into them. The kernel keeps no value's bytes; the one thing it keeps
-  unread is the client's request body (`ClientContext::body()`).
+  unread is the client's request body, which it hands only to formats; a
+  plugin reads the bytes an input came in through its origin (0020).
 - A provider's error answer keeps its format's name
   (`Fault::with_answer(format, answer)`, for an error event within a
   response too), as only that format writes it.

@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bytes::Bytes;
 use futures::future::BoxFuture;
 
 use crate::context::unlocked;
@@ -9,7 +8,7 @@ use crate::format::{AnyFormat, is_input};
 use crate::input::{Input, InputFilters, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
-use crate::transport::{AnyTransport, Head};
+use crate::transport::AnyTransport;
 use crate::{ClientContext, Extensions, Fault, Filter, Plugin};
 
 /// A provider the gateway can call: a format and a transport.
@@ -18,8 +17,6 @@ pub(crate) struct Provider {
     pub(crate) format: Arc<dyn AnyFormat>,
     pub(crate) transport: Arc<AnyTransport>,
 }
-
-pub(crate) type CallEdit = Box<dyn FnOnce(&mut Head, &mut Bytes) -> Result<(), Fault> + Send>;
 
 /// One call to a provider, as the provider edge's hooks see it.
 pub struct ProviderContext {
@@ -30,12 +27,10 @@ pub struct ProviderContext {
     pub(crate) provider: String,
     /// Its first input.
     pub(crate) input: Input,
-    /// In `Mutex`es for the reason `ClientContext`'s edits are.
+    /// In a `Mutex` for the reason `ClientContext`'s output filters are.
     pub(crate) outputs: Mutex<Filters>,
     /// Filters of the later inputs it sends, shared with their reader.
     pub(crate) inputs: InputFilters,
-    /// Edits of the call's head and first frame, in the order added.
-    pub(crate) call_edits: Mutex<Vec<CallEdit>>,
     /// Idle once it ends: its response's body and its inputs' reader stop,
     /// so a reader still waiting wakes.
     pub(crate) cut: Arc<InFlight>,
@@ -133,7 +128,7 @@ impl ProviderContext {
 
     /// Whether the call was handed to its transport, so it may have reached
     /// the provider. `false` in `on_provider`, and for a call that failed
-    /// before that: by a hook, an edit or an input it could not write.
+    /// before that: by a hook or an input it could not write.
     pub fn is_sent(&self) -> bool {
         self.sent
     }
@@ -162,24 +157,5 @@ impl ProviderContext {
     /// this call alone.
     pub fn extensions_mut(&mut self) -> &mut Extensions {
         &mut self.client.extensions
-    }
-
-    /// Edit this call's head, the provider's format's
-    /// [`Ask`](crate::Format::Ask), and first frame, after its
-    /// [`request_encoder`](crate::Format::request_encoder), in the order
-    /// added. `Err` fails the call, as `H` of another type does with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL). Keys go in an extension
-    /// ([`ProviderContext::extensions_mut`]), as a transport may strip them.
-    pub fn edit_call<H: Any>(
-        &mut self,
-        f: impl FnOnce(&mut H, &mut Bytes) -> Result<(), Fault> + Send + 'static,
-    ) {
-        let edit = move |head: &mut Head, first: &mut Bytes| match head.downcast_mut() {
-            Some(head) => f(head, first),
-            None => Err(Fault::internal(
-                "a call edit of another wire than the provider's",
-            )),
-        };
-        unlocked(&mut self.call_edits).push(Box::new(edit));
     }
 }

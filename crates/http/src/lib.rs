@@ -102,8 +102,7 @@ where
     req
 }
 
-/// An HTTP response as an exchange, such as a transport's, or a plugin's to
-/// [`relay`](respan_gateway_core::ClientContext::relay).
+/// An HTTP response as an exchange, such as a transport returns.
 pub fn answer<B>(resp: http::Response<B>) -> Exchange<Answer>
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,

@@ -7,7 +7,7 @@ use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use futures::stream::{self, StreamExt};
 
-use crate::fault::{PANICKED, guarded};
+use crate::fault::PANICKED;
 use crate::format::{AnyEncoder, AnyFormat, Values};
 use crate::lifecycle::EndHooks;
 use crate::plugin::failed;
@@ -54,7 +54,7 @@ pub(crate) async fn deliver(
         drop(resp);
         return Box::pin(refuse(format, fault, hooks)).await;
     }
-    let (ask, body) = (cx.head.clone(), cx.body().clone());
+    let (ask, body) = (cx.head.clone(), cx.input.raw().clone());
     let streaming = cx.later.is_some();
     let Response {
         head: answer,
@@ -79,8 +79,7 @@ pub(crate) async fn deliver(
         done.map(|done| (encoder, head, opening, done))
     };
     // A format that panics building its encoder cannot write a refusal.
-    let (encoder, mut head, opening, done) = match std::panic::catch_unwind(AssertUnwindSafe(build))
-    {
+    let (encoder, head, opening, done) = match std::panic::catch_unwind(AssertUnwindSafe(build)) {
         Ok(Ok(built)) => built,
         Ok(Err(fault)) if refused => return unwritable(hooks, fault),
         Ok(Err(fault)) => {
@@ -108,11 +107,6 @@ pub(crate) async fn deliver(
         true => pipe.first(!refused).await,
         false => Ok(()),
     };
-    // An edit that fails or panics fails the head before it goes out.
-    let first = first.and_then(|()| {
-        let edits = std::mem::take(&mut pipe.hooks.cx().edits().head);
-        guarded(|| edits.into_iter().rev().try_for_each(|edit| edit(&mut head)))
-    });
     match first {
         Ok(()) => {}
         Err(fault) if refused => return unwritable(pipe.hooks, fault),
@@ -235,7 +229,7 @@ impl Pipe {
         let mut end = batch.end.take();
         let mut values = batch.values.take();
         if let Some(values) = &mut values {
-            let filtered = self.hooks.cx().edits().outputs.run(values);
+            let filtered = self.hooks.cx().outputs().run(values);
             if let Err(f) = filtered.and(self.encode(values)) {
                 end = Some(Err(f));
             }
@@ -263,7 +257,7 @@ impl Pipe {
             return end;
         }
         let mut tail = None;
-        let end = self.hooks.cx().edits().outputs.end(end, &mut tail);
+        let end = self.hooks.cx().outputs().end(end, &mut tail);
         match tail.map(|values| self.encode(&values)) {
             Some(Err(f)) => failed(f, &end),
             _ => end,

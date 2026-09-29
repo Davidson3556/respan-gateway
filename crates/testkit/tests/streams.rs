@@ -1208,67 +1208,6 @@ async fn a_101_goes_only_to_a_request_that_asked() {
 }
 
 #[tokio::test]
-async fn a_head_edit_that_sets_101_unasked_is_refused() {
-    /// Sets 101 on whatever response goes out.
-    struct Switch;
-
-    #[async_trait]
-    impl Plugin for Switch {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head: &mut Answer| {
-                head.status = StatusCode::SWITCHING_PROTOCOLS;
-                Ok(())
-            });
-            Ok(None)
-        }
-    }
-
-    let (echo, mock) = (Echo::default(), MockTransport::new());
-    let (gw, _) = talk(&echo, &mock, vec![Arc::new(Switch)]);
-
-    let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"a"}"#)).await;
-
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let _ = frames(resp).await;
-    // The adapter refuses it and drops the gateway's response, so
-    // the request ends abandoned.
-    assert_eq!(
-        ended.await.map_err(|f| f.code().to_owned()),
-        Err(codes::ABANDONED.into())
-    );
-}
-
-// A plugin sets its own status with a head edit, after the format wrote
-// the head.
-#[tokio::test]
-async fn a_plugins_head_edit_sets_its_status() {
-    /// Accepts the request with nothing to say.
-    struct Accept;
-
-    #[async_trait]
-    impl Plugin for Accept {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.edit_response_head(|head: &mut Answer| {
-                head.status = StatusCode::ACCEPTED;
-                Ok(())
-            });
-            let none = futures::stream::empty::<Result<Heard, Fault>>();
-            Ok(Some(Response::stream(none)))
-        }
-    }
-
-    let (echo, mock) = (Echo::default(), MockTransport::new());
-    let (gw, _) = talk(&echo, &mock, vec![Arc::new(Accept)]);
-    let (send, req) = upgrade();
-
-    let (resp, _) = serve(&gw, req).await;
-    drop(send);
-
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    assert!(frames(resp).await.is_empty());
-}
-
-#[tokio::test]
 async fn a_clone_of_a_polled_call_keeps_its_settings() {
     struct Again;
 
