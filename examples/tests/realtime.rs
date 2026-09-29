@@ -1266,3 +1266,74 @@ async fn l6_a_client_that_says_two_things_and_leaves_during_a_wrap_ends_then() -
     );
     Ok(())
 }
+
+/// A tool's definition is read by every turn, so it is held like text: a
+/// 40 KB description in a wallet of two caps is refused, and never read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_definition_is_held_like_text() {
+    let (raw, gw, _meter, wallets, addr) = raw_session(5, 2 * TURN).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let tool = json!({ "type": "function", "name": "lookup",
+        "description": "x".repeat(40_000), "parameters": { "type": "object" } });
+    say(
+        &mut ws,
+        json!({ "type": "session.update", "session": { "tools": [tool] } }),
+    )
+    .await;
+    assert_eq!(heard(&mut ws).await["type"], "session.updated");
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    assert_eq!(
+        closed(&mut ws).await,
+        Some((1008, "insufficient_funds".into()))
+    );
+    gw.idle().await;
+    assert!(
+        lock(&raw.read)
+            .iter()
+            .all(|e| e["type"] != "response.create")
+    );
+    assert_eq!(wallets.spent("sk-demo"), 0);
+    assert!(wallets.available("sk-demo") >= 0);
+}
+
+/// A provider that refuses every event with an `error` naming it, as one
+/// does that does not know the gateway's `session.type`.
+async fn provider_that_refuses_the_cap() -> std::net::SocketAddr {
+    use axum::extract::ws::{Message, WebSocketUpgrade};
+    let app = axum::Router::new().route(
+        "/v1/realtime",
+        axum::routing::get(|ws: WebSocketUpgrade| async move {
+            ws.protocols(["realtime"])
+                .on_upgrade(|mut socket| async move {
+                    let hello = json!({ "type": "session.created" }).to_string();
+                    let _ = socket.send(Message::Text(hello.into())).await;
+                    while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                        let event: Value = serde_json::from_str(&text).unwrap_or_default();
+                        let error = json!({ "type": "error", "error": {
+                        "code": "unknown_parameter", "event_id": event["event_id"] } });
+                        let _ = socket.send(Message::Text(error.to_string().into())).await;
+                    }
+                })
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let at = listener.local_addr().expect("an address");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    at
+}
+
+/// A session whose cap the provider refuses is closed with a fault, not
+/// left uncapped; the client never hears the error for an event it never sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_whose_cap_is_refused_is_closed() {
+    let at = provider_that_refuses_the_cap().await;
+    let (gw, _wallets, addr) = front(at, 100_000).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let close = closed(&mut ws).await.expect("a close");
+    assert_eq!(close.0, 1011);
+    gw.idle().await;
+}
