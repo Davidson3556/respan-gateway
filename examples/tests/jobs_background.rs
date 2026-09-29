@@ -458,3 +458,47 @@ async fn an_endpoint_under_the_prefix_that_is_not_an_id_passes_through() -> Resu
     assert_eq!(mock.sent().len(), 1);
     Ok(())
 }
+
+/// Whatever else lies under the prefix (`compact`) is the provider's too.
+#[tokio::test(start_paused = true)]
+async fn any_path_under_the_prefix_that_is_not_ours_passes_through() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(
+        WEST,
+        mock::json(StatusCode::OK, r#"{"object":"response.compaction"}"#),
+    );
+    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let req = request("POST", "/v1/responses/compact", r#"{"input":"hi"}"#);
+    let answer = send(&gateway, req).await?;
+    assert_eq!(answer["object"], "response.compaction");
+    assert_eq!(mock.sent()[0].uri().path(), "/v1/responses/compact");
+    Ok(())
+}
+
+/// Two tenants whose answers carry the same provider id: the id a chained
+/// answer echoes is mapped back to its own tenant's signed id, never the
+/// other's.
+#[tokio::test(start_paused = true)]
+async fn an_echoed_id_is_mapped_back_within_its_own_tenant() -> Result<(), Fault> {
+    let as_tenant = |key: &str, body: &str| {
+        http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("authorization", format!("Bearer {key}"))
+            .body(full(body.to_owned()))
+            .expect("a request")
+    };
+    let mock = MockTransport::new();
+    let same = r#"{"id":"native-1"}"#;
+    let echo = r#"{"id":"native-2","previous_response_id":"native-1"}"#;
+    for body in [same, same, echo] {
+        mock.reply(WEST, mock::json(StatusCode::OK, body));
+    }
+    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let _a = send(&gateway, as_tenant("tenant-a", "{}")).await?;
+    let b = send(&gateway, as_tenant("tenant-b", "{}")).await?;
+    let chained = json!({ "previous_response_id": b["id"] }).to_string();
+    let next = send(&gateway, as_tenant("tenant-b", &chained)).await?;
+    assert_eq!(next["previous_response_id"], b["id"]);
+    Ok(())
+}

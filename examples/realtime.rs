@@ -18,7 +18,8 @@
 //!   of `max_output_tokens`, and caps the client's own), and a
 //!   `response.create` is rewritten to ask for at most `TURN` output tokens.
 //!   A turn holds what the session has said so far (every string that enters
-//!   its context, a tool's `output` and `arguments` included, but not audio)
+//!   its context, a tool's `output` and `arguments` and its definitions
+//!   included, but not audio)
 //!   plus that cap; it is refused, closing the client with 1008, when the
 //!   wallet cannot cover it, and its `response.done` settles what it cost. A
 //!   turn the provider starts on its own (server voice detection) is held
@@ -471,6 +472,13 @@ impl<L: Ledger> Wallet<L> {
     async fn before(self: Arc<Self>, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
         let mut said = 0;
         edit_texts(&mut event.json, CONTEXT, &mut |text| said += text.len());
+        // Tool definitions (name, description, parameters) are read by every turn.
+        for tools in [
+            &event.json["session"]["tools"],
+            &event.json["response"]["tools"],
+        ] {
+            said += tools.as_array().map_or(0, |_| tools.to_string().len());
+        }
         lock(&self.turns).bytes += Amount::try_from(said).unwrap_or_default();
         if event.json["type"] == "response.create" {
             let response = &mut event.json["response"];
@@ -587,22 +595,34 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
             turns: Mutex::default(),
         });
         let asks = wallet.clone();
+        let cap = format!("cap_{}", HoldId::new());
+        let capped = cap.clone();
         cx.wrap(move |events: Events<ClientEvent>| {
             // The session is capped before the client says anything, so the
             // turns the provider starts (voice detection) are bounded too.
-            let open = json!({ "type": "session.update", "session": { "type": "realtime" } });
+            let open = json!({ "type": "session.update", "event_id": capped,
+                "session": { "type": "realtime" } });
             let open = stream::once(async move { Ok(ClientEvent::new(open)) });
             open.chain(events)
                 .and_then(move |event| asks.clone().before(event))
         })?;
         let answers = wallet.clone();
         cx.wrap(move |events: Events<ProviderEvent>| {
-            // The provider's answer to the session's cap is not the client's.
+            // The provider's answer to the session's cap is not the client's:
+            // its `session.updated` is the first (the client speaks after the
+            // cap), and an `error` naming the cap ends a session that cannot
+            // be capped, rather than let it run uncapped.
             let mut ours = true;
-            let events = events.try_filter(move |event| {
-                let mine = ours && event.json["type"] == "session.updated";
+            let events = events.try_filter_map(move |event| {
+                let kind = event.json["type"].as_str().unwrap_or_default();
+                let refused = kind == "error" && event.json["error"]["event_id"] == cap;
+                let mine = ours && kind == "session.updated";
                 ours &= !mine;
-                std::future::ready(!mine)
+                std::future::ready(match (refused, mine) {
+                    (true, _) => Err(Fault::new("cap_refused", "the session cannot be capped")
+                        .with(CloseCode(1011))),
+                    (_, mine) => Ok((!mine).then_some(event)),
+                })
             });
             events.and_then(move |event| answers.clone().after(event))
         })?;

@@ -28,7 +28,8 @@
 //!   `/input_items`), with the provider's id in what goes out and the
 //!   signed one in what comes back, the `previous_response_id` an answer
 //!   echoes included. The endpoints under the prefix that are not ids
-//!   (`/v1/responses/input_tokens`) pass through to the default deployment.
+//!   (`/v1/responses/input_tokens`, `compact`: anything not shaped like a
+//!   signed id) pass through to the default deployment.
 //!
 //! The format is `rest`'s: its input carries the method and path, so what a
 //! plugin changes in it, the encoder writes.
@@ -126,12 +127,16 @@ struct Job(String);
 #[derive(Clone)]
 struct NoContent;
 
+/// Where a provider's id is unique: a tenant's key at a deployment.
+type Home = (u64, usize);
+
 #[derive(Default)]
 struct Shared {
     /// A durable store (SQL, Redis) with a TTL in production.
     entries: Mutex<HashMap<String, Entry>>,
-    /// The provider's id for each signed one, of a job once it has answered.
-    natives: Mutex<HashMap<String, String>>,
+    /// The provider's id for each signed one, of a job once it has answered,
+    /// with the tenant and deployment it lives at (ids are only unique there).
+    natives: Mutex<HashMap<String, (Home, String)>>,
     keys: AtomicU64,
 }
 
@@ -144,19 +149,18 @@ fn answer(body: impl Into<Bytes>) -> Option<Response> {
     Some(Response::stream(stream::iter([Ok(body)])))
 }
 
-/// The Responses endpoints under `/v1/responses/` that are not ids.
-const ENDPOINTS: [&str; 1] = ["input_tokens"];
-
 fn not_found() -> Fault {
     Fault::not_found("no such response")
 }
 
 /// The signed id at the start of a path `/v1/responses/{id}...`, and the rest
-/// of the path (`/cancel`, `?background=true`, or nothing).
+/// of the path (`/cancel`, `?background=true`, or nothing). Whatever under
+/// the prefix is not shaped like one of ours (`input_tokens`, `compact`) is
+/// an endpoint of the provider's.
 fn split(path: &str) -> Option<(&str, &str)> {
     let path = path.strip_prefix("/v1/responses/")?;
     let (id, rest) = path.split_at(path.find(['/', '?']).unwrap_or(path.len()));
-    (!ENDPOINTS.contains(&id)).then_some((id, rest))
+    id.starts_with("resp_").then_some((id, rest))
 }
 
 /// Whether a request asks for a streamed answer, in its body or its query.
@@ -174,8 +178,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Jobs {
     /// `got` with the signed `id` for the provider's, which is returned, and
-    /// the signed id for the `previous_response_id` it echoes.
-    fn show(&self, got: &mut Got<Rest>, id: &str) -> Result<Option<String>, Fault> {
+    /// the signed id for the `previous_response_id` it echoes, of the same home.
+    fn show(&self, got: &mut Got<Rest>, id: &str, home: Home) -> Result<Option<String>, Fault> {
         let mut body: Value = serde_json::from_slice(&got.0)
             .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
         let native = body["id"].as_str().map(str::to_owned);
@@ -184,7 +188,9 @@ impl Jobs {
         }
         if let Some(previous) = body["previous_response_id"].as_str() {
             let natives = lock(&self.0.natives);
-            let signed = natives.iter().find(|(_, native)| *native == previous);
+            let signed = natives
+                .iter()
+                .find(|(_, (at, native))| *at == home && native == previous);
             if let Some((signed, _)) = signed {
                 body["previous_response_id"] = signed.as_str().into();
             }
@@ -195,7 +201,9 @@ impl Jobs {
 
     /// The provider's id for a signed one, if it has named it.
     fn native(&self, id: &str) -> Option<String> {
-        lock(&self.0.natives).get(id).cloned()
+        lock(&self.0.natives)
+            .get(id)
+            .map(|(_, native)| native.clone())
     }
 
     /// A `previous_response_id` in `body` goes to the provider as its own id,
@@ -242,9 +250,9 @@ impl Jobs {
             ask.path.clone_from(&path);
             Ok(())
         })?;
-        let id = id.to_owned();
+        let (id, home) = (id.to_owned(), (tenant(cx), deployment));
         let jobs = self.clone();
-        cx.filter(move |got: &mut Got<Rest>| jobs.show(got, &id).map(drop))?;
+        cx.filter(move |got: &mut Got<Rest>| jobs.show(got, &id, home).map(drop))?;
         Ok(None)
     }
 
@@ -257,10 +265,10 @@ impl Jobs {
         deployment: usize,
     ) -> Result<Option<Response>, Fault> {
         cx.set_target(DEPLOYMENTS[deployment]);
-        let jobs = self.clone();
+        let (jobs, home) = (self.clone(), (tenant(cx), deployment));
         cx.filter(move |got: &mut Got<Rest>| {
-            if let Some(native) = jobs.show(got, &id)? {
-                lock(&jobs.0.natives).insert(id.clone(), native);
+            if let Some(native) = jobs.show(got, &id, home)? {
+                lock(&jobs.0.natives).insert(id.clone(), (home, native));
             }
             Ok(())
         })?;
