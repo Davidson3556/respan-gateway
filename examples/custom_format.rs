@@ -152,7 +152,7 @@ impl_format!(OpenAiEmbeddings);
 
 /// The JSON a value came in, to write its changes into.
 fn origin_json<T: PartialEq>(origin: &Relayed<T>) -> Value {
-    let bytes = origin.origin(NAME).map(|o| &o.bytes[..]).unwrap_or(b"{}");
+    let bytes = origin.came_in(NAME).map(|o| &o.bytes[..]).unwrap_or(b"{}");
     serde_json::from_slice(bytes).unwrap_or_default()
 }
 

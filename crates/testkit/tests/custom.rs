@@ -217,7 +217,7 @@ impl JevFormat {
                 // What is no content, from another format, writes nothing.
                 return Ok(Bytes::new());
             }
-            let like = answers.iter().find_map(|a| a.origin.origin(name));
+            let like = answers.iter().find_map(|a| a.origin.came_in(name));
             let like = like.map(|o| &o.bytes);
             Ok(frame(like, json!({ key: texts.concat() })))
         };
@@ -284,7 +284,7 @@ impl Encoder<Jev, ()> for Prompts {
     fn head(&mut self, _first: Option<&Jev>) {}
 
     fn encode(&mut self, jev: &Jev, out: &mut BytesMut) -> Result<(), Fault> {
-        let origin = jev.origin.origin(self.0.name);
+        let origin = jev.origin.came_in(self.0.name);
         if let Some(bytes) = jev.origin.bytes(self.0.name, jev) {
             out.extend_from_slice(bytes);
             return Ok(());

@@ -1810,7 +1810,7 @@ impl Codec for InPath {
         let (seen, head) = (self.0.clone(), line_head(client));
         let head = move |first: Option<&LIn>| {
             let raw = first
-                .and_then(|i| i.1.origin(LINE))
+                .and_then(|i| i.1.came_in(LINE))
                 .map(|o| o.bytes.clone());
             lock(&seen).push((first.is_some(), raw.unwrap_or_default()));
             head
@@ -1829,7 +1829,7 @@ impl Encoder<LIn, ()> for AsItCame {
     fn head(&mut self, _first: Option<&LIn>) {}
 
     fn encode(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
-        match input.1.origin(LINE) {
+        match input.1.came_in(LINE) {
             Some(origin) => {
                 out.extend_from_slice(&origin.bytes);
                 Ok(())

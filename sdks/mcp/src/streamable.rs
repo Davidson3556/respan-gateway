@@ -66,7 +66,7 @@ impl Codec for StreamableHttp {
 
     fn accepts(&self, head: &RequestHead) -> bool {
         let mcp = [Method::POST, Method::GET, Method::DELETE].contains(&head.method);
-        head.uri.path() == self.path && mcp
+        mcp && formats::clean_path(head.uri.path()) == formats::clean_path(self.path)
     }
 
     fn request_decoder(&self, head: &RequestHead) -> Box<dyn Decoder<ToServer>> {
@@ -251,7 +251,7 @@ fn event(output: &ToClient) -> Bytes {
     } else if output.messages.is_empty() {
         return Bytes::new();
     }
-    let like = output.origin.origin(NAME).map(|o| &o.bytes);
+    let like = output.origin.came_in(NAME).map(|o| &o.bytes);
     sse::event_as(like, None, body(&output.messages, output.batch)).into()
 }
 

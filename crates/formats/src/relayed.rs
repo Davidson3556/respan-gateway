@@ -56,13 +56,18 @@ impl<T: PartialEq> Relayed<T> {
     }
 
     /// Its origin if `format` decoded it: the shape to write changes into.
-    pub fn origin(&self, format: &str) -> Option<&Came<T>> {
+    pub fn came_in(&self, format: &str) -> Option<&Came<T>> {
         self.0.as_deref().filter(|o| *o.format == *format)
+    }
+
+    /// What the bytes said, if decoded by any format.
+    pub fn said(&self) -> Option<&T> {
+        self.0.as_deref().map(|o| &o.said)
     }
 
     /// The bytes to write for `now` in `format`, while it says what they said.
     pub fn bytes(&self, format: &str, now: &T) -> Option<&Bytes> {
-        self.origin(format)
+        self.came_in(format)
             .filter(|o| o.said == *now)
             .map(|o| &o.bytes)
     }
@@ -92,7 +97,7 @@ mod tests {
         assert_eq!(relayed.bytes("f", &1), Some(&Bytes::from_static(b"x")));
         assert_eq!(relayed.bytes("f", &2), None);
         assert_eq!(relayed.bytes("g", &1), None);
-        assert!(relayed.origin("f").is_some_and(|o| o.said == 1));
+        assert!(relayed.came_in("f").is_some_and(|o| o.said == 1));
         assert!(relayed == Relayed::default());
     }
 

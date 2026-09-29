@@ -141,7 +141,7 @@ impl Transport for MockAt {
         proxy_call(&mut call.head);
         strip_client_origin_headers(&mut call.head.headers);
         credentials(&mut call, &self.headers);
-        let (call, _) = respan_gateway_http::call(call);
+        let (call, _) = respan_gateway_http::into_request(call);
         let (mut head, body) = call.into_parts();
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);

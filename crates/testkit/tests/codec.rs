@@ -482,7 +482,7 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
             let mut resp = http::Response::new(http_body_util::Full::new(Bytes::from(UNARY)));
             let json = HeaderValue::from_static("application/json");
             resp.headers_mut().insert("content-type", json);
-            Ok(respan_gateway_http::answer(resp))
+            Ok(respan_gateway_http::from_response(resp))
         }
     }
 
@@ -633,8 +633,8 @@ impl Encoder<Reply, ()> for Noting {
 
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
         let noted = match (
-            reply.origin(AnthropicMessages.name()),
-            reply.origin(OpenAiChat.name()),
+            reply.came_in(AnthropicMessages.name()),
+            reply.came_in(OpenAiChat.name()),
         ) {
             (Some(_), _) => "own",
             (_, Some(_)) => "openai",

@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_formats::AnthropicMessages;
 use respan_gateway_formats::conversation::{Message, Role};
 
 #[test]
@@ -326,5 +327,59 @@ async fn b_two_interleaved_calls_are_restored_end_to_end() -> Result<(), Fault> 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(joined_args(&body, 0).0, "{\"to\":\"bob@x.io\"}", "{body}");
     assert_eq!(joined_args(&body, 1).0, "{\"to\":\"alice@y.org", "{body}");
+    Ok(())
+}
+
+/// An OpenAI client served by an Anthropic provider: the placeholder split
+/// across `partial_json` fragments is restored in the OpenAI arguments.
+#[tokio::test]
+async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result<(), Fault> {
+    const ANTHROPIC: &str = "http://anthropic.test/v1";
+    let event = |name: &str, data: serde_json::Value| format!("event: {name}\ndata: {data}\n\n");
+    let partial = |json: &str| {
+        let delta = json!({ "type": "input_json_delta", "partial_json": json });
+        event(
+            "content_block_delta",
+            json!({ "type": "content_block_delta", "index": 0, "delta": delta }),
+        )
+    };
+    let start = json!({ "type": "content_block_start", "index": 0,
+        "content_block": { "type": "tool_use", "id": "toolu_1", "name": "send", "input": {} } });
+    let message = json!({ "id": "m1", "type": "message", "role": "assistant", "model": "c",
+        "content": [], "usage": { "input_tokens": 5, "output_tokens": 1 } });
+    let stop = json!({ "type": "message_delta", "usage": { "output_tokens": 9 },
+        "delta": { "stop_reason": "tool_use", "stop_sequence": null } });
+    let chunks = [
+        event(
+            "message_start",
+            json!({ "type": "message_start", "message": message }),
+        ),
+        event("content_block_start", start),
+        partial("{\"to\":\"<EMA"),
+        partial("IL_"),
+        partial("1>\"}"),
+        event(
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": 0 }),
+        ),
+        event("message_delta", stop),
+        event("message_stop", json!({ "type": "message_stop" })),
+    ];
+    let mock = MockTransport::new();
+    mock.reply(
+        ANTHROPIC,
+        mock::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>()),
+    );
+    let gw = Gateway::new()
+        .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))?
+        .serve(OpenAiChat)?
+        .plugin("pii", Pii)?
+        .plugin("pii-input", PiiInput)?
+        .target("anthropic")?;
+    let (status, _, body) = read_whole(serve(&gw, chat(PROMPT.into(), json!({}))).await.0).await;
+    let body = String::from_utf8_lossy(&body?).into_owned();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (args, _) = joined_args(&body, 0);
+    assert_eq!(args, r#"{"to":"bob@x.io"}"#, "{body}");
     Ok(())
 }

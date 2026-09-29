@@ -66,7 +66,7 @@ enum Claim {
 /// store is a table keyed by `Key` with a TTL: `claim` is an
 /// `INSERT .. ON CONFLICT DO NOTHING` (or Redis `SET NX EX`), waiting
 /// polls or subscribes until the row is done, and a result is each reply's
-/// bytes (`reply.origin(format)`), decoded again to replay.
+/// bytes (`reply.came_in(format)`), decoded again to replay.
 #[async_trait]
 trait Store: Send + Sync + 'static {
     /// `Run` for the first request with `key`; else its result, waiting
@@ -135,7 +135,7 @@ impl<S: Store> Plugin for Idempotent<S> {
         let tenant = cx.extensions().get::<Credential>();
         // The body as it came: the bytes the client's conversation came in.
         let chat = cx.input::<Conversation>()?;
-        let body = chat.origin(cx.format()).map_or(&[][..], |o| &o.bytes);
+        let body = chat.came_in(cx.format()).map_or(&[][..], |o| &o.bytes);
         let key = (
             hash(tenant.and_then(|c| c.get(AUTHORIZATION.as_str()))),
             key.to_owned(),

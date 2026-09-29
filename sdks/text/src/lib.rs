@@ -245,7 +245,9 @@ fn edit_json_text(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
         out.push_str(&if plain == was {
             before.to_owned()
         } else {
-            escaped(&plain)
+            // A cut-off escape at the end stays as it came.
+            let cut = steps(before).last().filter(|(_, m)| m.is_none());
+            escaped(&plain) + cut.map_or("", |(step, _)| step)
         });
         out.push_str(quote);
         rest = &after[quote.len()..];
@@ -300,12 +302,17 @@ impl Readable for Reply {
     }
 }
 
+/// Whether `raw` is an Anthropic `*_delta` event.
+fn is_delta(raw: &Value) -> bool {
+    let event = raw.get("type").and_then(Value::as_str);
+    event.is_some_and(|t| t.ends_with("_delta"))
+}
+
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
         Piece::Other { raw, .. } => {
-            let event = raw.get("type").and_then(Value::as_str);
-            let delta = event.is_some_and(|t| t.ends_with("_delta"));
+            let delta = is_delta(raw);
             edit_raw(Arc::make_mut(raw), "", delta, edit)
         }
         _ => Ok(()),
@@ -362,7 +369,7 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
 /// them) are held per call like text, so a match split across their
 /// fragments is seen whole and what replaces it is escaped as JSON text; the
 /// tail held at a finish or the end is released as a chunk of just that call's
-/// arguments. Anthropic's `partial_json` is not held.
+/// arguments. Anthropic's `partial_json` is held the same way.
 #[derive(Debug)]
 pub struct Holdback<R> {
     rewrite: R,
@@ -532,8 +539,9 @@ fn for_arguments(v: &mut Value, visit: &mut impl FnMut(&[Step], &mut String)) {
                 for (name, value) in fields.iter_mut() {
                     path.push(Step::Key(name.clone()));
                     let calls = ["function", "function_call"].contains(&parent);
+                    let arguments = (calls && name == "arguments") || name == "partial_json";
                     match value {
-                        Value::String(s) if delta && calls && name == "arguments" => visit(path, s),
+                        Value::String(s) if delta && arguments => visit(path, s),
                         _ => walk(value, name, delta || name == "delta", path, visit),
                     }
                     path.pop();
@@ -545,14 +553,20 @@ fn for_arguments(v: &mut Value, visit: &mut impl FnMut(&[Step], &mut String)) {
             _ => {}
         }
     }
-    walk(v, "", false, &mut Vec::new(), visit);
+    walk(v, "", is_delta(v), &mut Vec::new(), visit);
 }
 
 /// The chunk that holds only `text` at `path`.
 fn skeleton(path: &[Step], text: String) -> Value {
     match path {
         [] => text.into(),
-        [Step::Key(name), rest @ ..] => json!({ name.as_str(): skeleton(rest, text) }),
+        [Step::Key(name), rest @ ..] => {
+            let mut object = json!({ name.as_str(): skeleton(rest, text) });
+            if name == "partial_json" {
+                object["type"] = "input_json_delta".into();
+            }
+            object
+        }
         [Step::Element, rest @ ..] => Value::Array(vec![skeleton(rest, text)]),
         [Step::Index(n), rest @ ..] => {
             let mut object = skeleton(rest, text);

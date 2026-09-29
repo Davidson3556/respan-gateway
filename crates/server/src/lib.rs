@@ -213,7 +213,7 @@ impl Transport for HttpTransport {
             })?;
         let broke = |e| Fault::upstream("the provider's body broke off").with_source(e);
         let resp = http::Response::from(resp).map(|body| body.map_err(broke));
-        let mut resp = respan_gateway_http::answer(resp);
+        let mut resp = respan_gateway_http::from_response(resp);
         strip_origin_headers(&mut resp.head.headers);
         Ok(resp)
     }
