@@ -166,6 +166,11 @@ fn anthropic_choice(choice: &Value) -> Result<Value, Fault> {
 
 /// OpenAI's `tool_choice`, and whether the model may call one tool only.
 fn openai_choice(choice: &Value) -> Result<(Value, bool), Fault> {
+    let choice = known_fields(
+        choice,
+        &["type", "name", "disable_parallel_tool_use"],
+        "a 'tool_choice'",
+    )?;
     let one = choice["disable_parallel_tool_use"] == true;
     let choice = match (choice["type"].as_str(), choice["name"].as_str()) {
         (Some("auto"), _) => "auto".into(),
@@ -237,6 +242,9 @@ fn result_text(content: &Value) -> Result<String, Fault> {
         Value::Array(blocks) => blocks.as_slice(),
         _ => &[],
     };
+    for block in blocks {
+        known_fields(block, &["type", "text"], "a tool result's text block")?;
+    }
     let all: Option<String> = blocks
         .iter()
         .map(|b| b["text"].as_str().filter(|_| b["type"] == "text"))
@@ -343,6 +351,10 @@ fn openai_fragments(choices: &Value) -> Option<Vec<Fragment>> {
     let [choice] = choices.as_array()?.as_slice() else {
         return None;
     };
+    // Each choice of `n > 1` numbers its own calls: not one list of calls.
+    if choice["index"].as_u64().is_some_and(|i| i != 0) {
+        return None;
+    }
     let mut fields = vec!["index", "delta", "message"];
     fields.extend(INERT_CHOICE);
     let body = [&choice["delta"], &choice["message"]];

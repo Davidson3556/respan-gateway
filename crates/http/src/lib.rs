@@ -69,7 +69,6 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 pub use driver::Accepted;
-use driver::ERROR_BODY_CAP;
 pub use transport::{
     CallHeaders, Dialer, Exchange, Frames, Transport, credentials, is_connection_header,
     proxy_call, strip_client_origin_headers, strip_origin_headers,
@@ -192,16 +191,16 @@ impl std::ops::Deref for Asked {
 
 /// [`handle`] `req`, streaming if it asks to switch protocols (`Upgrade`):
 /// the adapter for an embedder or test that performs every switch.
-pub async fn serve<B>(
+pub fn serve<B>(
     gateway: &Gateway,
     req: http::Request<B>,
-) -> (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)
+) -> impl Future<Output = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)> + Send + 'static
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
     let streaming = req.headers().contains_key(UPGRADE);
-    handle(gateway, req, streaming).await
+    handle(gateway, req, streaming)
 }
 
 /// Hand `req` to `gateway` as an HTTP adapter does, streaming if
@@ -212,28 +211,35 @@ where
 /// ([`plain`]); the response loses a hop's headers ([`outgoing`]); a
 /// [`bodiless`] one goes with none, the gateway's body read apart. The
 /// caller bounds a whole body and removes an `Upgrade` it will not perform.
-/// Call it on a tokio runtime.
-pub async fn handle<B>(
+///
+/// Like [`Gateway::handle`], the request counts for [`Gateway::idle`] from
+/// this call, not from the future's first poll, and the future borrows
+/// nothing: a job handed over from an end hook calls this where it starts
+/// and awaits the future in its own task. Await it on a tokio runtime.
+pub fn handle<B>(
     gateway: &Gateway,
     req: http::Request<B>,
     streaming: bool,
-) -> (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)
+) -> impl Future<Output = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)> + Send + 'static
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
     let (Arrived { head, body, to }, extensions) = arrive(req);
     let (wire, answer) = Accepted::new(head, body, streaming);
-    let ended = gateway.handle(wire, extensions).await;
-    let (resp, ended) = match answer.await {
-        Some(resp) => (Ok(resp), ended),
-        None => {
-            let fault = ended.await.err();
-            let fault = fault.unwrap_or_else(|| Fault::internal("no format answered"));
-            (Err(fault.clone()), ready(Err(fault)).boxed())
-        }
-    };
-    (depart(&to, streaming, resp), ended)
+    let handled = gateway.handle(wire, extensions);
+    async move {
+        let ended = handled.await;
+        let (resp, ended) = match answer.await {
+            Some(resp) => (Ok(resp), ended),
+            None => {
+                let fault = ended.await.err();
+                let fault = fault.unwrap_or_else(|| Fault::internal("no format answered"));
+                (Err(fault.clone()), ready(Err(fault)).boxed())
+            }
+        };
+        (depart(&to, streaming, resp), ended)
+    }
 }
 
 /// Marks the plain text of a refusal no codec could write, which goes as
@@ -357,11 +363,21 @@ pub(crate) fn depart(
     }
 }
 
-/// Read `body`'s frames until it ends, waits on something, or has given
-/// [`ERROR_BODY_CAP`] bytes. A bodiless answer's frames are content it
-/// cannot send, read only to reach its end; the cap is the driver's for a
-/// body read only to be classified, far past any real one, and here it
-/// bounds a body that is always ready and never ends. An output says
+/// The polls [`drain_ready`] spends on one body. Bytes are no measure: it
+/// discards what it reads, so a frame costs one poll however large, and a
+/// ready body's size is already in memory. What must be bounded is the
+/// polls, as a body that is always ready, or that yields and never gives a
+/// frame, would hold the thread forever. An output costs two polls a frame
+/// (one `Pending` woken at once, then the frame), so this reads the end of
+/// a ready body of 2048 frames, far more than any answer that has no body
+/// to send is made of, and returns within microseconds on one that has no
+/// end.
+const DRAIN_POLLS: usize = 4096;
+
+/// Read `body`'s frames until it ends, waits on something, or has spent
+/// [`DRAIN_POLLS`] polls. A bodiless answer's frames are content it cannot
+/// send, read only to reach its end, so a ready body of any size is read
+/// through and its end told. An output says
 /// `Pending` between the frames it sent apart (rule 5) but wakes itself at
 /// once, as a yield does, so a `Pending` that was woken during its poll is
 /// ready, and one that was not is waiting. Each poll runs outside tokio's
@@ -377,21 +393,17 @@ fn drain_ready(body: &mut Body) {
     let woken = Arc::new(Woken(AtomicBool::new(false)));
     let waker = futures::task::waker(woken.clone());
     let mut cx = std::task::Context::from_waker(&waker);
-    let mut read = 0;
-    while read < ERROR_BODY_CAP {
+    for _ in 0..DRAIN_POLLS {
         let next = std::future::poll_fn(|cx| {
             http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), cx)
         });
         let mut next = std::pin::pin!(tokio::task::unconstrained(next));
-        let frame = loop {
-            match next.as_mut().poll(&mut cx) {
-                std::task::Poll::Pending if woken.0.swap(false, Ordering::SeqCst) => {}
-                std::task::Poll::Pending => return,
-                std::task::Poll::Ready(frame) => break frame,
-            }
-        };
-        let Some(Ok(frame)) = frame else { return };
-        read += frame.data_ref().map_or(1, |data| data.len().max(1));
+        match next.as_mut().poll(&mut cx) {
+            std::task::Poll::Pending if woken.0.swap(false, Ordering::SeqCst) => {}
+            std::task::Poll::Pending => return,
+            std::task::Poll::Ready(Some(Ok(_))) => {}
+            std::task::Poll::Ready(_) => return,
+        }
     }
 }
 

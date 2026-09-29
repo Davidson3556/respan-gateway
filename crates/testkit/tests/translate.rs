@@ -2780,3 +2780,206 @@ async fn control_sequential_openai_tool_calls_reach_an_anthropic_client() {
         "{out}"
     );
 }
+
+// ---------------- loop-4 audit ----------------
+
+/// Sends the client's message as the call's own input, as a guardrail that
+/// rewrites the prompt does: never a relay, so the provider's pieces are
+/// written anew even in the client's own format.
+struct L4Own(&'static str);
+
+#[async_trait]
+impl Plugin for L4Own {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let chat = cx.input::<Conversation>()?.clone();
+        Ok(Some(cx.call(self.0).with_input(chat).await?))
+    }
+}
+
+/// Each OpenAI tool call's accumulated `(id, arguments)` by index, as an
+/// OpenAI SDK accumulates a stream.
+fn l4_openai_calls(out: &str) -> Vec<(String, String)> {
+    let mut by: std::collections::BTreeMap<u64, (String, String)> = Default::default();
+    for (_, d) in events(out) {
+        for c in d["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let e = by.entry(c["index"].as_u64().unwrap_or(99)).or_default();
+            if let Some(id) = c["id"].as_str() {
+                e.0 = id.into();
+            }
+            e.1.push_str(c["function"]["arguments"].as_str().unwrap_or(""));
+        }
+    }
+    by.into_values().collect()
+}
+
+/// An OpenAI client, an OpenAI provider, a call that is not a relay: the
+/// parallel calls OpenAI numbers by index must each keep valid arguments.
+#[tokio::test]
+async fn l4_parallel_openai_tool_calls_written_anew_for_an_openai_client_keep_valid_arguments() {
+    let h = Harness::with(vec![Arc::new(L4Own("openai"))]);
+    h.mock.reply(OPENAI, mock::sse(OPENAI_PARALLEL_STREAM));
+    let body = json!({ "model": "gpt-x", "stream": true,
+        "tools": [{ "type": "function", "function": { "name": "read", "parameters": { "type": "object" } } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(CHAT, body.to_string())).await;
+    assert_eq!(
+        l4_openai_calls(&out),
+        vec![
+            ("call_a".into(), r#"{"path":"a"}"#.into()),
+            ("call_b".into(), r#"{"path":"b"}"#.into())
+        ],
+        "{out}"
+    );
+}
+
+/// Anthropic's blocks come one after another; written anew for an Anthropic
+/// client, each tool block must stop before the next one starts.
+#[tokio::test]
+async fn l4_sequential_anthropic_tool_blocks_written_anew_stop_before_the_next_starts() {
+    const TWO_TOOLS: &[&str] = &[
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"read\",\"input\":{}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a\\\"}\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"read\",\"input\":{}}}\n\n",
+        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"b\\\"}\"}}\n\n",
+        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ];
+    let h = Harness::with(vec![Arc::new(L4Own("anthropic"))]);
+    h.mock.reply(ANTHROPIC, mock::sse(TWO_TOOLS));
+    let body = json!({ "model": "claude-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    let seq: Vec<String> = events(&out)
+        .into_iter()
+        .filter(|(_, d)| d["type"] == "content_block_start" || d["type"] == "content_block_stop")
+        .map(|(_, d)| format!("{}{}", d["type"].as_str().unwrap_or(""), d["index"]))
+        .collect();
+    assert_eq!(
+        seq,
+        [
+            "content_block_start0",
+            "content_block_stop0",
+            "content_block_start1",
+            "content_block_stop1"
+        ],
+        "{out}"
+    );
+}
+
+/// A text block after a tool call, then the tool call's arguments (index 0
+/// again): an Anthropic client must still get the arguments in the tool's
+/// block, or a refusal, never a mangled stream.
+#[tokio::test]
+async fn l4_openai_arguments_after_interleaved_text_reach_an_anthropic_client() {
+    const MIXED: &[&str] = &[
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hm\"}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(MIXED));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    eprintln!("{out}");
+}
+
+/// A tool result's text block carries `cache_control`, which OpenAI has no
+/// place for: refused, as the module says of fields with no equivalent.
+#[tokio::test]
+async fn l4_a_tool_result_text_blocks_extra_field_is_refused_not_dropped() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::json(StatusCode::OK, r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#));
+    let body = json!({
+        "model": "gpt-x", "max_tokens": 100,
+        "messages": [
+            { "role": "user", "content": "open a.rs" },
+            { "role": "assistant", "content": [{ "type": "tool_use", "id": "t1", "name": "read", "input": {} }] },
+            { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1",
+                "content": [{ "type": "text", "text": "fn main", "cache_control": { "type": "ephemeral" } }] }] },
+        ],
+    });
+    let (status, text) = h.text(call(MESSAGES, body.to_string())).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "sent {}: {text}",
+        h.mock
+            .sent()
+            .first()
+            .map(|r| String::from_utf8_lossy(r.body()).into_owned())
+            .unwrap_or_default()
+    );
+}
+
+/// Anthropic's `tool_choice` with a field OpenAI has no place for is
+/// refused, not dropped.
+#[tokio::test]
+async fn l4_an_anthropic_tool_choice_extra_field_is_refused_not_dropped() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::json(StatusCode::OK, r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#));
+    let body = json!({
+        "model": "gpt-x", "max_tokens": 100,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "tool_choice": { "type": "auto", "cache_control": { "type": "ephemeral" } },
+        "messages": [{ "role": "user", "content": "hi" }],
+    });
+    let (status, text) = h.text(call(MESSAGES, body.to_string())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+}
+
+/// With `n > 1`, each choice numbers its own tool calls, so a call of the
+/// second choice must not merge into the first's: it is refused.
+#[tokio::test]
+async fn a_tool_call_of_a_later_choice_is_not_merged_into_the_first_choices() {
+    const TWO_CHOICES: &[&str] = &[
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-x\",\"choices\":[{\"index\":1,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        "data: [DONE]\n\n",
+    ];
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(TWO_CHOICES));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    assert!(!out.contains("call_b"), "{out}");
+    assert!(out.contains("event: error"), "{out}");
+}
+
+/// Parallel OpenAI calls reach an Anthropic client one block at a time.
+#[tokio::test]
+async fn parallel_openai_tool_calls_reach_an_anthropic_client_in_blocks_that_do_not_overlap() {
+    let h = Harness::new(Vec::new());
+    h.mock.reply(OPENAI, mock::sse(OPENAI_PARALLEL_STREAM));
+    let body = json!({ "model": "gpt-x", "max_tokens": 100, "stream": true,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "hi" }] });
+    let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
+    let seq: Vec<String> = events(&out)
+        .into_iter()
+        .filter(|(_, d)| d["type"] == "content_block_start" || d["type"] == "content_block_stop")
+        .map(|(_, d)| format!("{}{}", d["type"].as_str().unwrap_or(""), d["index"]))
+        .collect();
+    assert_eq!(
+        seq,
+        [
+            "content_block_start0",
+            "content_block_stop0",
+            "content_block_start1",
+            "content_block_stop1"
+        ],
+        "{out}"
+    );
+}

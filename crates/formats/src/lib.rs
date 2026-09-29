@@ -51,11 +51,13 @@ pub fn posts_to(head: &RequestHead, suffix: &str) -> bool {
 
 /// A path as every front end reads it: percent escapes decoded, `;`
 /// parameters dropped, dot-segments removed (RFC 3986 5.2.4) and empty
-/// segments collapsed, so `/v1/chat/./completions`, `/v1//chat/completions`
+/// segments collapsed, and a backslash read as a slash (as the outbound
+/// client reads it), so `/v1/chat/./completions`, `/v1//chat/completions`
 /// and `/x/../v1/chat/completions/` all spell `/v1/chat/completions`.
 pub fn clean_path(path: &str) -> String {
     let mut kept: Vec<String> = Vec::new();
-    for segment in respan_gateway_http::percent_decode(path).split('/') {
+    // The outbound client reads a backslash as a slash, so a match must too.
+    for segment in respan_gateway_http::percent_decode(path).split(['/', '\\']) {
         let segment = segment.split(';').next().unwrap_or_default();
         match segment {
             "" | "." => {}
@@ -64,6 +66,23 @@ pub fn clean_path(path: &str) -> String {
         }
     }
     kept.iter().fold(String::new(), |out, s| out + "/" + s)
+}
+
+/// A request's path as [`clean_path`] reads it, written as a URI path: what
+/// a relay sends on, so the provider only gets a path that was matched.
+pub(crate) fn canonical_path(path: &str) -> String {
+    let mut out = String::new();
+    for byte in clean_path(path).bytes() {
+        match byte {
+            b'/' | b'-' | b'.' | b'_' | b'~' => out.push(char::from(byte)),
+            b if b.is_ascii_alphanumeric() => out.push(char::from(b)),
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    match out.is_empty() {
+        true => "/".to_owned(),
+        false => out,
+    }
 }
 
 /// Whether a request's path ends in `suffix`, however it is spelled (see

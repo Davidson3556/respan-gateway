@@ -60,7 +60,7 @@ async fn a_101_answer_carries_the_providers_frames_in_order() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_call_that_ends_in_an_err_drops_the_connection_and_the_answer_ends_abandoned() {
+async fn a_call_that_ends_in_an_err_drops_the_connection_and_the_answer_ends_with_it() {
     let probe = Probe::start().await;
     let (tx, call) = call("/x");
     let mut answer = WsTransport::new(probe.base())
@@ -69,10 +69,10 @@ async fn a_call_that_ends_in_an_err_drops_the_connection_and_the_answer_ends_aba
         .await
         .unwrap();
     tx.unbounded_send(text("a")).unwrap();
-    tx.unbounded_send(Err(Fault::bad_request("client left")))
+    tx.unbounded_send(Err(Fault::new("policy", "an input was refused")))
         .unwrap();
     let end = answer.body.next().await.unwrap().unwrap_err();
-    assert_eq!(end.code(), "abandoned");
+    assert_eq!(end.code(), "policy");
     eventually("the connection dropped", || {
         probe.live.load(Ordering::SeqCst) == 0
     })

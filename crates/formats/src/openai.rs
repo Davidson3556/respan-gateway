@@ -584,9 +584,9 @@ struct Chunks {
     /// A written finish, kept back to the end and sent before those chunks.
     finish: Option<BytesMut>,
     /// The tool calls written so far, by the number their maker gave them,
-    /// and whether the last has no arguments yet.
     calls: Vec<usize>,
-    bare: bool,
+    /// The places of the calls that have no arguments yet.
+    bare: Vec<usize>,
 }
 
 impl Chunks {
@@ -629,15 +629,18 @@ impl Chunks {
         let arguments = &fragment.arguments;
         let call = match (fragment.start, at) {
             (Some((id, name)), None) => {
-                self.end_call(out);
                 let at = self.calls.len();
                 self.calls.push(fragment.index.unwrap_or(at));
-                self.bare = arguments.is_empty();
+                if arguments.is_empty() {
+                    self.bare.push(at);
+                }
                 let function = json!({ "name": name, "arguments": arguments });
                 json!({ "index": at, "id": id, "type": "function", "function": function })
             }
             (_, Some(at)) => {
-                self.bare &= arguments.is_empty() || at + 1 < self.calls.len();
+                if !arguments.is_empty() {
+                    self.bare.retain(|b| *b != at);
+                }
                 json!({ "index": at, "function": { "arguments": arguments } })
             }
             (None, None) => return Err(unwritable_content()),
@@ -646,11 +649,11 @@ impl Chunks {
         Ok(())
     }
 
-    /// Ends the last tool call: one that had no arguments has none, as JSON.
-    fn end_call(&mut self, out: &mut BytesMut) {
-        if std::mem::take(&mut self.bare) {
+    /// Ends the tool calls: one that had no arguments has none, as JSON.
+    fn end_calls(&mut self, out: &mut BytesMut) {
+        for at in std::mem::take(&mut self.bare) {
             let function = json!({ "arguments": "{}" });
-            let call = json!({ "index": self.calls.len() - 1, "function": function });
+            let call = json!({ "index": at, "function": function });
             self.choice(out, json!({ "tool_calls": [call] }));
         }
     }
@@ -771,7 +774,7 @@ impl Encoder<Reply, ()> for Chunks {
             self.write(&Reply::finished(Finish::Stop), out)?;
         }
         self.begin(out);
-        self.end_call(out);
+        self.end_calls(out);
         out.extend_from_slice(&self.finish.take().unwrap_or_default());
         out.extend_from_slice(&self.held.take().unwrap_or_default());
         // Relayed chunks carry their own usage chunk.

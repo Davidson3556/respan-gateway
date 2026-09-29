@@ -211,13 +211,18 @@ pub(crate) fn keys(
     }
     if own.is_empty() {
         let client = extensions.get::<Credential>().filter(|_| relayed);
-        if let Some(client) = client.cloned() {
-            client.restore(head);
+        match client.cloned() {
+            Some(client) => client.restore(head),
+            // No key follows a subprotocol's marker (`token`), so it goes:
+            // a provider refuses a marker with no key.
+            None => {
+                take_protocol_keys(&mut head.headers, true);
+            }
         }
         return;
     }
     remove_if(&mut head.headers, |n| is_credential(n.as_str()));
-    take_protocol_keys(&mut head.headers);
+    take_protocol_keys(&mut head.headers, true);
     take_query(&mut head.uri, is_credential);
     for name in own.keys() {
         head.headers.remove(name);
@@ -311,5 +316,29 @@ mod tests {
         credentials(&mut relay, &HeaderMap::new());
         assert_eq!(relay.head.headers["authorization"], "Bearer sk-c");
         assert_eq!(relay.head.headers["x-api-key"], "k");
+    }
+
+    #[test]
+    fn a_subprotocol_marker_goes_where_its_key_does() {
+        let marked = || head(&[("sec-websocket-protocol", "realtime, token")]);
+        // Own keys replace the client's: no key is left for the marker.
+        let mut own = HeaderMap::new();
+        own.insert("authorization", HeaderValue::from_static("Bearer own"));
+        let mut keyed = call(marked(), None, true);
+        credentials(&mut keyed, &own);
+        assert_eq!(keyed.head.headers["sec-websocket-protocol"], "realtime");
+        // No key at all, as on a call not a relay.
+        let mut unrelayed = call(marked(), None, false);
+        credentials(&mut unrelayed, &HeaderMap::new());
+        assert_eq!(unrelayed.head.headers["sec-websocket-protocol"], "realtime");
+        // The client's own key comes back after its marker.
+        let mut client = HeaderMap::new();
+        client.insert("sec-websocket-protocol", HeaderValue::from_static("dg"));
+        let mut relay = call(marked(), Some(client), true);
+        credentials(&mut relay, &HeaderMap::new());
+        assert_eq!(
+            relay.head.headers["sec-websocket-protocol"],
+            "realtime, token, dg"
+        );
     }
 }
