@@ -103,50 +103,49 @@ async fn reading_a_response_first_changes_nothing() {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
-/// The time to read `n` events of a response as `mode` says; the best of a
-/// few runs, so a noisy machine cannot fail it.
+/// Read `n` events of a response as `mode` says, and how long that took.
 async fn time_of(mode: u8, lead: &'static str, n: usize) -> Duration {
-    let mut best = Duration::MAX;
-    for _ in 0..3 {
-        let t = fnt(move |_| {
-            async move {
-                let chunks = stream::iter((0..n).map(move |_| Ok(lead.to_string())))
-                    .chain(stream::iter([Ok("x".to_string()), Ok("DONE".to_string())]));
-                Ok(answer(200, chunks.boxed()))
-            }
-            .boxed()
-        });
-        let gw = Gateway::new()
-            .serve(Toy)
-            .unwrap()
-            .provider("a", Toy, t)
-            .unwrap()
-            .plugin("mode", Mode(mode))
-            .unwrap();
-        let start = Instant::now();
-        let (res, _) = handle(&gw, req(vec!["q"])).await;
-        let (_, body) = read(res).await.unwrap();
-        best = best.min(start.elapsed());
-        assert_eq!(body.len(), n * (lead.len() + 1) + "x;!".len());
-    }
-    best
+    let t = fnt(move |_| {
+        async move {
+            // Each chunk arrives on its own, so each is a batch of its own.
+            let chunks = stream::iter((0..n).map(move |_| lead.to_string()))
+                .chain(stream::iter(["x".to_string(), "DONE".to_string()]))
+                .then(|chunk| async {
+                    tokio::task::yield_now().await;
+                    Ok(chunk)
+                });
+            Ok(answer(200, chunks.boxed()))
+        }
+        .boxed()
+    });
+    let gw = Gateway::new()
+        .serve(Toy)
+        .unwrap()
+        .provider("a", Toy, t)
+        .unwrap()
+        .plugin("mode", Mode(mode))
+        .unwrap();
+    let start = Instant::now();
+    let (res, _) = handle(&gw, req(vec!["q"])).await;
+    let (_, body) = read(res).await.unwrap();
+    let took = start.elapsed();
+    assert_eq!(body.len(), n * (lead.len() + 1) + "x;!".len());
+    took
 }
 
 /// B3: a read to the end, or through a run without content, takes time in
-/// proportion to the response, not its square.
+/// proportion to the response, not its square. The count of work is not
+/// visible from outside, so the size is chosen so the two cannot be told
+/// apart by a busy machine: linear takes well under a second (in debug
+/// too), a rescan of every held batch on each read (n^2/2 steps) takes
+/// about a minute, and the bound sits between with a wide margin on both sides.
 #[tokio::test(flavor = "current_thread")]
 async fn reading_until_is_linear_in_the_chunks() {
+    const BOUND: Duration = Duration::from_secs(15);
     for (mode, lead) in [(2u8, "c"), (1, "keepalive")] {
-        let n = 12_000;
-        let (one, two) = (
-            time_of(mode, lead, n).await,
-            time_of(mode, lead, 2 * n).await,
-        );
-        assert!(
-            two < one * 3,
-            "mode {mode}: {n} chunks took {one:?}, {} took {two:?}",
-            2 * n
-        );
+        let n = 100_000;
+        let took = time_of(mode, lead, n).await;
+        assert!(took < BOUND, "mode {mode}: {n} chunks took {took:?}");
     }
 }
 
