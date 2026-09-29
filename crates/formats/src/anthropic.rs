@@ -551,6 +551,9 @@ struct EventStream {
     /// The tool call blocks not yet stopped, by the number their maker
     /// gave the call.
     tools: Vec<(usize, u32)>,
+    /// Tool calls that started while a block was open, by number, with
+    /// their id, name and arguments so far.
+    queued: Vec<(usize, String, String, String)>,
     /// The provider's open text block and its stop, kept back until the
     /// next event so released text can still go in.
     provider_open: Option<(u32, Option<Bytes>)>,
@@ -613,7 +616,8 @@ impl EventStream {
         }
     }
 
-    /// Stops the open text block and every open tool block.
+    /// Stops the open text block or tool block, then writes each queued
+    /// tool call whole, one block after another.
     fn close_block(&mut self, out: &mut BytesMut) {
         let text = self.open.take().filter(|(block, _)| block.is_some());
         let tools = std::mem::take(&mut self.tools);
@@ -624,6 +628,22 @@ impl EventStream {
         for index in all {
             emit(out, json!({ "type": "content_block_stop", "index": index }));
         }
+        for (_, id, name, arguments) in std::mem::take(&mut self.queued) {
+            let index = self.start_tool(&id, &name, out);
+            delta_json(index, &arguments, out);
+            emit(out, json!({ "type": "content_block_stop", "index": index }));
+        }
+    }
+
+    /// Opens a tool block at the next index.
+    fn start_tool(&mut self, id: &str, name: &str, out: &mut BytesMut) -> u32 {
+        let index = self.opened;
+        self.opened += 1;
+        let block = json!({ "type": "tool_use", "id": id, "name": name, "input": {} });
+        let start =
+            json!({ "type": "content_block_start", "index": index, "content_block": block });
+        emit(out, start);
+        index
     }
 
     /// Text of `block`, opening a new block at the next index if needed.
@@ -647,35 +667,39 @@ impl EventStream {
         delta(index, text, out);
     }
 
-    /// Write a piece of a tool call another format made: its start opens a
-    /// block, which stays open for the arguments of parallel calls that
-    /// follow; arguments go to the call they continue.
+    /// Write a piece of a tool call another format made. A block stops
+    /// before the next starts, so a call that starts while another is open
+    /// and may still get arguments (its maker numbers calls, and streams
+    /// them interleaved) waits, with its arguments, for the open block to
+    /// stop; the open call's arguments go out as they come.
     fn call(&mut self, fragment: Fragment, out: &mut BytesMut) -> Result<(), Fault> {
-        let at = fragment.continues(self.tools.iter().map(|t| t.0));
-        let index = match (fragment.start, at) {
+        let keys: Vec<usize> = (self.tools.iter().map(|t| t.0))
+            .chain(self.queued.iter().map(|q| q.0))
+            .collect();
+        let at = fragment.continues(keys.iter().copied());
+        let Fragment {
+            index,
+            start,
+            arguments,
+        } = fragment;
+        match (start, at) {
             (Some((id, name)), None) => {
-                if matches!(self.open, Some((Some(_), _))) {
-                    self.close_block(out);
+                if index.is_some() && matches!(self.open, Some((None, _))) {
+                    let key = index.unwrap_or_default();
+                    self.queued.push((key, id, name, arguments));
+                    return Ok(());
                 }
-                let index = self.opened;
-                self.opened += 1;
-                self.open = Some((None, index));
-                self.tools
-                    .push((fragment.index.unwrap_or(index as usize), index));
-                let block = json!({ "type": "tool_use", "id": id, "name": name, "input": {} });
-                let start = json!({ "type": "content_block_start", "index": index, "content_block": block });
-                emit(out, start);
-                index
+                self.close_block(out);
+                let block = self.start_tool(&id, &name, out);
+                self.open = Some((None, block));
+                self.tools.push((index.unwrap_or(block as usize), block));
+                delta_json(block, &arguments, out);
             }
-            (_, Some(at)) => self.tools[at].1,
+            (_, Some(at)) if at < self.tools.len() => {
+                delta_json(self.tools[at].1, &arguments, out);
+            }
+            (_, Some(at)) => self.queued[at - self.tools.len()].3.push_str(&arguments),
             (None, None) => return Err(unwritable_content()),
-        };
-        if !fragment.arguments.is_empty() {
-            let delta = json!({ "type": "input_json_delta", "partial_json": fragment.arguments });
-            emit(
-                out,
-                json!({ "type": "content_block_delta", "index": index, "delta": delta }),
-            );
         }
         Ok(())
     }
@@ -792,6 +816,18 @@ fn delta(index: u32, text: &str, out: &mut BytesMut) {
     let delta = json!({ "type": "text_delta", "text": text });
     let v = json!({ "type": "content_block_delta", "index": index, "delta": delta });
     emit(out, v);
+}
+
+/// Write a piece of a tool call's arguments, if there is one.
+fn delta_json(index: u32, arguments: &str, out: &mut BytesMut) {
+    if arguments.is_empty() {
+        return;
+    }
+    let delta = json!({ "type": "input_json_delta", "partial_json": arguments });
+    emit(
+        out,
+        json!({ "type": "content_block_delta", "index": index, "delta": delta }),
+    );
 }
 
 /// Write the event `v`, named by its type.
