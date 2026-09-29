@@ -20,7 +20,7 @@ use crate::{Codec, Dialer, Encoder, Exchange, RequestHead, ResponseHead};
 /// [`Format::dial`](respan_gateway_core::Format::dial):
 ///
 /// - The call is written from the client's head on a relay (`relay`), its
-///   first input from its value (`opening`), else, on a relay, the
+///   first input from its value (`input`), else, on a relay, the
 ///   client's bytes unread; then its later inputs, if any follow, streamed
 ///   ([`Exchange::streams`]), else whole. [`Exchange::relayed`] is set if
 ///   and only if the call carries the session's own inputs (it has an
@@ -42,11 +42,11 @@ pub fn dial<C: Codec + Clone>(
     dialer: &Dialer,
     extensions: Extensions,
     relay: Option<&Origin>,
-    opening: Option<&C::Input>,
+    input: Option<&C::Input>,
     later: Option<Events<C::Input>>,
 ) -> Result<BoxFuture<'static, Result<Half<C::Output>, Fault>>, Fault> {
     let came = relay.and_then(|o| o.downcast_ref::<Came>());
-    let (head, first, encoder, done) = first_frame(codec, opening, came, later.is_some())?;
+    let (head, first, encoder, done) = first_frame(codec, input, came, later.is_some())?;
     // A body done as it opens has no later inputs.
     let later = later.filter(|_| !done);
     let streams = later.is_some();
@@ -64,7 +64,7 @@ pub fn dial<C: Codec + Clone>(
     };
     let mut call = Exchange::new(head, body);
     call.extensions = extensions;
-    // Not `opening`'s source: a filter's edit of the session's own input
+    // Not `input`'s source: a filter's edit of the session's own input
     // still relays (see `Exchange::relayed`); only a call of its own has no
     // origin.
     call.relayed = came.is_some();
@@ -107,7 +107,7 @@ fn is_whole(answer: &ResponseHead, sent: &RequestHead) -> bool {
 #[allow(clippy::type_complexity)]
 fn first_frame<C: Codec>(
     codec: &C,
-    opening: Option<&C::Input>,
+    input: Option<&C::Input>,
     came: Option<&Came>,
     streams: bool,
 ) -> Result<
@@ -122,11 +122,11 @@ fn first_frame<C: Codec>(
     let client = came.map(|c| &*c.head);
     // A plugin's or filtered input as its value; else as it came, its bytes
     // unread if relayed.
-    let mut body = match (opening, came.and_then(|c| c.body.as_ref())) {
+    let mut body = match (input, came.and_then(|c| c.body.as_ref())) {
         (None, Some(raw)) => raw.clone(),
         _ => Bytes::new(),
     };
-    let first = opening;
+    let first = input;
     let mut encoder = codec.request_encoder(client, &mut body, streams);
     let head = encoder.head(first);
     let mut opening = BytesMut::new();

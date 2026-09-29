@@ -47,7 +47,8 @@ async fn cut_requests_leave_nothing_behind() {
     );
 }
 
-/// Counts the toy's opening decodes, to show a relay never decodes.
+/// Counts the toy's decodes of the input in an origin, to show a relay
+/// never decodes.
 struct Counted(Arc<AtomicUsize>);
 impl Format for Counted {
     type Input = In;
@@ -68,9 +69,9 @@ impl Format for Counted {
     {
         Toy.accept(w, r)
     }
-    fn opening(&self, o: &Origin) -> Option<Result<In, Fault>> {
+    fn input(&self, o: &Origin) -> Option<Result<In, Fault>> {
         self.0.fetch_add(1, Ordering::SeqCst);
-        Toy.opening(o)
+        Toy.input(o)
     }
     fn dial(
         &self,

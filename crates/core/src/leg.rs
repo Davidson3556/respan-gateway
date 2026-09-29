@@ -89,14 +89,14 @@ pub(crate) fn idle(cut: &Arc<InFlight>) -> BoxFuture<'static, Fault> {
     cut.idle().map(|()| Fault::abandoned()).boxed()
 }
 
-/// The inputs after an opening, if any follow: read once, and their input
+/// The inputs after the head's, if any follow: read once, and their input
 /// filters. A plugin's [`wrap`](crate::ClientContext::wrap) puts a new one
 /// in front, whose events wrap the one `before` it.
 pub(crate) struct Later {
     events: Mutex<Option<AnyEvents>>,
     /// Whether a reader read an input.
     read: AtomicBool,
-    /// Whether none follow the opening.
+    /// Whether none follow the head.
     pub(crate) ended: bool,
     pub(crate) filters: Layer,
     before: Option<Arc<Later>>,

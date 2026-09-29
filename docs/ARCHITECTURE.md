@@ -107,9 +107,9 @@ trait Format { type Input; type Output; type Wire; type Dialer;
   fn is_content(&self, output: &Output) -> bool { true }
   fn accept(&self, wire: Wire, reply: BoxFuture<(Half<Output>, Ended)>)
       -> BoxFuture<Result<(Option<Origin>, Option<Events<Input>>), Fault>>; // refuses
-  fn opening(&self, origin: &Origin) -> Option<Result<Input, Fault>> { None }
+  fn input(&self, origin: &Origin) -> Option<Result<Input, Fault>> { None }
   fn dial(&self, dialer: &Dialer, extensions: Extensions, relay: Option<&Origin>,
-          opening: Option<&Input>, later: Option<Events<Input>>)
+          input: Option<&Input>, later: Option<Events<Input>>)
       -> Result<BoxFuture<Result<Half<Output>, Fault>>, Fault>; }
 // Events<T>   = BoxStream<Result<T, Fault>>
 // Origin      = Arc<dyn Any>: what came with a head, sealed
@@ -124,7 +124,7 @@ The rules, in full in the rustdoc of `Format`:
    adapter awaits `handle`, then that slot (a compiled example,
    both edges and the adapter, is in `Format`'s rustdoc). Its inputs are `Some(events)` if any follow the
    head (a session) and `None` if none do (a one-shot request); `dial` is
-   told the same with `later: None`. `opening` gives the input that came
+   told the same with `later: None`. `input` gives the input that came
    with the head, only for a request whose inputs are `None`; the gateway
    calls it only when a value is needed, never on an unchanged relay.
 2. **A provider edge classifies its answer at its head.** `dial` returns
@@ -143,7 +143,7 @@ The rules, in full in the rustdoc of `Format`:
    fails on. Outputs to be read apart return `Pending` between.
 
 The client edge has defaults (`accepts` is false, `accept` refuses,
-`opening` is `None`), so a format that keeps them is dial-only: an
+`input` is `None`), so a format that keeps them is dial-only: an
 in-process model is a provider whose `Dialer` is the model
 (`examples/custom_transport.rs`).
 
@@ -190,8 +190,8 @@ One function decides relay (`relay_origin` in `call.rs`): the client's origin
 reaches a provider only when the call carries the request's inputs, as
 filters and wraps left them, not an input of its own (`with_input`, a
 plugin's own request, such as a judge's prompt), and goes to a format of
-the client's name. Then `dial` gets `relay`, and a relay whose opening no
-plugin changed gets `opening: None`: the driver writes the origin's head and raw
+the client's name. Then `dial` gets `relay`, and a relay whose input no
+plugin changed gets `input: None`: the driver writes the origin's head and raw
 body unread, and a changed value is written into its own bytes by the
 format. The provider's origin returns to the client edge only on a relay, so
 the client's format writes the provider's head; a translated call is written
@@ -291,7 +291,7 @@ Every crate but `core` uses only the public API of the crates below it.
 | Inputs that fail end their call and the reply with that fault | `leg.rs` (`Reading`), `call.rs` (`dial`) | core `wrap` |
 | Edge contract: refusal at the head, outputs dropped unread | `call.rs`, `reply.rs` | core `contract`; `sdks/ws/tests/kernel.rs` |
 | The fault split | the kind (`Relayed::whose`), where the format writes an input | testkit `codec`, `line`, `custom`, `translate` |
-| Lazy decode; a big body relays unread | `opening.rs` | core `stress`; e2e |
+| Lazy decode; a big body relays unread | `input.rs` | core `stress`; e2e |
 | Byte-exact relay; a key only on a same-name relay | `relay_origin`; the driver; `http::credentials` | testkit `relay`, `translate`; `crates/http/tests/rules.rs`; e2e; `sdks/ws/tests` (`passthrough`, `credentials`) |
 | Head timing, framing, batches, keep-alives | the driver, the formats | `crates/http/tests` (`driver_toy`, `driver_formats`); testkit `streams`, `line` |
 | Panic guards | `guarded`, `leg.rs`; the driver for codecs | core `panic_matrix`; `driver_toy` |

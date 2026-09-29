@@ -64,7 +64,7 @@ impl Format for Pipe {
         ready(Ok((Some(origin), None))).boxed()
     }
 
-    fn opening(&self, origin: &Origin) -> Option<Result<Question, Fault>> {
+    fn input(&self, origin: &Origin) -> Option<Result<Question, Fault>> {
         origin.downcast_ref::<Question>().cloned().map(Ok)
     }
 
@@ -73,11 +73,11 @@ impl Format for Pipe {
         dialer: &Scripted,
         _extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<&Question>,
+        input: Option<&Question>,
         _later: Option<Events<Question>>,
     ) -> Result<BoxFuture<'static, Result<Half<Reply>, Fault>>, Fault> {
         let relayed = relay.and_then(|o| o.downcast_ref::<Question>());
-        let question = opening.or(relayed);
+        let question = input.or(relayed);
         if question.is_some_and(|q| q.0 == "unwritable") {
             return Err(Fault::bad_request("unwritable"));
         }

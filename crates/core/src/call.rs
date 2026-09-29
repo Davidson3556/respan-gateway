@@ -12,9 +12,9 @@ use futures::{FutureExt, StreamExt, stream};
 use crate::fault::{PANICKED, guarded};
 use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin};
 use crate::gateway::Registered;
+use crate::input::Input;
 use crate::leg::{self, Later, cut, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
-use crate::opening::Opening;
 use crate::provider::Provider;
 use crate::response::Batch;
 use crate::{ClientContext, Extensions, Fault, ProviderContext, Response};
@@ -154,10 +154,10 @@ async fn send(
     let p = p.map_err(|e| {
         Fault::config("a provider this request cannot use was called").with_source(e)
     })?;
-    let (opening, later) = match own {
+    let (input, later) = match own {
         None => {
             let later = (!cx.later.ended).then(|| (cx.later.clone(), cx.format.clone()));
-            (cx.opening.clone(), later)
+            (cx.input.clone(), later)
         }
         Some(input) => {
             if p.format.kind().0 != (*input).type_id() {
@@ -165,7 +165,7 @@ async fn send(
                     "a call's own input is not the input type of provider '{provider}'"
                 )));
             }
-            (Opening::own(p.format.clone(), input), None)
+            (Input::own(p.format.clone(), input), None)
         }
     };
     let mut client = cx.copy();
@@ -176,7 +176,7 @@ async fn send(
         format: p.format.clone(),
         provider,
         flowing: later.is_some(),
-        opening,
+        input,
         outputs: Arc::default(),
         inputs: Arc::default(),
         running: InFlight::enter(&cut),
@@ -217,7 +217,7 @@ fn relay_origin(cx: &ClientContext, own: bool, p: &Provider) -> Option<Origin> {
 /// whose kind they are of.
 type Flowing = Option<(Arc<Later>, Arc<dyn AnyFormat>)>;
 
-/// Dial `p` with the call's opening and `later` inputs: the provider's
+/// Dial `p` with the call's first input and `later` ones: the provider's
 /// origin (on a relay alone) and events, a refusal at the head as one `Err`.
 /// Inputs that fail, not cut, end the call with that fault, before the
 /// provider's head too, so the call and the reply end as the inputs did,
@@ -229,8 +229,8 @@ async fn dial(
     edge: &mut CallEdge,
 ) -> Result<(Option<Origin>, AnyEvents), Fault> {
     let px = edge.cx();
-    let relay = relay_origin(cx, px.opening.own, p);
-    let opening = px.opening.sent(relay.is_some())?;
+    let relay = relay_origin(cx, px.input.own, p);
+    let input = px.input.sent(relay.is_some())?;
     let (fail, mut failed) = oneshot::channel();
     let later = later.map(|(later, format)| {
         let call = Some((px.inputs.clone(), fail));
@@ -239,7 +239,7 @@ async fn dial(
     let (dialer, ext) = (&*p.dialer, px.client.extensions.clone());
     let dialed = guarded(|| {
         p.format
-            .dial(dialer, ext, relay.as_ref(), opening.as_ref(), later)
+            .dial(dialer, ext, relay.as_ref(), input.as_ref(), later)
     })?;
     px.sent = true;
     let (origin, events) = match dialed.await {

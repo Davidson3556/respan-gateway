@@ -69,7 +69,7 @@ pub fn accept<C: Codec + Clone>(
 
 /// The one input of a one-shot request, decoded from its origin; `None`
 /// for a streaming one's, or an origin of another wire.
-pub fn opening<C: Codec>(codec: &C, origin: &Origin) -> Option<Result<C::Input, Fault>> {
+pub fn input<C: Codec>(codec: &C, origin: &Origin) -> Option<Result<C::Input, Fault>> {
     let came = origin.downcast_ref::<Came>()?;
     let raw = came.body.as_ref()?;
     Some(decode(codec, &came.head, raw))

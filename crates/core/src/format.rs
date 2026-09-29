@@ -55,7 +55,7 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 /// 1. [`accept`](Format::accept) resolves when the request is in: a
 ///    one-shot request once its body is read, which its origin keeps, no
 ///    inputs following (`None`); a session at once, its inputs the frames to
-///    come. The plugins run once it resolves. [`opening`](Format::opening)
+///    come. The plugins run once it resolves. [`input`](Format::input)
 ///    is `Some` only for a request whose inputs are `None`.
 /// 2. A provider edge classifies its answer at its head: a refusal resolves
 ///    `Ok((origin, Err(fault)))`, which the gateway sends as a refusal and a
@@ -131,7 +131,7 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 ///         async move { Ok((Some(origin), None)) }.boxed()
 ///     }
 ///
-///     fn opening(&self, origin: &Origin) -> Option<Result<Ask, Fault>> {
+///     fn input(&self, origin: &Origin) -> Option<Result<Ask, Fault>> {
 ///         let line = origin.downcast_ref::<String>()?;
 ///         Some(Ok(Ask(line.clone())))
 ///     }
@@ -142,12 +142,12 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 ///         _: &(),
 ///         _: Extensions,
 ///         relay: Option<&Origin>,
-///         opening: Option<&Ask>,
+///         input: Option<&Ask>,
 ///         _: Option<Events<Ask>>,
 ///     ) -> Result<BoxFuture<'static, Result<Half<Say>, Fault>>, Fault> {
 ///         // On a relay of it unchanged, the line is the origin's own.
-///         let relayed = relay.and_then(|o| self.opening(o)?.ok());
-///         let Ask(line) = opening.cloned().or(relayed).unwrap_or(Ask(String::new()));
+///         let relayed = relay.and_then(|o| self.input(o)?.ok());
+///         let Ask(line) = input.cloned().or(relayed).unwrap_or(Ask(String::new()));
 ///         let outputs = stream::iter([Ok(Say(line))]).boxed();
 ///         Ok(async move { Ok((None, Ok(outputs))) }.boxed())
 ///     }
@@ -224,14 +224,14 @@ pub trait Format: Send + Sync + 'static {
     /// only for a request whose inputs are `None` (rule 1), as a one-shot
     /// request's, else `None`. The gateway calls it only when a value is
     /// needed, never on a relay of it unchanged. By default, `None`.
-    fn opening(&self, _origin: &Origin) -> Option<Result<Self::Input, Fault>> {
+    fn input(&self, _origin: &Origin) -> Option<Result<Self::Input, Fault>> {
         None
     }
 
     /// The provider edge.
     ///
     /// - `relay`: the client's origin, only on a relay.
-    /// - `opening`: the first input, to write from its value; `None` on a
+    /// - `input`: the first input, to write from its value; `None` on a
     ///   relay means the origin's own, as it came.
     /// - `later`: the inputs that follow; `None` if none do.
     ///
@@ -251,7 +251,7 @@ pub trait Format: Send + Sync + 'static {
         dialer: &Self::Dialer,
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<&Self::Input>,
+        input: Option<&Self::Input>,
         later: Option<Events<Self::Input>>,
     ) -> Result<BoxFuture<'static, Result<Half<Self::Output>, Fault>>, Fault>;
 }
@@ -290,13 +290,13 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
         wire: Box<dyn Any + Send>,
         reply: BoxFuture<'static, AnyReply>,
     ) -> BoxFuture<'static, AnyAccepted>;
-    fn opening(&self, origin: &Origin) -> Option<Result<AnyInput, Fault>>;
+    fn input(&self, origin: &Origin) -> Option<Result<AnyInput, Fault>>;
     fn dial(
         &self,
         dialer: &(dyn Any + Send + Sync),
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<&AnyInput>,
+        input: Option<&AnyInput>,
         later: Option<AnyInputs>,
     ) -> Result<AnyDialed, Fault>;
     /// Whether any of `outputs` is content.
@@ -386,9 +386,9 @@ impl<F: Format> AnyFormat for Erased<F> {
             .boxed()
     }
 
-    fn opening(&self, origin: &Origin) -> Option<Result<AnyInput, Fault>> {
-        let opening = self.format.opening(origin)?;
-        Some(opening.map(|input| Arc::new(input) as AnyInput))
+    fn input(&self, origin: &Origin) -> Option<Result<AnyInput, Fault>> {
+        let input = self.format.input(origin)?;
+        Some(input.map(|input| Arc::new(input) as AnyInput))
     }
 
     fn dial(
@@ -396,13 +396,13 @@ impl<F: Format> AnyFormat for Erased<F> {
         dialer: &(dyn Any + Send + Sync),
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<&AnyInput>,
+        input: Option<&AnyInput>,
         later: Option<AnyInputs>,
     ) -> Result<AnyDialed, Fault> {
         let dialer = dialer
             .downcast_ref()
             .ok_or_else(|| Fault::internal("a dialer of another type than its format's"))?;
-        let opening = opening
+        let input = input
             .map(|input| {
                 input
                     .downcast_ref()
@@ -410,9 +410,7 @@ impl<F: Format> AnyFormat for Erased<F> {
             })
             .transpose()?;
         let later = later.map(|later| later.map(|item| item.and_then(owned)).boxed());
-        let dialed = self
-            .format
-            .dial(dialer, extensions, relay, opening, later)?;
+        let dialed = self.format.dial(dialer, extensions, relay, input, later)?;
         Ok(dialed
             .map_ok(|(origin, events)| (origin, events.map(erase)))
             .boxed())

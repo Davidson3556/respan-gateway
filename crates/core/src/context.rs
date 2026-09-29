@@ -9,9 +9,9 @@ use tokio::runtime::Handle;
 use crate::call::OpenCalls;
 use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin, erase, is_input, typed};
 use crate::gateway::Inner;
+use crate::input::Input;
 use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
-use crate::opening::Opening;
 use crate::plugin::Filters;
 use crate::{Call, Events, Extensions, Fault, Filter, Gateway, Plugin};
 
@@ -25,7 +25,7 @@ pub struct ClientContext {
     /// The provider called if every plugin passes.
     pub(crate) target: Option<String>,
     /// The input that came with the head; none for a streaming request.
-    pub(crate) opening: Opening,
+    pub(crate) input: Input,
     /// The inputs that follow it.
     pub(crate) later: Arc<Later>,
     /// Idle once the request ends, as `running` is dropped; copies share it.
@@ -93,7 +93,7 @@ impl ClientContext {
     ) -> Self {
         let cut = Arc::default();
         Self {
-            opening: Opening::new(format.clone(), origin.clone()),
+            input: Input::new(format.clone(), origin.clone()),
             format,
             origin,
             extensions,
@@ -138,7 +138,7 @@ impl ClientContext {
     /// streaming request; or the decoder's or a filter's `Err`. A relay
     /// sends the body unread, so a plugin that vets input refuses on `Err`.
     pub fn input<T: Any>(&self) -> Result<&T, Fault> {
-        self.opening.get()
+        self.input.get()
     }
 
     /// The request's inputs as `T`, as filters and wraps left them: a copy
@@ -154,7 +154,7 @@ impl ClientContext {
             return stream::once(async { Err(Fault::wrong_kind::<T>()) }).boxed();
         }
         if self.later.ended {
-            return stream::once(ready(self.opening.get::<T>().cloned())).boxed();
+            return stream::once(ready(self.input.get::<T>().cloned())).boxed();
         }
         let items = inputs(self.later.clone(), self.format.clone(), None, &self.cut);
         let typed = |input: AnyInput| {
@@ -200,7 +200,7 @@ impl ClientContext {
             origin: self.origin.clone(),
             extensions: self.extensions.clone(),
             target: self.target.clone(),
-            opening: self.opening.clone(),
+            input: self.input.clone(),
             later: self.later.clone(),
             cut: self.cut.clone(),
             running: None,
@@ -234,7 +234,7 @@ impl ClientContext {
     ) -> Result<(), Fault> {
         match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
-            true if self.later.ended => self.opening.filter(Filters::of(filter)),
+            true if self.later.ended => self.input.filter(Filters::of(filter)),
             true => locked(&self.later.filters).add(filter, true),
         }
     }

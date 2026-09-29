@@ -4,9 +4,9 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::format::{AnyFormat, is_input};
+use crate::input::Input;
 use crate::leg::{Layer, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
-use crate::opening::Opening;
 use crate::plugin::Filters;
 use crate::{ClientContext, Extensions, Fault, Filter, Plugin};
 
@@ -24,8 +24,8 @@ pub struct ProviderContext {
     /// The provider's format.
     pub(crate) format: Arc<dyn AnyFormat>,
     pub(crate) provider: String,
-    /// Its first input: its own, or the request's opening.
-    pub(crate) opening: Opening,
+    /// Its first input: its own, or the one that came with the request's head.
+    pub(crate) input: Input,
     /// Filters of its outputs, whoever reads them.
     pub(crate) outputs: Layer,
     /// Filters of the later inputs it sends, shared with their reader.
@@ -101,7 +101,7 @@ impl ProviderContext {
     /// ([`Call::with_input`](crate::Call::with_input)), else the one that
     /// came with the request's head. `Err` as [`ClientContext::input`].
     pub fn input<T: Any>(&self) -> Result<&T, Fault> {
-        self.opening.get()
+        self.input.get()
     }
 
     /// Run `filter` as [`ClientContext::filter`] does, for this call alone:
@@ -115,7 +115,7 @@ impl ProviderContext {
             false => locked(&self.outputs).add(filter, false),
             // Later inputs follow only a session's head.
             true if self.flowing => locked(&self.inputs).add(filter, true),
-            true => self.opening.filter(Filters::of(filter)),
+            true => self.input.filter(Filters::of(filter)),
         }
     }
 

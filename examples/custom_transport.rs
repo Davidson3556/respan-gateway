@@ -46,10 +46,10 @@ impl Format for Local {
         model: &Model,
         _extensions: Extensions,
         _relay: Option<&Origin>,
-        opening: Option<&Conversation>,
+        input: Option<&Conversation>,
         _later: Option<Events<Conversation>>,
     ) -> Result<BoxFuture<'static, Result<Half<Reply>, Fault>>, Fault> {
-        let chat = opening.ok_or_else(|| Fault::bad_request("no conversation"))?;
+        let chat = input.ok_or_else(|| Fault::bad_request("no conversation"))?;
         let answer = model(chat)?;
 
         // One reply per word, then the finish with usage (a word is a token here).

@@ -175,7 +175,7 @@ impl Format for Toy {
         .boxed()
     }
 
-    fn opening(&self, origin: &Origin) -> Option<Result<In, Fault>> {
+    fn input(&self, origin: &Origin) -> Option<Result<In, Fault>> {
         boom(14);
         let body = origin.downcast_ref::<ToyOrigin>()?.body.as_ref()?;
         Some(match body.as_str() {
@@ -189,7 +189,7 @@ impl Format for Toy {
         dialer: &Dialer,
         extensions: Extensions,
         relay: Option<&Origin>,
-        opening: Option<&In>,
+        input: Option<&In>,
         later: Option<Events<In>>,
     ) -> Result<BoxFuture<'static, Result<Half<Out>, Fault>>, Fault> {
         boom(12);
@@ -197,7 +197,7 @@ impl Format for Toy {
             return Err(Fault::config("the toy cannot send this call"));
         }
         let relayed = relay.and_then(|o| o.downcast_ref::<ToyOrigin>());
-        let text = match (opening, relayed) {
+        let text = match (input, relayed) {
             (Some(input), _) => Some(input.0.clone()),
             (None, Some(origin)) => origin.body.clone(),
             (None, None) => None,
@@ -636,7 +636,7 @@ impl Plugin for Rec {
         boom(20);
         let n = PANIC.load(Ordering::SeqCst);
         if n == 14 {
-            // `opening` is lazy: only a read decodes it.
+            // `Format::input` is lazy: only a read decodes it.
             let _ = cx.input::<In>();
         }
         if n == 26 {

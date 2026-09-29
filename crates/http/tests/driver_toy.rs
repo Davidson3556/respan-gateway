@@ -516,8 +516,9 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     assert_eq!(seen.frames(), frames(&[Ok("hello"), Err("bad_request")]));
 }
 
-/// A streaming request's inputs follow, even with its body ended, and it has
-/// no opening; a one-shot request's do not, and its opening is its body.
+/// A streaming request's inputs follow, even with its body ended, and its
+/// origin holds no input; a one-shot request's do not, and its input is its
+/// body.
 #[tokio::test]
 async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     let (tx, body) = upload();
@@ -530,7 +531,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     let mut inputs = inputs.unwrap();
     assert!(inputs.next().await.is_none());
     let origin = origin.unwrap();
-    assert!(respan_gateway_http::__private::opening(&Toy::default(), &origin).is_none());
+    assert!(respan_gateway_http::__private::input(&Toy::default(), &origin).is_none());
 
     let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
     let (origin, inputs) =
@@ -538,8 +539,8 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
             .await
             .unwrap();
     assert!(inputs.is_none());
-    let opening = respan_gateway_http::__private::opening(&Toy::default(), &origin.unwrap());
-    assert_eq!(opening.map(|o| o.ok()), Some(Some(In("q".into()))));
+    let input = respan_gateway_http::__private::input(&Toy::default(), &origin.unwrap());
+    assert_eq!(input.map(|o| o.ok()), Some(Some(In("q".into()))));
 }
 
 /// Dial the toy through `transport`, with one input and none to follow.

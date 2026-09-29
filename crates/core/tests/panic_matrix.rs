@@ -15,7 +15,7 @@ use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::*;
 
 /// Points: 1 the client edge's input stream; 5 the provider edge's event
-/// stream; 12 `dial`; 13 `is_content`; 14 `opening`; 17 `accepts`; 18
+/// stream; 12 `dial`; 13 `is_content`; 14 `input`; 17 `accepts`; 18
 /// `accept`, 19 its future; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
 /// dial future; 29 a provider stream's first poll.
 const POINTS: [usize; 20] = [

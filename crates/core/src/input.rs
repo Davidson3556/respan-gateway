@@ -7,7 +7,7 @@ use crate::fault::{PANICKED, guarded};
 use crate::format::{AnyFormat, AnyInput, Origin};
 use crate::plugin::Filters;
 
-/// The client's origin, its opening input decoded when first needed.
+/// The client's origin, the input in it decoded when first needed.
 struct Base {
     format: Arc<dyn AnyFormat>,
     origin: Option<Origin>,
@@ -17,7 +17,7 @@ struct Base {
 /// The input that came with a request's head, and the holder's changed
 /// copy; or a call's own.
 #[derive(Clone)]
-pub(crate) struct Opening {
+pub(crate) struct Input {
     base: Arc<Base>,
     /// Set once a filter ran over it or a call brings its own; a filter's
     /// failure is kept.
@@ -26,7 +26,7 @@ pub(crate) struct Opening {
     pub(crate) own: bool,
 }
 
-impl Opening {
+impl Input {
     pub(crate) fn new(format: Arc<dyn AnyFormat>, origin: Option<Origin>) -> Self {
         let base = Base {
             format,
@@ -40,7 +40,7 @@ impl Opening {
         }
     }
 
-    /// A call's own opening, `input`, of `format`'s kind.
+    /// A call's own `input`, of `format`'s kind.
     pub(crate) fn own(format: Arc<dyn AnyFormat>, input: AnyInput) -> Self {
         Self {
             changed: Some(Ok(input)),
@@ -54,20 +54,19 @@ impl Opening {
         &self.base.format
     }
 
-    /// The client's opening, decoded once; `None` if none came.
+    /// The client's input, decoded once; `None` if none came.
     fn base(&self) -> Option<Result<&AnyInput, Fault>> {
         let base = &*self.base;
         let decoded = base.decoded.get_or_init(|| {
             let origin = base.origin.as_ref()?;
             // A panic is an internal fault.
-            let opening = AssertUnwindSafe(|| base.format.opening(origin));
-            std::panic::catch_unwind(opening)
-                .unwrap_or_else(|_| Some(Err(Fault::internal(PANICKED))))
+            let input = AssertUnwindSafe(|| base.format.input(origin));
+            std::panic::catch_unwind(input).unwrap_or_else(|_| Some(Err(Fault::internal(PANICKED))))
         });
         decoded.as_ref().map(|d| d.as_ref().map_err(Clone::clone))
     }
 
-    /// The opening as it is now.
+    /// The input as it is now.
     fn value(&self) -> Result<&AnyInput, Fault> {
         match &self.changed {
             Some(changed) => changed.as_ref().map_err(Clone::clone),
@@ -79,7 +78,7 @@ impl Opening {
         }
     }
 
-    /// The opening as `T`; another type is refused without decoding.
+    /// The input as `T`; another type is refused without decoding.
     pub(crate) fn get<T: Any>(&self) -> Result<&T, Fault> {
         if self.format().kind().0 != TypeId::of::<T>() {
             return Err(Fault::wrong_kind::<T>());
@@ -122,7 +121,7 @@ impl Opening {
 
     /// What a call writes first: a call's own or a changed input as its
     /// value; on a relay, unchanged, `None` (the origin's own, never
-    /// decoded); else the decoded opening, if any.
+    /// decoded); else the decoded input, if any.
     pub(crate) fn sent(&self, relay: bool) -> Result<Option<AnyInput>, Fault> {
         match &self.changed {
             Some(changed) => changed.clone().map(Some),

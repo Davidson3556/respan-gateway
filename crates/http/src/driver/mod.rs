@@ -1,6 +1,6 @@
 //! HTTP's one driver, which makes any [`Codec`] a
 //! [`Format`](respan_gateway_core::Format) ([`impl_format!`](crate::impl_format)):
-//! its client edge ([`accept`], [`opening`]) serves an [`Accepted`]
+//! its client edge ([`accept`], [`input`]) serves an [`Accepted`]
 //! request, its provider edge ([`dial`]) calls through a [`Dialer`]. It is
 //! one symmetric pair: a reader turns frames into events through a
 //! [`Decoder`](crate::Decoder), a writer events into frames through an
@@ -39,7 +39,7 @@ use respan_gateway_core::Fault;
 #[cfg(doc)]
 use respan_gateway_core::Gateway;
 
-pub use accept::{accept, opening};
+pub use accept::{accept, input};
 pub use dial::dial;
 
 use crate::{Body, Frames, RequestHead};
@@ -192,13 +192,13 @@ macro_rules! impl_format {
                 $crate::__private::accept(self, wire, reply)
             }
 
-            fn opening(
+            fn input(
                 &self,
                 origin: &$crate::__private::Origin,
             ) -> ::core::option::Option<
                 ::core::result::Result<Self::Input, $crate::__private::Fault>,
             > {
-                $crate::__private::opening(self, origin)
+                $crate::__private::input(self, origin)
             }
 
             fn dial(
@@ -206,7 +206,7 @@ macro_rules! impl_format {
                 dialer: &$crate::Dialer,
                 extensions: $crate::__private::Extensions,
                 relay: ::core::option::Option<&$crate::__private::Origin>,
-                opening: ::core::option::Option<&Self::Input>,
+                input: ::core::option::Option<&Self::Input>,
                 later: ::core::option::Option<$crate::__private::Events<Self::Input>>,
             ) -> ::core::result::Result<
                 $crate::__private::BoxFuture<
@@ -218,7 +218,7 @@ macro_rules! impl_format {
                 >,
                 $crate::__private::Fault,
             > {
-                $crate::__private::dial(self, dialer, extensions, relay, opening, later)
+                $crate::__private::dial(self, dialer, extensions, relay, input, later)
             }
         }
     };
