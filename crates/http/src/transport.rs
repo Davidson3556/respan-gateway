@@ -2,7 +2,7 @@
 
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue};
-use respan_gateway_core::Exchange;
+use respan_gateway_core::{Exchange, Extensions};
 
 use crate::credential::{Credential, is_credential, take_query};
 use crate::{HOP_BY_HOP, remove_if, strip_named};
@@ -84,7 +84,16 @@ impl std::fmt::Debug for CallHeaders {
 /// and parameters; with neither, the client's [`Credential`], only on a
 /// call that is `relayed`, as a key is for its own protocol's provider.
 pub fn credentials(call: &mut Exchange<crate::Ask>, headers: &HeaderMap) {
-    let (head, extensions) = (&mut call.head, &call.extensions);
+    keys(&mut call.head, &call.extensions, call.relayed, headers);
+}
+
+/// [`credentials`] for a call of `head` and `extensions`, `relayed` or not.
+pub(crate) fn keys(
+    head: &mut crate::Ask,
+    extensions: &Extensions,
+    relayed: bool,
+    headers: &HeaderMap,
+) {
     let mut own = headers.clone();
     if let Some(CallHeaders(call)) = extensions.get::<CallHeaders>() {
         let sent = |n: &&HeaderName| !is_connection_header(n);
@@ -96,7 +105,7 @@ pub fn credentials(call: &mut Exchange<crate::Ask>, headers: &HeaderMap) {
         }
     }
     if own.is_empty() {
-        let client = extensions.get::<Credential>().filter(|_| call.relayed);
+        let client = extensions.get::<Credential>().filter(|_| relayed);
         if let Some(client) = client.cloned() {
             client.restore(head);
         }

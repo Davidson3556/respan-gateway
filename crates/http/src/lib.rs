@@ -18,6 +18,7 @@
 //!   ([`retry_after`]), and writes no body where HTTP has none
 //!   ([`bodiless`]).
 
+pub mod codec;
 mod credential;
 mod transport;
 
@@ -192,6 +193,36 @@ where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
+    let (Arrived { head, body, to }, extensions) = arrive(req);
+    let mut req = Exchange::new(head, body);
+    req.extensions = extensions;
+    req.streams = streaming;
+    let (resp, outcome) = typed(gateway, req).await;
+    let resp = resp.map(|r| http::Response::from_parts(r.head, into_http_body(r.body)));
+    (depart(&to, streaming, resp), outcome.boxed())
+}
+
+/// A request as the adapter hands it on, and what its answer needs of it.
+pub(crate) struct Arrived {
+    pub(crate) head: Ask,
+    pub(crate) body: respan_gateway_core::Body,
+    pub(crate) to: Asking,
+}
+
+/// What of a request its answer's rules need.
+pub(crate) struct Asking {
+    pub(crate) method: Method,
+    pub(crate) path: String,
+}
+
+/// A request as it arrives at the adapter ([`handle`]): the hop's headers
+/// go but `Upgrade`, credentials into a [`Credential`], and an [`Asked`]
+/// view joins them.
+pub(crate) fn arrive<B>(req: http::Request<B>) -> (Arrived, Extensions)
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Fault>,
+{
     let Exchange {
         mut head,
         body,
@@ -205,32 +236,44 @@ where
         extensions.insert(credential);
     }
     extensions.insert(Asked(Arc::new(head.clone())));
-    let mut req = Exchange::new(head, body);
-    req.extensions = extensions;
-    req.streams = streaming;
-    let (resp, outcome) = typed(gateway, req).await;
-    let resp = match resp {
+    let arrived = Arrived {
+        head,
+        body,
+        to: Asking { method, path },
+    };
+    (arrived, extensions)
+}
+
+/// The answer to request `to` as it departs the adapter ([`handle`]): what
+/// no format can write, or a 101 to a request not `streaming`, as
+/// text/plain; a hop's headers gone; a [`bodiless`] one with none, the
+/// gateway's body read apart.
+pub(crate) fn depart(
+    to: &Asking,
+    streaming: bool,
+    resp: Result<http::Response<Body>, Fault>,
+) -> http::Response<Body> {
+    match resp {
         Err(fault) if fault.code() == codes::NOT_FOUND => {
-            let text = format!("no format served accepts {method} {path}");
+            let text = format!("no format served accepts {} {}", to.method, to.path);
             plain(&Fault::not_found(text))
         }
         Err(fault) => plain(&fault),
-        Ok(resp) if resp.head.status == StatusCode::SWITCHING_PROTOCOLS && !streaming => {
+        Ok(resp) if resp.status() == StatusCode::SWITCHING_PROTOCOLS && !streaming => {
             // RFC 9110 15.2.2: a 101 only to a request that asked.
             let asked = "a 101 to a request that did not ask to switch protocols";
             plain(&Fault::internal(asked))
         }
         Ok(resp) => {
-            let (mut head, mut body) = (resp.head, into_http_body(resp.body));
+            let (mut head, mut body) = resp.into_parts();
             outgoing(&mut head);
-            if bodiless(&method, head.status) {
+            if bodiless(&to.method, head.status) {
                 tokio::spawn(async move { while body.frame().await.is_some() {} });
                 body = full(Bytes::new());
             }
             http::Response::from_parts(head, body)
         }
-    };
-    (resp, outcome.boxed())
+    }
 }
 
 /// [`Gateway::handle`] on the HTTP wire: the request's head erased, the
