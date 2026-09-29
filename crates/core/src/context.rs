@@ -1,40 +1,34 @@
 use std::any::Any;
 use std::future::ready;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
-use bytes::Bytes;
+use futures::StreamExt;
 use futures::future::BoxFuture;
-use futures::stream::{self, BoxStream};
-use futures::{StreamExt, TryStreamExt};
+use futures::stream;
 use tokio::runtime::Handle;
 
 use crate::call::OpenCalls;
-use crate::format::{AnyFormat, SharedHead, is_input};
+use crate::dialect::{AnyDialect, AnyInput, Origin, is_input};
 use crate::gateway::Inner;
-use crate::input::{Input, Later, locked, stream};
+use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
+use crate::opening::Opening;
 use crate::plugin::Filters;
-use crate::{Call, Extensions, Fault, Filter, Plugin};
-
-/// What a `Mutex` reached through `&mut` holds; it never locks, and makes
-/// its holder `Sync` for end hooks.
-pub(crate) fn unlocked<T>(m: &mut Mutex<T>) -> &mut T {
-    m.get_mut().unwrap_or_else(PoisonError::into_inner)
-}
+use crate::{Call, Events, Extensions, Fault, Filter, Plugin};
 
 /// One client request, as the client edge's hooks see it.
 pub struct ClientContext {
-    /// The first format served that accepted the request.
-    pub(crate) format: Arc<dyn AnyFormat>,
-    /// The head as the adapter handed it over: the formats' alone to read.
-    pub(crate) head: SharedHead,
+    /// The first dialect served that accepted the request.
+    pub(crate) dialect: Arc<dyn AnyDialect>,
+    /// What came with the head, sealed: only a relay hands it on.
+    pub(crate) origin: Option<Origin>,
     pub(crate) extensions: Extensions,
     /// The provider called if every plugin passes.
     pub(crate) target: Option<String>,
     /// The input that came with the head; none for a streaming request.
-    pub(crate) input: Input,
-    /// A streaming request's later inputs.
-    pub(crate) later: Option<Arc<Later>>,
+    pub(crate) opening: Opening,
+    /// The inputs that follow it.
+    pub(crate) later: Arc<Later>,
     /// Idle once the request ends, as `running` is dropped; copies share it.
     pub(crate) cut: Arc<InFlight>,
     running: Option<InFlightGuard>,
@@ -47,14 +41,14 @@ pub struct ClientContext {
     pub(crate) open: Arc<OpenCalls>,
     /// Filters of the response sent to the client; they end with it, or
     /// with the request if it ends first.
-    pub(crate) outputs: Mutex<Filters>,
+    pub(crate) outputs: Layer,
     pub(crate) gateway: Arc<Inner>,
 }
 
 impl std::fmt::Debug for ClientContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientContext")
-            .field("format", &self.format.name())
+            .field("format", &self.dialect.name())
             .finish_non_exhaustive()
     }
 }
@@ -73,45 +67,40 @@ impl Edge for ClientContext {
     fn close(&mut self, end: &Result<(), Fault>) {
         self.running = None;
         self.open.abandon();
-        if let Some(later) = &self.later {
-            later.end(Err(Fault::abandoned()));
-        }
-        let _ = self.outputs().end(end.clone(), &mut None);
+        self.later.end(Err(Fault::abandoned()));
+        let _ = locked(&self.outputs).end(end.clone(), &mut None);
     }
 }
 
 impl ClientContext {
     pub(crate) fn new(
-        format: Arc<dyn AnyFormat>,
-        head: SharedHead,
+        dialect: Arc<dyn AnyDialect>,
+        origin: Option<Origin>,
+        later: Later,
         extensions: Extensions,
-        body: Option<Bytes>,
-        later: Option<Later>,
-        runtime: Handle,
         gateway: Arc<Inner>,
     ) -> Self {
-        let target = gateway.target.clone();
         let cut = Arc::default();
         Self {
-            input: Input::new(format.clone(), head.clone(), body),
-            format,
-            head,
+            opening: Opening::new(dialect.clone(), origin.clone()),
+            dialect,
+            origin,
             extensions,
-            target,
-            later: later.map(Arc::new),
+            target: gateway.target.clone(),
+            later: Arc::new(later),
             running: Some(InFlight::enter(&cut)),
             cut,
-            runtime,
+            runtime: Handle::current(),
             settling: Arc::default(),
             open: Arc::default(),
-            outputs: Mutex::default(),
+            outputs: Layer::default(),
             gateway,
         }
     }
 
     /// The name of the client's format.
     pub fn format(&self) -> &str {
-        self.format.name()
+        self.dialect.name()
     }
 
     /// The request's extensions, from the adapter, such as the client's
@@ -129,7 +118,7 @@ impl ClientContext {
     /// Whether `T` is the client's format's [`Input`](crate::Format::Input)
     /// or [`Output`](crate::Format::Output), which the typed accessors take.
     pub fn is_kind<T: Any>(&self) -> bool {
-        is_input::<T>(&*self.format).is_ok()
+        is_input::<T>(&*self.dialect).is_ok()
     }
 
     /// The request's one input as `T`, as filters left it. `Err` with
@@ -137,7 +126,7 @@ impl ClientContext {
     /// streaming request; or the decoder's or a filter's `Err`. A relay
     /// sends the body unread, so a plugin that vets input refuses on `Err`.
     pub fn input<T: Any>(&self) -> Result<&T, Fault> {
-        self.input.get()
+        self.opening.get()
     }
 
     /// The request's inputs as `T`, as filters left them: a copy of a whole
@@ -147,19 +136,19 @@ impl ClientContext {
     /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the request ended
     /// first, never as if they were complete; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
     /// type or if another reader took them.
-    pub fn take_inputs<T: Any + Clone + Send>(&mut self) -> BoxStream<'static, Result<T, Fault>> {
-        if is_input::<T>(&*self.format) != Ok(true) {
+    pub fn take_inputs<T: Any + Clone + Send>(&mut self) -> Events<T> {
+        if is_input::<T>(&*self.dialect) != Ok(true) {
             return stream::once(async { Err(Fault::wrong_kind::<T>()) }).boxed();
         }
-        match &self.later {
-            None => stream::once(ready(self.input.get::<T>().cloned())).boxed(),
-            Some(later) => {
-                let input = self.input.clone();
-                let frames = stream(later.clone(), input, Arc::default(), &self.cut);
-                let value = |frame: crate::input::Frame| frame.input.downcast_ref::<T>().cloned();
-                frames.try_filter_map(move |f| ready(Ok(value(f)))).boxed()
-            }
+        if self.later.ended {
+            return stream::once(ready(self.opening.get::<T>().cloned())).boxed();
         }
+        let items = inputs(self.later.clone(), self.dialect.clone(), None, &self.cut);
+        let typed = |(input, _): (AnyInput, bool)| {
+            let typed = input.downcast_ref::<T>().cloned();
+            typed.ok_or_else(Fault::wrong_kind::<T>)
+        };
+        items.map(move |item| item.and_then(typed)).boxed()
     }
 
     /// The provider called if every plugin passes; initially the gateway's
@@ -176,25 +165,20 @@ impl ClientContext {
     /// A copy of it as it is now, for a call to keep.
     pub(crate) fn copy(&self) -> Self {
         Self {
-            format: self.format.clone(),
-            head: self.head.clone(),
+            dialect: self.dialect.clone(),
+            origin: self.origin.clone(),
             extensions: self.extensions.clone(),
             target: self.target.clone(),
-            input: self.input.clone(),
+            opening: self.opening.clone(),
             later: self.later.clone(),
             cut: self.cut.clone(),
             running: None,
             runtime: self.runtime.clone(),
             settling: self.settling.clone(),
             open: self.open.clone(),
-            outputs: Mutex::default(),
+            outputs: Layer::default(),
             gateway: self.gateway.clone(),
         }
-    }
-
-    /// The filters of the response sent to the client.
-    pub(crate) fn outputs(&mut self) -> &mut Filters {
-        unlocked(&mut self.outputs)
     }
 
     /// Run `filter` over the request's inputs if `T` is the client's
@@ -216,12 +200,10 @@ impl ClientContext {
         &mut self,
         filter: impl Filter<T>,
     ) -> Result<(), Fault> {
-        match is_input::<T>(&*self.format)? {
-            false => self.outputs().add(filter, false),
-            true => match &self.later {
-                Some(later) => locked(&later.filters).add(filter, true),
-                None => self.input.filter(Filters::of(filter)),
-            },
+        match is_input::<T>(&*self.dialect)? {
+            false => locked(&self.outputs).add(filter, false),
+            true if self.later.ended => self.opening.filter(Filters::of(filter)),
+            true => locked(&self.later.filters).add(filter, true),
         }
     }
 

@@ -1,52 +1,47 @@
 use std::any::Any;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use crate::context::unlocked;
-use crate::format::{AnyFormat, is_input};
-use crate::input::{Input, InputFilters, locked};
+use crate::dialect::{AnyDialect, is_input};
+use crate::leg::{Layer, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
+use crate::opening::Opening;
 use crate::plugin::Filters;
-use crate::transport::AnyTransport;
 use crate::{ClientContext, Extensions, Fault, Filter, Plugin};
 
-/// A provider the gateway can call: a format and a transport.
+/// A provider the gateway can call: a dialect and its dialer.
 #[derive(Clone)]
 pub(crate) struct Provider {
-    pub(crate) format: Arc<dyn AnyFormat>,
-    pub(crate) transport: Arc<AnyTransport>,
+    pub(crate) dialect: Arc<dyn AnyDialect>,
+    pub(crate) dialer: Arc<dyn Any + Send + Sync>,
 }
 
 /// One call to a provider, as the provider edge's hooks see it.
 pub struct ProviderContext {
     /// The request as it was when the call was made.
     pub(crate) client: ClientContext,
-    /// The provider's format.
-    pub(crate) format: Arc<dyn AnyFormat>,
+    /// The provider's dialect.
+    pub(crate) dialect: Arc<dyn AnyDialect>,
     pub(crate) provider: String,
-    /// Its first input.
-    pub(crate) input: Input,
-    /// In a `Mutex` for the reason `ClientContext`'s output filters are.
-    pub(crate) outputs: Mutex<Filters>,
+    /// Its first input: its own, or the request's opening.
+    pub(crate) opening: Opening,
+    /// Filters of its outputs, whoever reads them.
+    pub(crate) outputs: Layer,
     /// Filters of the later inputs it sends, shared with their reader.
-    pub(crate) inputs: InputFilters,
-    /// Idle once it ends: its response's body and its inputs' reader stop,
-    /// so a reader still waiting wakes.
+    pub(crate) inputs: Layer,
+    /// Whether it carries the request's inputs still flowing.
+    pub(crate) flowing: bool,
+    /// Idle once it ends: its response's events and its inputs' reader
+    /// stop, so a reader still waiting wakes.
     pub(crate) cut: Arc<InFlight>,
     /// In `cut` until it ends, then in its request's `settling` until its
     /// end hooks finish, as its request's end hooks wait for them.
     pub(crate) running: InFlightGuard,
-    /// Set once the call is handed to its transport.
+    /// Set once its dialect took it to send.
     pub(crate) sent: bool,
-    /// Set once the transport returned the provider's response head.
-    pub(crate) answered: bool,
-    /// Set once the response decoded its first value or its body broke off.
-    pub(crate) began: bool,
-    /// Set if the request encoder panicked on a later frame, which the
-    /// transport may be reading where nothing unwinds to the call: its
-    /// response then ends with it.
-    pub(crate) failed: Arc<OnceLock<Fault>>,
+    /// Set if the provider answered and refused it at its head.
+    pub(crate) refused: bool,
 }
 
 impl std::fmt::Debug for ProviderContext {
@@ -72,7 +67,7 @@ impl Edge for ProviderContext {
     fn close(&mut self, end: &Result<(), Fault>) {
         self.running = InFlight::enter(&self.client.settling);
         let _ = locked(&self.inputs).end(end.clone(), &mut None);
-        let _ = unlocked(&mut self.outputs).end(end.clone(), &mut None);
+        let _ = locked(&self.outputs).end(end.clone(), &mut None);
     }
 }
 
@@ -92,21 +87,21 @@ impl ProviderContext {
 
     /// The name of the provider's format.
     pub fn format(&self) -> &str {
-        self.format.name()
+        self.dialect.name()
     }
 
     /// Whether `T` is the provider's format's
     /// [`Input`](crate::Format::Input) or [`Output`](crate::Format::Output)
     /// type, which the typed accessors take.
     pub fn is_kind<T: Any>(&self) -> bool {
-        is_input::<T>(&*self.format).is_ok()
+        is_input::<T>(&*self.dialect).is_ok()
     }
 
     /// This call's first input as `T`, the call's input type: its own
     /// ([`Call::with_input`](crate::Call::with_input)), else the one that
     /// came with the request's head. `Err` as [`ClientContext::input`].
     pub fn input<T: Any>(&self) -> Result<&T, Fault> {
-        self.input.get()
+        self.opening.get()
     }
 
     /// Run `filter` as [`ClientContext::filter`] does, for this call alone:
@@ -116,13 +111,11 @@ impl ProviderContext {
         &mut self,
         filter: impl Filter<T>,
     ) -> Result<(), Fault> {
-        match is_input::<T>(&*self.format)? {
-            false => unlocked(&mut self.outputs).add(filter, false),
+        match is_input::<T>(&*self.dialect)? {
+            false => locked(&self.outputs).add(filter, false),
             // Later inputs follow only a streaming request, never an own input.
-            true if self.client.later.is_some() && self.input.own_format.is_none() => {
-                locked(&self.inputs).add(filter, true)
-            }
-            true => self.input.filter(Filters::of(filter)),
+            true if self.flowing => locked(&self.inputs).add(filter, true),
+            true => self.opening.filter(Filters::of(filter)),
         }
     }
 
@@ -133,16 +126,15 @@ impl ProviderContext {
         self.sent
     }
 
-    /// Whether the provider's head arrived and its body began no value: the
-    /// transport returned a response, and its body has decoded nothing, though
-    /// it did not break off. At a call's end, `Err` then means the response
-    /// failed as a whole before it began, such as by a refusal. It is false in
-    /// `on_provider`; for a call whose transport failed, before a head or in
-    /// its body; and once a value was decoded. A fault alone cannot say which
-    /// of these it is, as a provider's refusal and a response cut off look
-    /// alike.
+    /// Whether the provider answered and refused the call at its head: its
+    /// response failed as a whole before it began, with no value and not
+    /// broken off, as by an error status. At a call's end, `Err` then means
+    /// the provider refused. It is false in `on_provider`; for a call whose
+    /// transport failed, before a head or in its body; and for a response
+    /// that began. A fault alone cannot say which of these it is, as a
+    /// provider's refusal and a response cut off look alike.
     pub fn is_head_only(&self) -> bool {
-        self.answered && !self.began
+        self.refused
     }
 
     /// This call's extensions: the request's, its own

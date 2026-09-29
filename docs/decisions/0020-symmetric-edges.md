@@ -1,6 +1,6 @@
 # 0020. Symmetric edges
 
-- Status: in progress (step 2 of the migration has landed)
+- Status: in progress (step 3 of the migration has landed)
 - Date: 2026-09-29
 
 ## Context
@@ -68,3 +68,37 @@ output filters on its context alone. Nothing else changes.
   change.
 - Amends 0003, 0004, 0007, 0008, 0013 and 0015, which named the removed
   methods.
+
+## Step 3: the kernel on the contract
+
+The kernel routes events. The edge contract is in the core under a
+temporary name, `Dialect` (with `Events`, `Origin`, `Half`, `Ended`,
+`Reply`, `Dialed`), served with `Gateway::serve_dialect`, called with
+`Gateway::provider_dialect` and opened with `Gateway::open`; the flip
+renames them. It adopts the seven fixes to the draft: `dial`'s later
+inputs are an `Option` (`None`: none follow), and "ended at once" holds
+for `accept`'s inputs alone; `Reply` and `Dialed` are aliases; the gateway
+polls a client's inputs once as the session opens and keeps what that
+poll yields; `opening` is `Some` only if the inputs had ended then;
+`accept` never awaits its reply, the wire carries the adapter's slot, and
+the adapter drives `open` while it awaits the slot; outputs dropped unread
+end their call as their end, if ready, says, else abandoned; and `Ended`
+dropped first cuts the outputs with `Err(abandoned)`.
+
+`Format` and `Transport` did not change. A private driver
+(`core/src/legacy`) serves every old format and transport as a dialect and
+its dialer: the byte code the kernel had, moved, with one new part, the
+answer classified at its head (rule 3). It reads what of the answer is
+ready when the transport returns, waiting for nothing; a decoder's failure
+before any value, the body unbroken, is a refusal. So a streaming client
+its provider refuses gets a complete refusal (W1 is fixed), and
+`is_head_only` says "refused at its head", which is the tested meaning.
+
+One rule the draft did not state: what a provider edge's outputs have
+ready at once is one batch, whose values the call's filters see before
+the client's see the first. It keeps usage metered when a client filter
+fails on a value that shares its frame (`line.rs::f2_...`). The driver
+says `Pending` between frames, so its batch is a frame, as before.
+
+`Fault::abandoned` and `Fault::of_input` are public, for edges outside the
+core.

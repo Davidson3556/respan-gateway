@@ -181,9 +181,21 @@ impl Fault {
         Self::new(codes::TRUNCATED, "stream ended before completion")
     }
 
-    /// No one waits for it.
-    pub(crate) fn abandoned() -> Self {
+    /// No one waits for it: [`codes::ABANDONED`], such as a response whose
+    /// client left.
+    pub fn abandoned() -> Self {
         Self::new(codes::ABANDONED, "abandoned")
+    }
+
+    /// The same fault, of an input an edge could not write, as whose it is:
+    /// [`codes::BAD_REQUEST`] if the client's as decoded (`clients`), else
+    /// [`codes::CONFIG`], a plugin's; its hints go, as they were of
+    /// another cause.
+    pub fn of_input(self, clients: bool) -> Self {
+        self.recoded(match clients {
+            true => codes::BAD_REQUEST,
+            false => codes::CONFIG,
+        })
     }
 
     /// A setup that cannot work.

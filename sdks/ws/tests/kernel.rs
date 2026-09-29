@@ -1,5 +1,5 @@
 //! What a session shows of the kernel and the HTTP adapter, pinned, and the
-//! bugs it exposed (target/review/BUGS.md, W1).
+//! bug it exposed (target/review/BUGS.md, W1, fixed).
 #![allow(clippy::unwrap_used)]
 
 mod support;
@@ -40,12 +40,10 @@ fn upgrade() -> respan_gateway_http::http::Request<respan_gateway_http::Body> {
 }
 
 // A provider that refuses the upgrade answers with its status and a body.
-// The gateway sends a streaming request's head at once, so the client should
-// get that head with the body it goes with; what it gets is the status with a
-// body that then FAILS, which an HTTP server writes as a broken response
-// (the connection is aborted).
+// The call is refused at its head, so the client gets that head with the
+// body it goes with, not a head and then a body that fails, which an HTTP
+// server writes as a broken response (W1, fixed).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BUGS.md: W1, a provider's refusal of a streaming request is a head with a failing body"]
 async fn a_refused_upgrade_is_a_complete_answer() {
     let refusing = refusing().await;
     let (gateway, ..) = relay(&format!("ws://{refusing}"));
@@ -55,19 +53,22 @@ async fn a_refused_upgrade_is_a_complete_answer() {
     assert!(body.is_ok(), "the body failed: {body:?}");
 }
 
-// What it is today, pinned: the head, then a body that ends `Err` with the
-// provider's fault, which `serve_ws` turns into a whole plain-text answer.
+// What W1 was, inverted: the provider's refusal goes as it came, head and
+// body, not as a head and then a body that ends `Err` with its fault; the
+// request ends once, with that fault.
 #[tokio::test(flavor = "multi_thread")]
-async fn today_a_refused_upgrade_is_a_head_and_a_failing_body() {
+async fn a_refused_upgrade_is_the_providers_answer_as_it_came() {
     let refusing = refusing().await;
     let (gateway, ends, _) = relay(&format!("ws://{refusing}"));
     let (resp, _) = serve_http(&gateway, upgrade()).await;
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let fault: Fault = body.unwrap_err();
-    assert_eq!(fault.get::<Status>(), Some(&Status(403)));
+    assert_eq!(&body.unwrap()[..], br#"{"error":"no room"}"#);
     idle(&gateway).await;
-    assert_eq!(ends.all().len(), 1);
+    let ends = ends.all();
+    assert_eq!(ends.len(), 1);
+    let fault: Fault = ends[0].clone().unwrap_err();
+    assert_eq!(fault.get::<Status>(), Some(&Status(403)));
 }
 
 // The same refusal through the adapter of this crate is a whole answer

@@ -3,54 +3,54 @@ use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use futures::stream::{self, BoxStream, Stream};
+use futures::{FutureExt, StreamExt};
 
 use crate::call::{CallEdge, SharedCall};
+use crate::dialect::{AnyDialect, AnyEvents, Origin, Values};
 use crate::fault::PANICKED;
-use crate::format::{AnyDecoder, AnyFormat, Values};
-use crate::input::locked;
-use crate::transport::Head;
-use crate::{Body, Exchange, Fault};
+use crate::leg::{cut, locked};
+use crate::{Events, Fault};
 
 /// A response for the client, from a provider or a plugin. Dropped unsent
 /// and unread, its call ends abandoned.
 #[must_use = "a response does nothing unless sent or read"]
 pub struct Response {
-    /// The provider's head, handed to the client's format only if the
-    /// response is in it ([`Source::relayed`]); none for one made.
-    pub(crate) head: Option<Head>,
+    /// The provider's origin, only on a relay; none for one made.
+    pub(crate) origin: Option<Origin>,
     pub(crate) body: Source,
-    /// Whether its call streams the request's inputs, so its body flows
-    /// only once it is sent.
+    /// Whether its call carries the session's inputs still flowing, so its
+    /// events flow only once it is sent.
     pub(crate) streams: bool,
     /// What [`Response::until_content`] or [`Response::until_end`] read,
     /// to be read again first.
     pub(crate) ahead: VecDeque<Batch>,
     /// Its outputs' type; `None` for a refusal, which has none.
     pub(crate) output: Option<TypeId>,
+    /// Whether the provider refused it at its head: its one batch is the
+    /// refusal.
+    pub(crate) refused: bool,
 }
 
 impl std::fmt::Debug for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Response")
-            .field("relayed", &self.body.relayed())
+            .field("relayed", &self.origin.is_some())
             .finish_non_exhaustive()
     }
 }
 
-/// Outputs decoded or made, and the end if it came.
+/// Outputs read or made, and the end if it came.
 #[derive(Default)]
 pub(crate) struct Batch {
     pub(crate) values: Option<Values>,
     pub(crate) end: Option<Result<(), Fault>>,
-    /// Whether the body broke off, an end of the wire's, not the decoder's.
-    pub(crate) broke: bool,
     /// The call whose end this holds, ended once it is read.
     pub(crate) unread: Unread,
 }
 
-/// A call's end decoded and not yet read; dropped unread, the call ends so.
+/// A call's end read from its provider and not yet by its reader; dropped
+/// unread, the call ends so.
 #[derive(Default)]
 pub(crate) struct Unread(Option<(SharedCall, Result<(), Fault>)>);
 
@@ -95,8 +95,8 @@ impl Batch {
         }
     }
 
-    /// Decoded from `call`'s response: filtered; its end, if any, waits to
-    /// be read.
+    /// Read from `call`'s provider: filtered; its end, if any, waits to be
+    /// read.
     fn of(mut self, call: &SharedCall) -> Self {
         if locked(call).events(&mut self)
             && let Some(end) = &self.end
@@ -108,13 +108,14 @@ impl Batch {
 }
 
 impl Response {
-    fn new(head: Option<Head>, body: Source, output: Option<TypeId>) -> Self {
+    fn new(origin: Option<Origin>, body: Source, output: Option<TypeId>) -> Self {
         Self {
-            head,
+            origin,
             body,
             streams: false,
             ahead: VecDeque::new(),
             output,
+            refused: false,
         }
     }
 
@@ -145,7 +146,8 @@ impl Response {
     /// a failure or its end, and hold what was read, unsent, to decide on
     /// it or fall back. One whose call streams the request's inputs returns
     /// at once. `Err` if it fails first, such as with a provider's error
-    /// answer, which a refusal sends as it came.
+    /// answer, which a refusal sends as it came; one the provider refused
+    /// at its head fails at once.
     ///
     /// A response with no content is read, and held, to its end, so bound
     /// one that may never end. A decoder that panics ends its call
@@ -172,15 +174,16 @@ impl Response {
 
     /// Read until its first content, or its end if `to_end`, into `ahead`.
     async fn read_until(mut self, to_end: bool) -> Result<Response, Fault> {
-        // What is ahead was judged by an earlier read.
-        let mut content = self.streams || !self.ahead.is_empty();
+        // What is ahead was judged by an earlier read; a refusal is read.
+        let streams = self.streams && !self.refused;
+        let mut content = streams || !self.ahead.is_empty();
         // Noted as a batch is read, not found again by scanning them all.
         let mut end = self.end().cloned();
         loop {
             match &end {
                 Some(Err(fault)) if !content => return Err(fault.clone()),
                 Some(_) => return Ok(self),
-                None if self.streams || (content && !to_end) => return Ok(self),
+                None if streams || (content && !to_end) => return Ok(self),
                 None => {
                     let (batch, read) = self.body.next().await;
                     content |= read;
@@ -203,7 +206,7 @@ impl Response {
     /// fails; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL)
     /// for another type. Its call ends with the stream, or abandoned if
     /// dropped first.
-    pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T, Fault>> {
+    pub fn outputs<T: Any + Clone + Send>(mut self) -> Events<T> {
         if self.output != Some(TypeId::of::<T>()) {
             let fault = Fault::wrong_kind::<T>();
             self.body.end(Err(fault.clone()));
@@ -237,62 +240,36 @@ impl Response {
         .boxed()
     }
 
-    /// A kernel-made response that just ends, such as a refusal.
-    pub(crate) fn made(end: Result<(), Fault>) -> Self {
-        let body = Source::Made(stream::iter([Batch::end(end)]).boxed());
-        Self::new(None, body, None)
-    }
-
-    /// A response of bytes in `format` to the call with head `call` and
-    /// first bytes `sent`, `relayed` if in the client's format, whose body
-    /// flows only once sent if `streams`.
-    pub(crate) fn decoded(
-        format: &Arc<dyn AnyFormat>,
-        call: &dyn Any,
-        sent: &bytes::Bytes,
-        response: Exchange<Head>,
-        relayed: bool,
-        streams: bool,
+    /// A provider's answer through `call`'s provider edge, its origin kept
+    /// only on a relay: cut at the call's end, so a waiting reader wakes.
+    pub(crate) fn of_call(
+        dialect: &Arc<dyn AnyDialect>,
+        origin: Option<Origin>,
+        events: AnyEvents,
+        mut call: CallEdge,
     ) -> Self {
-        let Exchange { head, body, .. } = response;
-        let decoder = format.response_decoder(&*head, call, sent);
-        let output = Some(format.kind().1);
-        let body = Source::Bytes {
-            body,
-            decoder,
-            format: format.clone(),
-            relayed,
-            call: None,
+        let px = call.cx();
+        let (streams, refused) = (px.flowing, px.refused);
+        let events = cut(events, &px.cut);
+        let output = Some(dialect.kind().1);
+        let body = Source::Events {
+            events,
+            dialect: dialect.clone(),
+            call: Some(call.share()),
         };
         Self {
             streams,
-            ..Self::new(Some(head), body, output)
+            refused,
+            ..Self::new(origin, body, output)
         }
-    }
-
-    /// The same, read through `call`'s provider edge; its body is cut off at
-    /// the call's end, so a waiting reader wakes.
-    pub(crate) fn of_call(mut self, mut call: CallEdge) -> Self {
-        if let Source::Bytes {
-            body, call: slot, ..
-        } = &mut self.body
-        {
-            let cut = call.cx().cut.idle();
-            let taken = std::mem::replace(body, stream::empty().boxed());
-            *body = taken.take_until(cut).boxed();
-            *slot = Some(call.share());
-        }
-        self
     }
 }
 
-/// A response's body: bytes with their decoder and call, or outputs made.
+/// A response's body: a provider's events and its call, or outputs made.
 pub(crate) enum Source {
-    Bytes {
-        body: Body,
-        decoder: Box<dyn AnyDecoder>,
-        format: Arc<dyn AnyFormat>,
-        relayed: bool,
+    Events {
+        events: AnyEvents,
+        dialect: Arc<dyn AnyDialect>,
         call: Option<SharedCall>,
     },
     /// Outputs a plugin made, each of which is content.
@@ -300,32 +277,27 @@ pub(crate) enum Source {
 }
 
 impl Source {
-    /// Whether it is in the client's format, so its head goes to it.
-    pub(crate) fn relayed(&self) -> bool {
-        matches!(self, Source::Bytes { relayed: true, .. })
-    }
-
     /// Its call, if any.
     pub(crate) fn call(&self) -> Option<&SharedCall> {
         match self {
-            Source::Bytes { call, .. } => call.as_ref(),
+            Source::Events { call, .. } => call.as_ref(),
             Source::Made(..) => None,
         }
     }
 
     /// The next batch, eventually one with the end, not to be read past,
     /// and whether it held content before any filter, filtered on its
-    /// call's provider edge if it has one. The call ends when the batch with its end is read ([`Batch::read`]) or
-    /// dropped. A panic ends the call internal.
+    /// call's provider edge if it has one. The call ends when the batch
+    /// with its end is read ([`Batch::read`]) or dropped. A panic of the
+    /// provider's stream, `is_content` or a filter ends the call internal
+    /// and unwinds on.
     pub(crate) async fn next(&mut self) -> (Batch, bool) {
-        let (body, decoder, format, call) = match self {
-            Source::Bytes {
-                body,
-                decoder,
-                format,
+        let (events, dialect, call) = match self {
+            Source::Events {
+                events,
+                dialect,
                 call,
-                ..
-            } => (body, decoder, format, call),
+            } => (events, dialect, call),
             Source::Made(made) => {
                 let truncated = || Batch::end(Err(Fault::truncated()));
                 let batch = made.next().await.unwrap_or_else(truncated);
@@ -333,62 +305,46 @@ impl Source {
                 return (batch, content);
             }
         };
-        let mut frame = body.next().await;
-        // A request encoder that panicked, unseen by the transport, fails it.
-        if let Some(fault) = call.as_ref().and_then(|c| locked(c).failure()) {
-            frame = Some(Err(fault));
-        }
-        let is_broken = matches!(frame, Some(Err(_)));
-        let mut batch = Batch::default();
-        let mut content = false;
-        let decode = AssertUnwindSafe(|| {
-            let (values, end) = match frame {
-                Some(Ok(bytes)) => decoder.decode(Some(bytes)),
-                Some(Err(f)) => (None, Some(Err(f))),
-                None => decoder.decode(None),
-            };
-            content = values.as_ref().is_some_and(|v| format.any_content(v));
-            batch.broke = is_broken;
-            batch.values = values;
-            batch.end = end;
-            if let Some(call) = call {
-                batch = std::mem::take(&mut batch).of(call);
-            }
-        });
-        if let Err(panic) = std::panic::catch_unwind(decode) {
-            if let Some(call) = call {
-                locked(call).finish(Err(Fault::internal(PANICKED)));
-            }
-            std::panic::resume_unwind(panic);
-        }
-        (batch, content)
-    }
-
-    /// Its reader stops before reading on: a call's decoder is told the
-    /// body ended, and the call ends `Ok` if it says the body is complete,
-    /// else abandoned, as a body was left. A panic ends the call internal.
-    pub(crate) fn close_unread(&mut self) {
-        let Source::Bytes { decoder, call, .. } = self else {
-            return;
-        };
-        let close = AssertUnwindSafe(|| {
-            let (values, end) = decoder.decode(None);
-            let end = Some(match end {
-                Some(Err(_)) => Err(Fault::abandoned()),
-                _ => Ok(()),
-            });
-            if let Some(call) = call {
-                Batch {
-                    values,
-                    end,
+        let item = AssertUnwindSafe(events.next()).catch_unwind().await;
+        let read = item.map(|item| {
+            let mut batch = match item {
+                Some(Ok(values)) => Batch {
+                    values: Some(values),
                     ..Batch::default()
+                },
+                Some(Err(fault)) => Batch::end(Err(fault)),
+                None => Batch::end(Ok(())),
+            };
+            let of = AssertUnwindSafe(|| {
+                // What is ready with it is one batch, as a frame's outputs
+                // are: the call's filters see all of it before the client's
+                // see its first.
+                while let Some(values) = &mut batch.values
+                    && batch.end.is_none()
+                {
+                    match events.next().now_or_never() {
+                        None => break,
+                        Some(Some(Ok(more))) => dialect.append(values, more),
+                        Some(Some(Err(fault))) => batch.end = Some(Err(fault)),
+                        Some(None) => batch.end = Some(Ok(())),
+                    }
                 }
-                .of(call)
-                .read();
-            }
+                let content = (batch.values.as_ref()).is_some_and(|v| dialect.any_content(v));
+                if let Some(call) = call {
+                    batch = std::mem::take(&mut batch).of(call);
+                }
+                content
+            });
+            std::panic::catch_unwind(of).map(|content| (batch, content))
         });
-        if std::panic::catch_unwind(close).is_err() {
-            self.end(Err(Fault::internal(PANICKED)));
+        match read {
+            Ok(Ok(read)) => read,
+            Ok(Err(panic)) | Err(panic) => {
+                if let Some(call) = call {
+                    locked(call).finish(Err(Fault::internal(PANICKED)));
+                }
+                std::panic::resume_unwind(panic)
+            }
         }
     }
 

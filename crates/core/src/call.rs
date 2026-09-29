@@ -1,25 +1,21 @@
 use std::any::Any;
-use std::future::Future;
+use std::future::{Future, ready};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
-use bytes::{Bytes, BytesMut};
 use futures::future::BoxFuture;
-use futures::stream::{BoxStream, Stream};
 use futures::{FutureExt, StreamExt, stream};
 
-use crate::context::unlocked;
-use crate::fault::PANICKED;
-use crate::format::{AnyEncoder, AnyInput};
+use crate::dialect::{AnyEvents, AnyInput, Origin};
+use crate::fault::{PANICKED, guarded};
 use crate::gateway::Registered;
-use crate::input::{Frame as InputFrame, Input, locked, stream as inputs};
+use crate::leg::{self, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::response::Batch;
-use crate::transport::Head;
-use crate::{ClientContext, Exchange, Extensions, Fault, ProviderContext, Response, Transport};
+use crate::{ClientContext, Extensions, Fault, ProviderContext, Response};
 
 /// A call from [`ClientContext::call`], sent when first awaited; it may
 /// outlive the hook. A clone is an unsent copy.
@@ -142,13 +138,13 @@ async fn send(
         // Relayed within one name, else translated within one kind.
         Some(p)
             if own.is_none()
-                && cx.format.name() != p.format.name()
-                && cx.format.kind() != p.format.kind() =>
+                && cx.dialect.name() != p.dialect.name()
+                && cx.dialect.kind() != p.dialect.kind() =>
         {
             Err(format!(
                 "the client speaks {}, provider '{provider}' speaks {}, and they share no kind",
-                cx.format.name(),
-                p.format.name()
+                cx.dialect.name(),
+                p.dialect.name()
             ))
         }
         Some(p) => Ok(p),
@@ -156,43 +152,41 @@ async fn send(
     let p = p.map_err(|e| {
         Fault::config("a provider this request cannot use was called").with_source(e)
     })?;
-    let mut input = cx.input.clone();
+    let mut opening = cx.opening.clone();
     if let Some(own) = own {
-        if p.format.kind().0 != (*own).type_id() {
+        if p.dialect.kind().0 != (*own).type_id() {
             return Err(Fault::another_kind(format!(
                 "a call's own input is not the input type of provider '{provider}'"
             )));
         }
-        input.bring(p.format.clone(), own);
+        opening.bring(p.dialect.clone(), own);
     }
-    // A call's own input is none of the client's, so never relayed.
-    let relay = input.own_format.is_none() && cx.format.name() == p.format.name();
     let mut client = cx.copy();
     client.extensions.extend(extensions);
     let cut = Arc::default();
     let px = ProviderContext {
         client,
-        format: p.format.clone(),
+        dialect: p.dialect.clone(),
         provider,
-        input,
-        outputs: Mutex::default(),
+        // A call's own input is none of the client's: nothing follows it.
+        flowing: opening.own.is_none() && !cx.later.ended,
+        opening,
+        outputs: Arc::default(),
         inputs: Arc::default(),
         running: InFlight::enter(&cut),
         cut,
         sent: false,
-        answered: false,
-        began: false,
-        failed: Arc::default(),
+        refused: false,
     };
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
     let sent = async {
         edge.start().await?;
-        send_call(&cx, p, relay, &mut edge).await
+        dial(&cx, p, &mut edge).await
     };
     // A panic ends this call as internal before unwinding, so the drop
     // during unwinding does not end it abandoned.
     match AssertUnwindSafe(sent).catch_unwind().await {
-        Ok(Ok(resp)) => Ok(resp.of_call(edge)),
+        Ok(Ok((origin, events))) => Ok(Response::of_call(&p.dialect, origin, events, edge)),
         Ok(Err(fault)) => {
             edge.finish(Err(fault.clone()));
             Err(fault)
@@ -204,193 +198,43 @@ async fn send(
     }
 }
 
-/// Send `px`'s call to `p`, relaying the client's inputs if `relay`.
-async fn send_call(
+/// The one way a client's origin reaches a provider: a call that carries
+/// the session's own inputs (no input of its own, which no plugin can
+/// forge) to a dialect of the client's name.
+fn relay_origin(cx: &ClientContext, own: bool, p: &Provider) -> Option<Origin> {
+    (!own && cx.dialect.name() == p.dialect.name())
+        .then(|| cx.origin.clone())
+        .flatten()
+}
+
+/// Dial `p` with the call's opening and later inputs: the provider's origin
+/// (on a relay alone) and events, a refusal at the head as one `Err`.
+async fn dial(
     cx: &ClientContext,
     p: &Provider,
-    relay: bool,
     edge: &mut CallEdge,
-) -> Result<Response, Fault> {
+) -> Result<(Option<Origin>, AnyEvents), Fault> {
     let px = edge.cx();
-    // A streaming request's later inputs follow, unless the call has its own.
-    let later = cx.later.as_ref().filter(|_| px.input.own_format.is_none());
-    let client = relay.then(|| &*px.client.head as &dyn Any);
-    let (head, first, encoder, done) = first_frame(&px.input, p, client, later.is_some())?;
-    // A body done as it opens has no later inputs.
-    let later = later.filter(|_| !done);
-    let extensions = px.client.extensions.clone();
-    // The decoder reads the provider's head as it came, for the call as sent.
-    let sent = p
-        .format
-        .copy_ask(&*head)
-        .ok_or_else(|| Fault::internal("a call's head of another wire than its format's"))?;
-    // An empty first frame is none, as an HTTP body of no bytes has none.
-    let first_frame = stream::iter((!first.is_empty()).then(|| Ok(first.clone())));
-    let body = match later {
-        None => first_frame.boxed(),
-        Some(later) => {
-            let (input, filters) = (px.input.clone(), px.inputs.clone());
-            let frames = inputs(later.clone(), input, filters, &px.cut);
-            let rest = later_frames(frames, encoder, px.failed.clone());
-            first_frame.chain(rest).boxed()
-        }
-    };
-    let mut call = Exchange::new(head, body);
-    call.extensions = extensions;
-    call.relayed = relay;
-    call.streams = later.is_some();
+    let relay = relay_origin(cx, px.opening.own.is_some(), p);
+    let opening = px.opening.sent(relay.is_some())?;
+    let later = px.flowing.then(|| {
+        let call = Some(px.inputs.clone());
+        inputs(cx.later.clone(), cx.dialect.clone(), call, &px.cut)
+    });
+    let (dialer, ext) = (&*p.dialer, px.client.extensions.clone());
+    let opening = opening.as_ref().map(|(input, clients)| (input, *clients));
+    let dialed = guarded(|| p.dialect.dial(dialer, ext, relay.as_ref(), opening, later))?;
     px.sent = true;
-    let resp = p.transport.send(call).await?;
-    edge.cx().answered = true;
-    Ok(Response::decoded(
-        &p.format,
-        &*sent,
-        &first,
-        resp,
-        relay,
-        later.is_some(),
-    ))
-}
-
-/// The call's head as its format writes it, from the `client`'s head if it
-/// relays the client's message; its first frame: the encoder's opening bytes,
-/// then the client's bytes if relayed unread, else the input written from
-/// its value, then the end unless it `streams`; the encoder; and whether the
-/// body is done as it opens, when the first frame is the opening bytes
-/// alone. Content that cannot be written is whose it is (`Whose`).
-fn first_frame(
-    input: &Input,
-    p: &Provider,
-    client: Option<&dyn Any>,
-    streams: bool,
-) -> Result<(Head, Bytes, Box<dyn AnyEncoder>, bool), Fault> {
-    let ((mut body, first), whose) = input.sent(client.is_some())?;
-    let mut encoder = p.format.request_encoder(client, &mut body, streams);
-    let head = encoder.head(first.as_ref());
-    // What cannot be opened is the format's to say, whoever's input it is.
-    let mut opening = BytesMut::new();
-    if encoder.open(&mut opening)? {
-        return Ok((head, opening.freeze(), encoder, true));
-    }
-    let mut more = BytesMut::new();
-    let mut write = || {
-        if let Some(first) = &first {
-            encoder.input(first, &mut more)?;
+    let (origin, events) = dialed.await?;
+    // A provider's head goes only to a client of the name it came in.
+    let origin = relay.and(origin);
+    Ok(match events {
+        Ok(events) => (origin, events),
+        Err(fault) => {
+            edge.cx().refused = true;
+            (origin, stream::once(ready(Err(fault))).boxed())
         }
-        match streams {
-            true => Ok(()),
-            false => encoder.end(&Ok(()), &mut more),
-        }
-    };
-    write().map_err(|fault| whose.fault(fault))?;
-    if !opening.is_empty() || !more.is_empty() {
-        body = [&opening[..], &body[..], &more[..]].concat().into();
-    }
-    Ok((head, body, encoder, false))
-}
-
-/// Where a streamed call's request encoder panicked, if it did.
-type Failure = Arc<OnceLock<Fault>>;
-
-/// A streamed call's frames after its first, as its body: each of `frames`
-/// written by `encoder`, then, if it has bytes, the end. A frame that cannot
-/// be written is whose it is (`Whose`).
-///
-/// The body ends with the first failure, its own or the frames' (the
-/// client's body breaking, or the inputs cut off: `abandoned`), as an
-/// `Err`, and only after the encoder was told that failure as its end, so
-/// no clean end follows one. A panic in the encoder ends it `internal`, in
-/// the body and, as the transport may read the body where nothing unwinds
-/// to the call, in `failed`.
-fn later_frames(
-    frames: BoxStream<'static, Result<InputFrame, Fault>>,
-    encoder: Box<dyn AnyEncoder>,
-    failed: Failure,
-) -> impl Stream<Item = Result<Bytes, Fault>> {
-    let writing = Writing {
-        frames,
-        encoder,
-        failed,
-        done: false,
-        abort: None,
-    };
-    stream::unfold(
-        writing,
-        |mut w| async move { w.next().await.map(|b| (b, w)) },
-    )
-}
-
-struct Writing {
-    frames: BoxStream<'static, Result<InputFrame, Fault>>,
-    encoder: Box<dyn AnyEncoder>,
-    failed: Failure,
-    /// Whether the frames ended, or the body failed.
-    done: bool,
-    /// The failure to end the body with, once its last bytes are out.
-    abort: Option<Fault>,
-}
-
-impl Writing {
-    async fn next(&mut self) -> Option<Result<Bytes, Fault>> {
-        loop {
-            if let Some(fault) = self.abort.take() {
-                return Some(Err(fault));
-            }
-            if self.done {
-                return None;
-            }
-            let frame = self.frames.next().await;
-            let mut out = BytesMut::new();
-            let encoder = &mut self.encoder;
-            let step = std::panic::catch_unwind(AssertUnwindSafe(|| match &frame {
-                Some(Ok(frame)) => {
-                    let written = encoder.input(&frame.input, &mut out);
-                    written.map_err(|f| frame.whose.fault(f)).map(|()| true)
-                }
-                None => encoder.end(&Ok(()), &mut out).map(|()| false),
-                Some(Err(fault)) => Err(fault.clone()),
-            }));
-            match step {
-                Err(_) => return Some(Err(self.panicked())),
-                Ok(Ok(more)) => {
-                    self.done = !more;
-                    // A frame is one, an empty one too; the end, if it has bytes.
-                    if more || !out.is_empty() {
-                        return Some(Ok(out.freeze()));
-                    }
-                }
-                Ok(Err(fault)) => {
-                    self.done = true;
-                    // Its partial output is dropped; a failed end was told.
-                    out.clear();
-                    if frame.is_some() {
-                        let ended =
-                            AssertUnwindSafe(|| self.encoder.end(&Err(fault.clone()), &mut out));
-                        match std::panic::catch_unwind(ended) {
-                            Ok(Ok(())) => {}
-                            Ok(Err(_)) => out.clear(),
-                            Err(_) => {
-                                self.panicked();
-                                out.clear();
-                            }
-                        }
-                    }
-                    self.abort = Some(fault);
-                    if !out.is_empty() {
-                        return Some(Ok(out.freeze()));
-                    }
-                }
-            }
-        }
-    }
-
-    /// The encoder panicked: the body and the call end `internal`.
-    fn panicked(&mut self) -> Fault {
-        self.done = true;
-        let fault = Fault::internal(PANICKED);
-        let _ = self.failed.set(fault.clone());
-        fault
-    }
+    })
 }
 
 /// One call's provider edge, whose end hooks run exactly once.
@@ -484,17 +328,8 @@ impl CallEdge {
         Ok(())
     }
 
-    /// How the request encoder failed, if it panicked and the call has not
-    /// ended.
-    pub(crate) fn failure(&mut self) -> Option<Fault> {
-        match self.is_finished() {
-            true => None,
-            false => self.cx().failed.get().cloned(),
-        }
-    }
-
     /// Turn `batch` of this call's response into what its reader gets, as
-    /// decoded: its outputs filtered. Whether it holds an end, a failed
+    /// the provider edge gave it: its outputs filtered. Whether it holds an end, a failed
     /// filter's too, for [`CallEdge::settle`] once read. Once the call
     /// ended, just an abandoned end.
     pub(crate) fn events(&mut self, batch: &mut Batch) -> bool {
@@ -502,11 +337,8 @@ impl CallEdge {
             *batch = Batch::end(Err(Fault::abandoned()));
             return false;
         }
-        let px = self.cx();
-        px.began |= batch.values.is_some() || batch.broke;
-        let outputs = unlocked(&mut px.outputs);
         if let Some(values) = &mut batch.values
-            && let Err(f) = outputs.run(values)
+            && let Err(f) = leg::run(&[&self.cx().outputs], values)
         {
             batch.end = Some(Err(f));
         }
@@ -523,7 +355,7 @@ impl CallEdge {
         let Some(end) = batch.end.take() else {
             return;
         };
-        let end = unlocked(&mut self.cx().outputs).end(end, &mut batch.values);
+        let end = leg::end(&[&self.cx().outputs], end, &mut batch.values);
         batch.end = Some(end.clone());
         self.finish(end);
     }

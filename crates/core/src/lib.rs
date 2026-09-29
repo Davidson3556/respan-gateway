@@ -1,29 +1,37 @@
 #![warn(missing_docs)]
 //! The respan-gateway kernel: a [`Gateway`] runs each request through its
 //! [`Plugin`]s and streams the [`Response`] back (`docs/ARCHITECTURE.md`).
+//!
+//! The kernel routes events: a client edge and a provider edge, each a
+//! [`Dialect`] over a connection, turn bytes and heads into a kind's events
+//! and back. [`Format`] and [`Transport`] are served as dialects by the byte
+//! driver the kernel had (decision 0020, until its flip).
 
 mod call;
 mod context;
-mod deliver;
+mod dialect;
+mod extensions;
 mod fault;
-mod format;
 mod gateway;
-mod input;
+mod leg;
+mod legacy;
 mod lifecycle;
+mod opening;
 mod plugin;
 mod provider;
 mod response;
-mod transport;
+mod session;
 
 pub use call::Call;
 pub use context::ClientContext;
+pub use dialect::{Dialect, Dialed, Ended, Events, Half, Origin, Reply};
+pub use extensions::Extensions;
 pub use fault::{Fault, codes};
-pub use format::{Decoder, Encoder, Format};
 pub use gateway::Gateway;
+pub use legacy::{Body, Decoder, Encoder, Exchange, Format, Head, Transport};
 pub use plugin::{Filter, Plugin};
 pub use provider::ProviderContext;
 pub use response::Response;
-pub use transport::{Body, Exchange, Extensions, Head, Transport};
 
 /// The crates the kernel's contracts use, at the kernel's versions.
 pub use {async_trait::async_trait, bytes, futures, serde_json};
