@@ -289,6 +289,7 @@ streaming requests route by the adapter's view of their head
 | `sdks/text` | Read and rewrite chat text across stream deltas. |
 | `sdks/ledger` | Reserve before a call, settle once from what your filter priced. |
 | `sdks/mcp` | The MCP kind, streamable HTTP format and stdio transport. |
+| `sdks/ws` | WebSocket sessions: `WsTransport`, an axum adapter (`serve_ws`), `JsonEvents`. |
 | `examples` | One runnable, tested example per use case ([list](../examples/README.md)). |
 
 SDKs and examples use only the public API of the crates above.

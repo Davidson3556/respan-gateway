@@ -20,6 +20,7 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 | [fallback](fallback.rs) | 4, 6 | Retry with `Retry-After`, fallback to another format, a hedged race, a stall watchdog. |
 | [judge](judge.rs) | 5 | A plugin that asks a small model to pick the target, as a subrequest. |
 | [mcp_proxy](mcp_proxy.rs) | 7 (MCP part) | MCP over streamable HTTP with a tool allow-list; optionally a stdio server. |
+| [realtime](realtime.rs) | 7 (WebSocket part) | OpenAI Realtime over WebSocket: e-mail addresses hidden from the provider and restored across deltas, each turn metered as it completes. |
 | [jobs](jobs.rs) | 8 | An idempotent request: a retry or duplicate gets the stored result; one provider call. |
 | [wallet](wallet.rs) | 9 | Nested prepaid wallets; fifty parallel requests never overspend $1. |
 | [cost_cap](cost_cap.rs) | 9 | A per-call cost cap: bound `max_tokens`, hold it, cut a runaway stream, settle. |
@@ -35,7 +36,9 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 ## Not built
 
 - Use case 4: splitting an embedding batch and merging `/v1/models`.
-- Use case 7: realtime (WebSocket) sessions.
+- Use case 7: audio turns, Gemini Live and Responses over WebSocket, a limit on
+  a session's length, draining long sessions at shutdown, and a turn cut before
+  its `response.done` (`realtime` does not meter it).
 - Use case 10: fair share per end user.
 - Use case 8: signed job ids.
 - Use case 2: restoring a placeholder split across streamed tool-argument

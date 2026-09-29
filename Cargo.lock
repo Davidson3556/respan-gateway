@@ -1207,6 +1207,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "mockllm",
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
@@ -1217,8 +1218,10 @@ dependencies = [
  "respan-gateway-server",
  "respan-gateway-testkit",
  "respan-gateway-text",
+ "respan-gateway-ws",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1322,6 +1325,26 @@ dependencies = [
  "respan-gateway-http",
  "respan-gateway-testkit",
  "tokio",
+]
+
+[[package]]
+name = "respan-gateway-ws"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "futures",
+ "mockllm",
+ "respan-gateway-core",
+ "respan-gateway-formats",
+ "respan-gateway-http",
+ "respan-gateway-testkit",
+ "rustls",
+ "rustls-native-certs",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -1798,7 +1821,11 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
 ]
 
@@ -1938,6 +1965,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror",
 ]

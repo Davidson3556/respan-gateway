@@ -21,6 +21,7 @@ respan-gateway-routing = { path = "sdks/routing" }
 respan-gateway-text = { path = "sdks/text" }
 respan-gateway-ledger = { path = "sdks/ledger" }
 respan-gateway-mcp = { path = "sdks/mcp" }
+respan-gateway-ws = { path = "sdks/ws" }
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
