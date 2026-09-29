@@ -82,6 +82,96 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 /// the adapter drives [`Gateway::handle`](crate::Gateway::handle) to its end
 /// while it awaits that slot. A slot dropped unfilled means no format took
 /// the wire: `handle`'s end says why, for the adapter to write plainly.
+///
+/// A format of one line per request, both edges, and its adapter:
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use respan_gateway_core::futures::channel::oneshot;
+/// # use respan_gateway_core::futures::future::BoxFuture;
+/// # use respan_gateway_core::futures::{FutureExt, StreamExt, TryStreamExt, stream};
+/// # use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Gateway, Half, Origin};
+/// #[derive(Clone)]
+/// struct Ask(String);
+/// #[derive(Clone)]
+/// struct Say(String);
+///
+/// /// What the edge writes, handed to the adapter.
+/// type Reply = BoxFuture<'static, (Half<Say>, Ended)>;
+///
+/// /// A client's connection: its line, and the adapter's slot.
+/// struct Line(String, oneshot::Sender<Reply>);
+///
+/// struct Echo;
+///
+/// impl Format for Echo {
+///     type Input = Ask;
+///     type Output = Say;
+///     type Wire = Line;
+///     type Dialer = ();
+///
+///     fn name(&self) -> &str {
+///         "echo"
+///     }
+///
+///     fn accepts(&self, _: &Line) -> bool {
+///         true
+///     }
+///
+///     fn accept(
+///         &self,
+///         Line(line, slot): Line,
+///         reply: Reply,
+///     ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<Ask>>), Fault>> {
+///         // Handed over, never awaited here: it resolves after this does.
+///         let _ = slot.send(reply);
+///         let origin: Origin = Arc::new(line);
+///         async move { Ok((Some(origin), None)) }.boxed()
+///     }
+///
+///     fn opening(&self, origin: &Origin) -> Option<Result<Ask, Fault>> {
+///         let line = origin.downcast_ref::<String>()?;
+///         Some(Ok(Ask(line.clone())))
+///     }
+///
+///     /// An in-process provider that says the line back.
+///     fn dial(
+///         &self,
+///         _: &(),
+///         _: Extensions,
+///         relay: Option<&Origin>,
+///         opening: Option<&Ask>,
+///         _: Option<Events<Ask>>,
+///     ) -> Result<BoxFuture<'static, Result<Half<Say>, Fault>>, Fault> {
+///         // On a relay of it unchanged, the line is the origin's own.
+///         let relayed = relay.and_then(|o| self.opening(o)?.ok());
+///         let Ask(line) = opening.cloned().or(relayed).unwrap_or(Ask(String::new()));
+///         let outputs = stream::iter([Ok(Say(line))]).boxed();
+///         Ok(async move { Ok((None, Ok(outputs))) }.boxed())
+///     }
+/// }
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Fault> {
+/// let gw = Gateway::new().serve(Echo)?.provider("echo", Echo, ())?.target("echo")?;
+///
+/// // The adapter: hand over the wire with a slot, drive `handle`, then
+/// // write what the slot holds and call `Ended` once its end is out.
+/// let (slot, written) = oneshot::channel();
+/// let end = gw.handle(Line("hi".into(), slot), Extensions::new()).await;
+/// let Ok(reply) = written.await else {
+///     return end.await; // no format took it: write this end plainly
+/// };
+/// let ((_origin, outputs), ended) = reply.await;
+/// let lines: Result<Vec<String>, Fault> = match outputs {
+///     Ok(outputs) => outputs.map_ok(|Say(line)| line).try_collect().await,
+///     Err(refusal) => Err(refusal), // written as a refusal
+/// };
+/// ended(lines.clone().map(drop));
+/// assert_eq!(lines?, ["hi"]);
+/// end.await
+/// # }
+/// ```
 pub trait Format: Send + Sync + 'static {
     /// What a client sends, one or a stream.
     type Input: Clone + Send + Sync + 'static;

@@ -118,7 +118,9 @@ trait Format { type Input; type Output; type Wire; type Dialer;
 The rules, in full in the rustdoc of `Format`:
 
 1. **`accept` resolves when the request is in**, its origin kept, and
-   never awaits `reply`. Its inputs are `Some(events)` if any follow the
+   never awaits `reply`: the wire carries the adapter's slot, and the
+   adapter drives `handle` while it awaits that slot (a compiled example,
+   both edges and the adapter, is in `Format`'s rustdoc). Its inputs are `Some(events)` if any follow the
    head (a session) and `None` if none do (a one-shot request); `dial` is
    told the same with `later: None`. `opening` gives the input that came
    with the head, only for a request whose inputs are `None`; the gateway
