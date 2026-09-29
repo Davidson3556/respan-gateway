@@ -8,8 +8,8 @@ use futures::{FutureExt, StreamExt};
 
 use crate::call::{CallEdge, SharedCall};
 use crate::fault::PANICKED;
-use crate::format::{AnyEvents, AnyFormat, Origin, Values};
-use crate::leg::{cut, locked};
+use crate::format::{AnyEvents, AnyFormat, Origin, Values, erase};
+use crate::leg::{cut, idle, locked};
 use crate::{Events, Fault};
 
 /// A response for the client, from a provider or a plugin. Dropped unsent
@@ -129,26 +129,18 @@ impl Response {
         T: Any + Send + Sync,
         S: Stream<Item = Result<T, Fault>> + Send + 'static,
     {
-        let batches = stream.map(|output| match output {
-            Ok(output) => Batch {
-                values: Some(Box::new(vec![output])),
-                ..Batch::default()
-            },
-            Err(fault) => Batch::end(Err(fault)),
-        });
-        let done = stream::once(async { Batch::end(Ok(())) });
-        let body = Source::Made(batches.chain(done).boxed());
+        let body = Source::made(erase(stream.boxed()));
         Self::new(None, body, Some(TypeId::of::<T>()))
     }
 
     /// Read it until its first content
     /// ([`Format::is_content`](crate::Format::is_content), before filters),
     /// a failure or its end, and hold what was read, unsent, to decide on
-    /// it or fall back. One whose call streams inputs, the request's or its
-    /// own, returns at once, as waiting could deadlock a peer that waits for
-    /// them. `Err` if it fails first, such as with a provider's error
-    /// answer, which a refusal sends as it came; one the provider refused
-    /// at its head fails at once.
+    /// it or fall back. One whose call streams the request's inputs returns
+    /// at once, as waiting could deadlock a peer that waits for them. `Err`
+    /// if it fails first, such as with a provider's error answer, which a
+    /// refusal sends as it came; one the provider refused at its head fails
+    /// at once.
     ///
     /// A response with no content is read, and held, to its end, so bound
     /// one that may never end. A decoder that panics ends its call
@@ -251,7 +243,7 @@ impl Response {
     ) -> Self {
         let px = call.cx();
         let (streams, refused) = (px.flowing, px.refused);
-        let events = cut(events, &px.cut);
+        let events = cut(events, idle(&px.cut));
         let output = Some(format.kind().1);
         let body = Source::Events {
             events,
@@ -278,6 +270,19 @@ pub(crate) enum Source {
 }
 
 impl Source {
+    /// Outputs made of `events`: each a success, the first `Err` the end.
+    pub(crate) fn made(events: AnyEvents) -> Self {
+        let batches = events.map(|values| match values {
+            Ok(values) => Batch {
+                values: Some(values),
+                ..Batch::default()
+            },
+            Err(fault) => Batch::end(Err(fault)),
+        });
+        let done = stream::once(async { Batch::end(Ok(())) });
+        Source::Made(batches.chain(done).boxed())
+    }
+
     /// Its call, if any.
     pub(crate) fn call(&self) -> Option<&SharedCall> {
         match self {

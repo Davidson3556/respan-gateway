@@ -77,6 +77,8 @@ pub struct ToyWire {
 pub struct ToyReply {
     pub status: u16,
     pub body: Text,
+    /// The provider's head, its status, if it reached the client (a relay).
+    pub head: Option<u16>,
 }
 
 /// A request as a test builds it.
@@ -293,12 +295,13 @@ async fn write(
     streams: bool,
     quirk: Quirk,
 ) -> ToyReply {
-    let ((_origin, outputs), ended) = reply.await;
+    let ((origin, outputs), ended) = reply.await;
     let mut writer = Writer {
         outputs: stream::empty().boxed(),
         ended: Some(ended),
         peeked: None,
         done: false,
+        head: origin.and_then(|o| o.downcast_ref::<u16>().copied()),
     };
     let outputs = match outputs {
         Ok(outputs) => outputs,
@@ -335,14 +338,17 @@ struct Writer {
     ended: Option<Ended>,
     peeked: Option<Option<Result<Out, Fault>>>,
     done: bool,
+    head: Option<u16>,
 }
 
 impl Writer {
     fn reply(self, status: u16) -> ToyReply {
+        let head = self.head;
         let body = stream::unfold(self, |mut w| async move { w.frame().await.map(|f| (f, w)) });
         ToyReply {
             status,
             body: body.boxed(),
+            head,
         }
     }
 

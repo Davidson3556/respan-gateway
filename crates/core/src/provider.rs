@@ -30,7 +30,7 @@ pub struct ProviderContext {
     pub(crate) outputs: Layer,
     /// Filters of the later inputs it sends, shared with their reader.
     pub(crate) inputs: Layer,
-    /// Whether it streams inputs: the request's still flowing, or its own.
+    /// Whether it streams the request's inputs, still flowing.
     pub(crate) flowing: bool,
     /// Idle once it ends: its response's events and its inputs' reader
     /// stop, so a reader still waiting wakes.
@@ -99,9 +99,7 @@ impl ProviderContext {
 
     /// This call's first input as `T`, the call's input type: its own
     /// ([`Call::with_input`](crate::Call::with_input)), else the one that
-    /// came with the request's head. `Err` as [`ClientContext::input`], and
-    /// for a call whose own inputs stream
-    /// ([`Call::with_inputs`](crate::Call::with_inputs)).
+    /// came with the request's head. `Err` as [`ClientContext::input`].
     pub fn input<T: Any>(&self) -> Result<&T, Fault> {
         self.opening.get()
     }
@@ -115,7 +113,7 @@ impl ProviderContext {
     ) -> Result<(), Fault> {
         match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
-            // Later inputs follow only a session or a call's own streamed ones.
+            // Later inputs follow only a session's head.
             true if self.flowing => locked(&self.inputs).add(filter, true),
             true => self.opening.filter(Filters::of(filter)),
         }

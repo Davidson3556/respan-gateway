@@ -218,14 +218,13 @@ async fn hear(
             }
             Some(Ok(Message::Binary(_))) => {
                 let _ = tell.send(Told::Binary);
-                let fault = Fault::bad_request("a binary frame: only text frames are carried");
-                let _ = input.send(Err(fault)).await;
+                // The client's own end, which no one waits for: 1003 says why.
+                let _ = input.send(Err(Fault::abandoned())).await;
                 return Heard::Binary;
             }
             Some(Ok(_)) => {}
             Some(Err(_)) | None => {
-                let fault = Fault::bad_request("the client's connection broke off");
-                let _ = input.send(Err(fault)).await;
+                let _ = input.send(Err(Fault::abandoned())).await;
                 return Heard::Dropped;
             }
         }

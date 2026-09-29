@@ -1,17 +1,18 @@
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::future::{Future, ready};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 
-use futures::future::BoxFuture;
-use futures::{FutureExt, Stream, StreamExt, stream};
+use futures::channel::oneshot;
+use futures::future::{BoxFuture, pending};
+use futures::{FutureExt, StreamExt, stream};
 
 use crate::fault::{PANICKED, guarded};
-use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin, erase};
+use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin};
 use crate::gateway::Registered;
-use crate::leg::{self, Later, inputs, locked};
+use crate::leg::{self, Later, cut, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::opening::Opening;
 use crate::provider::Provider;
@@ -24,8 +25,8 @@ use crate::{ClientContext, Extensions, Fault, ProviderContext, Response};
 pub struct Call {
     request: Arc<ClientContext>,
     provider: String,
-    /// Its own input or inputs, if any.
-    own: Option<Own>,
+    /// Its own input, if any.
+    own: Option<AnyInput>,
     extensions: Extensions,
     /// The call once sent, shared with its request, which drops it at its end.
     sent: Option<Arc<Sending>>,
@@ -37,15 +38,6 @@ impl std::fmt::Debug for Call {
             .field("provider", &self.provider)
             .finish_non_exhaustive()
     }
-}
-
-/// A call's own input ([`Call::with_input`]) or inputs
-/// ([`Call::with_inputs`]), of the provider's input type.
-#[derive(Clone)]
-enum Own {
-    Input(AnyInput),
-    /// The type, and the inputs, read once as a session's are.
-    Inputs(TypeId, Arc<Later>),
 }
 
 /// An unsent copy.
@@ -76,28 +68,7 @@ impl Call {
     /// must be the provider's input type, of any kind, or the call fails
     /// with [`codes::INTERNAL`](crate::codes::INTERNAL).
     pub fn with_input<T: Any + Send + Sync>(mut self, input: T) -> Self {
-        self.own = Some(Own::Input(Arc::new(input)));
-        self
-    }
-
-    /// Stream `inputs` in place of the client's, as a session's inputs
-    /// stream: pulled as the provider edge reads, through this call's input
-    /// filters, their end or first `Err` the end of what the call sends. A
-    /// plugin makes them, typically from
-    /// [`take_inputs`](ClientContext::take_inputs) with async work on each,
-    /// such as a remote check. Like [`with_input`](Call::with_input), they
-    /// are none of the client's: the call never relays. They must be the
-    /// provider's input type, or the call fails with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL). A clone shares them:
-    /// the first sent reads them, and gives them back if it read none, as a
-    /// retry of a session's call does.
-    pub fn with_inputs<T, S>(mut self, inputs: S) -> Self
-    where
-        T: Any + Send + Sync,
-        S: Stream<Item = Result<T, Fault>> + Send + 'static,
-    {
-        let later = Later::new(Some(erase(inputs.boxed())));
-        self.own = Some(Own::Inputs(TypeId::of::<T>(), Arc::new(later)));
+        self.own = Some(Arc::new(input));
         self
     }
 
@@ -159,10 +130,10 @@ type Sending = Mutex<(
 async fn send(
     cx: Arc<ClientContext>,
     provider: String,
-    own: Option<Own>,
+    own: Option<AnyInput>,
     extensions: Extensions,
 ) -> Result<Response, Fault> {
-    // Own inputs send nothing of the client's, so only their type must
+    // An own input sends nothing of the client's, so only its type must
     // match; provider details go to logs.
     let p = match cx.gateway.providers.get(&provider) {
         None => Err(format!("unknown provider '{provider}'")),
@@ -188,17 +159,13 @@ async fn send(
             let later = (!cx.later.ended).then(|| (cx.later.clone(), cx.format.clone()));
             (cx.opening.clone(), later)
         }
-        Some(own) => {
-            let (ty, input, later) = match own {
-                Own::Input(input) => ((*input).type_id(), Some(input), None),
-                Own::Inputs(ty, later) => (ty, None, Some((later, p.format.clone()))),
-            };
-            if p.format.kind().0 != ty {
+        Some(input) => {
+            if p.format.kind().0 != (*input).type_id() {
                 return Err(Fault::another_kind(format!(
                     "a call's own input is not the input type of provider '{provider}'"
                 )));
             }
-            (Opening::own(p.format.clone(), input), later)
+            (Opening::own(p.format.clone(), input), None)
         }
     };
     let mut client = cx.copy();
@@ -238,20 +205,22 @@ async fn send(
 }
 
 /// The one way a client's origin reaches a provider: a call that carries
-/// the request's own inputs (none of its own, which no plugin can forge) to
-/// a format of the client's name.
+/// the request's inputs, as plugins left them, not one of its own, to a
+/// format of the client's name.
 fn relay_origin(cx: &ClientContext, own: bool, p: &Provider) -> Option<Origin> {
     (!own && cx.format.name() == p.format.name())
         .then(|| cx.origin.clone())
         .flatten()
 }
 
-/// Where a call's later inputs come from: the request's or its own, and
-/// the format whose kind they are of.
+/// The request's later inputs, if they still flow, and the client's format,
+/// whose kind they are of.
 type Flowing = Option<(Arc<Later>, Arc<dyn AnyFormat>)>;
 
 /// Dial `p` with the call's opening and `later` inputs: the provider's
 /// origin (on a relay alone) and events, a refusal at the head as one `Err`.
+/// Inputs that fail, not cut, end the events with that fault, so the call
+/// and the reply end as the inputs did, for the client edge to say.
 async fn dial(
     cx: &ClientContext,
     p: &Provider,
@@ -261,8 +230,9 @@ async fn dial(
     let px = edge.cx();
     let relay = relay_origin(cx, px.opening.own, p);
     let opening = px.opening.sent(relay.is_some())?;
+    let (fail, failed) = oneshot::channel();
     let later = later.map(|(later, format)| {
-        let call = Some(px.inputs.clone());
+        let call = Some((px.inputs.clone(), fail));
         inputs(later, format, call, &px.cut)
     });
     let (dialer, ext) = (&*p.dialer, px.client.extensions.clone());
@@ -274,8 +244,15 @@ async fn dial(
     let (origin, events) = dialed.await?;
     // A provider's head goes only to a client of the name it came in.
     let origin = relay.and(origin);
+    // A reader dropped with no failure says nothing.
+    let failed = async {
+        match failed.await {
+            Ok(fault) => fault,
+            Err(_) => pending().await,
+        }
+    };
     Ok(match events {
-        Ok(events) => (origin, events),
+        Ok(events) => (origin, cut(events, failed.boxed())),
         Err(fault) => {
             edge.cx().refused = true;
             (origin, stream::once(ready(Err(fault))).boxed())

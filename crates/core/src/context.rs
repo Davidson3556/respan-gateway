@@ -1,14 +1,13 @@
 use std::any::Any;
 use std::future::ready;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
 use futures::future::BoxFuture;
-use futures::stream;
+use futures::{Stream, StreamExt, stream};
 use tokio::runtime::Handle;
 
 use crate::call::OpenCalls;
-use crate::format::{AnyFormat, AnyInput, Origin, is_input};
+use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin, erase, is_input, typed};
 use crate::gateway::Inner;
 use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
@@ -39,11 +38,19 @@ pub struct ClientContext {
     pub(crate) settling: Arc<InFlight>,
     /// Its calls being sent or with an open response, ended when it ends.
     pub(crate) open: Arc<OpenCalls>,
-    /// Filters of the response sent to the client; they end with it, or
+    /// Filters of the response sent to the client added since the last
+    /// [`wrap`](ClientContext::wrap), which run first; they end with it, or
     /// with the request if it ends first.
     pub(crate) outputs: Layer,
+    /// Each wrap of the response sent to the client, in the order added,
+    /// with the filters added before it, which run after it; taken when
+    /// sent.
+    pub(crate) wrapped: Mutex<Vec<(Option<Wrap>, Layer)>>,
     pub(crate) gateway: Arc<Inner>,
 }
+
+/// A plugin's wrap of the outputs sent to the client, erased.
+pub(crate) type Wrap = Box<dyn FnOnce(AnyEvents) -> AnyEvents + Send>;
 
 impl std::fmt::Debug for ClientContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,13 +69,17 @@ impl Edge for ClientContext {
         plugin.on_client_end(self, end)
     }
 
-    /// Open calls end abandoned, the inputs left are cut off, and output
-    /// filters still open end as the request did.
+    /// The inputs left are cut off, first, so a plugin's stream that ends
+    /// as the one it wraps is cut ends after the cut; open calls end
+    /// abandoned; output filters still open end as the request did.
     fn close(&mut self, end: &Result<(), Fault>) {
+        self.later.end(Err(Fault::abandoned()));
         self.running = None;
         self.open.abandon();
-        self.later.end(Err(Fault::abandoned()));
-        let _ = locked(&self.outputs).end(end.clone(), &mut None);
+        let wrapped = locked(&self.wrapped);
+        for layer in std::iter::once(&self.outputs).chain(wrapped.iter().rev().map(|w| &w.1)) {
+            let _ = locked(layer).end(end.clone(), &mut None);
+        }
     }
 }
 
@@ -94,6 +105,7 @@ impl ClientContext {
             settling: Arc::default(),
             open: Arc::default(),
             outputs: Layer::default(),
+            wrapped: Mutex::default(),
             gateway,
         }
     }
@@ -129,13 +141,14 @@ impl ClientContext {
         self.opening.get()
     }
 
-    /// The request's inputs as `T`, as filters left them: a copy of a whole
-    /// request's one; a streaming request's as they arrive, read once, so no
-    /// call gets them, taken when first awaited and given back if none was
-    /// read. Ends with the client's inputs, `Err` if the body broke, and
-    /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the request ended
-    /// first, never as if they were complete; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
-    /// type or if another reader took them.
+    /// The request's inputs as `T`, as filters and wraps left them: a copy
+    /// of a whole request's one; a streaming request's as they arrive, read
+    /// once, so no call gets them, taken when first awaited and given back
+    /// if none was read. Ends with the client's inputs, `Err` if the body
+    /// broke, and [`codes::ABANDONED`](crate::codes::ABANDONED) if the
+    /// request ended first, never as if they were complete; one `Err` with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) for another type or if
+    /// another reader took or read them.
     pub fn take_inputs<T: Any + Clone + Send>(&mut self) -> Events<T> {
         if is_input::<T>(&*self.format) != Ok(true) {
             return stream::once(async { Err(Fault::wrong_kind::<T>()) }).boxed();
@@ -168,6 +181,12 @@ impl ClientContext {
     /// here and await its future in the job's task. Move the gateway into
     /// that job, not into the plugin: the gateway holds its plugins, so a
     /// plugin that keeps it frees neither.
+    ///
+    /// A request handed back this way is a new one: it inherits none of
+    /// this request's extensions, and every plugin runs on it again, with
+    /// no limit on how deep requests nest. So a plugin that hands one back
+    /// marks it with an extension of its own and passes a request it marked,
+    /// or it may loop.
     pub fn gateway(&self) -> Gateway {
         Gateway {
             inner: self.gateway.clone(),
@@ -189,6 +208,7 @@ impl ClientContext {
             settling: self.settling.clone(),
             open: self.open.clone(),
             outputs: Layer::default(),
+            wrapped: Mutex::default(),
             gateway: self.gateway.clone(),
         }
     }
@@ -197,11 +217,11 @@ impl ClientContext {
     /// [`Input`](crate::Format::Input), or the outputs sent to it if its
     /// [`Output`](crate::Format::Output).
     ///
-    /// Input filters, the one way to edit inputs, run the first added first,
-    /// before calls and [`ClientContext::take_inputs`]. A whole request's one
-    /// input is edited at once and the filter ended; it stays one input. A
-    /// streaming request's are edited as read; once they ended, a filter
-    /// sees their end at once. Output filters run after the provider edge's,
+    /// Input filters run the first added first, before calls and
+    /// [`ClientContext::take_inputs`]. A whole request's one input is edited
+    /// at once and the filter ended; it stays one input. A streaming
+    /// request's are edited as read; once they ended, a filter sees their
+    /// end at once. Output filters run after the provider edge's,
     /// the last added first.
     ///
     /// `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
@@ -219,17 +239,65 @@ impl ClientContext {
         }
     }
 
+    /// Wrap the request's inputs if `T` is the client's
+    /// [`Input`](crate::Format::Input), or the outputs sent to it if its
+    /// [`Output`](crate::Format::Output), in a stream of `wrap`'s: for work
+    /// a [filter](ClientContext::filter) cannot do, as it waits, such as a
+    /// remote check of each input or a deadline that cuts the outputs.
+    ///
+    /// ```ignore
+    /// cx.wrap(|turns: Events<Turn>| turns.and_then(check))?;
+    /// cx.wrap(|events: Events<Event>| events.take_until(sleep(limit)))?;
+    /// ```
+    ///
+    /// The stream takes the place of the one it wraps, and the request stays
+    /// what it was: a call of its inputs relays as before, and the provider's
+    /// head still reaches the client. Wraps and filters apply in plugin
+    /// order: a wrap sees inputs after the filters and wraps added before it,
+    /// outputs before them. Its stream is pulled as its reader reads; the
+    /// request's end cuts what it wraps and what it gives with
+    /// [`codes::ABANDONED`](crate::codes::ABANDONED), never a clean end.
+    /// Inputs that fail end the call that reads them with that fault, so
+    /// the client edge can say it. A call made before the wrap keeps the
+    /// inputs as they were.
+    ///
+    /// `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
+    /// type, or for the inputs of a whole request, whose one input came with
+    /// its head: vet it here and edit it with a filter.
+    pub fn wrap<T, S>(
+        &mut self,
+        wrap: impl FnOnce(Events<T>) -> S + Send + 'static,
+    ) -> Result<(), Fault>
+    where
+        T: Any + Clone + Send + Sync,
+        S: Stream<Item = Result<T, Fault>> + Send + 'static,
+    {
+        if !is_input::<T>(&*self.format)? {
+            let wrap: Wrap = Box::new(|outputs| erase(wrap(typed(outputs)).boxed()));
+            let before = std::mem::take(&mut self.outputs);
+            locked(&self.wrapped).push((Some(wrap), before));
+            return Ok(());
+        }
+        if self.later.ended {
+            let whole = "a whole request's one input came with its head: edit it with a filter";
+            return Err(Fault::internal(whole));
+        }
+        let inputs = erase(wrap(self.take_inputs::<T>()).boxed());
+        self.later = Arc::new(Later::wrapping(inputs, self.later.clone()));
+        Ok(())
+    }
+
     /// A call to `provider`, the one way to reach one: a copy of the request
     /// as it is now, sent when first awaited, carrying its inputs as filters
-    /// left them, translated for another format of the kind. Every plugin's
-    /// [`on_provider`](crate::Plugin::on_provider) runs first. A provider's
+    /// and wraps left them, translated for another format of the kind.
+    /// Every plugin's [`on_provider`](crate::Plugin::on_provider) runs
+    /// first. A provider's
     /// error answer is `Ok` here and fails the response as read.
     ///
     /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if `provider` is
     /// unknown or cannot take the inputs; with
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) for a
-    /// [`Call::with_input`] or [`Call::with_inputs`] of another kind or once
-    /// the request ended; with
+    /// [`Call::with_input`] of another kind or once the request ended; with
     /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the request ends
     /// while it is pending; or the `Err` of a hook, the codec or the
     /// transport.

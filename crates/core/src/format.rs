@@ -330,7 +330,7 @@ pub(crate) fn erase<T: Send + 'static>(events: Events<T>) -> AnyEvents {
 }
 
 /// Erased events typed, each item's values in turn.
-fn typed<T: Send + 'static>(events: AnyEvents) -> Events<T> {
+pub(crate) fn typed<T: Send + 'static>(events: AnyEvents) -> Events<T> {
     let each = |item: Result<Values, Fault>| {
         let values =
             item.and_then(|v| v.downcast::<Vec<T>>().map_err(|_| Fault::wrong_kind::<T>()));

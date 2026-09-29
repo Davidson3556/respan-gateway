@@ -303,7 +303,7 @@ async fn a_frame_that_is_not_json_fails_the_session() {
     say(&mut ws, "not json either").await;
     assert_eq!(
         hear(&mut ws).await,
-        Heard::Closed(Some((1011, "abandoned".into())))
+        Heard::Closed(Some((1011, "bad_request".into())))
     );
     idle(&server.gateway).await;
     // Nothing that is not JSON reached the provider.

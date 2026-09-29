@@ -1,7 +1,7 @@
 //! The layer engine: a stream pulled through filter layers, each ended once
 //! with what it kept back flowing on through the layers after it; a cut
 //! gives `Err(abandoned)`, never a clean end; every poll of an edge's stream
-//! is guarded. A session's inputs or a call's own to the call, a provider's events to a
+//! is guarded. A session's inputs to a call, a provider's events to a
 //! [`Response`](crate::Response), and a response to the client run on it.
 
 use std::collections::VecDeque;
@@ -10,6 +10,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use futures::{FutureExt, StreamExt};
 
@@ -56,29 +58,40 @@ pub(crate) fn end(
     end
 }
 
-/// `items` until `cut` is idle, then `Err(abandoned)`: only their own end
-/// is a clean one.
+/// `items` until `until` resolves, then `Err` with the fault it gives: only
+/// their own end is a clean one, and not if `until` is ready with it.
 pub(crate) fn cut<T: Send + 'static>(
     items: BoxStream<'static, Result<T, Fault>>,
-    cut: &Arc<InFlight>,
+    until: BoxFuture<'static, Fault>,
 ) -> BoxStream<'static, Result<T, Fault>> {
     // `None` marks the items' own end, which the cut must not pass for.
     let items = items.map(Some).chain(stream::once(ready(None)));
-    let cut = items.take_until(cut.idle()).boxed();
+    let cut = items.take_until(until);
     stream::unfold(Some(cut), |cut| async move {
         let mut cut = cut?;
         match cut.next().await {
             Some(Some(item)) => Some((item, Some(cut))),
-            Some(None) => None,
-            None => Some((Err(Fault::abandoned()), None)),
+            // An end that a cut caused, such as a plugin's stream ending as
+            // the stream it wraps was cut, is the cut's.
+            Some(None) => (cut.take_future()?.now_or_never()).map(|f| (Err(f), None)),
+            None => Some((
+                Err(cut.take_result().unwrap_or_else(Fault::abandoned)),
+                None,
+            )),
         }
     })
     .boxed()
 }
 
-/// The inputs after an opening, if any follow, a session's or a call's own:
-/// read once, and their first input filters (the client edge's, for a
-/// session's).
+/// Resolves [`codes::ABANDONED`](crate::codes::ABANDONED) once `cut` is
+/// idle, as when its request or call ended.
+pub(crate) fn idle(cut: &Arc<InFlight>) -> BoxFuture<'static, Fault> {
+    cut.idle().map(|()| Fault::abandoned()).boxed()
+}
+
+/// The inputs after an opening, if any follow: read once, and their input
+/// filters. A plugin's [`wrap`](crate::ClientContext::wrap) puts a new one
+/// in front, whose events wrap the one `before` it.
 pub(crate) struct Later {
     events: Mutex<Option<AnyEvents>>,
     /// Whether a reader read an input.
@@ -86,6 +99,7 @@ pub(crate) struct Later {
     /// Whether none follow the opening.
     pub(crate) ended: bool,
     pub(crate) filters: Layer,
+    before: Option<Arc<Later>>,
 }
 
 impl Later {
@@ -95,27 +109,41 @@ impl Later {
             events: Mutex::new(events),
             read: AtomicBool::new(false),
             filters: Layer::default(),
+            before: None,
+        }
+    }
+
+    /// `events` in front of `before`, whose inputs they wrap.
+    pub(crate) fn wrapping(events: AnyEvents, before: Arc<Later>) -> Self {
+        Self {
+            before: Some(before),
+            ..Self::new(Some(events))
         }
     }
 
     /// The request ended: its filters end `end`, if they have not, and the
-    /// events go, so nothing that outlives it keeps the client's connection.
+    /// events go, so nothing that outlives it keeps the client's connection;
+    /// then those it wraps, so a reader sees the cut here first.
     pub(crate) fn end(&self, end: Result<(), Fault>) {
+        let _ = locked(&self.filters).end(end.clone(), &mut None);
         locked(&self.events).take();
-        let _ = locked(&self.filters).end(end, &mut None);
+        if let Some(before) = &self.before {
+            before.end(end);
+        }
     }
 }
 
-/// `later`'s inputs through its input filters, then `call`'s;
-/// cut, when `until` is
-/// idle or either layer ended, with `Err(abandoned)`. Taken on the first
-/// poll; given back if none was read.
+/// `later`'s inputs through its input filters, then those of `call`, which
+/// is told the first failure; cut, when `until` is idle or either layer
+/// ended, with `Err(abandoned)`. Taken on the first poll; given back if none
+/// was read.
 pub(crate) fn inputs(
     later: Arc<Later>,
     format: Arc<dyn AnyFormat>,
-    call: Option<Layer>,
+    call: Option<(Layer, oneshot::Sender<Fault>)>,
     until: &Arc<InFlight>,
 ) -> AnyInputs {
+    let (call, failed) = call.unzip();
     let mut layers = vec![later.filters.clone()];
     layers.extend(call);
     let reading = Reading {
@@ -125,12 +153,13 @@ pub(crate) fn inputs(
         layers,
         ready: VecDeque::new(),
         ended: false,
+        failed,
     };
     let items = stream::unfold(
         reading,
         |mut r| async move { r.next().await.map(|i| (i, r)) },
     );
-    cut(items.boxed(), until)
+    cut(items.boxed(), idle(until))
 }
 
 struct Reading {
@@ -141,12 +170,19 @@ struct Reading {
     layers: Vec<Layer>,
     ready: VecDeque<Result<AnyInput, Fault>>,
     ended: bool,
+    /// Told the first failure, which ends the call that reads them.
+    failed: Option<oneshot::Sender<Fault>>,
 }
 
 impl Reading {
     async fn next(&mut self) -> Option<Result<AnyInput, Fault>> {
         loop {
             if let Some(item) = self.ready.pop_front() {
+                if let Err(fault) = &item
+                    && let Some(failed) = self.failed.take()
+                {
+                    let _ = failed.send(fault.clone());
+                }
                 return Some(item);
             }
             if self.ended {
@@ -163,14 +199,13 @@ impl Reading {
                         // cannot send again.
                         self.ended = true;
                         let read = self.later.read.load(Ordering::SeqCst);
-                        return match locked(&self.later.filters).outcome() {
-                            Some(Err(fault)) => Some(Err(fault)),
-                            Some(Ok(())) if !read => None,
-                            _ => {
-                                let taken = "another reader took the request's inputs";
-                                Some(Err(Fault::internal(taken)))
-                            }
+                        let fault = match locked(&self.later.filters).outcome() {
+                            Some(Err(fault)) => fault,
+                            Some(Ok(())) if !read => return None,
+                            _ => Fault::internal("another reader took the request's inputs"),
                         };
+                        self.ready.push_back(Err(fault));
+                        continue;
                     }
                 },
             };

@@ -40,11 +40,10 @@ impl Opening {
         }
     }
 
-    /// A call's own opening, of `format`'s kind: `input`, or none for a
-    /// call whose own inputs stream.
-    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: Option<AnyInput>) -> Self {
+    /// A call's own opening, `input`, of `format`'s kind.
+    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: AnyInput) -> Self {
         Self {
-            changed: input.map(Ok),
+            changed: Some(Ok(input)),
             own: true,
             ..Self::new(format, None)
         }

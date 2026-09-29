@@ -1,15 +1,18 @@
 //! Turns a request's response into its client edge's reply.
 
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use futures::FutureExt;
+use futures::future::ready;
+use futures::{FutureExt, StreamExt, stream};
 
 use crate::call::SharedCall;
 use crate::fault::PANICKED;
 use crate::format::{AnyFormat, AnyReply};
-use crate::leg::{Outgoing, cut, locked};
+use crate::leg::{Outgoing, cut, idle, locked};
 use crate::lifecycle::EndHooks;
+use crate::response::Source;
 use crate::{ClientContext, Ended, Fault, Response};
 
 /// The reply of `resp`: a refusal, or the response's origin (on a relay)
@@ -54,17 +57,28 @@ pub(crate) async fn reply(
         return refusal(fault, hooks);
     }
     let call = resp.body.call().cloned();
-    let (outputs, until) = (cx.outputs.clone(), cx.cut.clone());
     let Response {
         origin,
         body,
         ahead,
         ..
     } = resp;
-    let outgoing = Outgoing::new(ahead, body, outputs, origin.is_some());
+    let relayed = origin.is_some();
+    let mut events = Outgoing::new(ahead, body, cx.outputs.clone(), relayed).events();
+    // Each wrap, the last added first, then the filters added before it.
+    let wrapped = cx.wrapped.get_mut().unwrap_or_else(|e| e.into_inner());
+    for (wrap, layer) in wrapped.iter_mut().rev() {
+        let Some(wrap) = wrap.take() else { continue };
+        let wrap = AssertUnwindSafe(move || wrap(events));
+        // A panic is an internal fault.
+        let panicked = || stream::once(ready(Err(Fault::internal(PANICKED)))).boxed();
+        let outputs = std::panic::catch_unwind(wrap).unwrap_or_else(|_| panicked());
+        let source = Source::made(outputs);
+        events = Outgoing::new(VecDeque::new(), source, layer.clone(), relayed).events();
+    }
     // Once the request ended, as when its edge dropped `Ended`, its outputs
     // are cut.
-    let events = cut(outgoing.events(), &until);
+    let events = cut(events, idle(&cx.cut));
     ((origin, Ok(events)), ended(hooks, call))
 }
 
