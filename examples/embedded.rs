@@ -50,15 +50,15 @@ async fn ask(
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
     let (wire, answer) = Accepted::new(head, body, false);
-    let outcome = gw.handle(wire, Extensions::new()).await;
-    let Some(resp) = answer.await else {
-        let fault = outcome.await.err();
+    let handled = gw.handle(wire, Extensions::new()).await;
+    let Some((resp, end)) = answer.await else {
+        let fault = handled.err();
         return Err(fault.unwrap_or_else(|| Fault::internal("no format answered")));
     };
     // Read the body first: the end resolves once the response ends.
     let (head, body) = resp.into_parts();
     let body = body.collect().await?.to_bytes();
-    Ok((head.status, body, outcome.await))
+    Ok((head.status, body, end.await))
 }
 
 #[tokio::main]

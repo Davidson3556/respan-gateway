@@ -35,6 +35,7 @@ use bytes::Bytes;
 use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
+use respan_gateway_core::Fault;
 #[cfg(doc)]
 use respan_gateway_core::Gateway;
 
@@ -48,8 +49,15 @@ use crate::{Codec, Dialer, Encoder};
 /// The message a panic in a codec or plugin ends with.
 const PANICKED: &str = "a plugin or format panicked";
 
+/// How a request ended, as its client edge told [`Ended`](respan_gateway_core::Ended),
+/// once its answer's end is out.
+pub(crate) type End = BoxFuture<'static, Result<(), Fault>>;
+
+/// What the client edge wrote, and how the request ended.
+type Written = (http::Response<Body>, End);
+
 /// What the client edge hands its adapter, through the wire's slot.
-type Writing = BoxFuture<'static, http::Response<Body>>;
+type Writing = BoxFuture<'static, Written>;
 
 /// A client's HTTP request as its adapter accepted it: an HTTP format's
 /// [`Wire`](respan_gateway_core::Format::Wire), which [`Gateway::handle`]
@@ -70,13 +78,14 @@ impl Accepted {
     ///
     /// The answer is the response as its codec wrote it, before the
     /// adapter's rules for a hop, or plain text for a refusal no codec can
-    /// write. `None` if no format took the request: [`Gateway::handle`]'s
-    /// end says why. Drive `handle` to its end while awaiting it.
+    /// write, and how the request ended, once its end is out. `None` if no
+    /// format wrote one: [`Gateway::handle`]'s `Err` says why. Await it
+    /// after `handle`.
     pub fn new(
         head: RequestHead,
         body: Frames,
         streams: bool,
-    ) -> (Accepted, BoxFuture<'static, Option<http::Response<Body>>>) {
+    ) -> (Accepted, BoxFuture<'static, Option<Written>>) {
         let (slot, writing) = oneshot::channel::<Writing>();
         let wire = Accepted {
             head,

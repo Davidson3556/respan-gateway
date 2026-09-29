@@ -70,7 +70,7 @@ pub struct ToyWire {
     frames: Text,
     streams: bool,
     quirk: Quirk,
-    slot: oneshot::Sender<BoxFuture<'static, ToyReply>>,
+    slot: oneshot::Sender<BoxFuture<'static, (ToyReply, End)>>,
 }
 
 /// What the adapter writes: a status and text frames, `Err` if it broke off.
@@ -89,10 +89,11 @@ pub struct Req {
 }
 
 impl ToyWire {
-    /// The wire, and the adapter's future of the reply: `None` if the
-    /// gateway dropped the wire unanswered.
-    pub fn new(req: Req) -> (ToyWire, BoxFuture<'static, Option<ToyReply>>) {
-        let (slot, reply) = oneshot::channel::<BoxFuture<'static, ToyReply>>();
+    /// The wire, and the adapter's future of the reply and how it ended, as
+    /// the edge told `Ended`: `None` if the gateway dropped the wire
+    /// unanswered.
+    pub fn new(req: Req) -> (ToyWire, BoxFuture<'static, Option<(ToyReply, End)>>) {
+        let (slot, reply) = oneshot::channel::<BoxFuture<'static, (ToyReply, End)>>();
         let wire = ToyWire {
             frames: req.frames,
             streams: req.streams,
@@ -288,14 +289,34 @@ fn events(body: Text) -> Events<Out> {
     .boxed()
 }
 
-/// Writes a reply: a refusal as one; an open answer's head at once if it
-/// streams, else with its first bytes, a failure before any refused.
+/// Writes a reply, and how it ended once told: a refusal as one; an open
+/// answer's head at once if it streams, else with its first bytes, a
+/// failure before any refused.
 async fn write(
     reply: BoxFuture<'static, (Half<Out>, Ended)>,
     streams: bool,
     quirk: Quirk,
-) -> ToyReply {
+) -> (ToyReply, End) {
     let ((origin, outputs), ended) = reply.await;
+    let (tell, told) = oneshot::channel();
+    let ended: Ended = Box::new(move |end| {
+        ended(end.clone());
+        let _ = tell.send(end);
+    });
+    let told = told.map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())));
+    (
+        written_reply(origin, outputs, ended, streams, quirk).await,
+        told.boxed(),
+    )
+}
+
+async fn written_reply(
+    origin: Option<Origin>,
+    outputs: Result<Events<Out>, Fault>,
+    ended: Ended,
+    streams: bool,
+    quirk: Quirk,
+) -> ToyReply {
     let mut writer = Writer {
         outputs: stream::empty().boxed(),
         ended: Some(ended),
@@ -430,17 +451,16 @@ pub fn ok_resp(v: Vec<&'static str>) -> Answer {
 
 pub type End = BoxFuture<'static, Result<(), Fault>>;
 
-/// `Gateway::handle` on the toy wire, as its adapter does it: the reply,
-/// or the end the adapter writes plainly if the gateway dropped the wire.
+/// `Gateway::handle` on the toy wire, as its adapter does it: the reply and
+/// its end, or the fault the adapter writes plainly if no edge replies.
 pub async fn handle(gw: &Gateway, req: Req) -> (Result<ToyReply, Fault>, End) {
     let (wire, reply) = ToyWire::new(req);
-    let end = gw.handle(wire, Extensions::new()).await.shared();
+    let handled = gw.handle(wire, Extensions::new()).await;
     match reply.await {
-        Some(reply) => (Ok(reply), end.boxed()),
+        Some((reply, end)) => (Ok(reply), end),
         None => {
-            let fault = end.clone().await.err();
-            let fault = fault.unwrap_or_else(|| Fault::internal("no reply"));
-            (Err(fault), end.boxed())
+            let fault = handled.err().unwrap_or_else(|| Fault::internal("no reply"));
+            (Err(fault.clone()), std::future::ready(Err(fault)).boxed())
         }
     }
 }

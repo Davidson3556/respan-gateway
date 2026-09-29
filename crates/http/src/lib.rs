@@ -229,11 +229,11 @@ where
     let (wire, answer) = Accepted::new(head, body, streaming);
     let handled = gateway.handle(wire, extensions);
     async move {
-        let ended = handled.await;
+        let handled = handled.await;
         let (resp, ended) = match answer.await {
-            Some(resp) => (Ok(resp), ended),
+            Some((resp, ended)) => (Ok(resp), ended),
             None => {
-                let fault = ended.await.err();
+                let fault = handled.err();
                 let fault = fault.unwrap_or_else(|| Fault::internal("no format answered"));
                 (Err(fault.clone()), ready(Err(fault)).boxed())
             }

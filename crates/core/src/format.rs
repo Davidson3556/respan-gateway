@@ -79,10 +79,11 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 ///
 /// [`accept`](Format::accept) must not await its `reply`, which resolves
 /// only once `accept`'s future did and the plugins ran: the `Wire` carries
-/// the adapter's slot, through which the edge hands over what it writes, and
-/// the adapter drives [`Gateway::handle`](crate::Gateway::handle) to its end
-/// while it awaits that slot. A slot dropped unfilled means no format took
-/// the wire: `handle`'s end says why, for the adapter to write plainly.
+/// the adapter's slot, through which the edge hands over what it writes. The
+/// adapter awaits [`Gateway::handle`](crate::Gateway::handle), then that
+/// slot; `handle`'s `Err` means no edge will write a reply and says why, for
+/// the adapter to write plainly. The edge knows when its reply's end is out,
+/// as it calls [`Ended`] then.
 ///
 /// A format of one line per request, both edges, and its adapter:
 ///
@@ -156,13 +157,12 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 /// # async fn main() -> Result<(), Fault> {
 /// let gw = Gateway::new().serve(Echo)?.provider("echo", Echo, ())?.target("echo")?;
 ///
-/// // The adapter: hand over the wire with a slot, drive `handle`, then
+/// // The adapter: hand over the wire with a slot and await `handle`, then
 /// // write what the slot holds and call `Ended` once its end is out.
 /// let (slot, written) = oneshot::channel();
-/// let end = gw.handle(Line("hi".into(), slot), Extensions::new()).await;
-/// let Ok(reply) = written.await else {
-///     return end.await; // no format took it: write this end plainly
-/// };
+/// // `Err`: no edge writes a reply; write this plainly.
+/// gw.handle(Line("hi".into(), slot), Extensions::new()).await?;
+/// let reply = written.await.map_err(|_| Fault::abandoned())?;
 /// let ((_origin, outputs), ended) = reply.await;
 /// let lines: Result<Vec<String>, Fault> = match outputs {
 ///     Ok(outputs) => outputs.map_ok(|Say(line)| line).try_collect().await,
@@ -170,7 +170,7 @@ pub type Ended = Box<dyn FnOnce(Result<(), Fault>) + Send>;
 /// };
 /// ended(lines.clone().map(drop));
 /// assert_eq!(lines?, ["hi"]);
-/// end.await
+/// # Ok(())
 /// # }
 /// ```
 pub trait Format: Send + Sync + 'static {

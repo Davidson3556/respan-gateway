@@ -39,11 +39,11 @@ connection: the client edge is accepted, the provider edge is dialed.
    adds an `Asked` view of its head, and hands an `Accepted` wire to
    `Gateway::handle(wire, extensions)`, which takes the caller's wire type.
 2. `handle` gives the wire to the first served format whose `accepts` says
-   yes. None: the wire is dropped and the end is `Err(not_found)` (or
-   `internal` if a format panicked), for the adapter to write plainly. The
-   request is in flight from the call on, before its future is polled, so
-   `Gateway::idle` waits for a body still being read and for a job's request
-   handed from an end hook; the future borrows nothing.
+   yes. None: the wire is dropped and `handle` resolves `Err(not_found)`
+   (or `internal` if a format panicked), for the adapter to write plainly.
+   The request is in flight from the call on, before its future is polled,
+   so `Gateway::idle` waits for a body still being read and for a job's
+   request handed from an end hook; the future borrows nothing.
 3. `Format::accept` resolves once the request is in: a one-shot request
    after its body is read (no inputs follow), a session at once (inputs
    follow). It gives the client's origin and its inputs, if any. `Err` (a body that broke) is refused before any plugin.
@@ -61,12 +61,12 @@ connection: the client edge is accepted, the provider edge is dialed.
 7. The client-edge filters and wraps edit what is sent; the gateway
    resolves the `reply` future it gave `accept` with the reply (the
    provider's origin on a relay, and the outputs or a refusal) and
-   `Ended`. The client edge
-   writes the reply's head and body and calls `Ended` with how the reply
-   ended.
+   `Ended`, and `handle` resolves `Ok`. The client edge writes the reply's
+   head and body and calls `Ended` with how the reply ended, once its end
+   is out; an adapter that wants that moment asks its edge (HTTP's hands
+   it over with the response).
 8. `Ended` ends any open calls `abandoned`, then each call's
-   `on_provider_end` runs, then `on_client_end`. `handle`'s end future
-   resolves once the reply's end is out, before end hooks finish.
+   `on_provider_end` runs, then `on_client_end`.
 
 Output filters and wraps run provider edge first and the last added first;
 input filters and wraps the first added first: a plugin sees inputs after
@@ -121,7 +121,7 @@ The rules, in full in the rustdoc of `Format`:
 
 1. **`accept` resolves when the request is in**, its origin kept, and
    never awaits `reply`: the wire carries the adapter's slot, and the
-   adapter drives `handle` while it awaits that slot (a compiled example,
+   adapter awaits `handle`, then that slot (a compiled example,
    both edges and the adapter, is in `Format`'s rustdoc). Its inputs are `Some(events)` if any follow the
    head (a session) and `None` if none do (a one-shot request); `dial` is
    told the same with `later: None`. `opening` gives the input that came

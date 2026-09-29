@@ -371,8 +371,11 @@ async fn open(
     BoxFuture<'static, Result<(), Fault>>,
 ) {
     let (wire, answer) = Accepted::new(ask(), frames, streams);
-    let end = gw.handle(wire, Extensions::new()).await;
-    (answer.await, end)
+    let handled = gw.handle(wire, Extensions::new()).await;
+    match answer.await {
+        Some((resp, end)) => (Some(resp), end),
+        None => (None, future::ready(handled).boxed()),
+    }
 }
 
 /// What a client got: its status and body as text, or the failure it

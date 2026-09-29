@@ -214,8 +214,9 @@ async fn a_job_hands_its_gateway_a_request_of_its_own() {
             // Handed here, awaited in the job's own task.
             let job = cx.gateway().handle(wire, marked);
             tokio::spawn(async move {
-                let _end = job.await;
-                let _ = read(reply.await.ok_or_else(|| Fault::internal("none"))).await;
+                let _ = job.await;
+                let reply = reply.await.map(|(reply, _)| reply);
+                let _ = read(reply.ok_or_else(|| Fault::internal("none"))).await;
             });
             Ok(None)
         }
@@ -275,8 +276,11 @@ async fn idle_waits_for_a_job_started_in_an_end_hook() {
             marked.insert(Mark);
             let job = cx.gateway().handle(wire, marked);
             tokio::spawn(async move {
-                let end = job.await;
-                let _ = read(reply.await.ok_or_else(|| Fault::internal("none"))).await;
+                let _ = job.await;
+                let Some((reply, end)) = reply.await else {
+                    return;
+                };
+                let _ = read(Ok(reply)).await;
                 let _ = end.await;
             });
         }

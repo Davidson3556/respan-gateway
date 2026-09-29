@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use futures::channel::oneshot;
-use futures::future::{BoxFuture, ready};
 
 use crate::fault::PANICKED;
 use crate::format::{AnyFormat, AnyReply, Erased};
@@ -130,19 +129,19 @@ impl Gateway {
     }
 
     /// Serve `wire` in the first format served ([`Gateway::serve`]) that
-    /// [`accepts`](Format::accepts) it: resolves once its client edge has
-    /// its reply, with a future of how the request ended, as
-    /// [`Plugin::on_client_end`] gets it, resolved once the reply's end is
-    /// out, before end hooks finish. The caller built `wire`, so it knows
-    /// its type; a format of another wire type never accepts it.
+    /// [`accepts`](Format::accepts) it: resolves `Ok` once its client edge
+    /// has its reply, whose end the edge tells with [`Ended`](crate::Ended).
+    /// The caller built `wire`, so it knows its type; a format of another
+    /// wire type never accepts it.
     ///
-    /// If no format accepts it, the wire is dropped with no reply, and the end
-    /// is `Err`, for the adapter to write plainly:
-    /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND), or
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if one panicked. The
-    /// adapter owns the wire's rules: it takes out what no plugin or format
-    /// should see, such as the gateway's own keys, before, and what a hop
-    /// must not carry after.
+    /// `Err` if no client edge will write a reply, for the adapter to write
+    /// plainly: [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no format
+    /// accepts the wire, which is dropped;
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if one panicked; or
+    /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the edge dropped its
+    /// reply. The adapter owns the wire's rules: it takes out what no plugin
+    /// or format should see, such as the gateway's own keys, before, and
+    /// what a hop must not carry after.
     ///
     /// The request counts for [`Gateway::idle`] from this call on, before
     /// the future is first polled, and the future borrows nothing: a job
@@ -150,13 +149,11 @@ impl Gateway {
     /// awaits the future in its own task, so `idle` never misses it. Await
     /// it on a tokio runtime, which runs the end hooks; it panics outside
     /// one.
-    // It resolves twice by design: once the reply is ready, then at its end.
-    #[allow(clippy::async_yields_async)]
     pub fn handle<W: Send + 'static>(
         &self,
         wire: W,
         extensions: Extensions,
-    ) -> impl Future<Output = BoxFuture<'static, Result<(), Fault>>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), Fault>> + Send + 'static {
         let wire: Box<dyn Any + Send> = Box::new(wire);
         // A format that panics in `accepts` is the adapter's to write.
         let served = &self.inner.served;
@@ -180,10 +177,7 @@ impl Gateway {
         });
         let inner = self.inner.clone();
         async move {
-            let (format, accepting) = match accepting {
-                Ok(accepting) => accepting,
-                Err(fault) => return unwritten(fault),
-            };
+            let (format, accepting) = accepting?;
             let accepted = AssertUnwindSafe(accepting).catch_unwind().await;
             let panicked = accepted.is_err();
             let accepted = accepted.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
@@ -193,9 +187,8 @@ impl Gateway {
             };
             let in_flight = inner.in_flight.clone();
             let cx = ClientContext::new(format.clone(), origin, later, extensions, inner.clone());
-            let (outcome, ended) = oneshot::channel();
             let settling = cx.settling.clone();
-            let mut hooks = EndHooks::new(&in_flight, cx, Some(outcome));
+            let mut hooks = EndHooks::new(&in_flight, cx);
             drop(reading);
             // The request's end hooks run after its calls'.
             hooks.after = Some(settling);
@@ -211,13 +204,15 @@ impl Gateway {
             // An edge that dropped its reply ends the request abandoned, but
             // one whose future panicked took its reply with it: the request
             // ends as the refusal says, `internal`.
-            if let Err((_, ended)) = tx.send(reply)
-                && panicked
-            {
-                ended(Err(Fault::internal(PANICKED)));
-            }
-            let ended = ended.map(|told| told.expect("every request's end is told"));
-            ended.boxed()
+            let Err((_, ended)) = tx.send(reply) else {
+                return Ok(());
+            };
+            let fault = match panicked {
+                true => Fault::internal(PANICKED),
+                false => Fault::abandoned(),
+            };
+            ended(Err(fault.clone()));
+            Err(fault)
         }
     }
 
@@ -272,11 +267,6 @@ impl Gateway {
         };
         Err(Fault::config(fault))
     }
-}
-
-/// An end for a wire no format took, for the adapter to write plainly.
-fn unwritten(fault: Fault) -> BoxFuture<'static, Result<(), Fault>> {
-    ready(Err(fault)).boxed()
 }
 
 /// The reply an edge gets if the gateway dropped the request first.

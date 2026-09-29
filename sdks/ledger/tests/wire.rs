@@ -151,10 +151,8 @@ async fn accounting_settles_on_a_wire_of_its_own() {
         let gw = gw.and_then(|g| g.target("p"));
         let gw = gw.and_then(|g| g.plugin("accounting", accounting));
         let gw = gw.unwrap_or_else(|f| panic!("{f}"));
-        let outcome = gw
-            .handle(Question(question.into()), Extensions::new())
-            .await;
-        drop(outcome.await);
+        let handled = gw.handle(Question(question.into()), Extensions::new());
+        drop(handled.await);
         gw.idle().await;
         assert_eq!(ledger.spent("key"), charged, "{case}");
         assert_eq!(ledger.available("key"), 1000 - charged, "{case}");

@@ -5,13 +5,14 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::{Ended, Events, Fault, Half, Origin};
 
 use super::reader::Reader;
 use super::writer::Writer;
-use super::{Accepted, Came, PANICKED};
+use super::{Accepted, Came, End, PANICKED};
 use crate::{
     Body, Codec, Encoder, Frames, RequestHead, ResponseHead, Unwritten, answered, bodiless,
     fresh_response_head, into_http_body, plain,
@@ -99,15 +100,22 @@ async fn read_whole(mut body: Frames) -> Result<Bytes, Fault> {
 
 /// What the adapter gets: `reply` written to the client whose request had
 /// head `ask` and body `body`, streaming if `streaming`; a failure no codec
-/// can write as plain text.
+/// can write as plain text; and how it ended, as this edge told [`Ended`].
 async fn written<C: Codec>(
     codec: C,
     reply: BoxFuture<'static, (Half<C::Output>, Ended)>,
     ask: Arc<RequestHead>,
     body: Bytes,
     streaming: bool,
-) -> http::Response<Body> {
+) -> (http::Response<Body>, End) {
     let ((origin, outputs), ended) = reply.await;
+    let (tell, told) = oneshot::channel();
+    let ended: Ended = Box::new(move |end| {
+        ended(end.clone());
+        let _ = tell.send(end);
+    });
+    // Dropped untold, the request ended abandoned.
+    let told = told.map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())));
     let to = Client {
         codec,
         ask,
@@ -118,14 +126,15 @@ async fn written<C: Codec>(
         Err(fault) => to.refuse(fault, Some(ended), None).await,
         Ok(outputs) => to.deliver(origin, outputs, ended).await,
     };
-    match handed {
+    let resp = match handed {
         Ok((head, body)) => http::Response::from_parts(head, into_http_body(body)),
         Err(fault) => {
             let mut resp = plain(&fault);
             resp.extensions_mut().insert(Unwritten);
             resp
         }
-    }
+    };
+    (resp, told.boxed())
 }
 
 /// The client an answer is written to, in its codec.

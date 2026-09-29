@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::FutureExt;
-use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use tokio::sync::Notify;
 
@@ -35,22 +34,15 @@ pub(crate) struct EndHooks<E: Edge> {
     cx: Option<E>,
     /// End hooks that must finish before these start.
     pub(crate) after: Option<Arc<InFlight>>,
-    /// Also receives the end, for `Gateway::handle`'s future.
-    report: Option<oneshot::Sender<Result<(), Fault>>>,
 }
 
 impl<E: Edge> EndHooks<E> {
-    pub(crate) fn new(
-        in_flight: &Arc<InFlight>,
-        cx: E,
-        report: Option<oneshot::Sender<Result<(), Fault>>>,
-    ) -> Self {
+    pub(crate) fn new(in_flight: &Arc<InFlight>, cx: E) -> Self {
         Self {
             live: Some(InFlight::enter(in_flight)),
             ran: 0,
             cx: Some(cx),
             after: None,
-            report,
         }
     }
 
@@ -71,9 +63,6 @@ impl<E: Edge> EndHooks<E> {
         };
         // The end is known, so a panic neither changes it nor stops the hooks.
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| cx.close(&end)));
-        if let Some(to) = self.report.take() {
-            let _ = to.send(end.clone());
-        }
         let (ran, live, after) = (self.ran, self.live.take(), self.after.take());
         // The context goes before `live`, so `Gateway::idle` finds the
         // request's values, the gateway's own included, dropped.

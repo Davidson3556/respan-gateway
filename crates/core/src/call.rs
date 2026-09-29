@@ -184,7 +184,7 @@ async fn send(
         sent: false,
         refused: false,
     };
-    let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
+    let mut edge = EndHooks::new(&cx.gateway.in_flight, px);
     let sent = async {
         edge.start().await?;
         dial(&cx, p, later, &mut edge).await
