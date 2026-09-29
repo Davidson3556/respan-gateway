@@ -57,6 +57,9 @@ pub fn posts_to(head: &RequestHead, suffix: &str) -> bool {
 /// `/v1//chat/completions` and `/x/../v1/chat/completions/` all spell
 /// `/v1/chat/completions`.
 pub fn clean_path(path: &str) -> String {
+    // Match what is forwarded (see `forwarded_path`), so the provider never
+    // gets a structure matching did not see.
+    let path = &forwarded_path(path);
     let mut kept: Vec<String> = Vec::new();
     // The outbound client reads a backslash as a slash, so a match must too.
     for segment in respan_gateway_http::percent_decode(path).split(['/', '\\']) {
@@ -277,5 +280,49 @@ mod tests {
         assert!(!posts_to(&other, "/chat/completions"));
         let get = head(http::Method::GET, "/v1/chat/completions");
         assert!(!posts_to(&get, "/chat/completions"));
+    }
+}
+
+// ===== loop 6 audit: appended to crates/formats/src/lib.rs =====
+#[cfg(test)]
+mod l6_audit {
+    use super::{clean_path, forwarded_path};
+
+    /// The doc of `forwarded_path` claims the provider never gets a
+    /// structure matching did not look at: matching the forwarded path must
+    /// read what matching the client's path read. Every path of up to four
+    /// segments from a small alphabet of the spellings that matter.
+    #[test]
+    fn l6_matching_the_forwarded_path_reads_what_matching_read() {
+        let parts = [
+            "a", "..", ".", "", "x%2Fy", "x%5Cy", "%2E%2E", "..;p", "..%3Bp", "a;p", "%2F..",
+            "..%2F",
+        ];
+        let mut bad = Vec::new();
+        let mut paths = vec![String::new()];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for p in &paths {
+                for s in parts {
+                    next.push(format!("{p}/{s}"));
+                }
+            }
+            paths.extend(next);
+        }
+        for p in &paths {
+            let (direct, forwarded) = (clean_path(p), clean_path(&forwarded_path(p)));
+            if direct != forwarded {
+                bad.push(format!(
+                    "{p}: matched {direct:?}, provider reads {forwarded:?}"
+                ));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} of {} paths, e.g.\n{}",
+            bad.len(),
+            paths.len(),
+            bad[..bad.len().min(8)].join("\n")
+        );
     }
 }

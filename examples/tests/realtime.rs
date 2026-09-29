@@ -1118,3 +1118,74 @@ async fn audio_deltas_are_not_counted_as_text() {
     gw.idle().await;
     assert_eq!(wallets.spent("sk-demo"), 2 * 30);
 }
+
+// ===== loop 6 audit =====
+
+/// A session with a slow input wrap (400 ms per input): the client says
+/// `items` `conversation.item.create`s then a `response.create`, back to
+/// back, and leaves 50 ms later. How long after it left the session ended,
+/// and what the provider was sent.
+async fn l6_leave_during_a_wrap(
+    items: usize,
+) -> Result<(Option<(u128, String)>, Vec<Value>), Fault> {
+    struct Slow;
+    #[respan_gateway_core::async_trait]
+    impl Plugin for Slow {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.wrap(|events: Events<ClientEvent>| {
+                events.and_then(|e| async move {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    Ok(e)
+                })
+            })?;
+            Ok(None)
+        }
+    }
+    let openai = FakeOpenAi::start().await;
+    let provider = openai.base_url().replace("http://", "ws://");
+    let at = EndAt::default();
+    let gw = Gateway::new()
+        .serve(realtime())?
+        .provider(
+            "openai",
+            realtime(),
+            WsTransport::new(provider.trim_end_matches("/v1"))?,
+        )?
+        .target("openai")?
+        .plugin("at", at.clone())?
+        .plugin("slow", Slow)?;
+    let addr = listen(&gw).await;
+    let mut ws = client(addr).await;
+    hear(&mut ws).await;
+    let item = json!({ "type": "conversation.item.create", "item": { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] } });
+    for _ in 0..items {
+        say(&mut ws, item.clone()).await;
+    }
+    say(&mut ws, json!({ "type": "response.create" })).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let left = std::time::Instant::now();
+    drop(ws);
+    gw.idle().await;
+    let ended = lock(&at.0).clone();
+    let after = ended
+        .first()
+        .map(|(t, c)| (t.duration_since(left).as_millis(), c.clone()));
+    Ok((after, read_by_provider(&openai)))
+}
+
+/// Loop 5's bug 1 with one more frame: the client says two things back to
+/// back and leaves while the wrap holds the first. `hear` is parked in
+/// `input.send(second)` (its flush waits until the gateway pulls it), so it
+/// reads nothing from the socket and never sees the client go: the session
+/// lives until the wrap lets the first through (~350 ms). Fixed by watching
+/// the socket during the send (one frame of lookahead).
+#[tokio::test(flavor = "multi_thread")]
+async fn l6_a_client_that_says_two_things_and_leaves_during_a_wrap_ends_then() -> Result<(), Fault>
+{
+    let (after, read) = l6_leave_during_a_wrap(1).await?;
+    assert!(
+        read.is_empty() && after.as_ref().is_some_and(|(ms, _)| *ms < 200),
+        "the session ended {after:?} after the client left; the provider was sent {read:?}"
+    );
+    Ok(())
+}

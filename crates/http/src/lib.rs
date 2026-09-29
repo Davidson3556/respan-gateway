@@ -374,11 +374,17 @@ pub(crate) fn depart(
 /// that yields between frames from one that has them all, so neither can
 /// this. What a task may do in one poll is what tokio's cooperative budget
 /// allows, so every poll spends from it, and a spent budget is not ready
-/// either: a body ready without end, or waking itself and never giving a
-/// frame, cannot hold the thread, and no count of ours stands in for the
-/// runtime's. A bodiless answer of more frames than that budget ends
-/// `abandoned`, as one still waiting does.
+/// either. A task under `tokio::task::unconstrained` never spends it, so
+/// the read has a bound of its own that does not depend on the runtime,
+/// `DRAIN_POLLS`: a bodiless answer's body has no frames to a few, so the
+/// bound is far past any real one and costs the thread milliseconds at
+/// most (a runtime's own budget is 128). A body ready
+/// without end, or waking itself and never giving a frame, cannot hold the
+/// thread. A bodiless answer of more frames than the budget or this bound
+/// ends `abandoned`, as one still waiting does.
 fn drain_ready(body: &mut Body) {
+    /// The most polls one drain makes.
+    const DRAIN_POLLS: usize = 1 << 16;
     struct Woken(AtomicBool);
     impl futures::task::ArcWake for Woken {
         fn wake_by_ref(this: &Arc<Self>) {
@@ -388,11 +394,13 @@ fn drain_ready(body: &mut Body) {
     let woken = Arc::new(Woken(AtomicBool::new(false)));
     let waker = futures::task::waker(woken.clone());
     let mut cx = std::task::Context::from_waker(&waker);
-    loop {
+    let mut left = DRAIN_POLLS;
+    while left > 0 {
         let mut budget = std::pin::pin!(tokio::task::consume_budget());
         if budget.as_mut().poll(&mut cx).is_pending() {
             return;
         }
+        left -= 1;
         woken.0.store(false, Ordering::SeqCst);
         match http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), &mut cx) {
             std::task::Poll::Pending if woken.0.load(Ordering::SeqCst) => {}

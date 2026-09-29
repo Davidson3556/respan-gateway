@@ -102,7 +102,7 @@ pub fn request_encoder<F: 'static>(
 }
 
 /// The response decoder of `format` for a response with `head` to the call
-/// with head `call`: a success's bytes, or a 101's if the call asked to
+/// with head `call`: a success's or a redirect's (a 304 too) bytes, or a 101's if the call asked to
 /// switch protocols, one message per frame; none for a response with no
 /// body; any other answer read whole ([`whole::answer`](crate::whole::answer)).
 pub fn response_decoder<F: 'static>(
@@ -111,10 +111,10 @@ pub fn response_decoder<F: 'static>(
     call: &RequestHead,
 ) -> Box<dyn Decoder<Got<F>>> {
     let switched = head.status == StatusCode::SWITCHING_PROTOCOLS && asked_to_switch(call);
-    match head.status.is_success() || switched {
-        _ if head.status.is_success() && bodiless(&call.method, head.status) => {
-            crate::whole::nothing()
-        }
+    // A redirect or a 304 is an answer to relay as it came, not a refusal.
+    let relayed = head.status.is_success() || head.status.is_redirection();
+    match relayed || switched {
+        _ if relayed && bodiless(&call.method, head.status) => crate::whole::nothing(),
         false => crate::whole::decoder(format, head, |_, _| Ok(())),
         true => crate::message_decoder(|bytes| Ok(Got::new(bytes))),
     }
