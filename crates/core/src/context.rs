@@ -15,7 +15,7 @@ use crate::input::{Input, Later, locked, stream};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
 use crate::transport::Head;
-use crate::{Call, Exchange, Extensions, Fault, Filter, Outcome, Plugin, Response};
+use crate::{Call, Exchange, Extensions, Fault, Filter, Plugin, Response};
 
 pub(crate) type HeadEdit = Box<dyn FnOnce(&mut Head) -> Result<(), Fault> + Send>;
 
@@ -74,8 +74,8 @@ impl Edge for ClientContext {
         self
     }
 
-    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, outcome: &'a Outcome) -> BoxFuture<'a, ()> {
-        plugin.on_client_end(self, outcome)
+    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<(), Fault>) -> BoxFuture<'a, ()> {
+        plugin.on_client_end(self, end)
     }
 
     /// Open calls end abandoned, the inputs left are cut off, and output

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::Asked;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
@@ -121,7 +121,7 @@ impl Plugin for Admission {
         Ok(None)
     }
 
-    async fn on_client_end(&self, cx: &ClientContext, _outcome: &Outcome) {
+    async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
         if let Some(Held(slot)) = cx.extensions().get::<Held>() {
             slot.lock().unwrap_or_else(PoisonError::into_inner).take();
         }

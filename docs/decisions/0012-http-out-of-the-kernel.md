@@ -53,3 +53,6 @@ text/plain for what no format writes. None is a kernel rule (0001).
 - 0013: the `http` types left the core too; head hooks became generic.
 - 0014: `with_words` became `with_answer(.., false)`; `Encoder::done`
   became `Encoder::open`'s `Ok(true)`.
+- 0015: `Relayed` became `Exchange::relayed`; `handle`'s `streaming`
+  became `Exchange::streams`; `is_answer` became
+  `ProviderContext::is_head_only`.

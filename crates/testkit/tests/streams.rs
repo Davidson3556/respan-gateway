@@ -250,7 +250,7 @@ impl Transport for Echo {
     type Answer = Answer;
 
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
-        let (head, body) = (call.head, call.body);
+        let (head, body, whole) = (call.head, call.body, !call.streams);
         self.heads
             .lock()
             .map(|mut h| h.push(head.headers.clone()))
@@ -258,7 +258,6 @@ impl Transport for Echo {
         let seen = self.frames.clone();
         // A whole call is one frame; empty, it carries no data, as an
         // empty HTTP body has no data frame.
-        let whole = body.size_hint() == (1, Some(1));
         let body =
             body.try_filter(move |frame| futures::future::ready(!whole || !frame.is_empty()));
         let echoed = body.map_ok(move |frame| {
@@ -353,7 +352,7 @@ async fn a_framed_requests_inputs_are_relayed_as_one_call_each_as_it_came() {
     assert_eq!(frames, [r#"{"heard":"a"}"#, r#"{"heard":"b"}"#]);
     assert_eq!(echo.frames(), [r#"{"say":"a"}"#, r#"{ "say": "b" }"#]);
     assert_eq!((echo.calls(), calls.all().len()), (1, 1));
-    assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(ended.await, Ok(()));
 }
 
 #[tokio::test]
@@ -501,10 +500,7 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
     assert_eq!(framed.status(), StatusCode::SWITCHING_PROTOCOLS);
     assert!(frames(whole).await.is_empty());
     assert!(frames(framed).await.is_empty());
-    assert_eq!(
-        (whole_ended.await.end, framed_ended.await.end),
-        (Ok(()), Ok(()))
-    );
+    assert_eq!((whole_ended.await, framed_ended.await), (Ok(()), Ok(())));
     gw.idle().await;
     let none = format!(
         "{}: a streaming request's inputs come after its head, to filters and take_inputs",
@@ -601,7 +597,7 @@ async fn a_bridge_calls_a_provider_of_another_kind_once_per_input_and_streams_ba
     let said: Vec<&Value> = sent.iter().map(|b| &b["messages"][0]["content"]).collect();
     assert_eq!(said, [&json!("x"), &json!("y")]);
     assert_eq!((echo.calls(), calls.all().len()), (0, 2));
-    assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(ended.await, Ok(()));
 }
 
 /// The text of `reply`, if it has any, as heard.
@@ -821,8 +817,12 @@ async fn a_panic_ending_a_call_keeps_its_end() {
             px.filter(PanicAtEnd)
         }
 
-        async fn on_provider_end(&self, _px: &ProviderContext, o: &respan_gateway_core::Outcome) {
-            let code = o.end.as_ref().err().map_or("ok", Fault::code);
+        async fn on_provider_end(
+            &self,
+            _px: &ProviderContext,
+            o: &Result<(), respan_gateway_core::Fault>,
+        ) {
+            let code = o.as_ref().err().map_or("ok", Fault::code);
             self.0.note(code);
         }
     }
@@ -868,12 +868,20 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
             >())))
         }
 
-        async fn on_client_end(&self, _cx: &ClientContext, _o: &respan_gateway_core::Outcome) {
+        async fn on_client_end(
+            &self,
+            _cx: &ClientContext,
+            _o: &Result<(), respan_gateway_core::Fault>,
+        ) {
             self.0.note("on_client_end");
         }
 
-        async fn on_provider_end(&self, _px: &ProviderContext, o: &respan_gateway_core::Outcome) {
-            let end = o.end.as_ref().err().map(|f| f.code().to_owned());
+        async fn on_provider_end(
+            &self,
+            _px: &ProviderContext,
+            o: &Result<(), respan_gateway_core::Fault>,
+        ) {
+            let end = o.as_ref().err().map(|f| f.code().to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1086,7 +1094,7 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let _ = frames(resp).await;
     assert_eq!(
-        ended.await.end.map_err(|f| f.code().to_owned()),
+        ended.await.map_err(|f| f.code().to_owned()),
         Err(codes::CONFIG.into())
     );
     gw.idle().await;
@@ -1194,7 +1202,7 @@ async fn a_101_goes_only_to_a_request_that_asked() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let _ = frames(resp).await;
     assert_eq!(
-        ended.await.end.map_err(|f| f.code().to_owned()),
+        ended.await.map_err(|f| f.code().to_owned()),
         Err(codes::UPSTREAM.into())
     );
 }
@@ -1225,7 +1233,7 @@ async fn a_head_edit_that_sets_101_unasked_is_refused() {
     // The adapter refuses it and drops the gateway's response, so
     // the request ends abandoned.
     assert_eq!(
-        ended.await.end.map_err(|f| f.code().to_owned()),
+        ended.await.map_err(|f| f.code().to_owned()),
         Err(codes::ABANDONED.into())
     );
 }
@@ -1281,7 +1289,6 @@ async fn a_clone_of_a_polled_call_keeps_its_settings() {
     let _ = resp.into_body().collect().await;
     let end = ended
         .await
-        .end
         .err()
         .map(|f| format!("{} {}", f.code(), f.message()));
     assert_eq!((status, end), (StatusCode::OK, None));
@@ -1315,8 +1322,12 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
             Ok(())
         }
 
-        async fn on_provider_end(&self, _px: &ProviderContext, o: &respan_gateway_core::Outcome) {
-            let end = o.end.as_ref().err().map(|f| f.code().to_owned());
+        async fn on_provider_end(
+            &self,
+            _px: &ProviderContext,
+            o: &Result<(), respan_gateway_core::Fault>,
+        ) {
+            let end = o.as_ref().err().map(|f| f.code().to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1439,7 +1450,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
             Err(f) => got.push(format!("aborted {f}")),
         }
     }
-    let end = ended.await.end.err().map(|f| f.code().to_owned());
+    let end = ended.await.err().map(|f| f.code().to_owned());
     assert_eq!((got, end), (Vec::<String>::new(), None));
 }
 
@@ -1530,11 +1541,11 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     // A host never polls a 204's body.
     drop(resp);
-    assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(ended.await, Ok(()));
     gw.idle().await;
     // Its empty body was read to its end as the head went out.
     let all = calls.all();
-    assert_eq!((all.len(), all[0].end.clone()), (1, Ok(())));
+    assert_eq!((all.len(), all[0].clone()), (1, Ok(())));
 }
 
 // ---- r6 internals probes ----
@@ -1582,14 +1593,22 @@ async fn dropped_then_retried() {
             Ok(())
         }
 
-        async fn on_provider_end(&self, px: &ProviderContext, _o: &respan_gateway_core::Outcome) {
+        async fn on_provider_end(
+            &self,
+            px: &ProviderContext,
+            _o: &Result<(), respan_gateway_core::Fault>,
+        ) {
             if px.provider() == "never" {
                 self.2.notified().await;
             }
             self.0.note(format!("on_provider_end {}", px.provider()));
         }
 
-        async fn on_client_end(&self, _cx: &ClientContext, _o: &respan_gateway_core::Outcome) {
+        async fn on_client_end(
+            &self,
+            _cx: &ClientContext,
+            _o: &Result<(), respan_gateway_core::Fault>,
+        ) {
             self.0.note("on_client_end");
         }
     }
@@ -1731,7 +1750,7 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
     say(&send, r#"{"say":"hi"}"#);
     drop(send);
     let frames = frames(resp).await;
-    let end = ended.await.end;
+    let end = ended.await;
     assert_eq!(
         echo.frames(),
         [r#"{"say":"hi"}"#, r#"{"say":"bye"}"#],
@@ -1837,5 +1856,5 @@ async fn r11_plugin_ws_to_sse_bridge() {
     gw.idle().await;
     assert_eq!(frames, [r#"{"heard":"one"}"#, r#"{"heard":"two"}"#]);
     assert_eq!(calls.all().len(), 2);
-    assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(ended.await, Ok(()));
 }

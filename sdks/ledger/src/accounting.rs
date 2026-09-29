@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
-use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait, codes};
 
 use crate::{Amount, HoldId, Ledger, NO_ACCOUNT};
 
@@ -65,7 +65,7 @@ impl Tally {
 /// have billed without its cost reported in full (a tally never added to,
 /// a stream cut off, or a call sent that failed before its head) is
 /// charged at least its reserve; one the provider answered with an error
-/// ([`Fault::is_answer`]) is charged nothing. It uses the provider edge alone: register
+/// (a refusal: [`ProviderContext::is_head_only`]) is charged nothing. It uses the provider edge alone: register
 /// it last, so it prices the call as every other plugin left it, and once
 /// per gateway. A filter the quote adds is then the call's last, so it
 /// sees each output first, before another plugin's filter can fail on it.
@@ -106,13 +106,14 @@ impl<L: Ledger> Accounting<L> {
     }
 
     /// What a call cost, as far as the gateway can tell.
-    fn charge(&self, hold: &Hold, sent: bool, outcome: &Outcome) -> Amount {
+    fn charge(&self, hold: &Hold, px: &ProviderContext, end: &Result<(), Fault>) -> Amount {
         let spent = hold.tally.spent();
-        match &outcome.end {
-            // The provider answered with an error in place of a response.
-            Err(fault) if fault.is_answer() => 0,
+        match end {
             // It never left the gateway.
-            _ if !sent => 0,
+            _ if !px.is_sent() => 0,
+            // The provider answered with an error before any content: its
+            // refusal, not a response cut off or a client that left.
+            Err(fault) if px.is_head_only() && !is_cut(fault) => 0,
             Ok(()) if hold.tally.is_reported() => spent,
             // Cut off, never reported, or sent and given up, such as timed
             // out waiting for its head: it may have reached the provider,
@@ -120,6 +121,12 @@ impl<L: Ledger> Accounting<L> {
             _ => spent.max(hold.reserve),
         }
     }
+}
+
+/// Whether `fault` says a response was cut off or its client left, which the
+/// provider may still bill, not that it refused.
+fn is_cut(fault: &Fault) -> bool {
+    [codes::ABANDONED, codes::TRUNCATED, codes::INTERNAL].contains(&fault.code())
 }
 
 /// One call's hold, in the call's extensions.
@@ -153,14 +160,14 @@ impl<L: Ledger> Plugin for Accounting<L> {
         self.ledger.reserve(&hold.id, &accounts, reserve, ttl).await
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let Some(hold) = px.client().extensions().get::<Arc<Hold>>().cloned() else {
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+        let Some(hold) = px.extensions().get::<Arc<Hold>>().cloned() else {
             return;
         };
         if hold.settled.swap(true, Ordering::Relaxed) {
             return;
         }
-        let spent = self.charge(&hold, px.is_sent(), outcome);
+        let spent = self.charge(&hold, px, end);
         // A failure is the ledger's to retry; the hold's TTL is the backstop.
         let _ = self.ledger.settle(&hold.id, spent).await;
     }

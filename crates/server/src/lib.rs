@@ -184,25 +184,26 @@ impl Transport for HttpTransport {
     type Answer = Answer;
 
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
+        let mut call = call;
+        proxy_call(&mut call.head);
+        strip_client_origin_headers(&mut call.head.headers);
+        credentials(&mut call, &self.headers);
         let Exchange {
             head: mut parts,
             body,
-            extensions,
+            streams,
             ..
         } = call;
-        proxy_call(&mut parts);
-        strip_client_origin_headers(&mut parts.headers);
-        credentials(&mut parts, &extensions, &self.headers);
         let path = parts.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
         parts.uri = url.parse().map_err(invalid)?;
         // A whole call is one frame, or none if empty, and goes with its length.
-        let body = match body.size_hint() {
-            (_, Some(0 | 1)) => {
+        let body = match streams {
+            false => {
                 let frames: Vec<_> = body.try_collect().await?;
                 reqwest::Body::from(frames.concat())
             }
-            _ => reqwest::Body::wrap_stream(body),
+            true => reqwest::Body::wrap_stream(body),
         };
         let req =
             reqwest::Request::try_from(http::Request::from_parts(parts, body)).map_err(invalid)?;

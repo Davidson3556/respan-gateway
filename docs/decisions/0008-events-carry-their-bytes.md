@@ -58,3 +58,5 @@ run time.
 - 0012: `with_raw` became `with_answer` and `with_words`; encoders are
   told a call streams.
 - 0014: `with_words` became `with_answer(.., false)`.
+- 0015: `with_answer(.., false)` lost its flag: `with_answer(format,
+  answer)`.

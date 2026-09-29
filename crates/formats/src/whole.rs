@@ -41,7 +41,7 @@ pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault 
         Some(wait) => fault.with_retry_after(wait),
         None => fault,
     };
-    fault.with_answer(format, http::Response::from_parts(head.clone(), body), true)
+    fault.with_answer(format, http::Response::from_parts(head.clone(), body))
 }
 
 /// A decoder of nothing, for a response with no body

@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::Extensions;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_formats::conversation::{Conversation, Message, Reply};
@@ -88,13 +88,12 @@ struct Log<S> {
 
 impl Record {
     /// A record without content or usage, from what every hook sees.
-    fn new(ext: &Extensions, call: Option<&str>, outcome: &Outcome) -> Self {
+    fn new(ext: &Extensions, call: Option<&str>, end: &Result<(), Fault>) -> Self {
         Self {
             request: ext.get::<RequestId>().map_or(0, |id| id.0),
             call: call.map(Into::into),
-            status: outcome.end.as_ref().err().map(|f| f.status()),
-            end: outcome
-                .end
+            status: end.as_ref().err().map(|f| f.status()),
+            end: end
                 .as_ref()
                 .map_or_else(|f| f.code().into(), |()| "ok".into()),
             usage: Usage::default(),
@@ -128,15 +127,15 @@ impl<S: Sink> Plugin for Log<S> {
         meter(px)
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let mut record = Record::new(px.client().extensions(), Some(px.provider()), outcome);
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+        let mut record = Record::new(px.extensions(), Some(px.provider()), end);
         record.usage = CallUsage::of(px).unwrap_or_default();
         self.sink.write(record).await;
     }
 
-    async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
+    async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>) {
         let ext = &cx.extensions();
-        let mut record = Record::new(ext, None, outcome);
+        let mut record = Record::new(ext, None, end);
         // Checked again: a marker set after `on_client` still holds.
         let captured = ext
             .get::<Captured>()

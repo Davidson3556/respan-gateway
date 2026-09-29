@@ -23,6 +23,7 @@ and call once. Tests state its promises; the
 | [0012](decisions/0012-http-out-of-the-kernel.md) | HTTP's rules live in the adapter, transports and formats |
 | [0013](decisions/0013-no-http-in-core.md) | No `http` types in the core: a wire is a pair of head types |
 | [0014](decisions/0014-api-trims.md) | API trims: one way to say each thing |
+| [0015](decisions/0015-core-trims.md) | Core trims: `relayed` and `streams` on `Exchange`, no `Outcome`, `is_head_only` |
 
 ## Two edges
 
@@ -44,9 +45,9 @@ answers skips those after it. Only `on_client` may `call` or `take_inputs`.
 
 ```
  adapter (crates/http): strip connection headers, lift the Credential,
-   add Asked; Upgrade? streaming; http::Request ─▶ Exchange<Ask>
+   add Asked; Upgrade? streams; http::Request ─▶ Exchange<Ask>
                   ▼
- Gateway::handle::<Ask, Answer>(req, streaming) ─▶ first format on that
+ Gateway::handle::<Ask, Answer>(req) ─▶ first format on that
    wire that accepts (none: Err, the adapter's plain 404)
    whole: body read in full, its one input; streaming: one input per frame
                   ▼
@@ -68,7 +69,7 @@ answers skips those after it. Only `on_client` may `call` or `take_inputs`.
    for a streaming request or a body done before it began
                   ▼ adapter: strip hop-by-hop headers
                   ▼ at the end
- on_provider_end, each call ─▶ on_client_end; the Outcome future resolves
+ on_provider_end, each call ─▶ on_client_end; the end future resolves
 ```
 
 Four flows:
@@ -98,8 +99,8 @@ gateway does not read is a kind of one (`formats::opaque`).
 
 A wire is a pair of head types, `Format::Ask` and `Format::Answer`, that a
 format and its transport share; HTTP's live in `crates/http`
-([0013](decisions/0013-no-http-in-core.md)). The kernel keeps no bytes and
-reads no head. It hands a head, like bytes, only to a format of the name
+([0013](decisions/0013-no-http-in-core.md)). The kernel reads no head.
+It hands a head, like bytes, only to a format of the name
 it came in, and only for a relay: a relay's call starts from the client's
 head and a relayed response's head is the provider's; a translated one
 starts anew. The encoder writes the head (`Encoder::head`) once, before
@@ -108,25 +109,28 @@ any bytes.
 A whole body is decoded only when read, so a plain relay's call carries
 the client's bytes, which its request encoder may edit; a streaming
 request's frames are decoded as they pass. The adapter says whether
-inputs stream. A provider's error answer is a `Fault` carrying its
+inputs stream (`Exchange::streams`), and the kernel says it of a call. A
+provider's error answer is a `Fault` carrying its
 status, retry and the answer, which the client's format writes as it came
 if it read it, else in its own words. The model belongs to the kind
 (`Conversation.model`); its place on the wire is the format's.
 
 ## Core types
 
-16 public types, plus `Body`, `codes` and re-exports; `handle` needs a
+14 public types, plus `Body`, `codes` and re-exports; `handle` needs a
 tokio runtime, which runs end hooks detached. The core depends on no
 `http` crate.
 
-- `Gateway`; `Transport`; `Exchange<H>`, a head, a body and `Extensions`,
-  which `handle` and `Transport::send` take and give; `Relayed`, the mark
-  on a call that relays the client's message.
+- `Gateway`; `Transport`; `Exchange<H>`, a head, a body, `Extensions` and
+  two flags (`streams`: later frames follow; `relayed`, kernel-set on a
+  call that relays the client's message), which `handle` and
+  `Transport::send` take and give.
 - `Plugin`, whose hooks get a `ClientContext` (a request) or a
-  `ProviderContext` (a call); `Call`, a `'static`, `Clone`, `Sync` future,
+  `ProviderContext` (a call), and an end, `&Result<(), Fault>`; a fact
+  about a call, such as `is_sent` or `is_head_only`, is a method of its
+  context; `Call`, a `'static`, `Clone`, `Sync` future,
   sent when awaited.
-- `Filter<T>` edits inputs (the only way) or outputs; `Outcome` says how
-  an edge ended; `Response` is a call's, `cx.relay`'s or
+- `Filter<T>` edits inputs (the only way) or outputs; `Response` is a call's, `cx.relay`'s or
   `Response::stream`'s, held with `until_content` or `until_end`, or read
   with `outputs`; `Fault` is the one error type.
 - `Format`, `Decoder<T>`, `Encoder<T, H>`: a protocol's codec.

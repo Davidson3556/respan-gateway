@@ -41,7 +41,7 @@ HTTP.
 
 ## Consequences
 
-- The core depends on no `http` crate. 16 public types.
+- The core depends on no `http` crate. 16 public types (14 since 0015).
 - HTTP formats and transports write
   `type Ask = respan_gateway_http::Ask; type Answer = respan_gateway_http::Answer;`.
 - Body-only encoders are `Encoder<T, ()>`, given a head by
@@ -49,3 +49,8 @@ HTTP.
 - A wire-neutral plugin cannot edit heads. Whether a call was handed to
   its transport is `ProviderContext::is_sent`, which the ledger reads.
 - Trailers never reach the kernel.
+
+## History
+
+- 0015: 14 public types; `ProviderContext::is_head_only` sits beside
+  `is_sent`.

@@ -15,7 +15,7 @@ use crate::input::Later;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::transport::{AnyTransport, Erased, Head};
-use crate::{ClientContext, Exchange, Fault, Format, Outcome, Plugin, Response, Transport};
+use crate::{ClientContext, Exchange, Fault, Format, Plugin, Response, Transport};
 
 /// A registered plugin and the plugins it runs after, by index.
 #[derive(Clone)]
@@ -181,10 +181,16 @@ impl Gateway {
     /// as the gateway's own keys, before, and what a hop must not carry
     /// after.
     ///
-    /// If `streaming`, the body's data frames are inputs as they arrive and
+    /// If `req.streams`, the body's data frames are inputs as they arrive and
     /// the response's head goes out at once, as the client waits for it.
     /// Else the body is read in full, so the caller bounds it; one that
-    /// fails while read is refused.
+    /// fails while read is refused. `req.relayed` is ignored.
+    ///
+    /// `Ask` is the head type of the request, and `Answer` that of the
+    /// response, which the kernel cannot check at compile time: the format
+    /// that accepts the request is found at run time, and `Err` with
+    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if its
+    /// [`Answer`](Format::Answer) is not `Answer`.
     ///
     /// `Err` for what no format can write, for the adapter to write plainly:
     /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no format accepts
@@ -192,20 +198,23 @@ impl Gateway {
     /// that does answers with other heads, panicked or could not write a
     /// refusal.
     ///
-    /// With it comes a future of the request's [`Outcome`], resolved once
-    /// the response ends, before end hooks finish. Call it on a tokio
+    /// With it comes a future of how the request ended, as
+    /// [`Plugin::on_client_end`] gets it, resolved once the response ends,
+    /// before end hooks finish. Call it on a tokio
     /// runtime, which runs the end hooks; it panics outside one.
     pub async fn handle<Ask, Answer>(
         &self,
         req: Exchange<Ask>,
-        streaming: bool,
-    ) -> (Result<Exchange<Answer>, Fault>, BoxFuture<'static, Outcome>)
+    ) -> (
+        Result<Exchange<Answer>, Fault>,
+        BoxFuture<'static, Result<(), Fault>>,
+    )
     where
         Ask: Send + Sync + 'static,
         Answer: Send + 'static,
     {
         let answer = TypeId::of::<Answer>();
-        let (resp, outcome) = self.handle_any(req, answer, streaming).await;
+        let (resp, outcome) = self.handle_any(req, answer).await;
         let other = "a response of another wire than asked";
         (resp.and_then(|resp| resp.downcast(other)), outcome)
     }
@@ -214,13 +223,17 @@ impl Gateway {
         &self,
         req: Exchange<Ask>,
         answer: TypeId,
-        streaming: bool,
-    ) -> (Result<Exchange<Head>, Fault>, BoxFuture<'static, Outcome>) {
+    ) -> (
+        Result<Exchange<Head>, Fault>,
+        BoxFuture<'static, Result<(), Fault>>,
+    ) {
         let runtime = tokio::runtime::Handle::current();
         let Exchange {
             head,
             body,
             extensions,
+            streams,
+            ..
         } = req;
         let head: Arc<dyn Any + Send + Sync> = Arc::new(head);
         // A format that panics in `accepts` is the adapter's to write.
@@ -238,7 +251,7 @@ impl Gateway {
             let other = "the format that accepts this request answers with other heads";
             return unwritten(Fault::internal(other));
         }
-        let (body, later, broken) = match streaming {
+        let (body, later, broken) = match streams {
             true => (None, Some(Later::new(body)), None),
             false => match read_whole(body).await {
                 Ok(bytes) => (Some(bytes), None, None),
@@ -352,11 +365,9 @@ fn runs_after(plugins: &[Registered], later: usize, first: usize) -> bool {
 }
 
 /// `fault` for the adapter to write, for a request no format took.
-fn unwritten(fault: Fault) -> (Handed, BoxFuture<'static, Outcome>) {
-    let outcome = Outcome {
-        end: Err(fault.clone()),
-    };
-    (Err(fault), futures::future::ready(outcome).boxed())
+fn unwritten(fault: Fault) -> (Handed, BoxFuture<'static, Result<(), Fault>>) {
+    let end = Err(fault.clone());
+    (Err(fault), futures::future::ready(end).boxed())
 }
 
 async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response, Fault> {
@@ -387,5 +398,5 @@ async fn read_whole(mut body: crate::Body) -> Result<Bytes, Fault> {
 #[cfg(test)]
 fn _handle_is_send(g: &Gateway, req: Exchange<()>) {
     fn send<T: Send>(_: T) {}
-    send(g.handle::<(), ()>(req, false));
+    send(g.handle::<(), ()>(req));
 }

@@ -10,7 +10,7 @@ use crate::input::{Input, InputFilters, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
 use crate::transport::{AnyTransport, Head};
-use crate::{ClientContext, Extensions, Fault, Filter, Outcome, Plugin};
+use crate::{ClientContext, Extensions, Fault, Filter, Plugin};
 
 /// A provider the gateway can call: a format and a transport.
 #[derive(Clone)]
@@ -44,6 +44,10 @@ pub struct ProviderContext {
     pub(crate) running: InFlightGuard,
     /// Set once the call is handed to its transport.
     pub(crate) sent: bool,
+    /// Set once the transport returned the provider's response head.
+    pub(crate) answered: bool,
+    /// Set once the response decoded its first value or its body broke off.
+    pub(crate) began: bool,
 }
 
 impl std::fmt::Debug for ProviderContext {
@@ -59,8 +63,8 @@ impl Edge for ProviderContext {
         &self.client
     }
 
-    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, outcome: &'a Outcome) -> BoxFuture<'a, ()> {
-        plugin.on_provider_end(self, outcome)
+    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<(), Fault>) -> BoxFuture<'a, ()> {
+        plugin.on_provider_end(self, end)
     }
 
     /// Its response and inputs are cut off, and filters still open end,
@@ -130,9 +134,27 @@ impl ProviderContext {
         self.sent
     }
 
-    /// This call's extensions, read as `px.client().extensions()`, to
-    /// change, such as to hand a tenant's key to the transport or keep a
-    /// tally for the call's end hook. Changes reach this call alone.
+    /// Whether the provider's response head arrived and its body then
+    /// decoded no value, though it did not break off: at a call's end, `Err`
+    /// means the provider failed the response as a whole before it began,
+    /// such as by refusing it. It is false in `on_provider`; for a call
+    /// whose transport failed, before a head or in its body; and once a
+    /// value was decoded. A fault alone cannot say which of these it is, as
+    /// a provider's refusal and a response cut off look alike.
+    pub fn is_head_only(&self) -> bool {
+        self.answered && !self.began
+    }
+
+    /// This call's extensions: the request's, its own
+    /// ([`Call::with_extension`](crate::Call::with_extension)) and what its
+    /// hooks set with [`extensions_mut`](ProviderContext::extensions_mut).
+    pub fn extensions(&self) -> &Extensions {
+        &self.client.extensions
+    }
+
+    /// This call's extensions, to change, such as to hand a tenant's key to
+    /// the transport or keep a tally for the call's end hook. Changes reach
+    /// this call alone.
     pub fn extensions_mut(&mut self) -> &mut Extensions {
         &mut self.client.extensions
     }

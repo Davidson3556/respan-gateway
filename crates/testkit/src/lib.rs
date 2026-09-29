@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Test kit for plugin authors: a scripted provider, recorders of outcomes
+//! Test kit for plugin authors: a scripted provider, recorders of ends
 //! on both edges, and request and response helpers. Hand a request to a
 //! gateway as the HTTP adapter does with [`serve`].
 
@@ -14,7 +14,7 @@ use http::header::CONTENT_TYPE;
 use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
 use respan_gateway_core::{
-    ClientContext, Exchange, Fault, Filter, Outcome, Plugin, ProviderContext, Transport,
+    ClientContext, Exchange, Fault, Filter, Plugin, ProviderContext, Transport,
 };
 use respan_gateway_core::{async_trait, bytes, futures};
 use respan_gateway_http::{Answer, Ask, Body, http, http_body, http_body_util};
@@ -140,11 +140,12 @@ impl Transport for MockAt {
 
     async fn send(&self, call: Exchange<Ask>) -> Result<Exchange<Answer>, Fault> {
         // Keep alike with `HttpTransport::send` in the server crate.
-        let (call, extensions) = respan_gateway_http::call(call);
+        let mut call = call;
+        proxy_call(&mut call.head);
+        strip_client_origin_headers(&mut call.head.headers);
+        credentials(&mut call, &self.headers);
+        let (call, _) = respan_gateway_http::call(call);
         let (mut head, body) = call.into_parts();
-        proxy_call(&mut head);
-        strip_client_origin_headers(&mut head.headers);
-        credentials(&mut head, &extensions, &self.headers);
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
         let url = format!("{}{path}", self.base);
         head.uri = url
@@ -214,44 +215,44 @@ pub fn run_filter<T>(filter: &mut impl Filter<T>, values: Vec<T>) -> Result<Vec<
     Ok(out)
 }
 
-/// A plugin that records each request's client-edge outcome; register it
+/// A plugin that records how each request ended; register it
 /// first to see every request whose plugins ran.
 #[derive(Debug, Clone, Default)]
-pub struct Outcomes(Arc<Mutex<Vec<Outcome>>>);
+pub struct Outcomes(Arc<Mutex<Vec<Result<(), Fault>>>>);
 
 impl Outcomes {
-    /// Every outcome recorded so far, in the order their end hooks ran.
-    pub fn all(&self) -> Vec<Outcome> {
+    /// Every end recorded so far, in the order their end hooks ran.
+    pub fn all(&self) -> Vec<Result<(), Fault>> {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
-    /// The one outcome recorded; panics if there is not exactly one.
-    pub fn only(&self) -> Outcome {
+    /// The one end recorded; panics if there is not exactly one.
+    pub fn only(&self) -> Result<(), Fault> {
         let mut all = self.all();
-        assert_eq!(all.len(), 1, "expected exactly one outcome: {all:?}");
+        assert_eq!(all.len(), 1, "expected exactly one end: {all:?}");
         all.remove(0)
     }
 }
 
 #[async_trait]
 impl Plugin for Outcomes {
-    async fn on_client_end(&self, _cx: &ClientContext, outcome: &Outcome) {
+    async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
         let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        all.push(outcome.clone());
+        all.push(end.clone());
     }
 }
 
-/// A plugin that records each call's provider-edge outcome; register it
+/// A plugin that records how each call ended; register it
 /// first to see every call.
 #[derive(Debug, Clone, Default)]
-pub struct Calls(Arc<Mutex<Vec<Outcome>>>);
+pub struct Calls(Arc<Mutex<Vec<Result<(), Fault>>>>);
 
 impl Calls {
-    /// Every outcome recorded so far, in the order their end hooks ran.
-    pub fn all(&self) -> Vec<Outcome> {
+    /// Every end recorded so far, in the order their end hooks ran.
+    pub fn all(&self) -> Vec<Result<(), Fault>> {
         self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -261,8 +262,8 @@ impl Calls {
 
 #[async_trait]
 impl Plugin for Calls {
-    async fn on_provider_end(&self, _px: &ProviderContext, outcome: &Outcome) {
+    async fn on_provider_end(&self, _px: &ProviderContext, end: &Result<(), Fault>) {
         let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        all.push(outcome.clone());
+        all.push(end.clone());
     }
 }

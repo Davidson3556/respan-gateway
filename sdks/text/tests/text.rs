@@ -465,12 +465,7 @@ async fn a_violation_in_the_held_start_is_refused_before_any_byte() -> Result<()
             "{target}: {body}"
         );
         assert_eq!(
-            outcome
-                .await
-                .end
-                .err()
-                .map(|f| f.code().to_owned())
-                .as_deref(),
+            outcome.await.err().map(|f| f.code().to_owned()).as_deref(),
             Some("blocked")
         );
     }

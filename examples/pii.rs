@@ -110,7 +110,7 @@ impl Plugin for PiiInput {
         if !px.is_kind::<Conversation>() {
             return Err(uncovered());
         }
-        let vault = match px.client().extensions().get::<Placeholders>() {
+        let vault = match px.extensions().get::<Placeholders>() {
             Some(vault) => vault.clone(),
             // A call a plugin before `pii` makes: restore its response.
             None => {

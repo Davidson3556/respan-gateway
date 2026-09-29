@@ -53,8 +53,6 @@ struct Inner {
     source: Option<Arc<dyn Error + Send + Sync>>,
     /// A provider's own words for it, and the format that read them.
     answer: Option<(Arc<str>, Arc<dyn Any + Send + Sync>)>,
-    /// Whether the provider answered with it in place of a response.
-    answered: bool,
 }
 
 impl Fault {
@@ -72,7 +70,6 @@ impl Fault {
             retry_after: None,
             source: None,
             answer: None,
-            answered: false,
         }))
     }
 
@@ -100,18 +97,9 @@ impl Fault {
     }
 
     /// The provider's own words for this failure, as `format` read them,
-    /// which that format writes as they came. `in_place`: the provider
-    /// answered with them in place of a response ([`Fault::is_answer`]);
-    /// else they are a failure within a response it began, such as an error
-    /// event.
-    pub fn with_answer<A: Any + Send + Sync>(
-        mut self,
-        format: &str,
-        answer: A,
-        in_place: bool,
-    ) -> Self {
+    /// which that format writes as they came.
+    pub fn with_answer<A: Any + Send + Sync>(mut self, format: &str, answer: A) -> Self {
         self.0.answer = Some((Arc::from(format), Arc::new(answer)));
-        self.0.answered = in_place;
         self
     }
 
@@ -122,17 +110,10 @@ impl Fault {
         answer.downcast_ref()
     }
 
-    /// Whether a provider answered with this failure in place of a response,
-    /// beginning none ([`Fault::with_answer`] `in_place`).
-    pub fn is_answer(&self) -> bool {
-        self.0.answered
-    }
-
     /// The same fault with `other`'s answer and retry, if any.
     pub(crate) fn with_answer_of(mut self, other: &Fault) -> Self {
         if other.0.answer.is_some() {
             self.0.answer = other.0.answer.clone();
-            self.0.answered = other.0.answered;
         }
         self.0.retry_after = self.0.retry_after.or(other.0.retry_after);
         self
@@ -229,7 +210,6 @@ impl fmt::Debug for Fault {
             .field("retry_after", &self.0.retry_after)
             .field("source", &self.0.source.as_ref().map(|s| s.to_string()))
             .field("answer", &self.0.answer.as_ref().map(|(of, _)| &**of))
-            .field("answered", &self.0.answered)
             .finish()
     }
 }
@@ -312,13 +292,10 @@ mod tests {
 
     #[test]
     fn an_answer_is_read_only_by_its_format_and_as_its_type() {
-        let f = Fault::upstream("x").with_answer("f", 7_u8, true);
+        let f = Fault::upstream("x").with_answer("f", 7_u8);
         assert_eq!(f.answer::<u8>("f"), Some(&7));
         assert_eq!(f.answer::<u8>("g"), None);
         assert_eq!(f.answer::<u16>("f"), None);
-        assert!(f.is_answer());
-        let words = Fault::upstream("x").with_answer("f", 7_u8, false);
-        assert!(!words.is_answer() && words.answer::<u8>("f").is_some());
     }
 
     #[test]

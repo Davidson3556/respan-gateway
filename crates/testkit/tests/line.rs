@@ -14,8 +14,8 @@ use http::StatusCode;
 use http_body::Frame;
 use http_body_util::{BodyExt, StreamBody};
 use respan_gateway_core::{
-    Call, ClientContext, Decoder, Encoder, Exchange, Fault, Filter, Format, Gateway, Outcome,
-    Plugin, ProviderContext, Response, Transport, async_trait,
+    Call, ClientContext, Decoder, Encoder, Exchange, Fault, Filter, Format, Gateway, Plugin,
+    ProviderContext, Response, Transport, async_trait,
 };
 use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::Usage;
@@ -329,8 +329,8 @@ impl Transport for Script {
 #[derive(Clone, Default)]
 struct Log(
     Shared<String>,
-    Shared<Outcome>,
-    Shared<Outcome>,
+    Shared<Result<(), Fault>>,
+    Shared<Result<(), Fault>>,
     Shared<Usage>,
 );
 
@@ -347,10 +347,10 @@ impl Log {
     fn notes(&self) -> Vec<String> {
         lock(&self.0).clone()
     }
-    fn calls(&self) -> Vec<Outcome> {
+    fn calls(&self) -> Vec<Result<(), Fault>> {
         lock(&self.1).clone()
     }
-    fn clients(&self) -> Vec<Outcome> {
+    fn clients(&self) -> Vec<Result<(), Fault>> {
         lock(&self.2).clone()
     }
     fn metered(&self) -> Vec<Usage> {
@@ -381,8 +381,8 @@ impl Plugin for Meter {
         })
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, _o: &Outcome) {
-        if let Some(LineUsage(usage)) = px.client().extensions().get::<LineUsage>() {
+    async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
+        if let Some(LineUsage(usage)) = px.extensions().get::<LineUsage>() {
             let usage = lock(usage).clone();
             lock(&self.0.3).push(usage);
         }
@@ -391,11 +391,11 @@ impl Plugin for Meter {
 
 #[async_trait]
 impl Plugin for Log {
-    async fn on_provider_end(&self, _px: &ProviderContext, o: &Outcome) {
-        lock(&self.1).push(o.clone());
+    async fn on_provider_end(&self, _px: &ProviderContext, end: &Result<(), Fault>) {
+        lock(&self.1).push(end.clone());
     }
-    async fn on_client_end(&self, _cx: &ClientContext, o: &Outcome) {
-        lock(&self.2).push(o.clone());
+    async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
+        lock(&self.2).push(end.clone());
     }
 }
 
@@ -498,7 +498,7 @@ async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
     let gw = gateway(script, &log, Log::default());
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert_eq!(log.calls()[0].end, Ok(()));
+    assert_eq!(log.calls()[0], Ok(()));
 }
 
 /// The same for a provider's 204, translated between the standard formats.
@@ -579,7 +579,7 @@ async fn until_content_then_drop(frames: Vec<&'static str>) -> Result<(), Fault>
     let log = Log::default();
     let gw = gateway(Script::default().then(StatusCode::OK, frames), &log, Peek);
     let _ = run(&gw, req(http::Method::POST)).await;
-    log.calls()[0].end.clone()
+    log.calls()[0].clone()
 }
 
 /// Abandoned whether or not `e` shared a frame with the content.
@@ -611,7 +611,7 @@ async fn f6_a_refused_head_request_ends_with_its_fault() {
     let gw = gateway(Script::default(), &log, No);
     let (status, _) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let end = log.clients()[0].end.clone();
+    let end = log.clients()[0].clone();
     assert_eq!(
         end.err().map(|f| f.code().to_owned()).as_deref(),
         Some("bad_request")
@@ -639,7 +639,7 @@ async fn f7_usage_decoded_after_a_calls_filter_failed_reaches_no_meter() {
     let script = Script::default().then(StatusCode::OK, vec!["i:ok\n", "i:bad\nu:7\ne\n"]);
     let gw = gateway(script, &log, Guard);
     let _ = run(&gw, req(http::Method::POST)).await;
-    assert!(log.calls()[0].end.is_err());
+    assert!(log.calls()[0].is_err());
     assert_eq!(t(&log.metered()[0]), None);
 }
 
@@ -664,8 +664,8 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
     let script = Script::default().then(StatusCode::OK, vec!["i:ok\n", "i:boom\n", "e\n"]);
     let gw = gateway(script, &log, Boom);
     let _ = run(&gw, req(http::Method::POST)).await;
-    let client = log.clients()[0].end.clone();
-    let call = log.calls()[0].end.clone();
+    let client = log.clients()[0].clone();
+    let call = log.calls()[0].clone();
     assert_eq!(
         client.err().map(|f| f.code().to_owned()).as_deref(),
         Some("internal")
@@ -831,7 +831,7 @@ async fn r8_3_a_panicking_head_edit_ends_the_call_internal_not_abandoned() {
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let calls = log.calls();
-    let code = calls[0].end.as_ref().err().map(|f| f.code().to_owned());
+    let code = calls[0].as_ref().err().map(|f| f.code().to_owned());
     assert_eq!(code.as_deref(), Some("internal"), "{:?}", calls[0]);
 }
 
@@ -992,7 +992,7 @@ async fn r9_1_a_204_read_through_outputs_ends_ok() {
     let gw = gateway(script, &log, Read(log.clone()));
     let _ = run(&gw, req(http::Method::POST)).await;
     assert_eq!(log.notes(), ["read true"]);
-    assert_eq!(log.calls()[0].end, Ok(()));
+    assert_eq!(log.calls()[0], Ok(()));
 }
 
 // A call filter, added by a marked call's `on_provider`, before one of the
@@ -1015,7 +1015,7 @@ async fn r9_2_a_call_filter_before_a_failing_one_gets_its_end() {
         }
 
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            if px.client().extensions().get::<Mark>().is_some() {
+            if px.extensions().get::<Mark>().is_some() {
                 px.filter(noting::<LOut>(&self.0, "first"))?;
                 px.filter(|_: &mut u32| Ok(()))?;
             }
@@ -1048,7 +1048,7 @@ async fn r9_3_usage_before_the_value_a_filter_fails_on_is_metered_once() {
     let gw = gateway(script, &log, P);
     let _ = run(&gw, req(http::Method::POST)).await;
     assert_eq!(log.metered().iter().map(t).collect::<Vec<_>>(), [Some(5.0)]);
-    assert!(log.calls()[0].end.is_err());
+    assert!(log.calls()[0].is_err());
 }
 
 // The client's `Outcome` keeps the refusal's end though an output filter
@@ -1080,7 +1080,7 @@ async fn r9_4_a_filter_failing_at_close_does_not_rewrite_the_outcome() {
     let (status, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(&body.unwrap_or_default()[..], b"x:no\n");
-    let end = log.clients()[0].end.clone();
+    let end = log.clients()[0].clone();
     assert_eq!(
         end.err().map(|f| f.message().to_owned()).as_deref(),
         Some("no")
@@ -1119,7 +1119,7 @@ async fn r9_4b_an_abandoned_call_stays_abandoned() {
     let script = Script::default().then(StatusCode::OK, vec!["i:hi\n", "e\n"]);
     let gw = gateway(script, &log, P);
     let _ = run(&gw, req(http::Method::POST)).await;
-    let end = log.calls()[0].end.clone();
+    let end = log.calls()[0].clone();
     assert_eq!(
         end.err().map(|f| f.code().to_owned()).as_deref(),
         Some("abandoned")
@@ -1552,7 +1552,7 @@ async fn r10_2_a_204_dropped_after_until_content_ends_ok() {
     let _ = run(&gw, req(http::Method::POST)).await;
     // The 200's end is its body's, which `until_content` did not reach; the 204's
     // comes with its head.
-    let ends: Vec<_> = log.calls().iter().map(|o| o.end.clone()).collect();
+    let ends = log.calls();
     let code = |e: &Result<(), Fault>| e.as_ref().err().map(|f| f.code().to_owned());
     assert_eq!(code(&ends[0]).as_deref(), Some("abandoned"));
     assert_eq!(ends[1], Ok(()));
@@ -1584,7 +1584,7 @@ async fn r10_3_a_panic_while_closing_ends_the_edge_internal() {
     let log = Log::default();
     let gw = gateway(Script::default(), &log, P);
     let _ = run(&gw, req(http::Method::POST)).await;
-    let end = log.clients()[0].end.clone();
+    let end = log.clients()[0].clone();
     // The end is known at close, so a panic changes it no more than a failure.
     assert_eq!(
         end.err().map(|f| f.code().to_owned()).as_deref(),
@@ -1775,7 +1775,7 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
     let call = &log.calls()[0];
-    let end = call.end.clone().map_err(|f| f.code().to_owned());
+    let end = call.clone().map_err(|f| f.code().to_owned());
     assert_eq!(
         (t(&log.metered()[0]), end),
         (None, Err(respan_gateway_core::codes::ABANDONED.to_owned()))
@@ -1887,6 +1887,6 @@ async fn r11_a_filter_that_panics_fails_the_call_internal() {
     let gw = gateway(script, &log, PanicsOnOutput);
     let _ = run(&gw, req(http::Method::POST)).await;
     let call = &log.calls()[0];
-    let internal = call.end.as_ref().is_err_and(|f| f.code() == "internal");
+    let internal = call.as_ref().is_err_and(|f| f.code() == "internal");
     assert_eq!((t(&log.metered()[0]), internal), (None, true));
 }

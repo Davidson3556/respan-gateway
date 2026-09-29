@@ -9,8 +9,8 @@ use bytes::Bytes;
 use common::{Metered, with_plugins};
 use http::StatusCode;
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
-    ProviderContext, Response, async_trait,
+    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
+    Response, async_trait,
 };
 use respan_gateway_core::{bytes, futures};
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
@@ -118,7 +118,7 @@ async fn a_passthrough_of_no_kind_relays_an_event_stream_byte_for_byte() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.ok(), Some(Bytes::from(stream.concat())));
     assert_eq!(mock.sent()[0].body(), "anything".as_bytes());
-    assert_eq!(log.only().end, Ok(()));
+    assert_eq!(log.only(), Ok(()));
 }
 
 // Must hold: the same, for a whole body, and a failure's body as it came.
@@ -355,7 +355,7 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
         let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
         assert!(body.contains("\"a\"") && !body.contains("\"b\""), "{body}");
         let call = &calls.all()[0];
-        assert!(matches!(&call.end, Err(f) if f.code() == "cap"));
+        assert!(matches!(call, Err(f) if f.code() == "cap"));
         let usage = meter.total();
         assert_eq!(
             usage.get(units::OUTPUT_TOKENS),
@@ -394,7 +394,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
 
     #[async_trait]
     impl Plugin for Bills {
-        async fn on_client_end(&self, cx: &ClientContext, _outcome: &Outcome) {
+        async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
             if let Some(CachedUsage(cached)) = cx.extensions().get() {
                 *self.0.lock().unwrap_or_else(|e| e.into_inner()) = cached.clone();
             }

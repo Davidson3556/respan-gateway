@@ -47,8 +47,8 @@ impl Backoff {
     }
 
     /// The wait before another try, after `tries` tries of which the last
-    /// was answered with `answer` ([`Fault::is_answer`]), or with none if it
-    /// failed first; `None` if it should not be retried.
+    /// was answered with `answer`, a failure of the provider's response, or
+    /// with none if it failed first; `None` if it should not be retried.
     fn wait(&self, tries: u32, answer: Option<&Fault>) -> Option<Duration> {
         if tries >= self.tries {
             return None;
@@ -74,7 +74,7 @@ fn retryable(status: u16) -> bool {
 }
 
 /// Put on every call [`first_success`] and [`race`] send
-/// (read as `px.client().extensions()`),
+/// (read as `px.extensions()`),
 /// so provider-edge hooks can tell attempts apart.
 #[derive(Debug, Clone)]
 pub struct Attempt {
@@ -136,34 +136,35 @@ pub enum Until {
 }
 
 /// An attempt, its answer read [`Until`] a point, and, read to its end,
-/// the failure a success ended with.
-type Answer = (Attempt, Result<Response, Fault>, Option<Fault>);
+/// the failure a success ended with; and whether the call got a response,
+/// so that a fault is the provider's.
+type Answer = (Attempt, Result<Response, Fault>, Option<Fault>, bool);
 
 /// Send `call` as `attempt` and read it `until` a point.
 async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
-    let (answer, late) = match call.with_extension(attempt.clone()).await {
+    let (answer, late, responded) = match call.with_extension(attempt.clone()).await {
         Ok(resp) => match until {
-            Until::Head => (Ok(resp), None),
-            Until::Content => (resp.until_content().await, None),
+            Until::Head => (Ok(resp), None, true),
+            Until::Content => (resp.until_content().await, None, true),
             Until::End => match resp.until_end().await {
-                Ok((resp, end)) => (Ok(resp), end.err()),
-                Err(fault) => (Err(fault), None),
+                Ok((resp, end)) => (Ok(resp), end.err(), true),
+                Err(fault) => (Err(fault), None, true),
             },
         },
-        Err(fault) => (Err(fault), None),
+        Err(fault) => (Err(fault), None, false),
     };
-    (attempt, answer, late)
+    (attempt, answer, late, responded)
 }
 
 /// How `answer` failed, if it did: its fault, or, read to its end, the
 /// failure a success ended with.
-fn failure((_, answer, late): &Answer) -> Option<&Fault> {
+fn failure((_, answer, late, _): &Answer) -> Option<&Fault> {
     answer.as_ref().err().or(late.as_ref())
 }
 
 /// Return `answer`, promoting its attempt if it is a response. A fault
 /// stays a loser: its call already ended, with nothing to commit.
-fn win((attempt, answer, _): Answer) -> Result<Response, Fault> {
+fn win((attempt, answer, ..): Answer) -> Result<Response, Fault> {
     if answer.is_ok() {
         attempt.won.store(true, Ordering::SeqCst);
     }
@@ -177,9 +178,9 @@ fn last(answer: Option<Answer>) -> Result<Response, Fault> {
 
 /// Each call in turn, retried as `backoff` says, until one's response is a
 /// success read `until` its stopping point; else the last answer, so the
-/// client sees the last 429 and its `Retry-After`. A provider's error
-/// answer ([`Fault::is_answer`]) is retried if its status may be answered
-/// otherwise, as long as its `Retry-After` says; a call that cannot be
+/// client sees the last 429 and its `Retry-After`. A failure of the
+/// provider's response, a refusal included, is retried if its status may
+/// be answered otherwise, as long as its `Retry-After` says; a call that cannot be
 /// made, such as with a `config` fault, moves on at once; an unreachable
 /// provider or a success failing before the point is retried; with
 /// [`Until::End`], one failing anywhere before its end.
@@ -195,10 +196,12 @@ pub async fn first_success(
             index += 1;
             let wait = match failure(&answer) {
                 None => return win(answer),
-                Some(f) if f.is_answer() => backoff.wait(tries, Some(f)),
-                Some(f) if f.code() == codes::UPSTREAM || f.code() == codes::TRUNCATED => {
-                    backoff.wait(tries, None)
-                }
+                // A failure of the response: retried as its status says,
+                // unless it is ours, or the client's leaving.
+                Some(f) if answer.3 && !ours(f) => backoff.wait(tries, Some(f)),
+                // A call not sent: an unreachable provider is retried; a
+                // hook's refusal or a call that cannot be made is not.
+                Some(f) if f.code() == codes::UPSTREAM => backoff.wait(tries, None),
                 _ => None,
             };
             let Some(wait) = wait else {
@@ -209,6 +212,12 @@ pub async fn first_success(
         }
     }
     last(previous)
+}
+
+/// Whether `fault` is the gateway's own, whatever the provider says: a
+/// bug, a setup that cannot work, or a call given up.
+fn ours(fault: &Fault) -> bool {
+    [codes::INTERNAL, codes::CONFIG, codes::ABANDONED].contains(&fault.code())
 }
 
 /// Start each call `stagger` after the one before, or at once when every
@@ -303,7 +312,7 @@ mod tests {
     use super::Backoff;
 
     fn answer(status: StatusCode, retry_after: Option<u64>) -> Fault {
-        let fault = Fault::new(status, "x", "x").with_answer("f", (), true);
+        let fault = Fault::new(status, "x", "x").with_answer("f", ());
         match retry_after {
             Some(secs) => fault.with_retry_after(Duration::from_secs(secs)),
             None => fault,

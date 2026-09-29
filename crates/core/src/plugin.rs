@@ -7,25 +7,6 @@ use crate::fault::guarded;
 use crate::format::Values;
 use crate::{ClientContext, Fault, ProviderContext, Response};
 
-/// How a request ([`Plugin::on_client_end`]) or one of its calls
-/// ([`Plugin::on_provider_end`]) ended.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct Outcome {
-    /// `Ok` if the response was read to its end. `Err` with the fault that
-    /// refused, failed or stopped it, such as a provider's error answer
-    /// ([`Fault::is_answer`]), or [`codes::ABANDONED`](crate::codes::ABANDONED)
-    /// if it was dropped or cut off first.
-    pub end: Result<(), Fault>,
-}
-
-/// Ended `Ok`.
-impl Default for Outcome {
-    fn default() -> Self {
-        Self { end: Ok(()) }
-    }
-}
-
 /// The extension point, on two edges: the client edge once per request, the
 /// provider edge once per call. Every plugin sees all traffic, in one order
 /// on both edges, and works on a kind through its types whatever the
@@ -59,7 +40,7 @@ impl Default for Outcome {
 ///     })
 /// });
 /// let (resp, _) = futures::future::select_ok(race).await?;
-/// // In on_provider_end: px.client().extensions().get::<Won>()
+/// // In on_provider_end: px.extensions().get::<Won>()
 /// ```
 #[async_trait]
 pub trait Plugin: Send + Sync + 'static {
@@ -75,7 +56,11 @@ pub trait Plugin: Send + Sync + 'static {
     /// and every call's `on_provider_end`; open calls end abandoned first.
     /// End hooks run in order, detached on the runtime; a panic does not
     /// stop the others, and [`Gateway::idle`](crate::Gateway::idle) waits.
-    async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {}
+    /// `end` is `Ok` if the response was read to its end, else the fault
+    /// that refused, failed or stopped it, such as a provider's error
+    /// answer, or [`codes::ABANDONED`](crate::codes::ABANDONED) if it was
+    /// dropped or cut off first.
+    async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {}
 
     /// The provider edge, before every call, until one plugin fails it,
     /// waiting for no earlier call's end hooks: a limit reserves here and
@@ -88,8 +73,10 @@ pub trait Plugin: Send + Sync + 'static {
 
     /// Once per call whose `on_provider` started: when it fails, its
     /// response's end is read, or it is dropped or cut off (abandoned). Runs
-    /// like `on_client_end`, before it.
-    async fn on_provider_end(&self, _px: &ProviderContext, _outcome: &Outcome) {}
+    /// like `on_client_end`, before it, with the call's `end`. What else is
+    /// known of a call is on its context, such as
+    /// [`is_sent`](ProviderContext::is_sent).
+    async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {}
 }
 
 /// A shared plugin; it forwards every method.
@@ -99,16 +86,16 @@ impl<P: Plugin + ?Sized> Plugin for Arc<P> {
         (**self).on_client(cx).await
     }
 
-    async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
-        (**self).on_client_end(cx, outcome).await;
+    async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>) {
+        (**self).on_client_end(cx, end).await;
     }
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         (**self).on_provider(px).await
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        (**self).on_provider_end(px, outcome).await;
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+        (**self).on_provider_end(px, end).await;
     }
 }
 

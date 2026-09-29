@@ -51,8 +51,8 @@ A client sends a request, plugins look at it, the gateway sends it on to a
 provider, and the response streams back through the plugins. A request
 carries inputs, its response outputs. A streaming request, such as a
 WebSocket (the HTTP adapter makes one of a request asking to switch
-protocols), has its inputs stream after its head; any other is whole: its
-body, even empty, is its one input. The kernel has no HTTP: the adapter,
+protocols), has its inputs stream after its head (`Exchange::streams`); any
+other is whole: its body, even empty, is its one input. The kernel has no HTTP: the adapter,
 transports and formats own its rules and heads
 ([0013](docs/decisions/0013-no-http-in-core.md)).
 
@@ -63,7 +63,8 @@ transports and formats own its rules and heads
 - **Edge**: where hooks run: the client edge once per request
   (`on_client`), the provider edge once per call (`on_provider`). Each
   edge's end hook (`on_client_end`, `on_provider_end`) runs once after it
-  ends. `on_client` passes (`Ok(None)`), answers, skipping the plugins
+  ends, with how it ended (`&Result<(), Fault>`); a fact about a call, such
+  as `is_sent`, is a method of its context. `on_client` passes (`Ok(None)`), answers, skipping the plugins
   after it, or refuses.
 - **Filter**: edits a request's inputs or a response's outputs as they
   stream; its type says which. Filters see every message, keep-alives and
@@ -78,10 +79,13 @@ transports and formats own its rules and heads
   the bytes it came in.
 - **Refusal**: a failure before the response head goes out, sent in the
   client's format with the fault's status and retry; a provider's error
-  answer (`Fault::is_answer`) goes as it came to a client of its format.
+  answer (`Fault::answer`) goes as it came to a client of its format.
 - **Relay**: a format's promise to write each message as the bytes it
   came in while it says the same, an edit written into them. A whole
-  request no plugin changed goes as the client's bytes, unread.
+  request no plugin changed goes as the client's bytes, unread. A call
+  that sends the client's own message to a provider of its format's name
+  is `relayed` (`Exchange::relayed`, set by the kernel alone): only a
+  relay carries the client's credential.
 - **Usage**: not the kernel's
   ([0010](docs/decisions/0010-usage-out-of-core.md)). The chat kind
   reports it in `Reply.usage` (`formats::Usage`); a plugin meters a call

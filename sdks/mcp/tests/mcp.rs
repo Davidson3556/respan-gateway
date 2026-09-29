@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use respan_gateway_core::serde_json::{Value, json};
-use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response};
 use respan_gateway_core::{Transport, async_trait, codes};
 use respan_gateway_http::Body;
 use respan_gateway_http::Credential;
@@ -67,7 +67,10 @@ fn request(method: Method, body: &str, headers: &[(&str, &str)]) -> http::Reques
     req.body(body).unwrap_or_else(|e| panic!("{e}"))
 }
 
-async fn send(gw: &Gateway, req: http::Request<Body>) -> (StatusCode, HeaderMap, String, Outcome) {
+async fn send(
+    gw: &Gateway,
+    req: http::Request<Body>,
+) -> (StatusCode, HeaderMap, String, Result<(), Fault>) {
     let (resp, outcome) = serve(gw, req).await;
     let (head, body) = resp.into_parts();
     let body = body.collect().await.map(|b| b.to_bytes());
@@ -111,7 +114,7 @@ async fn an_unedited_message_relays_byte_exact_and_an_edited_one_into_its_event(
         let (status, headers, sse, outcome) = send(&gw, posted()).await;
         assert_eq!((status, &sse[..]), (StatusCode::OK, &events.concat()[..]));
         assert_eq!(headers["content-type"], "text/event-stream");
-        assert!(outcome.end.is_ok());
+        assert!(outcome.is_ok());
         let (_, _, whole, _) = send(&gw, posted()).await;
         assert_eq!(whole, json);
         let sent = &mock.sent()[0];
@@ -161,13 +164,13 @@ async fn a_batch_answer_is_complete_only_once_every_id_is_answered() {
         (&json!(1), &json!(codes::TRUNCATED))
     );
     assert_eq!(
-        outcome.end.map_err(|f| f.code().to_owned()),
+        outcome.map_err(|f| f.code().to_owned()),
         Err(codes::TRUNCATED.to_owned())
     );
 
     let (_, _, body, outcome) = send(&gw, request(Method::POST, batch, &[])).await;
     assert_eq!(messages(&body).len(), 3);
-    assert!(outcome.end.is_ok());
+    assert!(outcome.is_ok());
 }
 
 #[tokio::test]
@@ -182,12 +185,12 @@ async fn delete_and_202_are_handled() {
         let (status, _, body, outcome) =
             send(&gw, request(Method::DELETE, "", &[(SESSION, "s1")])).await;
         assert_eq!((status, &body[..]), (StatusCode::NO_CONTENT, ""));
-        assert!(outcome.end.is_ok());
+        assert!(outcome.is_ok());
         let (status, headers, body, outcome) =
             send(&gw, request(Method::POST, note, &[(SESSION, "s1")])).await;
         assert_eq!((status, &body[..]), (StatusCode::ACCEPTED, ""));
         assert!(!headers.contains_key("content-type"));
-        assert!(outcome.end.is_ok());
+        assert!(outcome.is_ok());
 
         let sent = mock.sent();
         assert_eq!(
@@ -220,7 +223,7 @@ async fn a_stdio_child_answers_a_request_in_its_session() {
         messages(&body),
         [json!({ "jsonrpc": "2.0", "id": 2, "result": {} })]
     );
-    assert!(outcome.end.is_ok());
+    assert!(outcome.is_ok());
     let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     assert_eq!(
         send(&gw, request(Method::POST, note, &with)).await.0,
@@ -343,7 +346,7 @@ async fn sessions_are_capped() {
     init(&gw, &[]).await;
     let (status, ..) = send(&gw, request(Method::POST, INIT, &[])).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    send(&gw, request(Method::DELETE, "", &[(SESSION, &first)])).await;
+    drop(send(&gw, request(Method::DELETE, "", &[(SESSION, &first)])).await);
     init(&gw, &[]).await;
 }
 
@@ -463,7 +466,7 @@ echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}'; ex
         .unwrap_or_else(|_| panic!("the POST is still waiting"));
     let ids: Vec<_> = messages(&body).iter().map(|m| m["id"].clone()).collect();
     assert_eq!((status, ids), (StatusCode::OK, vec![Value::Null, json!(2)]));
-    assert!(outcome.end.is_err());
+    assert!(outcome.is_err());
 }
 
 /// Moves the caller's key into an [`Owner`], as an auth plugin would.
@@ -512,7 +515,7 @@ for i in $(seq 500); do echo '{"jsonrpc":"2.0","method":"notifications/message"}
     let with = [(SESSION, &session[..])];
     let (listen, _) = serve(&gw, request(Method::GET, "", &with)).await;
     let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-    send(&gw, request(Method::POST, note, &with)).await;
+    drop(send(&gw, request(Method::POST, note, &with)).await);
     // The client reads nothing until the server has said everything.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let body = tokio::time::timeout(Duration::from_secs(3), listen.into_body().collect())
@@ -544,7 +547,7 @@ echo '{"jsonrpc":"2.0","id":3,"result":{"fast":true}}'; exec sleep 100"#;
         .unwrap_or_else(|_| panic!("the POST is still waiting"));
     let fast = json!({"jsonrpc":"2.0","id":3,"result":{"fast":true}});
     assert_eq!(messages(&body), [fast], "{body}");
-    assert!(outcome.end.is_ok());
+    assert!(outcome.is_ok());
 }
 
 #[tokio::test]
@@ -618,7 +621,7 @@ async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
     );
     assert_eq!(error["error"]["data"]["code"], TIMED_OUT);
     assert_eq!(
-        outcome.end.err().map(|f| f.code().to_owned()),
+        outcome.err().map(|f| f.code().to_owned()),
         Some(TIMED_OUT.into())
     );
     // With nothing waiting, the session idles out and a new one fits.

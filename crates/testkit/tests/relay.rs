@@ -11,8 +11,8 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_core::Exchange;
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
-    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Outcome, Plugin,
-    ProviderContext, Response, Transport, codes,
+    ClientContext, Decoder, Encoder, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
+    Response, Transport, codes,
 };
 use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
@@ -111,8 +111,8 @@ impl Plugin for Hang {
         std::future::pending().await
     }
 
-    async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
-        self.0.on_client_end(cx, outcome).await;
+    async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>) {
+        self.0.on_client_end(cx, end).await;
     }
 }
 
@@ -120,7 +120,7 @@ struct PanicAtEnd;
 
 #[async_trait]
 impl Plugin for PanicAtEnd {
-    async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {
+    async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
         panic!("a buggy plugin");
     }
 }
@@ -169,7 +169,7 @@ async fn a_stream_is_relayed_byte_for_byte_with_usage() {
     h.mock.reply(OPENAI, mock::sse(STREAM));
 
     assert_eq!(h.body(chat()).await, STREAM.concat());
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
     let usage = h.usage.total();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
@@ -181,7 +181,7 @@ async fn a_unary_response_is_relayed_byte_for_byte_with_usage() {
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
 
     assert_eq!(h.body(unary_chat()).await, UNARY);
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
 
@@ -196,9 +196,11 @@ async fn an_error_page_is_relayed_as_it_is() {
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(body.ok().as_deref(), Some(page.as_bytes()));
-    // The provider answered with the failure, which the outcome carries.
+    // The provider answered with the failure, which the end carries.
     let o = h.log.only();
-    assert!(matches!(o.end, Err(f) if f.status() == StatusCode::BAD_GATEWAY && f.is_answer()));
+    assert!(
+        matches!(o, Err(f) if f.status() == StatusCode::BAD_GATEWAY && f.answer::<http::Response<bytes::Bytes>>("openai-chat").is_some())
+    );
 }
 
 #[tokio::test]
@@ -330,7 +332,9 @@ async fn a_head_edit_keeps_the_relay() {
     assert_eq!(stamp, Some(&HeaderValue::from_static("respan")));
     assert_eq!(body.ok().as_deref(), Some(error.as_bytes()));
     // This one is the provider's answer.
-    assert!(matches!(h.log.only().end, Err(f) if f.is_answer()));
+    assert!(
+        matches!(h.log.only(), Err(f) if f.answer::<http::Response<bytes::Bytes>>("openai-chat").is_some())
+    );
 }
 
 #[tokio::test]
@@ -422,7 +426,7 @@ async fn a_refusal_is_an_error_in_the_client_format() {
     assert_eq!(err["error"]["balance"], 0.12);
     assert!(h.mock.sent().is_empty());
     // The fault carries the status.
-    assert_eq!(h.log.only().end, Err(fault));
+    assert_eq!(h.log.only(), Err(fault));
 }
 
 #[tokio::test]
@@ -436,7 +440,7 @@ async fn a_plugin_can_respond_itself() {
     assert_eq!(body["usage"]["completion_tokens"], 1);
     // A plugin's own answer passes no provider edge, so
     // no meter there sees its usage; no call ran.
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
     assert!(h.usage.all().is_empty());
 }
 
@@ -452,7 +456,7 @@ async fn a_plugin_can_answer_by_calling_providers() {
 
     assert_eq!(h.body(chat()).await, STREAM.concat());
     assert_eq!(h.mock.sent().len(), 2);
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -482,7 +486,7 @@ async fn a_cut_stream_ends_with_an_error_event_relayed_or_filtered() {
             );
         }
         assert!(!body.contains("[DONE]"));
-        assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::TRUNCATED));
+        assert!(matches!(h.log.only(), Err(f) if f.code() == codes::TRUNCATED));
     }
 }
 
@@ -500,7 +504,7 @@ async fn a_transport_error_mid_stream_ends_with_an_error_event() {
 
     assert!(body.starts_with(&STREAM[..2].concat()), "{body}");
     assert!(body.ends_with("\"type\":\"upstream\",\"param\":null,\"code\":\"upstream\"}}\n\n"));
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::UPSTREAM));
 }
 
 #[tokio::test]
@@ -516,7 +520,7 @@ async fn a_unary_body_cut_before_any_bytes_is_an_error_in_the_client_format() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::UPSTREAM));
 }
 
 #[tokio::test]
@@ -529,7 +533,7 @@ async fn a_broken_unary_success_is_refused_as_the_providers_failure() {
     let (status, body) = h.text(unary_chat()).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::UPSTREAM));
 }
 
 #[tokio::test]
@@ -543,7 +547,7 @@ async fn a_client_that_leaves_mid_response_ends_once() {
     h.gw.idle().await;
 
     let o = h.log.only();
-    assert!(matches!(o.end, Err(f) if f.code() == codes::ABANDONED));
+    assert!(matches!(o, Err(f) if f.code() == codes::ABANDONED));
 }
 
 #[tokio::test]
@@ -556,7 +560,7 @@ async fn a_client_that_leaves_before_a_response_ends_once() {
     h.gw.idle().await;
 
     let o = h.log.only();
-    assert!(matches!(o.end, Err(f) if f.code() == codes::ABANDONED));
+    assert!(matches!(o, Err(f) if f.code() == codes::ABANDONED));
     assert_eq!(
         hang.all().len(),
         1,
@@ -592,7 +596,7 @@ async fn a_panicking_end_hook_does_not_skip_the_others() {
 
     let _ = h.send(chat()).await;
 
-    assert_eq!(after.only().end, Ok(()));
+    assert_eq!(after.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -702,7 +706,7 @@ impl Plugin for Named {
         Ok(None)
     }
 
-    async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {
+    async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
         self.note("client_end");
     }
 
@@ -711,7 +715,7 @@ impl Plugin for Named {
         Ok(())
     }
 
-    async fn on_provider_end(&self, _px: &ProviderContext, _outcome: &Outcome) {
+    async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {
         self.note("provider_end");
     }
 }
@@ -866,7 +870,7 @@ async fn a_panic_in_a_filter_is_refused_as_internal() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = body.map(|b| String::from_utf8_lossy(&b).into_owned());
     assert!(body.is_ok_and(|b| b.contains(codes::INTERNAL)));
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::INTERNAL));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::INTERNAL));
 }
 
 #[tokio::test]
@@ -887,7 +891,7 @@ async fn a_head_edit_that_panics_is_refused_as_internal() {
     let (status, _, _) = h.send(chat()).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::INTERNAL));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::INTERNAL));
 }
 
 #[tokio::test]
@@ -930,7 +934,7 @@ async fn a_plugin_that_panics_is_refused_as_internal() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = body.map(|b| String::from_utf8_lossy(&b).into_owned());
     assert!(body.is_ok_and(|b| b.contains(codes::INTERNAL)));
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::INTERNAL));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::INTERNAL));
 }
 
 #[tokio::test]
@@ -946,7 +950,7 @@ async fn a_refusal_its_format_cannot_write_is_a_plain_500() {
     assert_eq!(body.ok().as_deref(), Some(&b"not an error"[..]));
     // The adapter wrote the plain 500.
     let o = h.log.only();
-    assert!(matches!(o.end, Err(f) if f.code() == "odd"));
+    assert!(matches!(o, Err(f) if f.code() == "odd"));
 }
 
 #[tokio::test]
@@ -1040,7 +1044,7 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
     let (status, _, _) = h.send(chat()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     // Its fault has the status.
-    let end = h.log.only().end;
+    let end = h.log.only();
     assert!(matches!(end, Err(f) if f.status() == StatusCode::FORBIDDEN));
 
     let world = |e: &Reply| e.texts().any(|text| text.contains("world"));
@@ -1055,7 +1059,7 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
         body.ends_with("\"type\":\"blocked\",\"param\":null,\"code\":\"blocked\"}}\n\n"),
         "{body}"
     );
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == "blocked"));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == "blocked"));
 }
 
 #[tokio::test]
@@ -1084,7 +1088,7 @@ async fn plugins_see_the_request_and_change_its_model() {
             Ok(None)
         }
 
-        async fn on_client_end(&self, cx: &ClientContext, _outcome: &Outcome) {
+        async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
             if let Ok(mut seen) = self.0.lock() {
                 *seen = cx.extensions().get::<Seen>().map(|s| s.0);
             }
@@ -1099,7 +1103,7 @@ async fn plugins_see_the_request_and_change_its_model() {
     let sent: serde_json::Value =
         serde_json::from_slice(h.mock.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent["model"], "gpt-small");
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
     assert_eq!(redirect.0.lock().map(|s| *s).ok().flatten(), Some("hi"));
 }
 
@@ -1154,7 +1158,7 @@ async fn cached_whole_bytes_answer_a_streaming_client_as_a_stream() {
     assert!(body.starts_with("data: {"), "{body}");
     assert!(body.contains("\"content\":\"hi\""), "{body}");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -1169,7 +1173,7 @@ async fn a_unary_guardrail_refuses_with_its_status() {
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert!(body.contains("\"code\":\"blocked\""), "{body}");
     // Its fault has the status.
-    let end = h.log.only().end;
+    let end = h.log.only();
     assert!(matches!(end, Err(f) if f.status() == StatusCode::FORBIDDEN));
     // The head edits apply to the refusal.
     assert_eq!(
@@ -1195,7 +1199,7 @@ async fn a_call_kept_past_its_request_cannot_call() {
             Ok(None)
         }
 
-        async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {
+        async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
             let Some(call) = self.0.lock().ok().and_then(|mut kept| kept.take()) else {
                 return;
             };
@@ -1251,7 +1255,7 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
     assert!(gave_up.is_err());
     gw.idle().await;
 
-    assert!(matches!(log.only().end, Err(f) if f.code() == codes::ABANDONED));
+    assert!(matches!(log.only(), Err(f) if f.code() == codes::ABANDONED));
 }
 
 #[test]
@@ -1277,7 +1281,7 @@ async fn end_hooks_run_on_the_requests_runtime_wherever_its_response_is_read() {
 
     #[async_trait]
     impl Plugin for OnRuntime {
-        async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {
+        async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
             let on = tokio::runtime::Handle::try_current().is_ok();
             self.0.lock().map(|mut s| *s = Some(on)).ok();
         }
@@ -1769,7 +1773,7 @@ async fn an_embedder_reads_how_its_request_ended() {
     let (resp, ended) = serve(&h.gw, req).await;
     let _ = read_whole(resp).await;
 
-    assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(ended.await, Ok(()));
 }
 
 #[tokio::test]
@@ -1816,8 +1820,8 @@ async fn every_response_says_how_its_request_ended() {
     let (resp, ended) = serve(&h.gw, post("/nowhere", UNARY_REQ)).await;
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    // Its outcome is that of the plain refusal.
-    let end = ended.await.end.map_err(|f| f.code().to_owned());
+    // Its end is that of the plain refusal.
+    let end = ended.await.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err(codes::NOT_FOUND.to_owned()));
 }
 
@@ -1982,7 +1986,7 @@ async fn other_choices_a_filter_took_leave_their_chunks() {
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(!body.contains("error") && !body.contains("\"B\""), "{body}");
     assert!(body.ends_with("data: [DONE]\n\n"));
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -2155,7 +2159,7 @@ async fn a_calls_own_input_its_format_cannot_write_anew_is_the_plugins_fault() {
 
     // The plugin brought it, so it is not the client's fault.
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::CONFIG));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::CONFIG));
     assert!(h.mock.sent().is_empty());
 }
 
@@ -2394,7 +2398,7 @@ async fn a_relayed_redirect_passes_as_it_came_and_is_no_answer() {
     assert_eq!(body.ok().as_deref(), Some(&b""[..]));
     // The redirect is a fault, a 502 to any other format, that
     // carries the provider's answer.
-    let end = h.log.only().end.err();
+    let end = h.log.only().err();
     assert_eq!(
         end.as_ref().map(respan_gateway_http::status),
         Some(StatusCode::BAD_GATEWAY)
@@ -2469,7 +2473,7 @@ async fn a_plugins_own_answer_made_of_outputs_takes_its_status_from_a_head_edit(
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(headers["content-type"], "application/json");
     // A plugin's own answer is not a failed request.
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
     let body: serde_json::Value =
         serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["choices"][0]["message"]["content"], "later", "{body}");
@@ -2496,11 +2500,7 @@ async fn a_failure_labelled_as_a_stream_is_still_a_failure() {
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(STREAM.concat().as_bytes()));
-    let end = h
-        .log
-        .only()
-        .end
-        .map_err(|f| respan_gateway_http::status(&f));
+    let end = h.log.only().map_err(|f| respan_gateway_http::status(&f));
     assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE));
 }
 
@@ -2545,7 +2545,7 @@ async fn a_success_framed_as_an_event_is_the_providers_failure_on_every_path() {
         // Refused and counted a provider failure, plugin or not.
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(body.contains("\"code\":\"upstream\""), "{body}");
-        let end = h.log.only().end.map_err(|f| f.code().to_owned());
+        let end = h.log.only().map_err(|f| f.code().to_owned());
         assert_eq!(end, Err(codes::UPSTREAM.to_owned()));
     }
 }
@@ -2664,7 +2664,7 @@ async fn an_error_in_a_success_says_what_the_provider_answered() {
         .all()
         .into_iter()
         .map(|o| {
-            o.end.map_err(|f| {
+            o.map_err(|f| {
                 (
                     respan_gateway_http::status(&f),
                     f.code().to_owned(),
@@ -2701,7 +2701,7 @@ async fn a_gateway_dropped_mid_response_serves_what_it_began() {
     let (_, _, body) = read_whole(resp).await;
 
     assert_eq!(body.ok().as_deref(), Some(STREAM.concat().as_bytes()));
-    assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(ended.await, Ok(()));
 }
 
 #[tokio::test]
@@ -2748,7 +2748,7 @@ async fn a_providers_trailers_are_not_passed_on() {
     let collected = collected.unwrap_or_else(|e| panic!("{e}"));
     assert!(collected.trailers().is_none());
     assert_eq!(&collected.to_bytes()[..], UNARY.as_bytes());
-    assert_eq!(log.only().end, Ok(()));
+    assert_eq!(log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -2787,7 +2787,7 @@ async fn a_providers_error_event_in_a_stream_goes_out_as_it_came() {
 
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.ends_with(error), "{body}");
-    let end = h.log.only().end.map_err(|f| f.code().to_owned());
+    let end = h.log.only().map_err(|f| f.code().to_owned());
     assert_eq!(end, Err("server_error".to_owned()));
 }
 
@@ -2840,7 +2840,7 @@ async fn a_providers_error_after_its_finish_keeps_both_and_ends_last() {
         assert_eq!(finished, !held, "{body}");
         assert!(body.ends_with(error), "held {held}: {body}");
         assert_eq!(body.contains("[footer]"), held, "{body}");
-        let end = h.log.only().end.map_err(|f| f.code().to_owned());
+        let end = h.log.only().map_err(|f| f.code().to_owned());
         assert_eq!(end, Err("server_error".to_owned()));
     }
 }
@@ -2859,7 +2859,7 @@ async fn a_providers_error_event_mid_stream_goes_as_it_came_to_its_format() {
 
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.starts_with(content) && body.ends_with(error), "{body}");
-    assert!(h.log.only().end.is_err());
+    assert!(h.log.only().is_err());
 }
 
 // A provider's error inside a 200 goes as it came to a client of its format.
@@ -2934,7 +2934,7 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
     gw.idle().await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(log.only().end, Ok(()));
+    assert_eq!(log.only(), Ok(()));
     assert!(dropped.load(Ordering::SeqCst));
 }
 
@@ -2945,16 +2945,19 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
 #[derive(Clone, Default)]
 struct Bill {
     started: Arc<Mutex<Vec<String>>>,
-    ended: Arc<Mutex<Vec<(String, Outcome)>>>,
+    ended: Arc<Mutex<Vec<Ended>>>,
 }
+
+/// A call's name and how it ended.
+type Ended = (String, Result<(), Fault>);
 
 impl Bill {
     fn started(&self) -> Vec<String> {
         self.started.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
-    /// Each call's outcome, by call.
-    fn ended(&self) -> Vec<(String, Outcome)> {
+    /// Each call's end, by call.
+    fn ended(&self) -> Vec<Ended> {
         let mut ended = self.ended.lock().map(|e| e.clone()).unwrap_or_default();
         ended.sort_by(|a, b| a.0.cmp(&b.0));
         ended
@@ -2984,8 +2987,8 @@ impl Plugin for Bill {
         Ok(())
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let ended = (call_name(px), outcome.clone());
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+        let ended = (call_name(px), end.clone());
         self.ended.lock().map(|mut e| e.push(ended)).ok();
     }
 }
@@ -3040,10 +3043,7 @@ async fn every_call_a_smart_router_makes_is_billed_once_on_the_provider_edge() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bill.started(), ["openai/judge-1", "client", "backup/gpt-x"]);
     let ended = bill.ended();
-    let ended: Vec<_> = ended
-        .iter()
-        .map(|(c, o)| (c.as_str(), o.end.is_ok()))
-        .collect();
+    let ended: Vec<_> = ended.iter().map(|(c, o)| (c.as_str(), o.is_ok())).collect();
     assert_eq!(ended, [("backup/gpt-x", true), ("openai/judge-1", true)]);
     let billed = [
         ("backup/gpt-x".to_owned(), 4.0),
@@ -3074,7 +3074,7 @@ async fn a_call_refused_on_the_provider_edge_refuses_the_request_before_sending(
     assert!(h.mock.sent().is_empty());
     // Refused before the plugins after it ran on the provider edge.
     assert_eq!(bill.started(), ["client"]);
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == "denied"));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == "denied"));
 }
 
 #[tokio::test]
@@ -3175,8 +3175,8 @@ async fn a_call_dropped_unread_ends_once_as_abandoned() {
     assert_eq!(ended.len(), 2);
     let (call, dropped) = &ended[0];
     assert_eq!(call, "backup/gpt-x");
-    assert!(matches!(&dropped.end, Err(f) if f.code() == codes::ABANDONED));
-    assert_eq!(ended[1].1.end, Ok(()));
+    assert!(matches!(&dropped, Err(f) if f.code() == codes::ABANDONED));
+    assert_eq!(ended[1].1, Ok(()));
 }
 
 #[tokio::test]
@@ -3200,13 +3200,16 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
     // The failed call's end is the provider's answer, which carries its
     // status.
     let (failed, answered) = (&ended[1].1, &ended[0].1);
-    let failed = failed.end.as_ref().err();
-    assert!(failed.is_some_and(|f| f.is_answer()));
+    let failed = failed.as_ref().err();
+    assert!(failed.is_some_and(|f| {
+        f.answer::<http::Response<bytes::Bytes>>("openai-chat")
+            .is_some()
+    }));
     assert_eq!(
         failed.map(respan_gateway_http::status),
         Some(StatusCode::SERVICE_UNAVAILABLE)
     );
-    assert_eq!(answered.end, Ok(()));
+    assert_eq!(*answered, Ok(()));
     let backup = metered(&h)
         .into_iter()
         .find(|(c, _)| c.starts_with("backup"));
@@ -3215,7 +3218,7 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
 
 fn ended_with(bill: &Bill, code: &str) -> bool {
     let ended = bill.ended();
-    ended.len() == 1 && matches!(&ended[0].1.end, Err(f) if f.code() == code)
+    ended.len() == 1 && matches!(&ended[0].1, Err(f) if f.code() == code)
 }
 
 #[tokio::test]
@@ -3244,7 +3247,7 @@ async fn a_panic_in_a_provider_filter_ends_the_call_as_internal() {
 
     assert_eq!(h.text(chat()).await.0, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(ended_with(&bill, codes::INTERNAL));
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::INTERNAL));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::INTERNAL));
 }
 
 #[tokio::test]
@@ -3270,13 +3273,10 @@ async fn a_call_the_transport_fails_ends_with_its_fault() {
     assert_eq!(h.text(chat()).await.0, StatusCode::BAD_GATEWAY);
     // This one is no answer.
     assert!(ended_with(&bill, codes::UPSTREAM));
-    assert!(
-        bill.ended()[0]
-            .1
-            .end
-            .as_ref()
-            .is_err_and(|f| !f.is_answer())
-    );
+    assert!(bill.ended()[0].1.as_ref().is_err_and(|f| {
+        f.answer::<http::Response<bytes::Bytes>>("openai-chat")
+            .is_none()
+    }));
 }
 
 #[tokio::test]
@@ -3291,8 +3291,8 @@ async fn a_refused_call_ends_for_the_refusing_plugin_and_those_before_it() {
             Err(Fault::new(StatusCode::FORBIDDEN, "denied", "no calls"))
         }
 
-        async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-            self.0.on_provider_end(px, outcome).await;
+        async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+            self.0.on_provider_end(px, end).await;
         }
     }
 
@@ -3356,17 +3356,17 @@ async fn extensions_set_in_on_provider_reach_that_calls_end_only() {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             px.extensions_mut().insert(Reservation("r1"));
             // The call's extensions are its copy of the request's.
-            let call = &px.client().extensions();
+            let call = &px.extensions();
             assert!(call.get::<Reservation>().is_some());
             Ok(())
         }
 
-        async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
-            let held = px.client().extensions().get::<Reservation>().map(|r| r.0);
+        async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
+            let held = px.extensions().get::<Reservation>().map(|r| r.0);
             self.0.lock().map(|mut s| s.push(held)).ok();
         }
 
-        async fn on_client_end(&self, cx: &ClientContext, _outcome: &Outcome) {
+        async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
             let held = cx.extensions().get::<Reservation>().map(|r| r.0);
             self.0.lock().map(|mut s| s.push(held)).ok();
         }
@@ -3398,7 +3398,7 @@ async fn a_calls_request_is_as_it_was_when_the_call_was_made() {
             cx.call("openai").await.map(Some)
         }
 
-        async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
+        async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
             let model = px.client().input::<Conversation>().ok();
             let model = model.and_then(|c| c.model.clone());
             self.0.lock().map(|mut s| s.extend(model)).ok();
@@ -3423,7 +3423,7 @@ async fn idle_waits_for_a_slow_on_provider_end() {
 
     #[async_trait]
     impl Plugin for Slow {
-        async fn on_provider_end(&self, _px: &ProviderContext, _outcome: &Outcome) {
+        async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {
             tokio::time::sleep(Duration::from_millis(50)).await;
             self.0.store(true, Ordering::SeqCst);
         }
@@ -3524,7 +3524,7 @@ impl Format for Keyed {
 async fn extensions_set_in_on_provider_reach_a_call_edit_of_its_head() {
     let key = OnProvider(|px| {
         px.extensions_mut().insert(TenantKey("k1"));
-        let key = px.client().extensions().get::<TenantKey>().map(|k| k.0);
+        let key = px.extensions().get::<TenantKey>().map(|k| k.0);
         let key = key.unwrap_or_default();
         px.edit_call(move |head: &mut Ask, _: &mut bytes::Bytes| {
             let key = HeaderValue::from_static(key);
@@ -3656,12 +3656,12 @@ async fn every_calls_provider_end_runs_before_the_clients_end() {
 
     #[async_trait]
     impl Plugin for Order {
-        async fn on_provider_end(&self, _px: &ProviderContext, _outcome: &Outcome) {
+        async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {
             tokio::time::sleep(Duration::from_millis(20)).await;
             self.0.lock().map(|mut o| o.push("provider")).ok();
         }
 
-        async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {
+        async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
             self.0.lock().map(|mut o| o.push("client")).ok();
         }
     }
@@ -3759,13 +3759,13 @@ impl Ends {
 
 #[async_trait]
 impl Plugin for Ends {
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let end = outcome.end.as_ref().err().map_or("ok", |f| f.code());
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+        let end = end.as_ref().err().map_or("ok", |f| f.code());
         let end = format!("{} {end}", px.provider());
         self.0.lock().map(|mut e| e.push(end)).ok();
     }
 
-    async fn on_client_end(&self, _cx: &ClientContext, _outcome: &Outcome) {
+    async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {
         self.0.lock().map(|mut e| e.push("client".into())).ok();
     }
 }
@@ -3870,11 +3870,8 @@ async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
 
     let ended = bill.ended();
     assert_eq!(ended.len(), 1);
-    let outcome = &ended[0].1;
-    assert_eq!(
-        outcome.end.as_ref().err().map(|f| f.code()),
-        Some("blocked")
-    );
+    let end = &ended[0].1;
+    assert_eq!(end.as_ref().err().map(|f| f.code()), Some("blocked"));
     assert_eq!(input_tokens(&h.usage.all()[0]), 5.0);
 }
 
@@ -4193,7 +4190,7 @@ async fn a_response_whose_last_bytes_were_read_ends_complete() {
     drop(body);
     h.gw.idle().await;
 
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 /// Changes the head with an edit that panics.
@@ -4219,10 +4216,10 @@ async fn a_head_edit_that_panics_refuses_with_no_edits() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(!headers.contains_key("x-served-by"));
-    assert_eq!(code(&h.log.only().end), codes::INTERNAL);
+    assert_eq!(code(&h.log.only()), codes::INTERNAL);
     // The call ends with the panic that refused its response.
     let ended = bill.ended();
-    assert_eq!(code(&ended[0].1.end), codes::INTERNAL);
+    assert_eq!(code(&ended[0].1), codes::INTERNAL);
 }
 
 #[tokio::test]
@@ -4283,7 +4280,7 @@ async fn a_panic_before_any_bytes_is_refused() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(body.contains(codes::INTERNAL), "{body}");
-    assert_eq!(code(&h.log.only().end), codes::INTERNAL);
+    assert_eq!(code(&h.log.only()), codes::INTERNAL);
 }
 
 #[tokio::test]
@@ -4347,7 +4344,7 @@ async fn an_empty_stream_of_another_kind_is_refused() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(body.contains(codes::INTERNAL), "{body}");
-    assert_eq!(code(&h.log.only().end), codes::INTERNAL);
+    assert_eq!(code(&h.log.only()), codes::INTERNAL);
 }
 
 #[tokio::test]
@@ -4374,7 +4371,7 @@ async fn a_client_edge_failure_ends_the_call_however_its_bytes_were_split() {
 
         assert!(body.contains("blocked"), "{body}");
         let ended = bill.ended();
-        let end = ended[0].1.end.as_ref().err().map_or("ok", |f| f.code());
+        let end = ended[0].1.as_ref().err().map_or("ok", |f| f.code());
         assert_eq!(end, want, "{chunks:?}");
     }
 }
@@ -4413,7 +4410,7 @@ async fn idle_waits_for_a_response_still_streaming() {
 
     let _ = read_whole(resp).await;
     h.gw.idle().await;
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -4467,7 +4464,7 @@ async fn a_body_that_broke_off_is_refused_without_its_model_read() {
 
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(headers["content-type"], "application/json");
-    let end = ended.await.end.map_err(|f| f.code().to_owned());
+    let end = ended.await.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err("too_large".to_owned()));
 }
 
@@ -4985,7 +4982,7 @@ async fn a_205_is_sent_with_no_body() {
 
     assert_eq!(status, StatusCode::RESET_CONTENT);
     assert_eq!(body.ok(), Some(bytes::Bytes::new()));
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 // A call's usage is metered on its provider edge, as decoded.
@@ -5151,7 +5148,7 @@ async fn a_failed_input_filter_fails_the_input_for_every_later_reader() {
         h.text(unary_chat()).await.0,
         StatusCode::INTERNAL_SERVER_ERROR
     );
-    assert_eq!(code(&h.log.only().end), codes::INTERNAL);
+    assert_eq!(code(&h.log.only()), codes::INTERNAL);
     assert!(h.mock.sent().is_empty());
 }
 
@@ -5219,7 +5216,7 @@ async fn a_meter_sees_usage_though_a_filter_keeps_all_back_and_another_fails_at_
     let h = Harness::new(vec![Arc::new(Both)], Some("openai"));
     h.mock.reply(OPENAI, mock::sse(STREAM));
     let _ = h.send(chat()).await;
-    assert_eq!(code(&h.calls.all()[0].end), codes::INTERNAL);
+    assert_eq!(code(&h.calls.all()[0]), codes::INTERNAL);
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(5.0));
 }
 
@@ -5242,7 +5239,7 @@ async fn a_calls_response_read_to_its_end_then_dropped_ends_ok() {
 
     let all = h.calls.all();
     assert_eq!(all.len(), 1);
-    assert_eq!(all[0].end, Ok(()));
+    assert_eq!(all[0], Ok(()));
     assert_eq!(h.usage.all()[0].get(units::INPUT_TOKENS), Some(4.0));
 }
 
@@ -5253,7 +5250,7 @@ async fn a_meter_sees_usage_a_filter_fails_on() {
     let h = Harness::new(vec![Arc::new(ProviderCap)], Some("openai"));
     h.mock.reply(OPENAI, mock::json(StatusCode::OK, UNARY));
     let _ = h.send(unary_chat()).await;
-    assert_eq!(code(&h.calls.all()[0].end), "cap");
+    assert_eq!(code(&h.calls.all()[0]), "cap");
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
 
@@ -5299,7 +5296,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
         }
 
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            if px.client().extensions().get::<Mark>().is_none() {
+            if px.extensions().get::<Mark>().is_none() {
                 return Ok(());
             }
             let (seen, mut count) = (self.0.clone(), 0);
@@ -5395,17 +5392,17 @@ async fn a_filter_added_after_a_call_is_made_misses_that_whole_calls_input() {
 // ---- r6 internals probes ----
 
 /// The same provider bytes and the same client-edge guard must give the
-/// call the same outcome, however the transport split the bytes.
+/// call the same end, however the transport split the bytes.
 #[tokio::test]
 async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
     let guard = || -> Vec<Arc<dyn Plugin>> {
         vec![Arc::new(Guard(|e| e.texts().any(|text| text == " world")))]
     };
-    let outcome = |h: &Harness| {
+    let end = |h: &Harness| {
         let all = h.calls.all();
         let o = &all[0];
         (
-            o.end.as_ref().err().map(|f| f.code().to_owned()),
+            o.as_ref().err().map(|f| f.code().to_owned()),
             h.usage.all()[0].get(units::OUTPUT_TOKENS),
         )
     };
@@ -5420,8 +5417,8 @@ async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
     // N5: a call settles at the end of its body, so both end as the guard
     // refused; each meter saw what was decoded, joined the usage that came
     // with the bytes refused, as provider-edge filters run first.
-    assert_eq!(outcome(&split), (Some("blocked".to_owned()), None));
-    assert_eq!(outcome(&joined), (Some("blocked".to_owned()), Some(2.0)));
+    assert_eq!(end(&split), (Some("blocked".to_owned()), None));
+    assert_eq!(end(&joined), (Some("blocked".to_owned()), Some(2.0)));
 }
 
 /// A guard refuses a plugin's own answer that fails before its first byte,
@@ -5576,7 +5573,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
     let _ = read_whole(serve(&gw, unary_chat()).await.0).await;
     gw.idle().await;
 
-    assert_eq!(code(&calls.all()[0].end), "cap");
+    assert_eq!(code(&calls.all()[0]), "cap");
     assert_eq!(input_tokens(&meter.total()), 4.0);
     assert!(tally.0.lock().map(|t| t.is_empty()).unwrap_or_default());
 }

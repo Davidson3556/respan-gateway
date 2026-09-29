@@ -8,8 +8,7 @@ use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::futures::StreamExt;
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Transport,
-    async_trait, codes,
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, Transport, async_trait, codes,
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
@@ -89,16 +88,11 @@ impl Record {
 
 #[async_trait]
 impl Plugin for Record {
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let Some(a) = px.client().extensions().get::<Attempt>() else {
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+        let Some(a) = px.extensions().get::<Attempt>() else {
             return;
         };
-        let end = outcome
-            .end
-            .as_ref()
-            .err()
-            .map_or("ok", |f| f.code())
-            .to_owned();
+        let end = end.as_ref().err().map_or("ok", |f| f.code()).to_owned();
         let entry = (px.provider().to_owned(), a.index(), a.role(), end);
         self.0
             .lock()
@@ -214,11 +208,14 @@ fn harness(plan: Plan) -> Harness {
 }
 
 impl Harness {
-    async fn send(&self) -> (StatusCode, http::HeaderMap, String, Outcome) {
+    async fn send(&self) -> (StatusCode, http::HeaderMap, String, Result<(), Fault>) {
         self.post(REQUEST).await
     }
 
-    async fn post(&self, request: &'static str) -> (StatusCode, http::HeaderMap, String, Outcome) {
+    async fn post(
+        &self,
+        request: &'static str,
+    ) -> (StatusCode, http::HeaderMap, String, Result<(), Fault>) {
         let (resp, outcome) = serve(&self.gw, post("/v1/chat/completions", request)).await;
         let (status, headers, body) = read_whole(resp).await;
         let body = body.map_or_else(
@@ -261,7 +258,7 @@ async fn a_stream_failing_after_its_first_content_is_never_retried() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Hello") && body.contains("error"), "{body}");
     assert_eq!(h.sent_to(), ["a.test"]);
-    assert!(outcome.end.is_err());
+    assert!(outcome.is_err());
     let record = h.record.all();
     assert_eq!(record.len(), 1);
     assert_eq!(record[0].2, Role::Winner);
@@ -275,7 +272,7 @@ async fn a_success_failing_before_content_moves_on() {
 
     let (status, _, body, outcome) = h.send().await;
 
-    assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+    assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
     assert!(body.contains("Hello") && !body.contains("error"), "{body}");
     assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
@@ -452,7 +449,7 @@ async fn the_watchdog_does_not_cut_a_slow_whole_answer() {
 
     let (status, _, body, outcome) = h.post(WHOLE).await;
 
-    assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+    assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
     assert!(body.contains("an essay"), "{body}");
     assert_eq!(h.sent_to(), ["a.test"]);
     let record = h.record.all();
@@ -544,7 +541,7 @@ async fn until_head_commits_on_a_success_status_however_its_body_goes() {
         // Committed on its head, so its failure before any bytes is refused.
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
         assert_eq!(h.sent_to(), ["a.test"]);
-        assert!(matches!(outcome.end, Err(f) if f.code() == codes::UPSTREAM));
+        assert!(matches!(outcome, Err(f) if f.code() == codes::UPSTREAM));
         let a = ("a".to_owned(), 0, Role::Winner, codes::UPSTREAM.to_owned());
         assert_eq!(h.record.all(), [a]);
     }
@@ -562,7 +559,7 @@ async fn until_content_moves_on_from_a_success_failing_before_content() {
 
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+        assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     }
@@ -580,7 +577,7 @@ async fn until_end_sends_the_whole_answer_as_it_came_and_moves_on_before_content
 
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+        assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
         let mut roles: Vec<_> = h
@@ -619,7 +616,7 @@ async fn a_race_until_end_picks_the_call_that_finishes_first() {
         let start = Instant::now();
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())), "{until:?}");
+        assert_eq!((status, outcome), (StatusCode::OK, Ok(())), "{until:?}");
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat(), "{until:?}");
         let mut record = h.record.all();
         record.sort_by_key(|r| r.2 == Role::Loser);
@@ -656,7 +653,7 @@ async fn until_end_a_stream_failing_after_content_is_not_a_winner() {
 
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome.end), (StatusCode::OK, Ok(())));
+        assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
         let mut roles: Vec<_> = h
@@ -688,7 +685,7 @@ async fn until_end_retries_a_stream_failing_after_content_and_returns_the_last()
     assert_eq!(status, StatusCode::OK);
     assert!(body.starts_with(&[ROLE, HELLO].concat()), "{body}");
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
-    assert!(matches!(outcome.end, Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(outcome, Err(f) if f.code() == codes::UPSTREAM));
     assert_eq!(h.sent_to(), ["a.test", "a.test"]);
     let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
     assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);

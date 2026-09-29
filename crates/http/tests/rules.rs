@@ -395,7 +395,7 @@ async fn a_bodiless_response_ends_as_its_head_goes_out() {
     h.gw.idle().await;
 
     // The adapter reads the body it does not send to its end.
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -465,5 +465,5 @@ async fn a_bodiless_response_ends_its_call_ok_though_the_provider_sent_a_body() 
     let (status, _, _) = h.send(chat()).await;
 
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(h.calls.all()[0].end, Ok(()));
+    assert_eq!(h.calls.all()[0], Ok(()));
 }

@@ -130,7 +130,7 @@ impl Filter<Reply> for Settle {
 
 /// Who pays and the call's bound, with `Settle` to price it.
 fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
-    let seen = px.client().extensions().get::<Seen>().cloned();
+    let seen = px.extensions().get::<Seen>().cloned();
     let seen = seen.ok_or_else(|| Fault::internal("register Cap before Accounting"))?;
     let input = input_bound(px.input::<Conversation>()?)?;
     let reserve = PRICE.cost(input, seen.cap);

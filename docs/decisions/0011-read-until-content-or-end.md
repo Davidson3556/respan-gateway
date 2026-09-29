@@ -38,3 +38,5 @@ response whole.
 - 0012: an error answer became a failure; `Head` stopped telling it apart.
 - 0014: `until_end` returns the end with the response; `Response::end`
   went.
+- 0015: `Fault::is_answer` went; routing retries by whether the call got
+  a response.

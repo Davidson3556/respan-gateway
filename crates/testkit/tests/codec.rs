@@ -323,7 +323,7 @@ async fn r8_the_fault_of_content_that_cannot_be_written_is_whose_it_is() {
         let echo = Echo::default();
         let gw = msg(&echo, Edit(edit, Arc::default()));
         let (_, ended) = serve(&gw, post("/msg", body)).await;
-        let end = ended.await.end.map_err(|f| f.code().to_owned());
+        let end = ended.await.map_err(|f| f.code().to_owned());
         assert_eq!(end, Err(code.to_owned()), "{body} {edit:?}");
         assert!(echo.seen().is_empty(), "nothing is sent");
     }
@@ -376,7 +376,7 @@ async fn o11_1_a_head_to_an_endless_plugin_stream_ends_at_its_head() {
 
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
     assert!(idle.is_ok(), "the gateway stays busy");
-    assert_eq!(log.only().end, Ok(()));
+    assert_eq!(log.only(), Ok(()));
 }
 
 const CHAT: &str = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
@@ -786,11 +786,7 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
             Ok(())
         }
 
-        async fn on_provider_end(
-            &self,
-            px: &ProviderContext,
-            _outcome: &respan_gateway_core::Outcome,
-        ) {
+        async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
             let sent = px.is_sent();
             self.0
                 .lock()
@@ -817,5 +813,53 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
         let seen = plugin.0.lock().map(|s| s.clone()).unwrap_or_default();
         assert_eq!(seen, [(false, sent)], "{case}");
         assert_eq!(mock.sent().len(), usize::from(sent), "{case}");
+    }
+}
+
+/// A call says whether the provider's response head arrived and its body
+/// decoded no value without breaking off, as when a provider refuses: what
+/// a fault alone cannot say, as a refusal and a cut-off response look alike.
+#[tokio::test]
+async fn a_call_says_whether_its_response_was_head_only() {
+    #[derive(Clone, Default)]
+    struct HeadOnly(Arc<Mutex<Vec<bool>>>);
+
+    #[async_trait]
+    impl Plugin for HeadOnly {
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+            assert!(!px.is_head_only(), "not before a head");
+            Ok(())
+        }
+
+        async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
+            self.0.lock().map(|mut s| s.push(px.is_head_only())).ok();
+        }
+    }
+
+    let refused = mock::json(
+        StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"message":"x"}}"#,
+    );
+    let mut cut = mock::sse(&[]);
+    cut.body_mut()
+        .push(Err(Fault::upstream("connection reset")));
+    // (case, what the provider does, head only at the end)
+    let cases = [
+        ("answered", Some(mock::json(StatusCode::OK, UNARY)), false),
+        ("refused", Some(refused), true),
+        ("cut before any value", Some(cut), false),
+        ("transport failed", None, false),
+    ];
+    for (case, reply, head_only) in cases {
+        let mock = MockTransport::new();
+        if let Some(reply) = reply {
+            mock.reply("http://openai.test/v1", reply);
+        }
+        let plugin = HeadOnly::default();
+        let gw = chat(&mock, vec![Arc::new(plugin.clone())]);
+        let _ = read_whole(serve(&gw, post("/v1/chat/completions", CHAT)).await.0).await;
+        gw.idle().await;
+        let seen = plugin.0.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(seen, [head_only], "{case}");
     }
 }

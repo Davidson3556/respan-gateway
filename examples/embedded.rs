@@ -2,10 +2,10 @@
 //! pipeline in-process, with no server and no second hop. It builds a
 //! [`Gateway`], hands [`Gateway::handle`] an exchange on the HTTP wire (an
 //! `http` request head and its body), whole, reads the response and awaits
-//! the request's [`Outcome`]. With no HTTP hop, it needs no adapter; `Err`
+//! how the request ended. With no HTTP hop, it needs no adapter; `Err`
 //! is what no format could write.
 //!
-//! The request's `Outcome` says how it ended. The kernel counts no usage:
+//! The kernel counts no usage:
 //! the embedder tallies it with a plugin that sums what each call's
 //! provider reports (`Meter`), as billing would.
 //!
@@ -13,7 +13,7 @@
 
 use respan_gateway_core::bytes::Bytes;
 use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
-use respan_gateway_core::{Exchange, Fault, Gateway, Outcome, serde_json};
+use respan_gateway_core::{Exchange, Fault, Gateway, serde_json};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::{Answer, Ask, http};
@@ -32,8 +32,11 @@ fn gateway(mock: &MockTransport, tally: Meter) -> Result<Gateway, Fault> {
 }
 
 /// One chat request through the pipeline: the answer's status and body,
-/// and the request's outcome.
-async fn ask(gw: &Gateway, prompt: &str) -> Result<(http::StatusCode, Bytes, Outcome), Fault> {
+/// and how the request ended.
+async fn ask(
+    gw: &Gateway,
+    prompt: &str,
+) -> Result<(http::StatusCode, Bytes, Result<(), Fault>), Fault> {
     let body = serde_json::json!({
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": prompt}],
@@ -44,11 +47,9 @@ async fn ask(gw: &Gateway, prompt: &str) -> Result<(http::StatusCode, Bytes, Out
         .map_err(respan_gateway_http::built_wrong)?
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
-    let (resp, outcome) = gw
-        .handle::<Ask, Answer>(Exchange::new(head, body), false)
-        .await;
+    let (resp, outcome) = gw.handle::<Ask, Answer>(Exchange::new(head, body)).await;
     let resp = resp?;
-    // Read the body first: the outcome resolves once the response ends.
+    // Read the body first: the end resolves once the response ends.
     let body: Vec<Bytes> = resp.body.try_collect().await?;
     Ok((resp.head.status, body.concat().into(), outcome.await))
 }
@@ -59,10 +60,10 @@ async fn main() -> Result<(), Fault> {
     mock.reply(OPENAI, mock::json(http::StatusCode::OK, ANSWER));
     let tally = Meter::default();
     let gw = gateway(&mock, tally.clone())?;
-    let (status, body, outcome) = ask(&gw, "Say hi").await?;
+    let (status, body, end) = ask(&gw, "Say hi").await?;
     // End hooks run detached; wait for them before reading the tally.
     gw.idle().await;
-    println!("status: {status}, ended: {:?}", outcome.end);
+    println!("status: {status}, ended: {:?}", end);
     println!("body:   {}", String::from_utf8_lossy(&body));
     println!("usage:  {:?}", tally.usage());
     Ok(())

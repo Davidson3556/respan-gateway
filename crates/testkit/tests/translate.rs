@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{
-    ClientContext, Exchange, Fault, Plugin, ProviderContext, Relayed, Response, Transport, codes,
+    ClientContext, Exchange, Fault, Plugin, ProviderContext, Response, Transport, codes,
 };
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply, units};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
@@ -19,7 +19,7 @@ use common::{
     Adds, CHAT, Call, Calls, Disclaimer, Flip, Footer, Harness, HoldAll, MESSAGES, Metered,
     Nameless, OPENAI, Shout, Silence, Unmask, add_provider, call, providers, with_plugins,
 };
-use respan_gateway_core::{Filter, Outcome};
+use respan_gateway_core::Filter;
 use serde_json::{Value, json};
 
 const ANTHROPIC: &str = "http://anthropic.test";
@@ -172,8 +172,13 @@ async fn only_a_relay_carries_the_clients_anthropic_version() {
     assert_eq!(said(1), Some(version));
 }
 
-/// Sends every request to OpenAI, and marks every call a relay in
-/// `on_provider`, as no plugin can.
+/// A lookalike of the marker a plugin might try to set.
+#[derive(Clone)]
+struct Relayed;
+
+/// Sends every request to OpenAI, and in `on_provider` does all it can to
+/// make every call look like a relay: a marker in its extensions and an
+/// edit of the call. Neither sets `Exchange::relayed`.
 struct Forges;
 
 #[async_trait]
@@ -185,11 +190,12 @@ impl Plugin for Forges {
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         px.extensions_mut().insert(Relayed);
+        px.edit_call::<respan_gateway_http::Ask>(|_, _| Ok(()));
         Ok(())
     }
 }
 
-/// A transport that notes whether each call came marked [`Relayed`].
+/// A transport that notes whether each call came `relayed`.
 struct Marks<T>(T, Arc<Mutex<Vec<bool>>>);
 
 #[async_trait]
@@ -198,7 +204,7 @@ impl<T: Transport> Transport for Marks<T> {
     type Answer = T::Answer;
 
     async fn send(&self, call: Exchange<T::Ask>) -> Result<Exchange<T::Answer>, Fault> {
-        let relayed = call.extensions.get::<Relayed>().is_some();
+        let relayed = call.relayed;
         self.1
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -207,9 +213,9 @@ impl<T: Transport> Transport for Marks<T> {
     }
 }
 
-// The kernel marks a call `Relayed` when it relays the client's own
-// message, and no other, whatever a plugin set; only a relay carries the
-// client's key to a provider with none of its own.
+// The kernel sets `Exchange::relayed` on a call that relays the client's
+// own message, and no other, whatever a plugin did; only a relay carries
+// the client's key to a provider with none of its own.
 #[tokio::test]
 async fn only_a_relay_is_marked_and_carries_the_clients_key() {
     let (mock, marks) = (MockTransport::new(), Arc::default());
@@ -316,7 +322,7 @@ async fn an_openai_client_streams_from_anthropic() {
     );
     assert_eq!(chunks[n - 1], Value::String("[DONE]".into()));
 
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
     let usage = h.usage.total();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
@@ -375,7 +381,7 @@ async fn an_anthropic_client_streams_from_openai() {
             "usage": { "input_tokens": 5, "output_tokens": 2 },
         })
     );
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -483,7 +489,7 @@ async fn a_provider_error_reaches_the_client_in_its_format() {
         v,
         json!({ "error": { "message": "slow down", "type": "rate_limit_error", "param": null, "code": "rate_limit_error" } })
     );
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == "rate_limit_error"));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == "rate_limit_error"));
 }
 
 #[tokio::test]
@@ -512,7 +518,7 @@ async fn a_cut_translated_stream_ends_with_an_error_in_the_client_format() {
     let last = events(&body).pop().map(|(_, d)| d).unwrap_or_default();
     assert_eq!(last["error"]["type"], "truncated");
     assert!(!body.contains("[DONE]"));
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == codes::TRUNCATED));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::TRUNCATED));
 }
 
 #[tokio::test]
@@ -589,7 +595,7 @@ async fn an_error_in_a_success_is_a_failure_not_an_empty_answer() {
 
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
     assert!(body.contains("\"type\":\"server_error\""), "{body}");
-    assert!(h.log.only().end.is_err());
+    assert!(h.log.only().is_err());
 }
 
 #[tokio::test]
@@ -601,7 +607,7 @@ async fn a_success_that_is_not_a_response_is_a_failure_not_an_empty_answer() {
     let (status, body) = h.text(anthropic_request(false)).await;
 
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-    assert!(h.log.only().end.is_err());
+    assert!(h.log.only().is_err());
 }
 
 #[tokio::test]
@@ -772,7 +778,7 @@ async fn an_anthropic_error_event_reaches_an_openai_client_with_its_code() {
 
     let last = events(&body).pop().map(|(_, d)| d).unwrap_or_default();
     assert_eq!(last["error"]["type"], "overloaded_error");
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == "overloaded_error"));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == "overloaded_error"));
 }
 
 #[tokio::test]
@@ -831,7 +837,7 @@ async fn a_translated_stream_split_mid_event_decodes_once() {
         })
         .collect();
     assert_eq!(text, "Hello world");
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -852,7 +858,7 @@ async fn a_filtered_stream_that_ends_in_a_provider_error_ends_with_that_error() 
     let (name, data) = events(&out).pop().unwrap_or_default();
     assert_eq!(name.as_deref(), Some("error"));
     assert_eq!(data["error"]["type"], "overloaded_error");
-    assert!(matches!(h.log.only().end, Err(f) if f.code() == "overloaded_error"));
+    assert!(matches!(h.log.only(), Err(f) if f.code() == "overloaded_error"));
 }
 
 #[tokio::test]
@@ -941,7 +947,7 @@ async fn usage_counts_even_when_its_chunk_cannot_be_translated() {
     let _ = h.text(anthropic_request(true)).await;
 
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(9.0));
-    assert!(h.log.only().end.is_err());
+    assert!(h.log.only().is_err());
 }
 
 #[tokio::test]
@@ -1076,7 +1082,7 @@ async fn a_filter_restores_text_across_an_anthropic_stream_and_releases_the_rest
         ]
     );
     assert!(!out.contains("\"index\":1"), "{out}");
-    assert_eq!(h.log.only().end, Ok(()));
+    assert_eq!(h.log.only(), Ok(()));
 }
 
 #[tokio::test]
@@ -1922,12 +1928,12 @@ async fn an_anthropic_response_is_reframed_as_its_client_asked() {
 
 /// Records how each call ends on the provider edge.
 #[derive(Clone, Default)]
-struct CallEnds(Arc<Mutex<Vec<Outcome>>>);
+struct CallEnds(Arc<Mutex<Vec<Result<(), Fault>>>>);
 
 #[async_trait]
 impl Plugin for CallEnds {
-    async fn on_provider_end(&self, _px: &ProviderContext, outcome: &Outcome) {
-        self.0.lock().map(|mut all| all.push(outcome.clone())).ok();
+    async fn on_provider_end(&self, _px: &ProviderContext, end: &Result<(), Fault>) {
+        self.0.lock().map(|mut all| all.push(end.clone())).ok();
     }
 }
 
@@ -1966,8 +1972,8 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     assert_eq!(body["error"]["code"], "upstream", "{body}");
     // The call ends with the refusal, which carries the provider's answer.
     let ends = ends.0.lock().map(|all| all.clone()).unwrap_or_default();
-    assert!(matches!(&ends[..], [o] if o.end.as_ref().is_err_and(|f| f.code() == codes::UPSTREAM)));
-    let answer = ends[0].end.as_ref().err();
+    assert!(matches!(&ends[..], [o] if o.as_ref().is_err_and(|f| f.code() == codes::UPSTREAM)));
+    let answer = ends[0].as_ref().err();
     let answer = answer.and_then(|f| {
         f.answer::<http::Response<respan_gateway_core::bytes::Bytes>>("anthropic-messages")
     });
@@ -2019,7 +2025,7 @@ async fn a_translated_failure_labelled_as_a_stream_is_still_a_failure() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let body: Value = serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
     assert_eq!(body["type"], "error", "{body}");
-    let end = h.log.only().end.map_err(|f| f.status());
+    let end = h.log.only().map_err(|f| f.status());
     assert_eq!(end, Err(503));
 }
 
@@ -2040,7 +2046,7 @@ async fn a_provider_error_framed_as_an_event_keeps_its_words() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.contains("slow down"), "{body}");
-    let end = h.log.only().end.err().map(|f| f.message().to_owned());
+    let end = h.log.only().err().map(|f| f.message().to_owned());
     assert_eq!(end.as_deref(), Some("slow down"));
 }
 
@@ -2063,7 +2069,6 @@ async fn an_anthropic_stream_error_with_no_type_keeps_its_words() {
     let end = h
         .log
         .only()
-        .end
         .map_err(|f| (f.code().to_owned(), f.message().to_owned()));
     assert_eq!(end, Err(("overloaded_error".to_owned(), "busy".to_owned())));
 }
@@ -2104,7 +2109,7 @@ async fn an_anthropic_error_after_its_message_delta_keeps_both_and_ends_last() {
 
     assert!(out.contains("message_delta"), "{out}");
     assert!(out.ends_with(error), "{out}");
-    let end = h.log.only().end.map_err(|f| f.code().to_owned());
+    let end = h.log.only().map_err(|f| f.code().to_owned());
     assert_eq!(end, Err("overloaded_error".to_owned()));
 }
 

@@ -9,7 +9,7 @@ use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::{
-    ClientContext, Fault, Filter, Gateway, Outcome, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply};
@@ -118,8 +118,8 @@ impl Plugin for Metered {
         })
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
-        if let Some(CallUsage(usage)) = px.client().extensions().get::<CallUsage>() {
+    async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
+        if let Some(CallUsage(usage)) = px.extensions().get::<CallUsage>() {
             let usage = usage.lock().unwrap_or_else(PoisonError::into_inner).clone();
             let model = px
                 .input::<Conversation>()

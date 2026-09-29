@@ -112,3 +112,5 @@ plugins, keys to transports, deadlines and draining to the embedder.
   formats and transports; `head_mut` and `with_status` went.
 - 0013: the promise of a call with its own `http::Request` went; no
   `http` types remain.
+- 0015: `Outcome` went; end hooks and `handle`'s future take a
+  `Result<(), Fault>`.

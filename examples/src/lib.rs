@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::{Fault, Outcome, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
 use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 
@@ -42,7 +42,7 @@ impl CallUsage {
 /// added first, so meter from the plugin that runs last (register it last,
 /// or `Gateway::after` every plugin that filters outputs).
 pub fn meter(px: &mut ProviderContext) -> Result<(), Fault> {
-    if !px.is_kind::<Conversation>() || px.client().extensions().get::<CallUsage>().is_some() {
+    if !px.is_kind::<Conversation>() || px.extensions().get::<CallUsage>().is_some() {
         return Ok(());
     }
     let usage = CallUsage::default();
@@ -76,7 +76,7 @@ impl Plugin for Meter {
         meter(px)
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
+    async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         if let Some(usage) = CallUsage::of(px) {
             *self.0.lock().unwrap_or_else(PoisonError::into_inner) += &usage;
         }

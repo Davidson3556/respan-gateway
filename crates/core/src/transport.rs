@@ -25,15 +25,33 @@ pub struct Exchange<H> {
     /// Values for plugins and the transport, such as a credential the
     /// adapter lifted from the head; none on a response.
     pub extensions: Extensions,
+    /// Whether this exchange relays the client's own message. The kernel
+    /// sets it on a call, and only when the call sends the client's inputs
+    /// (not an input of its own) to a provider whose format has the client
+    /// format's name; a transport passes on what belongs to the client,
+    /// such as its credential, only then. No plugin can set it, and the
+    /// kernel ignores it on a request. False on a response.
+    pub relayed: bool,
+    /// Whether later frames follow the head: the body's data frames are
+    /// messages as they arrive, and the head goes on at once. On a request
+    /// into [`Gateway::handle`](crate::Gateway::handle), the adapter sets it
+    /// (a request that switches protocols, say); else the body is read in
+    /// full, so the caller bounds it. On a call, the kernel sets it when the
+    /// call sends the client's inputs of a streaming request, and no other:
+    /// a transport sends the body as it arrives, else whole.
+    pub streams: bool,
 }
 
 impl<H> Exchange<H> {
-    /// An exchange of `head` and `body`, with no extensions.
+    /// An exchange of `head` and `body`, with no extensions, not relayed,
+    /// not streaming.
     pub fn new(head: H, body: Body) -> Self {
         Self {
             head,
             body,
             extensions: Extensions::new(),
+            relayed: false,
+            streams: false,
         }
     }
 }
@@ -48,6 +66,8 @@ impl<H: Any + Send + Sync> Exchange<H> {
             head: Box::new(self.head),
             body: self.body,
             extensions: self.extensions,
+            relayed: self.relayed,
+            streams: self.streams,
         }
     }
 }
@@ -59,6 +79,8 @@ impl Exchange<Head> {
             head: *self.head.downcast().map_err(|_| Fault::internal(what))?,
             body: self.body,
             extensions: self.extensions,
+            relayed: self.relayed,
+            streams: self.streams,
         })
     }
 }
@@ -68,6 +90,8 @@ impl<H: std::fmt::Debug> std::fmt::Debug for Exchange<H> {
         f.debug_struct("Exchange")
             .field("head", &self.head)
             .field("extensions", &self.extensions)
+            .field("relayed", &self.relayed)
+            .field("streams", &self.streams)
             .finish_non_exhaustive()
     }
 }
@@ -85,7 +109,7 @@ impl<T: Clone + Send + Sync + 'static> Value for T {
 
 /// Values of any `Clone` type, at most one per type, that the adapter,
 /// plugins and transports hand each other with a request or call. The
-/// kernel reads none but [`Relayed`](crate::Relayed).
+/// kernel reads none.
 #[derive(Default)]
 pub struct Extensions(HashMap<TypeId, Box<dyn Value>>);
 
@@ -165,9 +189,10 @@ pub trait Transport: Send + Sync + 'static {
     /// it, its address relative to this transport. A relay's starts from the
     /// client's head, so strip what the protocol forbids a proxy to pass
     /// on. Its body carries the inputs, one per data frame: a whole call's
-    /// at once, its size exact; a streaming request's as they arrive. The
-    /// transport decides whose keys reach the provider. Its extensions are
-    /// the call's, with [`Relayed`](crate::Relayed) on a relay alone.
+    /// at once, its size exact; a call that `streams` has them as they
+    /// arrive, so send its body as it comes. The transport decides whose
+    /// keys reach the provider. Its extensions are the call's; the kernel
+    /// sets `call.relayed` on a relay alone.
     ///
     /// `Err` if the call could not be sent: [`Fault::upstream`] if the
     /// provider is unreachable, [`Fault::config`] if this transport cannot

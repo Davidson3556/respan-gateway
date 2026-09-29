@@ -48,3 +48,4 @@ rules, each a job that plugins, extensions or transports already do.
   crate to `crates/http`.
 - 0014: `px.extensions()` went; a call's are read as
   `px.client().extensions()` and written with `px.extensions_mut()`.
+- 0015: `px.extensions()` is back, beside `px.extensions_mut()`.

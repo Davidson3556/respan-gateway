@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::{
-    ClientContext, Exchange, Fault, Gateway, Outcome, Plugin, ProviderContext, Response, Transport,
+    ClientContext, Exchange, Fault, Gateway, Plugin, ProviderContext, Response, Transport,
     async_trait,
 };
 use respan_gateway_formats::conversation::{Conversation, set_model};
@@ -66,12 +66,12 @@ struct Log(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
 impl Plugin for Log {
-    async fn on_provider_end(&self, px: &ProviderContext, outcome: &Outcome) {
-        let Some(attempt) = px.client().extensions().get::<Attempt>() else {
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+        let Some(attempt) = px.extensions().get::<Attempt>() else {
             return;
         };
         let (index, role) = (attempt.index(), attempt.role());
-        let end = outcome.end.as_ref().err().map_or("ok", |f| f.code());
+        let end = end.as_ref().err().map_or("ok", |f| f.code());
         let chat = px.input::<Conversation>().ok();
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());

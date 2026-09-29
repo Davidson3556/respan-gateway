@@ -8,7 +8,7 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use tokio::sync::Notify;
 
-use crate::{ClientContext, Fault, Outcome, Plugin};
+use crate::{ClientContext, Fault, Plugin};
 
 /// The context an edge's hooks get: [`ClientContext`] on the client edge,
 /// [`ProviderContext`](crate::ProviderContext) on the provider edge.
@@ -17,7 +17,7 @@ pub(crate) trait Edge: Send + Sync + 'static {
     fn client(&self) -> &ClientContext;
 
     /// `plugin`'s end hook on this edge.
-    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, outcome: &'a Outcome) -> BoxFuture<'a, ()>;
+    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<(), Fault>) -> BoxFuture<'a, ()>;
 
     /// The edge ends `end`, just before its end hooks.
     fn close(&mut self, end: &Result<(), Fault>);
@@ -34,15 +34,15 @@ pub(crate) struct EndHooks<E: Edge> {
     cx: Option<E>,
     /// End hooks that must finish before these start.
     pub(crate) after: Option<Arc<InFlight>>,
-    /// Also receives the `Outcome`, for `Gateway::handle`'s future.
-    report: Option<oneshot::Sender<Outcome>>,
+    /// Also receives the end, for `Gateway::handle`'s future.
+    report: Option<oneshot::Sender<Result<(), Fault>>>,
 }
 
 impl<E: Edge> EndHooks<E> {
     pub(crate) fn new(
         in_flight: &Arc<InFlight>,
         cx: E,
-        report: Option<oneshot::Sender<Outcome>>,
+        report: Option<oneshot::Sender<Result<(), Fault>>>,
     ) -> Self {
         Self {
             live: Some(InFlight::enter(in_flight)),
@@ -70,9 +70,8 @@ impl<E: Edge> EndHooks<E> {
         };
         // The end is known, so a panic neither changes it nor stops the hooks.
         let _ = std::panic::catch_unwind(AssertUnwindSafe(|| cx.close(&end)));
-        let outcome = Outcome { end };
         if let Some(to) = self.report.take() {
-            let _ = to.send(outcome.clone());
+            let _ = to.send(end.clone());
         }
         let (ran, live, after) = (self.ran, self.live.take(), self.after.take());
         // The context goes before `live`, so `Gateway::idle` finds the
@@ -89,7 +88,7 @@ impl<E: Edge> EndHooks<E> {
             }
             for plugin in cx.client().gateway.chain.iter().take(ran) {
                 // One plugin's panic must not cost the others their hook.
-                let hook = AssertUnwindSafe(cx.hook(&**plugin, &outcome));
+                let hook = AssertUnwindSafe(cx.hook(&**plugin, &end));
                 let _ = hook.catch_unwind().await;
             }
             drop(cx);

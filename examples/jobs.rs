@@ -26,7 +26,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::futures::stream;
-use respan_gateway_core::{ClientContext, Fault, Gateway, Outcome, Plugin, Response, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
 use respan_gateway_http::Body;
@@ -153,11 +153,11 @@ impl<S: Store> Plugin for Idempotent<S> {
         Ok(None)
     }
 
-    async fn on_client_end(&self, cx: &ClientContext, outcome: &Outcome) {
+    async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>) {
         let Some(Running(key, sent)) = cx.extensions().get::<Running>() else {
             return;
         };
-        let result = outcome.end.is_ok().then(|| locked(sent).clone().into());
+        let result = end.is_ok().then(|| locked(sent).clone().into());
         self.0.finish(key, result).await;
     }
 }

@@ -20,12 +20,6 @@ use crate::response::Batch;
 use crate::transport::Head;
 use crate::{ClientContext, Exchange, Extensions, Fault, ProviderContext, Response, Transport};
 
-/// The kernel's mark in the extensions of a call that relays the client's
-/// own message, to a provider of its format's name, and of no other call:
-/// a transport passes on what belongs to the client only when it is there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Relayed;
-
 /// A call from [`ClientContext::call`], sent when first awaited; it may
 /// outlive the hook. A clone is an unsent copy.
 #[must_use = "a call is sent only when awaited"]
@@ -177,6 +171,8 @@ async fn send(
         running: InFlight::enter(&cut),
         cut,
         sent: false,
+        answered: false,
+        began: false,
     };
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
     let sent = async {
@@ -213,11 +209,7 @@ async fn send_call(
     for edit in std::mem::take(unlocked(&mut px.call_edits)) {
         edit(&mut head, &mut first)?;
     }
-    let mut extensions = px.client.extensions.clone();
-    extensions.remove::<Relayed>();
-    if relay {
-        extensions.insert(Relayed);
-    }
+    let extensions = px.client.extensions.clone();
     // The decoder reads the provider's head as it came, for the call as sent.
     let sent = p
         .format
@@ -233,13 +225,13 @@ async fn send_call(
             first_frame.chain(later_frames(frames, encoder)).boxed()
         }
     };
-    let call = Exchange {
-        head,
-        body,
-        extensions,
-    };
+    let mut call = Exchange::new(head, body);
+    call.extensions = extensions;
+    call.relayed = relay;
+    call.streams = later.is_some();
     px.sent = true;
     let resp = p.transport.send(call).await?;
+    edge.cx().answered = true;
     Ok(Response::decoded(
         &p.format,
         &*sent,
@@ -406,7 +398,9 @@ impl CallEdge {
             *batch = Batch::end(Err(Fault::abandoned()));
             return false;
         }
-        let outputs = unlocked(&mut self.cx().outputs);
+        let px = self.cx();
+        px.began |= batch.values.is_some() || batch.broke;
+        let outputs = unlocked(&mut px.outputs);
         if let Some(values) = &mut batch.values
             && let Err(f) = outputs.run(values)
         {

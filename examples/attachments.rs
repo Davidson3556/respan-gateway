@@ -154,7 +154,7 @@ impl Plugin for PdfToText {
             return Ok(());
         }
         // Named by `x-tenant` here; in practice, by your auth plugin.
-        let ext = px.client().extensions();
+        let ext = px.extensions();
         let until = ext.get::<Deadline>().map(|d| d.0);
         let until = until.unwrap_or_else(|| Instant::now() + self.budget);
         let asked = ext.get::<Asked>();

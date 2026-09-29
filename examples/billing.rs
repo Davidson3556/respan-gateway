@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::{Fault, Gateway, Outcome, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::Usage;
@@ -93,12 +93,12 @@ impl<S: UsageStore> Plugin for Billing<S> {
         meter(px)
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, _outcome: &Outcome) {
+    async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         let Some(usage) = CallUsage::of(px).filter(|u| !u.is_empty()) else {
             return;
         };
         // Who pays: here a header an auth plugin vouched for.
-        let asked = px.client().extensions().get::<Asked>();
+        let asked = px.extensions().get::<Asked>();
         let header = asked.and_then(|a| a.headers.get("x-account")?.to_str().ok());
         let account = header.unwrap_or("anonymous");
         // The model this call asked for, as every plugin left it.

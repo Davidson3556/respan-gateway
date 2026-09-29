@@ -143,7 +143,7 @@ impl Decoder<Reply> for Replies {
     fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
         match self.ok {
             true => Ok(()),
-            false => Err(Fault::new(429u16, "busy", "busy").with_answer(PIPE, (), true)),
+            false => Err(Fault::new(429u16, "busy", "busy").with_answer(PIPE, ())),
         }
     }
 }
@@ -222,9 +222,7 @@ async fn accounting_settles_on_a_wire_of_its_own() {
         let gw = gw.and_then(|g| g.plugin("accounting", accounting));
         let gw = gw.unwrap_or_else(|f| panic!("{f}"));
         let body = stream::iter([Ok(Bytes::from(question))]).boxed();
-        let (resp, outcome) = gw
-            .handle::<Ask, Answer>(Exchange::new(Ask, body), false)
-            .await;
+        let (resp, outcome) = gw.handle::<Ask, Answer>(Exchange::new(Ask, body)).await;
         if let Ok(resp) = resp {
             let _: Vec<_> = resp.body.collect().await;
         }

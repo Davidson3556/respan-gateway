@@ -34,7 +34,7 @@ use http::header::{
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
-use respan_gateway_core::{Exchange, Extensions, Fault, Gateway, Outcome, codes};
+use respan_gateway_core::{Exchange, Extensions, Fault, Gateway, codes};
 use respan_gateway_core::{bytes, futures};
 
 /// The crates HTTP formats and transports use, at these versions.
@@ -147,7 +147,7 @@ impl std::ops::Deref for Asked {
 pub async fn serve<B>(
     gateway: &Gateway,
     req: http::Request<B>,
-) -> (http::Response<Body>, BoxFuture<'static, Outcome>)
+) -> (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -168,7 +168,7 @@ pub async fn handle<B>(
     gateway: &Gateway,
     req: http::Request<B>,
     streaming: bool,
-) -> (http::Response<Body>, BoxFuture<'static, Outcome>)
+) -> (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
@@ -188,7 +188,8 @@ where
     extensions.insert(Asked(Arc::new(head.clone())));
     let mut req = Exchange::new(head, body);
     req.extensions = extensions;
-    let (resp, outcome) = gateway.handle::<Ask, Answer>(req, streaming).await;
+    req.streams = streaming;
+    let (resp, outcome) = gateway.handle::<Ask, Answer>(req).await;
     let resp = match resp {
         Err(fault) if fault.code() == codes::NOT_FOUND => {
             let text = format!("no format served accepts {method} {path}");
@@ -392,7 +393,7 @@ mod tests {
         let mut answer = http::Response::new(Bytes::from_static(b"busy"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         let fault = Fault::new(StatusCode::TOO_MANY_REQUESTS, "busy", "busy")
-            .with_answer("f", answer, true)
+            .with_answer("f", answer)
             .with_retry_after(Duration::from_secs(3));
         let (mut head, ()) = http::Response::new(()).into_parts();
         assert_eq!(

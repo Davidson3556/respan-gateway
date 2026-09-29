@@ -15,12 +15,12 @@ mod provider;
 mod response;
 mod transport;
 
-pub use call::{Call, Relayed};
+pub use call::Call;
 pub use context::ClientContext;
 pub use fault::{Fault, codes};
 pub use format::{Decoder, Encoder, Format};
 pub use gateway::Gateway;
-pub use plugin::{Filter, Outcome, Plugin};
+pub use plugin::{Filter, Plugin};
 pub use provider::ProviderContext;
 pub use response::Response;
 pub use transport::{Body, Exchange, Extensions, Transport};

@@ -180,7 +180,7 @@ mod tests {
         assert_eq!((head.status.as_u16(), &out[..]), (404, &b"gone"[..]));
         let mut answer = http::Response::new(Bytes::from_static(b"{}"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-        let fault = Fault::upstream("x").with_answer("raw", answer, true);
+        let fault = Fault::upstream("x").with_answer("raw", answer);
         let mut encoder = response_encoder::<Raw>("raw", None, &ask, Some(&fault));
         let head = encoder.head(None);
         let mut out = BytesMut::new();
@@ -214,6 +214,7 @@ mod tests {
         assert!(decoder.decode(Bytes::from_static(b"a"), &mut got).is_ok());
         let fault = decoder.end(&mut got).err();
         assert_eq!(fault.as_ref().map(Fault::code), Some("upstream"));
-        assert!(fault.is_some_and(|f| !f.is_answer()), "never relayed");
+        let answer = fault.and_then(|f| f.answer::<http::Response<Bytes>>("raw").cloned());
+        assert!(answer.is_none(), "never relayed");
     }
 }

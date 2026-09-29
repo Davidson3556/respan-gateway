@@ -44,6 +44,8 @@ impl std::fmt::Debug for Response {
 pub(crate) struct Batch {
     pub(crate) values: Option<Values>,
     pub(crate) end: Option<Result<(), Fault>>,
+    /// Whether the body broke off, an end of the wire's, not the decoder's.
+    pub(crate) broke: bool,
     /// The call whose end this holds, ended once it is read.
     pub(crate) unread: Unread,
 }
@@ -320,6 +322,7 @@ impl Source {
             }
         };
         let frame = body.next().await;
+        let is_broken = matches!(frame, Some(Err(_)));
         let mut batch = Batch::default();
         let mut content = false;
         let decode = AssertUnwindSafe(|| {
@@ -329,6 +332,7 @@ impl Source {
                 None => decoder.decode(None),
             };
             content = values.as_ref().is_some_and(|v| format.any_content(v));
+            batch.broke = is_broken;
             batch.values = values;
             batch.end = end;
             if let Some(call) = call {

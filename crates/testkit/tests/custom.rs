@@ -160,7 +160,7 @@ impl Format for JevFormat {
             let v = formats::json(&raw);
             // An error inside a success is the provider's, relayed.
             if let Some(message) = v.as_ref().and_then(|v| v["error"]["message"].as_str()) {
-                return Err(Fault::upstream(message).with_answer(&name, raw, false));
+                return Err(Fault::upstream(message).with_answer(&name, raw));
             }
             let text = v.as_ref().and_then(|v| v[answer].as_str());
             let text = text.ok_or_else(|| Fault::upstream("not a jev answer"))?;
@@ -436,7 +436,7 @@ async fn a_default_target_of_another_kind_is_not_used() {
 
     // A target exists, so the setup, not the request, is at fault.
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let end = ended.await.end.map_err(|f| f.code().to_owned());
+    let end = ended.await.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err(codes::CONFIG.to_owned()));
     assert!(mock.sent().is_empty());
 }
@@ -480,7 +480,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
     // Without the plugin, a chat request goes to `v2`, which cannot take it.
     let (resp, ended) = serve(&gw(Vec::new()), chat()).await;
     assert_eq!(read_whole(resp).await.0, StatusCode::INTERNAL_SERVER_ERROR);
-    let end = ended.await.end.map_err(|f| f.code().to_owned());
+    let end = ended.await.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err(codes::CONFIG.to_owned()));
     assert!(mock.sent().is_empty());
 
@@ -535,7 +535,7 @@ async fn a_call_to_a_provider_of_another_kind_is_refused_when_made() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.contains("cannot use"), "{body}");
-    let end = ended.await.end.map_err(|f| f.code().to_owned());
+    let end = ended.await.map_err(|f| f.code().to_owned());
     assert_eq!(end, Err(respan_gateway_core::codes::CONFIG.to_owned()));
     assert!(mock.sent().is_empty(), "nothing left for the provider");
 }
@@ -891,7 +891,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body.ok().as_deref(), Some(&b"busy"[..]));
-    let end = ended.await.end.map_err(|f| f.status());
+    let end = ended.await.map_err(|f| f.status());
     assert_eq!(end, Err(StatusCode::SERVICE_UNAVAILABLE.as_u16()));
 
     // A body cut short upstream is cut short for the client.
@@ -1045,7 +1045,7 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
-    let end = log.only().end;
+    let end = log.only();
     assert!(matches!(end, Err(f) if f.code() == respan_gateway_core::codes::INTERNAL));
 }
 
@@ -1197,7 +1197,7 @@ async fn a_redirect_is_passed_on_as_it_came_not_read_as_an_answer() {
     assert_eq!(body.ok().as_deref(), Some(&b"<html>moved</html>"[..]));
     // The redirect is a fault, a 502 to any other format, that
     // carries the provider's answer, 301 and all.
-    let end = ended.await.end.err();
+    let end = ended.await.err();
     assert_eq!(
         end.as_ref().map(Fault::status),
         Some(StatusCode::BAD_GATEWAY.as_u16())
@@ -1229,7 +1229,7 @@ async fn a_user_formats_failure_keeps_the_providers_words() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body.ok().as_deref(), Some(error.as_bytes()));
-    let end = ended.await.end;
+    let end = ended.await;
     let end = end.map_err(|f| (f.code().to_owned(), f.message().to_owned()));
     let said = ("invalid_request_error".to_owned(), "bad prompt".to_owned());
     assert_eq!(end, Err(said));
@@ -1261,7 +1261,7 @@ async fn a_jev_stream_keeps_its_comments_and_says_a_providers_error() {
     for _ in 0..3 {
         let (resp, ended) = serve(&gw, to("jev-v2", r#"{"prompt":"hi"}"#)).await;
         let (status, _, body) = read_whole(resp).await;
-        let end = ended.await.end.map_err(|f| f.message().to_owned());
+        let end = ended.await.map_err(|f| f.message().to_owned());
         ends.push((status, body.unwrap_or_default(), end));
     }
 
@@ -1963,6 +1963,6 @@ async fn a_keep_alive_reaches_filters_and_goes_where_it_came() {
     let (_, _, body) = read_whole(resp).await;
 
     assert_eq!(body.ok().as_deref(), Some(stream.concat().as_bytes()));
-    assert_eq!(ended.await.end, Ok(()));
+    assert_eq!(ended.await, Ok(()));
     assert_eq!(counts.0.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
