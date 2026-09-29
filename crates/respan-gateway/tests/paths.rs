@@ -113,3 +113,33 @@ target: p
         "these spellings skipped the chat format and reached the vendor's chat endpoint: {bypass:?}"
     );
 }
+
+/// Passthrough forwards the path it matched, cleaned, and the query as it
+/// came: whatever the spelling, the vendor gets one path.
+#[tokio::test]
+async fn passthrough_forwards_the_canonical_path() {
+    let (base, seen) = recorder().await;
+    let gw = Gateway::start(&format!(
+        "providers:
+  p: {{ format: openai-chat, base_url: '{base}/chatv1' }}
+  any: {{ format: passthrough, base_url: '{base}/pt' }}
+serve: [openai-chat, passthrough]
+target: p
+"
+    ))
+    .await;
+    let addr = gw.base.trim_start_matches("http://").to_owned();
+    for (sent, forwarded) in [
+        ("/v1\\models", "/pt/v1/models"),
+        ("/v1/./models", "/pt/v1/models"),
+        ("/v1/x/../models?a=1", "/pt/v1/models?a=1"),
+        ("/v1/%6Dodels", "/pt/v1/models"),
+        ("/v1/files/file-1?limit=2", "/pt/v1/files/file-1?limit=2"),
+        ("/v1/a%20b", "/pt/v1/a%20b"),
+    ] {
+        seen.lock().unwrap().clear();
+        send_raw(&addr, sent).await;
+        let got = seen.lock().unwrap().clone();
+        assert_eq!(got, [format!("POST {forwarded} HTTP/1.1")], "sent {sent}");
+    }
+}

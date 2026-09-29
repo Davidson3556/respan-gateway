@@ -68,6 +68,23 @@ pub fn clean_path(path: &str) -> String {
     kept.iter().fold(String::new(), |out, s| out + "/" + s)
 }
 
+/// A request's path as [`clean_path`] reads it, written as a URI path: what
+/// a relay sends on, so the provider only gets a path that was matched.
+pub(crate) fn canonical_path(path: &str) -> String {
+    let mut out = String::new();
+    for byte in clean_path(path).bytes() {
+        match byte {
+            b'/' | b'-' | b'.' | b'_' | b'~' => out.push(char::from(byte)),
+            b if b.is_ascii_alphanumeric() => out.push(char::from(b)),
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    match out.is_empty() {
+        true => "/".to_owned(),
+        false => out,
+    }
+}
+
 /// Whether a request's path ends in `suffix`, however it is spelled (see
 /// [`clean_path`]).
 pub fn path_ends_with(head: &RequestHead, suffix: &str) -> bool {
