@@ -107,7 +107,7 @@ impl ProviderContext {
     /// Run `filter` as [`ClientContext::filter`] does, for this call alone:
     /// over its inputs after the client edge's filters, or its outputs,
     /// whoever reads them, before them.
-    pub fn filter<T: Clone + PartialEq + Send + Sync + 'static>(
+    pub fn filter<T: Clone + Send + Sync + 'static>(
         &mut self,
         filter: impl Filter<T>,
     ) -> Result<(), Fault> {

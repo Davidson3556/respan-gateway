@@ -89,7 +89,7 @@ pub trait Format: Send + Sync + 'static {
     type Input: Clone + PartialEq + Send + Sync + 'static;
 
     /// What a provider answers, one or a stream.
-    type Output: Clone + PartialEq + Send + Sync + 'static;
+    type Output: Clone + Send + Sync + 'static;
 
     /// A client connection as its adapter hands it over, with its reply
     /// slot.

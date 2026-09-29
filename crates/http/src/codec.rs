@@ -34,7 +34,7 @@ pub trait Codec: Send + Sync + 'static {
     type Input: Clone + PartialEq + Send + Sync + 'static;
 
     /// What a response carries, one or a stream.
-    type Output: Clone + PartialEq + Send + Sync + 'static;
+    type Output: Clone + Send + Sync + 'static;
 
     /// The protocol's identity. Codecs of one name relay rather than
     /// translate, and share a kind.

@@ -196,7 +196,7 @@ impl ClientContext {
     /// type or a whole input filtered to other than one; or the filter's
     /// `Err`, which reading or sending the input then gets too; or the
     /// failure the inputs ended with.
-    pub fn filter<T: Clone + PartialEq + Send + Sync + 'static>(
+    pub fn filter<T: Clone + Send + Sync + 'static>(
         &mut self,
         filter: impl Filter<T>,
     ) -> Result<(), Fault> {
