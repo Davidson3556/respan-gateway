@@ -92,6 +92,70 @@ async fn two_spellings_of_max_tokens_cannot_overspend() -> Result<(), Fault> {
     Ok(())
 }
 
+/// Use case 4 with use case 9: a hedge races two deployments, and the one
+/// that loses is charged too. It was abandoned before it reported any usage,
+/// and it may have cost all it was allowed, so it pays at least its hold.
+#[tokio::test(start_paused = true)]
+async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault> {
+    use respan_gateway_core::{ClientContext, Plugin, Response, async_trait};
+    use respan_gateway_http::{Exchange, RequestHead, ResponseHead, Transport};
+    use respan_gateway_routing::{Until, race};
+    use std::time::Duration;
+
+    const EU: &str = "http://openai-eu.test/v1";
+
+    /// Answers after a delay: the deployment that loses.
+    struct Slow<T>(T, Duration);
+
+    #[async_trait]
+    impl<T: Transport> Transport for Slow<T> {
+        async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+            tokio::time::sleep(self.1).await;
+            self.0.send(call).await
+        }
+    }
+
+    /// Races both deployments, the second starting 200 ms after the first.
+    struct Hedge;
+
+    #[async_trait]
+    impl Plugin for Hedge {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            let calls = ["openai", "openai-eu"].map(|p| cx.call(p));
+            let stagger = Duration::from_millis(200);
+            race(calls, stagger, Until::Content).await.map(Some)
+        }
+    }
+
+    let (mock, ledger) = (MockTransport::new(), wallets());
+    let prices = prices();
+    let accounting = Accounting::new(ledger.clone(), move |px, tally| quote(px, tally, &prices));
+    let slow = Slow(mock.at(OPENAI), Duration::from_secs(1));
+    let gw = Gateway::new()
+        .provider("openai", OpenAiChat, slow)?
+        .provider("openai-eu", OpenAiChat, mock.at(EU))?
+        .serve(OpenAiChat)?
+        .plugin("hedge", Hedge)?
+        .plugin("accounting", accounting)?;
+    mock.reply(EU, answer());
+
+    assert!(ask(&gw, "sk-b1").await?.is_success());
+
+    // The winner settled from its usage (80,020); the loser held up to
+    // 12,000 output tokens at $8 a million, 96,000, and pays no less.
+    let spent = ledger.spent("sk-b1");
+    assert!(
+        spent >= 80_020 + 96_000,
+        "the loser was not charged its hold: {spent}"
+    );
+    assert_eq!(
+        ledger.available("sk-b1"),
+        1_000_000 - spent,
+        "nothing left held"
+    );
+    Ok(())
+}
+
 /// A client's absurd `max_tokens` prices high, never wraps to a free hold.
 #[tokio::test]
 async fn a_huge_max_tokens_is_priced_high_not_wrapped() -> Result<(), Fault> {

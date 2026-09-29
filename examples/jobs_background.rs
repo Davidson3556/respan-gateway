@@ -141,7 +141,10 @@ impl Jobs {
             Entry::Native(native) => {
                 cx.set_target(DEPLOYMENTS[deployment]);
                 let path = format!("/v1/responses/{native}");
-                cx.filter(move |ask: &mut Ask| Ok(ask.path.clone_from(&path)))?;
+                cx.filter(move |ask: &mut Ask| {
+                    ask.path.clone_from(&path);
+                    Ok(())
+                })?;
                 Ok(None)
             }
         }
