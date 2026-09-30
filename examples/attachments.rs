@@ -31,7 +31,7 @@
 //! from `GET /v1/files/{id}` and the PDF signature before conversion.
 //!
 //! The HTTP adapter can allow 80 MiB on this route while keeping smaller
-//! limits elsewhere: `respan_gateway_server::router_with_limit(gateway,
+//! limits elsewhere: `respan_gateway_axum::router_with_limit(gateway,
 //! |head| if head.uri.path() == "/v1/chat/completions" { 80 << 20 } else { 1 << 20 })`.
 //! The converter allows 72 MiB of base64, enough for a 50 MiB PDF.
 //!
@@ -56,10 +56,10 @@ use respan_gateway_examples::store::{
 };
 use respan_gateway_formats::conversation::{Content, Conversation};
 use respan_gateway_formats::opaque::Got;
-use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_http::{Asked, CallHeaders, Credential};
+use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use serde_json::json;

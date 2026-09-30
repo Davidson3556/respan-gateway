@@ -16,8 +16,8 @@ everything else built as modules on one public API.
 2. **Plugins are compiled in.** No dynamic loading of any kind. A custom
    gateway is your own binary that depends on these crates.
 
-Details and reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
-[`docs/decisions/`](docs/decisions/).
+Current contracts and package boundaries:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Try it
 
@@ -68,8 +68,7 @@ A client sends a request, plugins look at it, the gateway sends it on to a
 provider, and the response streams back through the plugins. The kernel
 routes events and never sees a byte, a head or a key: the client edge and
 the provider edge own them
-([architecture](docs/ARCHITECTURE.md),
-[0024](docs/decisions/0024-flows-and-symmetric-edges.md)).
+([architecture](docs/ARCHITECTURE.md#one-shape-at-both-edges)).
 
 - **Gateway**: what you build and hand requests to: providers, client
   formats, plugins and a default target, each registered by value.
@@ -86,7 +85,7 @@ the provider edge own them
   the type order for each edge; Format has no client/provider methods.
   `Events<T>` implements the standard `Stream` trait. Formats with the
   same name and transport can relay each message as its original bytes;
-  formats of one kind translate. An HTTP format is a **Codec** (`crates/http`),
+  formats of one kind translate. An HTTP format is a **Codec** (`sdks/http`),
   made a `Format` in both orientations by `impl_format!`. Its **Transport**
   holds an accepted exchange or a shared outbound sender. `Transport::accept`
   serves the incoming edge; `connect(transport)` supplies each outgoing
@@ -119,19 +118,35 @@ test when its milestone lands. The kernel API is frozen after M2.
 | M8 MCP gateway | `mcp` kind, relay, aggregation, per-key access |
 | M9 Agent loop | Gateway-run MCP tools inside chat and Responses requests |
 
-## Crates
+## Structure
+
+The kernel defines extension contracts; SDKs help authors implement them;
+first-party plugins and providers use those same public APIs. Adapters host
+the gateway, and the binary chooses what to compose. See the
+[repository layers](docs/ARCHITECTURE.md#repository-layers).
 
 | Path | What it is |
 |---|---|
-| `crates/core` | The kernel: typed streams, symmetric boundaries, plugins and lifecycle; no HTTP or kinds. |
-| `crates/http` | HTTP's wire: `Codec`, `Transport`, the driver, the adapter, credentials. |
-| `crates/formats` | The chat kind, OpenAI Chat and Anthropic Messages. |
-| `crates/plugins` | First-party plugins, such as the model router. |
-| `crates/server` | The axum router and the HTTP transport. |
-| `crates/testkit` | A mock transport and tests through the real formats. |
-| `crates/respan-gateway` | The binary: YAML config, `check` and `proxy`. |
-| `sdks/` | Building blocks for plugins: `routing`, `text`, `ledger`, `mcp`, `ws`. |
-| `examples/` | Runnable, tested examples of the [use cases](examples/README.md). |
+| `core/` | The neutral kernel: typed streams, plugins and lifecycle; no HTTP or message kinds. |
+| `sdks/http/` | HTTP codec/transport contracts, driver, credentials and an optional Reqwest backend. |
+| `sdks/formats/` | Shared conversation/usage types, framing/relay helpers and vendor-neutral passthrough; no vendor codecs. |
+| `sdks/{routing,text,ledger,mcp,ws}/` | Reusable routing, text, accounting and protocol mechanisms. |
+| `plugins/` | Concrete first-party policies, currently the model router. |
+| `providers/` | First-party OpenAI Chat and Anthropic Messages codecs, reusable on both edges. |
+| `adapters/axum/` | Axum HTTP ingress and optional WebSocket hosting. |
+| `gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
+| `testkit/` | Mock transport and public-API integration testing helpers. |
+| `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
+
+SDKs do not depend on concrete providers, plugins or hosting adapters in
+production. Ledger is a reusable mechanism; pricing and billing integrations
+live in examples. Implementing `Plugin` alone does not make a helper a
+first-party policy. A future first-party PyO3 embedding adapter will live at
+`adapters/python/`; it is not implemented yet.
+
+The HTTP SDK's `reqwest` feature enables `HttpTransport`. The Axum adapter's
+`ws` feature enables its `ws` hosting module. Both are opt-in, so codec authors
+and ordinary HTTP hosts do not need unrelated hosting or transport code.
 
 ## Development
 
@@ -139,7 +154,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### End-to-end tests
 
-`crates/respan-gateway/tests/e2e.rs` starts the built binary on a free
+`gateway/tests/e2e.rs` starts the built binary on a free
 port with a temp config, and talks real HTTP to it and to fake providers
 on localhost from [mockllm](https://github.com/lihe07/mockllm), which
 check each call by the real provider's rules and answer in its exact

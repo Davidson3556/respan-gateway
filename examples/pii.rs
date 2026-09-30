@@ -25,11 +25,11 @@
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable};
 use serde_json::{self, json};

@@ -3,9 +3,9 @@
 The project is pre-alpha; the architecture is being designed.
 
 Before proposing a change to the core, read
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and the
-[decision records](docs/decisions/). A change that contradicts an
-accepted decision needs a new decision record.
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the source of truth for the
+current architecture. Architectural changes must explain their rationale and
+update that document and the relevant tests together.
 
 Every change must pass:
 

@@ -13,13 +13,12 @@ events; OpenAI Realtime and Gemini Live run through the same code.
   `strip_client_origin_headers`, `credentials`, `CallHeaders`), so a client's
   key passes only on a same-dialect relay. `.with_headers(map)` sets the
   transport's own keys; `.max_message(bytes)` (default 16 MiB).
-- `serve_ws(&gateway, ws, req)` and `router(gateway)`: the axum adapter. It
-  accepts the client's `WebSocketUpgrade`, calls `respan_gateway_http::handle(..,
-  true)`, and pumps frames both ways. A request the gateway refuses (no format,
-  a plugin, an unreachable provider, a provider that refuses the upgrade) is an
-  ordinary HTTP answer to the handshake, before any upgrade. To mix sessions
-  with plain HTTP, route the sessions to `serve_ws` on top of
-  `respan_gateway_server::router`.
+- Axum hosting is in the separate `respan-gateway-axum` adapter, behind its
+  optional `ws` feature: `respan_gateway_axum::ws::{router, serve_ws,
+  serve_ws_until}`. It accepts a client's upgrade, calls
+  `respan_gateway_http::handle(.., true)`, and pumps frames both ways. A refused
+  request is answered before the upgrade. To mix sessions with plain HTTP,
+  route `serve_ws` on top of `respan_gateway_axum::router`.
 - `JsonEvents::new(name, path)`: a `Codec` (made a `Format` by `impl_format!`) whose kind is one JSON event per
   frame, `ClientEvent` in and `ProviderEvent` out (each has `json: Value`).
   A relay to a format of the same name is byte for byte while an event is
@@ -61,7 +60,7 @@ A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
   next side takes it: one frame in flight per hop, plus the sockets' own
   buffers. A client that does not read stalls the provider after about 6 MiB,
   and a provider that does not read stalls the client after about 7 MiB
-  (`tests/backpressure.rs`). The kernel buffers nothing beyond its one batch.
+  (`adapters/axum/tests/backpressure.rs`). The kernel buffers nothing beyond its one batch.
 - **No timeouts on a live session**: no idle limit, no keep-alive pings, no
   maximum length. The bounds are 10 s for the handshake (including a refusal body) and 5 s (`CLOSE_WAIT`) for
   the other side's part of a close. A limit on long sessions is a plugin's.

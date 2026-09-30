@@ -16,8 +16,9 @@ use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{Connection, Events, Fault, Format, Gateway};
+use respan_gateway_formats::Usage;
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
-use respan_gateway_formats::{OpenAiChat, Usage};
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Your model: a conversation in, its answer out.

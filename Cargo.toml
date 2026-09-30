@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "sdks/*", "examples"]
+members = ["core", "sdks/*", "plugins", "providers", "adapters/*", "gateway", "testkit", "examples"]
 resolver = "3"
 
 [workspace.package]
@@ -11,12 +11,13 @@ repository = "https://github.com/respanai/respan-gateway"
 publish = false
 
 [workspace.dependencies]
-respan-gateway-core = { path = "crates/core" }
-respan-gateway-formats = { path = "crates/formats" }
-respan-gateway-http = { path = "crates/http" }
-respan-gateway-plugins = { path = "crates/plugins" }
-respan-gateway-server = { path = "crates/server" }
-respan-gateway-testkit = { path = "crates/testkit" }
+respan-gateway-core = { path = "core" }
+respan-gateway-formats = { path = "sdks/formats" }
+respan-gateway-http = { path = "sdks/http" }
+respan-gateway-plugins = { path = "plugins" }
+respan-gateway-axum = { path = "adapters/axum" }
+respan-gateway-providers = { path = "providers" }
+respan-gateway-testkit = { path = "testkit" }
 respan-gateway-routing = { path = "sdks/routing" }
 respan-gateway-text = { path = "sdks/text" }
 respan-gateway-ledger = { path = "sdks/ledger" }

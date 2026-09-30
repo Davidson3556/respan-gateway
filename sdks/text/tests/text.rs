@@ -2,10 +2,10 @@ use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Respons
 use respan_gateway_formats::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role,
 };
-use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode};
+use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, run_filter as run, serve};
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
 use serde_json::{self, json};
@@ -102,7 +102,7 @@ fn a_reply_left_showing_nothing_waits_for_one_that_does() {
     assert!(out[0].start.is_some());
 }
 
-// Every value reaches a filter (0010): a keep-alive or usage alone passes
+// Every value reaches a filter: a keep-alive or usage alone passes
 // at once when nothing waits, even while text is held, and is never refused.
 #[test]
 fn a_keep_alive_or_usage_alone_passes_at_once_unless_replies_wait() {

@@ -16,11 +16,11 @@ use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
 use respan_gateway_http::http;
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 const JUDGE: &str = "http://judge.test/v1";

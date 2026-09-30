@@ -8,11 +8,11 @@ use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_ledger::{Accounting, Amount, HoldId, Ledger, MemoryLedger, Quote, Tally};
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 const P: &str = "http://p.test/v1";

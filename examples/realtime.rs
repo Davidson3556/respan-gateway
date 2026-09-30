@@ -852,7 +852,7 @@ async fn listen(gateway: &Gateway) -> std::net::SocketAddr {
         .await
         .expect("a port");
     let addr = listener.local_addr().expect("an address");
-    let app = respan_gateway_ws::router(gateway.clone());
+    let app = respan_gateway_axum::ws::router(gateway.clone());
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });

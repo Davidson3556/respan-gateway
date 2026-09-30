@@ -5,22 +5,30 @@ is being designed.
 
 ## Hard rules
 
-- Read `docs/ARCHITECTURE.md` and `docs/decisions/` before changing the core.
-- The core is feature-neutral (0001). Never add a trait or type named after a
+- Read `docs/ARCHITECTURE.md` before changing the core.
+- The core is feature-neutral. Never add a trait or type named after a
   feature to the core crate.
-- No dynamic plugin loading of any kind (0002). Do not propose it as an option.
-- A change that contradicts an accepted decision needs a new decision record.
+- No dynamic plugin loading of any kind. Do not propose it as an option.
+- `docs/ARCHITECTURE.md` is the architectural source of truth. Update it and
+  the relevant tests together when changing an architectural contract.
 
 ## Layout
 
-- `crates/core` is the kernel. Nothing feature-specific goes here.
+- `core/` is the kernel. Nothing feature-specific goes here.
 - Every other crate may use only the public API of `core`. If a helper needs
   private access, the kernel API is missing something; fix that instead.
-- Formats, first-party plugins, the server adapter, the testkit and the binary
-  are separate crates.
-- `sdks/*` and `examples` are workspace members that use only the public API
-  of the crates. Every example has tests (`examples/tests/<name>.rs`) that
-  `cargo test` runs.
+- `sdks/*` contains reusable mechanisms and shared message types. SDK production
+  dependencies must not point to providers, plugins, adapters or the binary.
+- `plugins/` contains concrete first-party policies; `providers/` contains
+  concrete provider codecs. Both use public core/SDK APIs, just like external
+  extensions. A generic helper implementing `Plugin` can still belong in an SDK.
+- `adapters/*` hosts the gateway in an environment: Axum today, a planned PyO3
+  adapter in `adapters/python/` later. Hosting must not leak back into SDKs.
+- `gateway/` composes providers, plugins and adapters through CLI configuration.
+  `testkit/` supplies public-API testing helpers. Test-only dependencies may
+  use concrete implementations without reversing production dependencies.
+- `examples/` demonstrates integrations, including application-specific billing.
+  Every example has tests (`examples/tests/<name>.rs`) that `cargo test` runs.
 
 ## Commands
 

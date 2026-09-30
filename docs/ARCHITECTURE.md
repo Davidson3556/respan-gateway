@@ -1,12 +1,74 @@
 # Architecture
 
-The kernel (`crates/core`) routes typed events, runs plugins, and manages
+The kernel (`core/`) routes typed events, runs plugins, and manages
 lifetimes. Protocol implementations encode and decode data, retain original
 bytes and headers, establish connections, and report delivery completion.
-The current boundary is defined by
-[0024](decisions/0024-flows-and-symmetric-edges.md) and
-[0025](decisions/0025-direction-independent-format.md). A change that contradicts
-an accepted [decision](decisions/) needs a new record.
+This document is the source of truth for the current architecture. Changes
+to these contracts must update this document and their tests together.
+
+## Design constraints
+
+- **Feature-neutral kernel.** Routing policy, fallback, guardrails, redaction,
+  caching, logging and accounting belong outside the core. Do not add kernel
+  traits or types named after features. The kernel does not count usage or
+  interpret HTTP headers, bytes, credentials or model kinds.
+- **Public API parity.** First-party extensions use the same public APIs as
+  external authors. If a helper needs private kernel access, improve the
+  public contract rather than granting special access.
+- **Compiled-in plugins only.** Configuration selects and orders implementations
+  already built into the application. No dynamic plugin loading: shared
+  libraries, WASM plugin runtimes, embedded scripting as a plugin mechanism,
+  and stable-ABI plugin interfaces are excluded. A planned Python embedding
+  adapter hosts the gateway; it is not a dynamic plugin-loading mechanism.
+- **Evolvable contracts.** Prefer defaulted trait methods and context methods
+  when extending public contracts. Evolving data types use private fields or
+  `#[non_exhaustive]` with constructors.
+
+## Repository layers
+
+The construction direction is **core → SDKs/helpers → concrete plugins and
+providers**; dependencies point back toward the contracts they use. Adapters
+host the gateway, and applications choose what to compose.
+
+| Path | Responsibility |
+|---|---|
+| `core/` | Typed routing, plugins, symmetric edges and lifecycle. |
+| `sdks/http/` | Codecs, transport, frames, framework-neutral exchange coordination, head timing and credentials; optional Reqwest backend. |
+| `sdks/formats/` | Shared conversation/usage types, relay/framing/error helpers and generic opaque passthrough. |
+| `sdks/routing/` | Reusable fallback, race and response-selection mechanisms. |
+| `sdks/text/` | Reusable text filtering, holdback and rewriting helpers. |
+| `sdks/ledger/` | Reusable accounting and lifecycle-aware settlement mechanisms. |
+| `sdks/mcp/` | MCP protocol and stdio transport mechanisms. |
+| `sdks/ws/` | WebSocket events and outbound transport, without hosting. |
+| `providers/` | Concrete OpenAI Chat and Anthropic Messages codecs and their translation machinery. |
+| `plugins/` | Concrete first-party policies, currently the model router. |
+| `adapters/axum/` | Axum HTTP hosting and optional WebSocket ingress. |
+| `gateway/` | YAML configuration and explicit composition, `check` and `proxy`. |
+| `testkit/` | Mock transport and public-API integration helpers. |
+| `examples/` | Runnable, tested integrations of the public contracts. |
+
+Every crate outside `core` uses only public APIs. SDK production dependencies
+must not point to concrete providers, plugins, adapters or the binary.
+Adapters must not depend on the CLI or choose application policy. Test-only
+dependencies can use concrete implementations to verify these contracts.
+
+Providers consume the same public conversation/codec helpers as external
+implementations; the formats SDK does not re-export vendor codecs. Its
+helpers remain HTTP-aware. The initial providers share one package; layering
+does not require a separate package per vendor. Text, tool calls and tool
+results translate between the implemented chat formats; images and files
+remain format-specific rather than natively translated.
+
+`HttpTransport` belongs to the HTTP SDK behind its default-off `reqwest`
+feature. Axum's default-off `ws` feature hosts WebSockets; the WS SDK retains
+its outbound transport and event codec without depending on Axum. A planned
+first-party PyO3 adapter belongs at `adapters/python/`, independently of Axum;
+no Python adapter is implemented yet.
+
+Ledger remains an SDK even where its generic helpers implement `Plugin`.
+Application-specific prices, accounts and billing integrations belong in
+examples, not kernel or SDK policy. Implementing a kernel trait does not by
+itself make a helper a concrete first-party policy.
 
 ## One shape at both edges
 
@@ -18,8 +80,9 @@ Sink<Events<Output>>  ◀─ plugins ── Future<Events<Output>>
 ```
 
 `Input` travels from the application toward the provider; `Output` travels
-back. These are the core's roles for the registered message types. Each boundary supplies an ordinary future that opens its incoming
-events and an ordinary sink that writes outgoing events. The types reverse
+back. These are the core's roles for the registered message types. Each
+boundary supplies an ordinary future that opens its incoming events and an
+ordinary sink that writes outgoing events. The types reverse
 at the provider. Opening, streaming and writing use Rust's existing
 `Future`, `Stream` and `Sink` contracts.
 
@@ -55,8 +118,8 @@ its outstanding write; a final write failure remains a call failure.
 A provider refusal cancels an unfinished upload immediately.
 
 The free `write(prepare)` helper implements this sink contract from a
-closure that synchronously prepares a delivery future. No public `Edge`,
-`Flow`, or `Writer` type is needed.
+closure that synchronously prepares a delivery future. Client-sink preparation
+failure takes precedence over an unread buffered provider ending.
 
 ## Constructing the boundaries
 
@@ -93,7 +156,7 @@ A provider is registered with `Gateway::provider(name, format, factory)`,
 where `factory: Fn(Extensions) -> T` constructs fresh I/O after the provider
 hooks on every attempt. The factory receives that call's final extensions.
 It can capture shared connection pools or model handles while each `T`
-owns the attempt's state. There are no associated `Wire` or `Dialer` types.
+owns the attempt's state.
 
 `bind` returns before connection establishment or input reading necessarily
 finishes. Starting a provider sink initiates the I/O
@@ -102,13 +165,24 @@ share their event kind, but may implement `Format<T, R, W>` for different I/O
 types. The input's concrete `T` selects compatible registered client
 implementations before their `matches` methods run.
 
+A **kind** is the input/output type pair, defined outside the kernel.
+Registered message types implement `Clone + Send + Sync + 'static`; input
+and output must be distinct types. Formats of one kind translate through
+these typed values. A normal call to an incompatible kind fails with
+`config`; `with_input` can call another kind by supplying that provider's
+input type. Typed plugin access with the wrong type fails with `internal`,
+rather than silently skipping traffic.
+
 There is no separate core transport interface. HTTP implements its own
 `Transport` handle: adapters use `Transport::accept`, and provider registration
 uses `connect(transport)` to supply a handle with each attempt’s extensions.
 Outbound senders use `Transport::new(async_callback)` or convert an existing
 HTTP, WebSocket, or stdio backend with `.into()`. An in-process
 model uses a cloned shared model handle as its per-call I/O
-([example](../examples/custom_transport.rs)).
+([example](../examples/custom_transport.rs)). HTTP outbound handle clones
+share resources; accepted-exchange clones can bind only once collectively.
+Constructing and binding these handles performs no I/O; the returned futures
+and sinks drive it.
 
 ## Gateway execution
 
@@ -121,8 +195,8 @@ model uses a cloned shared model handle as its per-call I/O
    before readiness, and successful readiness is retained until submission.
 3. Each `on_client` runs in registration order. It can pass, produce a
    response, refuse, set a target, make calls, or install filters and wraps.
-4. A call runs `on_provider` hooks, constructs fresh provider I/O, creates its pair, supplies its
-   input stream to that sink, and drives writing and incoming opening
+4. A call runs `on_provider` hooks, constructs fresh provider I/O, creates its
+   pair, supplies its input stream to that sink, and drives writing and incoming opening
    together. Preparation failure, sent failure, refusal,
    and an opened response retain distinct meanings.
 5. Provider output filters run before client output filters. The selected
@@ -132,7 +206,7 @@ model uses a cloned shared model handle as its per-call I/O
    lifetime guard also settles cancellation and panics.
 
 **An adapter must drive `handle` while consuming what its edge writes.**
-The handle now lasts through delivery. Waiting for it before reading an
+The handle lasts through delivery. Waiting for it before reading an
 HTTP response or WebSocket messages can deadlock. HTTP's adapter owns this
 coordination; direct embedders must implement it too. `handle` reports the
 writing result; detached end hooks may still be running when it resolves.
@@ -143,6 +217,85 @@ first added first; output filters and wraps run last added first. A
 plugin therefore sees inputs after earlier plugins and outputs before them.
 Every started hook receives its end once, including on cancellation and
 panic. An incoming exchange's end waits for its calls' end hooks.
+
+The kernel has one global plugin registry, not endpoint-specific routes or
+plugin chains. A response or refusal skips later client hooks. Mandatory
+checks must therefore precede short-circuiting plugins. Register input-producing
+plugins before checks or redactors that must inspect their additions. Plugins
+explicitly choose whether to pass or refuse other kinds; endpoint-specific
+policy can use adapter-supplied extensions.
+
+If every client hook passes, the selected target is called. There is one
+default target, replaced by subsequent `Gateway::target` calls; `set_target`
+changes the exchange's target without skipping later hooks. No target yields
+`not_found`. YAML `after:` ordering is resolved by the application before
+registration, not by a kernel scheduler.
+
+A call snapshots the client context when created and starts when first polled.
+Later whole-input edits or newly installed wraps do not change that snapshot;
+live-input readers and their existing filter layers remain shared. Its
+extensions combine the snapshot's values, call-specific values and
+provider-hook changes; provider-hook changes affect that call alone. Every
+provider call runs provider hooks, including calls made by plugins.
+
+New provider hooks do not wait for earlier calls' end hooks. Record a
+reservation before an await and settle it in the matching end hook:
+cancellation can occur at any await.
+
+A plugin can obtain the gateway through `ClientContext::gateway()` to launch
+an independent exchange. It inherits no extensions and runs the plugin chain
+again. There is no nesting-depth limit, so plugins must mark and recognize
+their own re-entry. Keep the gateway in the job, not in the registered plugin,
+to avoid a reference cycle.
+
+## Filters and asynchronous wraps
+
+A whole input remains exactly one value: filters edit it synchronously, and
+later hooks read the edited value through `input()`. Dropping or expanding
+that input is an `internal` fault. Input wraps apply only to live inputs;
+wrapping a whole input is also an `internal` fault. Await whole-input checks
+in the hook, then edit with a filter.
+
+Filters receive all values, including keep-alives and usage-only events.
+Each filter receives its end exactly once, including failure, cancellation
+and panic; a filter added after completion sees that end immediately. A
+filter panic becomes an `internal` fault. Metering is a provider-filter
+policy: register a meter after filters whose rejection or dropping must not
+hide values from it, since output filters run in reverse order.
+
+Provider events are coalesced into batches of at most 128 ready stream
+items. A full batch without an end yields before delivery so hot streams
+cannot monopolize the task. Provider filters see the entire batch before
+client filters see its first event; a large decoded frame can span several
+batches. A provider meter can observe usage in the same batch as output
+rejected by a client filter, but need not see unread later batches after
+failure. Wraps remain pull-driven asynchronous transformations; they compose
+without having to make the call themselves.
+
+A cut input ends with `Fault::abandoned`, never a clean EOF. An input
+filter/wrap failure ends the call with that fault. A wrap that cleanly
+stops reading output can finish the client response cleanly while the
+unfinished call is abandoned; a deadline that needs a reason emits a fault.
+
+## Response holding and routing policy
+
+`Response::buffer_until(predicate)` inspects provider-filtered events and
+retains buffered events, protocol metadata and call ownership for replay.
+An error before a match is returned; an error after a match remains buffered.
+Clean completion returns the response even without a match. Repeated calls
+recheck buffered events with the new predicate.
+
+`until_end` holds the entire response and returns it with its terminal result.
+Errors before any output are returned directly; later errors are retained
+for replay and returned alongside the response. Calling policy must bound
+buffering and waiting where needed. Both operations leave live-input calls
+unread to avoid duplex deadlock.
+
+The routing SDK offers `Until::Head`, `Until::content(predicate)` and
+`Until::End`. There is no universal content predicate: the plugin supplies
+the event type and criterion. Provider-filtered-out events cannot commit a
+content-based fallback, and synthetic responses obey the same predicate.
+For calls without live inputs, `End` selects only clean completion.
 
 ## Public API
 
@@ -164,10 +317,6 @@ panic. An incoming exchange's end waits for its calls' end hooks.
 
 `Events<T>` implements `Stream`; opening is a standard future and writing
 is a standard sink, optionally constructed with `write(prepare)`.
-`Origin`, `Headed`, `Ended`, and `Format::input` are removed, along with
-the associated `Wire` and `Dialer` types. The intermediate
-`Edge`/`Flow`/`Writer` design is also removed from the public API.
-The core imports no HTTP types, byte buffers, credentials, or model kinds.
 
 ## Protocol metadata and relay
 
@@ -195,6 +344,26 @@ Credentials remain an HTTP extension. Its driver marks `Exchange::relayed`
 only on eligible relays. The transport uses explicit call headers, then
 its configured credentials, then the client's credential only on a relay.
 A plugin that removes the credential extension stops pass-through.
+
+## Fault ownership
+
+`Fault` carries a code, not an HTTP status. Typed hints are interpreted by the
+relevant SDK or boundary; the kernel does not inspect them. HTTP defines
+`Status` and maps codes to default status codes. Provider error answers and
+in-stream errors can carry format-specific original answers through
+`with_answer`; only eligible relay responses retain those original answers.
+
+Input encoding failures are classified by the format and kind, not recoded
+by the kernel or HTTP driver. The shared `Relayed` helper classifies unchanged
+decoded input as `bad_request` and edited or newly constructed input as
+`config`. This is independent of transfer provenance: an unchanged clone
+passed through `with_input` can still be a client-input error even though
+the call does not relay.
+
+`ProviderContext::is_sent` and `is_refused` describe the call, not its fault.
+Sent means the call may have reached the provider; refused means its response
+was classified as refused before opening, not that an opened stream later
+failed.
 
 ## HTTP and WebSocket
 
@@ -228,35 +397,23 @@ message. `buffer_until` and `until_end` return immediately for calls with
 live inputs, because holding a response could deadlock a peer waiting to
 send its next message.
 
-Provider events are coalesced into batches of at most 128 ready stream
-items. A full batch without an end yields before delivery so hot streams
-cannot monopolize the task. Provider filters see the entire batch before client filters see
-its first event; a large decoded frame can span several batches. This lets
-a provider meter observe usage in the same batch as output rejected by a
-client filter, but does not promise to read later batches after failure. Wraps
-remain pull-driven asynchronous transformations; they compose without
-having to make the call themselves.
+## Verification
 
-A cut input ends with `Fault::abandoned`, never a clean EOF. An input
-filter/wrap failure ends the call with that fault. A wrap that cleanly
-stops reading output can finish the client response cleanly while the
-unfinished call is abandoned; a deadline that needs a reason emits a fault.
+Examples are workspace members using only public APIs. Every runnable example
+has tests under `examples/tests/` that run with `cargo test --workspace`.
+Protocol tests use local provider fakes; credentialed real-provider tests
+are opt-in and ignored by the normal suite.
 
-## Crates and verification
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
 
-Every crate outside `core` uses only the public APIs of the crates below it.
-
-| Crate | Responsibility |
-|---|---|
-| `core` | Typed routing, plugins, symmetric edges and lifecycle. |
-| `http` | Codecs, transport, frames, adapters, head timing and credential policy. |
-| `formats` | Conversation kind, OpenAI/Anthropic codecs, usage and relay helpers. |
-| `server` | Axum router and HTTP transport. |
-| `testkit` | Mock transport and real-format integration helpers. |
-| `plugins` | First-party plugins using the public API. |
-| `respan-gateway` | YAML configuration, model routing, `check` and `proxy`. |
-| `sdks` | Routing, text, accounting, MCP and WebSocket support. |
-| `examples` | Runnable integrations of the public contracts. |
+Also check all features and isolated no-default-feature packages when changing
+optional dependencies: workspace feature unification can hide missing feature
+boundaries. Build public documentation with
+`RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features`.
 
 | Guarantee | Evidence |
 |---|---|
@@ -269,4 +426,4 @@ Every crate outside `core` uses only the public APIs of the crates below it.
 | No clean EOF after interrupted upload | Core `upload`, `wrap`; HTTP `driver_toy`. |
 | Batch accounting and response holding | Core `contract`, `until`; ledger and routing suites. |
 | Byte-exact relay and credential isolation | Testkit `relay`, `translate`; HTTP rules; WS credentials tests. |
-| WS backpressure, closure and handshake behavior | `sdks/ws/tests` and HTTP driver tests. |
+| WS backpressure, closure and handshake behavior | WS SDK, Axum adapter and HTTP driver tests. |

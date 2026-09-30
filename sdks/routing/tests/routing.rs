@@ -9,11 +9,11 @@ use respan_gateway_core::futures::stream;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
 };
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_http::{RequestHead, ResponseHead};
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_routing::{Attempt, Backoff, Role, Until, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;

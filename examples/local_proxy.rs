@@ -12,12 +12,13 @@
 //! `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude`.
 
 use respan_gateway_core::{Fault, Gateway};
-use respan_gateway_formats::AnthropicMessages;
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::http::{self, HeaderValue};
+use respan_gateway_providers::AnthropicMessages;
 
+use respan_gateway_axum::router;
+use respan_gateway_http::HttpTransport;
 use respan_gateway_http::Transport;
-use respan_gateway_server::{HttpTransport, router};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 const ANTHROPIC: &str = "https://api.anthropic.com";

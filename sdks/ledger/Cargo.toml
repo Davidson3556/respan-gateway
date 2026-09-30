@@ -19,5 +19,6 @@ respan-gateway-http.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+respan-gateway-providers.workspace = true
 respan-gateway-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

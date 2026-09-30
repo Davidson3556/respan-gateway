@@ -13,7 +13,7 @@ pub async fn run(gateway: Gateway, address: &str) -> Result<(), std::io::Error> 
             move |State(gw): State<Gateway>, ws: WebSocketUpgrade, req: Request| {
                 let mut stopped = stopped.clone();
                 async move {
-                    respan_gateway_ws::serve_ws_until(&gw, ws, req, async move {
+                    respan_gateway_axum::ws::serve_ws_until(&gw, ws, req, async move {
                         while !*stopped.borrow_and_update() {
                             if stopped.changed().await.is_err() {
                                 break;

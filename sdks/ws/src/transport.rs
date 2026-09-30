@@ -76,7 +76,7 @@ fn is_handshake(name: &HeaderName) -> bool {
 /// the provider no faster than the answer is read (one frame in flight),
 /// and sends no faster than the provider takes.
 ///
-/// [`HttpTransport`]: https://docs.rs/respan-gateway-server
+/// [`HttpTransport`]: https://docs.rs/respan-gateway-http/latest/respan_gateway_http/struct.HttpTransport.html
 #[derive(Clone)]
 pub struct WsTransport {
     /// The base URL, without a trailing `/`.

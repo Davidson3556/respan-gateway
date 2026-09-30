@@ -1,0 +1,19 @@
+[package]
+name = "respan-gateway-providers"
+description = "First-party OpenAI Chat Completions and Anthropic Messages codecs for respan-gateway."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-formats.workspace = true
+serde.workspace = true
+serde_json.workspace = true

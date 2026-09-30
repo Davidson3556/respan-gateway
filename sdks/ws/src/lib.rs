@@ -3,13 +3,12 @@
 //!
 //! A WebSocket is an HTTP Upgrade exchange on the HTTP wire: the call's head
 //! is the upgrade request, the answer's head is the `101`, and the two bodies
-//! are streams of frames, **one body item per text frame**. This crate is
-//! the two edges and a format for it:
+//! are streams of frames, **one body item per text frame**. This SDK provides
+//! the outbound transport and a format; hosting is supplied separately:
 //!
 //! - [`WsTransport`]: an outbound [`Transport`](respan_gateway_http::Transport)
 //!   that connects to a `ws://` or `wss://` provider.
-//! - [`serve_ws`] and [`router`]: an axum adapter that accepts the client's
-//!   upgrade and pumps frames both ways.
+//! - Axum hosting lives in `respan_gateway_axum::ws`, not in this SDK.
 //! - [`JsonEvents`]: a [`Format`](respan_gateway_core::Format) whose kind is
 //!   one JSON event per frame ([`ClientEvent`] in, [`ProviderEvent`] out),
 //!   for plugins that filter a session's events.
@@ -37,11 +36,9 @@
 use std::time::Duration;
 
 mod events;
-mod serve;
 mod transport;
 
 pub use events::{ClientEvent, JsonEvents, ProviderEvent};
-pub use serve::{router, serve_ws, serve_ws_until};
 pub use transport::WsTransport;
 
 /// How long a side waits for the other's part of a close: the gateway for a
@@ -64,8 +61,10 @@ pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 pub struct CloseCode(pub u16);
 
 impl CloseCode {
-    /// The code to send: this one if a Close may carry it, else 1011.
-    pub(crate) fn sendable(self) -> u16 {
+    /// Normalize a close hint for a hosting adapter: this code if a Close
+    /// frame may carry it, otherwise 1011. The outbound transport applies
+    /// the same rule to provider close codes.
+    pub fn sendable(self) -> u16 {
         match self.0 {
             1000..=1003 | 1007..=1014 | 3000..=4999 => self.0,
             _ => 1011,

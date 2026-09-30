@@ -172,5 +172,5 @@ plus a completion, with no HTTP server inside it. The server is an adapter.
 ## Considered and rejected
 
 - **WASM or scripted plugins as an escape hatch for non-Rust users.** Violates
-  [0002](decisions/0002-no-dynamic-plugin-loading.md). The answer for those
+  the [compiled-in plugin constraint](ARCHITECTURE.md#design-constraints). The answer for those
   users is prebuilt images and a build tool, as with Caddy's `xcaddy`.

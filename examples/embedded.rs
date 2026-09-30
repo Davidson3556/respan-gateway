@@ -16,11 +16,11 @@ use respan_gateway_core::futures::future::join;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{Extensions, Fault, Gateway};
 use respan_gateway_examples::Meter;
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Transport, connect, http};
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock};
 
 const OPENAI: &str = "http://openai.test/v1";

@@ -18,6 +18,6 @@ respan-gateway-http.workspace = true
 respan-gateway-formats.workspace = true
 
 [dev-dependencies]
-respan-gateway-formats.workspace = true
+respan-gateway-providers.workspace = true
 respan-gateway-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

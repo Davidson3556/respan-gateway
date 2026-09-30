@@ -15,9 +15,9 @@ use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_formats::conversation::{Conversation, set_model};
-use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_http::{Asked, Body, Exchange, RequestHead, ResponseHead, Transport};
+use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_routing::{Attempt, Backoff, Until, first_success, race, watchdog};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 

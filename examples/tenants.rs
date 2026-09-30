@@ -19,11 +19,11 @@ use std::sync::{Arc, PoisonError, RwLock};
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// One tenant's policy, at one version.

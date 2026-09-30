@@ -29,10 +29,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
-use respan_gateway_formats::OpenAiChat;
 use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
+use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;
 

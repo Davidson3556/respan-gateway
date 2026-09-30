@@ -30,7 +30,9 @@ hmac = "0.12"
 getrandom = "0.3"
 reqwest.workspace = true
 respan-gateway-plugins.workspace = true
-respan-gateway-server.workspace = true
+respan-gateway-axum = { workspace = true, features = ["ws"] }
+respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-providers.workspace = true
 respan-gateway-testkit.workspace = true
 respan-gateway-routing.workspace = true
 respan-gateway-text.workspace = true
