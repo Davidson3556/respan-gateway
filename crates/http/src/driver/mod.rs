@@ -1,29 +1,18 @@
-//! HTTP's one driver, which makes any [`Codec`] a
-//! [`Format`](respan_gateway_core::Format) ([`impl_format!`](crate::impl_format)):
-//! its client edge ([`accept`], [`input`]) serves an [`Accepted`]
-//! request, its provider edge ([`dial`]) calls through a [`Dialer`]. It is
-//! one symmetric pair: a reader turns frames into events through a
-//! [`Decoder`](crate::Decoder), a writer events into frames through an
-//! [`Encoder`], on both edges. The byte half of the gateway's guarantees
-//! lives here:
+//! HTTP implementation of the core's stream/sink boundary.
+//! A client receives inputs and sends outputs; a provider receives outputs
+//! and sends inputs. An opening future yields the incoming event stream,
+//! and the outgoing sink accepts a stream and closes after delivery.
 //!
-//! - **Head timing (rule 3).** A one-shot request's answer writes its head
-//!   with its first bytes, a failure before any written as a refusal; a
-//!   streaming request's (an upgrade) when its reply resolves.
-//! - **The verdict at the head (rule 2).** A non-2xx answer, but a 101 to a
-//!   call that asked to switch, is read before [`dial`] resolves until its
-//!   codec decides: a refusal is known as one however slowly its body
-//!   comes, and an answer the codec relays streams from its first output.
-//! - **Batches (rule 5).** A provider's outputs say `Pending` between the
-//!   frames it sent apart.
-//! - **A body ends at its first failure (B1)**, an encoder's panic on a
-//!   call's later frame fails the call (B2), and [`Encoder::open`]'s bytes
-//!   come first, done at once for a response with no body.
-//! - **Relay.** A call of the session's own inputs to a format of the same
-//!   name starts from the client's head and, if no filter edited them, bytes
-//!   unread, and is [`Exchange::relayed`](crate::Exchange::relayed), even if
-//!   a filter edited its inputs; a call with its own input is not. A
-//!   provider's answer on a relay is written from its head and bytes.
+//! This driver owns protocol details: headers, bytes, lazy decoding,
+//! refusal classification, and response-head timing. An ordinary HTTP
+//! response opens with its first encoded bytes; a WebSocket upgrade opens
+//! before its first event, so either peer can initiate the conversation.
+//! Non-success provider responses are decoded until their codec decides
+//! whether they are refusals or event streams.
+//!
+//! Private event-stream metadata retains request and response heads for an
+//! eligible relay. Unedited lazy inputs preserve their original bytes;
+//! editing inputs preserves relay provenance but encodes the new values.
 
 mod accept;
 mod dial;
@@ -36,23 +25,33 @@ use bytes::Bytes;
 use futures::FutureExt;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use respan_gateway_core::Fault;
+use respan_gateway_core::{Connection, Extensions, Fault};
+
 #[cfg(doc)]
 use respan_gateway_core::Gateway;
 
-pub use accept::{accept, input};
+pub use accept::accept;
 pub use dial::dial;
 
-use crate::{Body, Frames, RequestHead};
+use crate::{Body, Exchange, Frames, RequestHead, ResponseHead};
 #[cfg(doc)]
-use crate::{Codec, Dialer, Encoder};
+use crate::{Codec, Encoder};
 
 /// The message a panic in a codec or plugin ends with.
 const PANICKED: &str = "a plugin or format panicked";
 
-/// How a request ended, as its client edge told [`Ended`](respan_gateway_core::Ended),
-/// once its answer's end is out.
+/// Completion of writing the client-facing body.
 pub(crate) type End = BoxFuture<'static, Result<(), Fault>>;
+
+/// Private acknowledgement owned by the body encoder. Dropping it reports
+/// abandonment through the receiver held by the edge's writer future.
+pub(crate) struct Completion(oneshot::Sender<Result<(), Fault>>);
+
+impl Completion {
+    pub(crate) fn finish(self, end: Result<(), Fault>) {
+        let _ = self.0.send(end);
+    }
+}
 
 /// What the client edge wrote, and how the request ended.
 type Written = (http::Response<Body>, End);
@@ -60,73 +59,125 @@ type Written = (http::Response<Body>, End);
 /// What the client edge hands its adapter, through the wire's slot.
 type Writing = BoxFuture<'static, Written>;
 
-/// A client's HTTP request as its adapter accepted it: an HTTP format's
-/// [`Wire`](respan_gateway_core::Format::Wire), which [`Gateway::handle`]
-/// takes. It carries the adapter's reply slot.
-pub struct Accepted {
-    head: RequestHead,
-    frames: Frames,
-    streams: bool,
-    slot: oneshot::Sender<Writing>,
+/// A transport handle consumed by a format: an accepted exchange or an
+/// outbound sender. Clones share the sender; an accepted exchange binds once.
+#[derive(Clone)]
+pub struct Transport {
+    state: Arc<TransportState>,
+    extensions: Extensions,
 }
 
-impl Accepted {
-    /// A request of `head` and `body`, and what to answer it with once the
-    /// gateway took it ([`Gateway::handle`]). If `streams`, its data frames
-    /// are inputs as they come and the answer's head goes out once the
-    /// reply resolves, as a client that switches protocols waits for it;
-    /// else its body is read whole, so the caller bounds it.
-    ///
-    /// The answer is the response as its codec wrote it, before the
-    /// adapter's rules for a hop, or plain text for a refusal no codec can
-    /// write, and how the request ended, once its end is out. `None` if no
-    /// format wrote one: [`Gateway::handle`]'s `Err` says why. Await it
-    /// after `handle`.
-    pub fn new(
+type Sending = dyn Fn(Exchange<RequestHead>) -> BoxFuture<'static, Result<Exchange<ResponseHead>, Fault>>
+    + Send
+    + Sync;
+
+enum TransportState {
+    Accepted {
+        head: Arc<RequestHead>,
+        incoming: std::sync::Mutex<Option<(Frames, bool, oneshot::Sender<Writing>)>>,
+    },
+    Outbound(Box<Sending>),
+}
+
+impl Transport {
+    /// Create a reusable outbound sender. Construction performs no I/O.
+    /// Return the response once its head arrives; ongoing writes belong in
+    /// [`Exchange::write_completion`](crate::Exchange::write_completion).
+    /// Send streaming bodies as frames arrive and abort on body errors.
+    /// Return redirects unchanged. Apply [`crate::proxy_call`] and
+    /// [`crate::credentials`] before sending HTTP calls to providers.
+    pub fn new<F>(send: impl Fn(Exchange<RequestHead>) -> F + Send + Sync + 'static) -> Self
+    where
+        F: std::future::Future<Output = Result<Exchange<ResponseHead>, Fault>> + Send + 'static,
+    {
+        Self {
+            state: Arc::new(TransportState::Outbound(Box::new(move |call| {
+                send(call).boxed()
+            }))),
+            extensions: Extensions::new(),
+        }
+    }
+
+    /// Accept a head and body, returning the handle and its eventual reply.
+    /// Drive the reply concurrently with [`Gateway::handle`], then keep
+    /// driving `handle` while consuming the response. [`crate::handle`]
+    /// performs this coordination. `None` means no format wrote a reply.
+    /// Non-streaming bodies are read whole; the adapter must bound their size.
+    pub fn accept(
         head: RequestHead,
         body: Frames,
         streams: bool,
-    ) -> (Accepted, BoxFuture<'static, Option<Written>>) {
+    ) -> (Self, BoxFuture<'static, Option<Written>>) {
         let (slot, writing) = oneshot::channel::<Writing>();
-        let wire = Accepted {
-            head,
-            frames: body,
-            streams,
-            slot,
+        let transport = Self {
+            state: Arc::new(TransportState::Accepted {
+                head: Arc::new(head),
+                incoming: std::sync::Mutex::new(Some((body, streams, slot))),
+            }),
+            extensions: Extensions::new(),
         };
         let answer = async move {
             let writing = writing.await.ok()?;
             Some(writing.await)
         };
-        (wire, answer.boxed())
+        (transport, answer.boxed())
     }
 
-    /// The request's head.
-    pub fn head(&self) -> &RequestHead {
-        &self.head
+    /// The accepted head, available for format matching.
+    pub fn head(&self) -> Option<&RequestHead> {
+        match self.state.as_ref() {
+            TransportState::Accepted { head, .. } => Some(head),
+            TransportState::Outbound(_) => None,
+        }
+    }
+
+    /// Send an encoded call through an outbound handle.
+    /// Accepted handles cannot initiate calls.
+    pub fn send(
+        &self,
+        call: Exchange<RequestHead>,
+    ) -> BoxFuture<'static, Result<Exchange<ResponseHead>, Fault>> {
+        match self.state.as_ref() {
+            TransportState::Outbound(send) => send(call),
+            TransportState::Accepted { .. } => async {
+                Err(Fault::config(
+                    "an accepted transport cannot initiate a call",
+                ))
+            }
+            .boxed(),
+        }
+    }
+
+    pub(crate) fn with_extensions(&self, extensions: Extensions) -> Self {
+        Self {
+            state: self.state.clone(),
+            extensions,
+        }
     }
 }
 
-impl std::fmt::Debug for Accepted {
+impl std::fmt::Debug for Transport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Accepted")
-            .field("head", &self.head)
-            .field("streams", &self.streams)
+        f.debug_struct("Transport")
+            .field("head", &self.head())
             .finish_non_exhaustive()
     }
 }
 
-/// What came with a client's head, its origin: the head, which a call that
-/// relays starts from, and a one-shot request's body, its bytes unread.
-struct Came {
+/// Protocol state retained privately on an incoming event stream for exact relay.
+/// The body is present only for a single, lazily decoded input.
+struct RequestMetadata {
     head: Arc<RequestHead>,
     body: Option<Bytes>,
 }
 
-/// Implements the kernel's [`Format`](respan_gateway_core::Format) for a
-/// [`Codec`](crate::Codec) through HTTP's driver: its wire is an
-/// [`Accepted`](crate::Accepted) request, its dialer a
-/// [`Dialer`](crate::Dialer). The codec must be `Clone`, as its edges
+/// A response head is format-owned relay state, never directly exposed as
+/// a public metadata payload.
+struct ResponseMetadata(ResponseHead);
+
+/// Implements both receive/send orientations of [`Format`](respan_gateway_core::Format) for a
+/// [`Codec`](crate::Codec) through HTTP's driver. Both directions consume
+/// the same HTTP-owned handle. The codec must be `Clone`, as its streams
 /// outlive the call that made them.
 ///
 /// ```
@@ -149,78 +200,149 @@ struct Came {
 ///     // ...
 /// }
 /// respan_gateway_http::impl_format!(Echo);
-/// let gateway = respan_gateway_core::Gateway::new().client(Echo);
+/// let gateway = respan_gateway_core::Gateway::new().client::<String, Vec<u8>, _>(Echo);
 /// assert!(gateway.is_ok());
 /// ```
 #[macro_export]
 macro_rules! impl_format {
     ($t:ty) => {
-        impl $crate::__private::Format for $t {
-            type Input = <$t as $crate::Codec>::Input;
-            type Output = <$t as $crate::Codec>::Output;
-            type Wire = $crate::Accepted;
-            type Dialer = $crate::Dialer;
-
+        impl
+            $crate::__private::Format<
+                $crate::Transport,
+                <$t as $crate::Codec>::Input,
+                <$t as $crate::Codec>::Output,
+            > for $t
+        {
             fn name(&self) -> &str {
                 $crate::Codec::name(self)
             }
 
-            fn accepts(&self, wire: &$crate::Accepted) -> bool {
-                $crate::Codec::accepts(self, wire.head())
+            fn matches(&self, io: &$crate::Transport) -> bool {
+                io.head()
+                    .is_some_and(|head| $crate::Codec::accepts(self, head))
             }
 
-            fn is_content(&self, output: &Self::Output) -> bool {
-                $crate::Codec::is_content(self, output)
-            }
-
-            fn accept(
+            fn bind(
                 &self,
-                wire: $crate::Accepted,
-                reply: $crate::__private::BoxFuture<
-                    'static,
-                    ($crate::__private::Headed<Self::Output>, $crate::__private::Ended),
-                >,
-            ) -> $crate::__private::BoxFuture<
-                'static,
-                ::core::result::Result<
-                    (
-                        ::core::option::Option<$crate::__private::Origin>,
-                        ::core::option::Option<$crate::__private::Events<Self::Input>>,
-                    ),
-                    $crate::__private::Fault,
+                io: $crate::Transport,
+            ) -> $crate::__private::Result<
+                $crate::__private::Connection<
+                    <$t as $crate::Codec>::Input,
+                    <$t as $crate::Codec>::Output,
                 >,
             > {
-                $crate::__private::accept(self, wire, reply)
+                $crate::__private::accept(self, io)
+            }
+        }
+
+        impl
+            $crate::__private::Format<
+                $crate::Transport,
+                <$t as $crate::Codec>::Output,
+                <$t as $crate::Codec>::Input,
+            > for $t
+        {
+            fn name(&self) -> &str {
+                $crate::Codec::name(self)
             }
 
-            fn input(
+            fn bind(
                 &self,
-                origin: &$crate::__private::Origin,
-            ) -> ::core::option::Option<
-                ::core::result::Result<Self::Input, $crate::__private::Fault>,
-            > {
-                $crate::__private::input(self, origin)
-            }
-
-            fn dial(
-                &self,
-                dialer: &$crate::Dialer,
-                extensions: $crate::__private::Extensions,
-                relay: ::core::option::Option<&$crate::__private::Origin>,
-                input: ::core::option::Option<&Self::Input>,
-                inputs: ::core::option::Option<$crate::__private::Events<Self::Input>>,
-            ) -> ::core::result::Result<
-                $crate::__private::BoxFuture<
-                    'static,
-                    ::core::result::Result<
-                        $crate::__private::Headed<Self::Output>,
-                        $crate::__private::Fault,
-                    >,
+                io: $crate::Transport,
+            ) -> $crate::__private::Result<
+                $crate::__private::Connection<
+                    <$t as $crate::Codec>::Output,
+                    <$t as $crate::Codec>::Input,
                 >,
-                $crate::__private::Fault,
             > {
-                $crate::__private::dial(self, dialer, extensions, relay, input, inputs)
+                $crate::__private::dial(self, io)
             }
         }
     };
+}
+
+/// Drive the gateway alongside an HTTP reply, then let its body own the
+/// remaining work. Cancelling either stage cancels the gateway exchange.
+#[doc(hidden)]
+pub async fn drive(
+    handled: BoxFuture<'static, Result<(), Fault>>,
+    answer: BoxFuture<'static, Option<Written>>,
+) -> Result<Written, Fault> {
+    use futures::future::{Either, select};
+    let (answer, pending) = match select(handled, answer).await {
+        Either::Left((end, answer)) => (answer.await, Err(end)),
+        Either::Right((answer, handled)) => (answer, Ok(handled)),
+    };
+    match answer {
+        Some((response, ended)) => {
+            let mut handled = pending.ok();
+            // An empty response may already have completed while its head
+            // was encoded. Settle that work even if no body is polled.
+            futures::future::poll_fn(|cx| {
+                poll_handle(&mut handled, cx);
+                std::task::Poll::Ready(())
+            })
+            .await;
+            let response = response.map(|body| {
+                use http_body_util::BodyExt;
+                Pump { handled, body }.boxed_unsync()
+            });
+            Ok((response, ended))
+        }
+        None => match pending {
+            Err(Err(fault)) => Err(fault),
+            Ok(handled) => {
+                handled.await?;
+                Err(Fault::internal("no format answered"))
+            }
+            Err(Ok(())) => Err(Fault::internal("no format answered")),
+        },
+    }
+}
+
+/// The gateway future drops first, ending its calls before their output
+/// streams are dropped by the protocol body.
+struct Pump {
+    handled: Option<BoxFuture<'static, Result<(), Fault>>>,
+    body: Body,
+}
+
+fn poll_handle(
+    handled: &mut Option<BoxFuture<'static, Result<(), Fault>>>,
+    cx: &mut std::task::Context<'_>,
+) {
+    if let Some(work) = handled
+        && work.as_mut().poll(cx).is_ready()
+    {
+        *handled = None;
+    }
+}
+
+impl http_body::Body for Pump {
+    type Data = Bytes;
+    type Error = Fault;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Fault>>> {
+        let this = self.get_mut();
+        poll_handle(&mut this.handled, cx);
+        let frame = std::pin::Pin::new(&mut this.body).poll_frame(cx);
+        // Reading the final frame can complete the writer. Observe it now,
+        // before a consumer drops the body immediately after that frame.
+        poll_handle(&mut this.handled, cx);
+        if matches!(frame, std::task::Poll::Ready(None)) && this.handled.is_some() {
+            return std::task::Poll::Pending;
+        }
+        frame
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.handled.is_none() && self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
 }

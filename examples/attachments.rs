@@ -306,9 +306,13 @@ struct Fallback;
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let calls = ["text-only", "reads-pdf"].map(|p| cx.call(p));
-        first_success(calls, &Backoff::once(), Until::Content)
-            .await
-            .map(Some)
+        first_success(
+            calls,
+            &Backoff::once(),
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        )
+        .await
+        .map(Some)
     }
 }
 
@@ -318,10 +322,18 @@ const STORE: &str = "http://files.test";
 
 fn gateway(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("text-only", OpenAiChat, mock.at(TEXT))?
-        .provider("reads-pdf", OpenAiChat, mock.at(PDF))?
-        .provider("files", FILES, mock.at(STORE))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "text-only",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(TEXT)),
+        )?
+        .provider::<Conversation, _, _>(
+            "reads-pdf",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(PDF)),
+        )?
+        .provider::<Ask, _, _>("files", FILES, respan_gateway_http::connect(mock.at(STORE)))?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)
 }
@@ -343,10 +355,18 @@ async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
 /// As `gateway`, with the PDF reader an Anthropic model.
 fn gateway_claude(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("text-only", OpenAiChat, mock.at(TEXT))?
-        .provider("reads-pdf", AnthropicMessages, mock.at(PDF))?
-        .provider("files", FILES, mock.at(STORE))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "text-only",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(TEXT)),
+        )?
+        .provider::<Conversation, _, _>(
+            "reads-pdf",
+            AnthropicMessages,
+            respan_gateway_http::connect(mock.at(PDF)),
+        )?
+        .provider::<Ask, _, _>("files", FILES, respan_gateway_http::connect(mock.at(STORE)))?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)
 }

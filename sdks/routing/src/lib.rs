@@ -4,8 +4,8 @@
 //! bound on a provider's head and body ([`Watchdog`]), and each attempt's [`Role`]
 //! ([`Attempt`]).
 //!
-//! Both helpers read each answer [`Until`] a stopping point, by default its
-//! first content ([`Response::until_content`]): they return a success only
+//! Both helpers read each answer [`Until`] a stopping point, using a plugin-supplied
+//! predicate for [`Until::content`]: they return a success only
 //! once it got there, and never retry after that, so a stream that fails
 //! later reaches the client cut short, not replayed. A fallback or hedge is
 //! a few lines of `on_client`:
@@ -13,9 +13,10 @@
 //! ```ignore
 //! let calls = ["openai", "anthropic"].map(|p| cx.call(p));
 //! let backoff = Backoff::new(3, Duration::from_millis(200), Duration::from_secs(10));
-//! first_success(calls, &backoff, Until::Content).await.map(Some)
+//! first_success(calls, &backoff, Until::content(Reply::is_content)).await.map(Some)
 //! ```
 
+use std::any::Any;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -23,7 +24,7 @@ use std::time::Duration;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::{self, FuturesUnordered};
 use respan_gateway_core::futures::{FutureExt, StreamExt};
-use respan_gateway_core::{Call, Fault, Response, async_trait, codes};
+use respan_gateway_core::{Call, Fault, Response, codes};
 use respan_gateway_http::{Exchange, RequestHead, Transport};
 
 /// How often to try one call, and how long to wait between tries.
@@ -121,19 +122,46 @@ impl Attempt {
 /// it: a success that fails before that point is retried, or loses the
 /// race; one that fails after it is committed.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum Until {
-    /// Its head, unread: the first call a provider answered wins, however
-    /// its body goes, an error answer too, which shows only once read.
+    /// The response opening, without reading events.
     Head,
-    /// Its first content ([`Response::until_content`]): what a client
-    /// streaming it would see first.
-    #[default]
-    Content,
-    /// Its end ([`Response::until_end`]), held whole until sent: the first
-    /// to finish cleanly wins. A success failing after its first content
-    /// does not count as one.
+    /// A plugin's condition for committing to a response. Use [`Until::content`].
+    Content(Arc<dyn Fn(Response) -> BoxFuture<'static, Result<Response, Fault>> + Send + Sync>),
+    /// The entire response; only a clean completion wins.
     End,
+}
+
+impl Until {
+    /// Wait for an event accepted by this plugin's content policy.
+    pub fn content<T: Any + Send + Sync>(
+        predicate: impl FnMut(&T) -> bool + Clone + Send + Sync + 'static,
+    ) -> Self {
+        Self::Content(Arc::new(move |response| {
+            until_content(response, predicate.clone()).boxed()
+        }))
+    }
+}
+
+impl std::fmt::Debug for Until {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Head => "Head",
+            Self::Content(_) => "Content",
+            Self::End => "End",
+        })
+    }
+}
+
+/// Wait for the plugin's first qualifying event, preserving buffered events,
+/// relay metadata and call ownership. The predicate sees provider-filtered
+/// outputs, including outputs synthesized by a plugin.
+/// Bound calls that may produce an unlimited stream of non-matching events.
+pub async fn until_content<T: Any + Send + Sync>(
+    response: Response,
+    predicate: impl FnMut(&T) -> bool + Send,
+) -> Result<Response, Fault> {
+    response.buffer_until(predicate).await
 }
 
 /// An attempt, its answer read [`Until`] a point, and, read to its end,
@@ -146,7 +174,7 @@ async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
     let (answer, late, responded) = match call.with_extension(attempt.clone()).await {
         Ok(resp) => match until {
             Until::Head => (Ok(resp), None, true),
-            Until::Content => (resp.until_content().await, None, true),
+            Until::Content(read) => (read(resp).await, None, true),
             Until::End => match resp.until_end().await {
                 Ok((resp, end)) => (Ok(resp), end.err(), true),
                 Err(fault) => (Err(fault), None, true),
@@ -203,7 +231,7 @@ pub async fn first_success(
     let (mut previous, mut index) = (None, 0);
     for call in calls {
         for tries in 1.. {
-            let answer = send(call.clone(), Attempt::new(index), until).await;
+            let answer = send(call.clone(), Attempt::new(index), until.clone()).await;
             index += 1;
             let wait = match failure(&answer) {
                 None => return win(answer),
@@ -260,7 +288,7 @@ pub async fn race(
             }
             () = &mut next, if waiting.peek().is_some() => {
                 if let Some((call, index)) = waiting.next() {
-                    running.push(send(call, Attempt::new(index), until).boxed());
+                    running.push(send(call, Attempt::new(index), until.clone()).boxed());
                 }
                 next.as_mut().reset(tokio::time::Instant::now() + stagger);
             }
@@ -284,16 +312,16 @@ pub struct Watchdog<T> {
     idle: Duration,
 }
 
-impl<T: Transport> Watchdog<T> {
+impl<T: Into<Transport>> Watchdog<T> {
     /// Bound `inner`'s wait for its head by `head`, and each gap in its body by `idle`.
     pub fn new(inner: T, head: Duration, idle: Duration) -> Self {
         Self { inner, head, idle }
     }
 }
 
-#[async_trait]
-impl<T: Transport> Transport for Watchdog<T> {
-    async fn send(
+impl Watchdog<Transport> {
+    /// Send an encoded call and return its response.
+    pub async fn send(
         &self,
         call: Exchange<RequestHead>,
     ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -310,6 +338,19 @@ impl<T: Transport> Transport for Watchdog<T> {
         });
         resp.body = bounded.boxed();
         Ok(resp)
+    }
+}
+impl<T: Into<Transport>> From<Watchdog<T>> for respan_gateway_http::Transport {
+    fn from(value: Watchdog<T>) -> Self {
+        let value = std::sync::Arc::new(Watchdog {
+            inner: value.inner.into(),
+            head: value.head,
+            idle: value.idle,
+        });
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 

@@ -170,10 +170,6 @@ impl Codec for StreamableHttp {
         let (pending, batch) = posted(request);
         failure(fault, &pending, false, batch).into()
     }
-
-    fn is_content(&self, output: &ToClient) -> bool {
-        !output.messages.is_empty()
-    }
 }
 
 impl_format!(StreamableHttp);

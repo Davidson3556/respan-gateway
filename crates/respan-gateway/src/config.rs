@@ -8,7 +8,7 @@ use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::conversation::Conversation;
-use respan_gateway_http::{Accepted, Dialer, Transport};
+use respan_gateway_http::{Codec, Transport};
 use respan_gateway_plugins::ModelRouter;
 use serde::Deserialize;
 
@@ -70,17 +70,29 @@ pub struct ModelRoute {
 /// provider that speaks it or serve its clients.
 pub struct KnownFormat {
     pub name: String,
-    pub provider: fn(Gateway, name: String, dialer: Dialer) -> Result<Gateway, Fault>,
+    pub provider: fn(Gateway, name: String, transport: Transport) -> Result<Gateway, Fault>,
     pub serve: fn(Gateway) -> Result<Gateway, Fault>,
 }
 
 impl KnownFormat {
     /// An HTTP format, as every provider the binary knows speaks.
-    pub fn of<F: Format<Wire = Accepted, Dialer = Dialer> + Default>() -> Self {
+    pub fn of<F>() -> Self
+    where
+        F: Codec
+            + Default
+            + Format<Transport, F::Input, F::Output>
+            + Format<Transport, F::Output, F::Input>,
+    {
         Self {
-            name: F::default().name().to_owned(),
-            provider: |gateway, name, dialer| gateway.provider(name, F::default(), dialer),
-            serve: |gateway| gateway.client(F::default()),
+            name: Codec::name(&F::default()).to_owned(),
+            provider: |gateway, name, transport| {
+                gateway.provider::<F::Input, F::Output, _>(
+                    name,
+                    F::default(),
+                    respan_gateway_http::connect(transport),
+                )
+            },
+            serve: |gateway| gateway.client::<F::Input, F::Output, _>(F::default()),
         }
     }
 }
@@ -92,7 +104,7 @@ impl Config {
 
     /// Builds the gateway: each provider's transport comes from `transport`,
     /// given its base URL and auth headers; formats are found in `formats`.
-    pub fn build<T: Transport>(
+    pub fn build<T: Into<Transport>>(
         &self,
         transport: impl Fn(&str, HeaderMap) -> Result<T, Fault>,
         formats: &[KnownFormat],
@@ -112,7 +124,7 @@ impl Config {
             let auth = auth_headers(name, p.auth.as_ref())?;
             let reach = transport(&p.base_url, auth)
                 .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
-            gateway = (format.provider)(gateway, name.clone(), Dialer::from(reach))?;
+            gateway = (format.provider)(gateway, name.clone(), reach.into())?;
         }
         let after = (self.serve.iter().skip_while(|n| *n != PASSTHROUGH)).nth(1);
         if let Some(after) = after {

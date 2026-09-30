@@ -5,12 +5,12 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::Extensions;
+use crate::{Extensions, Result};
 
 pub(crate) const PANICKED: &str = "a plugin or format panicked";
 
 /// `f`, with a panic an internal fault.
-pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, Fault>) -> Result<T, Fault> {
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     caught.unwrap_or_else(|_| Err(Fault::internal(PANICKED)))
 }
@@ -259,7 +259,7 @@ mod tests {
         }
     }
 
-    fn check() -> Result<(), Fault> {
+    fn check() -> Result<()> {
         Err(PluginError { limit: 3 })?
     }
 

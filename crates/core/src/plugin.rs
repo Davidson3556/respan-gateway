@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::fault::guarded;
 use crate::format::Values;
-use crate::{ClientContext, Fault, ProviderContext, Response};
+use crate::{ClientContext, Fault, ProviderContext, Response, Result};
 
 /// The extension point, on two edges: the client edge once per request, the
 /// provider edge once per call. Every plugin sees all traffic, in the order
@@ -22,7 +22,7 @@ use crate::{ClientContext, Fault, ProviderContext, Response};
 /// })?;
 /// ```
 ///
-/// To race calls, reply with the first read ([`Response::until_content`]
+/// To race calls, reply with the first read ([`Response::buffer_until`]
 /// or [`Response::until_end`]) and drop the others, which end abandoned. To
 /// tell the winner in `on_provider_end`, give each call a flag:
 ///
@@ -34,7 +34,7 @@ use crate::{ClientContext, Fault, ProviderContext, Response};
 ///     let won = Won::default();
 ///     let call = cx.call(provider).with_extension(won.clone());
 ///     Box::pin(async move {
-///         let resp = call.await?.until_content().await?;
+///         let resp = call.await?.buffer_until(|_: &Reply| true).await?;
 ///         won.0.store(true, Ordering::Relaxed);
 ///         Ok::<_, Fault>(resp)
 ///     })
@@ -48,7 +48,7 @@ pub trait Plugin: Send + Sync + 'static {
     /// `Ok(Some(response))` replies, skipping the rest; `Err` refuses. If all
     /// pass, the target is called; with none, the request is refused
     /// [`codes::NOT_FOUND`](crate::codes::NOT_FOUND).
-    async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>> {
         Ok(None)
     }
 
@@ -60,14 +60,14 @@ pub trait Plugin: Send + Sync + 'static {
     /// that refused, failed or stopped it, such as a provider's error
     /// answer, or [`codes::ABANDONED`](crate::codes::ABANDONED) if it was
     /// dropped or cut off first.
-    async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<(), Fault>) {}
+    async fn on_client_end(&self, _cx: &ClientContext, _end: &Result<()>) {}
 
     /// The provider edge, before every call, until one plugin fails it,
     /// waiting for no earlier call's end hooks: a limit reserves here and
     /// settles in its end hook. It may stop at any await, such as when a
     /// raced call is dropped, and `on_provider_end` still runs, so record a
     /// reservation before awaiting.
-    async fn on_provider(&self, _px: &mut ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(&self, _px: &mut ProviderContext) -> Result<()> {
         Ok(())
     }
 
@@ -78,25 +78,25 @@ pub trait Plugin: Send + Sync + 'static {
     /// [`codes::INTERNAL`](crate::codes::INTERNAL), wherever its transport
     /// read the body. What else is known of a call is on its context, such
     /// as [`is_sent`](ProviderContext::is_sent).
-    async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<(), Fault>) {}
+    async fn on_provider_end(&self, _px: &ProviderContext, _end: &Result<()>) {}
 }
 
 /// A shared plugin; it forwards every method.
 #[async_trait]
 impl<P: Plugin + ?Sized> Plugin for Arc<P> {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         (**self).on_client(cx).await
     }
 
-    async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>) {
+    async fn on_client_end(&self, cx: &ClientContext, end: &Result<()>) {
         (**self).on_client_end(cx, end).await;
     }
 
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         (**self).on_provider(px).await
     }
 
-    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<()>) {
         (**self).on_provider_end(px, end).await;
     }
 }
@@ -108,19 +108,19 @@ impl<P: Plugin + ?Sized> Plugin for Arc<P> {
 pub trait Filter<T>: Send + 'static {
     /// Take `value` and push what replaces it to `out`. `Err` fails the
     /// inputs or the response.
-    fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<(), Fault>;
+    fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<()>;
 
     /// Runs once at every end, a failure, drop or panic included: push what
     /// it kept back to `out`, dropped once it failed. `Err` fails the end,
     /// keeping a provider's answer.
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<T>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<()>, _out: &mut Vec<T>) -> Result<()> {
         Ok(())
     }
 }
 
 /// A closure that changes each value in place, or fails.
-impl<T, F: FnMut(&mut T) -> Result<(), Fault> + Send + 'static> Filter<T> for F {
-    fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<(), Fault> {
+impl<T, F: FnMut(&mut T) -> Result<()> + Send + 'static> Filter<T> for F {
+    fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<()> {
         out.push(value);
         out.last_mut().map_or(Ok(()), self)
     }
@@ -128,8 +128,8 @@ impl<T, F: FnMut(&mut T) -> Result<(), Fault> + Send + 'static> Filter<T> for F 
 
 /// One edge's filters of one direction, their values' type erased.
 trait AnyList: Any + Send {
-    fn run(&mut self, values: &mut Values) -> Result<(), Fault>;
-    fn end(&mut self, end: &Result<(), Fault>, values: &mut Option<Values>) -> Option<Fault>;
+    fn run(&mut self, values: &mut Values) -> Result<()>;
+    fn end(&mut self, end: &Result<()>, values: &mut Option<Values>) -> Option<Fault>;
 }
 
 /// Filters of `T`, in reverse order of application, each with whether it
@@ -139,7 +139,7 @@ struct List<T>(Vec<(Box<dyn Filter<T>>, bool)>);
 impl<T: Send + 'static> AnyList for List<T> {
     /// Each value in turn through every filter, so what one fails on leaves
     /// those before it written.
-    fn run(&mut self, values: &mut Values) -> Result<(), Fault> {
+    fn run(&mut self, values: &mut Values) -> Result<()> {
         let values = values
             .downcast_mut::<Vec<T>>()
             .ok_or_else(Fault::wrong_kind::<T>)?;
@@ -162,7 +162,7 @@ impl<T: Send + 'static> AnyList for List<T> {
 
     /// Each filter's end, once: what earlier ones kept back goes through
     /// it, unless it failed, then what it keeps back joins them.
-    fn end(&mut self, end: &Result<(), Fault>, values: &mut Option<Values>) -> Option<Fault> {
+    fn end(&mut self, end: &Result<()>, values: &mut Option<Values>) -> Option<Fault> {
         let (mut tail, mut fault) = (Vec::new(), None);
         for (filter, failed) in self.0.iter_mut().rev() {
             let was = *failed;
@@ -202,7 +202,7 @@ impl<T: Send + 'static> AnyList for List<T> {
 
 /// One edge's filters of one direction, and how they ended, once they did.
 #[derive(Default)]
-pub(crate) struct Filters(Option<Box<dyn AnyList>>, Option<Result<(), Fault>>);
+pub(crate) struct Filters(Option<Box<dyn AnyList>>, Option<Result<()>>);
 
 impl Filters {
     /// Add `filter`: of outputs, applied the last added first; of inputs,
@@ -213,7 +213,7 @@ impl Filters {
         &mut self,
         filter: impl Filter<T>,
         input: bool,
-    ) -> Result<(), Fault> {
+    ) -> Result<()> {
         if let Some(end) = self.1.clone() {
             return Self::of(filter).end(end, &mut None);
         }
@@ -238,7 +238,7 @@ impl Filters {
     }
 
     /// How they ended, if they have.
-    pub(crate) fn outcome(&self) -> Option<Result<(), Fault>> {
+    pub(crate) fn outcome(&self) -> Option<Result<()>> {
         self.1.clone()
     }
 
@@ -248,7 +248,7 @@ impl Filters {
 
     /// Run `values` through the filters until the first failure; `values`
     /// keeps what passed before it.
-    pub(crate) fn run(&mut self, values: &mut Values) -> Result<(), Fault> {
+    pub(crate) fn run(&mut self, values: &mut Values) -> Result<()> {
         match &mut self.0 {
             Some(list) => guarded(|| list.run(values)),
             None => Ok(()),
@@ -258,11 +258,7 @@ impl Filters {
     /// Run every filter's end for `end`, once, even after one fails or
     /// panics: what they kept back is added to `values`, and the end comes
     /// back, failed with the first failure; again, just that end.
-    pub(crate) fn end(
-        &mut self,
-        end: Result<(), Fault>,
-        values: &mut Option<Values>,
-    ) -> Result<(), Fault> {
+    pub(crate) fn end(&mut self, end: Result<()>, values: &mut Option<Values>) -> Result<()> {
         if let Some(ended) = &self.1 {
             return ended.clone();
         }
@@ -277,7 +273,7 @@ impl Filters {
 
 /// `fault` failing a response that ended `end`, keeping the provider's
 /// answer `end` carries.
-pub(crate) fn failed(fault: Fault, end: &Result<(), Fault>) -> Result<(), Fault> {
+pub(crate) fn failed(fault: Fault, end: &Result<()>) -> Result<()> {
     match end {
         Err(end) => Err(fault.with_answer_of(end)),
         Ok(()) => Err(fault),
@@ -295,7 +291,7 @@ mod tests {
     struct Noted(Arc<Mutex<Vec<&'static str>>>, &'static str, bool);
 
     impl Filter<String> for Noted {
-        fn edit(&mut self, output: String, out: &mut Vec<String>) -> Result<(), Fault> {
+        fn edit(&mut self, output: String, out: &mut Vec<String>) -> Result<()> {
             if output == self.1 {
                 return Err(Fault::internal("refused"));
             }
@@ -303,7 +299,7 @@ mod tests {
             Ok(())
         }
 
-        fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<String>) -> Result<(), Fault> {
+        fn end(&mut self, _end: &Result<()>, _out: &mut Vec<String>) -> Result<()> {
             self.0.lock().map(|mut n| n.push(self.1)).ok();
             match self.2 {
                 true => Err(Fault::internal(self.1)),
@@ -364,7 +360,7 @@ mod tests {
     struct Keep<T>(Vec<T>, bool);
 
     impl<T: Send + 'static> Filter<T> for Keep<T> {
-        fn edit(&mut self, v: T, _out: &mut Vec<T>) -> Result<(), Fault> {
+        fn edit(&mut self, v: T, _out: &mut Vec<T>) -> Result<()> {
             self.0.push(v);
             if self.1 {
                 Err(Fault::internal("fails"))
@@ -372,7 +368,7 @@ mod tests {
                 Ok(())
             }
         }
-        fn end(&mut self, _e: &Result<(), Fault>, out: &mut Vec<T>) -> Result<(), Fault> {
+        fn end(&mut self, _e: &Result<()>, out: &mut Vec<T>) -> Result<()> {
             out.append(&mut self.0);
             Ok(())
         }
@@ -393,10 +389,10 @@ mod tests {
     struct Panics;
 
     impl Filter<String> for Panics {
-        fn edit(&mut self, _v: String, _out: &mut Vec<String>) -> Result<(), Fault> {
+        fn edit(&mut self, _v: String, _out: &mut Vec<String>) -> Result<()> {
             Ok(())
         }
-        fn end(&mut self, _e: &Result<(), Fault>, _out: &mut Vec<String>) -> Result<(), Fault> {
+        fn end(&mut self, _e: &Result<()>, _out: &mut Vec<String>) -> Result<()> {
             panic!("a buggy filter")
         }
     }

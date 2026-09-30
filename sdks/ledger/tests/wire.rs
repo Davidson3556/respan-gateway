@@ -4,10 +4,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_core::futures::future::{BoxFuture, ready};
-use respan_gateway_core::futures::{FutureExt, StreamExt, TryStreamExt, stream};
+use respan_gateway_core::futures::FutureExt;
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::future::ready;
+use respan_gateway_core::futures::{TryStreamExt, stream};
 use respan_gateway_core::{
-    Ended, Events, Extensions, Fault, Format, Gateway, Headed, Origin, ProviderContext,
+    Connection, Events, Extensions, Fault, Format, Gateway, ProviderContext,
 };
 use respan_gateway_http::Status;
 use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote, Tally};
@@ -31,79 +33,77 @@ const PIPE: &str = "pipe";
 /// dropped. A provider's reply is `text` or `text:cost`; one not ok is
 /// refused at its head. A question `unwritable` cannot be written, so its
 /// call fails before it is sent.
+enum Io {
+    Client(Question),
+    Provider(Arc<Scripted>),
+}
+
 struct Pipe;
 
-impl Format for Pipe {
-    type Input = Question;
-    type Output = Reply;
-    type Wire = Question;
-    type Dialer = Scripted;
-
+impl Format<Io, Question, Reply> for Pipe {
     fn name(&self) -> &str {
         PIPE
     }
 
-    fn accepts(&self, _wire: &Question) -> bool {
-        true
+    fn matches(&self, io: &Io) -> bool {
+        matches!(io, Io::Client(_))
     }
 
-    fn accept(
-        &self,
-        wire: Question,
-        reply: BoxFuture<'static, (Headed<Reply>, Ended)>,
-    ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<Question>>), Fault>> {
-        tokio::spawn(async move {
-            let ((_, outputs), ended) = reply.await;
-            let end = match outputs {
-                Ok(outputs) => outputs.try_for_each(|_| ready(Ok(()))).await,
-                Err(fault) => Err(fault),
-            };
-            ended(end);
+    fn bind(&self, io: Io) -> Result<Connection<Question, Reply>, Fault> {
+        let Io::Client(wire) = io else {
+            return Err(Fault::config("expected client I/O"));
+        };
+        let writer = respan_gateway_core::write(|flow: Events<Reply>| {
+            Ok(async move { flow.try_for_each(|_| ready(Ok(()))).await })
         });
-        let origin = Arc::new(wire) as Origin;
-        ready(Ok((Some(origin), None))).boxed()
+        Ok((ready(Ok(Events::single(wire))).boxed(), Box::pin(writer)))
+    }
+}
+
+impl Format<Io, Reply, Question> for Pipe {
+    fn name(&self) -> &str {
+        PIPE
     }
 
-    fn input(&self, origin: &Origin) -> Option<Result<Question, Fault>> {
-        origin.downcast_ref::<Question>().cloned().map(Ok)
-    }
-
-    fn dial(
-        &self,
-        dialer: &Scripted,
-        _extensions: Extensions,
-        relay: Option<&Origin>,
-        input: Option<&Question>,
-        _inputs: Option<Events<Question>>,
-    ) -> Result<BoxFuture<'static, Result<Headed<Reply>, Fault>>, Fault> {
-        let relayed = relay.and_then(|o| o.downcast_ref::<Question>());
-        let question = input.or(relayed);
-        if question.is_some_and(|q| q.0 == "unwritable") {
-            return Err(Fault::bad_request("unwritable"));
-        }
+    fn bind(&self, io: Io) -> Result<Connection<Reply, Question>, Fault> {
+        let Io::Provider(dialer) = io else {
+            return Err(Fault::config("expected provider I/O"));
+        };
         let next = dialer.0.lock().map(|mut s| s.pop()).ok().flatten();
-        Ok(async move {
-            let (ok, frames) = next.unwrap_or_else(|| Err(Fault::upstream("no reply")))?;
-            let origin = Some(Arc::new(ok) as Origin);
-            if !ok {
-                let busy = Fault::new("busy", "busy").with(Status(429));
-                return Ok((origin, Err(busy)));
+        let (send, receive) = oneshot::channel();
+        let incoming = async move { receive.await.map_err(|_| Fault::abandoned()) };
+        let outgoing = respan_gateway_core::write(move |flow: Events<Question>| {
+            if flow
+                .value()
+                .transpose()?
+                .is_some_and(|q| q.0 == "unwritable")
+            {
+                return Err(Fault::bad_request("unwritable"));
             }
-            let replies = frames.into_iter().map(|raw| {
-                Ok(match raw.split_once(':') {
-                    Some((text, cost)) => Reply {
-                        text: text.to_owned(),
-                        cost: cost.parse().ok(),
-                    },
-                    None => Reply {
-                        text: raw.to_owned(),
-                        cost: None,
-                    },
-                })
-            });
-            Ok((origin, Ok(stream::iter(replies).boxed())))
-        }
-        .boxed())
+            Ok(async move {
+                let (ok, frames) = next.unwrap_or_else(|| Err(Fault::upstream("no reply")))?;
+                let flow = if !ok {
+                    Events::refused(Fault::new("busy", "busy").with(Status(429)))
+                } else {
+                    let replies = frames.into_iter().map(|raw| {
+                        Ok(match raw.split_once(':') {
+                            Some((text, cost)) => Reply {
+                                text: text.to_owned(),
+                                cost: cost.parse().ok(),
+                            },
+                            None => Reply {
+                                text: raw.to_owned(),
+                                cost: None,
+                            },
+                        })
+                    });
+                    Events::stream(stream::iter(replies))
+                };
+                let _ = send.send(flow);
+                Ok(())
+            })
+        });
+        Ok((incoming.boxed(), Box::pin(outgoing)))
     }
 }
 
@@ -144,14 +144,16 @@ async fn accounting_settles_on_a_wire_of_its_own() {
     for (case, question, reply, charged) in cases {
         let ledger = MemoryLedger::new();
         ledger.open("key", None, 1000);
-        let transport = Scripted(Mutex::new(vec![reply]));
+        let transport = Arc::new(Scripted(Mutex::new(vec![reply])));
         let accounting = Accounting::new(ledger.clone(), quote);
-        let gw = Gateway::new().client(Pipe);
-        let gw = gw.and_then(|g| g.provider("p", Pipe, transport));
+        let gw = Gateway::new().client::<Question, _, _>(Pipe);
+        let gw = gw.and_then(|g| {
+            g.provider::<Question, _, _>("p", Pipe, move |_| Io::Provider(transport.clone()))
+        });
         let gw = gw.and_then(|g| g.target("p"));
         let gw = gw.and_then(|g| g.plugin("accounting", accounting));
         let gw = gw.unwrap_or_else(|f| panic!("{f}"));
-        let handled = gw.handle(Question(question.into()), Extensions::new());
+        let handled = gw.handle(Io::Client(Question(question.into())), Extensions::new());
         drop(handled.await);
         gw.idle().await;
         assert_eq!(ledger.spent("key"), charged, "{case}");

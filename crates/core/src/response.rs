@@ -1,3 +1,4 @@
+use crate::Result;
 use std::any::{Any, TypeId};
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
@@ -6,23 +7,27 @@ use std::sync::Arc;
 use futures::stream::{self, BoxStream, Stream};
 use futures::{FutureExt, StreamExt};
 
+use crate::Fault;
 use crate::call::{CallEdge, SharedCall};
+use crate::events::Metadata;
 use crate::fault::PANICKED;
-use crate::format::{AnyEvents, AnyFormat, Origin, Values, erase};
+use crate::format::{AnyEvents, AnyFormat, Values, erase};
 use crate::leg::{cut, idle, locked};
-use crate::{Events, Fault};
+
+/// Bound ready-event coalescing, including reads attempted during drop.
+const MAX_BATCH_EVENTS: usize = 128;
 
 /// A response for the client, from a provider or a plugin. Dropped unsent
 /// and unread, its call ends abandoned.
 #[must_use = "a response does nothing unless sent or read"]
 pub struct Response {
-    /// The provider's origin, only on a relay; none for one made.
-    pub(crate) origin: Option<Origin>,
+    /// Format-owned relay metadata, absent on translated or synthetic outputs.
+    pub(crate) metadata: Metadata,
     pub(crate) body: Source,
     /// Whether its call streams inputs, so its events flow only once it is
     /// sent.
     pub(crate) streams: bool,
-    /// What [`Response::until_content`] or [`Response::until_end`] read,
+    /// What [`Response::buffer_until`] or [`Response::until_end`] read,
     /// to be read again first.
     pub(crate) ahead: VecDeque<Batch>,
     /// Its outputs' type; `None` for a refusal, which has none.
@@ -35,7 +40,7 @@ pub struct Response {
 impl std::fmt::Debug for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Response")
-            .field("relayed", &self.origin.is_some())
+            .field("relayed", &self.metadata.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -44,7 +49,7 @@ impl std::fmt::Debug for Response {
 #[derive(Default)]
 pub(crate) struct Batch {
     pub(crate) values: Option<Values>,
-    pub(crate) end: Option<Result<(), Fault>>,
+    pub(crate) end: Option<Result<()>>,
     /// The call whose end this holds, ended once it is read.
     pub(crate) unread: Unread,
 }
@@ -52,7 +57,7 @@ pub(crate) struct Batch {
 /// A call's end read from its provider and not yet by its reader; dropped
 /// unread, the call ends so.
 #[derive(Default)]
-pub(crate) struct Unread(Option<(SharedCall, Result<(), Fault>)>);
+pub(crate) struct Unread(Option<(SharedCall, Result<()>)>);
 
 impl Drop for Unread {
     fn drop(&mut self) {
@@ -73,7 +78,7 @@ fn settle(call: &SharedCall, batch: &mut Batch) -> std::thread::Result<()> {
 
 impl Batch {
     /// Just an end.
-    pub(crate) fn end(end: Result<(), Fault>) -> Self {
+    pub(crate) fn end(end: Result<()>) -> Self {
         Self {
             end: Some(end),
             ..Self::default()
@@ -108,9 +113,9 @@ impl Batch {
 }
 
 impl Response {
-    fn new(origin: Option<Origin>, body: Source, output: Option<TypeId>) -> Self {
+    fn new(metadata: Metadata, body: Source, output: Option<TypeId>) -> Self {
         Self {
-            origin,
+            metadata,
             body,
             streams: false,
             ahead: VecDeque::new(),
@@ -121,76 +126,101 @@ impl Response {
 
     /// A success of the client's outputs from `stream`, such as a merge of
     /// calls' [`outputs`](Response::outputs); the first `Err` fails it, a
-    /// refusal before any output. Every output is content. It passes no
+    /// refusal before any output. It passes no
     /// provider edge. Outputs of another type fail it with
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
     pub fn stream<T, S>(stream: S) -> Self
     where
         T: Any + Send + Sync,
-        S: Stream<Item = Result<T, Fault>> + Send + 'static,
+        S: Stream<Item = Result<T>> + Send + 'static,
     {
         let body = Source::made(erase(stream.boxed()));
         Self::new(None, body, Some(TypeId::of::<T>()))
     }
 
-    /// Read it until its first content
-    /// ([`Format::is_content`](crate::Format::is_content), before filters),
-    /// a failure or its end, and hold what was read, unsent, to decide on
-    /// it or fall back. One whose call streams the request's inputs returns
-    /// at once, as waiting could deadlock a peer that waits for them. `Err`
-    /// if it fails first, such as with a provider's error answer, which a
-    /// refusal sends as it came; one the provider refused at its head fails
-    /// at once.
+    /// Buffer outputs until `predicate` matches, the stream ends, or it fails.
+    /// Values are inspected after provider filters. Buffered values are replayed
+    /// when sent or read, retaining relay metadata and call ownership.
+    /// An error before a match is returned; an error after a match stays buffered.
+    /// A clean end returns the response even if no value matched.
     ///
-    /// A response with no content is read, and held, to its end, so bound
-    /// one that may never end. A decoder that panics ends its call
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) and unwinds through this
-    /// future, so a plugin's own task or a race that swallows the panic
-    /// loses it.
-    pub async fn until_content(self) -> Result<Response, Fault> {
-        self.read_until(false).await
+    /// Streaming-input calls return unread to avoid deadlocking duplex peers.
+    /// Bound the wait and buffered size in the calling policy if needed.
+    /// A repeated call checks buffered values against its new predicate.
+    pub async fn buffer_until<T: Any + Send + Sync>(
+        mut self,
+        mut predicate: impl FnMut(&T) -> bool + Send,
+    ) -> Result<Self> {
+        if self
+            .output
+            .is_some_and(|output| output != TypeId::of::<T>())
+        {
+            return Err(Fault::wrong_kind::<T>());
+        }
+        if self.streams && !self.refused {
+            return Ok(self);
+        }
+        let mut index = 0;
+        loop {
+            if index == self.ahead.len() {
+                let batch = self.body.next().await.0;
+                if batch.is_empty() {
+                    continue;
+                }
+                self.ahead.push_back(batch);
+            }
+            let batch = &self.ahead[index];
+            let matched = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                batch
+                    .values
+                    .as_ref()
+                    .and_then(|values| values.downcast_ref::<Vec<T>>())
+                    .is_some_and(|values| values.iter().any(&mut predicate))
+            }));
+            match matched {
+                Ok(true) => return Ok(self),
+                Ok(false) => {}
+                Err(panic) => {
+                    self.body.end(Err(Fault::internal(PANICKED)));
+                    std::panic::resume_unwind(panic);
+                }
+            }
+            if let Some(end) = &batch.end {
+                end.clone()?;
+                return Ok(self);
+            }
+            index += 1;
+        }
     }
 
-    /// Read it to its end and hold it all, a later failure too, such as to
-    /// race calls for completion; sent, it goes as it would have unread.
-    /// Returned with how it ended, `Ok` for one whose call streams inputs,
-    /// unread. Otherwise as
-    /// [`until_content`](Response::until_content), a panic included: the
-    /// awaiting plugin unwinds, and the request is refused
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) as any plugin panic is,
-    /// where a response read as it is sent aborts after its first bytes.
-    pub async fn until_end(self) -> Result<(Response, Result<(), Fault>), Fault> {
-        let resp = self.read_until(true).await?;
-        let end = resp.end().cloned().unwrap_or(Ok(()));
-        Ok((resp, end))
-    }
-
-    /// Read until its first content, or its end if `to_end`, into `ahead`.
-    async fn read_until(mut self, to_end: bool) -> Result<Response, Fault> {
-        // What is ahead was judged by an earlier read; a refusal is read.
-        let streams = self.streams && !self.refused;
-        let mut content = streams || !self.ahead.is_empty();
-        // Noted as a batch is read, not found again by scanning them all.
+    /// Buffer the entire response, retaining its metadata and eventual result.
+    /// Errors before any output are returned directly; later errors are held
+    /// for replay and also returned alongside the response. Streaming-input
+    /// calls return unread to avoid deadlocking duplex peers.
+    pub async fn until_end(mut self) -> Result<(Self, Result<()>)> {
+        if self.streams && !self.refused {
+            return Ok((self, Ok(())));
+        }
+        let mut seen = self.ahead.iter().any(|batch| batch.values.is_some());
         let mut end = self.end().cloned();
         loop {
-            match &end {
-                Some(Err(fault)) if !content => return Err(fault.clone()),
-                Some(_) => return Ok(self),
-                None if streams || (content && !to_end) => return Ok(self),
-                None => {
-                    let (batch, read) = self.body.next().await;
-                    content |= read;
-                    end = batch.end.clone();
-                    if !batch.is_empty() {
-                        self.ahead.push_back(batch);
-                    }
+            if let Some(end) = end {
+                if !seen {
+                    end.clone()?;
                 }
+                return Ok((self, end));
+            }
+            let (batch, has_values) = self.body.next().await;
+            seen |= has_values;
+            end = batch.end.clone();
+            if !batch.is_empty() {
+                self.ahead.push_back(batch);
             }
         }
     }
 
     /// How it ended, if read to its end.
-    fn end(&self) -> Option<&Result<(), Fault>> {
+    fn end(&self) -> Option<&Result<()>> {
         self.ahead.iter().find_map(|batch| batch.end.as_ref())
     }
 
@@ -199,7 +229,7 @@ impl Response {
     /// fails; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL)
     /// for another type. Its call ends with the stream, or abandoned if
     /// dropped first.
-    pub fn outputs<T: Any + Clone + Send>(mut self) -> Events<T> {
+    pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T>> {
         if self.output != Some(TypeId::of::<T>()) {
             let fault = Fault::wrong_kind::<T>();
             self.body.end(Err(fault.clone()));
@@ -233,11 +263,11 @@ impl Response {
         .boxed()
     }
 
-    /// A provider's answer through `call`'s provider edge, its origin kept
+    /// A provider's output flow through its call, with metadata retained
     /// only on a relay: cut at the call's end, so a waiting reader wakes.
     pub(crate) fn of_call(
         format: &Arc<dyn AnyFormat>,
-        origin: Option<Origin>,
+        metadata: Metadata,
         events: AnyEvents,
         mut call: CallEdge,
     ) -> Self {
@@ -253,7 +283,7 @@ impl Response {
         Self {
             streams,
             refused,
-            ..Self::new(origin, body, output)
+            ..Self::new(metadata, body, output)
         }
     }
 }
@@ -265,7 +295,7 @@ pub(crate) enum Source {
         format: Arc<dyn AnyFormat>,
         call: Option<SharedCall>,
     },
-    /// Outputs a plugin made, each of which is content.
+    /// Outputs a plugin made.
     Made(BoxStream<'static, Batch>),
 }
 
@@ -292,10 +322,10 @@ impl Source {
     }
 
     /// The next batch, eventually one with the end, not to be read past,
-    /// and whether it held content before any filter, filtered on its
+    /// and whether it held values before any filter, filtered on its
     /// call's provider edge if it has one. The call ends when the batch
     /// with its end is read ([`Batch::read`]) or dropped. A panic of the
-    /// provider's stream, `is_content` or a filter ends the call internal
+    /// provider's stream or a filter ends the call internal
     /// and unwinds on.
     pub(crate) async fn next(&mut self) -> (Batch, bool) {
         let (events, format, call) = match self {
@@ -307,8 +337,8 @@ impl Source {
             Source::Made(made) => {
                 let truncated = || Batch::end(Err(Fault::truncated()));
                 let batch = made.next().await.unwrap_or_else(truncated);
-                let content = batch.values.is_some();
-                return (batch, content);
+                let has_values = batch.values.is_some();
+                return (batch, has_values);
             }
         };
         let item = AssertUnwindSafe(events.next()).catch_unwind().await;
@@ -322,29 +352,40 @@ impl Source {
                 None => Batch::end(Ok(())),
             };
             let of = AssertUnwindSafe(|| {
-                // What is ready with it is one batch, as a frame's outputs
-                // are: the call's filters see all of it before the client's
-                // see its first.
+                // Coalesce ready events, with provider filters seeing the
+                // batch before client filters. A hot stream must still yield.
+                let mut count = 1;
                 while let Some(values) = &mut batch.values
                     && batch.end.is_none()
+                    && count < MAX_BATCH_EVENTS
                 {
                     match events.next().now_or_never() {
                         None => break,
-                        Some(Some(Ok(more))) => format.append(values, more),
+                        Some(Some(Ok(more))) => {
+                            format.append(values, more);
+                            count += 1;
+                        }
                         Some(Some(Err(fault))) => batch.end = Some(Err(fault)),
                         Some(None) => batch.end = Some(Ok(())),
                     }
                 }
-                let content = (batch.values.as_ref()).is_some_and(|v| format.any_content(v));
+                let has_values = batch.values.is_some();
                 if let Some(call) = call {
                     batch = std::mem::take(&mut batch).of(call);
                 }
-                content
+                (has_values, count == MAX_BATCH_EVENTS)
             });
-            std::panic::catch_unwind(of).map(|content| (batch, content))
+            std::panic::catch_unwind(of).map(|(has_values, full)| (batch, has_values, full))
         });
         match read {
-            Ok(Ok(read)) => read,
+            Ok(Ok((batch, has_values, full))) => {
+                // A terminal batch must reach its owner without suspension:
+                // its unread end is settled according to delivery's outcome.
+                if full && batch.end.is_none() {
+                    tokio::task::yield_now().await;
+                }
+                (batch, has_values)
+            }
             Ok(Err(panic)) | Err(panic) => {
                 if let Some(call) = call {
                     locked(call).finish(Err(Fault::internal(PANICKED)));
@@ -355,7 +396,7 @@ impl Source {
     }
 
     /// Its reader stopped with `end`; its call ends so.
-    pub(crate) fn end(&mut self, end: Result<(), Fault>) {
+    pub(crate) fn end(&mut self, end: Result<()>) {
         if let Some(call) = self.call() {
             locked(call).finish(end);
         }

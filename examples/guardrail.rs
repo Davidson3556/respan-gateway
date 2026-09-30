@@ -126,9 +126,13 @@ impl Plugin for Cache {
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn base(mock: &MockTransport) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
-        .client(AnthropicMessages)
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Conversation, _, _>(AnthropicMessages)
 }
 
 /// `guard` first, `guard-input` last, and `middle` between them.

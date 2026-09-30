@@ -234,8 +234,12 @@ async fn embed(body: &'static str) -> Result<(Bytes, StatusCode, Bytes, Usage), 
     let gw = Gateway::new()
         .plugin("pin", PinModel("small"))?
         .plugin("metered", metered.clone())?
-        .provider("openai", OpenAiEmbeddings, mock.at(AT))?
-        .client(OpenAiEmbeddings)?
+        .provider::<EmbedRequest, _, _>(
+            "openai",
+            OpenAiEmbeddings,
+            respan_gateway_http::connect(mock.at(AT)),
+        )?
+        .client::<EmbedRequest, _, _>(OpenAiEmbeddings)?
         .target("openai")?;
     let (status, _, answered) = read_whole(serve(&gw, post("/v1/embeddings", body)).await.0).await;
     gw.idle().await;

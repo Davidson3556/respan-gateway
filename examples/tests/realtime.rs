@@ -1,5 +1,6 @@
 use super::*;
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_ws::ClientEvent;
 
 /// A session against a scripted provider: the gateway's address, the
 /// provider, and what the plugins recorded.
@@ -824,11 +825,11 @@ async fn remote_session(
         lag: Duration::from_millis(lag),
     };
     let gw = Gateway::new()
-        .client(realtime())?
-        .provider(
+        .client::<ClientEvent, _, _>(realtime())?
+        .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            WsTransport::new(provider.trim_end_matches("/v1"))?,
+            respan_gateway_http::connect(WsTransport::new(provider.trim_end_matches("/v1"))?),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(remote))?;
@@ -920,11 +921,11 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .client(realtime())?
-        .provider(
+        .client::<ClientEvent, _, _>(realtime())?
+        .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            WsTransport::new(provider.trim_end_matches("/v1"))?,
+            respan_gateway_http::connect(WsTransport::new(provider.trim_end_matches("/v1"))?),
         )?
         .target("openai")?
         .plugin("at", at.clone())?
@@ -1150,11 +1151,11 @@ async fn l6_a_refused_turn_being_released_as_the_client_left_is_settled() -> Res
         lag: Duration::from_millis(300),
     };
     let gw = Gateway::new()
-        .client(realtime())?
-        .provider(
+        .client::<ClientEvent, _, _>(realtime())?
+        .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            WsTransport::new(format!("ws://{at}"))?,
+            respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(remote))?;
@@ -1230,11 +1231,11 @@ async fn l6_leave_during_a_wrap(
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .client(realtime())?
-        .provider(
+        .client::<ClientEvent, _, _>(realtime())?
+        .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            WsTransport::new(provider.trim_end_matches("/v1"))?,
+            respan_gateway_http::connect(WsTransport::new(provider.trim_end_matches("/v1"))?),
         )?
         .target("openai")?
         .plugin("at", at.clone())?
@@ -1481,11 +1482,11 @@ async fn l7_a_turn_the_provider_starts_during_a_reserve_is_still_held() -> Resul
         lag: Duration::from_millis(0),
     };
     let gw = Gateway::new()
-        .client(realtime())?
-        .provider(
+        .client::<ClientEvent, _, _>(realtime())?
+        .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            WsTransport::new(format!("ws://{at}"))?,
+            respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(remote))?;
@@ -1528,11 +1529,13 @@ async fn l7_a_client_that_leaves_at_any_moment_leaves_no_hold() -> Result<(), Fa
                 lag: Duration::from_millis(60),
             };
             let gw = Gateway::new()
-                .client(realtime())?
-                .provider(
+                .client::<ClientEvent, _, _>(realtime())?
+                .provider::<ClientEvent, _, _>(
                     "openai",
                     realtime(),
-                    WsTransport::new(provider.trim_end_matches("/v1"))?,
+                    respan_gateway_http::connect(WsTransport::new(
+                        provider.trim_end_matches("/v1"),
+                    )?),
                 )?
                 .target("openai")?
                 .plugin("reserve", Reserve(remote))?;
@@ -1684,11 +1687,11 @@ async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<
         first: Arc::new(AtomicUsize::new(0)),
     };
     let gw = Gateway::new()
-        .client(realtime())?
-        .provider(
+        .client::<ClientEvent, _, _>(realtime())?
+        .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            WsTransport::new(format!("ws://{at}"))?,
+            respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(jitter))?;
@@ -1814,11 +1817,11 @@ async fn l9_provider_turns_and_a_client_that_leaves_at_any_moment_leave_no_hold(
             lag: Duration::from_millis(40),
         };
         let gw = Gateway::new()
-            .client(realtime())?
-            .provider(
+            .client::<ClientEvent, _, _>(realtime())?
+            .provider::<ClientEvent, _, _>(
                 "openai",
                 realtime(),
-                WsTransport::new(format!("ws://{at}"))?,
+                respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
             )?
             .target("openai")?
             .plugin("reserve", Reserve(remote))?;

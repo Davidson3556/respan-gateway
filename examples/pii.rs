@@ -129,8 +129,12 @@ fn gateway_with(
     middle: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("pii", Pii)?;
     middle(gw)?.plugin("pii-input", PiiInput)?.target("openai")
 }

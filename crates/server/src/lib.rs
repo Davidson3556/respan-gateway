@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! HTTP for the kernel: an axum router that hands requests to a [`Gateway`]
 //! through the HTTP adapter ([`respan_gateway_http::handle`]), and a
-//! [`Transport`] that reaches a provider over HTTP.
+//! [`Transport`](respan_gateway_http::Transport) that reaches a provider over HTTP.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -13,8 +13,8 @@ use http::header;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use respan_gateway_core::futures::TryStreamExt;
-use respan_gateway_core::{Fault, Gateway, async_trait};
-use respan_gateway_http::{Exchange, Transport};
+use respan_gateway_core::{Fault, Gateway};
+use respan_gateway_http::Exchange;
 use respan_gateway_http::{RequestHead, ResponseHead, Status, http, http_body_util};
 use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
@@ -176,9 +176,9 @@ impl HttpTransport {
     }
 }
 
-#[async_trait]
-impl Transport for HttpTransport {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl HttpTransport {
+    /// Send an encoded call and return its response.
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let mut call = call;
         proxy_call(&mut call.head);
         strip_client_origin_headers(&mut call.head.headers);
@@ -216,5 +216,14 @@ impl Transport for HttpTransport {
         let mut resp = respan_gateway_http::from_response(resp);
         strip_origin_headers(&mut resp.head.headers);
         Ok(resp)
+    }
+}
+impl From<HttpTransport> for respan_gateway_http::Transport {
+    fn from(value: HttpTransport) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }

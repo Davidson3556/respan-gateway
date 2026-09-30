@@ -13,6 +13,7 @@
 
 use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_formats::AnthropicMessages;
+use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::http::{self, HeaderValue};
 
 use respan_gateway_http::Transport;
@@ -22,10 +23,14 @@ use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 const ANTHROPIC: &str = "https://api.anthropic.com";
 
 /// The whole setup, in code: serve Anthropic Messages, relay to Anthropic.
-fn gateway(transport: impl Transport) -> Result<Gateway, Fault> {
+fn gateway(transport: impl Into<Transport>) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("anthropic", AnthropicMessages, transport)?
-        .client(AnthropicMessages)?
+        .provider::<Conversation, _, _>(
+            "anthropic",
+            AnthropicMessages,
+            respan_gateway_http::connect(transport),
+        )?
+        .client::<Conversation, _, _>(AnthropicMessages)?
         .target("anthropic")
 }
 

@@ -1,5 +1,5 @@
 //! HTTP's driver on the real formats: relay, translation and streams
-//! through `serve`, `Accepted` and `Gateway::handle`, and what each of a
+//! through `serve`, `Transport` and `Gateway::handle`, and what each of a
 //! table of scenarios gives the client, sends the providers and ends with.
 #![allow(clippy::unwrap_used)]
 
@@ -53,11 +53,19 @@ struct Marking<T>(T, Marks);
 
 type Marks = Arc<Mutex<Vec<bool>>>;
 
-#[async_trait]
-impl<T: Transport> Transport for Marking<T> {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Marking<Transport> {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         lock(&self.1).push(call.relayed);
         self.0.send(call).await
+    }
+}
+impl<T: Into<Transport>> From<Marking<T>> for respan_gateway_http::Transport {
+    fn from(value: Marking<T>) -> Self {
+        let value = std::sync::Arc::new(Marking(value.0.into(), value.1));
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -113,9 +121,22 @@ impl Harness {
         let openai = Marking(mock.at(OPENAI), marks.clone());
         let anthropic = Marking(mock.at(ANTHROPIC), marks.clone());
         let gw = Gateway::new()
-            .provider("openai", OpenAiChat, openai)
-            .and_then(|g| g.provider("anthropic", AnthropicMessages, anthropic))
-            .and_then(|g| g.client(OpenAiChat)?.client(AnthropicMessages));
+            .provider::<Conversation, _, _>(
+                "openai",
+                OpenAiChat,
+                respan_gateway_http::connect(openai),
+            )
+            .and_then(|g| {
+                g.provider::<Conversation, _, _>(
+                    "anthropic",
+                    AnthropicMessages,
+                    respan_gateway_http::connect(anthropic),
+                )
+            })
+            .and_then(|g| {
+                g.client::<Conversation, _, _>(OpenAiChat)?
+                    .client::<Conversation, _, _>(AnthropicMessages)
+            });
         let gw = gw
             .and_then(|g| g.plugin("outcomes", outcomes.clone()))
             .and_then(|g| g.plugin("head-only", head_only.clone()))
@@ -516,11 +537,19 @@ impl SlowRefusal {
     }
 }
 
-#[async_trait]
-impl Transport for SlowRefusal {
-    async fn send(&self, _: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl SlowRefusal {
+    pub async fn send(&self, _: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let (head, body) = Self::answer();
         Ok(Exchange::new(head, body))
+    }
+}
+impl From<SlowRefusal> for respan_gateway_http::Transport {
+    fn from(value: SlowRefusal) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -531,8 +560,12 @@ impl Transport for SlowRefusal {
 async fn a_slow_refusal_is_refused() {
     let head_only = HeadOnly::default();
     let gw = Gateway::new()
-        .provider("openai", OpenAiChat, SlowRefusal)
-        .and_then(|g| g.client(OpenAiChat))
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(SlowRefusal),
+        )
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .and_then(|g| g.plugin("head-only", head_only.clone()))
         .and_then(|g| g.target("openai"))
         .unwrap();
@@ -553,13 +586,21 @@ async fn a_slow_refusal_is_refused() {
 #[derive(Clone)]
 struct HugeRefusal;
 
-#[async_trait]
-impl Transport for HugeRefusal {
-    async fn send(&self, _: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl HugeRefusal {
+    pub async fn send(&self, _: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let (mut head, ()) = http::Response::new(()).into_parts();
         head.status = StatusCode::SERVICE_UNAVAILABLE;
         let frames = (0..32).map(|_| Ok(Bytes::from(vec![b'x'; 64 * 1024])));
         Ok(Exchange::new(head, stream::iter(frames).boxed()))
+    }
+}
+impl From<HugeRefusal> for respan_gateway_http::Transport {
+    fn from(value: HugeRefusal) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -571,8 +612,12 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let head_only = HeadOnly::default();
         let outcomes = Outcomes::default();
         let gw = Gateway::new()
-            .provider("openai", OpenAiChat, HugeRefusal)
-            .and_then(|g| g.client(OpenAiChat))
+            .provider::<Conversation, _, _>(
+                "openai",
+                OpenAiChat,
+                respan_gateway_http::connect(HugeRefusal),
+            )
+            .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
             .and_then(|g| g.plugin("outcomes", outcomes.clone()))
             .and_then(|g| g.plugin("head-only", head_only.clone()))
             .and_then(|g| g.target("openai"))

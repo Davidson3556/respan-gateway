@@ -20,9 +20,13 @@ fn keyed(probe: &Probe) -> Gateway {
         .with_headers(own)
         .unwrap();
     Gateway::new()
-        .client(Raw)
+        .client::<<Raw as respan_gateway_http::Codec>::Input, _, _>(Raw)
         .unwrap()
-        .provider("p", Raw, transport)
+        .provider::<<Raw as respan_gateway_http::Codec>::Input, _, _>(
+            "p",
+            Raw,
+            respan_gateway_http::connect(transport),
+        )
         .unwrap()
         .target("p")
         .unwrap()

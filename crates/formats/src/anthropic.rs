@@ -104,10 +104,6 @@ impl Codec for AnthropicMessages {
     fn refusal(&self, fault: &Fault, _body: &Bytes, head: &mut ResponseHead) -> Bytes {
         refusal::<Self>(fault, head)
     }
-
-    fn is_content(&self, reply: &Reply) -> bool {
-        reply.is_content()
-    }
 }
 
 impl_format!(AnthropicMessages);

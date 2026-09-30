@@ -1,4 +1,4 @@
-//! An MCP server over stdio as a [`Transport`]: one child process per
+//! An MCP server over stdio as a [`Transport`](respan_gateway_http::Transport): one child process per
 //! session, one JSON-RPC message per line. It answers the requests
 //! [`StreamableHttp`](crate::StreamableHttp) sends, as an HTTP MCP server
 //! would: messages under the success statuses, the session in its header,
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use respan_gateway_core::{Extensions, Fault, async_trait};
+use respan_gateway_core::{Extensions, Fault};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
@@ -21,7 +21,7 @@ use tokio::process::Command;
 
 use crate::session::Session;
 use crate::{SESSION, lock, read};
-use respan_gateway_http::{Exchange, Transport};
+use respan_gateway_http::Exchange;
 
 /// Stands for "never": `Duration::MAX` would overflow a deadline.
 const CENTURY: Duration = Duration::from_secs(100 * 365 * 24 * 3600);
@@ -178,12 +178,21 @@ fn no_session() -> Fault {
     Fault::new(NO_SESSION, "no such session").with(Status(404))
 }
 
-#[async_trait]
-impl Transport for StdioTransport {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl StdioTransport {
+    /// Send an encoded call and return its response.
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let (call, extensions) = respan_gateway_http::into_request(call);
         let resp = self.send_http(call, &extensions).await?;
         Ok(respan_gateway_http::from_response(resp))
+    }
+}
+impl From<StdioTransport> for respan_gateway_http::Transport {
+    fn from(value: StdioTransport) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 

@@ -64,10 +64,14 @@ impl Plugin for ToolAllowList {
     }
 }
 
-fn gateway(server: impl Transport) -> Result<Gateway, Fault> {
+fn gateway(server: impl Into<Transport>) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("tools", StreamableHttp::default(), server)?
-        .client(StreamableHttp::default())?
+        .provider::<ToServer, _, _>(
+            "tools",
+            StreamableHttp::default(),
+            respan_gateway_http::connect(server),
+        )?
+        .client::<ToServer, _, _>(StreamableHttp::default())?
         .plugin("allow", ToolAllowList(Arc::from(["echo"])))?
         .target("tools")
 }

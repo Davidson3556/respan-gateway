@@ -12,6 +12,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example tenants`
 
+use respan_gateway_formats::conversation::Conversation;
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -95,9 +96,17 @@ const AZURE: &str = "http://azure.test/v1";
 
 fn gateway(mock: &MockTransport, tenants: Tenants) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .provider("azure", OpenAiChat, mock.at(AZURE))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .provider::<Conversation, _, _>(
+            "azure",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(AZURE)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("tenants", tenants)
 }
 

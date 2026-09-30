@@ -112,7 +112,10 @@ impl Harness {
             add_provider("openai", OpenAiChat, mock.at(OPENAI)),
             add_provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC)),
         ])
-        .and_then(|gw| gw.client(OpenAiChat)?.client(AnthropicMessages))
+        .and_then(|gw| {
+            gw.client::<Conversation, _, _>(OpenAiChat)?
+                .client::<Conversation, _, _>(AnthropicMessages)
+        })
         .and_then(|gw| with_plugins(gw, plugins))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
         Self {
@@ -197,9 +200,8 @@ impl Plugin for Forges {
 /// A transport that notes whether each call came `relayed`.
 struct Marks<T>(T, Arc<Mutex<Vec<bool>>>);
 
-#[async_trait]
-impl<T: Transport> Transport for Marks<T> {
-    async fn send(
+impl Marks<Transport> {
+    pub async fn send(
         &self,
         call: Exchange<respan_gateway_http::RequestHead>,
     ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -209,6 +211,15 @@ impl<T: Transport> Transport for Marks<T> {
             .unwrap_or_else(|e| e.into_inner())
             .push(relayed);
         self.0.send(call).await
+    }
+}
+impl<T: Into<Transport>> From<Marks<T>> for respan_gateway_http::Transport {
+    fn from(value: Marks<T>) -> Self {
+        let value = std::sync::Arc::new(Marks(value.0.into(), value.1));
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -223,7 +234,7 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
         add_provider("openai", OpenAiChat, at(OPENAI)),
         add_provider("anthropic", AnthropicMessages, at(ANTHROPIC)),
     ])
-    .and_then(|gw| gw.client(OpenAiChat))
+    .and_then(|gw| gw.client::<Conversation, _, _>(OpenAiChat))
     .and_then(|gw| {
         let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
         let plugins: Vec<Arc<dyn Plugin>> = vec![

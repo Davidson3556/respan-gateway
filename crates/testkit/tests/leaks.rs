@@ -1,6 +1,7 @@
 //! Every request-scoped value is dropped once its request ends and the
 //! gateway is idle, and a dropped gateway drops its plugins.
 
+use respan_gateway_formats::conversation::Conversation;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12,7 +13,7 @@ use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Finish, Reply};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
-use respan_gateway_http::{Exchange, Frames, Transport};
+use respan_gateway_http::{Exchange, Frames};
 use respan_gateway_testkit::{mock, post, read_whole, serve};
 
 const CHAT: &str = "/v1/chat/completions";
@@ -78,9 +79,18 @@ impl Plugin for Probing {
         match self.answer {
             Answer::Target => Ok(None),
             Answer::Fallback => {
-                let first = cx.call("openai").await?.until_content().await?;
+                let first = cx
+                    .call("openai")
+                    .await?
+                    .buffer_until(Reply::is_content)
+                    .await?;
                 drop(first);
-                Ok(Some(cx.call("backup").await?.until_content().await?))
+                Ok(Some(
+                    cx.call("backup")
+                        .await?
+                        .buffer_until(Reply::is_content)
+                        .await?,
+                ))
             }
             Answer::Own => {
                 let own = [Reply::text(0, "hi"), Reply::finished(Finish::Stop)];
@@ -112,15 +122,23 @@ struct Scripted {
     whole: bool,
 }
 
-#[async_trait]
-impl Transport for Scripted {
-    async fn send(
+impl Scripted {
+    pub async fn send(
         &self,
         call: Exchange<respan_gateway_http::RequestHead>,
     ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
         let _: Vec<Bytes> = call.body.try_collect().await?;
         let (head, chunks) = reply(self.whole).into_parts();
         Ok(Exchange::new(head, body(chunks)))
+    }
+}
+impl From<Scripted> for respan_gateway_http::Transport {
+    fn from(value: Scripted) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -137,9 +155,19 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         answer,
     };
     let gw = Gateway::new()
-        .provider("openai", OpenAiChat, Scripted { whole })
-        .and_then(|g| g.provider("backup", OpenAiChat, Scripted { whole }))
-        .and_then(|g| g.client(OpenAiChat))
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(Scripted { whole }),
+        )
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "backup",
+                OpenAiChat,
+                respan_gateway_http::connect(Scripted { whole }),
+            )
+        })
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .and_then(|g| g.plugin("probing", probing))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|f| panic!("{f}"));

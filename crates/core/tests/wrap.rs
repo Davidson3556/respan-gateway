@@ -98,7 +98,7 @@ struct Guard;
 
 #[async_trait]
 impl Plugin for Guard {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let check = cx.call("classifier");
         cx.wrap(move |inputs: Events<In>| {
             inputs.and_then(move |input| {
@@ -122,7 +122,7 @@ struct Deadline(Duration);
 
 #[async_trait]
 impl Plugin for Deadline {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let limit = self.0;
         cx.wrap(move |outputs: Events<Out>| outputs.take_until(tokio::time::sleep(limit)))?;
         Ok(None)
@@ -131,11 +131,11 @@ impl Plugin for Deadline {
 
 fn gateway(body: &Body, read: usize, checked: &Arc<AtomicUsize>, plugin: impl Plugin) -> Gateway {
     Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, body.provider(read))
+        .provider::<In, _, _>("p", Toy, connect(body.provider(read)))
         .unwrap()
-        .provider("classifier", Toy, classifier(checked.clone()))
+        .provider::<In, _, _>("classifier", Toy, connect(classifier(checked.clone())))
         .unwrap()
         .plugin("plugin", plugin)
         .unwrap()
@@ -144,16 +144,14 @@ fn gateway(body: &Body, read: usize, checked: &Arc<AtomicUsize>, plugin: impl Pl
 }
 
 /// The first reply frame, the reply kept open.
-async fn first(
-    res: Result<ToyReply, Fault>,
-) -> (String, BoxStream<'static, Result<String, Fault>>) {
+async fn first(res: Result<ToyReply>) -> (String, BoxStream<'static, Result<String>>) {
     let mut body = res.unwrap().body;
     let frame = body.next().await.unwrap().unwrap();
     (frame, body)
 }
 
 /// The rest of a reply, as `read` gives it.
-async fn rest(mut body: BoxStream<'static, Result<String, Fault>>) -> String {
+async fn rest(mut body: BoxStream<'static, Result<String>>) -> String {
     let mut out = String::new();
     while let Some(frame) = body.next().await {
         out.push_str(&frame.unwrap());
@@ -168,11 +166,11 @@ async fn rest(mut body: BoxStream<'static, Result<String, Fault>>) -> String {
 async fn a_flagged_input_is_refused_and_ends_the_call_with_that_fault() {
     let (body, checked, rec) = (Body::default(), Arc::default(), Rec::default());
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, body.provider(10))
+        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
         .unwrap()
-        .provider("classifier", Toy, classifier(Arc::clone(&checked)))
+        .provider::<In, _, _>("classifier", Toy, connect(classifier(Arc::clone(&checked))))
         .unwrap()
         .plugin("rec", rec.clone())
         .unwrap()
@@ -207,7 +205,7 @@ async fn a_filters_refusal_of_a_sessions_input_ends_the_call_with_it() {
     struct Refuse;
     #[async_trait]
     impl Plugin for Refuse {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.filter(|input: &mut In| match input.0.as_str() {
                 "evil" => Err(Fault::bad_request("refused")),
                 _ => Ok(()),
@@ -285,7 +283,7 @@ async fn a_wrap_that_swallows_the_cut_still_ends_abandoned() {
     struct Swallow;
     #[async_trait]
     impl Plugin for Swallow {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|inputs: Events<In>| inputs.take_while(|i| std::future::ready(i.is_ok())))?;
             Ok(None)
         }
@@ -310,7 +308,7 @@ async fn a_cut_ends_a_plugins_own_stream_abandoned() {
     struct Own;
     #[async_trait]
     impl Plugin for Own {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|_client: Events<In>| {
                 stream::once(async { Ok(In("x".into())) }).chain(stream::pending())
             })?;
@@ -336,7 +334,7 @@ async fn a_stream_that_fails_ends_the_inputs_and_the_call_with_its_fault() {
     struct Fails;
     #[async_trait]
     impl Plugin for Fails {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|_client: Events<In>| {
                 stream::iter([Ok(In("x".into())), Err(Fault::upstream("gone"))])
             })?;
@@ -361,7 +359,7 @@ async fn a_panicking_stream_is_a_failure_and_hooks_end_once() {
     struct Panics;
     #[async_trait]
     impl Plugin for Panics {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|_client: Events<In>| {
                 stream::iter([1, 2]).map(|i| match i {
                     2 => panic!("a plugin's stream panics"),
@@ -373,9 +371,9 @@ async fn a_panicking_stream_is_a_failure_and_hooks_end_once() {
     }
     let (seen, rec) = (Seen::default(), Rec::default());
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, seen.transport(true, done))
+        .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
         .unwrap()
         .plugin("rec", rec.clone())
         .unwrap()
@@ -403,7 +401,7 @@ async fn a_wrap_of_another_type_or_of_a_whole_input_is_refused() {
     struct Wrong(bool);
     #[async_trait]
     impl Plugin for Wrong {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             match self.0 {
                 true => cx.wrap(|s: Events<String>| s)?,
                 false => cx.wrap(|s: Events<In>| s)?,
@@ -426,9 +424,14 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
     struct Fallback;
     #[async_trait]
     impl Plugin for Fallback {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|inputs: Events<In>| inputs.map_ok(|In(text)| In(text.to_uppercase())))?;
-            match cx.call("refuses").await?.until_content().await {
+            match cx
+                .call("refuses")
+                .await?
+                .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                .await
+            {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(cx.call("p").await?)),
             }
@@ -437,11 +440,11 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
     let body = Body::default();
     let refuses = fnt(|_| async { Ok(answer(503, chunks(vec![]))) }.boxed());
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("refuses", Toy, refuses)
+        .provider::<In, _, _>("refuses", Toy, connect(refuses))
         .unwrap()
-        .provider("p", Toy, body.provider(10))
+        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
         .unwrap()
         .plugin("fallback", Fallback)
         .unwrap();
@@ -482,10 +485,15 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
     struct Retry;
     #[async_trait]
     impl Plugin for Retry {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|inputs: Events<In>| inputs)?;
             let call = cx.call("p");
-            match call.clone().await?.until_content().await {
+            match call
+                .clone()
+                .await?
+                .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                .await
+            {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(call.await?)),
             }
@@ -493,9 +501,9 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
     }
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, reads_then_refuses_first(bodies.clone()))
+        .provider::<In, _, _>("p", Toy, connect(reads_then_refuses_first(bodies.clone())))
         .unwrap()
         .plugin("retry", Retry)
         .unwrap();
@@ -517,11 +525,11 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
 async fn a_gate_and_a_deadline_compose_and_the_relay_is_kept() {
     let (body, checked, rec) = (Body::default(), Arc::default(), Rec::default());
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, body.provider(10))
+        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
         .unwrap()
-        .provider("classifier", Toy, classifier(Arc::clone(&checked)))
+        .provider::<In, _, _>("classifier", Toy, connect(classifier(Arc::clone(&checked))))
         .unwrap()
         .plugin("rec", rec.clone())
         .unwrap()
@@ -555,14 +563,14 @@ async fn a_gate_and_a_deadline_compose_and_the_relay_is_kept() {
 }
 
 /// A deadline that cuts the outputs with a fault of its own ends the reply
-/// and the call with it, as `Ended(Err(f))` ends the reply's call (rule 4),
+/// and the call with it, as the writer's failure ends the reply's call,
 /// though the wrap dropped the call's outputs unread.
 #[tokio::test]
 async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
     struct Cut;
     #[async_trait]
     impl Plugin for Cut {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|outputs: Events<Out>| {
                 let over = stream::once(async { Err(Fault::new("max_length", "over")) });
                 outputs.take(1).chain(over)
@@ -572,9 +580,9 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
     }
     let (body, rec) = (Body::default(), Rec::default());
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, body.provider(10))
+        .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
         .unwrap()
         .plugin("rec", rec.clone())
         .unwrap()
@@ -600,7 +608,7 @@ async fn l5_a_refusal_before_the_providers_head_is_the_refusal() {
     struct Gate;
     #[async_trait]
     impl Plugin for Gate {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|i: Events<In>| {
                 i.and_then(|x| async move {
                     match x.0.as_str() {
@@ -628,9 +636,9 @@ async fn l5_a_refusal_before_the_providers_head_is_the_refusal() {
         .boxed()
     });
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, dialer)
+        .provider::<In, _, _>("p", Toy, connect(dialer))
         .unwrap()
         .plugin("rec", rec.clone())
         .unwrap()
@@ -677,7 +685,7 @@ async fn wraps_and_filters_apply_in_plugin_order() {
     struct Tag(&'static str, bool);
     #[async_trait]
     impl Plugin for Tag {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             let name = self.0;
             if self.1 {
                 cx.wrap(move |s: Events<In>| s.map_ok(move |In(t)| In(format!("{t}{name}"))))?;
@@ -696,7 +704,7 @@ async fn wraps_and_filters_apply_in_plugin_order() {
         }
 
         /// The call's own input filter runs after the request's wraps.
-        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
             let name = self.0;
             px.filter(move |i: &mut In| {
                 i.0.push_str(&format!("c{name}"));
@@ -706,9 +714,9 @@ async fn wraps_and_filters_apply_in_plugin_order() {
     }
     let seen = Seen::default();
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, seen.transport(true, done))
+        .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
         .unwrap()
         .plugin("1", Tag("1", false))
         .unwrap()
@@ -732,16 +740,16 @@ async fn a_wrap_that_panics_fails_the_reply_internal() {
     struct Panics;
     #[async_trait]
     impl Plugin for Panics {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|_: Events<Out>| -> Events<Out> { panic!("a buggy wrap") })?;
             Ok(None)
         }
     }
     let (seen, rec) = (Seen::default(), Rec::default());
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, seen.transport(false, done))
+        .provider::<In, _, _>("p", Toy, connect(seen.transport(false, done)))
         .unwrap()
         .plugin("rec", rec.clone())
         .unwrap()
@@ -775,13 +783,13 @@ async fn wrapped_requests_end_once_when_dropped_at_every_await() {
             let (rec, seen) = (Rec::default(), Seen::default());
             let c = classifier.0.clone();
             let gw = Gateway::new()
-                .client(Toy)
+                .client::<In, _, _>(Toy)
                 .unwrap()
                 // Answers once it read the body, so the drops land while
                 // checked inputs flow.
-                .provider("p", Toy, seen.transport(true, done))
+                .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
                 .unwrap()
-                .provider("classifier", Toy, fnt(move |call| c(call)))
+                .provider::<In, _, _>("classifier", Toy, connect(fnt(move |call| c(call))))
                 .unwrap()
                 .plugin("rec", rec.clone())
                 .unwrap()

@@ -1,27 +1,27 @@
-//! Turns a request's response into its client edge's reply.
+//! Builds the outgoing flow for the application-facing edge.
 
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::future::ready;
 use futures::{FutureExt, StreamExt, stream};
 
 use crate::call::SharedCall;
 use crate::fault::PANICKED;
-use crate::format::{AnyFormat, AnyReply};
-use crate::leg::{Outgoing, cut, idle, locked};
+use crate::format::{AnyFormat, AnyValue};
+use crate::leg::{Outgoing, cut, idle};
 use crate::lifecycle::EndHooks;
-use crate::response::Source;
-use crate::{ClientContext, Ended, Fault, Response};
+use crate::response::{Batch, Source};
+use crate::{ClientContext, Events, Fault, Response, Result};
 
-/// The reply of `resp`: a refusal, or the response's origin (on a relay)
-/// and outputs; with [`Ended`], which owns the request's end hooks.
+/// Apply client output stages and retain the selected call until delivery ends.
 pub(crate) async fn reply(
     format: &Arc<dyn AnyFormat>,
-    resp: Result<Response, Fault>,
-    mut hooks: EndHooks<ClientContext>,
-) -> AnyReply {
+    resp: Result<Response>,
+    hooks: &mut EndHooks<ClientContext>,
+    discarded: &Arc<Mutex<Vec<Batch>>>,
+) -> (Events<AnyValue>, Option<SharedCall>) {
     let cx = hooks.cx();
     // A call's response goes only to its own request; one of another kind
     // fails, even with no outputs.
@@ -36,7 +36,7 @@ pub(crate) async fn reply(
     });
     let mut resp = match resp {
         Ok(resp) => resp,
-        Err(fault) => return refusal(fault, hooks),
+        Err(fault) => return (Events::refused(fault), None),
     };
     if resp.refused {
         // Its one batch is the refusal, through the call's filters.
@@ -50,21 +50,22 @@ pub(crate) async fn reply(
             _ => Fault::internal(PANICKED),
         };
         // A provider's words go only where its head would.
-        let fault = match resp.origin.is_some() {
+        let fault = match resp.metadata.is_some() {
             true => fault,
             false => fault.unrelayed(),
         };
-        return refusal(fault, hooks);
+        return (Events::refused(fault), None);
     }
     let call = resp.body.call().cloned();
     let Response {
-        origin,
+        metadata,
         body,
         ahead,
         ..
     } = resp;
-    let relayed = origin.is_some();
-    let mut events = Outgoing::new(ahead, body, cx.outputs.clone(), relayed).events();
+    let relayed = metadata.is_some();
+    let mut events =
+        Outgoing::new(ahead, body, cx.outputs.clone(), relayed, discarded.clone()).events();
     // Each wrap, the last added first, then the filters added before it.
     let wrapped = cx.wrapped.get_mut().unwrap_or_else(|e| e.into_inner());
     for (wrap, layer) in wrapped.iter_mut().rev() {
@@ -74,28 +75,27 @@ pub(crate) async fn reply(
         let panicked = || stream::once(ready(Err(Fault::internal(PANICKED)))).boxed();
         let outputs = std::panic::catch_unwind(wrap).unwrap_or_else(|_| panicked());
         let source = Source::made(outputs);
-        events = Outgoing::new(VecDeque::new(), source, layer.clone(), relayed).events();
+        events = Outgoing::new(
+            VecDeque::new(),
+            source,
+            layer.clone(),
+            relayed,
+            discarded.clone(),
+        )
+        .events();
     }
-    // Once the request ended, as when its edge dropped `Ended`, its outputs
+    // Once the client writer stops, its outputs
     // are cut.
     let events = cut(events, idle(&cx.cut));
-    ((origin, Ok(events)), ended(hooks, call))
-}
-
-/// A refusal with `fault`, which the client edge writes as one.
-pub(crate) fn refusal(fault: Fault, hooks: EndHooks<ClientContext>) -> AnyReply {
-    ((None, Err(fault)), ended(hooks, None))
-}
-
-/// Ends the request once its edge wrote the end, and on a failure its
-/// reply's call too, unless it ended; dropped uncalled, the request ends
-/// abandoned, and its calls with it.
-fn ended(hooks: EndHooks<ClientContext>, call: Option<SharedCall>) -> Ended {
-    Box::new(move |end| {
-        let mut hooks = hooks;
-        if let (Err(fault), Some(call)) = (&end, call) {
-            locked(&call).finish(Err(fault.clone()));
-        }
-        hooks.finish(end);
-    })
+    let format = format.clone();
+    let events = events.flat_map(move |values| {
+        let values = match values {
+            Ok(values) => format.outputs(values).into_iter().map(Ok).collect(),
+            Err(fault) => vec![Err(fault)],
+        };
+        stream::iter(values)
+    });
+    let mut flow = Events::stream(events);
+    flow.set_metadata(metadata);
+    (flow, call)
 }

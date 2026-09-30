@@ -87,10 +87,22 @@ impl Egress {
 
 fn gateway(mock: &MockTransport, egress: Egress) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("judge", OpenAiChat, mock.at(JUDGE))?
-        .provider("cheap", OpenAiChat, mock.at(CHEAP))?
-        .provider("strong", OpenAiChat, mock.at(STRONG))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "judge",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(JUDGE)),
+        )?
+        .provider::<Conversation, _, _>(
+            "cheap",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(CHEAP)),
+        )?
+        .provider::<Conversation, _, _>(
+            "strong",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(STRONG)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("egress", egress)?
         .plugin("judge", Judge)?
         .target("cheap")

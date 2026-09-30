@@ -149,8 +149,12 @@ const OPENAI: &str = "http://openai.test/v1";
 fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault> {
     let accounting = Accounting::new(ledger, quote);
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("cap", Cap)? // before accounting
         .plugin("accounting", accounting)?
         .target("openai")

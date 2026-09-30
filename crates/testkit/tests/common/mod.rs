@@ -38,9 +38,11 @@ pub type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 /// Provider `name`, speaking `format` over `transport`.
 pub fn add_provider<F, T>(name: &str, format: F, transport: T) -> AddProvider
 where
-    F: respan_gateway_core::Format,
-    T: Into<F::Dialer> + 'static,
+    F: respan_gateway_http::Codec
+        + respan_gateway_core::Format<respan_gateway_http::Transport, F::Output, F::Input>,
+    T: Into<respan_gateway_http::Transport>,
 {
+    let transport = respan_gateway_http::connect(transport);
     let name = name.to_owned();
     Box::new(move |g| g.provider(name, format, transport))
 }

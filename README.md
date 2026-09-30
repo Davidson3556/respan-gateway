@@ -67,9 +67,9 @@ not: `https://api.anthropic.com`.
 A client sends a request, plugins look at it, the gateway sends it on to a
 provider, and the response streams back through the plugins. The kernel
 routes events and never sees a byte, a head or a key: the client edge and
-the provider edge, each a format, own them
+the provider edge own them
 ([architecture](docs/ARCHITECTURE.md),
-[0020](docs/decisions/0020-symmetric-edges.md)).
+[0024](docs/decisions/0024-flows-and-symmetric-edges.md)).
 
 - **Gateway**: what you build and hand requests to: providers, client
   formats, plugins and a default target, each registered by value.
@@ -80,21 +80,24 @@ the provider edge, each a format, own them
   stream; its type says which. It sees every message. For work that waits,
   such as a remote check or a deadline, a plugin wraps the stream in its
   own instead (`cx.wrap`).
-- **Format**: one protocol's view of a kind, such as OpenAI Chat, and the
-  two edges that speak it: it accepts a client's connection and dials a
-  provider's. Its `Input` and `Output` types are its kind: formats of one
-  name relay each message as the bytes it came in, formats of one kind
-  translate. An HTTP format is a **Codec** (`crates/http`), one
-  protocol's decoders and encoders, made a `Format` by `impl_format!`; it
-  reaches a provider through a **Transport** (`http::Transport`), which
-  owns the URL, the keys and the connection.
+- **Format<T, R, W>**: one protocol's binding to owned I/O `T`, receiving
+  `R` and sending `W`. Its `bind(io)` returns a `Connection<R, W>` tuple:
+  an incoming opening future and an outgoing sink. The gateway chooses
+  the type order for each edge; Format has no client/provider methods.
+  `Events<T>` implements the standard `Stream` trait. Formats with the
+  same name and transport can relay each message as its original bytes;
+  formats of one kind translate. An HTTP format is a **Codec** (`crates/http`),
+  made a `Format` in both orientations by `impl_format!`. Its **Transport**
+  holds an accepted exchange or a shared outbound sender. `Transport::accept`
+  serves the incoming edge; `connect(transport)` supplies each outgoing
+  attempt with its extensions after its hooks.
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, as filters and wraps left them, or
   one input of its own (`with_input`). Only a call of the request's inputs
   to a provider of the client's format name is a relay, and carries the
-  client's origin and key.
+  client's protocol metadata and key.
 - **Response**: what a call, or `Response::stream`, gives back: read
-  (`outputs`), held (`until_content`, `until_end`) or sent.
+  (`outputs`), held (`buffer_until`, `until_end`) or sent.
 - **Fault**: the one error: a code that says whose fault it is, a message,
   a retry and typed hints such as HTTP's `Status`.
 
@@ -120,7 +123,7 @@ test when its milestone lands. The kernel API is frozen after M2.
 
 | Path | What it is |
 |---|---|
-| `crates/core` | The kernel: ten types, events only; no bytes, heads, HTTP or kinds. |
+| `crates/core` | The kernel: typed streams, symmetric boundaries, plugins and lifecycle; no HTTP or kinds. |
 | `crates/http` | HTTP's wire: `Codec`, `Transport`, the driver, the adapter, credentials. |
 | `crates/formats` | The chat kind, OpenAI Chat and Anthropic Messages. |
 | `crates/plugins` | First-party plugins, such as the model router. |

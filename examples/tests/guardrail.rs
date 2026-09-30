@@ -59,8 +59,12 @@ impl_format!(Responses);
 /// stays OpenAI; the guard refuses Responses traffic before any call.
 fn gateway_with_responses(mock: &MockTransport) -> Result<Gateway, Fault> {
     gateway(mock)?
-        .provider("responses", Responses, mock.at(OPENAI))?
-        .client(Responses)
+        .provider::<Sent<Responses>, _, _>(
+            "responses",
+            Responses,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Sent<Responses>, _, _>(Responses)
 }
 
 #[tokio::test]

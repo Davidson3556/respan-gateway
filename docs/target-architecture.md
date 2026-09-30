@@ -1,3 +1,7 @@
+> Historical design for ADR 0020. The current boundary is documented in
+> [ADR 0024](decisions/0024-flows-and-symmetric-edges.md) and
+> [Architecture](ARCHITECTURE.md).
+
 > **Historical.** This is the design document for 0020, kept as it was
 > written. Later decisions changed parts of it: `Fault::of_input` and the
 > per-input flag left in 0021, `Dialed` was inlined, and `Dialect` became

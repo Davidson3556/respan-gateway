@@ -16,15 +16,15 @@ use respan_gateway_core::*;
 
 fn gateway_of(seen: &Seen, wait: bool, answer: fn() -> Text) -> Gateway {
     Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("a", Toy, seen.transport(wait, answer))
+        .provider::<In, _, _>("a", Toy, connect(seen.transport(wait, answer)))
         .unwrap()
         .target("a")
         .unwrap()
 }
 
-fn frames(of: &[Result<&str, &str>]) -> Frames {
+fn frames(of: &[std::result::Result<&str, &str>]) -> Frames {
     of.iter()
         .map(|f| f.map(str::to_string).map_err(str::to_string))
         .collect()
@@ -85,7 +85,7 @@ async fn a_complete_upload_ends_cleanly() {
 struct Tap(Arc<Mutex<Vec<tokio::task::JoinHandle<Frames>>>>);
 #[async_trait]
 impl Plugin for Tap {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let mut inputs = cx.take_inputs::<In>();
         let task = tokio::spawn(async move {
             let mut got = vec![];
@@ -106,7 +106,7 @@ impl Plugin for Tap {
 async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {
     let taps = Arc::default();
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
         .plugin("tap", Tap(Arc::clone(&taps)))
         .unwrap();
@@ -128,7 +128,7 @@ async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {
 struct Collect(Arc<Mutex<Frames>>);
 #[async_trait]
 impl Plugin for Collect {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let got: Vec<_> = cx.take_inputs::<In>().collect().await;
         let got = got
             .into_iter()
@@ -211,9 +211,14 @@ async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
     struct Retry;
     #[async_trait]
     impl Plugin for Retry {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             let call = cx.call("a");
-            match call.clone().await?.until_content().await {
+            match call
+                .clone()
+                .await?
+                .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                .await
+            {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(call.await?)),
             }
@@ -221,9 +226,9 @@ async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
     }
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("a", Toy, reads_then_refuses_first(bodies.clone()))
+        .provider::<In, _, _>("a", Toy, connect(reads_then_refuses_first(bodies.clone())))
         .unwrap()
         .plugin("retry", Retry)
         .unwrap();

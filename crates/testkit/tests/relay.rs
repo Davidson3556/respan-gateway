@@ -32,7 +32,7 @@ use openai::{
     BACKUP, Cool, OnProvider, STREAM, STREAM_REQ, UNARY, UNARY_REQ, chat, gateway, provider, relay,
     unary_chat,
 };
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, impl_format};
 use serde_json::json;
 
 /// The error frame for a stream that stops short.
@@ -122,7 +122,7 @@ impl Plugin for Fallback {
         let mut last = Err(Fault::upstream("no providers"));
         for name in &self.0 {
             last = match cx.call(*name).await {
-                Ok(resp) => resp.until_content().await,
+                Ok(resp) => resp.buffer_until(Reply::is_content).await,
                 Err(fault) => Err(fault),
             };
             if last.is_ok() {
@@ -648,7 +648,7 @@ async fn plugins_run_in_registration_order_on_both_edges() {
     let mock = MockTransport::new();
     // Registered d, b, a, c, and they run in that order.
     let gw = providers([provider(&mock, "openai", OPENAI, None)])
-        .and_then(|g| g.client(OpenAiChat)?.target("openai"))
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat)?.target("openai"))
         .and_then(|g| {
             let g = g.plugin("d", named("d"))?.plugin("b", named("b"))?;
             g.plugin("a", named("a"))?.plugin("c", named("c"))
@@ -1105,9 +1105,11 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
     /// A provider that answers 200 and never sends a byte.
     struct Silent;
 
-    #[async_trait]
-    impl respan_gateway_http::Transport for Silent {
-        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+    impl Silent {
+        pub async fn send(
+            &self,
+            _req: Exchange<RequestHead>,
+        ) -> Result<Exchange<ResponseHead>, Fault> {
             let never = http_body_util::StreamBody::new(futures::stream::pending());
             let mut resp = http::Response::new(Body::new(never));
             resp.headers_mut().insert(
@@ -1115,6 +1117,15 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
                 HeaderValue::from_static("text/event-stream"),
             );
             Ok(respan_gateway_http::from_response(resp))
+        }
+    }
+    impl From<Silent> for respan_gateway_http::Transport {
+        fn from(value: Silent) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
@@ -1973,7 +1984,10 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mock = MockTransport::new();
     let gw = providers([provider(&mock, "openai", OPENAI, Some("Bearer sk-test"))])
-        .and_then(|g| g.client(OpenAiChat)?.client(AnthropicMessages))
+        .and_then(|g| {
+            g.client::<Conversation, _, _>(OpenAiChat)?
+                .client::<Conversation, _, _>(AnthropicMessages)
+        })
         .and_then(|g| g.plugin("seen", Seen(seen.clone()))?.target("openai"))
         .expect("builds");
     let messages = r#"{"model":"gpt-x","max_tokens":10,"messages":[]}"#;
@@ -2516,9 +2530,11 @@ async fn a_providers_trailers_are_not_passed_on() {
     /// A provider whose whole answer ends in a trailer.
     struct Trailed;
 
-    #[async_trait]
-    impl respan_gateway_http::Transport for Trailed {
-        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+    impl Trailed {
+        pub async fn send(
+            &self,
+            _req: Exchange<RequestHead>,
+        ) -> Result<Exchange<ResponseHead>, Fault> {
             let mut trailers = http::HeaderMap::new();
             trailers.insert("x-trailer", HeaderValue::from_static("1"));
             let frames = [
@@ -2532,6 +2548,15 @@ async fn a_providers_trailers_are_not_passed_on() {
             resp.headers_mut()
                 .insert("content-type", HeaderValue::from_static("application/json"));
             Ok(respan_gateway_http::from_response(resp))
+        }
+    }
+    impl From<Trailed> for respan_gateway_http::Transport {
+        fn from(value: Trailed) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
@@ -2668,9 +2693,11 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
     /// A provider that answers 200 and streams forever, keeping a guard.
     struct Endless(Arc<AtomicBool>);
 
-    #[async_trait]
-    impl respan_gateway_http::Transport for Endless {
-        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+    impl Endless {
+        pub async fn send(
+            &self,
+            _req: Exchange<RequestHead>,
+        ) -> Result<Exchange<ResponseHead>, Fault> {
             let guard = Dropped(self.0.clone());
             let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
                 let _ = &guard;
@@ -2682,6 +2709,15 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
                 HeaderValue::from_static("text/event-stream"),
             );
             Ok(respan_gateway_http::from_response(resp))
+        }
+    }
+    impl From<Endless> for respan_gateway_http::Transport {
+        fn from(value: Endless) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
@@ -3249,14 +3285,25 @@ struct TenantKey(&'static str);
 /// extensions.
 struct TenantTransport(MockAt);
 
-#[async_trait]
-impl Transport for TenantTransport {
-    async fn send(&self, mut req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl TenantTransport {
+    pub async fn send(
+        &self,
+        mut req: Exchange<RequestHead>,
+    ) -> Result<Exchange<ResponseHead>, Fault> {
         if let Some(key) = req.extensions.get::<TenantKey>().cloned() {
             let key = HeaderValue::from_static(key.0);
             req.head.headers.insert("x-tenant-key", key);
         }
         self.0.send(req).await
+    }
+}
+impl From<TenantTransport> for respan_gateway_http::Transport {
+    fn from(value: TenantTransport) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -3584,9 +3631,8 @@ impl Drop for Dropped {
 /// that marks when the provider's body is dropped.
 struct Endless(Arc<AtomicBool>);
 
-#[async_trait]
-impl Transport for Endless {
-    async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Endless {
+    pub async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let guard = Dropped(self.0.clone());
         let never = futures::StreamExt::inspect(futures::stream::pending(), move |_| {
             let _ = &guard;
@@ -3596,6 +3642,15 @@ impl Transport for Endless {
         let sse = HeaderValue::from_static("text/event-stream");
         resp.headers_mut().insert("content-type", sse);
         Ok(respan_gateway_http::from_response(resp))
+    }
+}
+impl From<Endless> for respan_gateway_http::Transport {
+    fn from(value: Endless) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -3868,7 +3923,7 @@ impl Encoder<Reply, ResponseHead> for Garbling {
 /// through `openai`.
 fn fragile(mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
     let list = [provider(mock, "openai", OPENAI, None)];
-    let gw = providers(list).and_then(|g| g.client(Fragile));
+    let gw = providers(list).and_then(|g| g.client::<Conversation, _, _>(Fragile));
     let gw = gw.and_then(|g| with_plugins(g, plugins)?.target("openai"));
     gw.unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -4039,7 +4094,10 @@ async fn a_translated_304_is_a_bad_gateway() {
     const ANTHROPIC: &str = "http://anthropic.test";
     let mock = MockTransport::new();
     let p = add_provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC));
-    let gw = providers([p]).and_then(|g| g.client(OpenAiChat)?.target("anthropic"));
+    let gw = providers([p]).and_then(|g| {
+        g.client::<Conversation, _, _>(OpenAiChat)?
+            .target("anthropic")
+    });
     let gw = gw.unwrap_or_else(|e| panic!("gateway: {e}"));
     let not_modified = http::Response::builder().status(StatusCode::NOT_MODIFIED);
     mock.reply(ANTHROPIC, not_modified.body(Vec::new()).unwrap_or_default());
@@ -4144,20 +4202,42 @@ async fn a_call_read_in_on_client_is_metered_like_the_targets() {
 async fn a_panicking_call_leaves_its_sibling_abandoned() {
     struct Never;
 
-    #[async_trait]
-    impl Transport for Never {
-        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+    impl Never {
+        pub async fn send(
+            &self,
+            _req: Exchange<RequestHead>,
+        ) -> Result<Exchange<ResponseHead>, Fault> {
             std::future::pending().await
+        }
+    }
+    impl From<Never> for respan_gateway_http::Transport {
+        fn from(value: Never) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
     /// Panics sending.
     struct Boom;
 
-    #[async_trait]
-    impl Transport for Boom {
-        async fn send(&self, _req: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+    impl Boom {
+        pub async fn send(
+            &self,
+            _req: Exchange<RequestHead>,
+        ) -> Result<Exchange<ResponseHead>, Fault> {
             panic!("a buggy transport")
+        }
+    }
+    impl From<Boom> for respan_gateway_http::Transport {
+        fn from(value: Boom) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
@@ -4274,10 +4354,20 @@ async fn a_fallback_reads_a_call_to_its_first_content() {
     #[async_trait]
     impl Plugin for Fallback {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            if let Ok(first) = cx.call("openai").await?.until_content().await {
+            if let Ok(first) = cx
+                .call("openai")
+                .await?
+                .buffer_until(Reply::is_content)
+                .await
+            {
                 return Ok(Some(first));
             }
-            Ok(Some(cx.call("backup").await?.until_content().await?))
+            Ok(Some(
+                cx.call("backup")
+                    .await?
+                    .buffer_until(Reply::is_content)
+                    .await?,
+            ))
         }
     }
 
@@ -4323,7 +4413,11 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
     #[async_trait]
     impl Plugin for Returns {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let resp = cx.call("openai").await?.until_content().await?;
+            let resp = cx
+                .call("openai")
+                .await?
+                .buffer_until(Reply::is_content)
+                .await?;
             self.note("returned");
             Ok(Some(resp))
         }
@@ -4385,7 +4479,12 @@ struct FirstContent;
 #[async_trait]
 impl Plugin for FirstContent {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if let Ok(first) = cx.call("openai").await?.until_content().await {
+        if let Ok(first) = cx
+            .call("openai")
+            .await?
+            .buffer_until(Reply::is_content)
+            .await
+        {
             return Ok(Some(first));
         }
         Ok(Some(cx.call("backup").await?))
@@ -4409,7 +4508,7 @@ async fn a_fallback_skips_a_success_that_fails_after_only_its_start() {
 }
 
 #[tokio::test]
-async fn until_content_judges_a_providers_content_before_filters() {
+async fn buffer_until_judges_provider_outputs_after_filters() {
     /// Takes every output of `openai`'s response.
     struct Mute;
 
@@ -4437,20 +4536,20 @@ async fn until_content_judges_a_providers_content_before_filters() {
 
     let (status, _) = h.text(chat()).await;
 
-    // The provider sent content, so the fallback kept it; that a filter
-    // emptied it is the plugin's business.
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(ends.all(), ["openai overloaded", "client"]);
-    assert_eq!(h.mock.sent().len(), 1);
+    // The filter removed the qualifying events, so the policy falls back.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ends.all(), ["openai overloaded", "backup ok", "client"]);
+    assert_eq!(h.mock.sent().len(), 2);
 }
 
 #[tokio::test]
-async fn until_content_again_returns_at_once_without_judging_after_filters() {
-    /// Takes every output of `openai`'s response.
+async fn buffer_until_rechecks_filtered_values_with_a_new_predicate() {
+    /// Replaces every output with a non-content event.
     struct Mute;
 
     impl Filter<Reply> for Mute {
-        fn edit(&mut self, _output: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        fn edit(&mut self, _output: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            out.push(Reply::default());
             Ok(())
         }
     }
@@ -4461,8 +4560,12 @@ async fn until_content_again_returns_at_once_without_judging_after_filters() {
     #[async_trait]
     impl Plugin for UntilContentTwice {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let first = cx.call("openai").await?.until_content().await?;
-            match first.until_content().await {
+            let first = cx
+                .call("openai")
+                .await?
+                .buffer_until(|_: &Reply| true)
+                .await?;
+            match first.buffer_until(Reply::is_content).await {
                 Ok(again) => Ok(Some(again)),
                 Err(_) => Ok(Some(cx.call("backup").await?)),
             }
@@ -4487,11 +4590,10 @@ async fn until_content_again_returns_at_once_without_judging_after_filters() {
 
     let (status, _) = h.text(chat()).await;
 
-    // The second `until_content` kept what the first judged, read no further
-    // and so did not see the failure.
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(ends.all(), ["openai overloaded", "client"]);
-    assert_eq!(h.mock.sent().len(), 1);
+    // The second predicate rejects the buffered values and finds the failure.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ends.all(), ["openai overloaded", "backup ok", "client"]);
+    assert_eq!(h.mock.sent().len(), 2);
 }
 
 #[tokio::test]
@@ -4542,7 +4644,12 @@ async fn a_dropped_response_runs_its_provider_filters_end() {
     #[async_trait]
     impl Plugin for Hedge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("openai").await?.until_content().await?);
+            drop(
+                cx.call("openai")
+                    .await?
+                    .buffer_until(Reply::is_content)
+                    .await?,
+            );
             Ok(Some(cx.call("backup").await?))
         }
     }
@@ -4812,7 +4919,12 @@ async fn a_calls_response_read_to_its_end_then_dropped_ends_ok() {
     #[async_trait]
     impl Plugin for ContentThenDrop {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("openai").await?.until_content().await?);
+            drop(
+                cx.call("openai")
+                    .await?
+                    .buffer_until(Reply::is_content)
+                    .await?,
+            );
             Err(Fault::not_found("done"))
         }
     }
@@ -5129,7 +5241,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
         Arc::new(meter.clone()),
     ];
     let gw = providers([provider(&mock, "openai", OPENAI, None)])
-        .and_then(|g| g.client(tally.clone()))
+        .and_then(|g| g.client::<<Tally as respan_gateway_http::Codec>::Input, _, _>(tally.clone()))
         .and_then(|g| with_plugins(g, chain))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
@@ -5166,7 +5278,7 @@ impl Plugin for Answers {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let resp = cx.call("openai").await?;
         match self.0 {
-            true => Ok(Some(resp.until_content().await?)),
+            true => Ok(Some(resp.buffer_until(Reply::is_content).await?)),
             false => Ok(Some(resp)),
         }
     }
@@ -5198,7 +5310,7 @@ impl Plugin for ArchFallback {
         let mut last = Err(Fault::upstream("no provider to try"));
         for name in &self.0 {
             last = match cx.call(*name).await {
-                Ok(resp) => resp.until_content().await,
+                Ok(resp) => resp.buffer_until(Reply::is_content).await,
                 Err(fault) => Err(fault),
             };
             if last.is_ok() {
@@ -5363,7 +5475,7 @@ impl Plugin for Fallback11 {
                     continue;
                 }
             };
-            match resp.until_content().await {
+            match resp.buffer_until(Reply::is_content).await {
                 Ok(resp) => return Ok(Some(resp)),
                 Err(fault) => last = Err(fault),
             }
@@ -5461,12 +5573,9 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_hidden_from_a_later_meter
     assert_eq!((&relayed, &translated), (&json!(99), &json!(99)));
 }
 
-// Every output a plugin makes is content for `until_content`: a plugin
-// filters what
-// is no content with the kind's own check, so a quiet reply, then a failure,
-// is not read to any content, and a fallback moves on.
+// The caller chooses whether a synthetic quiet event is enough to commit.
 #[tokio::test]
-async fn until_content_takes_every_output_a_plugin_makes_as_content() {
+async fn synthetic_outputs_use_the_callers_predicate() {
     struct FallsBack;
 
     #[async_trait]
@@ -5474,16 +5583,16 @@ async fn until_content_takes_every_output_a_plugin_makes_as_content() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut quiet = Reply::default();
             quiet.usage.add(units::INPUT_TOKENS, 1.0);
-            // Unfiltered, the quiet reply is content, so returned at once.
+            // A policy accepting any event commits to the quiet reply.
             let made = [Ok(quiet.clone()), Err(Fault::upstream("gone"))];
             let unfiltered = Response::stream(futures::stream::iter(made))
-                .until_content()
+                .buffer_until(|_: &Reply| true)
                 .await;
             assert!(unfiltered.is_ok());
             let made = [Ok(quiet), Err(Fault::upstream("gone"))];
             let content = |r: &Reply| std::future::ready(r.is_content());
             let made = futures::stream::iter(made).try_filter(content);
-            match Response::stream(made).until_content().await {
+            match Response::stream(made).buffer_until(Reply::is_content).await {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(cx.call("openai").await?)),
             }
@@ -5547,7 +5656,12 @@ async fn until_content_commits_on_neither_a_keep_alive_nor_usage_alone() {
     #[async_trait]
     impl Plugin for ContentOrBackup {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            match cx.call("openai").await?.until_content().await {
+            match cx
+                .call("openai")
+                .await?
+                .buffer_until(Reply::is_content)
+                .await
+            {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(cx.call("backup").await?)),
             }
@@ -5765,9 +5879,8 @@ async fn a_response_read_to_its_end_and_kept_past_its_request_ends_abandoned() {
 /// more.
 struct Paced(MockAt, Duration, Duration);
 
-#[async_trait]
-impl Transport for Paced {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Paced {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         tokio::time::sleep(self.1).await;
         use futures::StreamExt;
         let resp = self.0.send(call).await?;
@@ -5780,6 +5893,15 @@ impl Transport for Paced {
         .filter_map(|last| async move { last });
         let body = futures::stream::iter(frames).chain(last);
         Ok(Exchange::new(resp.head, body.boxed()))
+    }
+}
+impl From<Paced> for respan_gateway_http::Transport {
+    fn from(value: Paced) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -5799,7 +5921,7 @@ async fn a_race_by_completion_picks_the_provider_that_finishes_first() {
                     let resp = call.await?;
                     match to_end {
                         true => resp.until_end().await.map(|(resp, _)| resp),
-                        false => resp.until_content().await,
+                        false => resp.buffer_until(Reply::is_content).await,
                     }
                 })
             });

@@ -1,19 +1,21 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
-use futures::FutureExt;
-use futures::channel::oneshot;
+use futures::{FutureExt, SinkExt};
 
+use crate::call::SharedCall;
 use crate::fault::PANICKED;
-use crate::format::{AnyFormat, AnyReply, Erased};
-use crate::leg::Later;
+use crate::format::{AnyFormat, Erased};
+use crate::leg::locked;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::reply;
-use crate::{ClientContext, Extensions, Fault, Format, Plugin, Response};
+use crate::response::Batch;
+use crate::{ClientContext, Events, Extensions, Fault, Format, Plugin, Response, Result};
 
 /// A registered plugin and its name.
 #[derive(Clone)]
@@ -37,7 +39,7 @@ pub(crate) struct Inner {
 }
 
 /// The gateway. It has no server: an adapter or embedder hands it requests
-/// and owns their wire's rules. Built by value, each setting checked as
+/// and owns their transport's rules. Built by value, each setting checked as
 /// given: `Gateway::new().provider(..)?.client(..)?.plugin(..)?.target(..)?`.
 #[derive(Clone, Default)]
 pub struct Gateway {
@@ -62,26 +64,44 @@ impl Gateway {
         Gateway::default()
     }
 
-    /// Add provider `name`, speaking `format`, reached through `dialer`.
-    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if the name is
-    /// taken or the format breaks [`Gateway::client`]'s rules.
-    pub fn provider<F: Format>(
+    /// Add a provider speaking `format`. After its hooks run, each attempt
+    /// gets a fresh transport from `factory`, with that call's extensions.
+    /// The factory may return a lightweight handle backed by a shared pool.
+    /// `I` is the gateway input type and `O` its output type: this binding
+    /// receives `O` and sends `I`.
+    pub fn provider<I, O, T>(
         self,
         name: impl Into<String>,
-        format: F,
-        dialer: impl Into<F::Dialer>,
-    ) -> Result<Gateway, Fault> {
-        let dialer: Arc<dyn Any + Send + Sync> = Arc::new(dialer.into());
-        self.add_provider(name.into(), Arc::new(Erased::new(format)), dialer)
+        format: impl Format<T, O, I>,
+        factory: impl Fn(Extensions) -> T + Send + Sync + 'static,
+    ) -> Result<Gateway>
+    where
+        T: Send + 'static,
+        I: Clone + Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+    {
+        let factory =
+            Arc::new(move |extensions| Box::new(factory(extensions)) as Box<dyn Any + Send>);
+        self.add_provider(
+            name.into(),
+            Arc::new(Erased::<_, T, O, I, true>::new(format)),
+            factory,
+        )
     }
 
-    /// Accept clients that speak `format`: a wire handed to [`Gateway::handle`] goes
-    /// to the first client format that [`accepts`](Format::accepts) it.
-    /// `Err` with [`codes::CONFIG`](crate::codes::CONFIG) if its input and
-    /// output types are one, or a format of its name has another kind, wire
-    /// or dialer.
-    pub fn client<F: Format>(self, format: F) -> Result<Gateway, Fault> {
-        self.add_client(Arc::new(Erased::new(format)))
+    /// Register a client format receiving inputs `I` and sending outputs `O`
+    /// over transport `T`. The first registered
+    /// format whose `matches` accepts the transport handles it.
+    /// Formats sharing a name must share their event types, but may use
+    /// different transports. Same-name formats on different transports
+    /// translate typed events without forwarding protocol metadata.
+    pub fn client<I, O, T>(self, format: impl Format<T, I, O>) -> Result<Gateway>
+    where
+        T: Send + 'static,
+        I: Clone + Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+    {
+        self.add_client(Arc::new(Erased::<_, T, I, O, false>::new(format)))
     }
 
     /// Register `plugin` as `name`; its hooks run on every request and call,
@@ -89,11 +109,7 @@ impl Gateway {
     /// plugin that replies skips the ones after it, so register it after
     /// every plugin that must see each request. `Err` with
     /// [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
-    pub fn plugin(
-        mut self,
-        name: impl Into<String>,
-        plugin: impl Plugin,
-    ) -> Result<Gateway, Fault> {
+    pub fn plugin(mut self, name: impl Into<String>, plugin: impl Plugin) -> Result<Gateway> {
         let name = name.into();
         if self.inner.plugins.iter().any(|p| p.name == name) {
             return Err(Fault::config(format!(
@@ -109,7 +125,7 @@ impl Gateway {
     /// ([`ClientContext::set_target`]), replacing any set before; a request
     /// it cannot take fails as [`ClientContext::call`] does. `Err` with
     /// [`codes::CONFIG`](crate::codes::CONFIG) for an unknown provider.
-    pub fn target(mut self, provider: impl Into<String>) -> Result<Gateway, Fault> {
+    pub fn target(mut self, provider: impl Into<String>) -> Result<Gateway> {
         let target = provider.into();
         if !self.inner.providers.contains_key(&target) {
             return Err(Fault::config(format!("unknown provider '{target}'")));
@@ -128,37 +144,25 @@ impl Gateway {
         self.inner.in_flight.idle().await;
     }
 
-    /// Serve `wire` in the first client format ([`Gateway::client`]) that
-    /// [`accepts`](Format::accepts) it: resolves `Ok` once its client edge
-    /// has its reply, whose end the edge tells with [`Ended`](crate::Ended).
-    /// The caller built `wire`, so it knows its type; a format of another
-    /// wire type never accepts it.
+    /// Run one application-facing edge through delivery and its completion.
+    /// The first registered format matching `io` creates the edge.
     ///
-    /// `Err` if no client edge will write a reply, for the adapter to write
-    /// plainly: [`codes::NOT_FOUND`](crate::codes::NOT_FOUND) if no format
-    /// accepts the wire, which is dropped;
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) if one panicked; or
-    /// [`codes::ABANDONED`](crate::codes::ABANDONED) if the edge dropped its
-    /// reply. The adapter owns the wire's rules: it takes out what no plugin
-    /// or format should see, such as the gateway's own keys, before, and
-    /// what a hop must not carry after.
+    /// The adapter must consume the outgoing data concurrently with this
+    /// future. An error may mean the edge refused, failed during delivery,
+    /// or no format accepted the wire. Protocol adapters own how to encode it.
     ///
-    /// The request counts for [`Gateway::idle`] from this call on, before
-    /// the future is first polled, and the future borrows nothing: a job
-    /// that hands the gateway a request calls `handle` where it starts, and
-    /// awaits the future in its own task, so `idle` never misses it. Await
-    /// it on a tokio runtime, which runs the end hooks; it panics outside
-    /// one.
-    pub fn handle<W: Send + 'static>(
+    /// Work counts for `idle` from this call, before polling the future.
+    /// The future owns its state and requires a Tokio runtime when polled.
+    pub fn handle<T: Send + 'static>(
         &self,
-        wire: W,
+        io: T,
         extensions: Extensions,
-    ) -> impl Future<Output = Result<(), Fault>> + Send + 'static {
-        let wire: Box<dyn Any + Send> = Box::new(wire);
-        // A format that panics in `accepts` is the adapter's to write.
+    ) -> impl Future<Output = Result<()>> + Send + 'static {
+        let io: Box<dyn Any + Send> = Box::new(io);
+        // A format that panics in `matches` is the adapter's to write.
         let clients = &self.inner.clients;
-        let accepts = || clients.iter().find(|d| d.accepts(&*wire)).cloned();
-        let format = match std::panic::catch_unwind(AssertUnwindSafe(accepts)) {
+        let matches = || clients.iter().find(|d| d.matches(&*io)).cloned();
+        let format = match std::panic::catch_unwind(AssertUnwindSafe(matches)) {
             Ok(Some(format)) => Ok(format),
             Ok(None) => Err(Fault::not_found("no client format accepts this request")),
             Err(_) => Err(Fault::internal(PANICKED)),
@@ -166,53 +170,71 @@ impl Gateway {
         // In flight from this call on, while the request comes in too, so
         // `idle` waits for it.
         let reading = InFlight::enter(&self.inner.in_flight);
-        let (tx, rx) = oneshot::channel::<AnyReply>();
-        let reply = rx.map(|reply| reply.unwrap_or_else(|_| abandoned()));
         let accepting = format.and_then(|format| {
-            let accept = AssertUnwindSafe(|| format.accept(wire, reply.boxed()));
-            let accepting = std::panic::catch_unwind(accept);
-            accepting
-                .map_err(|_| Fault::internal(PANICKED))
-                .map(|a| (format, a))
+            let accepted = std::panic::catch_unwind(AssertUnwindSafe(|| format.bind(io)))
+                .unwrap_or_else(|_| Err(Fault::internal(PANICKED)))?;
+            Ok((format, accepted))
         });
         let inner = self.inner.clone();
         async move {
-            let (format, accepting) = accepting?;
-            let accepted = AssertUnwindSafe(accepting).catch_unwind().await;
-            let panicked = accepted.is_err();
-            let accepted = accepted.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-            let (origin, later, broken) = match accepted {
-                Ok((origin, later)) => (origin, Later::new(later), None),
-                Err(fault) => (None, Later::new(None), Some(fault)),
-            };
+            let (format, (opening, mut outgoing)) = accepting?;
+            let mut opening = AssertUnwindSafe(opening)
+                .catch_unwind()
+                .map(|opened| opened.unwrap_or_else(|_| Err(Fault::internal(PANICKED))));
+            // A binding may need send-side readiness to open receiving.
+            // Receiving may also open first and enable readiness later.
+            let mut ready = false;
+            let opened = poll_fn(|cx| {
+                if !ready {
+                    let readiness = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        outgoing.as_mut().poll_ready(cx)
+                    }))
+                    .unwrap_or_else(|_| Poll::Ready(Err(Fault::internal(PANICKED))));
+                    match readiness {
+                        Poll::Ready(Ok(())) => ready = true,
+                        Poll::Ready(Err(fault)) => return Poll::Ready(Err(fault)),
+                        Poll::Pending => {}
+                    }
+                }
+                opening.poll_unpin(cx).map(Ok)
+            })
+            .await?;
+            drop(opening);
+            let incoming = opened.unwrap_or_else(Events::refused);
+            let broken = incoming.refusal().cloned();
             let in_flight = inner.in_flight.clone();
-            let cx = ClientContext::new(format.clone(), origin, later, extensions, inner.clone());
+            let cx = ClientContext::new(format.clone(), incoming, extensions, inner.clone());
             let settling = cx.settling.clone();
             let mut hooks = EndHooks::new(&in_flight, cx);
             drop(reading);
-            // The request's end hooks run after its calls'.
             hooks.after = Some(settling);
-            let reply = match broken {
-                Some(fault) => reply::refusal(fault, hooks),
+            let discarded = Arc::new(Mutex::new(Vec::new()));
+            let (flow, call) = match broken {
+                Some(fault) => (Events::refused(fault), None),
                 None => {
-                    // A plugin panic is refused like a failure.
                     let ran = AssertUnwindSafe(run(&inner, &mut hooks)).catch_unwind();
                     let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-                    reply::reply(&format, resp, hooks).await
+                    reply::reply(&format, resp, &mut hooks, &discarded).await
                 }
             };
-            // An edge that dropped its reply ends the request abandoned, but
-            // one whose future panicked took its reply with it: the request
-            // ends as the refusal says, `internal`.
-            let Err((_, ended)) = tx.send(reply) else {
-                return Ok(());
+            // This guard ends the exchange before a cancelled writer drops
+            // the output stream it owns. Both halves then observe the cut.
+            let mut delivery = Delivery {
+                hooks,
+                call,
+                writing: None,
+                discarded,
             };
-            let fault = match panicked {
-                true => Fault::internal(PANICKED),
-                false => Fault::abandoned(),
+            let writing = async move {
+                if ready {
+                    outgoing.as_mut().start_send(flow)?;
+                } else {
+                    outgoing.feed(flow).await?;
+                }
+                outgoing.close().await
             };
-            ended(Err(fault.clone()));
-            Err(fault)
+            delivery.writing = Some(writing.boxed());
+            delivery.await
         }
     }
 
@@ -231,26 +253,26 @@ impl Gateway {
         mut self,
         name: String,
         format: Arc<dyn AnyFormat>,
-        dialer: Arc<dyn Any + Send + Sync>,
-    ) -> Result<Gateway, Fault> {
+        factory: Arc<dyn Fn(Extensions) -> Box<dyn Any + Send> + Send + Sync>,
+    ) -> Result<Gateway> {
         self.check(&*format)?;
         if self.inner.providers.contains_key(&name) {
             return Err(Fault::config(format!("provider '{name}' is defined twice")));
         }
-        let provider = Provider { format, dialer };
+        let provider = Provider { format, factory };
         self.inner_mut().providers.insert(name, provider);
         Ok(self)
     }
 
-    fn add_client(mut self, format: Arc<dyn AnyFormat>) -> Result<Gateway, Fault> {
+    fn add_client(mut self, format: Arc<dyn AnyFormat>) -> Result<Gateway> {
         self.check(&*format)?;
         self.inner_mut().clients.push(format);
         Ok(self)
     }
 
     /// `Ok` if `format`'s two types differ and formats of its name share
-    /// its kind and wire.
-    fn check(&self, format: &dyn AnyFormat) -> Result<(), Fault> {
+    /// its kind; transport types may differ.
+    fn check(&self, format: &dyn AnyFormat) -> Result<()> {
         let (name, kind) = (format.name(), format.kind());
         let inner = &self.inner;
         let providers = inner.providers.values().map(|p| &*p.format);
@@ -260,8 +282,6 @@ impl Gateway {
             format!("the kind of format {name} has one type for both directions")
         } else if named.iter().any(|d| d.kind() != kind) {
             format!("two formats named {name} are of different kinds")
-        } else if named.iter().any(|d| d.wire() != format.wire()) {
-            format!("two formats named {name} are on different wires")
         } else {
             return Ok(());
         };
@@ -269,13 +289,63 @@ impl Gateway {
     }
 }
 
-/// The reply an edge gets if the gateway dropped the request first.
-fn abandoned() -> AnyReply {
-    let headed = (None, Err(Fault::abandoned()));
-    (headed, Box::new(|_| {}))
+/// Owns completion while an edge writes. Drop runs before its future is
+/// dropped, so open calls and retained streams cannot outlive their owner.
+struct Delivery {
+    hooks: EndHooks<ClientContext>,
+    call: Option<SharedCall>,
+    writing: Option<futures::future::BoxFuture<'static, Result<()>>>,
+    discarded: Arc<Mutex<Vec<Batch>>>,
 }
 
-async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response, Fault> {
+impl Delivery {
+    fn finish(&mut self, end: Result<()>) {
+        if let (Err(fault), Some(call)) = (&end, &self.call) {
+            locked(call).finish(Err(fault.clone()));
+        }
+        // A writer may discard an unread body deliberately, or while
+        // failing preparation. Settle its ready provider end only after
+        // the delivery result is known; a write failure takes precedence.
+        let discarded = std::mem::take(&mut *locked(&self.discarded));
+        for mut batch in discarded {
+            let _ = std::panic::catch_unwind(AssertUnwindSafe(|| batch.read()));
+        }
+        self.hooks.finish(end);
+    }
+}
+
+impl Future for Delivery {
+    type Output = Result<()>;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let polled = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            self.writing
+                .as_mut()
+                .expect("a delivery has a writer")
+                .as_mut()
+                .poll(cx)
+        }));
+        let end = match polled {
+            Ok(std::task::Poll::Pending) => return std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(end)) => end,
+            Err(_) => Err(Fault::internal(PANICKED)),
+        };
+        self.finish(end.clone());
+        std::task::Poll::Ready(end)
+    }
+}
+
+impl Drop for Delivery {
+    fn drop(&mut self) {
+        if !self.hooks.is_finished() {
+            self.finish(Err(Fault::abandoned()));
+        }
+    }
+}
+
+async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response> {
     for Registered { plugin, .. } in &gateway.plugins {
         hooks.ran += 1;
         if let Some(resp) = plugin.on_client(hooks.cx()).await? {

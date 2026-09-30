@@ -2,13 +2,12 @@
 //! The respan-gateway kernel: a [`Gateway`] runs each request through its
 //! [`Plugin`]s and streams the [`Response`] back (`docs/ARCHITECTURE.md`).
 //!
-//! The kernel routes events and never sees a byte, a head or a key: a
-//! client edge and a provider edge, each a [`Format`] over a connection,
-//! turn bytes and heads into a kind's events and back (decision 0020). The
-//! byte machinery of HTTP's formats lives in `respan-gateway-http`.
+//! Formats open ordinary receive futures and send sinks. [`Events`] implements
+//! [`futures::Stream`]; codecs and byte I/O live outside the kernel.
 
 mod call;
 mod context;
+mod events;
 mod extensions;
 mod fault;
 mod format;
@@ -23,13 +22,17 @@ mod response;
 
 pub use call::Call;
 pub use context::ClientContext;
+pub use events::{Events, write};
 pub use extensions::Extensions;
 pub use fault::{Fault, codes};
-pub use format::{Ended, Events, Format, Headed, Origin};
+pub use format::{Connection, Format};
 pub use gateway::Gateway;
 pub use plugin::{Filter, Plugin};
 pub use provider::ProviderContext;
 pub use response::Response;
+
+/// A gateway operation that may fail with a [`Fault`].
+pub type Result<T> = std::result::Result<T, Fault>;
 
 /// The crates the kernel's contracts use, at the kernel's versions.
 pub use {async_trait::async_trait, futures};

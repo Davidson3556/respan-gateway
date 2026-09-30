@@ -10,7 +10,6 @@ use respan_gateway_core::{
 };
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply, units};
-use respan_gateway_http::Transport;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_ledger::{Accounting, Amount, HoldId, Ledger, MemoryLedger, Quote, Tally};
@@ -65,8 +64,10 @@ fn wallet(limit: Amount) -> MemoryLedger {
 /// `first`, then accounting over `ledger`, calling provider `p` on `mock`.
 fn gateway(mock: &MockTransport, first: impl Plugin, ledger: impl Ledger) -> Gateway {
     let accounting = Accounting::new(ledger, quote).ttl(Duration::from_millis(200));
-    let gw = Gateway::new().client(OpenAiChat);
-    let gw = gw.and_then(|g| g.provider("p", OpenAiChat, mock.at(P)));
+    let gw = Gateway::new().client::<Conversation, _, _>(OpenAiChat);
+    let gw = gw.and_then(|g| {
+        g.provider::<Conversation, _, _>("p", OpenAiChat, respan_gateway_http::connect(mock.at(P)))
+    });
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.and_then(|g| g.plugin("first", first));
     gw.and_then(|g| g.plugin("accounting", accounting))
@@ -294,9 +295,8 @@ async fn a_hold_that_lands_after_its_settlement_expires_with_its_ttl() {
 /// timeout does: the provider may be doing the work.
 struct NoHead;
 
-#[async_trait]
-impl Transport for NoHead {
-    async fn send(
+impl NoHead {
+    pub async fn send(
         &self,
         _call: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
     ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -304,13 +304,24 @@ impl Transport for NoHead {
         Err(Fault::upstream("no head within 1s"))
     }
 }
+impl From<NoHead> for respan_gateway_http::Transport {
+    fn from(value: NoHead) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
+    }
+}
 
 #[tokio::test(start_paused = true)]
 async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     let ledger = wallet(1000);
     let accounting = Accounting::new(ledger.clone(), quote);
-    let gw = Gateway::new().client(OpenAiChat);
-    let gw = gw.and_then(|g| g.provider("p", OpenAiChat, NoHead));
+    let gw = Gateway::new().client::<Conversation, _, _>(OpenAiChat);
+    let gw = gw.and_then(|g| {
+        g.provider::<Conversation, _, _>("p", OpenAiChat, respan_gateway_http::connect(NoHead))
+    });
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.and_then(|g| g.plugin("accounting", accounting));
     let gw = gw.unwrap_or_else(|f| panic!("{f}"));

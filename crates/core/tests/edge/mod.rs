@@ -3,7 +3,7 @@
 //! text, each one input; a provider's dialer answers a status and text
 //! frames, each one event: `DONE` completes it, `ERR` fails it, `PANIC`
 //! panics its stream, and one that ends without `DONE` is truncated. The
-//! edges write the head as the contract's rule 3 says.
+//! edges retain their own metadata and report actual writer completion.
 #![allow(dead_code, clippy::unwrap_used)]
 use std::future::Future;
 use std::pin::Pin;
@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 
+use respan_gateway_core::futures::Sink;
 use respan_gateway_core::futures::channel::{mpsc, oneshot};
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::BoxStream;
@@ -52,17 +53,17 @@ pub fn boom(n: usize) {
     }
 }
 
-pub type Text = BoxStream<'static, Result<String, Fault>>;
+pub type Text = BoxStream<'static, Result<String>>;
 
-/// The client's origin: its head, and its whole body if it had one.
+/// Private protocol metadata: the client's head and optional whole body.
 pub struct ToyOrigin {
     pub head: String,
     pub body: Option<String>,
 }
 
 /// How a toy client edge treats its reply, for the drop sweep: 0 as it
-/// should; 1 drops `Ended` at once and writes on; 2 writes the head alone,
-/// dropping the outputs unread, then calls `Ended(Ok)`.
+/// should; 1 drops its completion sender at once and writes on; 2 writes
+/// the head alone, dropping outputs unread, then completes successfully.
 pub type Quirk = u8;
 
 /// A client connection as the adapter hands it over.
@@ -88,11 +89,11 @@ pub struct Req {
     pub quirk: Quirk,
 }
 
-impl ToyWire {
+impl Io {
     /// The wire, and the adapter's future of the reply and how it ended, as
-    /// the edge told `Ended`: `None` if the gateway dropped the wire
+    /// the writer reports: `None` if the gateway dropped the wire
     /// unanswered.
-    pub fn new(req: Req) -> (ToyWire, BoxFuture<'static, Option<(ToyReply, End)>>) {
+    pub fn accept(req: Req) -> (Io, BoxFuture<'static, Option<(ToyReply, End)>>) {
         let (slot, reply) = oneshot::channel::<BoxFuture<'static, (ToyReply, End)>>();
         let wire = ToyWire {
             frames: req.frames,
@@ -106,127 +107,164 @@ impl ToyWire {
                 Err(_) => None,
             }
         });
-        (wire, reply.boxed())
+        (Io::Client(wire), reply.boxed())
     }
 }
 
 pub struct Toy;
 
-impl Format for Toy {
-    type Input = In;
-    type Output = Out;
-    type Wire = ToyWire;
-    type Dialer = Dialer;
-
+impl Format<Io, In, Out> for Toy {
     fn name(&self) -> &str {
         "toy"
     }
 
-    fn accepts(&self, _: &ToyWire) -> bool {
+    fn matches(&self, io: &Io) -> bool {
         boom(17);
-        true
+        matches!(io, Io::Client(_))
     }
 
-    fn is_content(&self, out: &Out) -> bool {
-        boom(13);
-        !out.0.starts_with("keepalive")
+    fn bind(&self, wire: Io) -> Result<Connection<In, Out>> {
+        accept_toy(wire, None)
+    }
+}
+
+impl Format<Io, Out, In> for Toy {
+    fn name(&self) -> &str {
+        "toy"
     }
 
-    fn accept(
-        &self,
-        wire: ToyWire,
-        reply: BoxFuture<'static, (Headed<Out>, Ended)>,
-    ) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<In>>), Fault>> {
-        boom(18);
-        let ToyWire {
-            frames,
-            streams,
-            quirk,
-            slot,
-        } = wire;
-        // Point 19 panics in the returned future, which then owns the reply,
-        // as an edge's does that awaits it there.
-        let held = match PANIC.load(Ordering::SeqCst) == 19 {
-            true => Some(reply),
-            false => {
-                let _ = slot.send(write(reply, streams, quirk).boxed());
-                None
-            }
-        };
-        async move {
-            let _held = held;
-            boom(19);
-            let origin = |body| {
-                Some(Arc::new(ToyOrigin {
-                    head: "/".into(),
-                    body,
-                }) as Origin)
-            };
-            if streams {
-                return Ok((origin(None), Some(inputs(frames))));
-            }
-            // One-shot: the request is in once its body is.
-            let (mut frames, mut all) = (frames, String::new());
-            while let Some(frame) = frames.next().await {
-                all.push_str(&frame?);
-            }
-            Ok((origin(Some(all)), None))
-        }
-        .boxed()
-    }
-
-    fn input(&self, origin: &Origin) -> Option<Result<In, Fault>> {
-        boom(14);
-        let body = origin.downcast_ref::<ToyOrigin>()?.body.as_ref()?;
-        Some(match body.as_str() {
-            "BAD" => Err(Fault::bad_request("bad")),
-            _ => Ok(In(body.clone())),
-        })
-    }
-
-    fn dial(
-        &self,
-        dialer: &Dialer,
-        extensions: Extensions,
-        relay: Option<&Origin>,
-        input: Option<&In>,
-        inputs: Option<Events<In>>,
-    ) -> Result<BoxFuture<'static, Result<Headed<Out>, Fault>>, Fault> {
+    fn bind(&self, io: Io) -> Result<Connection<Out, In>> {
         boom(12);
-        if extensions.get::<Unsendable>().is_some() {
-            return Err(Fault::config("the toy cannot send this call"));
-        }
-        let relayed = relay.and_then(|o| o.downcast_ref::<ToyOrigin>());
-        let text = match (input, relayed) {
-            (Some(input), _) => Some(input.0.clone()),
-            (None, Some(origin)) => origin.body.clone(),
-            (None, None) => None,
+        let Io::Provider { dialer, extensions } = io else {
+            return Err(Fault::config("a provider needs outgoing I/O"));
         };
-        let streams = inputs.is_some();
-        let body = match inputs {
-            None => stream::iter([Ok(format!("{}<END>", text.unwrap_or_default()))]).boxed(),
-            Some(inputs) => stream::iter(text.map(Ok)).chain(written(inputs)).boxed(),
-        };
-        let call = ToyCall {
-            relayed: relay.is_some(),
-            streams,
-            body,
-            extensions,
-        };
-        let answering = (dialer.0)(call);
-        Ok(async move {
-            let answer = answering.await?;
-            let origin = Some(Arc::new(answer.status) as Origin);
-            if answer.status != 200 {
-                let fault = Fault::new("x", "x")
-                    .with(Wire(answer.status))
-                    .with_answer("toy", ());
-                return Ok((origin, Err(fault)));
+        let dial = dialer.0;
+        let (answer, answered) = oneshot::channel();
+        let incoming = async move { answered.await.map_err(|_| Fault::abandoned()) };
+        let outgoing = respan_gateway_core::write(move |flow: Events<In>| {
+            if extensions.get::<Unsendable>().is_some() {
+                return Err(Fault::config("the toy cannot send this call"));
             }
-            Ok((origin, Ok(events(answer.body))))
-        }
-        .boxed())
+            let relayed = flow.metadata::<ToyOrigin>("toy");
+            let text = if flow.is_lazy() {
+                relayed.and_then(|o| o.body.clone())
+            } else {
+                flow.value().transpose()?.map(|v| v.0.clone())
+            };
+            let streams = !flow.is_single();
+            let relayed = relayed.is_some();
+            let body = if streams {
+                written(flow)
+            } else {
+                stream::iter([Ok(format!("{}<END>", text.unwrap_or_default()))]).boxed()
+            };
+            let call = ToyCall {
+                relayed,
+                streams,
+                body,
+                extensions,
+            };
+            let answering = dial(call);
+            Ok(async move {
+                let result = answering.await?;
+                let status = result.status;
+                let flow = if status != 200 {
+                    Events::refused(
+                        Fault::new("x", "x")
+                            .with(Wire(status))
+                            .with_answer("toy", ()),
+                    )
+                } else {
+                    Events::stream(events(result.body))
+                }
+                .with_metadata("toy", status);
+                let _ = answer.send(flow);
+                Ok(())
+            })
+        });
+        Ok((incoming.boxed(), Box::pin(outgoing)))
     }
+}
+
+/// Build the toy edge, optionally counting lazy decodes for the relay test.
+#[allow(clippy::type_complexity)]
+pub fn accept_toy(
+    io: Io,
+    decodes: Option<Arc<AtomicUsize>>,
+) -> Result<(
+    BoxFuture<'static, Result<Events<In>>>,
+    Pin<Box<dyn Sink<Events<Out>, Error = Fault> + Send>>,
+)> {
+    boom(18);
+    let Io::Client(wire) = io else {
+        return Err(Fault::config("a client needs incoming I/O"));
+    };
+    let ToyWire {
+        frames,
+        streams,
+        quirk,
+        slot,
+    } = wire;
+    let incoming = async move {
+        boom(19);
+        if streams {
+            return Ok(Events::stream(inputs(frames)).with_metadata(
+                "toy",
+                ToyOrigin {
+                    head: "/".into(),
+                    body: None,
+                },
+            ));
+        }
+        let (mut frames, mut all) = (frames, String::new());
+        while let Some(frame) = frames.next().await {
+            all.push_str(&frame?);
+        }
+        let body = all.clone();
+        Ok(Events::lazy(move || {
+            boom(14);
+            if let Some(decodes) = &decodes {
+                decodes.fetch_add(1, Ordering::SeqCst);
+            }
+            match body.as_str() {
+                "BAD" => Err(Fault::bad_request("bad")),
+                _ => Ok(In(body.clone())),
+            }
+        })
+        .with_metadata(
+            "toy",
+            ToyOrigin {
+                head: "/".into(),
+                body: Some(all),
+            },
+        ))
+    };
+    let outgoing = respan_gateway_core::write(move |flow| {
+        Ok(async move {
+            let (reply, end) = write(flow, streams, quirk).await;
+            let (observe, observed) = oneshot::channel();
+            if slot
+                .send(
+                    async move {
+                        (
+                            reply,
+                            observed
+                                .map(|e| e.unwrap_or_else(|_| Err(Fault::abandoned())))
+                                .boxed(),
+                        )
+                    }
+                    .boxed(),
+                )
+                .is_err()
+            {
+                return Err(Fault::abandoned());
+            }
+            let result = end.await;
+            let _ = observe.send(result.clone());
+            result
+        })
+    });
+    Ok((incoming.boxed(), Box::pin(outgoing)))
 }
 
 /// A call's extension that makes the toy's `dial` fail at once, unsent.
@@ -234,7 +272,7 @@ impl Format for Toy {
 pub struct Unsendable;
 
 /// A client's frames as inputs; `BAD` is `before-bad`, then a failure.
-fn inputs(frames: Text) -> Events<In> {
+fn inputs(frames: Text) -> BoxStream<'static, Result<In>> {
     frames
         .flat_map(|frame| {
             boom(1);
@@ -264,7 +302,7 @@ fn written(inputs: Events<In>) -> Text {
 }
 
 /// A provider's text frames as events.
-fn events(body: Text) -> Events<Out> {
+fn events(body: Text) -> BoxStream<'static, Result<Out>> {
     stream::unfold(Some((body, false)), |state| async move {
         let (mut body, mut done) = state?;
         loop {
@@ -292,37 +330,40 @@ fn events(body: Text) -> Events<Out> {
 /// Writes a reply, and how it ended once told: a refusal as one; an open
 /// answer's head at once if it streams, else with its first bytes, a
 /// failure before any refused.
-async fn write(
-    reply: BoxFuture<'static, (Headed<Out>, Ended)>,
-    streams: bool,
-    quirk: Quirk,
-) -> (ToyReply, End) {
-    let ((origin, outputs), ended) = reply.await;
+async fn write(flow: Events<Out>, streams: bool, quirk: Quirk) -> (ToyReply, End) {
+    let head = flow.metadata::<u16>("toy").copied();
+    let refusal = flow.refusal().cloned();
     let (tell, told) = oneshot::channel();
-    let ended: Ended = Box::new(move |end| {
-        ended(end.clone());
+    let complete: Completion = Box::new(move |end| {
         let _ = tell.send(end);
     });
-    let told = told.map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())));
+    let outputs = match refusal {
+        Some(fault) => Err(fault),
+        None => Ok(flow),
+    };
+    let reply = written_reply(head, outputs, complete, streams, quirk).await;
     (
-        written_reply(origin, outputs, ended, streams, quirk).await,
-        told.boxed(),
+        reply,
+        told.map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())))
+            .boxed(),
     )
 }
 
+type Completion = Box<dyn FnOnce(Result<()>) + Send>;
+
 async fn written_reply(
-    origin: Option<Origin>,
-    outputs: Result<Events<Out>, Fault>,
-    ended: Ended,
+    head: Option<u16>,
+    outputs: Result<Events<Out>>,
+    complete: Completion,
     streams: bool,
     quirk: Quirk,
 ) -> ToyReply {
     let mut writer = Writer {
-        outputs: stream::empty().boxed(),
-        ended: Some(ended),
+        outputs: Events::stream(stream::empty()),
+        ended: Some(complete),
         peeked: None,
         done: false,
-        head: origin.and_then(|o| o.downcast_ref::<u16>().copied()),
+        head,
     };
     let outputs = match outputs {
         Ok(outputs) => outputs,
@@ -346,7 +387,7 @@ async fn written_reply(
         writer.peeked = Some(first);
     }
     if quirk == 2 {
-        writer.outputs = stream::empty().boxed();
+        writer.outputs = Events::stream(stream::empty());
         writer.peeked = None;
         writer.done = true;
         writer.end(Ok(()));
@@ -356,8 +397,8 @@ async fn written_reply(
 
 struct Writer {
     outputs: Events<Out>,
-    ended: Option<Ended>,
-    peeked: Option<Option<Result<Out, Fault>>>,
+    ended: Option<Completion>,
+    peeked: Option<Option<Result<Out>>>,
     done: bool,
     head: Option<u16>,
 }
@@ -373,7 +414,7 @@ impl Writer {
         }
     }
 
-    async fn frame(&mut self) -> Option<Result<String, Fault>> {
+    async fn frame(&mut self) -> Option<Result<String>> {
         if self.done {
             return None;
         }
@@ -397,7 +438,7 @@ impl Writer {
         }))
     }
 
-    fn end(&mut self, end: Result<(), Fault>) {
+    fn end(&mut self, end: Result<()>) {
         if let Some(ended) = self.ended.take() {
             ended(end);
         }
@@ -422,12 +463,28 @@ pub fn answer(status: u16, body: Text) -> Answer {
     Answer { status, body }
 }
 
-pub type Dial = dyn Fn(ToyCall) -> BoxFuture<'static, Result<Answer, Fault>> + Send + Sync;
+pub type Dial = dyn Fn(ToyCall) -> BoxFuture<'static, Result<Answer>> + Send + Sync;
 pub struct Dialer(pub Arc<Dial>);
+
+/// One attempt's I/O, constructed by the adapter or provider factory.
+pub enum Io {
+    Client(ToyWire),
+    Provider {
+        dialer: Dialer,
+        extensions: Extensions,
+    },
+}
+
+pub fn connect(dialer: Dialer) -> impl Fn(Extensions) -> Io + Send + Sync {
+    move |extensions| Io::Provider {
+        dialer: Dialer(dialer.0.clone()),
+        extensions,
+    }
+}
 
 pub fn fnt<F>(f: F) -> Dialer
 where
-    F: Fn(ToyCall) -> BoxFuture<'static, Result<Answer, Fault>> + Send + Sync + 'static,
+    F: Fn(ToyCall) -> BoxFuture<'static, Result<Answer>> + Send + Sync + 'static,
 {
     Dialer(Arc::new(f))
 }
@@ -449,17 +506,52 @@ pub fn ok_resp(v: Vec<&'static str>) -> Answer {
     answer(200, chunks(v))
 }
 
-pub type End = BoxFuture<'static, Result<(), Fault>>;
+pub type End = BoxFuture<'static, Result<()>>;
 
 /// `Gateway::handle` on the toy wire, as its adapter does it: the reply and
 /// its end, or the fault the adapter writes plainly if no edge replies.
-pub async fn handle(gw: &Gateway, req: Req) -> (Result<ToyReply, Fault>, End) {
-    let (wire, reply) = ToyWire::new(req);
-    let handled = gw.handle(wire, Extensions::new()).await;
-    match reply.await {
-        Some((reply, end)) => (Ok(reply), end),
+pub async fn handle(gw: &Gateway, req: Req) -> (Result<ToyReply>, End) {
+    let (wire, reply) = Io::accept(req);
+    let handled = gw.handle(wire, Extensions::new()).boxed();
+    let (result, pending) = match futures::future::select(handled, reply).await {
+        futures::future::Either::Left((end, remaining)) => (remaining.await, Err(end)),
+        futures::future::Either::Right((reply, remaining)) => (reply, Ok(remaining)),
+    };
+    match result {
+        Some((mut reply, end)) => {
+            if let Ok(handle) = pending {
+                // The body owns and drives the gateway until delivery finishes.
+                // Dropping the body therefore cancels the entire exchange.
+                reply.body = stream::unfold(
+                    (reply.body, Some(handle)),
+                    |(mut body, mut handle)| async move {
+                        let item = if let Some(work) = handle.take() {
+                            match futures::future::select(work, body.next()).await {
+                                futures::future::Either::Left((_, next)) => next.await,
+                                futures::future::Either::Right((item, work)) => {
+                                    if item.is_none() {
+                                        let _ = work.await;
+                                    } else {
+                                        handle = Some(work);
+                                    }
+                                    item
+                                }
+                            }
+                        } else {
+                            body.next().await
+                        };
+                        item.map(|item| (item, (body, handle)))
+                    },
+                )
+                .boxed();
+            }
+            (Ok(reply), end)
+        }
         None => {
-            let fault = handled.err().unwrap_or_else(|| Fault::internal("no reply"));
+            let fault = match pending {
+                Err(Err(fault)) => fault,
+                _ => Fault::internal("no reply"),
+            };
             (Err(fault.clone()), std::future::ready(Err(fault)).boxed())
         }
     }
@@ -478,7 +570,7 @@ pub fn req_of(body: Vec<&'static str>, streams: bool) -> Req {
     }
 }
 
-pub type Upload = mpsc::UnboundedSender<Result<String, Fault>>;
+pub type Upload = mpsc::UnboundedSender<Result<String>>;
 
 /// A streaming request whose inputs are sent through the returned sender.
 pub fn upload() -> (Upload, Req) {
@@ -503,7 +595,7 @@ pub fn send(tx: &Upload, text: &'static str) {
 }
 
 /// A body as text frames, or the failure code it broke with.
-pub type Frames = Vec<Result<String, String>>;
+pub type Frames = Vec<std::result::Result<String, String>>;
 
 /// The frames a dialer read of a call's body, and whether it read to its
 /// end.
@@ -581,7 +673,7 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// What a client got: the reply's status and frames as text, or the
 /// failure it broke with.
-pub async fn read(res: Result<ToyReply, Fault>) -> Result<(u16, String), String> {
+pub async fn read(res: Result<ToyReply>) -> std::result::Result<(u16, String), String> {
     let reply = res.map_err(|f| format!("adapter: {}", f.code()))?;
     let mut body = reply.body;
     let mut out = String::new();
@@ -595,7 +687,7 @@ pub async fn read(res: Result<ToyReply, Fault>) -> Result<(u16, String), String>
 }
 
 /// The code of an end, or "ok".
-pub fn code(end: &Result<(), Fault>) -> String {
+pub fn code(end: &Result<()>) -> String {
     end.as_ref()
         .map_or_else(|f| f.code().to_string(), |()| "ok".into())
 }
@@ -603,10 +695,10 @@ pub fn code(end: &Result<(), Fault>) -> String {
 #[derive(Default, Debug)]
 pub struct Log {
     pub client_start: usize,
-    pub client_end: Vec<Result<(), Fault>>,
+    pub client_end: Vec<Result<()>>,
     pub prov_start: usize,
     /// Whether the call was sent, and how it ended.
-    pub prov_end: Vec<(bool, Result<(), Fault>)>,
+    pub prov_end: Vec<(bool, Result<()>)>,
     /// Whether each call ended refused at its head.
     pub head_only: Vec<bool>,
 }
@@ -630,40 +722,40 @@ impl Rec {
 }
 #[async_trait]
 impl Plugin for Rec {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         self.log().client_start += 1;
         tokio::task::yield_now().await;
         boom(20);
         let n = PANIC.load(Ordering::SeqCst);
         if n == 14 {
-            // `Format::input` is lazy: only a read decodes it.
+            // A single flow is lazy: only a read decodes it.
             let _ = cx.input::<In>();
         }
         if n == 26 {
-            cx.filter(|_: &mut Out| -> Result<(), Fault> {
+            cx.filter(|_: &mut Out| -> Result<()> {
                 boom(26);
                 Ok(())
             })?;
         }
         if n == 27 {
-            cx.filter(|_: &mut In| -> Result<(), Fault> {
+            cx.filter(|_: &mut In| -> Result<()> {
                 boom(27);
                 Ok(())
             })?;
         }
         Ok(None)
     }
-    async fn on_client_end(&self, _: &ClientContext, end: &Result<(), Fault>) {
+    async fn on_client_end(&self, _: &ClientContext, end: &Result<()>) {
         boom(22);
         self.log().client_end.push(end.clone());
     }
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         self.log().prov_start += 1;
         tokio::task::yield_now().await;
         boom(21);
         let n = PANIC.load(Ordering::SeqCst);
         if n == 24 {
-            px.filter(|_: &mut Out| -> Result<(), Fault> {
+            px.filter(|_: &mut Out| -> Result<()> {
                 boom(24);
                 Ok(())
             })?;
@@ -671,11 +763,11 @@ impl Plugin for Rec {
         if n == 25 {
             struct F;
             impl Filter<Out> for F {
-                fn edit(&mut self, v: Out, o: &mut Vec<Out>) -> Result<(), Fault> {
+                fn edit(&mut self, v: Out, o: &mut Vec<Out>) -> Result<()> {
                     o.push(v);
                     Ok(())
                 }
-                fn end(&mut self, _: &Result<(), Fault>, _: &mut Vec<Out>) -> Result<(), Fault> {
+                fn end(&mut self, _: &Result<()>, _: &mut Vec<Out>) -> Result<()> {
                     boom(25);
                     Ok(())
                 }
@@ -683,14 +775,14 @@ impl Plugin for Rec {
             px.filter(F)?;
         }
         if n == 32 {
-            px.filter(|_: &mut In| -> Result<(), Fault> {
+            px.filter(|_: &mut In| -> Result<()> {
                 boom(32);
                 Ok(())
             })?;
         }
         Ok(())
     }
-    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+    async fn on_provider_end(&self, px: &ProviderContext, end: &Result<()>) {
         boom(23);
         let mut log = self.log();
         log.prov_end.push((px.is_sent(), end.clone()));
@@ -730,10 +822,14 @@ pub fn limit<F: Future>(f: F, n: usize) -> Limit<F> {
 pub struct Racer;
 #[async_trait]
 impl Plugin for Racer {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let race = ["a", "b"].map(|p| {
             let call = cx.call(p);
-            Box::pin(async move { call.await?.until_content().await })
+            Box::pin(async move {
+                call.await?
+                    .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                    .await
+            })
         });
         let (resp, _) = futures::future::select_ok(race).await?;
         Ok(Some(resp))
@@ -745,11 +841,14 @@ impl Plugin for Racer {
 pub struct Mode(pub u8);
 #[async_trait]
 impl Plugin for Mode {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let resp = cx.call("a").await?;
         Ok(Some(match self.0 {
             0 => resp,
-            1 => resp.until_content().await?,
+            1 => {
+                resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                    .await?
+            }
             _ => resp.until_end().await?.0,
         }))
     }
@@ -769,22 +868,30 @@ pub fn gateway(scenario: usize, rec: &Rec) -> Gateway {
         }
         .boxed()
     });
-    let gw = Gateway::new().client(Toy).unwrap();
+    let gw = Gateway::new().client::<In, _, _>(Toy).unwrap();
     let gw = match scenario {
-        0 => gw.provider("a", Toy, slow_ok).unwrap().target("a").unwrap(),
+        0 => gw
+            .provider::<In, _, _>("a", Toy, connect(slow_ok))
+            .unwrap()
+            .target("a")
+            .unwrap(),
         1 => gw
-            .provider("a", Toy, reads_body)
+            .provider::<In, _, _>("a", Toy, connect(reads_body))
             .unwrap()
             .target("a")
             .unwrap(),
         2 => gw
-            .provider("a", Toy, slow_ok)
+            .provider::<In, _, _>("a", Toy, connect(slow_ok))
             .unwrap()
-            .provider("b", Toy, fast_ok)
+            .provider::<In, _, _>("b", Toy, connect(fast_ok))
             .unwrap()
             .plugin("racer", Racer)
             .unwrap(),
-        3 => gw.provider("a", Toy, cut).unwrap().target("a").unwrap(),
+        3 => gw
+            .provider::<In, _, _>("a", Toy, connect(cut))
+            .unwrap()
+            .target("a")
+            .unwrap(),
         _ => unreachable!(),
     };
     gw.plugin("rec", rec.clone())
@@ -798,11 +905,11 @@ pub fn gateway(scenario: usize, rec: &Rec) -> Gateway {
 pub struct Ends(pub Arc<Mutex<Vec<Arc<AtomicUsize>>>>);
 pub struct CountF<T>(Arc<AtomicUsize>, std::marker::PhantomData<fn() -> T>);
 impl<T: Send + 'static> Filter<T> for CountF<T> {
-    fn edit(&mut self, v: T, out: &mut Vec<T>) -> Result<(), Fault> {
+    fn edit(&mut self, v: T, out: &mut Vec<T>) -> Result<()> {
         out.push(v);
         Ok(())
     }
-    fn end(&mut self, _: &Result<(), Fault>, _: &mut Vec<T>) -> Result<(), Fault> {
+    fn end(&mut self, _: &Result<()>, _: &mut Vec<T>) -> Result<()> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -822,13 +929,13 @@ impl Ends {
 }
 #[async_trait]
 impl Plugin for Ends {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         cx.filter::<Out>(self.f())?;
         cx.filter::<In>(self.f())?;
         tokio::task::yield_now().await;
         Ok(None)
     }
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         px.filter::<Out>(self.f())?;
         px.filter::<In>(self.f())?;
         tokio::task::yield_now().await;

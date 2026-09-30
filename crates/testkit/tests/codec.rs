@@ -16,7 +16,7 @@ use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::bytes;
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, impl_format};
 use respan_gateway_http::{http, http_body_util};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve, streamed};
 
@@ -199,9 +199,8 @@ impl Echo {
     }
 }
 
-#[async_trait]
-impl Transport for Echo {
-    async fn send(
+impl Echo {
+    pub async fn send(
         &self,
         call: Exchange<respan_gateway_http::RequestHead>,
     ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -226,12 +225,25 @@ impl Transport for Echo {
         Ok(Exchange::new(resp, echoed.boxed()))
     }
 }
+impl From<Echo> for respan_gateway_http::Transport {
+    fn from(value: Echo) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
+    }
+}
 
 /// A gateway serving msg, calling a msg provider over `echo`, with `plugin`.
 fn msg(echo: &Echo, plugin: impl Plugin) -> Gateway {
     Gateway::new()
-        .provider("msg", Msg, echo.clone())
-        .and_then(|g| g.client(Msg)?.target("msg")?.plugin("p", plugin))
+        .provider::<In, _, _>("msg", Msg, respan_gateway_http::connect(echo.clone()))
+        .and_then(|g| {
+            g.client::<In, _, _>(Msg)?
+                .target("msg")?
+                .plugin("p", plugin)
+        })
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -368,7 +380,7 @@ async fn o11_1_a_head_to_an_endless_plugin_stream_ends_at_its_head() {
 
     let log = Outcomes::default();
     let gw = Gateway::new()
-        .client(Msg)
+        .client::<In, _, _>(Msg)
         .and_then(|g| g.plugin("log", log.clone())?.plugin("endless", Endless))
         .unwrap_or_else(|e| panic!("{e}"));
     let mut head = post("/msg", "");
@@ -410,10 +422,14 @@ fn with_headers(path: &str, body: &'static str) -> http::Request<respan_gateway_
 /// provider on `mock`, with `plugins` in order.
 fn chat(mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
     let gw = Gateway::new()
-        .provider("openai", OpenAiChat, mock.at("http://openai.test/v1"))
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at("http://openai.test/v1")),
+        )
         .and_then(|g| {
-            g.client(OpenAiChat)?
-                .client(AnthropicMessages)?
+            g.client::<Conversation, _, _>(OpenAiChat)?
+                .client::<Conversation, _, _>(AnthropicMessages)?
                 .target("openai")
         });
     let mut named = plugins.into_iter().enumerate();
@@ -470,9 +486,8 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
     #[derive(Clone, Default)]
     struct Keeps(Arc<Mutex<Option<http::HeaderMap>>>);
 
-    #[async_trait]
-    impl Transport for Keeps {
-        async fn send(
+    impl Keeps {
+        pub async fn send(
             &self,
             call: Exchange<respan_gateway_http::RequestHead>,
         ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -485,11 +500,24 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
             Ok(respan_gateway_http::from_response(resp))
         }
     }
+    impl From<Keeps> for respan_gateway_http::Transport {
+        fn from(value: Keeps) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
+        }
+    }
 
     let keeps = Keeps::default();
     let gw = Gateway::new()
-        .provider("openai", OpenAiChat, keeps.clone())
-        .and_then(|g| g.client(OpenAiChat)?.target("openai"))
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(keeps.clone()),
+        )
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat)?.target("openai"))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = read_whole(
         serve(&gw, with_headers("/v1/chat/completions", CHAT))
@@ -615,10 +643,6 @@ impl Codec for Noted {
     ) -> Bytes {
         AnthropicMessages.refusal(fault, body, head)
     }
-
-    fn is_content(&self, reply: &Reply) -> bool {
-        AnthropicMessages.is_content(reply)
-    }
 }
 
 impl_format!(Noted);
@@ -667,13 +691,22 @@ async fn r2_an_encoder_gets_another_formats_replies_with_their_origin() {
     for provider in ["anthropic", "openai"] {
         let (mock, noting) = (MockTransport::new(), Noted::default());
         let gw = Gateway::new()
-            .provider(
+            .provider::<<Noted as Codec>::Input, _, _>(
                 "anthropic",
                 noting.clone(),
-                mock.at("http://anthropic.test"),
+                respan_gateway_http::connect(mock.at("http://anthropic.test")),
             )
-            .and_then(|g| g.provider("openai", OpenAiChat, mock.at("http://openai.test")))
-            .and_then(|g| g.client(noting.clone())?.target(provider))
+            .and_then(|g| {
+                g.provider::<Conversation, _, _>(
+                    "openai",
+                    OpenAiChat,
+                    respan_gateway_http::connect(mock.at("http://openai.test")),
+                )
+            })
+            .and_then(|g| {
+                g.client::<<Noted as Codec>::Input, _, _>(noting.clone())?
+                    .target(provider)
+            })
             .unwrap_or_else(|e| panic!("{e}"));
         match provider {
             "anthropic" => mock.reply("http://anthropic.test", mock::sse(&stream)),

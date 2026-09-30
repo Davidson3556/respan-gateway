@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::future::{Future, ready};
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
@@ -7,17 +7,18 @@ use std::task::{Poll, Waker};
 
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, pending};
-use futures::{FutureExt, StreamExt, stream};
+use futures::{FutureExt, SinkExt, StreamExt, stream};
 
+use crate::events::Metadata;
 use crate::fault::{PANICKED, guarded};
-use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin};
+use crate::format::{AnyEvents, AnyFormat, AnyValue};
 use crate::gateway::Registered;
 use crate::input::Input;
 use crate::leg::{self, Later, cut, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::response::Batch;
-use crate::{ClientContext, Extensions, Fault, ProviderContext, Response};
+use crate::{ClientContext, Events, Extensions, Fault, ProviderContext, Response, Result};
 
 /// A call from [`ClientContext::call`], sent when first awaited; it may
 /// outlive the hook. A clone is an unsent copy.
@@ -26,7 +27,7 @@ pub struct Call {
     request: Arc<ClientContext>,
     provider: String,
     /// Its own input, if any.
-    own: Option<AnyInput>,
+    own: Option<AnyValue>,
     extensions: Extensions,
     /// The call once sent, shared with its request, which drops it at its end.
     sent: Option<Arc<Sending>>,
@@ -81,7 +82,7 @@ impl Call {
 }
 
 impl Future for Call {
-    type Output = Result<Response, Fault>;
+    type Output = Result<Response>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         let call = &mut *self;
@@ -122,17 +123,14 @@ impl Future for Call {
 /// tried and reverted; the test
 /// `a_pending_call_left_unpolled_still_ends_with_its_request`
 /// (`crates/testkit/tests/streams.rs`) pins it.
-type Sending = Mutex<(
-    Option<BoxFuture<'static, Result<Response, Fault>>>,
-    Option<Waker>,
-)>;
+type Sending = Mutex<(Option<BoxFuture<'static, Result<Response>>>, Option<Waker>)>;
 
 async fn send(
     cx: Arc<ClientContext>,
     provider: String,
-    own: Option<AnyInput>,
+    own: Option<AnyValue>,
     extensions: Extensions,
-) -> Result<Response, Fault> {
+) -> Result<Response> {
     // An own input sends nothing of the client's, so only its type must
     // match; provider details go to logs.
     let p = match cx.gateway.providers.get(&provider) {
@@ -181,7 +179,7 @@ async fn send(
         inputs: Arc::default(),
         running: InFlight::enter(&cut),
         cut,
-        sent: false,
+        sent: Arc::default(),
         refused: false,
     };
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px);
@@ -192,7 +190,7 @@ async fn send(
     // A panic ends this call as internal before unwinding, so the drop
     // during unwinding does not end it abandoned.
     match AssertUnwindSafe(sent).catch_unwind().await {
-        Ok(Ok((origin, events))) => Ok(Response::of_call(&p.format, origin, events, edge)),
+        Ok(Ok((metadata, events))) => Ok(Response::of_call(&p.format, metadata, events, edge)),
         Ok(Err(fault)) => {
             edge.finish(Err(fault.clone()));
             Err(fault)
@@ -204,65 +202,115 @@ async fn send(
     }
 }
 
-/// The one way a client's origin reaches a provider: a call that carries
-/// the request's inputs, as plugins left them, not one of its own, to a
-/// format of the client's name.
-fn relay_origin(cx: &ClientContext, own: bool, p: &Provider) -> Option<Origin> {
-    (!own && cx.format.name() == p.format.name())
-        .then(|| cx.origin.clone())
-        .flatten()
-}
+/// The live inputs owned by the client edge and their registered kind.
+type LiveInputs = Option<(Arc<Later>, Arc<dyn AnyFormat>)>;
 
-/// The request's later inputs, if they still flow, and the client's format,
-/// whose kind they are of.
-type Flowing = Option<(Arc<Later>, Arc<dyn AnyFormat>)>;
-
-/// Dial `p` with the call's first input and `later` ones: the provider's
-/// origin (on a relay alone) and events, a refusal at the head as one `Err`.
-/// Inputs that fail, not cut, end the call with that fault, before the
-/// provider's head too, so the call and the reply end as the inputs did,
-/// for the client edge to say.
+/// Open receiving and close the sending sink concurrently. A call counts
+/// as sent only after the sink has accepted its input sequence.
 async fn dial(
     cx: &ClientContext,
     p: &Provider,
-    later: Flowing,
+    later: LiveInputs,
     edge: &mut CallEdge,
-) -> Result<(Option<Origin>, AnyEvents), Fault> {
+) -> Result<(Metadata, AnyEvents)> {
     let px = edge.cx();
-    let relay = relay_origin(cx, px.input.own, p);
-    let input = px.input.sent(relay.is_some())?;
+    let relay = !px.input.own
+        && cx.format.name() == p.format.name()
+        && cx.format.transport() == p.format.transport();
     let (fail, mut failed) = oneshot::channel();
-    let later = later.map(|(later, format)| {
-        let call = Some((px.inputs.clone(), fail));
-        inputs(later, format, call, &px.cut)
-    });
-    let (dialer, ext) = (&*p.dialer, px.client.extensions.clone());
-    let dialed = guarded(|| {
-        p.format
-            .dial(dialer, ext, relay.as_ref(), input.as_ref(), later)
+    let mut outgoing = match later {
+        Some((later, format)) => {
+            let call = Some((px.inputs.clone(), fail));
+            Events::stream(inputs(later, format, call, &px.cut))
+        }
+        None => px.input.events(relay)?,
+    };
+    if relay {
+        outgoing.set_metadata(cx.metadata.clone());
+    }
+    let (opening, mut sink) = guarded(|| {
+        let io = (p.factory)(px.client.extensions.clone());
+        p.format.bind(io)
     })?;
-    px.sent = true;
-    let (origin, events) = match dialed.await {
-        Ok(dialed) => dialed,
-        // Inputs that failed first, as a refusal of one, are why.
+    // Submit one sequence, then close the sink to drive it through delivery.
+    // Opening progresses alongside sink readiness, preparation, and closing.
+    let submitted = px.sent.clone();
+    let writing = async move {
+        sink.feed(outgoing).await?;
+        submitted.store(true, std::sync::atomic::Ordering::Release);
+        sink.close().await
+    }
+    .boxed();
+    let opened = match futures::future::select(writing, opening).await {
+        futures::future::Either::Left((written, opening)) => match written {
+            Ok(()) => opening.await.map(|incoming| (incoming, None)),
+            Err(fault) => Err(fault),
+        },
+        futures::future::Either::Right((opened, writing)) => {
+            opened.map(|incoming| (incoming, Some(writing)))
+        }
+    };
+    let (mut incoming, writing) = match opened {
+        Ok(opened) => opened,
         Err(fault) => return Err(failed.try_recv().ok().flatten().unwrap_or(fault)),
     };
-    // A provider's head goes only to a client of the name it came in.
-    let origin = relay.and(origin);
-    // A reader dropped with no failure says nothing.
+    px.refused = incoming.refusal().is_some();
+    if !relay {
+        incoming.clear_metadata();
+    }
+    let metadata = incoming.metadata_copy();
+    let format = p.format.clone();
+    let events = incoming
+        .boxed()
+        .map(move |event| event.map(|event| format.output_values(vec![event])))
+        .boxed();
+    let events = drive_writer(events, writing);
     let failed = async {
         match failed.await {
             Ok(fault) => fault,
             Err(_) => pending().await,
         }
     };
-    Ok(match events {
-        Ok(events) => (origin, cut(events, failed.boxed())),
-        Err(fault) => {
-            edge.cx().refused = true;
-            (origin, stream::once(ready(Err(fault))).boxed())
-        }
-    })
+    Ok((metadata, cut(events, failed.boxed())))
+}
+
+/// Keep the other half progressing as the response is read. Dropping the
+/// response also drops any unfinished writer, cancelling that half.
+fn drive_writer(events: AnyEvents, writing: Option<BoxFuture<'static, Result<()>>>) -> AnyEvents {
+    stream::unfold(
+        (events, writing, false),
+        |(mut events, mut writing, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                let Some(write) = writing.take() else {
+                    let event = events.next().await?;
+                    let done = event.is_err();
+                    return Some((event, (events, None, done)));
+                };
+                match futures::future::select(write, events.next()).await {
+                    futures::future::Either::Left((Ok(()), _)) => continue,
+                    futures::future::Either::Left((Err(fault), _)) => {
+                        return Some((Err(fault), (events, None, true)));
+                    }
+                    futures::future::Either::Right((Some(event), write)) => {
+                        let done = event.is_err();
+                        return Some((event, (events, Some(write), done)));
+                    }
+                    futures::future::Either::Right((None, write)) => {
+                        // The receiving direction can finish before the
+                        // outgoing direction flushes its last data.
+                        return match write.await {
+                            Ok(()) => None,
+                            Err(fault) => Some((Err(fault), (events, None, true))),
+                        };
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
 }
 
 /// One call's provider edge, whose end hooks run exactly once.
@@ -347,7 +395,7 @@ impl CallEdge {
     }
 
     /// Run each plugin's `on_provider` until one refuses.
-    pub(crate) async fn start(&mut self) -> Result<(), Fault> {
+    pub(crate) async fn start(&mut self) -> Result<()> {
         let gateway = self.cx().client.gateway.clone();
         for Registered { plugin, .. } in &gateway.plugins {
             self.ran += 1;

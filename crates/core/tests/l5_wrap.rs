@@ -20,15 +20,15 @@ struct Meter(Arc<Mutex<Vec<String>>>);
 
 #[async_trait]
 impl Plugin for Meter {
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         struct F(Arc<Mutex<Vec<String>>>);
         impl Filter<Out> for F {
-            fn edit(&mut self, v: Out, o: &mut Vec<Out>) -> Result<(), Fault> {
+            fn edit(&mut self, v: Out, o: &mut Vec<Out>) -> Result<()> {
                 lock(&self.0).push(format!("saw {}", v.0));
                 o.push(v);
                 Ok(())
             }
-            fn end(&mut self, e: &Result<(), Fault>, _: &mut Vec<Out>) -> Result<(), Fault> {
+            fn end(&mut self, e: &Result<()>, _: &mut Vec<Out>) -> Result<()> {
                 lock(&self.0).push(format!("end {}", code(e)));
                 Ok(())
             }
@@ -37,11 +37,11 @@ impl Plugin for Meter {
     }
 }
 
-struct OutWrap(fn(Events<Out>) -> BoxStream<'static, Result<Out, Fault>>);
+struct OutWrap(fn(Events<Out>) -> BoxStream<'static, Result<Out>>);
 
 #[async_trait]
 impl Plugin for OutWrap {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let f = self.0;
         cx.wrap(move |outputs: Events<Out>| f(outputs))?;
         Ok(None)
@@ -50,12 +50,12 @@ impl Plugin for OutWrap {
 
 fn gw(body: fn() -> Text, wrap: OutWrap, meter: &Meter, rec: &Rec) -> Gateway {
     Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider(
+        .provider::<In, _, _>(
             "p",
             Toy,
-            fnt(move |_| async move { Ok(answer(200, body())) }.boxed()),
+            connect(fnt(move |_| async move { Ok(answer(200, body())) }.boxed())),
         )
         .unwrap()
         .plugin("rec", rec.clone())
@@ -227,10 +227,15 @@ async fn l5_a_retry_after_part_of_a_wrapped_session_was_read() {
     struct Retry;
     #[async_trait]
     impl Plugin for Retry {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|i: Events<In>| i.map_ok(|x| In(x.0.to_uppercase())))?;
             let call = cx.call("p");
-            match call.clone().await?.until_content().await {
+            match call
+                .clone()
+                .await?
+                .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                .await
+            {
                 Ok(resp) => Ok(Some(resp)),
                 Err(_) => Ok(Some(call.await?)),
             }
@@ -265,9 +270,9 @@ async fn l5_a_retry_after_part_of_a_wrapped_session_was_read() {
         .boxed()
     });
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, dialer)
+        .provider::<In, _, _>("p", Toy, connect(dialer))
         .unwrap()
         .plugin("retry", Retry)
         .unwrap();
@@ -292,7 +297,7 @@ async fn l5_a_fallback_mid_check_gets_each_input_once() {
     struct Gate;
     #[async_trait]
     impl Plugin for Gate {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|i: Events<In>| {
                 i.and_then(|x| async move {
                     CHECKS.fetch_add(1, Ordering::SeqCst);
@@ -303,7 +308,10 @@ async fn l5_a_fallback_mid_check_gets_each_input_once() {
             // The first call is given 10ms, then dropped for a second.
             let first = cx.call("p");
             let raced = tokio::time::timeout(Duration::from_millis(10), async {
-                first.await?.until_content().await
+                first
+                    .await?
+                    .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                    .await
             })
             .await;
             match raced {
@@ -314,39 +322,43 @@ async fn l5_a_fallback_mid_check_gets_each_input_once() {
     }
     let seen = Seen::default();
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, {
-            // The first dial waits on its body before answering (so it
-            // times out); the second answers at once.
-            let n = Arc::new(AtomicUsize::new(0));
-            let seen = seen.clone();
-            fnt(move |c| {
-                let first = n.fetch_add(1, Ordering::SeqCst) == 0;
+        .provider::<In, _, _>(
+            "p",
+            Toy,
+            connect({
+                // The first dial waits on its body before answering (so it
+                // times out); the second answers at once.
+                let n = Arc::new(AtomicUsize::new(0));
                 let seen = seen.clone();
-                async move {
-                    let mut body = c.body;
-                    if first {
-                        let _ = body.next().await;
-                        std::future::pending::<()>().await;
-                    }
-                    let s = seen.clone();
-                    tokio::spawn(async move {
-                        let _ = s;
-                        let mut got = vec![];
-                        while let Some(f) = body.next().await {
-                            got.push(f.map_err(|e| e.code().to_string()));
-                            if got.len() >= 2 {
-                                break;
-                            }
+                fnt(move |c| {
+                    let first = n.fetch_add(1, Ordering::SeqCst) == 0;
+                    let seen = seen.clone();
+                    async move {
+                        let mut body = c.body;
+                        if first {
+                            let _ = body.next().await;
+                            std::future::pending::<()>().await;
                         }
-                        drop(got);
-                    });
-                    Ok(answer(200, never()))
-                }
-                .boxed()
-            })
-        })
+                        let s = seen.clone();
+                        tokio::spawn(async move {
+                            let _ = s;
+                            let mut got = vec![];
+                            while let Some(f) = body.next().await {
+                                got.push(f.map_err(|e| e.code().to_string()));
+                                if got.len() >= 2 {
+                                    break;
+                                }
+                            }
+                            drop(got);
+                        });
+                        Ok(answer(200, never()))
+                    }
+                    .boxed()
+                })
+            }),
+        )
         .unwrap()
         .plugin("gate", Gate)
         .unwrap();

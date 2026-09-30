@@ -15,11 +15,11 @@ use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::*;
 
 /// Points: 1 the client edge's input stream; 5 the provider edge's event
-/// stream; 12 `dial`; 13 `is_content`; 14 `input`; 17 `accepts`; 18
-/// `accept`, 19 its future; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
+/// stream; 12 `dial`; 14 lazy decoding; 17 `accepts`; 18
+/// `accept`, 19 incoming opening; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
 /// dial future; 29 a provider stream's first poll.
-const POINTS: [usize; 20] = [
-    1, 5, 12, 13, 14, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32, 0,
+const POINTS: [usize; 19] = [
+    1, 5, 12, 14, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32, 0,
 ];
 
 #[tokio::test(flavor = "multi_thread")]
@@ -64,9 +64,9 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                         .boxed()
                     });
                     let gw = Gateway::new()
-                        .client(Toy)
+                        .client::<In, _, _>(Toy)
                         .unwrap()
-                        .provider("a", Toy, transport)
+                        .provider::<In, _, _>("a", Toy, connect(transport))
                         .unwrap()
                         .target("a")
                         .unwrap()
@@ -95,7 +95,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                             bad.push(format!("{label}: a panic escaped: {}", e.is_panic()))
                         }
                         Ok(Ok(None)) => bad.push(format!("{label}: the end future never resolved")),
-                        // A panic in `accept`'s future is `internal`, not
+                        // A panic while incoming opens is `internal`, not
                         // `abandoned`, as `Gateway::handle` says.
                         Ok(Ok(Some(end))) if n == 19 => {
                             let code = end.as_ref().err().map(Fault::code);

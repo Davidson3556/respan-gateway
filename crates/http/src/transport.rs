@@ -1,16 +1,17 @@
-//! How the gateway reaches a provider over HTTP ([`Transport`], [`Dialer`]),
+//! How the gateway reaches a provider over HTTP ([`Transport`], [`connect`]),
 //! and what a transport does to a call and its response.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue};
-use respan_gateway_core::{Extensions, Fault, async_trait};
+use respan_gateway_core::{Extensions, Fault};
 
+#[cfg(doc)]
+use crate::Transport;
 use crate::credential::{Credential, is_credential, take_protocol_keys, take_query};
-use crate::{HOP_BY_HOP, RequestHead, ResponseHead, remove_if, strip_named};
+use crate::{HOP_BY_HOP, remove_if, strip_named};
 
 /// A body, its bytes one item per data frame, ending with an `Err` if it
 /// broke off.
@@ -42,6 +43,14 @@ pub struct Exchange<H> {
     /// request's inputs. A transport sends such a body as it comes, else
     /// whole.
     pub streams: bool,
+    /// On a response, completion of the outgoing transfer when `send`
+    /// returned before writing finished. The response can be read while
+    /// this future is pending. A clean peer closure may finish it normally
+    /// even if no more input can be sent. A late write failure fails the call.
+    ///
+    /// `None` means the transport completed its outgoing handoff in `send`.
+    /// Request exchanges leave this unset. A refusal does not wait for it.
+    pub write_completion: Option<BoxFuture<'static, Result<(), Fault>>>,
 }
 
 impl<H> Exchange<H> {
@@ -54,6 +63,7 @@ impl<H> Exchange<H> {
             extensions: Extensions::new(),
             relayed: false,
             streams: false,
+            write_completion: None,
         }
     }
 }
@@ -69,47 +79,13 @@ impl<H: std::fmt::Debug> std::fmt::Debug for Exchange<H> {
     }
 }
 
-/// How the gateway reaches one provider over HTTP: a URL and keys, a
-/// process, a socket or in-process code, with any state its calls share.
-#[async_trait]
-pub trait Transport: Send + Sync + 'static {
-    /// Send `call` and return the provider's response, whatever it says,
-    /// once its head arrives; return redirects rather than follow them.
-    /// A relay's head starts from the client's, so strip what a proxy must
-    /// not pass on ([`proxy_call`](crate::proxy_call)). Send a body that
-    /// [`streams`](Exchange::streams) as it comes, else whole; one that ends
-    /// with an `Err` aborts the message. Decide whose keys reach the
-    /// provider ([`credentials`]).
-    ///
-    /// `Err` if the call could not be sent: [`Fault::upstream`] if the
-    /// provider is unreachable, [`Fault::config`] if this transport cannot
-    /// express it, or a failure of its own.
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault>;
-}
-
-/// A shared transport; it forwards every method.
-#[async_trait]
-impl<T: Transport + ?Sized> Transport for Arc<T> {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
-        (**self).send(call).await
-    }
-}
-
-/// How a codec's calls reach one provider: any [`Transport`], shared. A
-/// format's [`Dialer`](respan_gateway_core::Format::Dialer).
-#[derive(Clone)]
-pub struct Dialer(pub(crate) Arc<dyn Transport>);
-
-impl<T: Transport> From<T> for Dialer {
-    fn from(transport: T) -> Self {
-        Dialer(Arc::new(transport))
-    }
-}
-
-impl std::fmt::Debug for Dialer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Dialer").finish_non_exhaustive()
-    }
+/// Create a provider factory sharing an outbound transport. Each attempt
+/// receives its current extensions. Construction performs no I/O.
+pub fn connect(
+    transport: impl Into<crate::Transport>,
+) -> impl Fn(Extensions) -> crate::Transport + Send + Sync + 'static {
+    let transport = transport.into();
+    move |extensions| transport.with_extensions(extensions)
 }
 
 /// Strip from a call, whose head may be the client's, what a proxy does not

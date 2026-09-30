@@ -20,7 +20,7 @@ use crate::{RequestHead, ResponseHead};
 /// value as the bytes it came in while it says the same.
 ///
 /// A request's inputs stream, one per data frame, if its adapter says it
-/// streams ([`Accepted::new`](crate::Accepted::new)); else its body is its
+/// streams ([`Transport::accept`](crate::Transport::accept)); else its body is its
 /// one input, even empty. Heads reach only a codec of the name they came
 /// in: the client's to a call that relays the client's message, the
 /// provider's to the answer to such a call.
@@ -66,7 +66,7 @@ pub trait Codec: Send + Sync + 'static {
     /// [`codes::BAD_REQUEST`](respan_gateway_core::codes::BAD_REQUEST) if
     /// the input says what the client's bytes said, else
     /// [`codes::CONFIG`](respan_gateway_core::codes::CONFIG), a plugin's
-    /// ([`Format::dial`](respan_gateway_core::Format::dial)).
+    /// ([`Format::bind`](respan_gateway_core::Format::bind)).
     fn request_encoder(
         &self,
         client: Option<&RequestHead>,
@@ -118,14 +118,6 @@ pub trait Codec: Send + Sync + 'static {
         let text = HeaderValue::from_static("text/plain; charset=utf-8");
         head.headers.insert(CONTENT_TYPE, text);
         Bytes::from(fault.message().to_owned())
-    }
-
-    /// Whether `output` is content, what
-    /// [`Response::until_content`](respan_gateway_core::Response::until_content)
-    /// stops at; a value that says nothing yet, such as a keep-alive, is
-    /// not. By default, true.
-    fn is_content(&self, _output: &Self::Output) -> bool {
-        true
     }
 }
 

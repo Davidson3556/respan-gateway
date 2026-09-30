@@ -37,13 +37,23 @@ impl Plugin for Resilient {
         if asked.is_some_and(|a| a.headers.contains_key("x-hedge")) {
             let calls = [cx.call(target), cx.call("openai-eu")];
             let stagger = Duration::from_millis(200);
-            return race(calls, stagger, Until::Content).await.map(Some);
+            return race(
+                calls,
+                stagger,
+                Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            )
+            .await
+            .map(Some);
         }
         let backoff = Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5));
         let calls = [cx.call(target), cx.call("anthropic")];
-        first_success(calls, &backoff, Until::Content)
-            .await
-            .map(Some)
+        first_success(
+            calls,
+            &backoff,
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        )
+        .await
+        .map(Some)
     }
 
     /// Anthropic names its models its own way: a change for one provider's
@@ -82,11 +92,19 @@ impl Plugin for Log {
 /// A transport that answers after a delay, to show a hedge or a stall.
 struct Slow<T>(T, Duration);
 
-#[async_trait]
-impl<T: Transport> Transport for Slow<T> {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Slow<Transport> {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
+    }
+}
+impl<T: Into<Transport>> From<Slow<T>> for respan_gateway_http::Transport {
+    fn from(value: Slow<T>) -> Self {
+        let value = std::sync::Arc::new(Slow(value.0.into(), value.1));
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -115,10 +133,18 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     let (head, idle) = (Duration::from_secs(2), Duration::from_secs(1));
     let openai = Watchdog::new(Slow(mock.at(OPENAI), delay), head, idle);
     let gw = Gateway::new()
-        .client(OpenAiChat)?
-        .provider("openai", OpenAiChat, openai)?
-        .provider("openai-eu", OpenAiChat, mock.at(OPENAI_EU))?
-        .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))?
+        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, respan_gateway_http::connect(openai))?
+        .provider::<Conversation, _, _>(
+            "openai-eu",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI_EU)),
+        )?
+        .provider::<Conversation, _, _>(
+            "anthropic",
+            AnthropicMessages,
+            respan_gateway_http::connect(mock.at(ANTHROPIC)),
+        )?
         .plugin("log", log.clone())?
         .plugin("resilient", Resilient)?
         .target("openai")?;

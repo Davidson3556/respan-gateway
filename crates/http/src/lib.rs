@@ -3,8 +3,8 @@
 //!
 //! - **Formats.** A [`Codec`] is one protocol's bytes on HTTP;
 //!   [`impl_format!`] makes it a [`Format`](respan_gateway_core::Format), which
-//!   HTTP's one driver runs on both edges: a client's [`Accepted`] request,
-//!   and calls through a provider's [`Dialer`], made from any [`Transport`].
+//!   HTTP's driver runs on both sides through [`Transport`] handles: accepted
+//!   from an application or made by a provider's [`connect`] factory.
 //!
 //! Its rules live at the three places that own them:
 //!
@@ -68,10 +68,10 @@ pub fn percent_decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
-pub use driver::Accepted;
+pub use driver::Transport;
 pub use transport::{
-    CallHeaders, Dialer, Exchange, Frames, Transport, credentials, is_connection_header,
-    proxy_call, strip_client_origin_headers, strip_origin_headers,
+    CallHeaders, Exchange, Frames, connect, credentials, is_connection_header, proxy_call,
+    strip_client_origin_headers, strip_origin_headers,
 };
 
 /// The head of an HTTP request.
@@ -204,7 +204,7 @@ where
 }
 
 /// Hand `req` to `gateway` as an HTTP adapter does, streaming if
-/// `streaming`: as an [`Accepted`] request, to [`Gateway::handle`]. Before:
+/// `streaming`: as a [`Transport`] handle, to [`Gateway::handle`]. Before:
 /// the hop's headers go but `Upgrade` (RFC 9110 7.6.1), credentials into a
 /// [`Credential`], and an [`Asked`] view joins them. After: what no format
 /// can write, or a 101 to a request not `streaming`, goes as text/plain
@@ -226,17 +226,12 @@ where
     B::Error: Into<Fault>,
 {
     let (Arrived { head, body, to }, extensions) = arrive(req);
-    let (wire, answer) = Accepted::new(head, body, streaming);
+    let (wire, answer) = Transport::accept(head, body, streaming);
     let handled = gateway.handle(wire, extensions);
     async move {
-        let handled = handled.await;
-        let (resp, ended) = match answer.await {
-            Some((resp, ended)) => (Ok(resp), ended),
-            None => {
-                let fault = handled.err();
-                let fault = fault.unwrap_or_else(|| Fault::internal("no format answered"));
-                (Err(fault.clone()), ready(Err(fault)).boxed())
-            }
+        let (resp, ended) = match driver::drive(handled.boxed(), answer).await {
+            Ok((resp, ended)) => (Ok(resp), ended),
+            Err(fault) => (Err(fault.clone()), ready(Err(fault)).boxed()),
         };
         (depart(&to, streaming, resp), ended)
     }
@@ -522,9 +517,10 @@ pub fn bodiless(method: &Method, status: StatusCode) -> bool {
 /// What [`impl_format!`] names, not for use elsewhere.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::driver::{accept, dial, input};
+    pub use crate::driver::{accept, dial, drive};
+    pub use respan_gateway_core::futures::Sink;
     pub use respan_gateway_core::futures::future::BoxFuture;
-    pub use respan_gateway_core::{Ended, Events, Extensions, Fault, Format, Headed, Origin};
+    pub use respan_gateway_core::{Connection, Format, Result};
 }
 
 #[cfg(test)]

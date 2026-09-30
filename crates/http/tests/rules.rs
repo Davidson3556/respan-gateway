@@ -96,7 +96,7 @@ async fn the_clients_key_stays_off_a_transport_with_headers_of_its_own() {
         [
             add_provider("api-key", OpenAiChat, at("api-key")),
             add_provider("x-team", OpenAiChat, at("x-team")),
-            add_provider("shared", OpenAiChat, Arc::new(at("x-team"))),
+            add_provider("shared", OpenAiChat, Transport::from(at("x-team")).clone()),
         ],
         vec![Arc::new(ByHeader)],
         None,
@@ -406,9 +406,8 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
     /// Answers with a cookie of its origin, which it does not strip.
     struct Cookie;
 
-    #[async_trait]
-    impl Transport for Cookie {
-        async fn send(
+    impl Cookie {
+        pub async fn send(
             &self,
             _req: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
         ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault>
@@ -421,6 +420,15 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
             headers.insert("content-type", HeaderValue::from_static("application/json"));
             headers.insert("set-cookie", HeaderValue::from_static("a=1"));
             Ok(respan_gateway_http::from_response(resp))
+        }
+    }
+    impl From<Cookie> for respan_gateway_http::Transport {
+        fn from(value: Cookie) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 

@@ -145,9 +145,17 @@ fn key(value: &'static str) -> HeaderMap {
 
 fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
     Gateway::new()
-        .client(Models)?
-        .provider("a", Models, mock.at(A).with_headers(key("Bearer key-a")))?
-        .provider("b", Models, mock.at(B).with_headers(key("Bearer key-b")))?
+        .client::<Sent<Models>, _, _>(Models)?
+        .provider::<Sent<Models>, _, _>(
+            "a",
+            Models,
+            respan_gateway_http::connect(mock.at(A).with_headers(key("Bearer key-a"))),
+        )?
+        .provider::<Sent<Models>, _, _>(
+            "b",
+            Models,
+            respan_gateway_http::connect(mock.at(B).with_headers(key("Bearer key-b"))),
+        )?
         .plugin("merge", MergeModels(vec!["a", "b"]))
 }
 

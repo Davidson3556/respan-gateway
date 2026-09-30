@@ -1,7 +1,7 @@
 //! Dropping a request or its reply at every await point: every hook and
 //! filter still ends once, `idle` resolves and the end future resolves.
 //! On the toy edge, the sweeps add the client edge's quirks (see `edge::Quirk`), as the edge
-//! owns `Ended`.
+//! owns its delivery completion channel.
 #![allow(clippy::unwrap_used)]
 
 mod edge;
@@ -120,11 +120,11 @@ async fn filters_end_once_when_dropped_at_every_await() {
 }
 
 /// A call kept by a spawned task ends with its request, however far it got.
-type Tasks = std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<Result<(), Fault>>>>>;
+type Tasks = std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<Result<()>>>>>;
 struct Spawner(Tasks);
 #[async_trait]
 impl Plugin for Spawner {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let call = cx.call("a");
         let task = tokio::spawn(async move {
             let mut outputs = call.await?.outputs::<Out>();
@@ -156,9 +156,9 @@ async fn spawned_calls_end_with_their_request() {
             .boxed()
         });
         let gw = Gateway::new()
-            .client(Toy)
+            .client::<In, _, _>(Toy)
             .unwrap()
-            .provider("a", Toy, t)
+            .provider::<In, _, _>("a", Toy, connect(t))
             .unwrap()
             .plugin("rec", rec.clone())
             .unwrap()
@@ -194,10 +194,10 @@ async fn spawned_calls_end_with_their_request() {
 struct Ordered(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
 #[async_trait]
 impl Plugin for Ordered {
-    async fn on_client_end(&self, _: &ClientContext, _: &Result<(), Fault>) {
+    async fn on_client_end(&self, _: &ClientContext, _: &Result<()>) {
         lock(&self.0).push("client_end");
     }
-    async fn on_provider_end(&self, _: &ProviderContext, _: &Result<(), Fault>) {
+    async fn on_provider_end(&self, _: &ProviderContext, _: &Result<()>) {
         tokio::time::sleep(Duration::from_millis(20)).await;
         lock(&self.0).push("provider_end");
     }

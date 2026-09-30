@@ -82,8 +82,12 @@ fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault>
     let prices = prices();
     let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         // Register it last, so it prices the call as other plugins left it.
         .plugin("accounting", accounting)?
         .target("openai")

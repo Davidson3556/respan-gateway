@@ -15,9 +15,9 @@ use http_body::Frame;
 use http_body_util::{BodyExt, Full, StreamBody};
 use respan_gateway_core::{ClientContext, Fault, Filter, Plugin, ProviderContext};
 use respan_gateway_core::{async_trait, futures};
+use respan_gateway_http::Exchange;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{Body, RequestHead, ResponseHead, http, http_body, http_body_util};
-use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_http::{
     credentials, proxy_call, strip_client_origin_headers, strip_origin_headers,
 };
@@ -67,7 +67,7 @@ pub mod mock {
 /// Responses queued for one base URL.
 type Script = (String, VecDeque<mock::Reply>);
 
-/// Scripted providers, one [`Transport`] per base URL from [`at`](Self::at):
+/// Scripted providers, one [`Transport`](respan_gateway_http::Transport) per base URL from [`at`](Self::at):
 /// each queued reply answers one request, and one with none queued gets a
 /// 502 `upstream`. Every request is recorded with its full URL.
 #[derive(Debug, Clone, Default)]
@@ -133,9 +133,9 @@ impl MockAt {
     }
 }
 
-#[async_trait]
-impl Transport for MockAt {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl MockAt {
+    /// Send an encoded call and return its response.
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         // Keep alike with `HttpTransport::send` in the server crate.
         let mut call = call;
         proxy_call(&mut call.head);
@@ -170,6 +170,15 @@ impl Transport for MockAt {
         let (mut head, chunks) = script.into_parts();
         strip_origin_headers(&mut head.headers);
         Ok(Exchange::new(head, stream::iter(chunks).boxed()))
+    }
+}
+impl From<MockAt> for respan_gateway_http::Transport {
+    fn from(value: MockAt) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 

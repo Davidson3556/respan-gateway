@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use edge::*;
 use respan_gateway_core::futures::StreamExt;
-use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -50,38 +49,27 @@ async fn cut_requests_leave_nothing_behind() {
 /// Counts the toy's decodes of the input in an origin, to show a relay
 /// never decodes.
 struct Counted(Arc<AtomicUsize>);
-impl Format for Counted {
-    type Input = In;
-    type Output = Out;
-    type Wire = ToyWire;
-    type Dialer = Dialer;
+impl Format<Io, In, Out> for Counted {
     fn name(&self) -> &str {
         "toy"
     }
-    fn accepts(&self, w: &ToyWire) -> bool {
-        Toy.accepts(w)
+
+    fn matches(&self, w: &Io) -> bool {
+        <Toy as Format<Io, In, Out>>::matches(&Toy, w)
     }
-    fn accept(
-        &self,
-        w: ToyWire,
-        r: futures::future::BoxFuture<'static, (Headed<Out>, Ended)>,
-    ) -> futures::future::BoxFuture<'static, Result<(Option<Origin>, Option<Events<In>>), Fault>>
-    {
-        Toy.accept(w, r)
+
+    fn bind(&self, w: Io) -> Result<Connection<In, Out>> {
+        accept_toy(w, Some(self.0.clone()))
     }
-    fn input(&self, o: &Origin) -> Option<Result<In, Fault>> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Toy.input(o)
+}
+
+impl Format<Io, Out, In> for Counted {
+    fn name(&self) -> &str {
+        "toy"
     }
-    fn dial(
-        &self,
-        d: &Dialer,
-        e: Extensions,
-        r: Option<&Origin>,
-        o: Option<&In>,
-        l: Option<Events<In>>,
-    ) -> Result<BoxFuture<'static, Result<Headed<Out>, Fault>>, Fault> {
-        Toy.dial(d, e, r, o, l)
+
+    fn bind(&self, io: Io) -> Result<Connection<Out, In>> {
+        <Toy as Format<Io, Out, In>>::bind(&Toy, io)
     }
 }
 
@@ -104,9 +92,9 @@ async fn a_big_body_relays_whole() {
     });
     let decodes = Arc::new(AtomicUsize::new(0));
     let gw = Gateway::new()
-        .client(Counted(decodes.clone()))
+        .client::<In, _, _>(Counted(decodes.clone()))
         .unwrap()
-        .provider("a", Toy, t)
+        .provider::<In, _, _>("a", Toy, connect(t))
         .unwrap()
         .target("a")
         .unwrap();
@@ -133,7 +121,7 @@ async fn wrapped_sessions_dropped_at_random_end_once() {
     struct Both;
     #[async_trait]
     impl Plugin for Both {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|inputs: Events<In>| {
                 inputs
                     .take_while(|i| std::future::ready(i.is_ok()))
@@ -162,9 +150,9 @@ async fn wrapped_sessions_dropped_at_random_end_once() {
     for round in 0..400u64 {
         let (rec, seen) = (Rec::default(), Seen::default());
         let gw = Gateway::new()
-            .client(Toy)
+            .client::<In, _, _>(Toy)
             .unwrap()
-            .provider("p", Toy, seen.transport(false, endless))
+            .provider::<In, _, _>("p", Toy, connect(seen.transport(false, endless)))
             .unwrap()
             .plugin("rec", rec.clone())
             .unwrap()

@@ -364,11 +364,15 @@ impl Plugin for Jobs {
 const EAST: &str = "http://east.test";
 const WEST: &str = "http://west.test";
 
-fn gateway(east: impl Transport, west: impl Transport, jobs: &Jobs) -> Result<Gateway, Fault> {
+fn gateway(
+    east: impl Into<Transport>,
+    west: impl Into<Transport>,
+    jobs: &Jobs,
+) -> Result<Gateway, Fault> {
     Gateway::new()
-        .client(RESPONSES)?
-        .provider("east", RESPONSES, east)?
-        .provider("west", RESPONSES, west)?
+        .client::<Ask, _, _>(RESPONSES)?
+        .provider::<Ask, _, _>("east", RESPONSES, respan_gateway_http::connect(east))?
+        .provider::<Ask, _, _>("west", RESPONSES, respan_gateway_http::connect(west))?
         .plugin("jobs", jobs.clone())
 }
 

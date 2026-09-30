@@ -4,12 +4,12 @@ use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 
 use bytes::{Bytes, BytesMut};
-use futures::stream;
+use futures::stream::{self, BoxStream};
 use futures::{FutureExt, StreamExt};
-use respan_gateway_core::{Ended, Events, Fault};
+use respan_gateway_core::Fault;
 
-use super::PANICKED;
 use super::reader::Failure;
+use super::{Completion, PANICKED};
 use crate::{Encoder, Frames};
 
 /// A body written from events through an [`Encoder`], whose head was
@@ -27,7 +27,7 @@ use crate::{Encoder, Frames};
 /// - **A client's answer** ([`Writer::answer`]) is one frame per output to
 ///   a streaming request, else one per batch. A failure is written in the
 ///   protocol's words ([`Encoder::end`]), again as the end's own failure if
-///   that fails, and the body is aborted if that fails too. [`Ended`] is
+///   that fails, and the body is aborted if that fails too. the completion receiver is
 ///   told once its last bytes are handed out.
 pub(crate) struct Writer<T, H> {
     encoder: Box<dyn Encoder<T, H>>,
@@ -35,9 +35,9 @@ pub(crate) struct Writer<T, H> {
     /// Declared first, so dropped first (fields drop in declaration order):
     /// a client that leaves ends the request before its answer's call,
     /// which `values` holds.
-    pub(crate) ended: Option<Ended>,
+    pub(crate) ended: Option<Completion>,
     /// The values.
-    pub(crate) values: Option<Events<T>>,
+    pub(crate) values: Option<BoxStream<'static, Result<T, Fault>>>,
     /// A call's: where its encoder panicked.
     call: Option<Failure>,
     /// An answer's one failure, a refusal, its fault alone.
@@ -55,7 +55,11 @@ pub(crate) struct Writer<T, H> {
 
 impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
     /// A streamed call's body after its first frame: `later`, then the end.
-    pub(crate) fn call(encoder: Box<dyn Encoder<T, H>>, later: Events<T>, failed: Failure) -> Self {
+    pub(crate) fn call(
+        encoder: Box<dyn Encoder<T, H>>,
+        later: BoxStream<'static, Result<T, Fault>>,
+        failed: Failure,
+    ) -> Self {
         let mut writer = Self::new(encoder, Some(later), true);
         writer.call = Some(failed);
         writer
@@ -65,8 +69,8 @@ impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
     /// `streaming`, telling `ended` once its end is out.
     pub(crate) fn answer(
         encoder: Box<dyn Encoder<T, H>>,
-        ended: Ended,
-        outputs: Option<Events<T>>,
+        ended: Completion,
+        outputs: Option<BoxStream<'static, Result<T, Fault>>>,
         streaming: bool,
     ) -> Self {
         let mut writer = Self::new(encoder, outputs, streaming);
@@ -74,7 +78,11 @@ impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
         writer
     }
 
-    fn new(encoder: Box<dyn Encoder<T, H>>, values: Option<Events<T>>, streaming: bool) -> Self {
+    fn new(
+        encoder: Box<dyn Encoder<T, H>>,
+        values: Option<BoxStream<'static, Result<T, Fault>>>,
+        streaming: bool,
+    ) -> Self {
         Self {
             encoder,
             values,
@@ -126,7 +134,7 @@ impl<T: Send + 'static, H: Send + 'static> Writer<T, H> {
             && let Some(ended) = self.ended.take()
         {
             self.done = true;
-            ended(end);
+            ended.finish(end);
         }
     }
 

@@ -169,8 +169,12 @@ const OPENAI: &str = "http://openai.test/v1";
 
 fn gateway(mock: &MockTransport, store: &Arc<Memory>) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("idempotent", Idempotent(store.clone()))?
         .target("openai")
 }

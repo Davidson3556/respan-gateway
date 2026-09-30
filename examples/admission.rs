@@ -18,6 +18,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example admission`
 
+use respan_gateway_formats::conversation::Conversation;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -162,8 +163,12 @@ fn gateway(mock: &MockTransport, slots: &Slots, free: Duration) -> Result<Gatewa
         free,
     };
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("admission", admission)?
         .target("openai")
 }

@@ -24,12 +24,10 @@ struct Mark(Arc<()>, u8);
 
 #[async_trait]
 impl Plugin for Mark {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         cx.extensions_mut().insert(Marker(self.0.clone()));
         match self.1 {
-            1 => cx.wrap(|o: Events<Out>| {
-                o.take(1).boxed() as BoxStream<'static, Result<Out, Fault>>
-            })?,
+            1 => cx.wrap(|o: Events<Out>| o.take(1).boxed() as BoxStream<'static, Result<Out>>)?,
             2 => cx.wrap(|i: Events<In>| {
                 i.and_then(|x| async move {
                     tokio::task::yield_now().await;
@@ -41,7 +39,7 @@ impl Plugin for Mark {
                 .boxed()
             })?,
             3 => cx.wrap(|_o: Events<Out>| {
-                stream::pending().boxed() as BoxStream<'static, Result<Out, Fault>>
+                stream::pending().boxed() as BoxStream<'static, Result<Out>>
             })?,
             _ => {}
         }
@@ -53,9 +51,9 @@ fn gw(mark: &Arc<()>, how: u8, body: fn() -> Text, dialer: Option<Dialer>) -> Ga
     let dialer =
         dialer.unwrap_or_else(|| fnt(move |_| async move { Ok(answer(200, body())) }.boxed()));
     Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("p", Toy, dialer)
+        .provider::<In, _, _>("p", Toy, connect(dialer))
         .unwrap()
         .plugin("mark", Mark(mark.clone(), how))
         .unwrap()
@@ -199,7 +197,7 @@ async fn l6_handle_dropped_at_every_poll_leaks_nothing() {
             let (tx, mut r) = upload();
             r.streams = streams;
             send(&tx, "x");
-            let (wire, reply) = ToyWire::new(r);
+            let (wire, reply) = Io::accept(r);
             let mut handled = Box::pin(g.handle(wire, Extensions::new()));
             let waker = respan_gateway_core::futures::task::noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);

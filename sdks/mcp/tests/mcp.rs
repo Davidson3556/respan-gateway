@@ -23,9 +23,13 @@ const ECHO: &str = r#"while IFS= read -r line; do
   [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
 done"#;
 
-fn gateway(transport: impl Transport, plugin: Option<Touch>) -> Gateway {
-    let gw = Gateway::new().provider("mcp", StreamableHttp::default(), transport);
-    let gw = gw.and_then(|g| g.client(StreamableHttp::default()));
+fn gateway(transport: impl Into<Transport>, plugin: Option<Touch>) -> Gateway {
+    let gw = Gateway::new().provider::<ToServer, _, _>(
+        "mcp",
+        StreamableHttp::default(),
+        respan_gateway_http::connect(transport),
+    );
+    let gw = gw.and_then(|g| g.client::<ToServer, _, _>(StreamableHttp::default()));
     let gw = match plugin {
         Some(p) => gw.and_then(|g| g.plugin("touch", p)),
         None => gw,
@@ -271,9 +275,8 @@ async fn an_mcp_servers_error_is_written_as_a_json_rpc_error() {
 /// A server whose `GET` stream never says anything.
 struct Quiet;
 
-#[async_trait]
-impl Transport for Quiet {
-    async fn send(
+impl Quiet {
+    pub async fn send(
         &self,
         _call: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
     ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -284,6 +287,15 @@ impl Transport for Quiet {
             .body::<Body>(body)
             .map_err(respan_gateway_http::built_wrong)?;
         Ok(respan_gateway_http::from_response(resp))
+    }
+}
+impl From<Quiet> for respan_gateway_http::Transport {
+    fn from(value: Quiet) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -481,12 +493,12 @@ impl Plugin for Authenticates {
 #[tokio::test]
 async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
     let gw = Gateway::new()
-        .provider(
+        .provider::<ToServer, _, _>(
             "mcp",
             StreamableHttp::default(),
-            StdioTransport::new("sh", ["-c", ECHO]),
+            respan_gateway_http::connect(StdioTransport::new("sh", ["-c", ECHO])),
         )?
-        .client(StreamableHttp::default())?
+        .client::<ToServer, _, _>(StreamableHttp::default())?
         .plugin("auth", Authenticates)?
         .target("mcp")?;
     let session = init(&gw, &[("authorization", "Bearer alice")]).await;

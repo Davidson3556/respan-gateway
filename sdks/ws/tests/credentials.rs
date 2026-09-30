@@ -8,6 +8,7 @@ mod support;
 use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 use respan_gateway_http::CallHeaders;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
+use respan_gateway_ws::ClientEvent;
 use respan_gateway_ws::{JsonEvents, WsTransport};
 use support::*;
 
@@ -83,9 +84,13 @@ async fn a_transport_with_its_own_key_hides_the_clients() {
         .with_headers(own)
         .unwrap();
     let gateway = Gateway::new()
-        .client(Raw)
+        .client::<<Raw as respan_gateway_http::Codec>::Input, _, _>(Raw)
         .unwrap()
-        .provider("p", Raw, transport)
+        .provider::<<Raw as respan_gateway_http::Codec>::Input, _, _>(
+            "p",
+            Raw,
+            respan_gateway_http::connect(transport),
+        )
         .unwrap()
         .target("p")
         .unwrap();
@@ -110,9 +115,13 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
     let client_side = JsonEvents::new("one-name", "/v1/realtime");
     let provider_side = JsonEvents::new("another-name", "/other");
     let gateway = Gateway::new()
-        .client(client_side)
+        .client::<ClientEvent, _, _>(client_side)
         .unwrap()
-        .provider("p", provider_side, WsTransport::new(probe.base()).unwrap())
+        .provider::<ClientEvent, _, _>(
+            "p",
+            provider_side,
+            respan_gateway_http::connect(WsTransport::new(probe.base()).unwrap()),
+        )
         .unwrap()
         .target("p")
         .unwrap();
@@ -160,9 +169,13 @@ impl Plugin for Tenant {
 async fn a_key_set_for_the_call_replaces_the_clients() {
     let probe = Probe::start().await;
     let gateway = Gateway::new()
-        .client(Raw)
+        .client::<<Raw as respan_gateway_http::Codec>::Input, _, _>(Raw)
         .unwrap()
-        .provider("p", Raw, WsTransport::new(probe.base()).unwrap())
+        .provider::<<Raw as respan_gateway_http::Codec>::Input, _, _>(
+            "p",
+            Raw,
+            respan_gateway_http::connect(WsTransport::new(probe.base()).unwrap()),
+        )
         .unwrap()
         .plugin("tenant", Tenant)
         .unwrap()

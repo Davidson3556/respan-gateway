@@ -78,17 +78,27 @@ impl_format!(Raw);
 
 /// A gateway serving `format`, calling `provider` of `format` over `mock`
 /// at `base`, with `plugins`, recording outcomes on both edges.
-fn gateway(
-    format: impl respan_gateway_core::Format<Dialer = respan_gateway_http::Dialer> + Clone,
+fn gateway<F>(
+    format: F,
     mock: &MockTransport,
     base: &str,
     plugins: Vec<Arc<dyn Plugin>>,
-) -> (Gateway, Outcomes, Calls) {
+) -> (Gateway, Outcomes, Calls)
+where
+    F: Codec
+        + Clone
+        + respan_gateway_core::Format<respan_gateway_http::Transport, F::Input, F::Output>
+        + respan_gateway_core::Format<respan_gateway_http::Transport, F::Output, F::Input>,
+{
     let (log, calls) = (Outcomes::default(), Calls::default());
     let gw = Gateway::new()
-        .provider("p", format.clone(), mock.at(base))
+        .provider::<F::Input, F::Output, _>(
+            "p",
+            format.clone(),
+            respan_gateway_http::connect(mock.at(base)),
+        )
         .and_then(|g| {
-            g.client(format)?
+            g.client::<F::Input, F::Output, _>(format)?
                 .plugin("log", log.clone())?
                 .plugin("calls", calls.clone())
         });

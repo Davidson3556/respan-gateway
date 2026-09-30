@@ -24,7 +24,7 @@ use respan_gateway_formats::{call_head, headed, response_head, with_head};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{Asked, RequestHead, ResponseHead, fresh_response_head};
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, impl_format};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::{Calls, MockTransport, mock, post, serve, streamed};
 use serde_json::{Value, json};
@@ -248,9 +248,8 @@ impl Echo {
     }
 }
 
-#[async_trait]
-impl Transport for Echo {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Echo {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let (head, body, whole) = (call.head, call.body, !call.streams);
         self.heads
             .lock()
@@ -275,6 +274,15 @@ impl Transport for Echo {
         Ok(resp)
     }
 }
+impl From<Echo> for respan_gateway_http::Transport {
+    fn from(value: Echo) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
+    }
+}
 
 /// A gateway serving talk, relayed to the echo, with an OpenAI provider,
 /// recording every call.
@@ -284,7 +292,7 @@ fn talk(echo: &Echo, mock: &MockTransport, plugins: Vec<Arc<dyn Plugin>>) -> (Ga
         add_provider("echo", Talk, echo.clone()),
         add_provider("openai", OpenAiChat, mock.at(OPENAI)),
     ];
-    let gw = providers(list).and_then(|g| g.client(Talk));
+    let gw = providers(list).and_then(|g| g.client::<Say, _, _>(Talk));
     let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
     let gw = gw.and_then(|g| with_plugins(g, plugins));
     let gw = gw.and_then(|g| g.target("echo"));
@@ -611,7 +619,7 @@ fn heard(reply: &Reply) -> Option<Heard> {
 /// recording every call, with no target.
 fn talk_to(list: Vec<common::AddProvider>, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Calls) {
     let calls = Calls::default();
-    let gw = providers(list).and_then(|g| g.client(Talk));
+    let gw = providers(list).and_then(|g| g.client::<Say, _, _>(Talk));
     let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
     let gw = gw.and_then(|g| with_plugins(g, plugins));
     (gw.unwrap_or_else(|e| panic!("{e}")), calls)
@@ -622,9 +630,8 @@ fn talk_to(list: Vec<common::AddProvider>, plugins: Vec<Arc<dyn Plugin>>) -> (Ga
 #[derive(Clone, Default)]
 struct Early(Arc<Mutex<Vec<String>>>);
 
-#[async_trait]
-impl Transport for Early {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Early {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let mut body = call.body;
         let seen = self.0.clone();
         tokio::spawn(async move {
@@ -641,15 +648,35 @@ impl Transport for Early {
         Ok(resp)
     }
 }
+impl From<Early> for respan_gateway_http::Transport {
+    fn from(value: Early) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
+    }
+}
 
 /// A provider that never answers.
 #[derive(Clone)]
 struct Never;
 
-#[async_trait]
-impl Transport for Never {
-    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Never {
+    pub async fn send(
+        &self,
+        _call: Exchange<RequestHead>,
+    ) -> Result<Exchange<ResponseHead>, Fault> {
         std::future::pending().await
+    }
+}
+impl From<Never> for respan_gateway_http::Transport {
+    fn from(value: Never) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -657,10 +684,21 @@ impl Transport for Never {
 #[derive(Clone)]
 struct Down;
 
-#[async_trait]
-impl Transport for Down {
-    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Down {
+    pub async fn send(
+        &self,
+        _call: Exchange<RequestHead>,
+    ) -> Result<Exchange<ResponseHead>, Fault> {
         Err(Fault::upstream("unreachable"))
+    }
+}
+impl From<Down> for respan_gateway_http::Transport {
+    fn from(value: Down) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -963,7 +1001,12 @@ async fn a_101_is_read_until_content_at_once() {
     #[async_trait]
     impl Plugin for UntilContent {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Ok(Some(cx.call("echo").await?.until_content().await?))
+            Ok(Some(
+                cx.call("echo")
+                    .await?
+                    .buffer_until(|_: &Heard| true)
+                    .await?,
+            ))
         }
     }
 
@@ -1167,7 +1210,7 @@ impl_format!(Raw);
 async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
     let echo = Echo::default();
     let gw = providers([add_provider("raw", Raw, echo.clone())])
-        .and_then(|g| g.client(Raw)?.target("raw"))
+        .and_then(|g| g.client::<Sent<Raw>, _, _>(Raw)?.target("raw"))
         .unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
 
@@ -1191,15 +1234,23 @@ async fn a_101_goes_only_to_a_request_that_asked() {
     #[derive(Clone)]
     struct Switches;
 
-    #[async_trait]
-    impl Transport for Switches {
-        async fn send(
+    impl Switches {
+        pub async fn send(
             &self,
             _call: Exchange<RequestHead>,
         ) -> Result<Exchange<ResponseHead>, Fault> {
             let mut resp = Exchange::new(fresh_response_head(), futures::stream::empty().boxed());
             resp.head.status = StatusCode::SWITCHING_PROTOCOLS;
             Ok(resp)
+        }
+    }
+    impl From<Switches> for respan_gateway_http::Transport {
+        fn from(value: Switches) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
@@ -1353,11 +1404,22 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
     #[derive(Clone)]
     struct ReadThenFail;
 
-    #[async_trait]
-    impl Transport for ReadThenFail {
-        async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+    impl ReadThenFail {
+        pub async fn send(
+            &self,
+            call: Exchange<RequestHead>,
+        ) -> Result<Exchange<ResponseHead>, Fault> {
             let _ = call.body.collect::<Vec<_>>().await;
             Err(Fault::upstream("unreachable after reading"))
+        }
+    }
+    impl From<ReadThenFail> for respan_gateway_http::Transport {
+        fn from(value: ReadThenFail) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
@@ -1474,7 +1536,11 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
     const RAW: &str = "http://raw.test";
     let (mock, calls) = (MockTransport::new(), Calls::default());
     let gw = providers([add_provider("raw", Raw, mock.at(RAW))])
-        .and_then(|g| g.client(Raw)?.target("raw")?.plugin("calls", calls.clone()))
+        .and_then(|g| {
+            g.client::<Sent<Raw>, _, _>(Raw)?
+                .target("raw")?
+                .plugin("calls", calls.clone())
+        })
         .unwrap_or_else(|e| panic!("{e}"));
     let empty = http::Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1702,8 +1768,8 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
 
     let echo = Echo::default();
     let gw = Gateway::new()
-        .provider("echo", Strict, echo.clone())
-        .and_then(|g| g.client(Strict))
+        .provider::<Say, _, _>("echo", Strict, respan_gateway_http::connect(echo.clone()))
+        .and_then(|g| g.client::<Say, _, _>(Strict))
         .and_then(|g| g.plugin("p", P))
         .and_then(|g| g.target("echo"))
         .unwrap_or_else(|e| panic!("{e}"));

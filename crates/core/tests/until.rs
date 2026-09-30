@@ -13,7 +13,7 @@ use edge::*;
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::*;
 
-type Script = Vec<Result<&'static str, ()>>;
+type Script = Vec<std::result::Result<&'static str, ()>>;
 
 /// What a client and the hooks saw of a provider that answers `script` with
 /// `status`, its response read as `mode` says (see [`Mode`]).
@@ -21,7 +21,11 @@ async fn run(
     script: Script,
     status: u16,
     mode: u8,
-) -> (Result<(u16, String), String>, Vec<String>, Vec<String>) {
+) -> (
+    std::result::Result<(u16, String), String>,
+    Vec<String>,
+    Vec<String>,
+) {
     let rec = Rec::default();
     let script = Arc::new(script);
     let t = fnt(move |_| {
@@ -36,9 +40,9 @@ async fn run(
         .boxed()
     });
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("a", Toy, t)
+        .provider::<In, _, _>("a", Toy, connect(t))
         .unwrap()
         .plugin("rec", rec.clone())
         .unwrap()
@@ -48,7 +52,7 @@ async fn run(
     let got = read(res).await;
     gw.idle().await;
     let l = rec.log();
-    let ends = |ends: Vec<&Result<(), Fault>>| {
+    let ends = |ends: Vec<&Result<()>>| {
         ends.into_iter()
             .map(|e| {
                 e.as_ref()
@@ -119,9 +123,9 @@ async fn time_of(mode: u8, lead: &'static str, n: usize) -> Duration {
         .boxed()
     });
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("a", Toy, t)
+        .provider::<In, _, _>("a", Toy, connect(t))
         .unwrap()
         .plugin("mode", Mode(mode))
         .unwrap();
@@ -170,17 +174,21 @@ async fn until_content_holds_a_response_without_content_to_its_end() {
     struct Probe(Arc<AtomicUsize>, Arc<AtomicUsize>);
     #[async_trait]
     impl Plugin for Probe {
-        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let resp = cx.call("a").await?.until_content().await?;
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+            let resp = cx
+                .call("a")
+                .await?
+                .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                .await?;
             self.1
                 .store(self.0.load(Ordering::SeqCst), Ordering::SeqCst);
             Ok(Some(resp))
         }
     }
     let gw = Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("a", Toy, t)
+        .provider::<In, _, _>("a", Toy, connect(t))
         .unwrap()
         .plugin("probe", Probe(reads.clone(), at_return.clone()))
         .unwrap();
@@ -192,4 +200,37 @@ async fn until_content_holds_a_response_without_content_to_its_end() {
         "read to the end before it returned"
     );
     assert_eq!(body, format!("{}!", "keepalive;".repeat(999)));
+}
+
+#[tokio::test]
+async fn a_buffer_predicate_panic_settles_both_edges_as_internal() {
+    struct Panic;
+    #[async_trait]
+    impl Plugin for Panic {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+            let response = cx
+                .call("a")
+                .await?
+                .buffer_until(|_: &Out| panic!("predicate failed"))
+                .await?;
+            Ok(Some(response))
+        }
+    }
+    let rec = Rec::default();
+    let transport = fnt(|_| async { Ok(answer(200, slow(vec!["a", "DONE"]))) }.boxed());
+    let gateway = Gateway::new()
+        .client::<In, _, _>(Toy)
+        .unwrap()
+        .provider::<In, _, _>("a", Toy, connect(transport))
+        .unwrap()
+        .plugin("rec", rec.clone())
+        .unwrap()
+        .plugin("panic", Panic)
+        .unwrap();
+    let (response, end) = handle(&gateway, req(vec!["q"])).await;
+    assert_eq!(read(response).await, Ok((500, "ERR internal".into())));
+    assert_eq!(code(&end.await), "internal");
+    gateway.idle().await;
+    assert_eq!(rec.log().prov_codes(), ["internal"]);
+    assert_eq!(rec.log().client_codes(), ["internal"]);
 }

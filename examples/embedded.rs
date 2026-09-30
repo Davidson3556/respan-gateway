@@ -1,7 +1,7 @@
 //! Use case 14, the gateway as a library: another Rust service runs the
 //! pipeline in-process, with no server and no second hop. It builds a
 //! [`Gateway`], hands [`Gateway::handle`] a request on the HTTP wire (an
-//! [`Accepted`] `http` request head and its body, whole), reads the answer
+//! [`Transport`] `http` request head and its body, whole), reads the answer
 //! and awaits how the request ended. With no HTTP hop, it needs none of the
 //! adapter's rules (`respan_gateway_http::serve` applies them); no answer
 //! means no format took the request, and the end says why.
@@ -12,13 +12,15 @@
 //!
 //! `cargo run -p respan-gateway-examples --example embedded`
 
+use respan_gateway_core::futures::future::join;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{Extensions, Fault, Gateway};
 use respan_gateway_examples::Meter;
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Accepted, http};
+use respan_gateway_http::{Transport, connect, http};
 use respan_gateway_testkit::{MockTransport, mock};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -27,8 +29,8 @@ const OPENAI: &str = "http://openai.test/v1";
 /// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway(mock: &MockTransport, tally: Meter) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, connect(mock.at(OPENAI)))?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("tally", tally)?
         .target("openai")
 }
@@ -49,16 +51,23 @@ async fn ask(
         .map_err(respan_gateway_http::built_wrong)?
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
-    let (wire, answer) = Accepted::new(head, body, false);
-    let handled = gw.handle(wire, Extensions::new()).await;
-    let Some((resp, end)) = answer.await else {
-        let fault = handled.err();
-        return Err(fault.unwrap_or_else(|| Fault::internal("no format answered")));
+    let (wire, answer) = Transport::accept(head, body, false);
+    let handled = gw.handle(wire, Extensions::new());
+    let consume = async {
+        let Some((resp, end)) = answer.await else {
+            return Ok::<_, Fault>(None);
+        };
+        let (head, body) = resp.into_parts();
+        let body = body.collect().await?.to_bytes();
+        Ok(Some((head.status, body, end.await)))
     };
-    // Read the body first: the end resolves once the response ends.
-    let (head, body) = resp.into_parts();
-    let body = body.collect().await?.to_bytes();
-    Ok((head.status, body, end.await))
+    // The handle includes delivery, so drive it while consuming the reply.
+    let (handled, answer) = join(handled, consume).await;
+    answer?.ok_or_else(|| {
+        handled
+            .err()
+            .unwrap_or_else(|| Fault::internal("no format answered"))
+    })
 }
 
 #[tokio::main]

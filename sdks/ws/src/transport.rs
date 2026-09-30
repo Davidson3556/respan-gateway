@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use respan_gateway_core::Fault;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
-use respan_gateway_core::futures::{SinkExt, StreamExt, stream};
-use respan_gateway_core::{Fault, async_trait};
+use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap};
@@ -27,7 +27,7 @@ use tokio_tungstenite::{
 };
 
 use crate::{CLOSE_WAIT, CloseCode, MAX_MESSAGE};
-use respan_gateway_http::{Exchange, Frames, Transport};
+use respan_gateway_http::{Exchange, Frames};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -172,9 +172,9 @@ fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
     Fault::config("the provider request is not valid").with_source(e)
 }
 
-#[async_trait]
-impl Transport for WsTransport {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl WsTransport {
+    /// Send an encoded call and return its response.
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let mut call = call;
         proxy_call(&mut call.head);
         strip_client_origin_headers(&mut call.head.headers);
@@ -227,13 +227,34 @@ impl Transport for WsTransport {
         head.headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
         // One frame in flight: a reader that stops reading stops the connection's.
         let (frames, frames_in) = mpsc::channel(1);
-        tokio::spawn(session(socket, body, frames));
+        let writing = tokio::spawn(session(socket, body, frames));
         let frames_in = stream::unfold(frames_in, |mut rx| async {
             rx.recv().await.map(|f| (f, rx))
         });
         let mut answer = Exchange::new(head, frames_in.boxed());
         answer.streams = true;
+        answer.write_completion = Some(
+            async move {
+                writing.await.map_err(|error| {
+                    if error.is_cancelled() {
+                        Fault::abandoned()
+                    } else {
+                        Fault::internal("the WebSocket session panicked")
+                    }
+                })?
+            }
+            .boxed(),
+        );
         Ok(answer)
+    }
+}
+impl From<WsTransport> for respan_gateway_http::Transport {
+    fn from(value: WsTransport) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -251,8 +272,14 @@ enum Sent {
 }
 
 /// Pump `body`'s frames to the provider and the provider's to `frames`,
-/// until one side ends and the other has had its say.
-async fn session(socket: Socket, body: Frames, frames: Sender<Result<Bytes, Fault>>) {
+/// until one side ends and the other has had its say. Its result completes
+/// the HTTP transport's outgoing transfer; provider-initiated clean closure
+/// stops the upload normally. Read failures remain on the incoming flow.
+async fn session(
+    socket: Socket,
+    body: Frames,
+    frames: Sender<Result<Bytes, Fault>>,
+) -> Result<(), Fault> {
     let (sink, stream) = socket.split();
     let closing = Arc::new(AtomicBool::new(false));
     // Only the reader holds the answer's sender, so the answer ends when it
@@ -263,21 +290,24 @@ async fn session(socket: Socket, body: Frames, frames: Sender<Result<Bytes, Faul
     tokio::select! {
         // The provider is done or the answer is dropped, so the frames
         // still to send are dropped too, with the call's body.
-        () = &mut read => {}
+        () = &mut read => Ok(()),
         sent = sent => match sent {
             // Close is sent; the provider's part of it may take a while.
             Sent::Closed => {
                 let _ = tokio::time::timeout(CLOSE_WAIT, read).await;
+                Ok(())
             }
-            Sent::Gone(fault) => {
-                let _ = abort.send(fault);
+            Sent::Gone(fault) | Sent::Failed(fault) => {
+                let _ = abort.send(fault.clone());
                 read.await;
+                Err(fault)
             }
-            Sent::Failed(fault) => {
-                let _ = abort.send(fault);
+            Sent::Lost => {
+                // The reader classifies the socket failure on the incoming
+                // flow, preserving its precise close code or truncation.
                 read.await;
-            }
-            Sent::Lost => read.await,
+                Ok(())
+            },
         },
     }
 }

@@ -1,0 +1,408 @@
+//! One format over multiple transport types and fresh transports per attempt.
+#![allow(clippy::unwrap_used, clippy::type_complexity)]
+
+use std::cell::Cell;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::future::BoxFuture;
+use respan_gateway_core::futures::{FutureExt, Sink, StreamExt};
+use respan_gateway_core::{
+    ClientContext, Connection, Events, Extensions, Fault, Format, Gateway, Plugin, ProviderContext,
+    Response, async_trait, write,
+};
+
+#[derive(Clone)]
+struct Input(u8);
+#[derive(Clone)]
+struct Output(u8);
+struct PrivateMetadata;
+#[derive(Clone)]
+struct FromHook;
+
+#[derive(Default)]
+struct Trace {
+    factories: Mutex<Vec<(usize, bool)>>,
+    sent: Mutex<Vec<(usize, bool, u8)>>,
+    received: Mutex<Vec<(bool, u8)>>,
+    ended: Mutex<Vec<bool>>,
+}
+
+enum Io {
+    Client(Arc<Trace>),
+    Provider {
+        attempt: usize,
+        fail: bool,
+        trace: Arc<Trace>,
+    },
+}
+
+// Cell deliberately makes this transport Send without Sync.
+struct First(Io, Cell<u8>);
+struct Second(Io);
+struct Messages;
+
+type Receiving<T> = BoxFuture<'static, Result<Events<T>, Fault>>;
+type Sending<T> = Pin<Box<dyn Sink<Events<T>, Error = Fault> + Send>>;
+
+fn client(io: Io) -> Result<(Receiving<Input>, Sending<Output>), Fault> {
+    let Io::Client(trace) = io else {
+        return Err(Fault::config("wrong direction"));
+    };
+    let incoming = Events::lazy(|| Ok(Input(7))).with_metadata("messages", PrivateMetadata);
+    let outgoing = write(move |mut outputs: Events<Output>| {
+        let relayed = outputs.metadata::<PrivateMetadata>("messages").is_some();
+        Ok(async move {
+            while let Some(output) = outputs.next().await {
+                trace.received.lock().unwrap().push((relayed, output?.0));
+            }
+            Ok(())
+        })
+    });
+    Ok((
+        futures::future::ready(Ok(incoming)).boxed(),
+        Box::pin(outgoing),
+    ))
+}
+
+fn provider(io: Io) -> Result<(Receiving<Output>, Sending<Input>), Fault> {
+    let Io::Provider {
+        attempt,
+        fail,
+        trace,
+    } = io
+    else {
+        return Err(Fault::config("wrong direction"));
+    };
+    let (answer, answered) = oneshot::channel();
+    let incoming = async move { answered.await.map_err(|_| Fault::abandoned()) }.boxed();
+    let outgoing = write(move |inputs: Events<Input>| {
+        let relayed = inputs.metadata::<PrivateMetadata>("messages").is_some();
+        let value = inputs
+            .value()
+            .transpose()?
+            .ok_or_else(|| Fault::bad_request("one input"))?
+            .0;
+        trace.sent.lock().unwrap().push((attempt, relayed, value));
+        Ok(async move {
+            if fail {
+                return Err(Fault::upstream("retry this attempt"));
+            }
+            let outputs = Events::single(Output(value)).with_metadata("messages", PrivateMetadata);
+            answer.send(outputs).map_err(|_| Fault::abandoned())?;
+            Ok(())
+        })
+    });
+    Ok((incoming, Box::pin(outgoing)))
+}
+
+impl Format<First, Input, Output> for Messages {
+    fn name(&self) -> &str {
+        "messages"
+    }
+
+    fn matches(&self, io: &First) -> bool {
+        io.1.get() == 0 && matches!(io.0, Io::Client(_))
+    }
+
+    fn bind(&self, io: First) -> Result<Connection<Input, Output>, Fault> {
+        client(io.0)
+    }
+}
+
+impl Format<First, Output, Input> for Messages {
+    fn name(&self) -> &str {
+        "messages"
+    }
+
+    fn bind(&self, io: First) -> Result<Connection<Output, Input>, Fault> {
+        provider(io.0)
+    }
+}
+
+impl Format<Second, Input, Output> for Messages {
+    fn name(&self) -> &str {
+        "messages"
+    }
+
+    fn matches(&self, io: &Second) -> bool {
+        matches!(io.0, Io::Client(_))
+    }
+
+    fn bind(&self, io: Second) -> Result<Connection<Input, Output>, Fault> {
+        client(io.0)
+    }
+}
+
+impl Format<Second, Output, Input> for Messages {
+    fn name(&self) -> &str {
+        "messages"
+    }
+
+    fn bind(&self, io: Second) -> Result<Connection<Output, Input>, Fault> {
+        provider(io.0)
+    }
+}
+
+fn attempt(trace: &Arc<Trace>, extensions: Extensions, fail_first: bool) -> Io {
+    let mut factories = trace.factories.lock().unwrap();
+    let attempt = factories.len() + 1;
+    factories.push((attempt, extensions.get::<FromHook>().is_some()));
+    Io::Provider {
+        attempt,
+        fail: fail_first && attempt == 1,
+        trace: trace.clone(),
+    }
+}
+
+struct Hooks {
+    trace: Arc<Trace>,
+    retry: bool,
+    own: bool,
+    edit: bool,
+    reject: bool,
+}
+
+#[async_trait]
+impl Plugin for Hooks {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        if self.edit {
+            cx.filter(|input: &mut Input| {
+                input.0 += 1;
+                Ok(())
+            })?;
+        }
+        if self.own {
+            return cx.call("p").with_input(Input(9)).await.map(Some);
+        }
+        if self.retry {
+            let call = cx.call("p");
+            assert!(call.clone().await.is_err());
+            return call.await.map(Some);
+        }
+        Ok(None)
+    }
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+        px.extensions_mut().insert(FromHook);
+        if self.reject {
+            return Err(Fault::config("hook refused before transport creation"));
+        }
+        Ok(())
+    }
+    async fn on_provider_end(&self, px: &ProviderContext, _: &Result<(), Fault>) {
+        self.trace.ended.lock().unwrap().push(px.is_sent());
+    }
+}
+
+fn hooks(trace: &Arc<Trace>) -> Hooks {
+    Hooks {
+        trace: trace.clone(),
+        retry: false,
+        own: false,
+        edit: false,
+        reject: false,
+    }
+}
+
+#[tokio::test]
+async fn same_format_can_use_multiple_transports_without_relaying_metadata_between_them() {
+    let trace = Arc::new(Trace::default());
+    let factories = trace.clone();
+    let gateway = Gateway::new()
+        .client::<Input, Output, First>(Messages)
+        .unwrap()
+        .client::<Input, Output, Second>(Messages)
+        .unwrap()
+        .provider::<Input, _, _>("p", Messages, move |extensions| {
+            Second(attempt(&factories, extensions, false))
+        })
+        .unwrap()
+        .plugin("hooks", hooks(&trace))
+        .unwrap()
+        .target("p")
+        .unwrap();
+    gateway
+        .handle(
+            First(Io::Client(trace.clone()), Cell::new(0)),
+            Extensions::new(),
+        )
+        .await
+        .unwrap();
+    gateway.idle().await;
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(false, 7)]);
+    assert_eq!(*trace.factories.lock().unwrap(), [(1, true)]);
+
+    // The first registered transport does not consume an incompatible
+    // value while matching; the second implementation receives it intact.
+    gateway
+        .handle(Second(Io::Client(trace.clone())), Extensions::new())
+        .await
+        .unwrap();
+    gateway.idle().await;
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7), (2, true, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(false, 7), (true, 7)]);
+}
+
+#[tokio::test]
+async fn same_transport_preserves_original_provenance_even_after_a_filter() {
+    let trace = Arc::new(Trace::default());
+    let factories = trace.clone();
+    let mut plugin = hooks(&trace);
+    plugin.edit = true;
+    let gateway = Gateway::new()
+        .client::<Input, Output, First>(Messages)
+        .unwrap()
+        .provider::<Input, _, _>("p", Messages, move |extensions| {
+            First(attempt(&factories, extensions, false), Cell::new(0))
+        })
+        .unwrap()
+        .plugin("hooks", plugin)
+        .unwrap()
+        .target("p")
+        .unwrap();
+    gateway
+        .handle(
+            First(Io::Client(trace.clone()), Cell::new(0)),
+            Extensions::new(),
+        )
+        .await
+        .unwrap();
+    gateway.idle().await;
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 8)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(true, 8)]);
+}
+
+#[tokio::test]
+async fn own_input_does_not_relay_metadata_on_the_same_transport() {
+    let trace = Arc::new(Trace::default());
+    let factories = trace.clone();
+    let mut plugin = hooks(&trace);
+    plugin.own = true;
+    let gateway = Gateway::new()
+        .client::<Input, Output, First>(Messages)
+        .unwrap()
+        .provider::<Input, _, _>("p", Messages, move |extensions| {
+            First(attempt(&factories, extensions, false), Cell::new(0))
+        })
+        .unwrap()
+        .plugin("hooks", plugin)
+        .unwrap()
+        .target("p")
+        .unwrap();
+    gateway
+        .handle(
+            First(Io::Client(trace.clone()), Cell::new(0)),
+            Extensions::new(),
+        )
+        .await
+        .unwrap();
+    gateway.idle().await;
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 9)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(false, 9)]);
+}
+
+#[tokio::test]
+async fn retries_create_distinct_transports_after_each_attempts_hooks() {
+    let trace = Arc::new(Trace::default());
+    let factories = trace.clone();
+    let mut plugin = hooks(&trace);
+    plugin.retry = true;
+    let gateway = Gateway::new()
+        .client::<Input, Output, First>(Messages)
+        .unwrap()
+        .provider::<Input, _, _>("p", Messages, move |extensions| {
+            First(attempt(&factories, extensions, true), Cell::new(0))
+        })
+        .unwrap()
+        .plugin("hooks", plugin)
+        .unwrap()
+        .target("p")
+        .unwrap();
+    gateway
+        .handle(
+            First(Io::Client(trace.clone()), Cell::new(0)),
+            Extensions::new(),
+        )
+        .await
+        .unwrap();
+    gateway.idle().await;
+    assert_eq!(*trace.factories.lock().unwrap(), [(1, true), (2, true)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 7), (2, true, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(true, 7)]);
+}
+
+#[tokio::test]
+async fn rejected_provider_hook_does_not_create_a_transport() {
+    let trace = Arc::new(Trace::default());
+    let factories = trace.clone();
+    let mut plugin = hooks(&trace);
+    plugin.reject = true;
+    let gateway = Gateway::new()
+        .client::<Input, Output, First>(Messages)
+        .unwrap()
+        .provider::<Input, _, _>("p", Messages, move |extensions| {
+            First(attempt(&factories, extensions, false), Cell::new(0))
+        })
+        .unwrap()
+        .plugin("hooks", plugin)
+        .unwrap()
+        .target("p")
+        .unwrap();
+    assert!(
+        gateway
+            .handle(
+                First(Io::Client(trace.clone()), Cell::new(0)),
+                Extensions::new()
+            )
+            .await
+            .is_err()
+    );
+    gateway.idle().await;
+    assert!(trace.factories.lock().unwrap().is_empty());
+    assert_eq!(*trace.ended.lock().unwrap(), [false]);
+}
+
+#[tokio::test]
+async fn a_panicking_transport_factory_is_an_unsent_internal_failure() {
+    let trace = Arc::new(Trace::default());
+    let gateway = Gateway::new()
+        .client::<Input, Output, First>(Messages)
+        .unwrap()
+        .provider::<Input, _, _>("p", Messages, |_| -> First { panic!("factory failed") })
+        .unwrap()
+        .plugin("hooks", hooks(&trace))
+        .unwrap()
+        .target("p")
+        .unwrap();
+    let fault = gateway
+        .handle(
+            First(Io::Client(trace.clone()), Cell::new(0)),
+            Extensions::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(fault.code(), respan_gateway_core::codes::INTERNAL);
+    gateway.idle().await;
+    assert_eq!(*trace.ended.lock().unwrap(), [false]);
+}
+
+#[test]
+fn registration_checks_the_kind_after_assigning_the_edge_role() {
+    let gateway = Gateway::new()
+        .client::<Input, Output, First>(Messages)
+        .unwrap();
+    // This selects the receive-Input/send-Output implementation for an
+    // outgoing call: the gateway must interpret its kind in reverse.
+    let fault = gateway
+        .provider::<Output, Input, First>("backwards", Messages, |_| {
+            panic!("registration must not construct I/O")
+        })
+        .unwrap_err();
+    assert_eq!(fault.code(), "config");
+    assert_eq!(
+        fault.message(),
+        "two formats named messages are of different kinds"
+    );
+}

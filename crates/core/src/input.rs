@@ -1,73 +1,64 @@
+use crate::Result;
 use std::any::{Any, TypeId};
-use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
+use crate::Events;
 use crate::Fault;
-use crate::fault::{PANICKED, guarded};
-use crate::format::{AnyFormat, AnyInput, Origin};
+use crate::events::{Metadata, Single};
+use crate::fault::guarded;
+use crate::format::{AnyFormat, AnyValue};
 use crate::plugin::Filters;
-
-/// The client's origin, the input in it decoded when first needed.
-struct Base {
-    format: Arc<dyn AnyFormat>,
-    origin: Option<Origin>,
-    decoded: OnceLock<Option<Result<AnyInput, Fault>>>,
-}
 
 /// The input that came with a request's head, and the holder's changed
 /// copy; or a call's own.
 #[derive(Clone)]
 pub(crate) struct Input {
-    base: Arc<Base>,
+    format: Arc<dyn AnyFormat>,
+    single: Option<Arc<Single<AnyValue>>>,
+    metadata: Metadata,
     /// Set once a filter ran over it or a call brings its own; a filter's
     /// failure is kept.
-    changed: Option<Result<AnyInput, Fault>>,
+    changed: Option<Result<AnyValue>>,
     /// Whether it is a call's own, none of the client's.
     pub(crate) own: bool,
 }
 
 impl Input {
-    pub(crate) fn new(format: Arc<dyn AnyFormat>, origin: Option<Origin>) -> Self {
-        let base = Base {
-            format,
-            origin,
-            decoded: OnceLock::new(),
-        };
+    pub(crate) fn new(
+        format: Arc<dyn AnyFormat>,
+        single: Option<Arc<Single<AnyValue>>>,
+        metadata: Metadata,
+    ) -> Self {
         Self {
-            base: Arc::new(base),
+            format,
+            single,
+            metadata,
             changed: None,
             own: false,
         }
     }
 
     /// A call's own `input`, of `format`'s kind.
-    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: AnyInput) -> Self {
+    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: AnyValue) -> Self {
         Self {
             changed: Some(Ok(input)),
             own: true,
-            ..Self::new(format, None)
+            ..Self::new(format, None, None)
         }
     }
 
     /// The format whose kind it is of.
     fn format(&self) -> &Arc<dyn AnyFormat> {
-        &self.base.format
+        &self.format
     }
 
     /// The client's input, decoded once; `None` if none came.
-    fn base(&self) -> Option<Result<&AnyInput, Fault>> {
-        let base = &*self.base;
-        let decoded = base.decoded.get_or_init(|| {
-            let origin = base.origin.as_ref()?;
-            // A panic is an internal fault.
-            let input = AssertUnwindSafe(|| base.format.input(origin));
-            std::panic::catch_unwind(input).unwrap_or_else(|_| Some(Err(Fault::internal(PANICKED))))
-        });
-        decoded.as_ref().map(|d| d.as_ref().map_err(Clone::clone))
+    fn base(&self) -> Option<Result<&AnyValue>> {
+        self.single.as_ref().map(|single| single.value())
     }
 
     /// The input as it is now.
-    fn value(&self) -> Result<&AnyInput, Fault> {
+    fn value(&self) -> Result<&AnyValue> {
         match &self.changed {
             Some(changed) => changed.as_ref().map_err(Clone::clone),
             None => self.base().unwrap_or_else(|| {
@@ -79,7 +70,7 @@ impl Input {
     }
 
     /// The input as `T`; another type is refused without decoding.
-    pub(crate) fn get<T: Any>(&self) -> Result<&T, Fault> {
+    pub(crate) fn get<T: Any>(&self) -> Result<&T> {
         if self.format().kind().0 != TypeId::of::<T>() {
             return Err(Fault::wrong_kind::<T>());
         }
@@ -90,7 +81,7 @@ impl Input {
 
     /// Run the one input of a request or call whose inputs ended through
     /// `filters`, and end them: it stays one input.
-    pub(crate) fn filter(&mut self, mut filters: Filters) -> Result<(), Fault> {
+    pub(crate) fn filter(&mut self, mut filters: Filters) -> Result<()> {
         let format = self.format().clone();
         let filtered = self.value().cloned().and_then(|input| {
             // Dropping the held copy lets an input no one shares be moved.
@@ -104,7 +95,7 @@ impl Input {
                 filters.end(edited, &mut values)?;
                 let inputs = values.map(|v| format.inputs(v)).unwrap_or_default();
                 // Dropping a whole body's one input is refusing, `Err`'s job.
-                match <[AnyInput; 1]>::try_from(inputs) {
+                match <[AnyValue; 1]>::try_from(inputs) {
                     Ok([input]) => Ok(input),
                     Err(_) => Err(Fault::internal(
                         "an input filter left other than one input where a whole body is one",
@@ -119,14 +110,21 @@ impl Input {
         filtered.map(drop)
     }
 
-    /// What a call writes first: a call's own or a changed input as its
-    /// value; on a relay, unchanged, `None` (the origin's own, never
-    /// decoded); else the decoded input, if any.
-    pub(crate) fn sent(&self, relay: bool) -> Result<Option<AnyInput>, Fault> {
-        match &self.changed {
-            Some(changed) => changed.clone().map(Some),
-            None if relay => Ok(None),
-            None => self.base().map(|base| base.cloned()).transpose(),
+    /// Supply the event sequence accepted by the provider sink.
+    /// A filtered value is eager; an unchanged value keeps its lazy decoder.
+    pub(crate) fn events(&self, relay: bool) -> Result<Events<AnyValue>> {
+        let mut events = match &self.changed {
+            Some(value) => Events::single(value.clone()?),
+            None => self
+                .single
+                .as_ref()
+                .ok_or_else(|| Fault::internal("a live input needs its stream"))?
+                .clone()
+                .into_events(),
+        };
+        if relay {
+            events.set_metadata(self.metadata.clone());
         }
+        Ok(events)
     }
 }

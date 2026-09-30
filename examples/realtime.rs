@@ -719,8 +719,12 @@ fn gateway(
     longest: Duration,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .client(realtime())?
-        .provider("openai", realtime(), WsTransport::new(provider)?)?
+        .client::<ClientEvent, _, _>(realtime())?
+        .provider::<ClientEvent, _, _>(
+            "openai",
+            realtime(),
+            respan_gateway_http::connect(WsTransport::new(provider)?),
+        )?
         .target("openai")?
         .plugin("ends", ends.clone())?
         .plugin("pii", Pii)?

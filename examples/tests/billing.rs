@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_formats::conversation::units;
 
 #[tokio::test]
@@ -50,8 +51,12 @@ async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<
     let (mock, store) = (MockTransport::new(), Memory::default());
     let prices = HashMap::from([("small", Price::new(150_000, 600_000))]);
     let gw = Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("refuses", Refuses)?
         .plugin(
             "billing",

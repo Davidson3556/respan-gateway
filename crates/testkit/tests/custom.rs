@@ -7,7 +7,10 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
 use respan_gateway_core::futures;
-use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Response, codes};
+use respan_gateway_core::{
+    ClientContext, Connection, Fault, Filter, Gateway, Plugin, Response, codes,
+};
+use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::whole::Relay;
@@ -28,12 +31,15 @@ fn to(format: &str, body: impl Into<Bytes>) -> http::Request<respan_gateway_http
 }
 
 /// A gateway serving `format`: `providers`, `plugins` in order, `target`.
-fn serving(
-    format: impl respan_gateway_core::Format,
+fn serving<F>(
+    format: F,
     list: impl IntoIterator<Item = AddProvider>,
     plugins: Vec<Arc<dyn Plugin>>,
     target: Option<&str>,
-) -> Result<Gateway, Fault> {
+) -> Result<Gateway, Fault>
+where
+    F: Codec + respan_gateway_core::Format<respan_gateway_http::Transport, F::Input, F::Output>,
+{
     let gw = with_plugins(providers(list)?.client(format)?, plugins)?;
     match target {
         Some(t) => gw.target(t),
@@ -185,10 +191,6 @@ impl Codec for JevFormat {
             Some(raw) => raw.clone(),
             None => json!({ "error": fault.message() }).to_string().into(),
         }
-    }
-
-    fn is_content(&self, answer: &Answer) -> bool {
-        answer.text.is_some()
     }
 }
 
@@ -441,7 +443,10 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
             mock.at("http://o.test"),
         );
         providers([openai, add_provider("v2", V2, mock.at("http://v2.test"))])
-            .and_then(|gw| gw.client(V1)?.client(respan_gateway_formats::OpenAiChat))
+            .and_then(|gw| {
+                gw.client::<Jev, _, _>(V1)?
+                    .client::<Conversation, _, _>(respan_gateway_formats::OpenAiChat)
+            })
             .and_then(|gw| {
                 plugins
                     .into_iter()
@@ -482,7 +487,11 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
 // A format of no kind is a kind of one, so serving it needs no provider.
 #[tokio::test]
 async fn a_format_of_no_kind_is_served_like_any_other() {
-    assert!(providers([]).and_then(|gw| gw.client(Anywhere)).is_ok());
+    assert!(
+        providers([])
+            .and_then(|gw| gw.client::<Sent<Anywhere>, _, _>(Anywhere))
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -700,7 +709,19 @@ fn a_kind_of_one_type_for_both_directions_does_not_build() {
         }
     }
 
-    impl_format!(OneWay);
+    // The HTTP macro requires distinct message types. Exercise the core's
+    // registration check directly with the otherwise-invalid pair.
+    impl respan_gateway_core::Format<respan_gateway_http::Transport, Jev, Jev> for OneWay {
+        fn name(&self) -> &str {
+            Codec::name(self)
+        }
+        fn bind(
+            &self,
+            _: respan_gateway_http::Transport,
+        ) -> respan_gateway_core::Result<Connection<Jev, Jev>> {
+            panic!("invalid kind must be rejected before binding")
+        }
+    }
 
     let mock = MockTransport::new();
     let err = serving(
@@ -1474,8 +1495,13 @@ impl Plugin for NoteFormat {
 #[tokio::test]
 async fn the_first_format_served_that_accepts_a_request_serves_it() {
     let serving_by = |gw: Gateway, anywhere_first: bool| match anywhere_first {
-        true => gw.client(Anywhere)?.client(V1),
-        false => gw.client(V1)?.client(V2)?.client(Anywhere),
+        true => gw
+            .client::<Sent<Anywhere>, _, _>(Anywhere)?
+            .client::<Jev, _, _>(V1),
+        false => gw
+            .client::<Jev, _, _>(V1)?
+            .client::<Jev, _, _>(V2)?
+            .client::<Sent<Anywhere>, _, _>(Anywhere),
     };
     let served = async |anywhere_first: bool| {
         let note = NoteFormat::default();
@@ -1570,7 +1596,9 @@ async fn a_plugin_for_one_kind_lets_other_traffic_pass_when_it_says_so() {
         add_provider("any", Anywhere, mock.at("http://any.test")),
     ])
     .and_then(|gw| {
-        let gw = gw.client(V2)?.client(Anywhere)?;
+        let gw = gw
+            .client::<Jev, _, _>(V2)?
+            .client::<Sent<Anywhere>, _, _>(Anywhere)?;
         gw.plugin("to", ToHeader)?.plugin("polite", PoliteJev)
     })
     .unwrap_or_else(|e| panic!("{e}"));
@@ -1720,8 +1748,8 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
     let any = add_provider("any", Anywhere, mock.at("http://any.test"));
     let gw = providers([any])
         .and_then(|gw| {
-            gw.client(V1)?
-                .client(Anywhere)?
+            gw.client::<Jev, _, _>(V1)?
+                .client::<Sent<Anywhere>, _, _>(Anywhere)?
                 .plugin("kinds", kinds.clone())
         })
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1761,9 +1789,8 @@ async fn a_refusal_goes_out_with_its_faults_status_even_a_success() {
 /// A provider whose stream sends its first bytes and stays open.
 struct Open;
 
-#[async_trait]
-impl respan_gateway_http::Transport for Open {
-    async fn send(
+impl Open {
+    pub async fn send(
         &self,
         _call: respan_gateway_http::Exchange<RequestHead>,
     ) -> Result<respan_gateway_http::Exchange<Head>, Fault> {
@@ -1772,6 +1799,15 @@ impl respan_gateway_http::Transport for Open {
         let body = futures::stream::iter([Ok(first)]).chain(futures::stream::pending());
         let head = respan_gateway_http::fresh_response_head();
         Ok(respan_gateway_http::Exchange::new(head, body.boxed()))
+    }
+}
+impl From<Open> for respan_gateway_http::Transport {
+    fn from(value: Open) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -1783,7 +1819,12 @@ async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_f
     #[async_trait]
     impl Plugin for Race {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Ok(Some(cx.call("any").await?.until_content().await?))
+            Ok(Some(
+                cx.call("any")
+                    .await?
+                    .buffer_until(|_: &Got<Anywhere>| true)
+                    .await?,
+            ))
         }
     }
 

@@ -2,91 +2,100 @@
 //! transport, and the answer classified at its head (rule 2), then read
 //! into outputs.
 
-use std::sync::Arc;
-
 use bytes::{Bytes, BytesMut};
-use futures::future::BoxFuture;
+use futures::channel::oneshot;
 use futures::{FutureExt, StreamExt, stream};
 use http::StatusCode;
 use http::header::UPGRADE;
-use respan_gateway_core::{Events, Extensions, Fault, Headed, Origin};
+use respan_gateway_core::{Events, Fault, write};
 
-use super::Came;
 use super::reader::{Failure, Reader};
 use super::writer::Writer;
-use crate::{Codec, Dialer, Encoder, Exchange, RequestHead, ResponseHead};
+use super::{Connection, RequestMetadata, ResponseMetadata, Transport, TransportState};
+use crate::{Codec, Encoder, Exchange, RequestHead, ResponseHead};
 
-/// The provider edge of `codec` through `dialer`, as
-/// [`Format::dial`](respan_gateway_core::Format::dial):
-///
-/// - The call is written from the client's head on a relay (`relay`), its
-///   first input from its value (`input`), else, on a relay, the
-///   client's bytes unread; then its later inputs, if any follow, streamed
-///   ([`Exchange::streams`]), else whole. [`Exchange::relayed`] is set if
-///   and only if the call carries the session's own inputs (it has an
-///   origin to relay), as the plugins' filters left them, even edited or
-///   replaced; a call with its own input (`Call::with_input`) has none. The
-///   transport passes on the client's keys
-///   ([`credentials`](crate::credentials)) only then.
-/// - The answer is classified at its head (rule 2): a non-2xx answer, but
-///   a 101 to a call that asked to switch protocols, is read before this
-///   resolves until its codec decides, so its codec's failure before any
-///   output resolves `Ok((origin, Err(fault)))`, and its first output (an
-///   answer the codec relays as it came, such as a redirect) opens it, to
-///   stream from that frame on. While nothing is decided it is read up to
-///   `ERROR_BODY_CAP` bytes (1 MiB): past it the codec is given the end,
-///   as a shorter body would give it, so a refusal keeps its verdict and a
-///   huge one cannot exhaust memory. For another, what is ready of it when
-///   the transport returns is read, waiting for nothing.
-#[allow(clippy::type_complexity)]
+/// Build the two directions of a provider exchange. Writing the input
+/// starts the transport operation; its response opens the incoming events.
 pub fn dial<C: Codec + Clone>(
     codec: &C,
-    dialer: &Dialer,
-    extensions: Extensions,
-    relay: Option<&Origin>,
-    input: Option<&C::Input>,
-    later: Option<Events<C::Input>>,
-) -> Result<BoxFuture<'static, Result<Headed<C::Output>, Fault>>, Fault> {
-    let came = relay.and_then(|o| o.downcast_ref::<Came>());
-    let (head, first, encoder, done) = first_frame(codec, input, came, later.is_some())?;
-    // A body done as it opens has no later inputs.
-    let later = later.filter(|_| !done);
-    let streams = later.is_some();
-    // The decoder reads the provider's head as it came, for the call as sent.
-    let sent = head.clone();
-    // An empty first frame is none, as an HTTP body of no bytes has none.
-    let first_frame = stream::iter((!first.is_empty()).then(|| Ok(first.clone())));
-    let failed = Failure::default();
-    let body = match later {
-        None => first_frame.boxed(),
-        Some(later) => {
-            let rest = Writer::call(encoder, later, failed.clone()).frames();
-            first_frame.chain(rest).boxed()
-        }
-    };
-    let mut call = Exchange::new(head, body);
-    call.extensions = extensions;
-    // Not `input`'s source: a filter's edit of the session's own input
-    // still relays (see `Exchange::relayed`); only a call of its own has no
-    // origin.
-    call.relayed = came.is_some();
-    call.streams = streams;
-    let (codec, transport) = (codec.clone(), dialer.0.clone());
-    Ok(async move {
-        let Exchange { head, body, .. } = transport.send(call).await?;
-        let answer = Arc::new(head);
-        let decoder = codec.response_decoder(&answer, &sent, &first);
-        let mut read = Reader::outputs(body, decoder, failed);
-        if !is_open(&answer, &sent) {
-            read.decide().await;
-        }
-        let origin = Some(answer as Origin);
-        Ok(match read.refused() {
-            Some(fault) => (origin, Err(fault)),
-            None => (origin, Ok(read.boxed())),
-        })
+    io: Transport,
+) -> Result<Connection<C::Output, C::Input>, Fault> {
+    if !matches!(io.state.as_ref(), TransportState::Outbound(_)) {
+        return Err(Fault::config(
+            "an accepted transport cannot call a provider",
+        ));
     }
-    .boxed())
+    let extensions = io.extensions.clone();
+    let transport = io;
+    let (answer, answered) = oneshot::channel();
+    let incoming = async move { answered.await.map_err(|_| Fault::abandoned())? }.boxed();
+    let codec = codec.clone();
+    let outgoing = write(move |events: Events<C::Input>| {
+        if let Some(fault) = events.refusal() {
+            return Err(fault.clone());
+        }
+        let came = events.metadata::<RequestMetadata>(codec.name());
+        let relayed = came.is_some();
+        let streaming = !events.is_single();
+        let input = if events.is_lazy() && came.is_some() {
+            None
+        } else {
+            events.value().transpose()?
+        };
+        let (head, first, encoder, done) = first_frame(&codec, input, came, streaming)?;
+        let streams = streaming && !done;
+        let sent = head.clone();
+        let first_frame = stream::iter((!first.is_empty()).then(|| Ok(first.clone())));
+        let failed = Failure::default();
+        let body = if streams {
+            let rest = Writer::call(encoder, events.boxed(), failed.clone()).frames();
+            first_frame.chain(rest).boxed()
+        } else {
+            first_frame.boxed()
+        };
+        let mut call = Exchange::new(head, body);
+        call.extensions = extensions;
+        call.relayed = relayed;
+        call.streams = streams;
+        Ok(async move {
+            let response = async move {
+                let Exchange {
+                    head,
+                    body,
+                    write_completion,
+                    ..
+                } = transport.send(call).await?;
+                let decoder = codec.response_decoder(&head, &sent, &first);
+                let mut read = Reader::outputs(body, decoder, failed);
+                if !is_open(&head, &sent) {
+                    read.decide().await;
+                }
+                let response = match read.refused() {
+                    Some(fault) => Events::refused(fault),
+                    None => Events::stream(read),
+                };
+                Ok::<_, Fault>((
+                    response.with_metadata(codec.name(), ResponseMetadata(head)),
+                    write_completion,
+                ))
+            }
+            .await;
+            match response {
+                Ok((response, completion)) => {
+                    let _ = answer.send(Ok(response));
+                    match completion {
+                        Some(completion) => completion.await,
+                        None => Ok(()),
+                    }
+                }
+                Err(fault) => {
+                    let _ = answer.send(Err(fault.clone()));
+                    Err(fault)
+                }
+            }
+        })
+    });
+    Ok((incoming, Box::pin(outgoing)))
 }
 
 /// Whether `answer` to the call `sent` is open at its head: a 2xx, or a
@@ -109,7 +118,7 @@ fn is_open(answer: &ResponseHead, sent: &RequestHead) -> bool {
 fn first_frame<C: Codec>(
     codec: &C,
     input: Option<&C::Input>,
-    came: Option<&Came>,
+    came: Option<&RequestMetadata>,
     streams: bool,
 ) -> Result<
     (

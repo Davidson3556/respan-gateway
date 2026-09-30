@@ -13,13 +13,13 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::future::{self, BoxFuture};
-use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::{Extensions, Fault, Gateway, Headed, async_trait};
+use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
+use respan_gateway_core::{Events, Extensions, Fault, Gateway, async_trait};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Accepted, Body, Codec, Decoder, Dialer, Encoder, Exchange, Frames, RequestHead, ResponseHead,
-    Transport, fresh_request_head, fresh_response_head, http, impl_format,
+    Body, Codec, Decoder, Encoder, Exchange, Frames, RequestHead, ResponseHead, Transport,
+    fresh_request_head, fresh_response_head, http, impl_format,
 };
 use respan_gateway_testkit::{Calls, Outcomes};
 
@@ -221,28 +221,14 @@ impl Encoder<Out, ResponseHead> for RespEnc {
     }
 }
 
-type Answering = dyn Fn(Exchange<RequestHead>) -> BoxFuture<'static, Result<Exchange<ResponseHead>, Fault>>
-    + Send
-    + Sync;
-
-/// A transport of a function.
-struct Fnt(Arc<Answering>);
-
-#[async_trait]
-impl Transport for Fnt {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
-        (self.0)(call).await
-    }
-}
-
-fn fnt<F>(f: F) -> Fnt
+fn fnt<F>(f: F) -> Transport
 where
     F: Fn(Exchange<RequestHead>) -> BoxFuture<'static, Result<Exchange<ResponseHead>, Fault>>
         + Send
         + Sync
         + 'static,
 {
-    Fnt(Arc::new(f))
+    Transport::new(f)
 }
 
 /// A response of `status` with body `frames`.
@@ -297,7 +283,7 @@ struct Seen {
 impl Seen {
     /// A transport that reads the call's body in its own task, as reqwest
     /// does, and answers with `answer`, once the body ended if `wait`.
-    fn transport(&self, wait: bool, answer: fn() -> Frames) -> Fnt {
+    fn transport(&self, wait: bool, answer: fn() -> Frames) -> Transport {
         let seen = self.clone();
         fnt(move |c| {
             let seen = seen.clone();
@@ -326,12 +312,12 @@ impl Seen {
 
 /// Serves the toy, calling provider `a` of `codec` over `transport`, with
 /// recorders of both edges' ends.
-fn gateway_of(codec: Toy, transport: Fnt) -> (Gateway, Calls, Outcomes) {
+fn gateway_of(codec: Toy, transport: Transport) -> (Gateway, Calls, Outcomes) {
     let (calls, outcomes) = (Calls::default(), Outcomes::default());
     let gw = Gateway::new()
-        .client(Toy::default())
+        .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider("a", codec, transport)
+        .provider::<In, _, _>("a", codec, respan_gateway_http::connect(transport))
         .unwrap()
         .target("a")
         .unwrap()
@@ -360,7 +346,7 @@ fn ask() -> RequestHead {
     head
 }
 
-/// `frames` as a request, streaming if `streams`, through `Accepted` and
+/// `frames` as a request, streaming if `streams`, through `Transport` and
 /// `Gateway::open`: the answer, and how the session ended.
 async fn open(
     gw: &Gateway,
@@ -370,11 +356,11 @@ async fn open(
     Option<http::Response<Body>>,
     BoxFuture<'static, Result<(), Fault>>,
 ) {
-    let (wire, answer) = Accepted::new(ask(), frames, streams);
-    let handled = gw.handle(wire, Extensions::new()).await;
-    match answer.await {
-        Some((resp, end)) => (Some(resp), end),
-        None => (None, future::ready(handled).boxed()),
+    let (wire, answer) = Transport::accept(ask(), frames, streams);
+    let handled = gw.handle(wire, Extensions::new()).boxed();
+    match respan_gateway_http::__private::drive(handled, answer).await {
+        Ok((resp, end)) => (Some(resp), end),
+        Err(fault) => (None, future::ready(Err(fault)).boxed()),
     }
 }
 
@@ -523,39 +509,40 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
 async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     let (tx, body) = upload();
     drop(tx);
-    let (wire, _answer) = Accepted::new(ask(), body, true);
-    let (origin, inputs) =
-        respan_gateway_http::__private::accept(&Toy::default(), wire, future::pending().boxed())
-            .await
-            .unwrap();
-    let mut inputs = inputs.unwrap();
-    assert!(inputs.next().await.is_none());
-    let origin = origin.unwrap();
-    assert!(respan_gateway_http::__private::input(&Toy::default(), &origin).is_none());
+    let (wire, _answer) = Transport::accept(ask(), body, true);
+    let (incoming, _outgoing) =
+        respan_gateway_http::__private::accept(&Toy::default(), wire).unwrap();
+    let incoming = incoming.await.unwrap();
+    assert!(!incoming.is_single());
+    assert!(incoming.boxed().next().await.is_none());
 
-    let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
-    let (origin, inputs) =
-        respan_gateway_http::__private::accept(&Toy::default(), wire, future::pending().boxed())
-            .await
-            .unwrap();
-    assert!(inputs.is_none());
-    let input = respan_gateway_http::__private::input(&Toy::default(), &origin.unwrap());
-    assert_eq!(input.map(|o| o.ok()), Some(Some(In("q".into()))));
+    let (wire, _answer) = Transport::accept(ask(), chunks(vec!["q"]), false);
+    let (incoming, _outgoing) =
+        respan_gateway_http::__private::accept(&Toy::default(), wire).unwrap();
+    let incoming = incoming.await.unwrap();
+    assert!(incoming.is_single());
+    assert_eq!(
+        incoming.value().map(|v| v.cloned().ok()),
+        Some(Some(In("q".into())))
+    );
 }
 
-/// Dial the toy through `transport`, with one input and none to follow.
-fn dial(codec: &Toy, transport: Fnt) -> BoxFuture<'static, Result<Headed<Out>, Fault>> {
-    let dialer = Dialer::from(transport);
-    let input = In("q".into());
-    respan_gateway_http::__private::dial(
-        codec,
-        &dialer,
-        Extensions::new(),
-        None,
-        Some(&input),
-        None,
-    )
-    .unwrap()
+/// Drive the provider edge with one input, preserving opening separately
+/// from events so tests can examine refusal classification.
+fn dial(codec: &Toy, transport: Transport) -> BoxFuture<'static, Result<Events<Out>, Fault>> {
+    let factory = respan_gateway_http::connect(transport);
+    let (incoming, mut outgoing) =
+        respan_gateway_http::__private::dial(codec, factory(Extensions::new())).unwrap();
+    async move {
+        let writing = async move {
+            outgoing.send(Events::single(In("q".into()))).await?;
+            outgoing.close().await
+        };
+        let (opened, written) = future::join(incoming, writing).await;
+        written?;
+        opened
+    }
+    .boxed()
 }
 
 /// Rule 5: a provider's outputs say `Pending` between the frames it sent
@@ -563,8 +550,8 @@ fn dial(codec: &Toy, transport: Fnt) -> BoxFuture<'static, Result<Headed<Out>, F
 #[tokio::test]
 async fn a_providers_frames_are_read_apart() {
     let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "b", "DONE"])))).boxed());
-    let (_, outputs) = dial(&Toy::default(), transport).await.unwrap();
-    let mut outputs = outputs.unwrap();
+    let outputs = dial(&Toy::default(), transport).await.unwrap();
+    let mut outputs = outputs.boxed();
     let mut cx = Context::from_waker(std::task::Waker::noop());
     let mut polls = Vec::new();
     for _ in 0..6 {
@@ -593,14 +580,14 @@ fn late(text: &'static str) -> Frames {
 #[tokio::test]
 async fn a_slow_refusal_is_known_at_its_head() {
     let transport = fnt(|_| future::ready(Ok(answer(429, late("busy")))).boxed());
-    let (_, outputs) = dial(&Toy::default(), transport).await.unwrap();
-    let fault = outputs.err().unwrap();
+    let outputs = dial(&Toy::default(), transport).await.unwrap();
+    let fault = outputs.refusal().unwrap();
     assert_eq!(fault.code(), "refused");
     assert_eq!(fault.get(), Some(&respan_gateway_http::Status(429)));
 
     let transport = fnt(|_| future::ready(Ok(answer(200, late("DONE")))).boxed());
-    let (_, outputs) = dial(&Toy::default(), transport).await.unwrap();
-    assert!(outputs.is_ok(), "open, its body still to come");
+    let outputs = dial(&Toy::default(), transport).await.unwrap();
+    assert!(outputs.refusal().is_none(), "open, its body still to come");
 }
 
 /// Rule 2's exception: a 101 to a call that asked to switch is open at
@@ -613,8 +600,8 @@ async fn a_101_is_open_only_to_a_call_that_asked_to_switch() {
         ..Toy::default()
     };
     let dialed = tokio::time::timeout(Duration::from_secs(2), dial(&asked, switched()));
-    let (_, outputs) = dialed.await.unwrap().unwrap();
-    assert!(outputs.is_ok());
+    let outputs = dialed.await.unwrap().unwrap();
+    assert!(outputs.refusal().is_none());
 
     let dialed = tokio::time::timeout(
         Duration::from_millis(100),
@@ -635,33 +622,25 @@ async fn only_a_call_written_from_the_clients_origin_is_relayed() {
             future::ready(Ok(answer(200, chunks(vec!["a", "DONE"])))).boxed()
         })
     };
-    let dialer = Dialer::from(marking);
-    let (wire, _answer) = Accepted::new(ask(), chunks(vec!["q"]), false);
-    let (origin, _) =
-        respan_gateway_http::__private::accept(&Toy::default(), wire, future::pending().boxed())
-            .await
-            .unwrap();
-    let origin = origin.unwrap();
+    let factory = respan_gateway_http::connect(marking);
+    let (wire, _answer) = Transport::accept(ask(), chunks(vec!["q"]), false);
+    let (incoming, _outgoing) =
+        respan_gateway_http::__private::accept(&Toy::default(), wire).unwrap();
+    let inputs = incoming.await.unwrap();
     let toy = Toy::default();
-    let relayed = respan_gateway_http::__private::dial(
-        &toy,
-        &dialer,
-        Extensions::new(),
-        Some(&origin),
-        None,
-        None,
-    );
-    let _ = relayed.unwrap().await.unwrap();
-    let input = In("own".into());
-    let own = respan_gateway_http::__private::dial(
-        &toy,
-        &dialer,
-        Extensions::new(),
-        None,
-        Some(&input),
-        None,
-    );
-    let _ = own.unwrap().await.unwrap();
+    let (incoming, mut outgoing) =
+        respan_gateway_http::__private::dial(&toy, factory(Extensions::new())).unwrap();
+    let (opened, written) = future::join(incoming, outgoing.send(inputs)).await;
+    opened.unwrap();
+    written.unwrap();
+    outgoing.close().await.unwrap();
+    let (incoming, mut outgoing) =
+        respan_gateway_http::__private::dial(&toy, factory(Extensions::new())).unwrap();
+    let (opened, written) =
+        future::join(incoming, outgoing.send(Events::single(In("own".into())))).await;
+    opened.unwrap();
+    written.unwrap();
+    outgoing.close().await.unwrap();
     assert_eq!(*lock(&marks), [true, false]);
 }
 
@@ -674,7 +653,7 @@ async fn a_refusal_no_codec_can_write_keeps_its_body_even_to_a_head() {
         ..Toy::default()
     };
     // No target: every request is refused.
-    let gw = Gateway::new().client(toy).unwrap();
+    let gw = Gateway::new().client::<In, _, _>(toy).unwrap();
     for method in [http::Method::POST, http::Method::HEAD] {
         let req = http::Request::builder().method(method.clone()).uri("/x");
         let req = req.body(respan_gateway_http::full("q")).unwrap();
@@ -813,9 +792,9 @@ async fn a_client_that_leaves_ends_the_request_before_its_call() {
     let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "b", "DONE"])))).boxed());
     let calls = Calls::default();
     let gw = Gateway::new()
-        .client(Toy::default())
+        .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider("a", Toy::default(), transport)
+        .provider::<In, _, _>("a", Toy::default(), respan_gateway_http::connect(transport))
         .unwrap()
         .plugin("calls", calls.clone())
         .unwrap()
@@ -885,9 +864,9 @@ async fn provider_saw(plugin: impl respan_gateway_core::Plugin) -> Vec<(bool, St
         })
     };
     let gw = Gateway::new()
-        .client(Toy::default())
+        .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider("a", Toy::default(), noting)
+        .provider::<In, _, _>("a", Toy::default(), respan_gateway_http::connect(noting))
         .unwrap()
         .target("a")
         .unwrap()
@@ -1174,4 +1153,121 @@ fn l6_an_endless_ready_bodiless_answer_never_holds_the_thread() {
         got.is_ok(),
         "serve of a HEAD did not return in 3 s: the drain spins"
     );
+}
+
+/// A transport may open its response while upload delivery is still in
+/// progress. Reaching response EOF must wait for that delivery and report
+/// a late write failure through both provider and client end hooks.
+#[tokio::test]
+async fn response_opening_does_not_finish_an_outstanding_transport_write() {
+    for failure in [false, true] {
+        let (finished, completion) = respan_gateway_core::futures::channel::oneshot::channel();
+        let completion =
+            async move { completion.await.unwrap_or_else(|_| Err(Fault::abandoned())) }.boxed();
+        let completion = Arc::new(Mutex::new(Some(completion)));
+        let transport = fnt(move |_| {
+            let completion = lock(&completion).take().unwrap();
+            async move {
+                let mut response = answer(200, chunks(vec!["a", "DONE"]));
+                response.write_completion = Some(completion);
+                Ok(response)
+            }
+            .boxed()
+        });
+        let (gateway, calls, outcomes) = gateway_of(Toy::default(), transport);
+        let (response, ended) = tokio::time::timeout(
+            Duration::from_secs(1),
+            open(&gateway, chunks(vec!["q"]), false),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.as_ref().unwrap().status(), 200);
+        let mut reading = read(response).boxed();
+        assert!(reading.as_mut().now_or_never().is_none());
+        assert!(
+            calls.all().is_empty(),
+            "response EOF settled an unfinished write"
+        );
+        let end = if failure {
+            Err(Fault::upstream("late write failure"))
+        } else {
+            Ok(())
+        };
+        finished.send(end).unwrap();
+        let _ = reading.await;
+        let expected = if failure { "upstream" } else { "ok" };
+        assert_eq!(code(&ended.await), expected);
+        gateway.idle().await;
+        assert_eq!(codes(calls.all()), [expected]);
+        assert_eq!(codes(outcomes.all()), [expected]);
+    }
+}
+
+/// A refused handshake is a complete answer even if its transport would
+/// otherwise wait forever for the client to send session inputs.
+#[tokio::test]
+async fn refusal_does_not_wait_for_transport_write_completion() {
+    let transport = fnt(|_| {
+        async {
+            let mut response = answer(429, chunks(vec!["busy"]));
+            response.write_completion = Some(future::pending().boxed());
+            Ok(response)
+        }
+        .boxed()
+    });
+    let (gateway, calls, _) = gateway_of(Toy::default(), transport);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let (response, ended) = open(&gateway, chunks(vec!["q"]), true).await;
+        assert_eq!(response.as_ref().unwrap().status(), 429);
+        let _ = read(response).await;
+        assert_eq!(code(&ended.await), "refused");
+        gateway.idle().await;
+        assert_eq!(codes(calls.all()), ["refused"]);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn accepted_transport_clones_bind_only_once() {
+    let (transport, reply) = Transport::accept(ask(), chunks(vec!["q"]), false);
+    let clone = transport.clone();
+    assert!(clone.head().is_some());
+    let connection = respan_gateway_http::__private::accept(&Toy::default(), transport).unwrap();
+    assert!(respan_gateway_http::__private::accept(&Toy::default(), clone).is_err());
+    drop(connection);
+    assert!(reply.await.is_none());
+}
+
+#[tokio::test]
+async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let transport = Transport::new({
+        let seen = seen.clone();
+        move |call| {
+            lock(&seen).push(*call.extensions.get::<usize>().unwrap());
+            async { Ok(answer(200, chunks(vec!["a", "DONE"]))) }
+        }
+    });
+    let factory = respan_gateway_http::connect(transport);
+    let connection = |id| {
+        let mut extensions = Extensions::new();
+        extensions.insert(id);
+        respan_gateway_http::__private::dial(&Toy::default(), factory(extensions)).unwrap()
+    };
+    let first = connection(1usize);
+    let second = connection(2usize);
+    assert!(lock(&seen).is_empty());
+    let drive = |(incoming, mut outgoing): respan_gateway_core::Connection<Out, In>| async move {
+        let writing = async move {
+            outgoing.send(Events::single(In("q".into()))).await.unwrap();
+            outgoing.close().await.unwrap();
+        };
+        let (opened, ()) = future::join(incoming, writing).await;
+        opened.unwrap();
+    };
+    future::join(drive(first), drive(second)).await;
+    let mut seen = lock(&seen).clone();
+    seen.sort();
+    assert_eq!(seen, [1, 2]);
 }

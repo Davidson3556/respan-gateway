@@ -70,8 +70,12 @@ const AT: &str = "https://api.openai.com/v1";
 
 fn gateway(mock: &MockTransport, cap: usize) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("openai", OpenAiEmbeddings, mock.at(AT))?
-        .client(OpenAiEmbeddings)?
+        .provider::<EmbedRequest, _, _>(
+            "openai",
+            OpenAiEmbeddings,
+            respan_gateway_http::connect(mock.at(AT)),
+        )?
+        .client::<EmbedRequest, _, _>(OpenAiEmbeddings)?
         .plugin("split", Split(cap))?
         .target("openai")
 }

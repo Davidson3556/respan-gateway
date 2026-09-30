@@ -370,10 +370,18 @@ impl Plugin for Guard {
 
 fn gateway(mock: &MockTransport, target: &str, plugin: impl Plugin) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))?
-        .client(OpenAiChat)?
-        .client(AnthropicMessages)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .provider::<Conversation, _, _>(
+            "anthropic",
+            AnthropicMessages,
+            respan_gateway_http::connect(mock.at(ANTHROPIC)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Conversation, _, _>(AnthropicMessages)?
         .plugin("guard", plugin)?
         .target(target)
 }

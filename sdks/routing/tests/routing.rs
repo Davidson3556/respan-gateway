@@ -1,5 +1,6 @@
 //! The routing SDK's promises, against a mock provider.
 
+use respan_gateway_formats::conversation::Conversation;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -61,11 +62,11 @@ impl Plugin for Plan {
         match self {
             Plan::First(to, backoff, until) => {
                 let calls: Vec<_> = to.iter().map(|p| cx.call(*p)).collect();
-                first_success(calls, backoff, *until).await.map(Some)
+                first_success(calls, backoff, until.clone()).await.map(Some)
             }
             Plan::Race(to, stagger, until) => {
                 let calls: Vec<_> = to.iter().map(|p| cx.call(*p)).collect();
-                race(calls, *stagger, *until).await.map(Some)
+                race(calls, *stagger, until.clone()).await.map(Some)
             }
         }
     }
@@ -104,20 +105,30 @@ impl Plugin for Record {
 /// Answers only after `.1`.
 struct Slow<T>(T, Duration);
 
-#[async_trait]
-impl<T: Transport> Transport for Slow<T> {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Slow<Transport> {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
+    }
+}
+impl<T: Into<Transport>> From<Slow<T>> for respan_gateway_http::Transport {
+    fn from(value: Slow<T>) -> Self {
+        let value = std::sync::Arc::new(Slow(value.0.into(), value.1));
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
 /// A 200 stream that sends one empty chunk, then nothing.
 struct Stall;
 
-#[async_trait]
-impl Transport for Stall {
-    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Stall {
+    pub async fn send(
+        &self,
+        _call: Exchange<RequestHead>,
+    ) -> Result<Exchange<ResponseHead>, Fault> {
         let first = stream::iter([Ok(Bytes::from(ROLE))]);
         let body = first.chain(stream::pending()).boxed();
         let mut head = respan_gateway_http::fresh_response_head();
@@ -126,13 +137,24 @@ impl Transport for Stall {
         Ok(Exchange::new(head, body))
     }
 }
+impl From<Stall> for respan_gateway_http::Transport {
+    fn from(value: Stall) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
+    }
+}
 
 /// A 200 stream whose content comes at once and whose end comes 5 s later.
 struct Dribble;
 
-#[async_trait]
-impl Transport for Dribble {
-    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Dribble {
+    pub async fn send(
+        &self,
+        _call: Exchange<RequestHead>,
+    ) -> Result<Exchange<ResponseHead>, Fault> {
         let frame = |s: &'static str| Ok(Bytes::from(s));
         let first = stream::iter([frame(ROLE), frame(HELLO)]);
         let rest = stream::once(async move {
@@ -146,24 +168,55 @@ impl Transport for Dribble {
         Ok(Exchange::new(head, body.boxed()))
     }
 }
+impl From<Dribble> for respan_gateway_http::Transport {
+    fn from(value: Dribble) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
+    }
+}
 
 /// Never sends a head.
 struct Silent;
 
-#[async_trait]
-impl Transport for Silent {
-    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Silent {
+    pub async fn send(
+        &self,
+        _call: Exchange<RequestHead>,
+    ) -> Result<Exchange<ResponseHead>, Fault> {
         std::future::pending().await
+    }
+}
+impl From<Silent> for respan_gateway_http::Transport {
+    fn from(value: Silent) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
 /// Refuses the connection.
 struct Refused;
 
-#[async_trait]
-impl Transport for Refused {
-    async fn send(&self, _call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Refused {
+    pub async fn send(
+        &self,
+        _call: Exchange<RequestHead>,
+    ) -> Result<Exchange<ResponseHead>, Fault> {
         Err(Fault::upstream("connection refused"))
+    }
+}
+impl From<Refused> for respan_gateway_http::Transport {
+    fn from(value: Refused) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -176,16 +229,70 @@ struct Harness {
 fn harness(plan: Plan) -> Harness {
     let (mock, record) = (MockTransport::new(), Record::default());
     let gw = Gateway::new()
-        .client(OpenAiChat)
-        .and_then(|g| g.provider("a", OpenAiChat, mock.at(A)))
-        .and_then(|g| g.provider("b", OpenAiChat, mock.at(B)))
-        .and_then(|g| g.provider("slow", OpenAiChat, Slow(mock.at(A), secs(5))))
-        .and_then(|g| g.provider("stalled", OpenAiChat, watchdog(Stall)))
-        .and_then(|g| g.provider("silent", OpenAiChat, watchdog(Silent)))
-        .and_then(|g| g.provider("refused", OpenAiChat, Refused))
-        .and_then(|g| g.provider("dribble", OpenAiChat, Dribble))
-        .and_then(|g| g.provider("b-in-1s", OpenAiChat, Slow(mock.at(B), secs(1))))
-        .and_then(|g| g.provider("late", OpenAiChat, watchdog(Slow(mock.at(A), secs(3)))))
+        .client::<Conversation, _, _>(OpenAiChat)
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "a",
+                OpenAiChat,
+                respan_gateway_http::connect(mock.at(A)),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "b",
+                OpenAiChat,
+                respan_gateway_http::connect(mock.at(B)),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "slow",
+                OpenAiChat,
+                respan_gateway_http::connect(Slow(mock.at(A), secs(5))),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "stalled",
+                OpenAiChat,
+                respan_gateway_http::connect(watchdog(Stall)),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "silent",
+                OpenAiChat,
+                respan_gateway_http::connect(watchdog(Silent)),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "refused",
+                OpenAiChat,
+                respan_gateway_http::connect(Refused),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "dribble",
+                OpenAiChat,
+                respan_gateway_http::connect(Dribble),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "b-in-1s",
+                OpenAiChat,
+                respan_gateway_http::connect(Slow(mock.at(B), secs(1))),
+            )
+        })
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "late",
+                OpenAiChat,
+                respan_gateway_http::connect(watchdog(Slow(mock.at(A), secs(3)))),
+            )
+        })
         .and_then(|g| g.plugin("record", record.clone()))
         .and_then(|g| g.plugin("plan", plan))
         .unwrap_or_else(|f| panic!("{f}"));
@@ -224,7 +331,7 @@ fn secs(n: u64) -> Duration {
 }
 
 /// Waits 5 s for a head, 1 s between body frames.
-fn watchdog<T: Transport>(inner: T) -> Watchdog<T> {
+fn watchdog<T: Into<Transport>>(inner: T) -> Watchdog<T> {
     Watchdog::new(inner, secs(5), secs(1))
 }
 
@@ -234,7 +341,11 @@ fn retries(tries: u32) -> Backoff {
 
 #[tokio::test(start_paused = true)]
 async fn a_stream_failing_after_its_first_content_is_never_retried() {
-    let h = harness(Plan::First(vec!["a", "b"], retries(3), Until::Content));
+    let h = harness(Plan::First(
+        vec!["a", "b"],
+        retries(3),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock.reply(A, cut(&[ROLE, HELLO]));
     h.mock.reply(B, ok());
 
@@ -251,7 +362,11 @@ async fn a_stream_failing_after_its_first_content_is_never_retried() {
 
 #[tokio::test(start_paused = true)]
 async fn a_success_failing_before_content_moves_on() {
-    let h = harness(Plan::First(vec!["a", "b"], Backoff::once(), Until::Content));
+    let h = harness(Plan::First(
+        vec!["a", "b"],
+        Backoff::once(),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock.reply(A, cut(&[ROLE]));
     h.mock.reply(B, ok());
 
@@ -266,7 +381,11 @@ async fn a_success_failing_before_content_moves_on() {
 
 #[tokio::test(start_paused = true)]
 async fn retry_after_is_honoured() {
-    let h = harness(Plan::First(vec!["a"], retries(2), Until::Content));
+    let h = harness(Plan::First(
+        vec!["a"],
+        retries(2),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock.reply(A, too_many("3"));
     h.mock.reply(A, ok());
 
@@ -280,7 +399,11 @@ async fn retry_after_is_honoured() {
 
 #[tokio::test(start_paused = true)]
 async fn a_retry_after_beyond_the_max_moves_on_at_once() {
-    let h = harness(Plan::First(vec!["a", "b"], retries(3), Until::Content));
+    let h = harness(Plan::First(
+        vec!["a", "b"],
+        retries(3),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock.reply(A, too_many("60"));
     h.mock.reply(B, ok());
 
@@ -294,7 +417,11 @@ async fn a_retry_after_beyond_the_max_moves_on_at_once() {
 
 #[tokio::test(start_paused = true)]
 async fn with_no_success_the_client_gets_the_last_429_and_its_retry_after() {
-    let h = harness(Plan::First(vec!["a", "b"], Backoff::once(), Until::Content));
+    let h = harness(Plan::First(
+        vec!["a", "b"],
+        Backoff::once(),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock
         .reply(A, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
     h.mock.reply(B, too_many("7"));
@@ -315,8 +442,16 @@ async fn with_no_success_the_client_gets_the_last_429_and_its_retry_after() {
 #[tokio::test(start_paused = true)]
 async fn a_fallback_that_cannot_be_made_does_not_hide_the_providers_answer() {
     for plan in [
-        Plan::First(vec!["a", "missing"], Backoff::once(), Until::Content),
-        Plan::Race(vec!["a", "missing"], secs(1), Until::Content),
+        Plan::First(
+            vec!["a", "missing"],
+            Backoff::once(),
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        ),
+        Plan::Race(
+            vec!["a", "missing"],
+            secs(1),
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        ),
     ] {
         let h = harness(plan);
         h.mock
@@ -333,7 +468,7 @@ async fn a_config_error_on_one_target_moves_on_to_the_next() {
     let h = harness(Plan::First(
         vec!["missing", "b"],
         retries(3),
-        Until::Content,
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
     ));
     h.mock.reply(B, ok());
 
@@ -349,7 +484,7 @@ async fn a_race_drops_its_losers_which_end_abandoned() {
     let h = harness(Plan::Race(
         vec!["slow", "b"],
         Duration::ZERO,
-        Until::Content,
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
     ));
     h.mock.reply(A, ok());
     h.mock.reply(B, ok());
@@ -372,7 +507,11 @@ async fn a_race_drops_its_losers_which_end_abandoned() {
 
 #[tokio::test(start_paused = true)]
 async fn a_race_starts_the_next_call_only_after_its_stagger() {
-    let h = harness(Plan::Race(vec!["a", "b"], secs(2), Until::Content));
+    let h = harness(Plan::Race(
+        vec!["a", "b"],
+        secs(2),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock.reply(A, ok());
 
     let (status, ..) = h.send().await;
@@ -383,7 +522,11 @@ async fn a_race_starts_the_next_call_only_after_its_stagger() {
 
 #[tokio::test(start_paused = true)]
 async fn a_race_starts_the_next_call_at_once_when_the_others_failed() {
-    let h = harness(Plan::Race(vec!["a", "b"], secs(10), Until::Content));
+    let h = harness(Plan::Race(
+        vec!["a", "b"],
+        secs(10),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock
         .reply(A, mock::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
     h.mock.reply(B, ok());
@@ -401,7 +544,7 @@ async fn the_watchdog_fails_a_stalled_body_and_first_success_moves_on() {
     let h = harness(Plan::First(
         vec!["stalled", "b"],
         Backoff::once(),
-        Until::Content,
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
     ));
     h.mock.reply(B, ok());
 
@@ -419,7 +562,7 @@ async fn the_watchdog_bounds_the_wait_for_the_head_too() {
     let h = harness(Plan::First(
         vec!["silent", "b"],
         Backoff::once(),
-        Until::Content,
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
     ));
     h.mock.reply(B, ok());
 
@@ -444,7 +587,11 @@ async fn the_watchdog_bounds_the_wait_for_the_head_too() {
 async fn the_watchdog_does_not_cut_a_slow_whole_answer() {
     const WHOLE: &str = r#"{"model":"m","messages":[{"role":"user","content":"write an essay"}]}"#;
     const REPLY: &str = r#"{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"an essay"},"finish_reason":"stop"}]}"#;
-    let h = harness(Plan::First(vec!["late", "b"], retries(2), Until::Content));
+    let h = harness(Plan::First(
+        vec!["late", "b"],
+        retries(2),
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock.reply(A, mock::json(StatusCode::OK, REPLY));
     h.mock.reply(B, ok());
 
@@ -465,7 +612,11 @@ async fn a_whole_body_attempt_ends_with_its_role_set() {
     const WHOLE: &str = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
     const REPLY: &str = r#"{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
     for _ in 0..100 {
-        let h = harness(Plan::First(vec!["a", "b"], Backoff::once(), Until::Content));
+        let h = harness(Plan::First(
+            vec!["a", "b"],
+            Backoff::once(),
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        ));
         h.mock.reply(A, too_many("1"));
         h.mock.reply(B, mock::json(StatusCode::OK, REPLY));
 
@@ -486,7 +637,7 @@ async fn a_call_failing_before_its_head_ends_a_loser() {
         let h = harness(Plan::First(
             vec!["refused", "b"],
             Backoff::once(),
-            Until::Content,
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
         ));
         h.mock.reply(B, ok());
 
@@ -508,17 +659,16 @@ async fn a_call_failing_before_its_head_ends_a_loser() {
 
 #[tokio::test(start_paused = true)]
 async fn a_race_that_never_hedges_still_falls_over() {
-    let h = harness(Plan::Race(vec!["a", "b"], Duration::MAX, Until::Content));
+    let h = harness(Plan::Race(
+        vec!["a", "b"],
+        Duration::MAX,
+        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+    ));
     h.mock
         .reply(A, mock::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
     h.mock.reply(B, ok());
     let (status, _, body, _) = h.send().await;
     assert_eq!(status, StatusCode::OK, "{body}");
-}
-
-#[test]
-fn the_stopping_point_is_the_first_content_by_default() {
-    assert_eq!(Until::default(), Until::Content);
 }
 
 /// `a` answers 200 and fails before any content; `b` answers.
@@ -551,8 +701,16 @@ async fn until_head_commits_on_a_success_status_however_its_body_goes() {
 #[tokio::test(start_paused = true)]
 async fn until_content_moves_on_from_a_success_failing_before_content() {
     let plans = [
-        Plan::First(vec!["a", "b"], Backoff::once(), Until::Content),
-        Plan::Race(vec!["a", "b"], secs(1), Until::Content),
+        Plan::First(
+            vec!["a", "b"],
+            Backoff::once(),
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        ),
+        Plan::Race(
+            vec!["a", "b"],
+            secs(1),
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        ),
     ];
     for plan in plans {
         let h = harness(plan);
@@ -604,13 +762,17 @@ async fn until_end_sends_the_whole_answer_as_it_came_and_moves_on_before_content
 #[tokio::test(start_paused = true)]
 async fn a_race_until_end_picks_the_call_that_finishes_first() {
     for (until, winner, loser) in [
-        (Until::Content, "dribble", "b-in-1s"),
+        (
+            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            "dribble",
+            "b-in-1s",
+        ),
         (Until::End, "b-in-1s", "dribble"),
     ] {
         let h = harness(Plan::Race(
             vec!["dribble", "b-in-1s"],
             Duration::ZERO,
-            until,
+            until.clone(),
         ));
         h.mock.reply(B, ok());
 
@@ -629,11 +791,11 @@ async fn a_race_until_end_picks_the_call_that_finishes_first() {
         // A loser dropped before it was polled never started.
         let lost = (loser, Role::Loser, codes::ABANDONED);
         assert!(got[1..].iter().all(|r| *r == lost), "{until:?}: {got:?}");
-        if until == Until::End {
+        if matches!(until, Until::End) {
             assert_eq!(got.len(), 2);
         }
         // Reading to its end, the winner finished in 1 s, not 5.
-        if until == Until::End {
+        if matches!(until, Until::End) {
             assert!(start.elapsed() < secs(2), "{:?}", start.elapsed());
         }
     }
@@ -690,4 +852,18 @@ async fn until_end_retries_a_stream_failing_after_content_and_returns_the_last()
     assert_eq!(h.sent_to(), ["a.test", "a.test"]);
     let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
     assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);
+}
+
+#[tokio::test]
+async fn content_policy_accepts_custom_events_and_captured_configuration() {
+    let threshold = 2u32;
+    let Until::Content(read) = Until::content(move |event: &u32| *event >= threshold) else {
+        panic!("expected the supplied policy");
+    };
+    let make = || Response::stream(stream::iter([Ok(0u32), Err(Fault::upstream("cut"))]));
+    assert!(read(make()).await.is_err());
+    let Until::Content(read) = Until::content(|_: &u32| true) else {
+        panic!("expected the supplied policy");
+    };
+    assert!(read(make()).await.is_ok());
 }

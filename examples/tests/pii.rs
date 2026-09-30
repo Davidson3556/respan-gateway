@@ -1,5 +1,6 @@
 use super::*;
 use respan_gateway_formats::AnthropicMessages;
+use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_formats::conversation::{Message, Role};
 
 #[test]
@@ -371,8 +372,12 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
         mock::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>()),
     );
     let gw = Gateway::new()
-        .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "anthropic",
+            AnthropicMessages,
+            respan_gateway_http::connect(mock.at(ANTHROPIC)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("pii", Pii)?
         .plugin("pii-input", PiiInput)?
         .target("anthropic")?;

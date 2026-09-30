@@ -1,29 +1,38 @@
 //! Timing of a plain relay, unchanged, whole and streamed. Run with
 //! `cargo test --release -p respan-gateway-testkit --test bench -- --ignored --nocapture`.
 
+use respan_gateway_formats::conversation::Conversation;
 use std::time::Instant;
 
 use respan_gateway_core::futures::TryStreamExt;
-use respan_gateway_core::{Fault, Gateway, async_trait};
+use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_formats::OpenAiChat;
+use respan_gateway_http::Exchange;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_http::http_body_util::Full;
-use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_http::{RequestHead, ResponseHead};
 use respan_gateway_testkit::{post, read_whole, serve};
 
 /// Reads each call's body and answers with `.0`, as JSON or SSE.
 struct Canned(Bytes, &'static str);
 
-#[async_trait]
-impl Transport for Canned {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Canned {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         let _: Vec<Bytes> = call.body.try_collect().await?;
         let mut resp = http::Response::new(Full::new(self.0.clone()));
         let value = http::HeaderValue::from_static(self.1);
         resp.headers_mut().insert(http::header::CONTENT_TYPE, value);
         Ok(respan_gateway_http::from_response(resp))
+    }
+}
+impl From<Canned> for respan_gateway_http::Transport {
+    fn from(value: Canned) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -41,12 +50,12 @@ fn request(stream: bool) -> Bytes {
 
 async fn time(name: &str, stream: bool, reply: &str, content_type: &'static str) {
     let gw = Gateway::new()
-        .provider(
+        .provider::<Conversation, _, _>(
             "p",
             OpenAiChat,
-            Canned(Bytes::from(reply.to_owned()), content_type),
+            respan_gateway_http::connect(Canned(Bytes::from(reply.to_owned()), content_type)),
         )
-        .and_then(|g| g.client(OpenAiChat))
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .and_then(|g| g.target("p"))
         .unwrap_or_else(|f| panic!("{f}"));
     let body = request(stream);

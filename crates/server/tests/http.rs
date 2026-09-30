@@ -1,13 +1,14 @@
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
+use respan_gateway_formats::conversation::Conversation;
 use std::sync::{Arc, Mutex};
 
 use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, async_trait};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http;
 use respan_gateway_http::{CallHeaders, Credential, credentials};
-use respan_gateway_http::{Exchange, Frames, Transport};
+use respan_gateway_http::{Exchange, Frames};
 use respan_gateway_server::{HttpTransport, router};
 use tokio::net::TcpListener;
 
@@ -22,12 +23,12 @@ fn http(base: impl Into<String>) -> HttpTransport {
 /// `format` over `transport`, its target.
 fn gateway_to<F, T>(format: F, transport: T) -> Gateway
 where
-    F: Format,
-    T: Into<F::Dialer>,
+    F: respan_gateway_http::Codec + Format<respan_gateway_http::Transport, F::Output, F::Input>,
+    T: Into<respan_gateway_http::Transport>,
 {
     Gateway::new()
-        .provider("local", format, transport)
-        .and_then(|g| g.client(OpenAiChat))
+        .provider("local", format, respan_gateway_http::connect(transport))
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -166,9 +167,8 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
     #[derive(Clone, Default)]
     struct Note(Arc<Mutex<Vec<(http::HeaderMap, bytes::Bytes)>>>);
 
-    #[async_trait]
-    impl Transport for Note {
-        async fn send(
+    impl Note {
+        pub async fn send(
             &self,
             call: respan_gateway_http::Exchange<respan_gateway_http::RequestHead>,
         ) -> Result<respan_gateway_http::Exchange<respan_gateway_http::ResponseHead>, Fault>
@@ -184,6 +184,15 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
             let json = http::HeaderValue::from_static("application/json");
             resp.headers_mut().insert("content-type", json);
             Ok(respan_gateway_http::from_response(resp))
+        }
+    }
+    impl From<Note> for respan_gateway_http::Transport {
+        fn from(value: Note) -> Self {
+            let value = std::sync::Arc::new(value);
+            Self::new(move |call| {
+                let value = value.clone();
+                async move { value.send(call).await }
+            })
         }
     }
 
@@ -521,8 +530,12 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     .await;
     let log = Log::default();
     let gateway = Gateway::new()
-        .provider("local", OpenAiChat, http(format!("{provider}/v1")))
-        .and_then(|g| g.client(OpenAiChat))
+        .provider::<Conversation, _, _>(
+            "local",
+            OpenAiChat,
+            respan_gateway_http::connect(http(format!("{provider}/v1"))),
+        )
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
@@ -717,8 +730,12 @@ async fn l6_bodiless(with_304: bool) {
     .await;
     let ends = L6Ends::default();
     let gateway = Gateway::new()
-        .provider("any", Passthrough, http(provider.clone()))
-        .and_then(|g| g.client(Passthrough))
+        .provider::<respan_gateway_formats::opaque::Sent<respan_gateway_formats::opaque::Passthrough>, _, _>(
+            "any",
+            Passthrough,
+            respan_gateway_http::connect(http(provider.clone())),
+        )
+        .and_then(|g| g.client::<respan_gateway_formats::opaque::Sent<respan_gateway_formats::opaque::Passthrough>, _, _>(Passthrough))
         .and_then(|g| g.plugin("ends", ends.clone()))
         .and_then(|g| g.target("any"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));

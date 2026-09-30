@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 use tokio::sync::Notify;
 
 use crate::gateway::Registered;
-use crate::{ClientContext, Fault, Plugin};
+use crate::{ClientContext, Fault, Plugin, Result};
 
 /// The context an edge's hooks get: [`ClientContext`] on the client edge,
 /// [`ProviderContext`](crate::ProviderContext) on the provider edge.
@@ -17,10 +17,10 @@ pub(crate) trait Edge: Send + Sync + 'static {
     fn client(&self) -> &ClientContext;
 
     /// `plugin`'s end hook on this edge.
-    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<(), Fault>) -> BoxFuture<'a, ()>;
+    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<()>) -> BoxFuture<'a, ()>;
 
     /// The edge ends `end`, just before its end hooks.
-    fn close(&mut self, end: &Result<(), Fault>);
+    fn close(&mut self, end: &Result<()>);
 }
 
 /// Runs one edge's end hooks exactly once, for every plugin whose start
@@ -57,7 +57,7 @@ impl<E: Edge> EndHooks<E> {
     }
 
     /// End the edge `end`, once, and start its end hooks, detached.
-    pub(crate) fn finish(&mut self, end: Result<(), Fault>) {
+    pub(crate) fn finish(&mut self, end: Result<()>) {
         let Some(mut cx) = self.cx.take() else {
             return;
         };

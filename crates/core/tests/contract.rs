@@ -1,6 +1,6 @@
 //! The edge contract on the toy edge: the provider edge's staged answer
-//! (`Format::dial`), the W1 fix (a provider that refuses at its head gives
-//! the client a clean refusal) and rule 4 (outputs dropped unread).
+//! (writer preparation, opening and refusal), a complete refusal before
+//! upgrade, and lifecycle behavior when outputs are dropped unread.
 #![allow(clippy::unwrap_used)]
 
 mod edge;
@@ -14,9 +14,9 @@ use respan_gateway_core::*;
 
 fn gateway_of(rec: &Rec, dialer: Dialer) -> Gateway {
     Gateway::new()
-        .client(Toy)
+        .client::<In, _, _>(Toy)
         .unwrap()
-        .provider("a", Toy, dialer)
+        .provider::<In, _, _>("a", Toy, connect(dialer))
         .unwrap()
         .target("a")
         .unwrap()
@@ -88,7 +88,7 @@ async fn a_failure_after_the_head_ends_the_body() {
     drop(tx);
 }
 
-/// Rule 4: an edge that writes a head alone and drops the outputs unread
+/// An edge that writes a head alone and drops the outputs unread
 /// (a bodiless answer) ends their call `Ok` if its end was ready, else
 /// abandoned; the request ends as the edge says.
 #[tokio::test(flavor = "multi_thread")]
@@ -120,11 +120,11 @@ fn slow_after_first(body: &[&'static str]) -> Text {
     }
 }
 
-/// Fails a call in its hook, or makes the toy's `dial` refuse it at once.
+/// Fails a call in its hook, or makes the toy writer's preparation fail.
 struct Fails(u8);
 #[async_trait]
 impl Plugin for Fails {
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         match self.0 {
             1 => Err(Fault::internal("hook fails")),
             2 => {
@@ -136,8 +136,8 @@ impl Plugin for Fails {
     }
 }
 
-/// `dial`'s stages: a sync `Err` is not sent; a future `Err` is sent, with
-/// no answer; an answer is sent. Mode 2 is `dial`'s sync `Err`.
+/// Writer stages: a preparation error is not sent; a future error is sent,
+/// with no answer; an answer is sent. Mode 2 fails preparation.
 #[tokio::test(flavor = "current_thread")]
 async fn a_call_is_sent_only_once_handed_to_its_transport() {
     // (how it fails before or at its dialer, whether it was sent)
@@ -183,9 +183,9 @@ async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
             async move { Ok(answer(200, slow(chunks))) }.boxed()
         });
         let gw = Gateway::new()
-            .client(Toy)
+            .client::<In, _, _>(Toy)
             .unwrap()
-            .provider("a", Toy, t)
+            .provider::<In, _, _>("a", Toy, connect(t))
             .unwrap()
             .plugin("rec", rec.clone())
             .unwrap()
@@ -208,7 +208,7 @@ async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
 struct Endless;
 #[async_trait]
 impl Plugin for Endless {
-    async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>> {
         let endless = futures::stream::unfold((), |()| async {
             tokio::task::yield_now().await;
             Some((Ok::<_, Fault>(Out("x".into())), ()))
@@ -217,14 +217,14 @@ impl Plugin for Endless {
     }
 }
 
-/// Rule 4: an edge that drops `Ended` first ends the request abandoned, and
-/// its outputs then end `Err(abandoned)`, however much the answer had left.
+/// A writer whose completion channel disappears ends the exchange abandoned,
+/// and its outputs end `Err(abandoned)`, however much the answer had left.
 #[tokio::test(flavor = "multi_thread")]
-async fn outputs_end_abandoned_once_the_edge_drops_ended() {
+async fn outputs_end_abandoned_once_the_writer_loses_completion() {
     for streams in [false, true] {
         let rec = Rec::default();
         let gw = Gateway::new()
-            .client(Toy)
+            .client::<In, _, _>(Toy)
             .unwrap()
             .plugin("rec", rec.clone())
             .unwrap()
@@ -247,14 +247,14 @@ async fn outputs_end_abandoned_once_the_edge_drops_ended() {
 struct Meter(Arc<Mutex<Vec<String>>>);
 #[async_trait]
 impl Plugin for Meter {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         cx.filter(|o: &mut Out| match o.0.as_str() {
             "bad" => Err(Fault::bad_request("blocked")),
             _ => Ok(()),
         })?;
         Ok(None)
     }
-    async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
         let seen = self.0.clone();
         px.filter(move |o: &mut Out| {
             lock(&seen).push(o.0.clone());

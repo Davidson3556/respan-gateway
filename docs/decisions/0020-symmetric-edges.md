@@ -1,6 +1,6 @@
 # 0020. Symmetric edges
 
-- Status: accepted; amended by 0021, 0022 and 0023
+- Status: accepted; amended by 0021, 0022, 0023 and [0024](0024-flows-and-symmetric-edges.md) (standard futures, streams and sinks replace the asymmetric signatures and public lifecycle aliases)
 - Date: 2026-09-29
 
 ## Context

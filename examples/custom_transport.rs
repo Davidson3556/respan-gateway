@@ -1,5 +1,5 @@
 //! A model in this process, reached as a provider: a [`Format`] that only
-//! dials, its `Dialer` the model itself. No bytes are written or read: it
+//! dials, its I/O value the shared model. No bytes are written or read: it
 //! takes the call's [`Conversation`] and answers with [`Reply`]s, which any
 //! client of the conversation kind (OpenAI Chat, Anthropic Messages) gets in
 //! its own protocol, JSON or SSE as it asked. It is a full provider, so it
@@ -12,9 +12,10 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::futures::future::BoxFuture;
-use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::{Events, Extensions, Fault, Format, Gateway, Headed, Origin};
+use respan_gateway_core::futures::FutureExt;
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::{StreamExt, stream};
+use respan_gateway_core::{Connection, Events, Fault, Format, Gateway};
 use respan_gateway_formats::conversation::{Conversation, Finish, Reply, units};
 use respan_gateway_formats::{OpenAiChat, Usage};
 use respan_gateway_testkit::{post, read_whole, serve};
@@ -28,53 +29,52 @@ fn echo(chat: &Conversation) -> Result<String, Fault> {
     Ok(format!("you said: {last}"))
 }
 
-/// The format of a model in this process: its dialer is the model.
+/// A model in this process: each provider attempt receives a model handle.
 struct Local;
 
-impl Format for Local {
-    type Input = Conversation;
-    type Output = Reply;
-    type Wire = ();
-    type Dialer = Model;
-
+impl Format<Model, Reply, Conversation> for Local {
     fn name(&self) -> &str {
         "local"
     }
 
-    fn dial(
-        &self,
-        model: &Model,
-        _extensions: Extensions,
-        _relay: Option<&Origin>,
-        input: Option<&Conversation>,
-        _inputs: Option<Events<Conversation>>,
-    ) -> Result<BoxFuture<'static, Result<Headed<Reply>, Fault>>, Fault> {
-        let chat = input.ok_or_else(|| Fault::bad_request("no conversation"))?;
-        let answer = model(chat)?;
+    fn bind(&self, model: Model) -> Result<Connection<Reply, Conversation>, Fault> {
+        let (send, receive) = oneshot::channel();
+        let incoming = async move { receive.await.map_err(|_| Fault::abandoned()) };
+        let outgoing = respan_gateway_core::write(move |flow: Events<Conversation>| {
+            let chat = flow
+                .value()
+                .transpose()?
+                .ok_or_else(|| Fault::bad_request("no conversation"))?;
+            let answer = model(chat)?;
 
-        // One reply per word, then the finish with usage (a word is a token here).
-        let words = |s: &str| s.split_whitespace().count() as f64;
-        let mut usage = Usage::default();
-        let prompt = chat.messages.iter().map(|m| words(&m.text())).sum();
-        usage.add(units::INPUT_TOKENS, prompt);
-        usage.add(units::OUTPUT_TOKENS, words(&answer));
-        let model = chat.model.clone().unwrap_or_else(|| "local".into());
-        let mut replies = vec![Reply::start("local-1", model)];
-        // Each word keeps the space before the next: "you ", "said: ", ...
-        replies.extend(answer.split_inclusive(' ').map(|w| Reply::text(0, w)));
-        let mut last = Reply::finished(Finish::Stop);
-        last.usage = usage;
-        replies.push(last);
-        let outputs = stream::iter(replies.into_iter().map(Ok)).boxed();
-        Ok(async move { Ok((None, Ok(outputs))) }.boxed())
+            // One reply per word, then the finish with usage (a word is a token here).
+            let words = |s: &str| s.split_whitespace().count() as f64;
+            let mut usage = Usage::default();
+            let prompt = chat.messages.iter().map(|m| words(&m.text())).sum();
+            usage.add(units::INPUT_TOKENS, prompt);
+            usage.add(units::OUTPUT_TOKENS, words(&answer));
+            let model = chat.model.clone().unwrap_or_else(|| "local".into());
+            let mut replies = vec![Reply::start("local-1", model)];
+            // Each word keeps the space before the next: "you ", "said: ", ...
+            replies.extend(answer.split_inclusive(' ').map(|w| Reply::text(0, w)));
+            let mut last = Reply::finished(Finish::Stop);
+            last.usage = usage;
+            replies.push(last);
+            Ok(async move {
+                let outputs = stream::iter(replies.into_iter().map(Ok)).boxed();
+                let _ = send.send(Events::stream(outputs));
+                Ok(())
+            })
+        });
+        Ok((incoming.boxed(), Box::pin(outgoing)))
     }
 }
 
 fn gateway() -> Result<Gateway, Fault> {
     let model: Model = Arc::new(echo);
     Gateway::new()
-        .provider("local", Local, model)?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>("local", Local, move |_| model.clone())?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .target("local")
 }
 

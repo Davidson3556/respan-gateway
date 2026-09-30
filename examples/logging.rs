@@ -179,8 +179,12 @@ fn gateway(mock: &MockTransport, sink: impl Sink) -> Result<Gateway, Fault> {
         next: AtomicU64::new(1),
     };
     Gateway::new()
-        .provider("openai", OpenAiChat, mock.at(OPENAI))?
-        .client(OpenAiChat)?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(OPENAI)),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("tenancy", Tenancy(&["zdr-bank"]))?
         .plugin("log", log)?
         .target("openai")

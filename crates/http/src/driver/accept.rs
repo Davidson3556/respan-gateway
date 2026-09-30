@@ -6,13 +6,15 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
-use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::{Ended, Events, Fault, Headed, Origin};
+use respan_gateway_core::{Events, Fault, write};
 
 use super::reader::Reader;
 use super::writer::Writer;
-use super::{Accepted, Came, End, PANICKED};
+use super::{
+    Completion, Connection, PANICKED, RequestMetadata, ResponseMetadata, Transport, TransportState,
+};
 use crate::{
     Body, Codec, Encoder, Frames, RequestHead, ResponseHead, Unwritten, answered, bodiless,
     fresh_response_head, into_http_body, plain,
@@ -22,57 +24,68 @@ use crate::{
 /// a failure no codec can write.
 type Handed = Result<(ResponseHead, Frames), Fault>;
 
-/// The client edge of `codec` for `wire`: a one-shot request once its body
-/// is read, its input in its origin and no inputs following; a streaming one
-/// at once, its data frames the inputs. The writer goes to the wire's slot as
-/// the request is in. It never awaits `reply`.
-#[allow(clippy::type_complexity)]
+/// Build the two directions of an accepted HTTP exchange. Reading the
+/// incoming stream prepares protocol state needed by the response writer.
 pub fn accept<C: Codec + Clone>(
     codec: &C,
-    wire: Accepted,
-    reply: BoxFuture<'static, (Headed<C::Output>, Ended)>,
-) -> BoxFuture<'static, Result<(Option<Origin>, Option<Events<C::Input>>), Fault>> {
-    let codec = codec.clone();
-    async move {
-        let Accepted {
-            head,
-            frames,
-            streams,
-            slot,
-        } = wire;
-        let head = Arc::new(head);
+    io: Transport,
+) -> Result<Connection<C::Input, C::Output>, Fault> {
+    let TransportState::Accepted { head, incoming } = io.state.as_ref() else {
+        return Err(Fault::config(
+            "an outbound transport cannot accept a client",
+        ));
+    };
+    let (frames, streams, slot) = incoming
+        .lock()
+        .map_err(|_| Fault::config("accepted transport lock poisoned"))?
+        .take()
+        .ok_or_else(|| Fault::config("accepted transport already bound"))?;
+    let head = head.clone();
+    let (prepared, preparation) = oneshot::channel();
+    let reader = codec.clone();
+    let incoming = async move {
         if streams {
-            let writer = written(codec.clone(), reply, head.clone(), Bytes::new(), true);
-            let _ = slot.send(writer.boxed());
-            let came = Came {
+            let _ = prepared.send((head.clone(), Bytes::new()));
+            let came = RequestMetadata {
                 head: head.clone(),
                 body: None,
             };
-            let make = Box::new(move || codec.request_decoder(&head));
-            let inputs = Reader::inputs(frames, make);
-            return Ok((Some(Arc::new(came) as Origin), Some(inputs.boxed())));
+            let name = reader.name().to_owned();
+            let make = Box::new(move || reader.request_decoder(&head));
+            return Ok(Events::stream(Reader::inputs(frames, make)).with_metadata(&name, came));
         }
-        // One that fails while read is refused.
         let read = read_whole(frames).await;
         let raw = read.as_ref().cloned().unwrap_or_default();
-        let writer = written(codec, reply, head.clone(), raw.clone(), false);
-        let _ = slot.send(writer.boxed());
+        let _ = prepared.send((head.clone(), raw.clone()));
         read?;
-        let came = Came {
-            head,
-            body: Some(raw),
+        let came = RequestMetadata {
+            head: head.clone(),
+            body: Some(raw.clone()),
         };
-        Ok((Some(Arc::new(came) as Origin), None))
+        let name = reader.name().to_owned();
+        Ok(Events::lazy(move || decode(&reader, &head, &raw)).with_metadata(&name, came))
     }
-    .boxed()
-}
-
-/// The one input of a one-shot request, decoded from its origin; `None`
-/// for a streaming one's, or an origin of another wire.
-pub fn input<C: Codec>(codec: &C, origin: &Origin) -> Option<Result<C::Input, Fault>> {
-    let came = origin.downcast_ref::<Came>()?;
-    let raw = came.body.as_ref()?;
-    Some(decode(codec, &came.head, raw))
+    .boxed();
+    let codec = codec.clone();
+    let outgoing = write(move |events| {
+        let (tell, told) = oneshot::channel();
+        let completion = told
+            .map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())))
+            .boxed()
+            .shared();
+        let delivered = completion.clone();
+        Ok(async move {
+            let (head, body) = preparation.await.map_err(|_| Fault::internal(PANICKED))?;
+            let writing = async move {
+                let response = written(codec, events, Completion(tell), head, body, streams).await;
+                (response, completion.boxed())
+            }
+            .boxed();
+            slot.send(writing).map_err(|_| Fault::abandoned())?;
+            delivered.await
+        })
+    });
+    Ok((incoming, Box::pin(outgoing)))
 }
 
 /// The one input of a one-shot request's body.
@@ -98,43 +111,36 @@ async fn read_whole(mut body: Frames) -> Result<Bytes, Fault> {
     Ok(all.freeze())
 }
 
-/// What the adapter gets: `reply` written to the client whose request had
-/// head `ask` and body `body`, streaming if `streaming`; a failure no codec
-/// can write as plain text; and how it ended, as this edge told [`Ended`].
+/// Encode a supplied events and report completion after its final frame.
 async fn written<C: Codec>(
     codec: C,
-    reply: BoxFuture<'static, (Headed<C::Output>, Ended)>,
+    events: Events<C::Output>,
+    completion: Completion,
     ask: Arc<RequestHead>,
     body: Bytes,
     streaming: bool,
-) -> (http::Response<Body>, End) {
-    let ((origin, outputs), ended) = reply.await;
-    let (tell, told) = oneshot::channel();
-    let ended: Ended = Box::new(move |end| {
-        ended(end.clone());
-        let _ = tell.send(end);
-    });
-    // Dropped untold, the request ended abandoned.
-    let told = told.map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())));
+) -> http::Response<Body> {
+    let answer = events
+        .metadata::<ResponseMetadata>(codec.name())
+        .map(|state| state.0.clone());
     let to = Client {
         codec,
         ask,
         body,
         streaming,
     };
-    let handed = match outputs {
-        Err(fault) => to.refuse(fault, Some(ended), None).await,
-        Ok(outputs) => to.deliver(origin, outputs, ended).await,
+    let handed = match events.refusal().cloned() {
+        Some(fault) => to.refuse(fault, Some(completion), None).await,
+        None => to.deliver(answer, events.boxed(), completion).await,
     };
-    let resp = match handed {
+    match handed {
         Ok((head, body)) => http::Response::from_parts(head, into_http_body(body)),
         Err(fault) => {
             let mut resp = plain(&fault);
             resp.extensions_mut().insert(Unwritten);
             resp
         }
-    };
-    (resp, told.boxed())
+    }
 }
 
 /// The client an answer is written to, in its codec.
@@ -151,8 +157,8 @@ impl<C: Codec> Client<C> {
     async fn refuse(
         self,
         fault: Fault,
-        ended: Option<Ended>,
-        hold: Option<Events<C::Output>>,
+        ended: Option<Completion>,
+        hold: Option<BoxStream<'static, Result<C::Output, Fault>>>,
     ) -> Handed {
         let Some(ended) = ended else {
             return Err(Fault::internal("an answer's end told twice"));
@@ -191,14 +197,12 @@ impl<C: Codec> Client<C> {
     /// streaming request's at once, as its client waits for it.
     async fn deliver(
         self,
-        origin: Option<Origin>,
-        outputs: Events<C::Output>,
-        ended: Ended,
+        answer: Option<ResponseHead>,
+        outputs: BoxStream<'static, Result<C::Output, Fault>>,
+        ended: Completion,
     ) -> Handed {
         // A head goes only to a codec of the name it came in.
-        let answer = origin
-            .as_ref()
-            .and_then(|o| o.downcast_ref::<ResponseHead>());
+        let answer = answer.as_ref();
         let build = || {
             let codec = &self.codec;
             let mut encoder = codec.response_encoder(answer, &self.ask, &self.body);
@@ -235,7 +239,7 @@ impl<C: Codec> Client<C> {
             // says.
             drop(writer.values.take());
             if let Some(ended) = writer.ended.take() {
-                ended(Ok(()));
+                ended.finish(Ok(()));
             }
             return Ok((head, stream::empty().boxed()));
         }
@@ -271,10 +275,10 @@ impl<T> Encoder<T, ResponseHead> for Refusal {
 
 /// A refusal its codec could not write: the adapter writes it, as an
 /// internal fault; the request ends with `fault`.
-fn unwritable(ended: Option<Ended>, fault: Fault) -> Handed {
+fn unwritable(ended: Option<Completion>, fault: Fault) -> Handed {
     let handed = Fault::internal(fault.message().to_owned()).with_source(fault.clone());
     if let Some(ended) = ended {
-        ended(Err(fault));
+        ended.finish(Err(fault));
     }
     Err(handed)
 }

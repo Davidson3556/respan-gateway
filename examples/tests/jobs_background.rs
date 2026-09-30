@@ -7,11 +7,19 @@ use respan_gateway_http::{Exchange, RequestHead, ResponseHead};
 /// Answers after `.1`: a provider that takes its time.
 struct Slow<T>(T, Duration);
 
-#[async_trait]
-impl<T: Transport> Transport for Slow<T> {
-    async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
+impl Slow<Transport> {
+    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
         tokio::time::sleep(self.1).await;
         self.0.send(call).await
+    }
+}
+impl<T: Into<Transport>> From<Slow<T>> for respan_gateway_http::Transport {
+    fn from(value: Slow<T>) -> Self {
+        let value = std::sync::Arc::new(Slow(value.0.into(), value.1));
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 

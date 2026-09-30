@@ -3,6 +3,7 @@
 //! no usage: [`Meter`], registered last, sums what lines report through a
 //! provider-edge filter, so these tests show what such a filter sees.
 
+use respan_gateway_formats::conversation::Conversation;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -22,7 +23,7 @@ use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bodiless;
 use respan_gateway_http::bytes;
-use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, Transport, impl_format};
+use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, impl_format};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::serve;
 
@@ -117,10 +118,6 @@ impl Codec for Line {
     ) -> Bytes {
         Bytes::from(format!("x:{}\n", fault.message()))
     }
-
-    fn is_content(&self, output: &LOut) -> bool {
-        !output.0.is_empty()
-    }
 }
 
 impl_format!(Line);
@@ -204,10 +201,6 @@ macro_rules! as_line {
             head: &mut respan_gateway_http::ResponseHead,
         ) -> Bytes {
             Line.refusal(fault, body, head)
-        }
-
-        fn is_content(&self, output: &LOut) -> bool {
-            Line.is_content(output)
         }
     };
 }
@@ -333,9 +326,8 @@ impl Script {
     }
 }
 
-#[async_trait]
-impl Transport for Script {
-    async fn send(
+impl Script {
+    pub async fn send(
         &self,
         _call: Exchange<respan_gateway_http::RequestHead>,
     ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -345,6 +337,15 @@ impl Transport for Script {
         let mut head = respan_gateway_http::fresh_response_head();
         head.status = status;
         Ok(Exchange::new(head, frames.boxed()))
+    }
+}
+impl From<Script> for respan_gateway_http::Transport {
+    fn from(value: Script) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -425,8 +426,8 @@ impl Plugin for Log {
 
 fn gateway(script: Script, log: &Log, plugin: impl Plugin) -> Gateway {
     Gateway::new()
-        .provider("p", Line, script)
-        .and_then(|g| g.client(Line))
+        .provider::<LIn, _, _>("p", Line, respan_gateway_http::connect(script))
+        .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("p"))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("x", plugin))
@@ -470,7 +471,10 @@ async fn f1_usage_read_until_content_is_metered_even_if_the_response_is_dropped(
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let call: Call = cx.call("p");
             // Read to its first content; the plugin answers on its own.
-            let read = call.await?.until_content().await?;
+            let read = call
+                .await?
+                .buffer_until(|out: &LOut| !out.0.is_empty())
+                .await?;
             drop(read);
             let own = futures::stream::iter([Ok(out("own"))]);
             Ok(Some(Response::stream(own)))
@@ -535,8 +539,12 @@ async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
     const ANTHROPIC: &str = "http://anthropic.test";
     let mock = MockTransport::new();
     let gw = Gateway::new()
-        .provider("anthropic", AnthropicMessages, mock.at(ANTHROPIC))
-        .and_then(|g| g.client(OpenAiChat))
+        .provider::<Conversation, _, _>(
+            "anthropic",
+            AnthropicMessages,
+            respan_gateway_http::connect(mock.at(ANTHROPIC)),
+        )
+        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .and_then(|g| g.target("anthropic"))
         .unwrap_or_else(|e| panic!("{e}"));
     let empty = http::Response::builder().status(StatusCode::NO_CONTENT);
@@ -595,7 +603,12 @@ async fn until_content_then_drop(frames: Vec<&'static str>) -> Result<(), Fault>
     #[async_trait]
     impl Plugin for Peek {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("p").await?.until_content().await?);
+            drop(
+                cx.call("p")
+                    .await?
+                    .buffer_until(|out: &LOut| !out.0.is_empty())
+                    .await?,
+            );
             let own = futures::stream::iter([Ok(out("own"))]);
             Ok(Some(Response::stream(own)))
         }
@@ -930,7 +943,12 @@ struct Fallback;
 #[async_trait]
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        match cx.call("p").await?.until_content().await {
+        match cx
+            .call("p")
+            .await?
+            .buffer_until(|out: &LOut| !out.0.is_empty())
+            .await
+        {
             Ok(resp) => Ok(Some(resp)),
             Err(_) => cx.call("p").await.map(Some),
         }
@@ -1126,7 +1144,12 @@ async fn r9_4b_an_abandoned_call_stays_abandoned() {
             px.filter(Fails)
         }
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("p").await?.until_content().await?);
+            drop(
+                cx.call("p")
+                    .await?
+                    .buffer_until(|out: &LOut| !out.0.is_empty())
+                    .await?,
+            );
             Ok(Some(Response::stream(futures::stream::iter([Ok(out(
                 "x",
             ))]))))
@@ -1386,9 +1409,8 @@ impl Encoder<LIn, ()> for Untranslatable {
 #[derive(Clone, Default)]
 struct Paths(Shared<String>);
 
-#[async_trait]
-impl Transport for Paths {
-    async fn send(
+impl Paths {
+    pub async fn send(
         &self,
         call: Exchange<respan_gateway_http::RequestHead>,
     ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
@@ -1398,6 +1420,15 @@ impl Transport for Paths {
             respan_gateway_http::fresh_response_head(),
             body.boxed(),
         ))
+    }
+}
+impl From<Paths> for respan_gateway_http::Transport {
+    fn from(value: Paths) -> Self {
+        let value = std::sync::Arc::new(value);
+        Self::new(move |call| {
+            let value = value.clone();
+            async move { value.send(call).await }
+        })
     }
 }
 
@@ -1419,8 +1450,12 @@ impl Plugin for Model {
 
 fn pathed(paths: &Paths, model: Option<&'static str>) -> Gateway {
     Gateway::new()
-        .provider("pathed", Pathed, paths.clone())
-        .and_then(|g| g.client(Line))
+        .provider::<<Pathed as Codec>::Input, _, _>(
+            "pathed",
+            Pathed,
+            respan_gateway_http::connect(paths.clone()),
+        )
+        .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("pathed"))
         .and_then(|g| g.plugin("model", Model(model)))
         .unwrap_or_else(|e| panic!("{e}"))
@@ -1471,8 +1506,12 @@ async fn v9_1_untranslatable_content_is_the_clients_fault_only_as_decoded() {
     }
 
     let gw = Gateway::new()
-        .provider("pathed", Pathed, paths.clone())
-        .and_then(|g| g.client(Line))
+        .provider::<<Pathed as Codec>::Input, _, _>(
+            "pathed",
+            Pathed,
+            respan_gateway_http::connect(paths.clone()),
+        )
+        .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("pathed"))
         .and_then(|g| g.plugin("tag", Tag))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1534,7 +1573,12 @@ async fn r10_2_a_204_dropped_after_until_content_ends_ok() {
     #[async_trait]
     impl Plugin for DropIt {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            drop(cx.call("p").await?.until_content().await?);
+            drop(
+                cx.call("p")
+                    .await?
+                    .buffer_until(|out: &LOut| !out.0.is_empty())
+                    .await?,
+            );
             Ok(Some(own()))
         }
     }
@@ -1629,7 +1673,11 @@ async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
     #[async_trait]
     impl Plugin for Fallback {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let read = cx.call("posted").await?.until_content().await;
+            let read = cx
+                .call("posted")
+                .await?
+                .buffer_until(|out: &LOut| !out.0.is_empty())
+                .await;
             self.0.note(format!("content {}", read.is_ok()));
             Ok(Some(own()))
         }
@@ -1638,8 +1686,12 @@ async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec!["x:boom\n"]);
     let gw = Gateway::new()
-        .provider("posted", Posted, script.clone())
-        .and_then(|g| g.client(Line))
+        .provider::<<Posted as Codec>::Input, _, _>(
+            "posted",
+            Posted,
+            respan_gateway_http::connect(script.clone()),
+        )
+        .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("x", Fallback(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1705,8 +1757,12 @@ async fn r10_6_first_is_an_item_only_for_an_input_not_the_clients() {
     for to in [None, Some("hi"), Some("m2")] {
         let script = Script::default().then(StatusCode::OK, vec!["i:ok\ne\n"]);
         let gw = Gateway::new()
-            .provider("p", Seen(seen.clone()), script)
-            .and_then(|g| g.client(Line))
+            .provider::<<Seen as Codec>::Input, _, _>(
+                "p",
+                Seen(seen.clone()),
+                respan_gateway_http::connect(script),
+            )
+            .and_then(|g| g.client::<LIn, _, _>(Line))
             .and_then(|g| g.target("p"))
             .and_then(|g| g.plugin("x", Touch(to)))
             .unwrap_or_else(|e| panic!("{e}"));
@@ -1768,8 +1824,12 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec!["i:hi\n", "u:5\ne\n"]);
     let gw = Gateway::new()
-        .provider("posted", Posted, script)
-        .and_then(|g| g.client(Line))
+        .provider::<<Posted as Codec>::Input, _, _>(
+            "posted",
+            Posted,
+            respan_gateway_http::connect(script),
+        )
+        .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("posted"))
         .and_then(|g| g.plugin("log", log.clone()))
         .and_then(|g| g.plugin("meter", Meter(log.clone())))
@@ -1863,8 +1923,12 @@ async fn r11_first_is_a_changed_input_even_with_the_clients_bytes() {
     let seen = Shared::default();
     let script = Script::default().then(StatusCode::OK, vec!["i:ok\ne\n"]);
     let gw = Gateway::new()
-        .provider("p", InPath(seen.clone()), script)
-        .and_then(|g| g.client(Line))
+        .provider::<<InPath as Codec>::Input, _, _>(
+            "p",
+            InPath(seen.clone()),
+            respan_gateway_http::connect(script),
+        )
+        .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("p"))
         .and_then(|g| g.plugin("x", Change))
         .unwrap_or_else(|e| panic!("{e}"));

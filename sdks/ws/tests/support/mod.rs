@@ -592,9 +592,9 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
     let (ends, calls) = (Outcomes::default(), Calls::default());
     let transport = WsTransport::new(base).unwrap();
     let gateway = Gateway::new()
-        .client(Raw)
+        .client::<Sent<Raw>, _, _>(Raw)
         .unwrap()
-        .provider("p", Raw, transport)
+        .provider::<Sent<Raw>, _, _>("p", Raw, respan_gateway_http::connect(transport))
         .unwrap()
         .plugin("ends", ends.clone())
         .unwrap()

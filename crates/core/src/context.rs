@@ -7,24 +7,25 @@ use futures::{Stream, StreamExt, stream};
 use tokio::runtime::Handle;
 
 use crate::call::OpenCalls;
-use crate::format::{AnyEvents, AnyFormat, AnyInput, Origin, erase, is_input, typed};
+use crate::events::Metadata;
+use crate::format::{AnyEvents, AnyFormat, AnyValue, erase, is_input, typed};
 use crate::gateway::Inner;
 use crate::input::Input;
 use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
-use crate::{Call, Events, Extensions, Fault, Filter, Gateway, Plugin};
+use crate::{Call, Events, Extensions, Fault, Filter, Gateway, Plugin, Result};
 
 /// One client request, as the client edge's hooks see it.
 pub struct ClientContext {
     /// The first client format that accepted the request.
     pub(crate) format: Arc<dyn AnyFormat>,
-    /// What came with the head, sealed: only a relay hands it on.
-    pub(crate) origin: Option<Origin>,
+    /// Format-owned metadata; only a relay hands it on.
+    pub(crate) metadata: Metadata,
     pub(crate) extensions: Extensions,
     /// The provider called if every plugin passes.
     pub(crate) target: Option<String>,
-    /// The input that came with the head; none for a streaming request.
+    /// The opening value; none for a streaming flow.
     pub(crate) input: Input,
     /// The inputs that follow it.
     pub(crate) later: Arc<Later>,
@@ -65,14 +66,14 @@ impl Edge for ClientContext {
         self
     }
 
-    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<(), Fault>) -> BoxFuture<'a, ()> {
+    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<()>) -> BoxFuture<'a, ()> {
         plugin.on_client_end(self, end)
     }
 
     /// The inputs left are cut off, first, so a plugin's stream that ends
     /// as the one it wraps is cut ends after the cut; open calls end
     /// abandoned; output filters still open end as the request did.
-    fn close(&mut self, end: &Result<(), Fault>) {
+    fn close(&mut self, end: &Result<()>) {
         self.later.end(Err(Fault::abandoned()));
         self.running = None;
         self.open.abandon();
@@ -86,16 +87,27 @@ impl Edge for ClientContext {
 impl ClientContext {
     pub(crate) fn new(
         format: Arc<dyn AnyFormat>,
-        origin: Option<Origin>,
-        later: Later,
+        mut incoming: Events<AnyValue>,
         extensions: Extensions,
         gateway: Arc<Inner>,
     ) -> Self {
         let cut = Arc::default();
+        let metadata = incoming.metadata_copy();
+        let single = incoming.take_single();
+        let later = if single.is_some() || incoming.refusal().is_some() {
+            Later::new(None)
+        } else {
+            let input_format = format.clone();
+            let events = incoming
+                .boxed()
+                .map(move |event| event.map(|event| input_format.values(vec![event])))
+                .boxed();
+            Later::new(Some(events))
+        };
         Self {
-            input: Input::new(format.clone(), origin.clone()),
+            input: Input::new(format.clone(), single, metadata.clone()),
             format,
-            origin,
+            metadata,
             extensions,
             target: gateway.target.clone(),
             later: Arc::new(later),
@@ -127,8 +139,8 @@ impl ClientContext {
         &mut self.extensions
     }
 
-    /// Whether `T` is the client's format's [`Input`](crate::Format::Input)
-    /// or [`Output`](crate::Format::Output), which the typed accessors take.
+    /// Whether `T` is the client's format's input type
+    /// or output type, which the typed accessors take.
     pub fn is_kind<T: Any>(&self) -> bool {
         is_input::<T>(&*self.format).is_ok()
     }
@@ -137,7 +149,7 @@ impl ClientContext {
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) for another type or a
     /// streaming request; or the decoder's or a filter's `Err`. A relay
     /// sends the body unread, so a plugin that vets input refuses on `Err`.
-    pub fn input<T: Any>(&self) -> Result<&T, Fault> {
+    pub fn input<T: Any>(&self) -> Result<&T> {
         self.input.get()
     }
 
@@ -149,7 +161,9 @@ impl ClientContext {
     /// request ended first, never as if they were complete; one `Err` with
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) for another type or if
     /// another reader took or read them.
-    pub fn take_inputs<T: Any + Clone + Send>(&mut self) -> Events<T> {
+    pub fn take_inputs<T: Any + Clone + Send>(
+        &mut self,
+    ) -> futures::stream::BoxStream<'static, Result<T>> {
         if is_input::<T>(&*self.format) != Ok(true) {
             return stream::once(async { Err(Fault::wrong_kind::<T>()) }).boxed();
         }
@@ -157,7 +171,7 @@ impl ClientContext {
             return stream::once(ready(self.input.get::<T>().cloned())).boxed();
         }
         let items = inputs(self.later.clone(), self.format.clone(), None, &self.cut);
-        let typed = |input: AnyInput| {
+        let typed = |input: AnyValue| {
             let typed = input.downcast_ref::<T>().cloned();
             typed.ok_or_else(Fault::wrong_kind::<T>)
         };
@@ -197,7 +211,7 @@ impl ClientContext {
     pub(crate) fn copy(&self) -> Self {
         Self {
             format: self.format.clone(),
-            origin: self.origin.clone(),
+            metadata: self.metadata.clone(),
             extensions: self.extensions.clone(),
             target: self.target.clone(),
             input: self.input.clone(),
@@ -214,8 +228,8 @@ impl ClientContext {
     }
 
     /// Run `filter` over the request's inputs if `T` is the client's
-    /// [`Input`](crate::Format::Input), or the outputs sent to it if its
-    /// [`Output`](crate::Format::Output).
+    /// input type, or the outputs sent to it if its
+    /// output type.
     ///
     /// Input filters run the first added first, before calls and
     /// [`ClientContext::take_inputs`]. A whole request's one input is edited
@@ -231,7 +245,7 @@ impl ClientContext {
     pub fn filter<T: Clone + Send + Sync + 'static>(
         &mut self,
         filter: impl Filter<T>,
-    ) -> Result<(), Fault> {
+    ) -> Result<()> {
         match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
             true if self.later.ended => self.input.filter(Filters::of(filter)),
@@ -240,25 +254,25 @@ impl ClientContext {
     }
 
     /// Wrap the request's inputs if `T` is the client's
-    /// [`Input`](crate::Format::Input), or the outputs sent to it if its
-    /// [`Output`](crate::Format::Output), in a stream of `wrap`'s: for work
+    /// input type, or the outputs sent to it if its
+    /// output type, in a stream of `wrap`'s: for work
     /// a [filter](ClientContext::filter) cannot do, as it waits, such as a
     /// remote check of each input or a deadline that cuts the outputs.
     ///
     /// ```
     /// # use respan_gateway_core::futures::{StreamExt, TryStreamExt};
-    /// # use respan_gateway_core::{ClientContext, Events, Fault};
+    /// # use respan_gateway_core::{ClientContext, Events, Result};
     /// # use tokio::time::{Duration, sleep};
     /// # #[derive(Clone)]
     /// # struct Turn;
     /// # #[derive(Clone)]
     /// # struct Event;
     /// /// A remote check of one input, such as a classifier's call.
-    /// async fn check(turn: Turn) -> Result<Turn, Fault> {
+    /// async fn check(turn: Turn) -> Result<Turn> {
     ///     Ok(turn)
     /// }
     ///
-    /// fn on_client(cx: &mut ClientContext, limit: Duration) -> Result<(), Fault> {
+    /// fn on_client(cx: &mut ClientContext, limit: Duration) -> Result<()> {
     ///     cx.wrap(|turns: Events<Turn>| turns.and_then(check))?;
     ///     cx.wrap(move |events: Events<Event>| events.take_until(sleep(limit)))
     /// }
@@ -283,16 +297,14 @@ impl ClientContext {
     /// `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
     /// type, or for the inputs of a whole request, whose one input came with
     /// its head: vet it here and edit it with a filter.
-    pub fn wrap<T, S>(
-        &mut self,
-        wrap: impl FnOnce(Events<T>) -> S + Send + 'static,
-    ) -> Result<(), Fault>
+    pub fn wrap<T, S>(&mut self, wrap: impl FnOnce(Events<T>) -> S + Send + 'static) -> Result<()>
     where
         T: Any + Clone + Send + Sync,
-        S: Stream<Item = Result<T, Fault>> + Send + 'static,
+        S: Stream<Item = Result<T>> + Send + 'static,
     {
         if !is_input::<T>(&*self.format)? {
-            let wrap: Wrap = Box::new(|outputs| erase(wrap(typed(outputs)).boxed()));
+            let wrap: Wrap =
+                Box::new(|outputs| erase(wrap(Events::stream(typed(outputs))).boxed()));
             let before = std::mem::take(&mut self.outputs);
             locked(&self.wrapped).push((Some(wrap), before));
             return Ok(());
@@ -301,7 +313,7 @@ impl ClientContext {
             let whole = "a whole request's one input came with its head: edit it with a filter";
             return Err(Fault::internal(whole));
         }
-        let inputs = erase(wrap(self.take_inputs::<T>()).boxed());
+        let inputs = erase(wrap(Events::stream(self.take_inputs::<T>())).boxed());
         self.later = Arc::new(Later::wrapping(inputs, self.later.clone()));
         Ok(())
     }

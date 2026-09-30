@@ -8,13 +8,13 @@ use crate::input::Input;
 use crate::leg::{Layer, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
-use crate::{ClientContext, Extensions, Fault, Filter, Plugin};
+use crate::{ClientContext, Extensions, Filter, Plugin, Result};
 
-/// A provider the gateway can call: a format and its dialer.
+/// A provider the gateway can call: a format and a fresh-transport factory.
 #[derive(Clone)]
 pub(crate) struct Provider {
     pub(crate) format: Arc<dyn AnyFormat>,
-    pub(crate) dialer: Arc<dyn Any + Send + Sync>,
+    pub(crate) factory: Arc<dyn Fn(Extensions) -> Box<dyn Any + Send> + Send + Sync>,
 }
 
 /// One call to a provider, as the provider edge's hooks see it.
@@ -39,7 +39,7 @@ pub struct ProviderContext {
     /// end hooks finish, as its request's end hooks wait for them.
     pub(crate) running: InFlightGuard,
     /// Set once its format took it to send.
-    pub(crate) sent: bool,
+    pub(crate) sent: Arc<std::sync::atomic::AtomicBool>,
     /// Set if the provider answered and refused it at its head.
     pub(crate) refused: bool,
 }
@@ -57,14 +57,14 @@ impl Edge for ProviderContext {
         &self.client
     }
 
-    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<(), Fault>) -> BoxFuture<'a, ()> {
+    fn hook<'a>(&'a self, plugin: &'a dyn Plugin, end: &'a Result<()>) -> BoxFuture<'a, ()> {
         plugin.on_provider_end(self, end)
     }
 
     /// Its response and inputs are cut off, and filters still open end,
     /// dropping what they keep back, before its end hooks run. Its end
     /// hooks settle for its request from here.
-    fn close(&mut self, end: &Result<(), Fault>) {
+    fn close(&mut self, end: &Result<()>) {
         self.running = InFlight::enter(&self.client.settling);
         let _ = locked(&self.inputs).end(end.clone(), &mut None);
         let _ = locked(&self.outputs).end(end.clone(), &mut None);
@@ -91,8 +91,8 @@ impl ProviderContext {
     }
 
     /// Whether `T` is the provider's format's
-    /// [`Input`](crate::Format::Input) or [`Output`](crate::Format::Output)
-    /// type, which the typed accessors take.
+    /// input type or output type
+    /// which the typed accessors take.
     pub fn is_kind<T: Any>(&self) -> bool {
         is_input::<T>(&*self.format).is_ok()
     }
@@ -100,7 +100,7 @@ impl ProviderContext {
     /// This call's first input as `T`, the call's input type: its own
     /// ([`Call::with_input`](crate::Call::with_input)), else the one that
     /// came with the request's head. `Err` as [`ClientContext::input`].
-    pub fn input<T: Any>(&self) -> Result<&T, Fault> {
+    pub fn input<T: Any>(&self) -> Result<&T> {
         self.input.get()
     }
 
@@ -110,7 +110,7 @@ impl ProviderContext {
     pub fn filter<T: Clone + Send + Sync + 'static>(
         &mut self,
         filter: impl Filter<T>,
-    ) -> Result<(), Fault> {
+    ) -> Result<()> {
         match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
             // Later inputs follow only a session's head.
@@ -123,7 +123,7 @@ impl ProviderContext {
     /// the provider. `false` in `on_provider`, and for a call that failed
     /// before that: by a hook or an input it could not write.
     pub fn is_sent(&self) -> bool {
-        self.sent
+        self.sent.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether the provider answered and refused the call at its head: its
