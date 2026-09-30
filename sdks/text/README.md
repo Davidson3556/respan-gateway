@@ -20,9 +20,11 @@ Order: input filters run in registration order, so register any plugin
 that adds to the input BEFORE the plugin that checks or redacts it, or
 its text goes unchecked.
 
-Not handled: a match split across streamed tool-argument fragments, or
-across two text blocks (Anthropic's citations make many); an edit of a
-bare number in a streamed tool-argument fragment, which is written
+With `Holdback`, matches split across OpenAI or Anthropic tool-argument
+fragments are handled, including split JSON escapes.
+
+Not handled: a match split across two text blocks (Anthropic's citations
+make many); an edit of a bare number in a streamed tool-argument fragment, which is written
 unquoted; Anthropic tool blocks in a request, which are refused as
 content with no text form (in a reply they are read).
 

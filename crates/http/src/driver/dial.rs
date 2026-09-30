@@ -18,14 +18,14 @@ use crate::{Codec, Encoder, Exchange, RequestHead, ResponseHead};
 /// starts the transport operation; its response opens the incoming events.
 pub fn dial<C: Codec + Clone>(
     codec: &C,
-    io: Transport,
+    mut io: Transport,
 ) -> Result<Connection<C::Output, C::Input>, Fault> {
     if !matches!(io.state.as_ref(), TransportState::Outbound(_)) {
         return Err(Fault::config(
             "an accepted transport cannot call a provider",
         ));
     }
-    let extensions = io.extensions.clone();
+    let extensions = std::mem::take(&mut io.extensions);
     let transport = io;
     let (answer, answered) = oneshot::channel();
     let incoming = async move { answered.await.map_err(|_| Fault::abandoned())? }.boxed();
@@ -70,7 +70,7 @@ pub fn dial<C: Codec + Clone>(
                 if !is_open(&head, &sent) {
                     read.decide().await;
                 }
-                let response = match read.refused() {
+                let response = match read.refused().await {
                     Some(fault) => Events::refused(fault),
                     None => Events::stream(read),
                 };

@@ -416,9 +416,37 @@ fn unchunked(raw: &[u8]) -> Vec<u8> {
         }
         // A chunk cut short gives what came of it.
         body.extend_from_slice(&data[..size.min(data.len())]);
-        match data.get(size + 2..) {
+        match data.get(size..).and_then(|tail| tail.get(2..)) {
             Some(more) => rest = more,
             None => return body,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unchunked;
+
+    #[test]
+    fn oversized_refusal_chunks_keep_the_available_body() {
+        for size in [usize::MAX, usize::MAX - 1] {
+            let raw = format!("{size:x}\r\nno room");
+            assert_eq!(unchunked(raw.as_bytes()), b"no room");
+        }
+    }
+
+    #[test]
+    fn refusal_chunks_preserve_complete_truncated_and_unframed_bodies() {
+        assert_eq!(
+            unchunked(b"3;ext=yes\r\nno \r\n4\r\nroom\r\n0\r\n\r\n"),
+            b"no room"
+        );
+        assert_eq!(unchunked(b"20\r\nno room"), b"no room");
+        assert_eq!(unchunked(b"7\r\nno room\r"), b"no room");
+        assert_eq!(
+            unchunked(b"not chunks\r\nno room"),
+            b"not chunks\r\nno room"
+        );
+        assert_eq!(unchunked(b"no room"), b"no room");
     }
 }

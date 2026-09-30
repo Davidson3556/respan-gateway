@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use respan_gateway_core::{Extensions, Fault};
+use respan_gateway_core::Fault;
+use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_http::Status;
+use respan_gateway_http::bytes::BytesMut;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::{BodyExt, Full};
@@ -181,8 +183,7 @@ fn no_session() -> Fault {
 impl StdioTransport {
     /// Send an encoded call and return its response.
     pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
-        let (call, extensions) = respan_gateway_http::into_request(call);
-        let resp = self.send_http(call, &extensions).await?;
+        let resp = self.send_http(call).await?;
         Ok(respan_gateway_http::from_response(resp))
     }
 }
@@ -197,12 +198,13 @@ impl From<StdioTransport> for respan_gateway_http::Transport {
 }
 
 impl StdioTransport {
-    async fn send_http(
-        &self,
-        call: http::Request<Body>,
-        extensions: &Extensions,
-    ) -> Result<Reply, Fault> {
-        let (head, body) = call.into_parts();
+    async fn send_http(&self, call: Exchange<RequestHead>) -> Result<Reply, Fault> {
+        let Exchange {
+            head,
+            body: mut frames,
+            extensions,
+            ..
+        } = call;
         let owner = match extensions.get::<Owner>() {
             Some(Owner(owner)) => self.keys.hash_one((true, Some(owner.as_bytes()))),
             None => {
@@ -212,7 +214,10 @@ impl StdioTransport {
                     .hash_one((false, authorization.map(HeaderValue::as_bytes)))
             }
         };
-        let body = body.collect().await?.to_bytes();
+        let mut body = BytesMut::new();
+        while let Some(bytes) = frames.try_next().await? {
+            body.extend_from_slice(&bytes);
+        }
         let Some(id) = head.headers.get(SESSION) else {
             return match head.method {
                 Method::POST => self.start(owner, &body).await,

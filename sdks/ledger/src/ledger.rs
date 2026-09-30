@@ -53,7 +53,8 @@ pub trait Ledger: Send + Sync + 'static {
     /// Hold `amount` on every account in `accounts`, or on none, until
     /// settled or until `ttl` passes, when the hold is released but its
     /// accounts are kept for a late settlement for one more `ttl`. A known
-    /// `id` is a no-op.
+    /// `id`, including one already settled, is a no-op until that deadline.
+    /// After it is forgotten, the same `id` can reserve again.
     async fn reserve(
         &self,
         id: &HoldId,
@@ -90,10 +91,10 @@ struct Account {
 #[derive(Debug)]
 struct Hold {
     chain: Vec<String>,
-    /// Held on each account in `chain`; 0 once expired.
+    /// Held on each account in `chain`; 0 once expired or settled.
     amount: Amount,
     expires: Instant,
-    /// When a hold never settled is forgotten: one `ttl` after it expired.
+    /// When this id is forgotten, settled or not: one `ttl` after expiry.
     forget: Instant,
 }
 
@@ -166,12 +167,13 @@ impl Books {
     }
 
     fn close(&mut self, id: &HoldId, spent: Amount) {
-        let Some(hold) = self.holds.remove(id) else {
+        let Some(hold) = self.holds.get_mut(id) else {
             return;
         };
-        for name in &hold.chain {
-            if let Some(a) = self.accounts.get_mut(name) {
-                a.held = a.held.saturating_sub(hold.amount);
+        let amount = std::mem::take(&mut hold.amount);
+        for name in std::mem::take(&mut hold.chain) {
+            if let Some(a) = self.accounts.get_mut(&name) {
+                a.held = a.held.saturating_sub(amount);
                 a.spent = a.spent.saturating_add(spent);
             }
         }

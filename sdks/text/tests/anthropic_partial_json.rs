@@ -81,9 +81,9 @@ fn a_split_backslash_hides_a_term_in_anthropic_partial_json() {
     );
 }
 
-/// A term split across two Anthropic fragments passes a refusing check.
+/// A term split across two Anthropic fragments is still refused.
 #[test]
-fn a_term_split_across_anthropic_partial_json_passes_a_check() {
+fn a_term_split_across_anthropic_partial_json_is_refused() {
     let split = run(
         &mut Holdback::new(Refuse),
         vec![partial("{\"s\":\"bo"), partial("mb\"}")],
@@ -95,7 +95,7 @@ fn a_term_split_across_anthropic_partial_json_passes_a_check() {
     );
 }
 
-/// A placeholder split across Anthropic fragments is not restored.
+/// A placeholder split across Anthropic fragments is restored.
 #[test]
 fn a_placeholder_split_across_anthropic_partial_json_is_restored() {
     let vault = Placeholders::default();

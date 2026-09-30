@@ -23,7 +23,7 @@ use respan_gateway_formats::{OpenAiChat, message_decoder, set_path};
 use respan_gateway_formats::{call_head, headed, response_head, with_head};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
-use respan_gateway_http::{Asked, RequestHead, ResponseHead, fresh_response_head};
+use respan_gateway_http::{Asked, RequestHead, ResponseHead, Transport, fresh_response_head};
 use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, impl_format};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_testkit::{Calls, MockTransport, mock, post, serve, streamed};
@@ -658,50 +658,6 @@ impl From<Early> for respan_gateway_http::Transport {
     }
 }
 
-/// A provider that never answers.
-#[derive(Clone)]
-struct Never;
-
-impl Never {
-    pub async fn send(
-        &self,
-        _call: Exchange<RequestHead>,
-    ) -> Result<Exchange<ResponseHead>, Fault> {
-        std::future::pending().await
-    }
-}
-impl From<Never> for respan_gateway_http::Transport {
-    fn from(value: Never) -> Self {
-        let value = std::sync::Arc::new(value);
-        Self::new(move |call| {
-            let value = value.clone();
-            async move { value.send(call).await }
-        })
-    }
-}
-
-/// A provider that cannot be reached, and never reads the call's body.
-#[derive(Clone)]
-struct Down;
-
-impl Down {
-    pub async fn send(
-        &self,
-        _call: Exchange<RequestHead>,
-    ) -> Result<Exchange<ResponseHead>, Fault> {
-        Err(Fault::upstream("unreachable"))
-    }
-}
-impl From<Down> for respan_gateway_http::Transport {
-    fn from(value: Down) -> Self {
-        let value = std::sync::Arc::new(value);
-        Self::new(move |call| {
-            let value = value.clone();
-            async move { value.send(call).await }
-        })
-    }
-}
-
 /// Notes each hook's name, and what its calls returned.
 #[derive(Clone, Default)]
 struct Notes(Arc<Mutex<Vec<String>>>);
@@ -919,7 +875,14 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
 
     let spawner = Spawner::default();
     let (gw, _) = talk_to(
-        vec![add_provider("never", Talk, Never)],
+        vec![add_provider(
+            "never",
+            Talk,
+            Transport::new(|call| async move {
+                let _call = call;
+                std::future::pending().await
+            }),
+        )],
         vec![Arc::new(spawner.clone())],
     );
 
@@ -954,7 +917,14 @@ async fn a_retry_after_a_call_that_failed_unread_gets_every_input() {
 
     let echo = Echo::default();
     let list = vec![
-        add_provider("down", Talk, Down),
+        add_provider(
+            "down",
+            Talk,
+            Transport::new(|call| async move {
+                let _call = call;
+                Err(Fault::upstream("unreachable"))
+            }),
+        ),
         add_provider("echo", Talk, echo.clone()),
     ];
     let (gw, _) = talk_to(list, vec![Arc::new(Retry)]);
@@ -1334,7 +1304,14 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
 
     let hold = Hold::default();
     let (gw, _) = talk_to(
-        vec![add_provider("never", Talk, Never)],
+        vec![add_provider(
+            "never",
+            Talk,
+            Transport::new(|call| async move {
+                let _call = call;
+                std::future::pending().await
+            }),
+        )],
         vec![Arc::new(hold.clone())],
     );
     let (resp, ended) = serve(&gw, post("/v1/talk", r#"{"say":"x"}"#)).await;
@@ -1627,8 +1604,22 @@ async fn dropped_then_retried() {
     let retry = Retry::default();
     let (gw, _) = talk_to(
         vec![
-            add_provider("never", Talk, Never),
-            add_provider("never2", Talk, Never),
+            add_provider(
+                "never",
+                Talk,
+                Transport::new(|call| async move {
+                    let _call = call;
+                    std::future::pending().await
+                }),
+            ),
+            add_provider(
+                "never2",
+                Talk,
+                Transport::new(|call| async move {
+                    let _call = call;
+                    std::future::pending().await
+                }),
+            ),
         ],
         vec![Arc::new(retry.clone())],
     );
@@ -1671,7 +1662,14 @@ async fn r6_on_provider_sees_the_requests_task_locals() {
 
     let seen = Seen::default();
     let (gw, _) = talk_to(
-        vec![add_provider("down", Talk, Down)],
+        vec![add_provider(
+            "down",
+            Talk,
+            Transport::new(|call| async move {
+                let _call = call;
+                Err(Fault::upstream("unreachable"))
+            }),
+        )],
         vec![Arc::new(seen.clone())],
     );
     TRACE

@@ -24,6 +24,9 @@ pub(crate) type Failure = Arc<OnceLock<Fault>>;
 /// as a time limit is the transport's job.
 pub(crate) const ERROR_BODY_CAP: usize = 1 << 20;
 
+/// Empty or ignored frames still consume work, even when they add no bytes.
+const MAX_READY_FRAMES: usize = 128;
+
 /// Builds a decoder once the first frame comes.
 type Make<T> = Box<dyn FnOnce() -> Box<dyn Decoder<T>> + Send>;
 
@@ -96,8 +99,14 @@ impl<T: Send + 'static> Reader<T> {
     /// An answer decided before the cap is never cut.
     pub(crate) async fn decide(&mut self) {
         let mut read = 0;
+        let mut frames = 0;
         while self.ready.is_empty() && !self.ended {
+            if frames == MAX_READY_FRAMES {
+                tokio::task::yield_now().await;
+                frames = 0;
+            }
             let frame = self.body.next().await;
+            frames += 1;
             read += frame
                 .as_ref()
                 .and_then(|f| f.as_ref().ok())
@@ -110,14 +119,20 @@ impl<T: Send + 'static> Reader<T> {
     }
 
     /// The provider's refusal at its head (rule 2), as far as its answer
-    /// is ready now, waiting for nothing: its decoder's failure before any
+    /// is ready, yielding between batches: its decoder's failure before any
     /// output, the body unbroken, as a provider's error answer is.
-    pub(crate) fn refused(&mut self) -> Option<Fault> {
+    pub(crate) async fn refused(&mut self) -> Option<Fault> {
+        let mut frames = 0;
         while self.ready.is_empty() && !self.ended {
+            if frames == MAX_READY_FRAMES {
+                tokio::task::yield_now().await;
+                frames = 0;
+            }
             let Some(frame) = self.body.next().now_or_never() else {
                 break;
             };
             self.read(frame);
+            frames += 1;
         }
         match self.ready.front() {
             Some(Err(_)) if !self.broke => self.ready.pop_front().and_then(Result::err),
@@ -165,12 +180,17 @@ impl<T: Send + 'static> Stream for Reader<T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
+        let mut frames = 0;
         loop {
             if let Some(value) = this.ready.pop_front() {
                 return Poll::Ready(Some(value));
             }
             if this.ended {
                 return Poll::Ready(None);
+            }
+            if frames == MAX_READY_FRAMES {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
             if this.apart && !this.yielded {
                 this.yielded = true;
@@ -180,6 +200,7 @@ impl<T: Send + 'static> Stream for Reader<T> {
             let frame = ready!(this.body.poll_next_unpin(cx));
             this.yielded = false;
             this.read(frame);
+            frames += 1;
         }
     }
 }
@@ -195,5 +216,72 @@ impl<T> Decoder<T> for Unmade {
 
     fn end(&mut self, _: &mut Vec<T>) -> Result<(), Fault> {
         Err(Fault::internal("a body read with no decoder"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::stream;
+
+    use super::*;
+
+    struct Quiet;
+    impl Decoder<()> for Quiet {
+        fn decode(&mut self, _: Bytes, _: &mut Vec<()>) -> Result<(), Fault> {
+            Ok(())
+        }
+        fn end(&mut self, _: &mut Vec<()>) -> Result<(), Fault> {
+            Err(Fault::upstream("refused"))
+        }
+    }
+
+    fn empty_frames(read: Arc<AtomicUsize>) -> Frames {
+        stream::iter(0..10_000)
+            .map(move |_| {
+                read.fetch_add(1, Ordering::SeqCst);
+                Ok(Bytes::new())
+            })
+            .boxed()
+    }
+
+    #[tokio::test]
+    async fn refusal_peeking_yields_without_losing_a_late_refusal() {
+        let read = Arc::new(AtomicUsize::new(0));
+        let mut reader = Reader::outputs(
+            empty_frames(read.clone()),
+            Box::new(Quiet),
+            Failure::default(),
+        );
+        let mut refused = reader.refused().boxed();
+        assert!(refused.as_mut().now_or_never().is_none());
+        assert!(read.load(Ordering::SeqCst) <= MAX_READY_FRAMES);
+        assert_eq!(refused.await, Some(Fault::upstream("refused")));
+        assert_eq!(read.load(Ordering::SeqCst), 10_000);
+    }
+
+    #[tokio::test]
+    async fn empty_error_frames_yield_even_though_the_byte_cap_is_not_reached() {
+        let read = Arc::new(AtomicUsize::new(0));
+        let mut reader = Reader::outputs(
+            empty_frames(read.clone()),
+            Box::new(Quiet),
+            Failure::default(),
+        );
+        let mut decision = reader.decide().boxed();
+        assert!(decision.as_mut().now_or_never().is_none());
+        assert!(read.load(Ordering::SeqCst) <= MAX_READY_FRAMES);
+        decision.await;
+        assert_eq!(reader.refused().await, Some(Fault::upstream("refused")));
+    }
+
+    #[tokio::test]
+    async fn ignored_incoming_frames_cannot_spin_in_one_poll() {
+        let read = Arc::new(AtomicUsize::new(0));
+        let mut reader = Reader::inputs(empty_frames(read.clone()), Box::new(|| Box::new(Quiet)));
+        assert!(reader.next().now_or_never().is_none());
+        assert!(read.load(Ordering::SeqCst) <= MAX_READY_FRAMES);
+        assert_eq!(reader.next().await, Some(Err(Fault::upstream("refused"))));
     }
 }

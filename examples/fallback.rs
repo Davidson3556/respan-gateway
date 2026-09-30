@@ -1,7 +1,7 @@
 //! Fallback, hedging and stalls (use cases 4 and 6). `Resilient` retries
 //! the target as `Retry-After` asks, then falls back to a provider in
 //! another format, or, for a request marked `x-hedge`, races a second
-//! deployment started 200 ms later. A `Watchdog` fails OpenAI when its head
+//! deployment started 200 ms later. A `watchdog` fails OpenAI when its head
 //! takes over 2 s or its stream goes silent for 1 s. A stream that fails after
 //! its first content reached the client is never retried. Not built here:
 //! splitting an embedding batch and merging `/v1/models`.
@@ -18,7 +18,7 @@ use respan_gateway_formats::conversation::{Conversation, set_model};
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_http::{Asked, Body, Exchange, RequestHead, ResponseHead, Transport};
-use respan_gateway_routing::{Attempt, Backoff, Until, Watchdog, first_success, race};
+use respan_gateway_routing::{Attempt, Backoff, Until, first_success, race, watchdog};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// Falls back from the target to Anthropic, or hedges it with `openai-eu`.
@@ -131,7 +131,7 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     // A whole answer's head comes only once it is done: a deployment waits
     // minutes for it, and seconds between stream events.
     let (head, idle) = (Duration::from_secs(2), Duration::from_secs(1));
-    let openai = Watchdog::new(Slow(mock.at(OPENAI), delay), head, idle);
+    let openai = watchdog(Slow(mock.at(OPENAI), delay), head, idle);
     let gw = Gateway::new()
         .client::<Conversation, _, _>(OpenAiChat)?
         .provider::<Conversation, _, _>("openai", OpenAiChat, respan_gateway_http::connect(openai))?

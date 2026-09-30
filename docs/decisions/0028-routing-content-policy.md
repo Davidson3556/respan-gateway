@@ -11,8 +11,8 @@ rechecks buffered events against its own predicate. Errors before a
 match are returned; errors after it are retained for replay. A clean end
 returns the response even without a match. Duplex calls remain unread.
 
-The routing SDK provides `until_content(response, predicate)` and
-`Until::content(predicate)`. Plugins supply the event type and criterion,
+The routing SDK provides `Until::content(predicate)`, using core's
+`buffer_until` directly. Plugins supply the event type and criterion,
 for example `Reply::is_content`. There is no universal default predicate.
 
 This intentionally changes the former pre-filter classification: events

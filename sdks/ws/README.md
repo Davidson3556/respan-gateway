@@ -37,8 +37,8 @@ tests relay through `formats::opaque` too.
 | The end | Input (client to provider) | Output (provider to client) |
 |---|---|---|
 | Client sends Close | ends clean | provider is sent Close 1000; its end, however it comes within 5 s, is clean |
-| Client drops, no Close | ends `Err(bad_request)` | dropped: request and calls end `abandoned` |
-| Client sends a binary frame | ends `Err(bad_request)` | client is sent Close 1003; ends `abandoned` |
+| Client drops, no Close | ends `Err(abandoned)` | dropped: request and calls end `abandoned` |
+| Client sends a binary frame | ends `Err(abandoned)` | client is sent Close 1003; ends `abandoned` |
 | Provider sends Close 1000 (or no code) | dropped | ends clean; client is sent Close 1000 |
 | Provider sends Close with another code | dropped | `Err(upstream)` with that `CloseCode`; client is sent that code |
 | Provider drops, no Close | dropped | `Err(truncated)`; client is sent 1011 `truncated` |

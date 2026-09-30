@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! Attempt control for respan-gateway plugins: retry with `Retry-After`
 //! ([`first_success`], [`Backoff`]), a staggered race ([`race`]), a stall
-//! bound on a provider's head and body ([`Watchdog`]), and each attempt's [`Role`]
+//! bound on a provider's head and body ([`watchdog`]), and each attempt's [`Role`]
 //! ([`Attempt`]).
 //!
 //! Both helpers read each answer [`Until`] a stopping point, using a plugin-supplied
@@ -138,7 +138,7 @@ impl Until {
         predicate: impl FnMut(&T) -> bool + Clone + Send + Sync + 'static,
     ) -> Self {
         Self::Content(Arc::new(move |response| {
-            until_content(response, predicate.clone()).boxed()
+            response.buffer_until(predicate.clone()).boxed()
         }))
     }
 }
@@ -151,17 +151,6 @@ impl std::fmt::Debug for Until {
             Self::End => "End",
         })
     }
-}
-
-/// Wait for the plugin's first qualifying event, preserving buffered events,
-/// relay metadata and call ownership. The predicate sees provider-filtered
-/// outputs, including outputs synthesized by a plugin.
-/// Bound calls that may produce an unlimited stream of non-matching events.
-pub async fn until_content<T: Any + Send + Sync>(
-    response: Response,
-    predicate: impl FnMut(&T) -> bool + Send,
-) -> Result<Response, Fault> {
-    response.buffer_until(predicate).await
 }
 
 /// An attempt, its answer read [`Until`] a point, and, read to its end,
@@ -297,61 +286,32 @@ pub async fn race(
     }
 }
 
-/// A transport that fails a silent provider rather than hanging: one that
-/// sends no head within `head` (an `upstream` fault), or no body frame
-/// within `idle` of the head or the frame before (the stream ends as an
-/// error in the client's framing). Before any content, [`first_success`]
-/// retries it.
+/// Bound a provider's wait for its head by `head`, and each gap between
+/// body frames by `idle`. A timeout is an `upstream` fault; before any
+/// content, [`first_success`] retries it.
 ///
 /// A whole (non-streaming) answer sends its head only once it is done, so
 /// `head` is the longest answer to wait for; `idle` bounds a stream's gaps.
-#[derive(Debug, Clone)]
-pub struct Watchdog<T> {
-    inner: T,
-    head: Duration,
-    idle: Duration,
-}
-
-impl<T: Into<Transport>> Watchdog<T> {
-    /// Bound `inner`'s wait for its head by `head`, and each gap in its body by `idle`.
-    pub fn new(inner: T, head: Duration, idle: Duration) -> Self {
-        Self { inner, head, idle }
-    }
-}
-
-impl Watchdog<Transport> {
-    /// Send an encoded call and return its response.
-    pub async fn send(
-        &self,
-        call: Exchange<RequestHead>,
-    ) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
-        let stalled = |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
-        let resp = tokio::time::timeout(self.head, self.inner.send(call)).await;
-        let mut resp = resp.map_err(|_| stalled(self.head))??;
-        let (frames, idle) = (Some(resp.body), self.idle);
-        let bounded = stream::unfold(frames, move |frames| async move {
-            let mut frames = frames?;
-            match tokio::time::timeout(idle, frames.next()).await {
-                Ok(frame) => Some((frame?, Some(frames))),
-                Err(_) => Some((Err(stalled(idle)), None)),
-            }
-        });
-        resp.body = bounded.boxed();
-        Ok(resp)
-    }
-}
-impl<T: Into<Transport>> From<Watchdog<T>> for respan_gateway_http::Transport {
-    fn from(value: Watchdog<T>) -> Self {
-        let value = std::sync::Arc::new(Watchdog {
-            inner: value.inner.into(),
-            head: value.head,
-            idle: value.idle,
-        });
-        Self::new(move |call| {
-            let value = value.clone();
-            async move { value.send(call).await }
-        })
-    }
+pub fn watchdog(inner: impl Into<Transport>, head: Duration, idle: Duration) -> Transport {
+    let inner = inner.into();
+    Transport::new(move |call: Exchange<RequestHead>| {
+        let inner = inner.clone();
+        async move {
+            let stalled =
+                |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
+            let resp = tokio::time::timeout(head, inner.send(call)).await;
+            let mut resp = resp.map_err(|_| stalled(head))??;
+            let bounded = stream::unfold(Some(resp.body), move |frames| async move {
+                let mut frames = frames?;
+                match tokio::time::timeout(idle, frames.next()).await {
+                    Ok(frame) => Some((frame?, Some(frames))),
+                    Err(_) => Some((Err(stalled(idle)), None)),
+                }
+            });
+            resp.body = bounded.boxed();
+            Ok(resp)
+        }
+    })
 }
 
 #[cfg(test)]

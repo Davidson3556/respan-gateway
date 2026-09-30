@@ -2,8 +2,8 @@
 
 Attempt control for plugins: retry with `Retry-After`, fallback, a staggered
 race, a stall bound, and each attempt's role. Each answer is read `Until` a
-stopping point before it is judged: its `Head`, its first `Content`
-(`Response::until_content`, the default), or its `End`
+stopping point before it is judged: its `Head`, a plugin-chosen event
+(`Until::content(predicate)`), or its `End`
 (`Response::until_end`, held whole, to race for completion; a success
 that failed on the way, as the end it returns says, does not count). A success
 counts only once read that far; nothing is retried after that. A
@@ -15,7 +15,7 @@ its `Head`, unread, it cannot be told from a success.
   call in turn, retried as `Backoff::new(tries, base, max)` says.
 - `race(calls, stagger, Until) -> Result<Response, Fault>`: start each call
   `stagger` after the last; the first success wins.
-- `Watchdog::new(transport, head, idle)`: an `http::Transport` that wraps another and fails a call
+- `watchdog(transport, head, idle) -> Transport`: fails a call
   whose head is late or whose body goes silent.
 - `Attempt` (extension on each call): its `index()` and `Role`.
 

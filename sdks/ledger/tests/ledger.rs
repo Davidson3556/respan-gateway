@@ -65,6 +65,33 @@ async fn reserve_and_settle_are_idempotent_by_hold_id() {
     assert_eq!((ledger.spent("acme"), ledger.available("team")), (60, 240));
 }
 
+#[tokio::test(start_paused = true)]
+async fn settled_ids_ignore_replayed_reservations_until_forgotten() -> Result<(), Fault> {
+    let ledger = ledger();
+    let (id, key) = (HoldId::new(), names(&["key-1"]));
+    ledger.reserve(&id, &key, 100, TTL).await?;
+    ledger.settle(&id, 60).await?;
+
+    // Replays before and after hold expiry neither reserve nor charge again.
+    for elapsed in [Duration::ZERO, TTL + Duration::from_secs(1)] {
+        tokio::time::advance(elapsed).await;
+        ledger.reserve(&id, &key, 100, TTL).await?;
+        assert_eq!(ledger.available("team"), 240);
+        ledger.settle(&id, 60).await?;
+        for account in ["key-1", "team", "acme"] {
+            assert_eq!(ledger.spent(account), 60, "{account}");
+        }
+    }
+
+    // Retention stays bounded by the original expiry plus one TTL.
+    tokio::time::advance(TTL).await;
+    ledger.reserve(&id, &key, 100, TTL).await?;
+    assert_eq!(ledger.available("team"), 140);
+    ledger.settle(&id, 60).await?;
+    assert_eq!(ledger.spent("acme"), 120);
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_unknown_account_is_refused() {
     let refused = ledger()

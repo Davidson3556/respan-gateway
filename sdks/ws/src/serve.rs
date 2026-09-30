@@ -3,8 +3,6 @@
 
 use std::future::Future;
 use std::pin::{Pin, pin};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -305,7 +303,7 @@ async fn write(
     told: oneshot::Receiver<Told>,
     mut until: Until,
 ) {
-    let gone = Arc::new(AtomicBool::new(false));
+    let mut gone = false;
     let mut told = told;
     let frame = loop {
         let next = tokio::select! {
@@ -313,7 +311,7 @@ async fn write(
             biased;
             Ok(told) = &mut told => {
                 match told {
-                    Told::Closed => gone.store(true, Ordering::SeqCst),
+                    Told::Closed => gone = true,
                     Told::Binary => return close(&mut sink, 1003, "binary").await,
                 }
                 continue;
@@ -322,7 +320,7 @@ async fn write(
             next = output.next() => next,
         };
         match next {
-            Some(Ok(bytes)) if !gone.load(Ordering::SeqCst) => {
+            Some(Ok(bytes)) if !gone => {
                 let Ok(text) = Utf8Bytes::try_from(bytes) else {
                     break (1011, "internal".to_owned());
                 };
@@ -341,7 +339,7 @@ async fn write(
             None => break (1000, String::new()),
         }
     };
-    if !gone.load(Ordering::SeqCst) {
+    if !gone {
         close(&mut sink, frame.0, &frame.1).await;
     }
 }

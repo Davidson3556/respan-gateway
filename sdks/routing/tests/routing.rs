@@ -14,7 +14,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_http::{Exchange, Transport};
 use respan_gateway_http::{RequestHead, ResponseHead};
-use respan_gateway_routing::{Attempt, Backoff, Role, Until, Watchdog, first_success, race};
+use respan_gateway_routing::{Attempt, Backoff, Role, Until, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::time::Instant;
 
@@ -331,8 +331,8 @@ fn secs(n: u64) -> Duration {
 }
 
 /// Waits 5 s for a head, 1 s between body frames.
-fn watchdog<T: Into<Transport>>(inner: T) -> Watchdog<T> {
-    Watchdog::new(inner, secs(5), secs(1))
+fn watchdog(inner: impl Into<Transport>) -> Transport {
+    respan_gateway_routing::watchdog(inner, secs(5), secs(1))
 }
 
 fn retries(tries: u32) -> Backoff {
