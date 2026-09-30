@@ -80,3 +80,44 @@ async fn a_chunk_that_fails_fails_the_request() -> Result<(), Fault> {
     assert_ne!(status, StatusCode::OK);
     Ok(())
 }
+
+#[test]
+fn a_zero_batch_cap_is_rejected() {
+    assert!(gateway(&MockTransport::new(), 0).is_err());
+}
+
+#[tokio::test]
+async fn out_of_order_vectors_are_merged_by_their_input_index() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(
+        AT,
+        mock::json(
+            StatusCode::OK,
+            r#"{"data":[{"index":1,"embedding":[1.0]},{"index":0,"embedding":[0.0]}]}"#,
+        ),
+    )
+    .reply(AT, answer(&[2.0], 1));
+    let (status, body) = embed(&gateway(&mock, 2)?, r#"{"input":["a","b","c"]}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body?;
+    for i in 0..3 {
+        assert_eq!(body["data"][i]["embedding"][0], json!(i as f64));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_or_duplicate_vectors_fail_the_split_request() -> Result<(), Fault> {
+    for bad in [
+        r#"{"data":[{"index":0,"embedding":[0.0]}]}"#,
+        r#"{"data":[{"index":0,"embedding":[0.0]},{"index":0,"embedding":[1.0]}]}"#,
+        r#"{"data":[{"index":0,"embedding":"base64"},{"index":1,"embedding":[1.0]}]}"#,
+    ] {
+        let mock = MockTransport::new();
+        mock.reply(AT, mock::json(StatusCode::OK, bad))
+            .reply(AT, answer(&[2.0], 1));
+        let (status, _) = embed(&gateway(&mock, 2)?, r#"{"input":["a","b","c"]}"#).await;
+        assert_ne!(status, StatusCode::OK, "{bad}");
+    }
+    Ok(())
+}

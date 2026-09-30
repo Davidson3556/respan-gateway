@@ -153,6 +153,73 @@ async fn a_forged_id_is_refused_before_any_call() -> Result<(), Fault> {
     Ok(())
 }
 
+#[tokio::test]
+async fn malformed_unicode_ids_are_refused_before_any_call() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    // The signed-id byte length is valid, but either numeric slice would
+    // end inside a multibyte character.
+    for forged in [
+        format!("resp_é{}", "0".repeat(31)),
+        format!("resp_1{}é{}", "0".repeat(15), "0".repeat(15)),
+    ] {
+        let body = json!({ "previous_response_id": forged });
+        let req = request("POST", "/v1/responses", &body.to_string());
+        let (status, ..) = read_whole(serve(&gateway, req).await.0).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{forged}");
+    }
+    assert!(mock.sent().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn response_json_split_across_frames_is_mapped_whole() -> Result<(), Fault> {
+    use respan_gateway_core::futures::StreamExt;
+
+    let mock = MockTransport::new();
+    mock.reply(
+        WEST,
+        mock::json(StatusCode::OK, r#"{"id":"native-1","status":"completed"}"#),
+    );
+    let west: Transport = mock.at(WEST).into();
+    let split = Transport::new(move |call| {
+        let west = west.clone();
+        async move {
+            let mut response = west.send(call).await?;
+            response.body = response
+                .body
+                .flat_map(|frame| {
+                    let pieces = match frame {
+                        Ok(bytes) => bytes
+                            .iter()
+                            .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
+                            .collect(),
+                        Err(fault) => vec![Err(fault)],
+                    };
+                    stream::iter(pieces)
+                })
+                .boxed();
+            Ok(response)
+        }
+    });
+    let jobs = Jobs::default();
+    let gateway = gateway(mock.at(EAST), split, &jobs)?;
+    let body = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
+    let id = body["id"].as_str().unwrap_or_default();
+    assert!(id.starts_with("resp_"), "{body}");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(jobs.native(id).as_deref(), Some("native-1"));
+
+    // A bodyless response stays bodyless; buffering must not synthesize
+    // an empty JSON event for the mapping filter.
+    mock.reply(WEST, mock::json(StatusCode::NO_CONTENT, ""));
+    let req = request("DELETE", &format!("/v1/responses/{id}"), "");
+    let (status, _, body) = read_whole(serve(&gateway, req).await.0).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body?.is_empty());
+    Ok(())
+}
+
 /// The same request, from a tenant with another key.
 fn as_other(mut req: http::Request<Body>) -> http::Request<Body> {
     let key = "Bearer other-key".parse().expect("a header value");

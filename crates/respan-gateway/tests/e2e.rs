@@ -1127,9 +1127,30 @@ fn proxy_without_a_vendor_or_with_a_bad_address_is_a_usage_error() {
     for args in [
         &["proxy"][..],
         &["proxy", "--anthropic", "--listen", "nowhere"],
+        &["proxy", "--anthropic", "check", "--listen"],
+        &["proxy", "--openai", "check", "--url"],
     ] {
         let out = std::process::Command::new(bin).args(args).output().unwrap();
         assert!(!out.status.success(), "{args:?}");
         assert!(!out.stderr.is_empty(), "{args:?}");
     }
+}
+
+#[test]
+fn proxy_url_with_a_quote_is_not_parsed_as_yaml() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        .args([
+            "proxy",
+            "--openai",
+            "check",
+            "--url",
+            "http://localhost/vendor's/v1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

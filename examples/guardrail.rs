@@ -76,8 +76,8 @@ impl Plugin for Guard {
             return Err(uncovered());
         }
         cx.filter(Holdback::new(self.0.clone()))?;
-        // A streamed tool call's arguments come in fragments no check sees
-        // whole, so the guard refuses tool calls in answers.
+        // This example allows text-only answers. Holdback can inspect
+        // tool arguments, but this policy refuses tool calls outright.
         cx.filter(|reply: &mut Reply| {
             let text_only = reply
                 .content

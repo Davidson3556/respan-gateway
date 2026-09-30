@@ -36,22 +36,32 @@ fn formats() -> [KnownFormat; 3] {
 /// The config of `proxy`: one vendor, no keys of its own, its chat format
 /// and every other request relayed to `url`. For OpenAI the chat provider's
 /// URL holds the version (`/v1`), the passthrough's is the origin.
-fn proxy_config(anthropic: bool, url: Option<&str>) -> Result<config::Config, String> {
+fn proxy_config(anthropic: bool, url: Option<&str>) -> config::Config {
     let (format, default) = match anthropic {
         true => ("anthropic-messages", "https://api.anthropic.com"),
         false => ("openai-chat", "https://api.openai.com/v1"),
     };
     let url = url.unwrap_or(default).trim_end_matches('/');
     let origin = url.strip_suffix("/v1").unwrap_or(url);
-    let yaml = format!(
-        "providers:
-  vendor: {{ format: {format}, base_url: '{url}' }}
-  any: {{ format: passthrough, base_url: '{origin}' }}
-serve: [{format}, passthrough]
-target: vendor
-"
-    );
-    config::Config::parse(&yaml).map_err(|e| e.message().to_owned())
+    config::Config {
+        listen: None,
+        providers: [("vendor", format, url), ("any", "passthrough", origin)]
+            .into_iter()
+            .map(|(name, format, base)| {
+                (
+                    name.to_owned(),
+                    config::ProviderConfig {
+                        format: format.to_owned(),
+                        base_url: base.to_owned(),
+                        auth: None,
+                    },
+                )
+            })
+            .collect(),
+        serve: vec![format.to_owned(), "passthrough".to_owned()],
+        plugins: Vec::new(),
+        target: Some("vendor".to_owned()),
+    }
 }
 
 /// A provider's transport: HTTP to `base_url`, sending `auth`.
@@ -77,8 +87,16 @@ async fn main() -> ExitCode {
             "--anthropic" | "--openai" if proxy && vendor.is_none() => {
                 vendor = Some(arg == "--anthropic");
             }
-            "--url" if proxy => url = args.next(),
-            "--listen" if proxy => listen = args.next(),
+            "--url" | "--listen" if proxy => {
+                let Some(value) = args.next() else {
+                    return fail(USAGE);
+                };
+                if arg == "--url" {
+                    url = Some(value);
+                } else {
+                    listen = Some(value);
+                }
+            }
             "--version" | "-V" => {
                 println!("respan-gateway {VERSION}");
                 return ExitCode::SUCCESS;
@@ -90,11 +108,16 @@ async fn main() -> ExitCode {
     let loaded = match (proxy, vendor) {
         (true, Some(anthropic)) => {
             config_path = "proxy".to_owned();
-            proxy_config(anthropic, url.as_deref()).and_then(|mut config| {
-                let addr = listen.as_deref().map(str::parse).transpose();
-                config.listen = addr.map_err(|e| format!("--listen: {e}"))?;
-                Ok(config)
-            })
+            let mut config = proxy_config(anthropic, url.as_deref());
+            listen
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map(|addr| {
+                    config.listen = addr;
+                    config
+                })
+                .map_err(|e| format!("--listen: {e}"))
         }
         (true, None) => return fail(USAGE),
         (false, _) => std::fs::read_to_string(&config_path)

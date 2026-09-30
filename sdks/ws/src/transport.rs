@@ -11,27 +11,26 @@ use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
-use respan_gateway_http::http::{self, HeaderMap};
+use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use respan_gateway_http::{RequestHead, ResponseHead, full};
 use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
 };
 use tokio::sync::mpsc::{self, Sender};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as Code;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Error, Message};
-use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
-};
 
 use crate::{CLOSE_WAIT, CloseCode, MAX_MESSAGE};
 use respan_gateway_http::{Exchange, Frames};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type Socket = WebSocketStream<reqwest::Upgraded>;
 
 /// Headers of the handshake the WebSocket library writes itself, and the
 /// extension and key headers of the client's own connection: none of them
@@ -146,26 +145,85 @@ impl WsTransport {
     }
 }
 
-/// The TLS settings every `wss` connection shares, built once: the system's
-/// roots, as `reqwest`'s `rustls` build has, and the `aws-lc-rs` provider that
-/// build has, named here since the crates in a build may enable others and
-/// rustls then cannot choose one.
-fn tls() -> Result<Arc<rustls::ClientConfig>, Fault> {
-    static TLS: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
-    let built = TLS.get_or_init(|| {
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
+/// HTTP owns refusal framing; tungstenite receives only validated upgrades.
+/// Keep system roots and an explicit TLS provider even in builds enabling both providers.
+fn client() -> Result<reqwest::Client, Fault> {
+    static CLIENT: OnceLock<Result<reqwest::Client, Fault>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+            let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
             .with_safe_default_protocol_versions()
-            .map_err(|e| e.to_string())?;
-        Ok(Arc::new(
-            config.with_root_certificates(roots).with_no_client_auth(),
-        ))
-    });
-    built
+            .map_err(|e| Fault::internal("the TLS settings could not be built").with_source(e))?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            reqwest::Client::builder()
+                .http1_only()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
+                .no_zstd()
+                .tls_backend_preconfigured(tls)
+                .build()
+                .map_err(|e| {
+                    Fault::internal("the WebSocket HTTP client could not be built").with_source(e)
+                })
+        })
         .clone()
-        .map_err(|e| Fault::internal("the TLS settings could not be built").with_source(e))
+}
+
+/// Verify the negotiated protocol before exposing the upgraded stream.
+fn validate_upgrade(sent: &HeaderMap, received: &HeaderMap) -> Result<(), Fault> {
+    let equals = |name, value: &str| {
+        received
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case(value))
+    };
+    let connection = received
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|v| v.trim().eq_ignore_ascii_case("upgrade"));
+    let accept = sent
+        .get(header::SEC_WEBSOCKET_KEY)
+        .map(|key| derive_accept_key(key.as_bytes()));
+    let key_matches = accept.as_ref().is_some_and(|key| {
+        received
+            .get(header::SEC_WEBSOCKET_ACCEPT)
+            .is_some_and(|v| v == key)
+    });
+    let protocol = match (
+        sent.get(header::SEC_WEBSOCKET_PROTOCOL),
+        received.get(header::SEC_WEBSOCKET_PROTOCOL),
+    ) {
+        (None, None) => true,
+        (Some(offered), Some(chosen)) => offered.to_str().ok().is_some_and(|offers| {
+            offers
+                .split(',')
+                .any(|p| p.trim().as_bytes() == chosen.as_bytes())
+        }),
+        _ => false,
+    };
+    if equals(header::UPGRADE, "websocket")
+        && connection
+        && key_matches
+        && protocol
+        && !received.contains_key(header::SEC_WEBSOCKET_EXTENSIONS)
+    {
+        Ok(())
+    } else {
+        Err(Fault::upstream(
+            "the provider returned an invalid WebSocket handshake",
+        ))
+    }
 }
 
 fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
@@ -190,62 +248,66 @@ impl WsTransport {
         let config = WebSocketConfig::default()
             .max_message_size(Some(self.max_message))
             .max_frame_size(Some(self.max_message));
-        let tls = match self.base.starts_with("wss") {
-            true => Some(Connector::Rustls(tls()?)),
-            false => None,
+        let connect = async {
+            let expected = req.headers().clone();
+            let url = req.uri().to_string().replacen("ws", "http", 1);
+            let resp = client()?
+                .get(url)
+                .headers(expected.clone())
+                .send()
+                .await
+                .map_err(|e| Fault::upstream("the provider could not be reached").with_source(e))?;
+            let mut head = respan_gateway_http::fresh_response_head();
+            head.status = resp.status();
+            head.version = resp.version();
+            head.headers = resp.headers().clone();
+            if head.status != StatusCode::SWITCHING_PROTOCOLS {
+                let body = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| Fault::truncated().with_source(e))?;
+                head.headers.remove(header::TRANSFER_ENCODING);
+                head.headers.remove(header::CONTENT_LENGTH);
+                strip_origin_headers(&mut head.headers);
+                return Ok(Exchange::new(
+                    head,
+                    respan_gateway_http::body_of(full(body)),
+                ));
+            }
+            validate_upgrade(&expected, &head.headers)?;
+            let upgraded = resp.upgrade().await.map_err(|e| {
+                Fault::upstream("the provider did not upgrade the connection").with_source(e)
+            })?;
+            let socket =
+                WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(config)).await;
+            strip_origin_headers(&mut head.headers);
+            head.headers.remove(header::SEC_WEBSOCKET_ACCEPT);
+            head.headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
+            // One frame in flight: a reader that stops reading stops the connection's.
+            let (frames, frames_in) = mpsc::channel(1);
+            let writing = tokio::spawn(session(socket, body, frames));
+            let frames_in = stream::unfold(frames_in, |mut rx| async {
+                rx.recv().await.map(|f| (f, rx))
+            });
+            let mut answer = Exchange::new(head, frames_in.boxed());
+            answer.streams = true;
+            answer.write_completion = Some(
+                async move {
+                    writing.await.map_err(|error| {
+                        if error.is_cancelled() {
+                            Fault::abandoned()
+                        } else {
+                            Fault::internal("the WebSocket session panicked")
+                        }
+                    })?
+                }
+                .boxed(),
+            );
+            Ok(answer)
         };
-        let connect = connect_async_tls_with_config(req, Some(config), false, tls);
-        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connect).await;
-        let (socket, resp) = match connected {
-            Ok(Ok(connected)) => connected,
-            // The provider refused the upgrade: its answer, as it came.
-            Ok(Err(Error::Http(resp))) => {
-                let (mut parts, body) = (*resp).into_parts();
-                // The library hands back the body as it read it, still framed.
-                let body = body.unwrap_or_default();
-                let chunked = parts.headers.remove(header::TRANSFER_ENCODING).is_some();
-                let body = if chunked { unchunked(&body) } else { body };
-                parts.headers.remove(header::CONTENT_LENGTH);
-                let body = full(body);
-                let mut answer =
-                    respan_gateway_http::from_response(http::Response::from_parts(parts, body));
-                strip_origin_headers(&mut answer.head.headers);
-                return Ok(answer);
-            }
-            Ok(Err(e)) => {
-                return Err(match e {
-                    Error::Url(_) | Error::HttpFormat(_) => invalid(e),
-                    // The error names the provider's URL, for logs only.
-                    e => Fault::upstream("the provider could not be reached").with_source(e),
-                });
-            }
-            Err(_) => return Err(Fault::upstream("the provider took too long to accept")),
-        };
-        let (mut head, _) = resp.into_parts();
-        strip_origin_headers(&mut head.headers);
-        head.headers.remove(header::SEC_WEBSOCKET_ACCEPT);
-        head.headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
-        // One frame in flight: a reader that stops reading stops the connection's.
-        let (frames, frames_in) = mpsc::channel(1);
-        let writing = tokio::spawn(session(socket, body, frames));
-        let frames_in = stream::unfold(frames_in, |mut rx| async {
-            rx.recv().await.map(|f| (f, rx))
-        });
-        let mut answer = Exchange::new(head, frames_in.boxed());
-        answer.streams = true;
-        answer.write_completion = Some(
-            async move {
-                writing.await.map_err(|error| {
-                    if error.is_cancelled() {
-                        Fault::abandoned()
-                    } else {
-                        Fault::internal("the WebSocket session panicked")
-                    }
-                })?
-            }
-            .boxed(),
-        );
-        Ok(answer)
+        tokio::time::timeout(CONNECT_TIMEOUT, connect)
+            .await
+            .map_err(|_| Fault::upstream("the provider took too long to accept"))?
     }
 }
 impl From<WsTransport> for respan_gateway_http::Transport {
@@ -395,58 +457,61 @@ async fn read_frames(
     let _ = frames.send(Err(fault)).await;
 }
 
-/// The body of `raw`, a `Transfer-Encoding: chunked` body as far as it came;
-/// what is not framed as chunks is kept as it is.
-fn unchunked(raw: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-    let mut rest = raw;
-    loop {
-        let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") else {
-            return raw.to_vec();
-        };
-        let size = std::str::from_utf8(&rest[..line_end])
-            .ok()
-            .and_then(|line| usize::from_str_radix(line.split(';').next()?.trim(), 16).ok());
-        let Some(size) = size else {
-            return raw.to_vec();
-        };
-        let data = &rest[line_end + 2..];
-        if size == 0 {
-            return body;
-        }
-        // A chunk cut short gives what came of it.
-        body.extend_from_slice(&data[..size.min(data.len())]);
-        match data.get(size..).and_then(|tail| tail.get(2..)) {
-            Some(more) => rest = more,
-            None => return body,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::unchunked;
+    use super::*;
 
     #[test]
-    fn oversized_refusal_chunks_keep_the_available_body() {
-        for size in [usize::MAX, usize::MAX - 1] {
-            let raw = format!("{size:x}\r\nno room");
-            assert_eq!(unchunked(raw.as_bytes()), b"no room");
+    fn upgrades_require_the_key_and_only_negotiated_protocols() {
+        let mut sent = HeaderMap::new();
+        sent.insert(
+            header::SEC_WEBSOCKET_KEY,
+            "dGhlIHNhbXBsZSBub25jZQ==".parse().expect("header"),
+        );
+        let mut received = HeaderMap::new();
+        received.insert(header::UPGRADE, "websocket".parse().expect("header"));
+        received.insert(
+            header::CONNECTION,
+            "keep-alive, Upgrade".parse().expect("header"),
+        );
+        received.insert(
+            header::SEC_WEBSOCKET_ACCEPT,
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".parse().expect("header"),
+        );
+        assert!(validate_upgrade(&sent, &received).is_ok());
+        for name in [
+            header::UPGRADE,
+            header::CONNECTION,
+            header::SEC_WEBSOCKET_ACCEPT,
+        ] {
+            let mut invalid = received.clone();
+            invalid.remove(&name);
+            assert!(validate_upgrade(&sent, &invalid).is_err());
+            invalid.insert(name, "wrong".parse().expect("header"));
+            assert!(validate_upgrade(&sent, &invalid).is_err());
         }
-    }
-
-    #[test]
-    fn refusal_chunks_preserve_complete_truncated_and_unframed_bodies() {
-        assert_eq!(
-            unchunked(b"3;ext=yes\r\nno \r\n4\r\nroom\r\n0\r\n\r\n"),
-            b"no room"
+        for name in [
+            header::SEC_WEBSOCKET_PROTOCOL,
+            header::SEC_WEBSOCKET_EXTENSIONS,
+        ] {
+            let mut unsolicited = received.clone();
+            unsolicited.insert(name, "unsolicited".parse().expect("header"));
+            assert!(validate_upgrade(&sent, &unsolicited).is_err());
+        }
+        sent.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            "chat, realtime".parse().expect("header"),
         );
-        assert_eq!(unchunked(b"20\r\nno room"), b"no room");
-        assert_eq!(unchunked(b"7\r\nno room\r"), b"no room");
-        assert_eq!(
-            unchunked(b"not chunks\r\nno room"),
-            b"not chunks\r\nno room"
+        assert!(validate_upgrade(&sent, &received).is_err());
+        received.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            "realtime".parse().expect("header"),
         );
-        assert_eq!(unchunked(b"no room"), b"no room");
+        assert!(validate_upgrade(&sent, &received).is_ok());
+        received.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            "other".parse().expect("header"),
+        );
+        assert!(validate_upgrade(&sent, &received).is_err());
     }
 }

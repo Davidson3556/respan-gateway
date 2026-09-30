@@ -1340,6 +1340,7 @@ dependencies = [
  "bytes",
  "futures",
  "mockllm",
+ "reqwest",
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",

@@ -184,3 +184,73 @@ async fn wss_fails_cleanly_against_a_server_that_is_not_tls() {
     assert_eq!(refused.code(), "upstream");
     assert!(!refused.message().contains(&addr.to_string()));
 }
+
+/// Headers arrive first, then each body fragment in a later socket write.
+async fn delayed_refusal(
+    headers: &str,
+    body: &[&str],
+) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let head = format!("HTTP/1.1 403 Forbidden\r\n{headers}\r\n");
+    let body: Vec<String> = body.iter().map(|s| (*s).to_owned()).collect();
+    let provider = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = socket.read(&mut buf).await.unwrap();
+        socket.write_all(head.as_bytes()).await.unwrap();
+        for fragment in body {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if socket.write_all(fragment.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let (_tx, call) = call("/x");
+    let answer = WsTransport::new(format!("ws://{addr}"))
+        .unwrap()
+        .send(call)
+        .await;
+    provider.await.unwrap();
+    answer
+}
+
+#[tokio::test]
+async fn a_refused_upgrade_reads_the_body_after_the_headers() {
+    for (headers, fragments) in [
+        ("Content-Length: 7\r\n", vec!["no ", "room"]),
+        (
+            "Transfer-Encoding: chunked\r\n",
+            vec!["3\r\nno \r\n", "4\r\nroom\r\n", "0\r\n\r\n"],
+        ),
+        ("Connection: close\r\n", vec!["no ", "room"]),
+    ] {
+        let answer = delayed_refusal(headers, &fragments).await.unwrap();
+        assert_eq!(answer.head.status, 403);
+        let bytes = answer
+            .body
+            .map(|chunk| chunk.unwrap())
+            .collect::<Vec<_>>()
+            .await
+            .concat();
+        assert_eq!(bytes, b"no room", "{headers}");
+    }
+}
+
+#[tokio::test]
+async fn a_truncated_or_malformed_refusal_fails_instead_of_relaying_a_partial_body() {
+    for (headers, fragments) in [
+        ("Content-Length: 20\r\n", vec!["no room"]),
+        ("Transfer-Encoding: chunked\r\n", vec!["7\r\nno room\r\n"]),
+        (
+            "Transfer-Encoding: chunked\r\n",
+            vec!["not-a-size\r\nno room"],
+        ),
+    ] {
+        let fault = delayed_refusal(headers, &fragments)
+            .await
+            .expect_err("invalid body");
+        assert_eq!(fault.code(), "truncated", "{headers}");
+    }
+}

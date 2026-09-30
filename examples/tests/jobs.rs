@@ -67,6 +67,41 @@ async fn the_key_is_bound_to_the_credential_and_the_body() -> Result<(), Fault> 
 }
 
 #[tokio::test]
+async fn every_credential_form_isolates_cached_results() -> Result<(), Fault> {
+    for form in ["x-api-key", "api-key", "query", "subprotocol"] {
+        let mock = MockTransport::new();
+        mock.reply(OPENAI, mock::sse(STREAM))
+            .reply(OPENAI, mock::sse(STREAM));
+        let gw = gateway(&mock, &Arc::default())?;
+        for token in ["acme", "beta", "acme", "beta"] {
+            let mut req = keyed(ACME, "op-1", BODY);
+            req.headers_mut().remove(AUTHORIZATION);
+            match form {
+                "query" => {
+                    *req.uri_mut() = format!("/v1/chat/completions?api_key={token}")
+                        .parse()
+                        .map_err(|_| Fault::internal("test query URI"))?;
+                }
+                "subprotocol" => {
+                    req.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_str(&format!("openai-insecure-api-key.{token}"))
+                            .map_err(|_| Fault::internal("test subprotocol credential"))?,
+                    );
+                }
+                header => {
+                    req.headers_mut()
+                        .insert(header, HeaderValue::from_static(token));
+                }
+            }
+            assert!(whole(&send(&gw, req).await?));
+        }
+        assert_eq!(mock.sent().len(), 2, "each {form} tenant runs once");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_zero_retention_request_stores_nothing() -> Result<(), Fault> {
     let mock = MockTransport::new();
     mock.reply(OPENAI, mock::sse(STREAM))

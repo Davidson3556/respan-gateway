@@ -5,7 +5,7 @@
 //! hash of the body: the same key with another body runs on its own. A
 //! retry, or a duplicate sent while the first runs, gets the stored result
 //! or waits for the run in flight: the provider is called once. The tenant
-//! is a hash of `Authorization`, which the adapter lifted into a
+//! is a hash of all its credentials, which the adapter lifted into a
 //! [`Credential`], so replaying another tenant's result takes its
 //! credential, not just its key. A zero-retention request (marked
 //! `NoContent`, as in `logging.rs`) stores nothing: it runs every time.
@@ -47,6 +47,21 @@ fn hash(value: impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Include every credential form, keeping repeated values in their wire order.
+fn tenant(cx: &ClientContext) -> u64 {
+    let credential = cx.extensions().get::<Credential>();
+    let parts = credential.map(|credential| {
+        let mut headers: Vec<_> = credential
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes()))
+            .collect();
+        headers.sort_by_key(|(name, _)| *name);
+        (headers, credential.query().collect::<Vec<_>>())
+    });
+    hash(parts)
 }
 
 /// Marks a zero-retention request; your tenancy plugin sets it.
@@ -132,15 +147,10 @@ impl<S: Store> Plugin for Idempotent<S> {
         let Some(key) = header.filter(|_| stores) else {
             return Ok(None);
         };
-        let tenant = cx.extensions().get::<Credential>();
         // The body as it came: the bytes the client's conversation came in.
         let chat = cx.input::<Conversation>()?;
         let body = chat.came_in(cx.format()).map_or(&[][..], |o| &o.bytes);
-        let key = (
-            hash(tenant.and_then(|c| c.get(AUTHORIZATION.as_str()))),
-            key.to_owned(),
-            hash(body),
-        );
+        let key = (tenant(cx), key.to_owned(), hash(body));
         if let Claim::Done(replies) = self.0.claim(&key).await {
             let replies = Arc::unwrap_or_clone(replies).into_iter().map(Ok);
             return Ok(Some(Response::stream(stream::iter(replies))));

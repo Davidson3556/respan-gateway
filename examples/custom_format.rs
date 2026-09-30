@@ -110,10 +110,26 @@ impl Codec for OpenAiEmbeddings {
         formats::whole::decoder(NAME, head, move |raw, out| {
             let v: Value = serde_json::from_slice(&raw).map_err(|_| Fault::upstream("not JSON"))?;
             let mut said = Embeddings::default();
-            let data = v["data"].as_array().into_iter().flatten();
-            // Float vectors; base64 ones are relayed but not read here.
-            let vector = |d: &Value| serde_json::from_value(d["embedding"].clone());
-            said.vectors = data.map(|d| vector(d).unwrap_or_default()).collect();
+            let malformed = || Fault::upstream("invalid embedding indices or vectors");
+            let data = v["data"].as_array().ok_or_else(malformed)?;
+            let mut ordered = vec![None; data.len()];
+            for item in data {
+                let index = item["index"]
+                    .as_u64()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| ordered.get_mut(index))
+                    .ok_or_else(malformed)?;
+                // Base64 vectors can relay unread, but cannot be edited as floats.
+                let vector: Vec<f64> =
+                    serde_json::from_value(item["embedding"].clone()).map_err(|_| malformed())?;
+                if vector.is_empty() || index.replace(vector).is_some() {
+                    return Err(malformed());
+                }
+            }
+            said.vectors = ordered
+                .into_iter()
+                .collect::<Option<_>>()
+                .ok_or_else(malformed)?;
             if let Some(tokens) = v["usage"]["prompt_tokens"].as_f64() {
                 said.usage.add(INPUT_TOKENS, tokens);
             }

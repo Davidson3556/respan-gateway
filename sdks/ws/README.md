@@ -63,7 +63,7 @@ A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
   and a provider that does not read stalls the client after about 7 MiB
   (`tests/backpressure.rs`). The kernel buffers nothing beyond its one batch.
 - **No timeouts on a live session**: no idle limit, no keep-alive pings, no
-  maximum length. The bounds are 10 s to connect and 5 s (`CLOSE_WAIT`) for
+  maximum length. The bounds are 10 s for the handshake (including a refusal body) and 5 s (`CLOSE_WAIT`) for
   the other side's part of a close. A limit on long sessions is a plugin's.
 - **`wss` uses the system's root certificates** and the `aws-lc-rs` provider,
   named in the code because the workspace's dependencies enable both `ring`
@@ -71,7 +71,8 @@ A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
   building and failing cleanly, not against a real TLS server.
 - A provider's refusal of the upgrade (a 401) is a complete answer: the
   provider edge reads its body before the gateway answers, and on a relay the
-  client gets the provider's status and body as they came. `serve_ws` writes
+  client gets the provider's status and body as they came. An incomplete or malformed
+  refusal body fails as `truncated`. `serve_ws` writes
   it whole and sized, not chunked.
 - No reconnection or session resumption.
 

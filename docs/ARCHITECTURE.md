@@ -179,7 +179,7 @@ API is encapsulation, not protection against trusted Rust code that knows
 the type and name.
 
 Metadata crosses to a provider only when the call carries the application's
-inputs to a format of the same name. Input filters and wraps preserve that
+inputs to a format of the same name and transport type. Input filters and wraps preserve that
 provenance. A translation or `with_input` call gets fresh transfer metadata,
 even when its value was cloned from the application's input. The provider's
 metadata returns only on an eligible relay. A plugin-created response
@@ -199,7 +199,8 @@ A plugin that removes the credential extension stops pass-through.
 ## HTTP and WebSocket
 
 An HTTP format implements `Codec`, with request/response decoders and
-encoders, protocol recognition, refusal formatting and content detection.
+encoders, protocol recognition and refusal formatting. Plugins decide which
+decoded events count as content.
 `impl_format!` supplies both `Format<Transport, Input, Output>` and
 `Format<Transport, Output, Input>` implementations. `Transport::accept`
 constructs incoming I/O from the HTTP exchange; `connect(transport)` returns

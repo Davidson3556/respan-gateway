@@ -50,11 +50,18 @@ impl Plugin for Split {
         let calls = request.input.chunks(self.0).map(|chunk| {
             let mut part = request.clone();
             part.input = chunk.to_vec();
-            cx.call(target.clone()).with_input(part)
+            (chunk.len(), cx.call(target.clone()).with_input(part))
         });
-        let answers = try_join_all(calls.map(|call| async move {
-            let outputs = call.await?.outputs::<Embeddings>();
-            outputs.try_collect::<Vec<_>>().await
+        let answers = try_join_all(calls.map(|(expected, call)| async move {
+            let answers = call
+                .await?
+                .outputs::<Embeddings>()
+                .try_collect::<Vec<_>>()
+                .await?;
+            if answers.len() != 1 || answers[0].vectors.len() != expected {
+                return Err(Fault::upstream("the provider omitted embedding vectors"));
+            }
+            Ok(answers)
         }))
         .await?;
         let mut merged = Embeddings::default();
@@ -69,6 +76,9 @@ impl Plugin for Split {
 const AT: &str = "https://api.openai.com/v1";
 
 fn gateway(mock: &MockTransport, cap: usize) -> Result<Gateway, Fault> {
+    if cap == 0 {
+        return Err(Fault::config("the embedding batch cap must be positive"));
+    }
     Gateway::new()
         .provider::<EmbedRequest, _, _>(
             "openai",

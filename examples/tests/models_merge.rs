@@ -73,3 +73,20 @@ async fn a_provider_that_fails_is_left_out_and_all_failing_fails() -> Result<(),
     assert_ne!(status, StatusCode::OK);
     Ok(())
 }
+
+#[tokio::test]
+async fn malformed_lists_are_failures_not_empty_successes() -> Result<(), Fault> {
+    for bad in [r#"{}"#, r#"{"data":[{}]}"#, r#"{"data":[{"id":42}]}"#] {
+        let mock = MockTransport::new();
+        mock.reply(A, mock::json(StatusCode::OK, bad))
+            .reply(B, list(&["valid"]));
+        let (status, _, body) = ask(&gateway(&mock)?).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ids(&body), ["valid"]);
+        mock.reply(A, mock::json(StatusCode::OK, bad))
+            .reply(B, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
+        let (status, _, _) = ask(&gateway(&mock)?).await;
+        assert_ne!(status, StatusCode::OK);
+    }
+    Ok(())
+}

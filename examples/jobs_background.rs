@@ -51,13 +51,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_core::futures::stream;
+use respan_gateway_core::futures::{TryStreamExt, future, stream};
 use respan_gateway_core::{
-    ClientContext, Extensions, Fault, Gateway, Plugin, Response, async_trait,
+    ClientContext, Events, Extensions, Fault, Gateway, Plugin, Response, async_trait,
 };
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_formats::opaque::Got;
-use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, Method};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Asked, Body, Credential, Transport, built_wrong, full};
@@ -105,8 +105,8 @@ fn sign(deployment: usize, key: u64, tenant: u64) -> String {
 /// this tenant.
 fn verify(id: &str, tenant: u64) -> Option<usize> {
     let rest = id.strip_prefix("resp_").filter(|r| r.len() == 33)?;
-    let deployment: usize = rest[..1].parse().ok()?;
-    let key = u64::from_str_radix(&rest[1..17], 16).ok()?;
+    let deployment: usize = rest.get(..1)?.parse().ok()?;
+    let key = u64::from_str_radix(rest.get(1..17)?, 16).ok()?;
     (deployment < DEPLOYMENTS.len() && sign(deployment, key, tenant) == id).then_some(deployment)
 }
 
@@ -174,6 +174,23 @@ fn streams(cx: &ClientContext, body: &Value) -> bool {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The REST codec emits transport frames; id mapping needs one complete
+/// JSON body. Register after the mapping filter so it runs before it.
+fn whole_response(cx: &mut ClientContext) -> Result<(), Fault> {
+    cx.wrap(|events: Events<Got<Rest>>| {
+        stream::once(async move {
+            let body = events
+                .try_fold(BytesMut::new(), |mut body, chunk| async move {
+                    body.extend_from_slice(&chunk.0);
+                    Ok(body)
+                })
+                .await?;
+            Ok((!body.is_empty()).then(|| Got::new(body.freeze())))
+        })
+        .try_filter_map(|body| future::ready(Ok(body)))
+    })
 }
 
 impl Jobs {
@@ -253,6 +270,7 @@ impl Jobs {
         let (id, home) = (id.to_owned(), (tenant(cx), deployment));
         let jobs = self.clone();
         cx.filter(move |got: &mut Got<Rest>| jobs.show(got, &id, home).map(drop))?;
+        whole_response(cx)?;
         Ok(None)
     }
 
@@ -272,6 +290,7 @@ impl Jobs {
             }
             Ok(())
         })?;
+        whole_response(cx)?;
         Ok(None)
     }
 

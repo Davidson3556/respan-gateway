@@ -4,8 +4,9 @@
 //! The judge's call is a subrequest (`cx.call(p).with_input(prompt)`), so it
 //! is a call like any other: it inherits the request's extensions (tenant,
 //! trace), every plugin's `on_provider` runs before it (egress rules, keys,
-//! budgets), and a plugin that meters calls meters it too. The provider edge
-//! cannot call, so a subrequest cannot recurse: the depth limit is one.
+//! budgets), and a plugin that meters calls meters it too. `cx.call` runs
+//! provider hooks without rerunning `Judge::on_client`, so this judge's
+//! subrequest does not recursively invoke the judge.
 //!
 //! `cargo run -p respan-gateway-examples --example judge`
 

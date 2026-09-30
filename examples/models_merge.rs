@@ -102,13 +102,20 @@ impl Plugin for MergeModels {
             return Ok(None);
         }
         let calls: Vec<_> = self.0.iter().map(|p| cx.call(*p)).collect();
-        let lists: Vec<Result<Value, Fault>> = join_all(calls.into_iter().map(|call| async move {
-            let frames: Vec<Got<Models>> = call.await?.outputs().try_collect().await?;
-            let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.to_vec()).collect();
-            serde_json::from_slice::<Value>(&bytes)
-                .map_err(|_| Fault::upstream("a provider's models are not JSON"))
-        }))
-        .await;
+        let lists: Vec<Result<Vec<Value>, Fault>> =
+            join_all(calls.into_iter().map(|call| async move {
+                let frames: Vec<Got<Models>> = call.await?.outputs().try_collect().await?;
+                let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.to_vec()).collect();
+                let mut list: Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| Fault::upstream("a provider's models are not JSON"))?;
+                match list["data"].take() {
+                    Value::Array(models) if models.iter().all(|m| m["id"].is_string()) => {
+                        Ok(models)
+                    }
+                    _ => Err(Fault::upstream("a provider's models are not a list of ids")),
+                }
+            }))
+            .await;
         let (lists, failures): (Vec<_>, Vec<_>) = lists.into_iter().partition(Result::is_ok);
         if lists.is_empty() {
             return Err(failures
@@ -117,11 +124,7 @@ impl Plugin for MergeModels {
                 .unwrap_or_else(|| Fault::upstream("no provider")));
         }
         let mut data: Vec<Value> = Vec::new();
-        for model in lists
-            .iter()
-            .flatten()
-            .flat_map(|l| l["data"].as_array().into_iter().flatten())
-        {
+        for model in lists.iter().flatten().flatten() {
             if !data.iter().any(|seen| seen["id"] == model["id"]) {
                 data.push(model.clone());
             }

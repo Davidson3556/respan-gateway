@@ -50,8 +50,8 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 - Use case 8: a webhook when a job finishes, and holding the tenant's budget
   for a job while it runs.
 - Use case 2: streamed calls with several choices (`n > 1`) are refused by
-  `pii`, not restored; Anthropic's streamed `partial_json` fragments are not
-  held, only OpenAI's tool-call arguments.
+  `pii`, not restored. Split tool-argument placeholders are restored for
+  both OpenAI chunks and Anthropic `partial_json` fragments.
 - Use case 1: a stored file's type is assumed to be PDF (a real resolver asks
   the files endpoint for it).
 - Use case 8: jobs that survive a restart (`jobs` and `jobs_background` keep
