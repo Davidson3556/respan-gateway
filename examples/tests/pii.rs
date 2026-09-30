@@ -1,6 +1,6 @@
 use super::*;
-use respan_gateway_formats::conversation::Conversation;
-use respan_gateway_formats::conversation::{Message, Role};
+use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_messages::conversation::{Message, Role};
 use respan_gateway_providers::AnthropicMessages;
 
 #[test]

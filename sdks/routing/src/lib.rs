@@ -1,8 +1,9 @@
 #![warn(missing_docs)]
-//! Attempt control for respan-gateway plugins: retry with `Retry-After`
-//! ([`first_success`], [`Backoff`]), a staggered race ([`race`]), a stall
-//! bound on a provider's head and body ([`watchdog`]), and each attempt's [`Role`]
-//! ([`Attempt`]).
+//! Transport-neutral attempt control for respan-gateway plugins: sequential
+//! retries and fallback ([`first_success`], [`Backoff`]), a staggered race
+//! ([`race`]), and each attempt's [`Role`] ([`Attempt`]).
+//! The caller supplies a retry classifier; HTTP callers can use
+//! `respan_gateway_http::retryable`.
 //!
 //! Both helpers read each answer [`Until`] a stopping point, using a plugin-supplied
 //! predicate for [`Until::content`]: they return a success only
@@ -13,7 +14,8 @@
 //! ```ignore
 //! let calls = ["openai", "anthropic"].map(|p| cx.call(p));
 //! let backoff = Backoff::new(3, Duration::from_millis(200), Duration::from_secs(10));
-//! first_success(calls, &backoff, Until::content(Reply::is_content)).await.map(Some)
+//! first_success(calls, &backoff, Until::content(Reply::is_content),
+//!     respan_gateway_http::retryable).await.map(Some)
 //! ```
 
 use std::any::Any;
@@ -22,10 +24,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use respan_gateway_core::futures::future::BoxFuture;
-use respan_gateway_core::futures::stream::{self, FuturesUnordered};
+use respan_gateway_core::futures::stream::FuturesUnordered;
 use respan_gateway_core::futures::{FutureExt, StreamExt};
-use respan_gateway_core::{Call, Fault, Response, codes};
-use respan_gateway_http::{Exchange, RequestHead, Transport};
+use respan_gateway_core::{Call, Fault, Response};
 
 /// How often to try one call, and how long to wait between tries.
 #[derive(Debug, Clone, Copy)]
@@ -37,8 +38,8 @@ pub struct Backoff {
 
 impl Backoff {
     /// Up to `tries` tries per call, waiting `base`, doubled after each
-    /// retry, at most `max`. A `Retry-After` is waited for as asked, or,
-    /// if longer than `max`, not at all: the call is not retried.
+    /// retry, at most `max`. An optional response-supplied delay is waited
+    /// for as asked, or, if longer than `max`, not at all: the call is not retried.
     pub fn new(tries: u32, base: Duration, max: Duration) -> Self {
         Self { tries, base, max }
     }
@@ -48,31 +49,20 @@ impl Backoff {
         Self::new(1, Duration::ZERO, Duration::ZERO)
     }
 
-    /// The wait before another try, after `tries` tries of which the last
-    /// was answered with `answer`, a failure of the provider's response, or
-    /// with none if it failed first; `None` if it should not be retried.
-    fn wait(&self, tries: u32, answer: Option<&Fault>) -> Option<Duration> {
+    /// The wait before another try, after `tries` tries; `None` if the
+    /// attempt budget is spent or the supplied delay exceeds `max`.
+    fn wait(&self, tries: u32, delay: Option<Duration>) -> Option<Duration> {
         if tries >= self.tries {
             return None;
         }
         let doubled = 2u32.saturating_pow(tries.saturating_sub(1));
         let backoff = self.base.saturating_mul(doubled).min(self.max);
-        match answer {
+        match delay {
+            Some(asked) if asked > self.max => None,
+            Some(asked) => Some(asked),
             None => Some(backoff),
-            Some(answer) if !retryable(respan_gateway_http::status(answer).as_u16()) => None,
-            Some(answer) => match answer.retry_after() {
-                Some(asked) if asked > self.max => None,
-                Some(asked) => Some(asked),
-                None => Some(backoff),
-            },
         }
     }
-}
-
-/// Whether another try may be answered otherwise; other client errors would
-/// not. 529, "overloaded" from some providers, is as safe to retry as a 503.
-fn retryable(status: u16) -> bool {
-    [408, 425, 429, 500, 502, 503, 504, 529].contains(&status)
 }
 
 /// Put on every call [`first_success`] and [`race`] send
@@ -154,8 +144,8 @@ impl std::fmt::Debug for Until {
 }
 
 /// An attempt, its answer read [`Until`] a point, and, read to its end,
-/// the failure a success ended with; and whether the call got a response,
-/// so that a fault is the provider's.
+/// the failure a success ended with; and whether `call.await` opened a
+/// response before applying `Until`.
 type Answer = (Attempt, Result<Response, Fault>, Option<Fault>, bool);
 
 /// Send `call` as `attempt` and read it `until` a point.
@@ -203,19 +193,23 @@ fn keep(previous: &mut Option<Answer>, answer: Answer) {
     }
 }
 
-/// Each call in turn, retried as `backoff` says, until one's response is a
-/// success read `until` its stopping point; else the last answer, so the
-/// client sees the last 429 and its `Retry-After`, or, if the last call
-/// could not be made, the last that a provider answered. A failure of the
-/// provider's response, a refusal included, is retried if its status may
-/// be answered otherwise, as long as its `Retry-After` says; a call that cannot be
-/// made, such as with a `config` fault, moves on at once; an unreachable
-/// provider or a success failing before the point is retried; with
-/// [`Until::End`], one failing anywhere before its end.
+/// Each call in turn, retried when `should_retry` permits and `backoff`
+/// allows, until one's response is a success read `until` its stopping point;
+/// else the last answer, preferring a response over a fallback that could not
+/// be made. The classifier is called for **every** failed attempt, including
+/// failures before opening, while reading content, and at [`Until::End`]. Its
+/// `response_opened` argument is true exactly when `call.await` returned
+/// `Ok(Response)` before applying `until`; it does not mean the request was
+/// sent, a refusal occurred, or bytes were delivered. Returning false skips
+/// retries of that target but still permits the next fallback. Only opened
+/// responses contribute `Fault::retry_after()` to the backoff wait. HTTP
+/// callers can select `respan_gateway_http::retryable`; other transports can
+/// supply their own policy. Neither policy nor timing makes an input replayable.
 pub async fn first_success(
     calls: impl IntoIterator<Item = Call>,
     backoff: &Backoff,
     until: Until,
+    should_retry: impl Fn(&Fault, bool) -> bool,
 ) -> Result<Response, Fault> {
     let (mut previous, mut index) = (None, 0);
     for call in calls {
@@ -224,12 +218,10 @@ pub async fn first_success(
             index += 1;
             let wait = match failure(&answer) {
                 None => return win(answer),
-                // A failure of the response: retried as its status says,
-                // unless it is ours, or the client's leaving.
-                Some(f) if answer.3 && !ours(f) => backoff.wait(tries, Some(f)),
-                // A call not sent: an unreachable provider is retried; a
-                // hook's refusal or a call that cannot be made is not.
-                Some(f) if f.code() == codes::UPSTREAM => backoff.wait(tries, None),
+                Some(f) if should_retry(f, answer.3) => {
+                    let delay = if answer.3 { f.retry_after() } else { None };
+                    backoff.wait(tries, delay)
+                }
                 _ => None,
             };
             let Some(wait) = wait else {
@@ -240,12 +232,6 @@ pub async fn first_success(
         }
     }
     last(previous)
-}
-
-/// Whether `fault` is the gateway's own, whatever the provider says: a
-/// bug, a setup that cannot work, or a call given up.
-fn ours(fault: &Fault) -> bool {
-    [codes::INTERNAL, codes::CONFIG, codes::ABANDONED].contains(&fault.code())
 }
 
 /// Start each call `stagger` after the one before, or at once when every
@@ -286,65 +272,20 @@ pub async fn race(
     }
 }
 
-/// Bound a provider's wait for its head by `head`, and each gap between
-/// body frames by `idle`. A timeout is an `upstream` fault; before any
-/// content, [`first_success`] retries it.
-///
-/// A whole (non-streaming) answer sends its head only once it is done, so
-/// `head` is the longest answer to wait for; `idle` bounds a stream's gaps.
-pub fn watchdog(inner: impl Into<Transport>, head: Duration, idle: Duration) -> Transport {
-    let inner = inner.into();
-    Transport::new(move |call: Exchange<RequestHead>| {
-        let inner = inner.clone();
-        async move {
-            let stalled =
-                |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
-            let resp = tokio::time::timeout(head, inner.send(call)).await;
-            let mut resp = resp.map_err(|_| stalled(head))??;
-            let bounded = stream::unfold(Some(resp.body), move |frames| async move {
-                let mut frames = frames?;
-                match tokio::time::timeout(idle, frames.next()).await {
-                    Ok(frame) => Some((frame?, Some(frames))),
-                    Err(_) => Some((Err(stalled(idle)), None)),
-                }
-            });
-            resp.body = bounded.boxed();
-            Ok(resp)
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use respan_gateway_core::Fault;
-    use respan_gateway_http::Status;
-    use respan_gateway_http::http::StatusCode;
-
     use super::Backoff;
 
-    fn answer(status: StatusCode, retry_after: Option<u64>) -> Fault {
-        let fault = Fault::new("x", "x")
-            .with(Status(status.as_u16()))
-            .with_answer("f", ());
-        match retry_after {
-            Some(secs) => fault.with_retry_after(Duration::from_secs(secs)),
-            None => fault,
-        }
-    }
-
     #[test]
-    fn backoff_doubles_up_to_its_max_and_skips_answers_no_retry_changes() {
+    fn backoff_doubles_up_to_its_max_and_bounds_supplied_delays() {
         let backoff = Backoff::new(5, Duration::from_millis(400), Duration::from_secs(1));
         let waits: Vec<_> = (1..=5).map(|n| backoff.wait(n, None)).collect();
         let ms = |n| Some(Duration::from_millis(n));
         assert_eq!(waits, [ms(400), ms(800), ms(1000), ms(1000), None]);
-        let busy = answer(StatusCode::TOO_MANY_REQUESTS, Some(1));
-        assert_eq!(backoff.wait(1, Some(&busy)), ms(1000));
-        let too_long = answer(StatusCode::TOO_MANY_REQUESTS, Some(2));
-        assert_eq!(backoff.wait(1, Some(&too_long)), None);
-        let bad_request = answer(StatusCode::BAD_REQUEST, None);
-        assert_eq!(backoff.wait(1, Some(&bad_request)), None);
+        assert_eq!(backoff.wait(1, Some(Duration::from_secs(1))), ms(1000));
+        assert_eq!(backoff.wait(1, Some(Duration::from_secs(2))), None);
+        assert_eq!(backoff.wait(5, Some(Duration::ZERO)), None);
     }
 }

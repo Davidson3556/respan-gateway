@@ -1,6 +1,6 @@
 //! Loop 2 adversarial tests (fork B).
 
-use respan_gateway_formats::conversation::{Finish, Piece, Reply};
+use respan_gateway_messages::conversation::{Finish, Piece, Reply};
 use respan_gateway_testkit::run_filter as run;
 use respan_gateway_text::{Holdback, Placeholders};
 use serde_json::{Value, json};

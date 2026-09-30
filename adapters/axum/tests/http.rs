@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
-use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_messages::conversation::Conversation;
 use std::sync::{Arc, Mutex};
 
 use respan_gateway_axum::router;

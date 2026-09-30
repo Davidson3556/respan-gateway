@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::Usage;
-use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply};
 use respan_gateway_http::Body;
+use respan_gateway_messages::Usage;
+use respan_gateway_messages::conversation::{Conversation, Finish, Piece, Reply};
 pub use respan_gateway_testkit::Calls;
 use respan_gateway_testkit::{MockTransport, Outcomes, post, read_whole, serve};
 

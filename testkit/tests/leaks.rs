@@ -1,7 +1,7 @@
 //! Every request-scoped value is dropped once its request ends and the
 //! gateway is idle, and a dropped gateway drops its plugins.
 
-use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_messages::conversation::Conversation;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -9,10 +9,10 @@ use futures::{StreamExt, TryStreamExt, stream};
 use http::StatusCode;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response};
 use respan_gateway_core::{async_trait, futures};
-use respan_gateway_formats::conversation::{Finish, Reply};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Exchange, Frames};
+use respan_gateway_messages::conversation::{Finish, Reply};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{mock, post, read_whole, serve};
 

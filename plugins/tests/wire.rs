@@ -12,7 +12,8 @@ use respan_gateway_core::{
     Connection, Events, Extensions, Fault, Format, Gateway, ProviderContext,
 };
 use respan_gateway_http::Status;
-use respan_gateway_ledger::{Accounting, Amount, MemoryLedger, Quote, Tally};
+use respan_gateway_ledger::{Amount, MemoryLedger, Tally};
+use respan_gateway_plugins::{Accounting, Quote};
 
 const RESERVE: Amount = 100;
 

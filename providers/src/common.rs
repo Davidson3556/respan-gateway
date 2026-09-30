@@ -1028,8 +1028,8 @@ pub(crate) fn set(v: &mut Map<String, Value>, key: &str, value: Option<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::Details;
     use crate::{AnthropicMessages, OpenAiChat};
+    use respan_gateway_messages::Details;
 
     #[test]
     fn a_translated_error_keeps_each_formats_schema() {

@@ -9,8 +9,8 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_http::http::Method;
+use respan_gateway_messages::relayed::Relayed;
 use serde_json::{Value, json};
 
 mod session;

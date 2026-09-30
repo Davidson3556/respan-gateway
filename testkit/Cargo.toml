@@ -19,5 +19,6 @@ respan-gateway-http.workspace = true
 respan-gateway-providers.workspace = true
 serde_json.workspace = true
 respan-gateway-formats.workspace = true
+respan-gateway-messages.workspace = true
 respan-gateway-plugins.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

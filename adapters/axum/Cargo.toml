@@ -28,6 +28,7 @@ http-body-util.workspace = true
 respan-gateway-providers.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-formats.workspace = true
+respan-gateway-messages.workspace = true
 respan-gateway-testkit.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "sync", "test-util"] }

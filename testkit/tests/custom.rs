@@ -10,9 +10,7 @@ use respan_gateway_core::futures;
 use respan_gateway_core::{
     ClientContext, Connection, Fault, Filter, Gateway, Plugin, Response, codes,
 };
-use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_formats::opaque::{self, Got, Sent};
-use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::whole::Relay;
 use respan_gateway_formats::{self as formats, default_content_type, sse};
 use respan_gateway_http::Asked;
@@ -21,6 +19,8 @@ use respan_gateway_http::bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 use respan_gateway_http::{RequestHead, ResponseHead as Head};
+use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_messages::relayed::Relayed;
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -531,7 +531,7 @@ async fn a_plugin_for_another_kind_is_refused_not_ignored() {
     #[async_trait]
     impl Plugin for Redact {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|_: &mut respan_gateway_formats::conversation::Reply| Ok(()))?;
+            cx.filter(|_: &mut respan_gateway_messages::conversation::Reply| Ok(()))?;
             Ok(None)
         }
     }
@@ -560,7 +560,7 @@ async fn a_plugin_made_response_of_another_kind_fails_loudly() {
     #[async_trait]
     impl Plugin for Wrong {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let wrong = [Ok(respan_gateway_formats::conversation::Reply::text(
+            let wrong = [Ok(respan_gateway_messages::conversation::Reply::text(
                 0, "hi",
             ))];
             Ok(Some(Response::stream(futures::stream::iter(wrong))))
@@ -582,7 +582,7 @@ async fn a_plugin_asking_for_another_kind_is_told_so_before_decoding() {
     #[async_trait]
     impl Plugin for Chatty {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            type Chat = respan_gateway_formats::conversation::Conversation;
+            type Chat = respan_gateway_messages::conversation::Conversation;
             // `is_kind` sets it apart from an undecodable body.
             assert!(!cx.is_kind::<Chat>());
             cx.input::<Chat>()?;

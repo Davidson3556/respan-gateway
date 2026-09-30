@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-formats"
-description = "Reusable wire-format helpers, conversation types, and opaque relay for respan-gateway."
+description = "Reusable HTTP-aware wire-format helpers and opaque relay for respan-gateway."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+respan-gateway-messages.workspace = true
 serde_json.workspace = true
 respan-gateway-http.workspace = true
 serde.workspace = true

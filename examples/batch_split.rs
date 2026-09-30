@@ -24,6 +24,7 @@
 use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::http::StatusCode;
+use respan_gateway_http::retryable;
 use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use std::time::Duration;
@@ -60,7 +61,7 @@ impl Plugin for Split {
         let answers = stream::iter(calls)
             .map(|(expected, call)| async move {
                 let backoff = Backoff::new(3, Duration::from_millis(10), Duration::from_secs(1));
-                let answers = first_success([call], &backoff, Until::End)
+                let answers = first_success([call], &backoff, Until::End, retryable)
                     .await?
                     .outputs::<Embeddings>()
                     .try_collect::<Vec<_>>()

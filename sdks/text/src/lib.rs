@@ -15,9 +15,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::{Fault, Filter};
-use respan_gateway_formats::conversation::{Content, Conversation, Piece, Reply};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
+use respan_gateway_messages::conversation::{Content, Conversation, Piece, Reply};
 use serde_json::{self, Map, Value, json};
 
 /// The code of a refusal of content that cannot be read.

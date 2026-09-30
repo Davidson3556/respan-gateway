@@ -14,12 +14,12 @@ use respan_gateway_core::async_trait;
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, codes,
 };
-use respan_gateway_formats::conversation::{
-    Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
-};
-use respan_gateway_formats::{Details, Usage};
 use respan_gateway_http::Asked;
 use respan_gateway_http::{Body, RequestHead, ResponseHead};
+use respan_gateway_messages::conversation::{
+    Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
+};
+use respan_gateway_messages::{Details, Usage};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_testkit::{MockAt, MockTransport, Outcomes, mock, post, read_whole, serve};
 

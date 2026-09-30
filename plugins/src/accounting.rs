@@ -1,13 +1,15 @@
 //! The plugin: reserve before every call, settle once when it ends.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait, codes};
 use respan_gateway_http::Status;
 
-use crate::{Amount, HoldId, Ledger, NO_ACCOUNT};
+use respan_gateway_ledger::{Amount, HoldId, Ledger, Tally};
+
+use crate::NO_ACCOUNT;
 
 type QuoteFn = dyn Fn(&mut ProviderContext, Tally) -> Result<Quote, Fault> + Send + Sync;
 
@@ -23,40 +25,6 @@ impl Quote {
     pub fn new(accounts: impl IntoIterator<Item = impl Into<String>>, reserve: Amount) -> Self {
         let accounts = accounts.into_iter().map(Into::into).collect();
         Self { accounts, reserve }
-    }
-}
-
-/// One call's cost as your code prices it, reported while the call runs,
-/// such as by a filter of the call's outputs that prices each usage
-/// increment its provider reports. [`Accounting`] settles the call from it.
-/// Clones share it.
-#[derive(Debug, Clone, Default)]
-pub struct Tally(Arc<Counted>);
-
-#[derive(Debug, Default)]
-struct Counted {
-    spent: AtomicI64,
-    reported: AtomicBool,
-}
-
-impl Tally {
-    /// Add `amount` to what the call cost, saturating; the call's cost now
-    /// counts as reported, even if `amount` is 0.
-    pub fn add(&self, amount: Amount) {
-        let spent = &self.0.spent;
-        let add = |now: Amount| Some(now.saturating_add(amount));
-        let _ = spent.fetch_update(Ordering::Relaxed, Ordering::Relaxed, add);
-        self.0.reported.store(true, Ordering::Relaxed);
-    }
-
-    /// What was added so far.
-    pub fn spent(&self) -> Amount {
-        self.0.spent.load(Ordering::Relaxed)
-    }
-
-    /// Whether anything was added.
-    pub fn is_reported(&self) -> bool {
-        self.0.reported.load(Ordering::Relaxed)
     }
 }
 

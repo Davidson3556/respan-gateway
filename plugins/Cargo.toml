@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-plugins"
-description = "First-party plugins, built only on the public kernel API."
+description = "First-party routing and accounting policies built on public core and SDK APIs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,3 +13,11 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-ledger.workspace = true
+
+[dev-dependencies]
+respan-gateway-messages.workspace = true
+respan-gateway-providers.workspace = true
+respan-gateway-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

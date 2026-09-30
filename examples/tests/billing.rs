@@ -1,6 +1,6 @@
 use super::*;
-use respan_gateway_formats::conversation::Conversation;
-use respan_gateway_formats::conversation::units;
+use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_messages::conversation::units;
 
 #[tokio::test]
 async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
@@ -38,7 +38,7 @@ struct Refuses;
 #[async_trait]
 impl Plugin for Refuses {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        px.filter(|_: &mut respan_gateway_formats::conversation::Reply| {
+        px.filter(|_: &mut respan_gateway_messages::conversation::Reply| {
             Err(Fault::bad_request("refused"))
         })
     }

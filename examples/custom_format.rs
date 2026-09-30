@@ -15,11 +15,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::conversation::units::INPUT_TOKENS;
-use respan_gateway_formats::{self as formats, Usage, relayed::Relayed, whole::Relay};
+use respan_gateway_formats::{self as formats, whole::Relay};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{Codec, Decoder, Encoder, RequestHead, ResponseHead, impl_format};
+use respan_gateway_messages::{Usage, conversation::units::INPUT_TOKENS, relayed::Relayed};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use serde_json::{self, Value, json};
 

@@ -12,11 +12,12 @@
 use std::sync::{Arc, Mutex};
 
 use respan_gateway_core::{Fault, codes};
-use respan_gateway_formats::{self as formats, relayed::Relayed, sse, whole::Relay};
+use respan_gateway_formats::{self as formats, sse, whole::Relay};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::{RequestHead, ResponseHead, bodiless};
+use respan_gateway_messages::relayed::Relayed;
 use serde_json::{Value, json};
 
 use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, requests};

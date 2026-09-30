@@ -13,6 +13,10 @@
 //!   [`Credential`] extension, publishes an [`Asked`] view of the head,
 //!   writes what no format can in plain text, and strips what a hop must
 //!   not carry from the response ([`outgoing`]).
+//! - **An outbound transport** can bound its provider head and polled body
+//!   frame gaps with [`watchdog`]. HTTP retry classification is explicitly
+//!   selected by a routing caller through [`retryable`]; it is not built into
+//!   routing's timing-only backoff.
 //! - **A transport** strips what a proxy must not pass on from a call
 //!   ([`proxy_call`], [`strip_client_origin_headers`]), decides whose keys
 //!   reach the provider ([`credentials`], [`CallHeaders`]), and strips a
@@ -29,6 +33,7 @@ mod driver;
 #[cfg(feature = "reqwest")]
 mod reqwest_backend;
 mod transport;
+mod watchdog;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,6 +84,7 @@ pub use transport::{
     CallHeaders, Exchange, Frames, connect, credentials, is_connection_header, proxy_call,
     strip_client_origin_headers, strip_origin_headers,
 };
+pub use watchdog::watchdog;
 
 /// The head of an HTTP request.
 pub type RequestHead = http::request::Parts;
@@ -180,6 +186,24 @@ pub fn status(fault: &Fault) -> StatusCode {
         },
     };
     StatusCode::from_u16(number).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// HTTP retry eligibility for a failed `first_success` attempt. Before a
+/// response opened, only an [`codes::UPSTREAM`] fault is retryable, regardless
+/// of any status hint. After opening, [`codes::INTERNAL`], [`codes::CONFIG`]
+/// and [`codes::ABANDONED`] are never retryable, even with a retryable status
+/// hint; otherwise statuses 408, 425, 429, 500, 502, 503, 504 and 529 are
+/// retryable (using [`status`] for the fault's explicit hint or default).
+/// `response_opened` means the call returned `Ok(Response)` before the
+/// caller's response-selection criterion ran, not that bytes arrived.
+pub fn retryable(fault: &Fault, response_opened: bool) -> bool {
+    if !response_opened {
+        return fault.code() == codes::UPSTREAM;
+    }
+    if [codes::INTERNAL, codes::CONFIG, codes::ABANDONED].contains(&fault.code()) {
+        return false;
+    }
+    [408, 425, 429, 500, 502, 503, 504, 529].contains(&status(fault).as_u16())
 }
 
 /// The client's request head, without its [`Credential`] or extensions: a
@@ -611,6 +635,30 @@ mod tests {
             let code = fault.code().to_owned();
             assert_eq!(of(fault.clone()), want, "{code}");
             assert_eq!(of(fault.with(Status(429))), 429, "{code}");
+        }
+    }
+
+    #[test]
+    fn retryable_respects_opening_stage_code_precedence_and_http_status() {
+        let hinted = |code, number| Fault::new(code, "x").with(Status(number));
+        for (fault, before, after) in [
+            (Fault::upstream("x"), true, true),
+            (hinted(codes::UPSTREAM, 400), true, false),
+            (hinted(codes::CONFIG, 503), false, false),
+            (hinted(codes::INTERNAL, 429), false, false),
+            (hinted(codes::ABANDONED, 502), false, false),
+            (hinted(codes::BAD_REQUEST, 503), false, true),
+            (hinted("custom", 400), false, false),
+            (Fault::new("custom", "x"), false, true),
+        ] {
+            assert_eq!(retryable(&fault, false), before, "before: {fault:?}");
+            assert_eq!(retryable(&fault, true), after, "after: {fault:?}");
+        }
+        for number in [408, 425, 429, 500, 502, 503, 504, 529] {
+            assert!(retryable(&hinted("custom", number), true), "{number}");
+        }
+        for number in [200, 400, 401, 403, 404, 409, 422, 499, 501, 505, 528, 530] {
+            assert!(!retryable(&hinted("custom", number), true), "{number}");
         }
     }
 

@@ -14,11 +14,13 @@ use std::time::Duration;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::conversation::{Conversation, set_model};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_http::{Asked, Body, Exchange, RequestHead, ResponseHead, Transport};
+use respan_gateway_http::{
+    Asked, Body, Exchange, RequestHead, ResponseHead, Transport, retryable, watchdog,
+};
+use respan_gateway_messages::conversation::{Conversation, Reply, set_model};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_routing::{Attempt, Backoff, Until, first_success, race, watchdog};
+use respan_gateway_routing::{Attempt, Backoff, Until, first_success, race};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
 /// Falls back from the target to Anthropic, or hedges it with `openai-eu`.
@@ -37,20 +39,17 @@ impl Plugin for Resilient {
         if asked.is_some_and(|a| a.headers.contains_key("x-hedge")) {
             let calls = [cx.call(target), cx.call("openai-eu")];
             let stagger = Duration::from_millis(200);
-            return race(
-                calls,
-                stagger,
-                Until::content(respan_gateway_formats::conversation::Reply::is_content),
-            )
-            .await
-            .map(Some);
+            return race(calls, stagger, Until::content(Reply::is_content))
+                .await
+                .map(Some);
         }
         let backoff = Backoff::new(2, Duration::from_millis(250), Duration::from_secs(5));
         let calls = [cx.call(target), cx.call("anthropic")];
         first_success(
             calls,
             &backoff,
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            Until::content(Reply::is_content),
+            retryable,
         )
         .await
         .map(Some)

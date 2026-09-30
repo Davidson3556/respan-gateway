@@ -20,10 +20,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::{CallUsage, Price, meter};
-use respan_gateway_formats::Usage;
-use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::Asked;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
+use respan_gateway_messages::Usage;
+use respan_gateway_messages::conversation::Conversation;
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use http::{HeaderValue, StatusCode};
 use respan_gateway_core::async_trait;
 use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, Response, codes};
-use respan_gateway_formats::conversation::{Conversation, Finish, Piece, Reply, units};
+use respan_gateway_messages::conversation::{Conversation, Finish, Piece, Reply, units};
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole, serve};
@@ -401,7 +401,7 @@ async fn the_client_gets_the_streaming_it_asked_for_whatever_a_plugin_asks_of_th
     #[async_trait]
     impl Plugin for Whole {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            use respan_gateway_formats::conversation::Conversation;
+            use respan_gateway_messages::conversation::Conversation;
             cx.filter(|chat: &mut Conversation| {
                 chat.stream = false;
                 Ok(())

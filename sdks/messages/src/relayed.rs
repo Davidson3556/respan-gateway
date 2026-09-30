@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use respan_gateway_core::{Fault, codes};
-use respan_gateway_http::bytes::Bytes;
 
 /// The bytes a value was decoded from, in `format`, and what they said.
 #[derive(Debug)]

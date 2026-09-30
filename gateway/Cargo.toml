@@ -16,6 +16,7 @@ respan-gateway-core.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-providers.workspace = true
 respan-gateway-formats.workspace = true
+respan-gateway-messages.workspace = true
 respan-gateway-plugins.workspace = true
 respan-gateway-axum.workspace = true
 axum.workspace = true

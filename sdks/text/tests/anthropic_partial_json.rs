@@ -1,7 +1,7 @@
 //! Holdback over Anthropic `partial_json` fragments: escapes and split matches.
 
 use respan_gateway_core::Fault;
-use respan_gateway_formats::conversation::{Piece, Reply};
+use respan_gateway_messages::conversation::{Piece, Reply};
 use respan_gateway_testkit::run_filter as run;
 use respan_gateway_text::{Holdback, Placeholders, Rewrite, partial_match};
 use serde_json::{Value, json};

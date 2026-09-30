@@ -1242,6 +1242,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "respan-gateway-plugins",
  "respan-gateway-providers",
  "respan-gateway-testkit",
@@ -1266,6 +1267,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "respan-gateway-providers",
  "respan-gateway-testkit",
  "respan-gateway-ws",
@@ -1304,6 +1306,7 @@ dependencies = [
  "respan-gateway-http",
  "respan-gateway-ledger",
  "respan-gateway-mcp",
+ "respan-gateway-messages",
  "respan-gateway-plugins",
  "respan-gateway-providers",
  "respan-gateway-routing",
@@ -1325,6 +1328,7 @@ version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "serde",
  "serde_json",
 ]
@@ -1341,6 +1345,7 @@ dependencies = [
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-formats",
+ "respan-gateway-messages",
  "respan-gateway-providers",
  "respan-gateway-testkit",
  "tokio",
@@ -1351,10 +1356,8 @@ name = "respan-gateway-ledger"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
- "respan-gateway-formats",
  "respan-gateway-http",
- "respan-gateway-providers",
- "respan-gateway-testkit",
+ "respan-gateway-messages",
  "serde_json",
  "tokio",
 ]
@@ -1366,9 +1369,19 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "respan-gateway-testkit",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "respan-gateway-messages"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "respan-gateway-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -1376,6 +1389,12 @@ name = "respan-gateway-plugins"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-ledger",
+ "respan-gateway-messages",
+ "respan-gateway-providers",
+ "respan-gateway-testkit",
+ "tokio",
 ]
 
 [[package]]
@@ -1385,6 +1404,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "serde",
  "serde_json",
 ]
@@ -1396,6 +1416,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "respan-gateway-providers",
  "respan-gateway-testkit",
  "tokio",
@@ -1408,6 +1429,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "respan-gateway-plugins",
  "respan-gateway-providers",
  "serde_json",
@@ -1419,8 +1441,8 @@ name = "respan-gateway-text"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
- "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "respan-gateway-providers",
  "respan-gateway-testkit",
  "serde_json",
@@ -1435,6 +1457,7 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-formats",
  "respan-gateway-http",
+ "respan-gateway-messages",
  "rustls",
  "rustls-native-certs",
  "serde_json",

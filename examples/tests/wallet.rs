@@ -1,5 +1,5 @@
 use super::*;
-use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_messages::conversation::Conversation;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn fifty_parallel_requests_never_overspend_a_one_dollar_wallet() -> Result<(), Fault> {
@@ -138,7 +138,7 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
             race(
                 calls,
                 stagger,
-                Until::content(respan_gateway_formats::conversation::Reply::is_content),
+                Until::content(respan_gateway_messages::conversation::Reply::is_content),
             )
             .await
             .map(Some)

@@ -11,9 +11,9 @@ use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, Exchange, RequestHead, ResponseHead, Transport};
+use respan_gateway_messages::conversation::Conversation;
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_testkit::{MockTransport, Outcomes, mock, post, read_whole};
 

@@ -1,17 +1,19 @@
 //! The routing SDK's promises, against a mock provider.
 
-use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_messages::conversation::{Conversation, Reply};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::futures::StreamExt;
-use respan_gateway_core::futures::stream;
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
+    ClientContext, Connection, Events, Fault, Format, Gateway, Plugin, ProviderContext, Response,
+    async_trait, codes, write,
 };
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_http::{Exchange, Transport};
+use respan_gateway_http::{Exchange, Transport, retryable};
 use respan_gateway_http::{RequestHead, ResponseHead};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_routing::{Attempt, Backoff, Role, Until, first_success, race};
@@ -50,9 +52,13 @@ fn too_many(seconds: &'static str) -> mock::Reply {
     reply
 }
 
+/// Retry policy selected by the plugin under test.
+type Classifier = Arc<dyn Fn(&Fault, bool) -> bool + Send + Sync>;
+
 /// How the plugin under test answers.
 enum Plan {
     First(Vec<&'static str>, Backoff, Until),
+    Classified(Vec<&'static str>, Backoff, Until, Classifier),
     Race(Vec<&'static str>, Duration, Until),
 }
 
@@ -62,7 +68,17 @@ impl Plugin for Plan {
         match self {
             Plan::First(to, backoff, until) => {
                 let calls: Vec<_> = to.iter().map(|p| cx.call(*p)).collect();
-                first_success(calls, backoff, until.clone()).await.map(Some)
+                first_success(calls, backoff, until.clone(), retryable)
+                    .await
+                    .map(Some)
+            }
+            Plan::Classified(to, backoff, until, classify) => {
+                let calls: Vec<_> = to.iter().map(|p| cx.call(*p)).collect();
+                first_success(calls, backoff, until.clone(), |fault, opened| {
+                    classify(fault, opened)
+                })
+                .await
+                .map(Some)
             }
             Plan::Race(to, stagger, until) => {
                 let calls: Vec<_> = to.iter().map(|p| cx.call(*p)).collect();
@@ -332,7 +348,7 @@ fn secs(n: u64) -> Duration {
 
 /// Waits 5 s for a head, 1 s between body frames.
 fn watchdog(inner: impl Into<Transport>) -> Transport {
-    respan_gateway_routing::watchdog(inner, secs(5), secs(1))
+    respan_gateway_http::watchdog(inner, secs(5), secs(1))
 }
 
 fn retries(tries: u32) -> Backoff {
@@ -344,7 +360,7 @@ async fn a_stream_failing_after_its_first_content_is_never_retried() {
     let h = harness(Plan::First(
         vec!["a", "b"],
         retries(3),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(A, cut(&[ROLE, HELLO]));
     h.mock.reply(B, ok());
@@ -365,7 +381,7 @@ async fn a_success_failing_before_content_moves_on() {
     let h = harness(Plan::First(
         vec!["a", "b"],
         Backoff::once(),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(A, cut(&[ROLE]));
     h.mock.reply(B, ok());
@@ -384,7 +400,7 @@ async fn retry_after_is_honoured() {
     let h = harness(Plan::First(
         vec!["a"],
         retries(2),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(A, too_many("3"));
     h.mock.reply(A, ok());
@@ -402,7 +418,7 @@ async fn a_retry_after_beyond_the_max_moves_on_at_once() {
     let h = harness(Plan::First(
         vec!["a", "b"],
         retries(3),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(A, too_many("60"));
     h.mock.reply(B, ok());
@@ -420,7 +436,7 @@ async fn with_no_success_the_client_gets_the_last_429_and_its_retry_after() {
     let h = harness(Plan::First(
         vec!["a", "b"],
         Backoff::once(),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock
         .reply(A, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
@@ -445,12 +461,12 @@ async fn a_fallback_that_cannot_be_made_does_not_hide_the_providers_answer() {
         Plan::First(
             vec!["a", "missing"],
             Backoff::once(),
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            Until::content(Reply::is_content),
         ),
         Plan::Race(
             vec!["a", "missing"],
             secs(1),
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            Until::content(Reply::is_content),
         ),
     ] {
         let h = harness(plan);
@@ -468,7 +484,7 @@ async fn a_config_error_on_one_target_moves_on_to_the_next() {
     let h = harness(Plan::First(
         vec!["missing", "b"],
         retries(3),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(B, ok());
 
@@ -480,11 +496,140 @@ async fn a_config_error_on_one_target_moves_on_to_the_next() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_false_classifier_suppresses_preopening_upstream_retries_but_allows_fallback() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let seen = observed.clone();
+    let h = harness(Plan::Classified(
+        vec!["refused", "b"],
+        retries(3),
+        Until::Head,
+        Arc::new(move |fault, opened| {
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((fault.code().to_owned(), opened));
+            false
+        }),
+    ));
+    h.mock.reply(B, ok());
+    let (status, _, body, end) = h.send().await;
+    assert_eq!((status, end), (StatusCode::OK, Ok(())));
+    assert!(body.contains("Hello"));
+    assert_eq!(h.sent_to(), ["b.test"]);
+    assert_eq!(
+        *observed.lock().unwrap_or_else(PoisonError::into_inner),
+        [(codes::UPSTREAM.to_owned(), false)]
+    );
+    let attempts = h.record.all();
+    assert_eq!(attempts.len(), 2, "no second refused attempt: {attempts:?}");
+    assert_eq!(attempts[0].0, "refused");
+    assert_eq!(attempts[1].0, "b");
+}
+
+#[tokio::test(start_paused = true)]
+async fn classifier_sees_opened_content_and_late_terminal_failures() {
+    for (until, first) in [
+        (Until::content(Reply::is_content), cut(&[ROLE])),
+        (Until::End, cut(&[ROLE, HELLO])),
+    ] {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let seen = observed.clone();
+        let h = harness(Plan::Classified(
+            vec!["a", "b"],
+            retries(3),
+            until,
+            Arc::new(move |fault, opened| {
+                seen.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((fault.code().to_owned(), opened));
+                false
+            }),
+        ));
+        h.mock.reply(A, first).reply(B, ok());
+        let (status, _, body, end) = h.send().await;
+        assert_eq!((status, end), (StatusCode::OK, Ok(())));
+        assert!(body.contains("Hello"));
+        assert_eq!(h.sent_to(), ["a.test", "b.test"]);
+        assert_eq!(
+            *observed.lock().unwrap_or_else(PoisonError::into_inner),
+            [(codes::UPSTREAM.to_owned(), true)]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
+    struct Local;
+    impl Format<Arc<AtomicUsize>, Reply, Conversation> for Local {
+        fn name(&self) -> &str {
+            "local"
+        }
+
+        fn bind(
+            &self,
+            invocations: Arc<AtomicUsize>,
+        ) -> Result<Connection<Reply, Conversation>, Fault> {
+            let (send, receive) = oneshot::channel();
+            let incoming = async move { receive.await.map_err(|_| Fault::abandoned()) };
+            let outgoing = write(move |input: Events<Conversation>| {
+                let _ = input
+                    .value()
+                    .transpose()?
+                    .ok_or_else(|| Fault::bad_request("missing input"))?;
+                if invocations.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(Fault::new("model_busy", "local model warming up"));
+                }
+                Ok(async move {
+                    let answer = stream::iter([Ok(Reply::text(0, "Local answer"))]).boxed();
+                    let _ = send.send(Events::stream(answer));
+                    Ok(())
+                })
+            });
+            Ok((incoming.boxed(), Box::pin(outgoing)))
+        }
+    }
+
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let seen = observed.clone();
+    let plan = Plan::Classified(
+        vec!["local"],
+        retries(2),
+        Until::content(Reply::is_content),
+        Arc::new(move |fault, opened| {
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((fault.code().to_owned(), opened));
+            fault.code() == "model_busy" && !opened
+        }),
+    );
+    let gw = Gateway::new()
+        .client::<Conversation, _, _>(OpenAiChat)
+        .expect("client format")
+        .provider::<Conversation, _, _>("local", Local, {
+            let invocations = invocations.clone();
+            move |_| invocations.clone()
+        })
+        .expect("local provider")
+        .plugin("plan", plan)
+        .expect("plan plugin");
+    let (resp, outcome) = serve(&gw, post("/v1/chat/completions", REQUEST)).await;
+    let (status, _, body) = read_whole(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body.expect("response body")).contains("Local answer"));
+    assert_eq!(outcome.await, Ok(()));
+    assert_eq!(invocations.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        *observed.lock().unwrap_or_else(PoisonError::into_inner),
+        [("model_busy".to_owned(), false)]
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_race_drops_its_losers_which_end_abandoned() {
     let h = harness(Plan::Race(
         vec!["slow", "b"],
         Duration::ZERO,
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(A, ok());
     h.mock.reply(B, ok());
@@ -510,7 +655,7 @@ async fn a_race_starts_the_next_call_only_after_its_stagger() {
     let h = harness(Plan::Race(
         vec!["a", "b"],
         secs(2),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(A, ok());
 
@@ -525,7 +670,7 @@ async fn a_race_starts_the_next_call_at_once_when_the_others_failed() {
     let h = harness(Plan::Race(
         vec!["a", "b"],
         secs(10),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock
         .reply(A, mock::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
@@ -544,7 +689,7 @@ async fn the_watchdog_fails_a_stalled_body_and_first_success_moves_on() {
     let h = harness(Plan::First(
         vec!["stalled", "b"],
         Backoff::once(),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(B, ok());
 
@@ -562,7 +707,7 @@ async fn the_watchdog_bounds_the_wait_for_the_head_too() {
     let h = harness(Plan::First(
         vec!["silent", "b"],
         Backoff::once(),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(B, ok());
 
@@ -590,7 +735,7 @@ async fn the_watchdog_does_not_cut_a_slow_whole_answer() {
     let h = harness(Plan::First(
         vec!["late", "b"],
         retries(2),
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock.reply(A, mock::json(StatusCode::OK, REPLY));
     h.mock.reply(B, ok());
@@ -615,7 +760,7 @@ async fn a_whole_body_attempt_ends_with_its_role_set() {
         let h = harness(Plan::First(
             vec!["a", "b"],
             Backoff::once(),
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            Until::content(Reply::is_content),
         ));
         h.mock.reply(A, too_many("1"));
         h.mock.reply(B, mock::json(StatusCode::OK, REPLY));
@@ -637,7 +782,7 @@ async fn a_call_failing_before_its_head_ends_a_loser() {
         let h = harness(Plan::First(
             vec!["refused", "b"],
             Backoff::once(),
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            Until::content(Reply::is_content),
         ));
         h.mock.reply(B, ok());
 
@@ -662,7 +807,7 @@ async fn a_race_that_never_hedges_still_falls_over() {
     let h = harness(Plan::Race(
         vec!["a", "b"],
         Duration::MAX,
-        Until::content(respan_gateway_formats::conversation::Reply::is_content),
+        Until::content(Reply::is_content),
     ));
     h.mock
         .reply(A, mock::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
@@ -704,13 +849,9 @@ async fn until_content_moves_on_from_a_success_failing_before_content() {
         Plan::First(
             vec!["a", "b"],
             Backoff::once(),
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            Until::content(Reply::is_content),
         ),
-        Plan::Race(
-            vec!["a", "b"],
-            secs(1),
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
-        ),
+        Plan::Race(vec!["a", "b"], secs(1), Until::content(Reply::is_content)),
     ];
     for plan in plans {
         let h = harness(plan);
@@ -762,11 +903,7 @@ async fn until_end_sends_the_whole_answer_as_it_came_and_moves_on_before_content
 #[tokio::test(start_paused = true)]
 async fn a_race_until_end_picks_the_call_that_finishes_first() {
     for (until, winner, loser) in [
-        (
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
-            "dribble",
-            "b-in-1s",
-        ),
+        (Until::content(Reply::is_content), "dribble", "b-in-1s"),
         (Until::End, "b-in-1s", "dribble"),
     ] {
         let h = harness(Plan::Race(
@@ -871,20 +1008,12 @@ async fn content_policy_accepts_custom_events_and_captured_configuration() {
 #[tokio::test]
 async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
     struct FailEnd;
-    impl respan_gateway_core::Filter<respan_gateway_formats::conversation::Reply> for FailEnd {
-        fn edit(
-            &mut self,
-            value: respan_gateway_formats::conversation::Reply,
-            out: &mut Vec<respan_gateway_formats::conversation::Reply>,
-        ) -> Result<(), Fault> {
+    impl respan_gateway_core::Filter<Reply> for FailEnd {
+        fn edit(&mut self, value: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
             out.push(value);
             Ok(())
         }
-        fn end(
-            &mut self,
-            _: &Result<(), Fault>,
-            _: &mut Vec<respan_gateway_formats::conversation::Reply>,
-        ) -> Result<(), Fault> {
+        fn end(&mut self, _: &Result<(), Fault>, _: &mut Vec<Reply>) -> Result<(), Fault> {
             Err(Fault::upstream("failed-at-end"))
         }
     }

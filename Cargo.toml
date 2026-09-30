@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 respan-gateway-core = { path = "core" }
 respan-gateway-formats = { path = "sdks/formats" }
+respan-gateway-messages = { path = "sdks/messages" }
 respan-gateway-http = { path = "sdks/http" }
 respan-gateway-plugins = { path = "plugins" }
 respan-gateway-axum = { path = "adapters/axum" }

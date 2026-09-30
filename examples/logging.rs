@@ -27,10 +27,10 @@ use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_examples::{CallUsage, meter};
-use respan_gateway_formats::Usage;
-use respan_gateway_formats::conversation::{Conversation, Message, Reply};
 use respan_gateway_http::Asked;
 use respan_gateway_http::http::HeaderValue;
+use respan_gateway_messages::Usage;
+use respan_gateway_messages::conversation::{Conversation, Message, Reply};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 

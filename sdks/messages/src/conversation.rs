@@ -11,8 +11,8 @@
 //! tools between OpenAI chat and Anthropic messages, which the formats
 //! rewrite: `tools`, `tool_choice`, calls and results, whole or streamed.
 
+use bytes::Bytes;
 use respan_gateway_core::Fault;
-use respan_gateway_http::bytes::Bytes;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
@@ -395,4 +395,54 @@ pub enum Finish {
     Filtered,
     /// A reason the kind has no form for, by the format's name.
     Other(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use respan_gateway_core::codes;
+    use serde_json::json;
+
+    #[test]
+    fn decoded_conversation_keeps_its_bytes_and_attributes_edits() {
+        let format: Arc<str> = Arc::from("chat");
+        let raw = Bytes::from_static(br#"{"messages":[{"role":"user","content":"hello"}]}"#);
+        let original = Conversation::new([Message::new(Role::User, "hello")]);
+        let mut decoded = original.came(&format, raw.clone());
+        let snapshot = decoded.clone();
+        assert_eq!(decoded.came_in("chat").map(|came| &came.bytes), Some(&raw));
+        assert!(decoded.came_in("other").is_none());
+        assert_eq!(decoded.said(), Some(&snapshot));
+        assert_eq!(
+            decoded.whose(Fault::internal("invalid")).code(),
+            codes::BAD_REQUEST
+        );
+        decoded.messages[0].content = vec!["edited".into()];
+        assert_eq!(decoded.said(), Some(&snapshot));
+        assert_eq!(
+            decoded.whose(Fault::internal("invalid")).code(),
+            codes::CONFIG
+        );
+    }
+
+    #[test]
+    fn message_sources_and_reply_bytes_survive_cloning() {
+        let source = json!({"role": "user", "content": "hello"});
+        let message = Message::new(Role::User, "hello").with_source(source.clone());
+        let mut clone = message.clone();
+        assert_eq!(clone.source(), Some(&source));
+        assert!(message.same_source(&clone));
+        clone.content = vec!["changed".into()];
+        assert!(!message.eq(&clone));
+        assert!(message.same_source(&clone));
+
+        let format: Arc<str> = Arc::from("chat");
+        let raw = Bytes::from_static(b"reply");
+        let reply = Reply::text(0, "hello").came(&format, raw.clone());
+        assert_eq!(
+            reply.clone().came_in("chat").map(|came| &came.bytes),
+            Some(&raw)
+        );
+        assert!(reply.came_in("other").is_none());
+    }
 }

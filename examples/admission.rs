@@ -24,7 +24,7 @@
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::futures::{future::BoxFuture, stream::BoxStream};
 use respan_gateway_examples::admission::{Slot, Slots};
-use respan_gateway_formats::conversation::{Conversation, Reply};
+use respan_gateway_messages::conversation::{Conversation, Reply};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 

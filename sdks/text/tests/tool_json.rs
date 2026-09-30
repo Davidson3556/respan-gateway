@@ -1,7 +1,7 @@
 //! Restoring and redacting inside tool calls keeps their JSON whole.
 
 use respan_gateway_core::Fault;
-use respan_gateway_formats::conversation::{Conversation, Message, Piece, Reply, Role};
+use respan_gateway_messages::conversation::{Conversation, Message, Piece, Reply, Role};
 use respan_gateway_testkit::run_filter as run;
 use respan_gateway_text::{Holdback, Placeholders, Readable, Rewrite};
 use serde_json::{self, Value, json};
@@ -278,7 +278,7 @@ fn a_unicode_escape_in_streamed_arguments_is_kept_whole() {
 
 #[test]
 fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Result<(), Fault> {
-    use respan_gateway_formats::conversation::Content;
+    use respan_gateway_messages::conversation::Content;
     let mut chat = Conversation::default();
     let mut message = Message::new(Role::Assistant, "");
     message.content = vec![
@@ -312,7 +312,7 @@ fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Re
 
 #[test]
 fn an_image_inside_a_tool_result_is_refused_before_any_edit() {
-    use respan_gateway_formats::conversation::Content;
+    use respan_gateway_messages::conversation::Content;
     let mut chat = Conversation::default();
     let mut message = Message::new(Role::User, "keep this");
     message.content.push(Content::other("anthropic-messages", json!({
@@ -331,7 +331,7 @@ fn an_image_inside_a_tool_result_is_refused_before_any_edit() {
 #[test]
 fn tool_indexes_do_not_delay_argument_tails_until_after_the_finish() -> Result<(), Fault> {
     use respan_gateway_core::Filter;
-    use respan_gateway_formats::conversation::Finish;
+    use respan_gateway_messages::conversation::Finish;
 
     for (format, raw) in [
         (

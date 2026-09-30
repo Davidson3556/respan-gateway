@@ -54,11 +54,11 @@ use respan_gateway_examples::store::{
     rusqlite::{OptionalExtension, params},
     sql,
 };
-use respan_gateway_formats::conversation::{Content, Conversation};
 use respan_gateway_formats::opaque::Got;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_http::{Asked, CallHeaders, Credential};
+use respan_gateway_http::{Asked, CallHeaders, Credential, retryable};
+use respan_gateway_messages::conversation::{Content, Conversation, Reply};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
@@ -529,7 +529,8 @@ impl Plugin for Fallback {
         first_success(
             calls,
             &Backoff::once(),
-            Until::content(respan_gateway_formats::conversation::Reply::is_content),
+            Until::content(Reply::is_content),
+            retryable,
         )
         .await
         .map(Some)

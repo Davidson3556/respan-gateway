@@ -7,8 +7,8 @@ use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Response, async_trait};
-use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::{Codec, Transport};
+use respan_gateway_messages::conversation::Conversation;
 use respan_gateway_plugins::ModelRouter;
 use serde::Deserialize;
 

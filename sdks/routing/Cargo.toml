@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-routing"
-description = "Attempt control: retry with Retry-After, fallback, race, a stall bound, and each attempt's role."
+description = "Transport-neutral attempt orchestration: caller-classified retries, backoff, fallback, race, and attempt roles."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,11 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
-respan-gateway-http.workspace = true
 tokio = { workspace = true, features = ["time", "macros"] }
 
 [dev-dependencies]
+respan-gateway-http.workspace = true
+respan-gateway-messages.workspace = true
 respan-gateway-providers.workspace = true
 respan-gateway-formats.workspace = true
 respan-gateway-testkit.workspace = true

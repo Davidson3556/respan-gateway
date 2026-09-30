@@ -36,10 +36,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
-use respan_gateway_formats::conversation::{Conversation, Reply};
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Asked, Credential};
+use respan_gateway_messages::conversation::{Conversation, Reply};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::sync::watch;

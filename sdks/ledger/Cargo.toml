@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-ledger"
-description = "Reserve before a call and settle once from what it cost, against a store and prices you supply."
+description = "Neutral ledger storage, reservations, and shared cost tallies."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,12 +13,10 @@ workspace = true
 
 [dependencies]
 respan-gateway-core.workspace = true
-respan-gateway-formats.workspace = true
+respan-gateway-messages.workspace = true
 serde_json.workspace = true
 respan-gateway-http.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-respan-gateway-providers.workspace = true
-respan-gateway-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

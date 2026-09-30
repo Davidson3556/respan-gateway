@@ -33,15 +33,16 @@ host the gateway, and applications choose what to compose.
 | Path | Responsibility |
 |---|---|
 | `core/` | Typed routing, plugins, symmetric edges and lifecycle. |
-| `sdks/http/` | Codecs, transport, frames, framework-neutral exchange coordination, head timing and credentials; optional Reqwest backend. |
-| `sdks/formats/` | Shared conversation/usage types, relay/framing/error helpers and generic opaque passthrough. |
-| `sdks/routing/` | Reusable fallback, race and response-selection mechanisms. |
+| `sdks/messages/` | HTTP-free conversation/usage types, per-value byte provenance and the canonical JSON fault hint `Details`. |
+| `sdks/http/` | Codecs, transport, frames, exchange coordination, credentials, watchdog and explicit HTTP retry classification; optional Reqwest backend. |
+| `sdks/formats/` | HTTP-aware framing/error helpers and generic opaque passthrough, using the shared messages. |
+| `sdks/routing/` | Transport-neutral fallback, race, response selection and backoff timing; callers supply retry classification. |
 | `sdks/text/` | Reusable text filtering, holdback and rewriting helpers. |
-| `sdks/ledger/` | Reusable accounting and lifecycle-aware settlement mechanisms. |
+| `sdks/ledger/` | Ledger storage, reservations, settlement primitives and shared usage-cost tallies. |
 | `sdks/mcp/` | MCP protocol and stdio transport mechanisms. |
 | `sdks/ws/` | WebSocket events and outbound transport, without hosting. |
 | `providers/` | Concrete OpenAI Chat and Anthropic Messages codecs and their translation machinery. |
-| `plugins/` | Concrete first-party policies, currently the model router. |
+| `plugins/` | Concrete first-party policies: model routing and conservative per-attempt accounting. |
 | `adapters/axum/` | Axum HTTP hosting and optional WebSocket ingress. |
 | `gateway/` | YAML configuration and explicit composition, `check` and `proxy`. |
 | `testkit/` | Mock transport and public-API integration helpers. |
@@ -65,10 +66,18 @@ its outbound transport and event codec without depending on Axum. A planned
 first-party PyO3 adapter belongs at `adapters/python/`, independently of Axum;
 no Python adapter is implemented yet.
 
-Ledger remains an SDK even where its generic helpers implement `Plugin`.
-Application-specific prices, accounts and billing integrations belong in
-examples, not kernel or SDK policy. Implementing a kernel trait does not by
-itself make a helper a concrete first-party policy.
+SDKs supply building blocks, not production `Plugin` implementations. Those
+implementations live in `plugins/` or application/example code; test-only
+plugins can exercise SDK contracts. Ledger remains an SDK for storage,
+reservations, settlement and `Tally`. The first-party `Accounting` plugin owns
+`Quote` and the conservative charging policy for refusals, failures and
+cancellation. Application-specific prices, accounts and billing integrations
+remain in examples.
+
+Messages and routing have no production HTTP dependency. Formats depends on
+messages and HTTP; HTTP depends on neither messages, formats nor routing.
+Text and ledger still attach HTTP status hints to their existing domain
+errors (422 and 401/402 respectively); this does not make all SDKs HTTP-free.
 
 ## One shape at both edges
 
@@ -297,6 +306,25 @@ the event type and criterion. Provider-filtered-out events cannot commit a
 content-based fallback, and synthetic responses obey the same predicate.
 For calls without live inputs, `End` selects only clean completion.
 
+`first_success` requires a retry classifier `Fn(&Fault, bool) -> bool`, called
+for every failed attempt. The bool is `response_opened`: the call returned
+`Ok(Response)` before applying `Until`, not whether it was sent, refused or
+delivered. Returning false skips further tries of that target but still
+allows fallback. `Backoff` controls timing and the attempt budget, not fault
+classification. A response-opened failure's retry delay overrides exponential
+backoff; a delay above the maximum skips the retry. Pre-opening retry delays
+are not used.
+
+HTTP callers can explicitly select `http::retryable`: before opening it
+accepts only `upstream`; after opening it excludes `internal`, `config` and
+`abandoned`, then accepts statuses 408, 425, 429, 500, 502, 503, 504 and 529.
+Non-HTTP callers supply their own classification. Neither classifier nor a
+clonable call grants replayability or guarantees idempotency.
+
+The HTTP SDK's `watchdog` wraps transport opening and polled next-frame waits.
+It retains exchange metadata and outgoing write completion. Its idle timeout
+is not an autonomous deadline while downstream leaves the body unpolled.
+
 ## Public API
 
 | Type | Responsibility |
@@ -424,6 +452,6 @@ boundaries. Build public documentation with
 | Refusal distinct from failed opening and failed first event | Core stream unit tests, `contract`, and `edge_runtime`; HTTP driver and WS tests. |
 | Live inputs read once, unused inputs returned for retry | Core `upload`, `wrap`, `l5_wrap`. |
 | No clean EOF after interrupted upload | Core `upload`, `wrap`; HTTP `driver_toy`. |
-| Batch accounting and response holding | Core `contract`, `until`; ledger and routing suites. |
+| Batch accounting and response holding | Core `contract`, `until`; plugin accounting, ledger and routing suites. |
 | Byte-exact relay and credential isolation | Testkit `relay`, `translate`; HTTP rules; WS credentials tests. |
 | WS backpressure, closure and handshake behavior | WS SDK, Axum adapter and HTTP driver tests. |

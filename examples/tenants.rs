@@ -12,7 +12,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example tenants`
 
-use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_messages::conversation::Conversation;
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 

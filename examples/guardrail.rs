@@ -19,11 +19,11 @@
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
 use respan_gateway_core::{Response, async_trait};
-use respan_gateway_formats::conversation::{Conversation, Piece, Reply};
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
+use respan_gateway_messages::conversation::{Conversation, Piece, Reply};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use respan_gateway_text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};

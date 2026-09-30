@@ -11,11 +11,12 @@ use std::collections::HashMap;
 use respan_gateway_core::{Fault, Gateway, ProviderContext, futures};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
-use respan_gateway_formats::conversation::{Conversation, Reply};
 use respan_gateway_http::Credential;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_ledger::{Accounting, MemoryLedger, Quote, Tally};
+use respan_gateway_ledger::{MemoryLedger, Tally};
+use respan_gateway_messages::conversation::{Conversation, Reply};
+use respan_gateway_plugins::{Accounting, Quote};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 

@@ -4,13 +4,13 @@
 use std::sync::Arc;
 
 use respan_gateway_core::Fault;
-use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{self as formats, whole};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{CONNECTION, UPGRADE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 use respan_gateway_http::{RequestHead, ResponseHead};
+use respan_gateway_messages::relayed::Relayed;
 use serde_json::{self, Value};
 
 /// Whether `head` asks to upgrade to a WebSocket.

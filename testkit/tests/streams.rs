@@ -16,9 +16,7 @@ use respan_gateway_core::futures;
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait, codes,
 };
-use respan_gateway_formats::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
-use respan_gateway_formats::relayed::Relayed;
 use respan_gateway_formats::{call_head, headed, response_head, with_head};
 use respan_gateway_formats::{message_decoder, set_path};
 use respan_gateway_http::Body;
@@ -26,6 +24,8 @@ use respan_gateway_http::bytes;
 use respan_gateway_http::{Asked, RequestHead, ResponseHead, Transport, fresh_response_head};
 use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, impl_format};
 use respan_gateway_http::{http, http_body, http_body_util};
+use respan_gateway_messages::conversation::{Conversation, Message, Reply, Role};
+use respan_gateway_messages::relayed::Relayed;
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{Calls, MockTransport, mock, post, serve, streamed};
 use serde_json::{Value, json};

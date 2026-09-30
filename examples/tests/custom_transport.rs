@@ -1,8 +1,8 @@
 use super::*;
 use respan_gateway_core::{Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::Meter;
-use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::{Status, http};
+use respan_gateway_messages::conversation::Conversation;
 use respan_gateway_providers::AnthropicMessages;
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {

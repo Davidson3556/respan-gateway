@@ -1,5 +1,5 @@
 use super::*;
-use respan_gateway_formats::conversation::units;
+use respan_gateway_messages::conversation::units;
 
 #[tokio::test]
 async fn content_is_logged_except_for_a_zero_retention_tenant() -> Result<(), Fault> {

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
+use respan_gateway_messages::conversation::Conversation;
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, Outcomes};
 

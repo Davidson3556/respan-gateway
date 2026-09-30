@@ -1,6 +1,6 @@
 use super::*;
 use respan_gateway_examples::Meter;
-use respan_gateway_formats::conversation::units;
+use respan_gateway_messages::conversation::units;
 
 #[tokio::test]
 async fn the_verdict_picks_the_target_and_the_provider_edge_covers_the_judge() -> Result<(), Fault>

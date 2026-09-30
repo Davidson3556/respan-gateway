@@ -12,13 +12,13 @@ use respan_gateway_core::futures;
 use respan_gateway_core::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::Usage;
-use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
+use respan_gateway_messages::Usage;
+use respan_gateway_messages::conversation::{Conversation, Reply, units};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_testkit::{Calls, MockTransport, Outcomes, mock, post, read_whole, serve};
 

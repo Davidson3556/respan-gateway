@@ -1,7 +1,7 @@
 //! Timing of a plain relay, unchanged, whole and streamed. Run with
 //! `cargo test --release -p respan-gateway-testkit --test bench -- --ignored --nocapture`.
 
-use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_messages::conversation::Conversation;
 use std::time::Instant;
 
 use respan_gateway_core::Gateway;

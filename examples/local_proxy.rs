@@ -12,8 +12,8 @@
 //! `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude`.
 
 use respan_gateway_core::{Fault, Gateway};
-use respan_gateway_formats::conversation::Conversation;
 use respan_gateway_http::http::{self, HeaderValue};
+use respan_gateway_messages::conversation::Conversation;
 use respan_gateway_providers::AnthropicMessages;
 
 use respan_gateway_axum::router;

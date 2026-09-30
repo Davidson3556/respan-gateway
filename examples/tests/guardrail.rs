@@ -1,9 +1,9 @@
 use super::*;
-use respan_gateway_formats::conversation::{Message, Role};
 use respan_gateway_formats::opaque::{self, Got, Sent};
 use respan_gateway_formats::posts_to;
 use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
 use respan_gateway_http::{RequestHead, ResponseHead};
+use respan_gateway_messages::conversation::{Message, Role};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 #[derive(Clone)]

@@ -18,7 +18,7 @@ reqwest = ["dep:reqwest"]
 [dependencies]
 respan-gateway-core.workspace = true
 reqwest = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "time"] }
 bytes.workspace = true
 futures.workspace = true
 http.workspace = true
@@ -28,5 +28,6 @@ http-body-util.workspace = true
 [dev-dependencies]
 respan-gateway-providers.workspace = true
 respan-gateway-formats.workspace = true
+respan-gateway-messages.workspace = true
 respan-gateway-testkit.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

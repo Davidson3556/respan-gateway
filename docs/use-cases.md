@@ -7,8 +7,9 @@ implements every requirement. See [examples](../examples/README.md) for
 implemented cases and remaining gaps.
 
 Core supplies typed event streams, per-edge contexts, plugin hooks, calls,
-response buffering, and lifecycle completion. Adapters own transport details;
-SDKs and plugins supply routing, storage, accounting, and other policies.
+response buffering, and lifecycle completion. Adapters own hosting details;
+SDKs supply protocol and storage mechanisms and attempt orchestration, while
+plugins compose them into routing, accounting, and other policies.
 Ordinary features (routing, rate limits, logging) are not listed separately;
 the design must support them.
 

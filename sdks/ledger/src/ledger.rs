@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::{Fault, async_trait};
-use respan_gateway_formats::Details;
 use respan_gateway_http::Status;
+use respan_gateway_messages::Details;
 use serde_json::json;
 use tokio::time::Instant;
 

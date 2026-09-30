@@ -3,11 +3,11 @@
 //! no usage: [`Meter`], registered last, sums what lines report through a
 //! provider-edge filter, so these tests show what such a filter sees.
 
-use respan_gateway_formats::conversation::Conversation;
+use respan_gateway_messages::conversation::Conversation;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_formats::relayed::Relayed;
+use respan_gateway_messages::relayed::Relayed;
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
@@ -18,13 +18,13 @@ use respan_gateway_core::futures;
 use respan_gateway_core::{
     Call, ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::Usage;
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bodiless;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{Codec, Decoder, Encoder, Exchange, impl_format};
 use respan_gateway_http::{http, http_body, http_body_util};
+use respan_gateway_messages::Usage;
 use respan_gateway_testkit::serve;
 
 /// What a client sends: one message, which keeps the bytes it came in.

@@ -128,21 +128,24 @@ the gateway, and the binary chooses what to compose. See the
 | Path | What it is |
 |---|---|
 | `core/` | The neutral kernel: typed streams, plugins and lifecycle; no HTTP or message kinds. |
-| `sdks/http/` | HTTP codec/transport contracts, driver, credentials and an optional Reqwest backend. |
-| `sdks/formats/` | Shared conversation/usage types, framing/relay helpers and vendor-neutral passthrough; no vendor codecs. |
-| `sdks/{routing,text,ledger,mcp,ws}/` | Reusable routing, text, accounting and protocol mechanisms. |
-| `plugins/` | Concrete first-party policies, currently the model router. |
+| `sdks/messages/` | HTTP-free conversation/usage types, byte provenance and JSON fault details. |
+| `sdks/http/` | HTTP codec/transport contracts, driver, credentials, watchdog, retry classification and optional Reqwest backend. |
+| `sdks/formats/` | HTTP-aware framing/error helpers and vendor-neutral passthrough; no vendor codecs. |
+| `sdks/{routing,text,ledger,mcp,ws}/` | Reusable attempt orchestration, text, ledger and protocol mechanisms. |
+| `plugins/` | Concrete first-party policies: model routing and conservative accounting. |
 | `providers/` | First-party OpenAI Chat and Anthropic Messages codecs, reusable on both edges. |
 | `adapters/axum/` | Axum HTTP ingress and optional WebSocket hosting. |
 | `gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
 | `testkit/` | Mock transport and public-API integration testing helpers. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
 
-SDKs do not depend on concrete providers, plugins or hosting adapters in
-production. Ledger is a reusable mechanism; pricing and billing integrations
-live in examples. Implementing `Plugin` alone does not make a helper a
-first-party policy. A future first-party PyO3 embedding adapter will live at
-`adapters/python/`; it is not implemented yet.
+SDKs provide building blocks, not production `Plugin` implementations, and
+do not depend on concrete providers, plugins or hosting adapters in production.
+Ledger storage and tallies stay in the SDK; the accounting plugin owns its
+charging policy. Application-specific pricing and billing integrations live in
+examples. Routing takes an explicit retry classifier, with HTTP classification
+available from the HTTP SDK. A future first-party PyO3 embedding adapter will
+live at `adapters/python/`; it is not implemented yet.
 
 The HTTP SDK's `reqwest` feature enables `HttpTransport`. The Axum adapter's
 `ws` feature enables its `ws` hosting module. Both are opt-in, so codec authors

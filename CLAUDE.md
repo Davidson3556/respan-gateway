@@ -17,11 +17,15 @@ is being designed.
 - `core/` is the kernel. Nothing feature-specific goes here.
 - Every other crate may use only the public API of `core`. If a helper needs
   private access, the kernel API is missing something; fix that instead.
-- `sdks/*` contains reusable mechanisms and shared message types. SDK production
-  dependencies must not point to providers, plugins, adapters or the binary.
-- `plugins/` contains concrete first-party policies; `providers/` contains
-  concrete provider codecs. Both use public core/SDK APIs, just like external
-  extensions. A generic helper implementing `Plugin` can still belong in an SDK.
+- `sdks/*` contains reusable mechanisms and shared message types, not production
+  `Plugin` implementations. SDK production dependencies must not point to
+  providers, plugins, adapters or the binary.
+- `sdks/messages/` owns HTTP-free shared types; `sdks/formats/` owns HTTP-aware
+  codec helpers. Routing orchestration takes caller-supplied retry classification.
+- `plugins/` contains concrete first-party policies, including model routing and
+  accounting; `providers/` contains concrete provider codecs. Both use public
+  core/SDK APIs, just like external extensions. Application-specific plugins
+  belong in applications or examples.
 - `adapters/*` hosts the gateway in an environment: Axum today, a planned PyO3
   adapter in `adapters/python/` later. Hosting must not leak back into SDKs.
 - `gateway/` composes providers, plugins and adapters through CLI configuration.

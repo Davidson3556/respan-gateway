@@ -4,7 +4,7 @@ use respan_gateway_core::Fault;
 use respan_gateway_http::{Status, http::StatusCode};
 use serde_json::Value;
 
-use crate::Details;
+use respan_gateway_messages::Details;
 
 /// Whether a JSON value says anything: not null or empty.
 pub fn says(v: &Value) -> bool {

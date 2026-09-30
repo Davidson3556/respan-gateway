@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 respan-gateway-core.workspace = true
 respan-gateway-formats.workspace = true
+respan-gateway-messages.workspace = true
 respan-gateway-http.workspace = true
 serde_json.workspace = true
 rusqlite = { version = "0.32.1", features = ["bundled"] }

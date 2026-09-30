@@ -8,10 +8,11 @@ use respan_gateway_core::futures::future::join_all;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_formats::conversation::{Conversation, Reply, units};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_ledger::{Accounting, Amount, HoldId, Ledger, MemoryLedger, Quote, Tally};
+use respan_gateway_ledger::{Amount, HoldId, Ledger, MemoryLedger, Tally};
+use respan_gateway_messages::conversation::{Conversation, Reply, units};
+use respan_gateway_plugins::{Accounting, Quote};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
@@ -194,6 +195,28 @@ async fn every_call_settles_exactly_once() {
         assert_eq!(settled, [(reserved[0], charged)], "{case}");
         assert_eq!(ledger.inner.available("key"), 1000 - charged, "{case}");
     }
+}
+
+#[tokio::test]
+async fn a_quote_without_accounts_is_refused_with_http_401() {
+    let (mock, ledger) = (MockTransport::new(), wallet(1000));
+    let accounting = Accounting::new(ledger.clone(), |_, _| Ok(Quote::new([] as [&str; 0], 100)));
+    let gw = Gateway::new()
+        .client::<Conversation, _, _>(OpenAiChat)
+        .and_then(|g| {
+            g.provider::<Conversation, _, _>(
+                "p",
+                OpenAiChat,
+                respan_gateway_http::connect(mock.at(P)),
+            )
+        })
+        .and_then(|g| g.target("p"))
+        .and_then(|g| g.plugin("accounting", accounting))
+        .unwrap_or_else(|f| panic!("{f}"));
+    let (status, _) = send(&gw, ask(false)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(mock.sent().is_empty());
+    assert_eq!(ledger.available("key"), 1000);
 }
 
 #[tokio::test]

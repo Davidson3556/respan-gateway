@@ -1,17 +1,13 @@
 #![warn(missing_docs)]
-//! Reusable wire-format helpers and the [`conversation`] kind. Concrete
-//! provider codecs live in `respan-gateway-providers`. Every decoded value
-//! keeps its bytes ([`relayed`]); traffic of no kind relays through [`opaque`].
+//! Reusable HTTP-aware wire-format helpers. Concrete provider codecs live
+//! in `respan-gateway-providers`; shared conversation, usage, provenance and
+//! fault-detail types live in `respan-gateway-messages`. Traffic of no kind
+//! relays through [`opaque`].
 
-pub mod conversation;
 pub mod errors;
 pub mod opaque;
-pub mod relayed;
 pub mod sse;
-mod usage;
 pub mod whole;
-
-pub use usage::Usage;
 
 use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
@@ -21,12 +17,6 @@ use respan_gateway_http::http::{
 use respan_gateway_http::{Decoder, Encoder};
 use respan_gateway_http::{RequestHead, ResponseHead};
 use serde_json::{self, Value};
-
-/// A fault's extra fields for the client's error body, a JSON object, as a
-/// hint ([`Fault::with`]): the formats write them into their error
-/// bodies, and the kernel never reads them.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Details(pub Value);
 
 /// A provider's message as JSON: a whole body, or an event's `data:`.
 pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
