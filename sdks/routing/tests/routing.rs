@@ -867,3 +867,48 @@ async fn content_policy_accepts_custom_events_and_captured_configuration() {
     };
     assert!(read(make()).await.is_ok());
 }
+
+#[tokio::test]
+async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
+    struct FailEnd;
+    impl respan_gateway_core::Filter<respan_gateway_formats::conversation::Reply> for FailEnd {
+        fn edit(
+            &mut self,
+            value: respan_gateway_formats::conversation::Reply,
+            out: &mut Vec<respan_gateway_formats::conversation::Reply>,
+        ) -> Result<(), Fault> {
+            out.push(value);
+            Ok(())
+        }
+        fn end(
+            &mut self,
+            _: &Result<(), Fault>,
+            _: &mut Vec<respan_gateway_formats::conversation::Reply>,
+        ) -> Result<(), Fault> {
+            Err(Fault::upstream("failed-at-end"))
+        }
+    }
+    struct FailFirst;
+    #[async_trait]
+    impl Plugin for FailFirst {
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
+            if px.provider() == "a" {
+                px.filter(FailEnd)?;
+            }
+            Ok(())
+        }
+    }
+    for plan in [
+        Plan::First(vec!["a", "b"], Backoff::once(), Until::End),
+        Plan::Race(vec!["a", "b"], secs(1), Until::End),
+    ] {
+        let mut h = harness(plan);
+        h.gw =
+            h.gw.plugin("fail-first", FailFirst)
+                .unwrap_or_else(|fault| panic!("{fault}"));
+        h.mock.reply(A, ok()).reply(B, ok());
+        let (status, _, _, end) = h.send().await;
+        assert_eq!((status, end), (StatusCode::OK, Ok(())));
+        assert_eq!(h.sent_to(), ["a.test", "b.test"]);
+    }
+}

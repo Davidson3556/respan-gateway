@@ -270,7 +270,11 @@ pub async fn drive(
 ) -> Result<Written, Fault> {
     use futures::future::{Either, select};
     let (answer, pending) = match select(handled, answer).await {
-        Either::Left((end, answer)) => (answer.await, Err(end)),
+        Either::Left((end, answer)) => {
+            // Preserve an already prepared reply, but do not wait for a
+            // sender retained by an unused clone after handling has ended.
+            (answer.now_or_never().flatten(), Err(end))
+        }
         Either::Right((answer, handled)) => (answer, Ok(handled)),
     };
     match answer {

@@ -4405,7 +4405,7 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
         }
 
         fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-            self.note("call ended");
+            self.note("filter ended");
             Ok(())
         }
     }
@@ -4425,6 +4425,10 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             px.filter(self.clone())
         }
+
+        async fn on_provider_end(&self, _: &ProviderContext, _: &Result<(), Fault>) {
+            self.note("call ended");
+        }
     }
 
     let (ends, returns) = (Ends::default(), Returns::default());
@@ -4440,7 +4444,7 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, UNARY);
     let order = returns.0.lock().map(|v| v.clone()).unwrap_or_default();
-    assert_eq!(order, ["returned", "call ended"]);
+    assert_eq!(order, ["filter ended", "returned", "call ended"]);
     assert_eq!(ends.all(), ["openai ok", "client"]);
 }
 

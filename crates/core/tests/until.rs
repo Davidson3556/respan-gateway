@@ -234,3 +234,97 @@ async fn a_buffer_predicate_panic_settles_both_edges_as_internal() {
     assert_eq!(rec.log().prov_codes(), ["internal"]);
     assert_eq!(rec.log().client_codes(), ["internal"]);
 }
+
+#[tokio::test]
+async fn buffered_filter_end_is_known_before_hooks_and_replayed_once() {
+    struct Tail {
+        ends: Arc<AtomicUsize>,
+        fail: bool,
+    }
+    impl Filter<Out> for Tail {
+        fn edit(&mut self, _: Out, _: &mut Vec<Out>) -> Result<()> {
+            Ok(())
+        }
+        fn end(&mut self, _: &Result<()>, out: &mut Vec<Out>) -> Result<()> {
+            self.ends.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(Fault::upstream("failed-at-end"));
+            }
+            out.push(Out("tail".into()));
+            Ok(())
+        }
+    }
+    struct Buffer {
+        ends: Arc<AtomicUsize>,
+        rec: Rec,
+        fail: bool,
+        discard: bool,
+    }
+    #[async_trait]
+    impl Plugin for Buffer {
+        async fn on_provider(&self, px: &mut ProviderContext) -> Result<()> {
+            px.filter(Tail {
+                ends: self.ends.clone(),
+                fail: self.fail,
+            })
+        }
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+            let (response, end) = cx.call("a").await?.until_end().await?;
+            assert_eq!(
+                end,
+                if self.fail {
+                    Err(Fault::upstream("failed-at-end"))
+                } else {
+                    Ok(())
+                }
+            );
+            assert_eq!(self.ends.load(Ordering::SeqCst), 1);
+            assert!(self.rec.log().prov_end.is_empty(), "hooks stay deferred");
+            // Repeated buffering must not run Filter::end again or lose its tail.
+            let (response, again) = response.until_end().await?;
+            assert_eq!(again, end);
+            if self.discard {
+                drop(response);
+                Ok(Some(Response::stream(stream::empty::<Result<Out>>())))
+            } else {
+                Ok(Some(response))
+            }
+        }
+    }
+    for fail in [false, true] {
+        for discard in [false, true] {
+            let ends = Arc::new(AtomicUsize::new(0));
+            let rec = Rec::default();
+            let transport = fnt(|_| async { Ok(answer(200, slow(vec!["a", "DONE"]))) }.boxed());
+            let gateway = Gateway::new()
+                .client::<In, _, _>(Toy)
+                .unwrap()
+                .provider::<In, _, _>("a", Toy, connect(transport))
+                .unwrap()
+                .plugin("rec", rec.clone())
+                .unwrap()
+                .plugin(
+                    "buffer",
+                    Buffer {
+                        ends: ends.clone(),
+                        rec: rec.clone(),
+                        fail,
+                        discard,
+                    },
+                )
+                .unwrap();
+            let (response, end) = handle(&gateway, req(vec!["q"])).await;
+            let (_, body) = read(response).await.unwrap();
+            let _ = end.await;
+            gateway.idle().await;
+            assert_eq!(ends.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                rec.log().prov_codes(),
+                [if fail { "upstream" } else { "ok" }]
+            );
+            if !fail && !discard {
+                assert_eq!(body, "tail;!");
+            }
+        }
+    }
+}

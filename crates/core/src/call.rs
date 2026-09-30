@@ -421,19 +421,30 @@ impl CallEdge {
         batch.end.is_some()
     }
 
-    /// At the end in `batch`, as it is read: what filters kept back, and the
-    /// call's end. Once the call ended, just an abandoned end.
-    pub(crate) fn settle(&mut self, batch: &mut Batch) {
+    /// Finalize output filters without settling the call's lifecycle hooks.
+    /// A buffered end already contains their outcome and released values.
+    pub(crate) fn finish_outputs(&mut self, batch: &mut Batch) {
         if self.is_finished() {
             *batch = Batch::end(Err(Fault::abandoned()));
             return;
         }
-        let Some(end) = batch.end.take() else {
-            return;
-        };
-        let end = leg::end(&[&self.cx().outputs], end, &mut batch.values);
-        batch.end = Some(end.clone());
-        self.finish(end);
+        let Some(end) = batch.end.take() else { return };
+        let mut outputs = locked(&self.cx().outputs);
+        // A later delivery failure must not be replaced by the cached result
+        // of filters finalized while buffering.
+        batch.end = Some(if outputs.ended() {
+            end
+        } else {
+            outputs.end(end, &mut batch.values)
+        });
+    }
+
+    /// Settle the call when its buffered end is read or discarded.
+    pub(crate) fn settle(&mut self, batch: &mut Batch) {
+        self.finish_outputs(batch);
+        if let Some(end) = &batch.end {
+            self.finish(end.clone());
+        }
     }
 }
 

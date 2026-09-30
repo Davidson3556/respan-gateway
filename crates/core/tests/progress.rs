@@ -466,3 +466,31 @@ async fn delivery_failure_keeps_precedence_over_a_full_batch_filter_failure() {
     gateway.idle().await;
     assert_eq!(*ends.lock().unwrap(), [expected]);
 }
+
+struct BufferBeforeDelivery;
+#[async_trait]
+impl Plugin for BufferBeforeDelivery {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+        let (response, end) = cx.call("p").await?.until_end().await?;
+        assert_eq!(end, Err(Fault::upstream("filter failed")));
+        Ok(Some(response))
+    }
+}
+
+#[tokio::test]
+async fn a_buffered_filter_result_does_not_override_delivery_failure() {
+    let ends = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let gateway = Gateway::new()
+        .client(RejectDelivery)
+        .unwrap()
+        .provider::<Input, Output, _>("p", Protocol(Arc::new(AtomicUsize::new(0)), false), |_| Io)
+        .unwrap()
+        .plugin("fail", FailAtBoundary(ends.clone()))
+        .unwrap()
+        .plugin("buffer", BufferBeforeDelivery)
+        .unwrap();
+    let expected = Err(Fault::internal("cannot prepare delivery"));
+    assert_eq!(gateway.handle(Io, Extensions::new()).await, expected);
+    gateway.idle().await;
+    assert_eq!(*ends.lock().unwrap(), [expected]);
+}

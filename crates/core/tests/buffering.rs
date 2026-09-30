@@ -77,3 +77,30 @@ async fn a_wrong_event_type_is_rejected_without_polling_the_source() {
     }));
     assert!(response.buffer_until(|_: &String| true).await.is_err());
 }
+
+#[tokio::test]
+async fn hot_synthetic_buffers_yield_and_release_the_source_on_cancellation() {
+    use respan_gateway_core::futures::FutureExt;
+    for to_end in [false, true] {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let response = Response::stream(stream::iter(0..100_000u32).map({
+            let reads = reads.clone();
+            move |value| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                Ok(value)
+            }
+        }));
+        let mut buffering = if to_end {
+            response
+                .until_end()
+                .map(|result| result.map(|(response, _)| response))
+                .boxed()
+        } else {
+            response.buffer_until(|_: &u32| false).boxed()
+        };
+        assert!(buffering.as_mut().now_or_never().is_none());
+        assert!(reads.load(Ordering::SeqCst) <= 128);
+        drop(buffering);
+        assert_eq!(Arc::strong_count(&reads), 1, "cancelled source is released");
+    }
+}

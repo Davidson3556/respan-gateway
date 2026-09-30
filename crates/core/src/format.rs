@@ -20,7 +20,8 @@ pub type Connection<R, W> = (
 ///
 /// A format holds shared configuration. Each binding consumes one transport
 /// and creates its own receive and send state. The gateway assigns the edge's
-/// role and chooses the message types at registration. A format can implement
+/// role and chooses the message types at registration. `R` and `W` must differ
+/// because event types select filter direction. A format can implement
 /// both `Format<T, A, B>` and `Format<T, B, A>` for the same transport type.
 pub trait Format<T, R, W>: Send + Sync + 'static {
     /// Protocol identity. Registrations with the same name must agree on

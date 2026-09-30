@@ -89,6 +89,24 @@ impl Batch {
         self.values.is_none() && self.end.is_none()
     }
 
+    /// Include final filter output and failure in a buffered end, while
+    /// leaving the call's end hooks deferred until replay or abandonment.
+    fn prepare(&mut self) {
+        let Some((call, _)) = self.unread.0.take() else {
+            return;
+        };
+        let prepared = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            locked(&call).finish_outputs(self);
+        }));
+        if let Err(panic) = prepared {
+            locked(&call).finish(Err(Fault::internal(PANICKED)));
+            std::panic::resume_unwind(panic);
+        }
+        if let Some(end) = &self.end {
+            self.unread = Unread(Some((call, end.clone())));
+        }
+    }
+
     /// Read by whoever reads or sends the response: the end of its call, if
     /// it holds it, goes through the call's filters and ends the call. A
     /// panic ends the call internal.
@@ -169,7 +187,8 @@ impl Response {
                 }
                 self.ahead.push_back(batch);
             }
-            let batch = &self.ahead[index];
+            let batch = &mut self.ahead[index];
+            batch.prepare();
             let matched = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 batch
                     .values
@@ -201,6 +220,9 @@ impl Response {
         if self.streams && !self.refused {
             return Ok((self, Ok(())));
         }
+        if let Some(batch) = self.ahead.back_mut() {
+            batch.prepare();
+        }
         let mut seen = self.ahead.iter().any(|batch| batch.values.is_some());
         let mut end = self.end().cloned();
         loop {
@@ -210,8 +232,9 @@ impl Response {
                 }
                 return Ok((self, end));
             }
-            let (batch, has_values) = self.body.next().await;
-            seen |= has_values;
+            let (mut batch, has_values) = self.body.next().await;
+            batch.prepare();
+            seen |= has_values || batch.values.is_some();
             end = batch.end.clone();
             if !batch.is_empty() {
                 self.ahead.push_back(batch);
@@ -310,7 +333,20 @@ impl Source {
             Err(fault) => Batch::end(Err(fault)),
         });
         let done = stream::once(async { Batch::end(Ok(())) });
-        Source::Made(batches.chain(done).boxed())
+        Source::Made(
+            batches
+                .chain(done)
+                .enumerate()
+                .then(|(index, batch)| async move {
+                    // Synthetic streams may be continuously ready too. Let
+                    // timeouts and cancellation run without delaying a terminal end.
+                    if index % MAX_BATCH_EVENTS == MAX_BATCH_EVENTS - 1 && batch.end.is_none() {
+                        tokio::task::yield_now().await;
+                    }
+                    batch
+                })
+                .boxed(),
+        )
     }
 
     /// Its call, if any.

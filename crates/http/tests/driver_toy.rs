@@ -1271,3 +1271,46 @@ async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
     seen.sort();
     assert_eq!(seen, [1, 2]);
 }
+
+#[tokio::test]
+async fn a_retained_transport_clone_does_not_hold_a_rejection_open() {
+    let gateway = Gateway::new();
+    let (transport, answer) = Transport::accept(ask(), chunks(vec!["q"]), false);
+    let retained = transport.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        respan_gateway_http::__private::drive(
+            gateway.handle(transport, Extensions::new()).boxed(),
+            answer,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.err().unwrap().code(),
+        respan_gateway_core::codes::NOT_FOUND
+    );
+    assert!(retained.head().is_some());
+}
+
+#[tokio::test]
+async fn a_completed_handler_keeps_an_already_ready_reply() {
+    let (transport, answer) = Transport::accept(ask(), chunks(vec!["q"]), false);
+    let (incoming, mut outgoing) =
+        respan_gateway_http::__private::accept(&Toy::default(), transport).unwrap();
+    incoming.await.unwrap();
+    let mut writing = async move {
+        outgoing
+            .send(Events::refused(Fault::upstream("refused")))
+            .await?;
+        outgoing.close().await
+    }
+    .boxed();
+    // Queue the encoded refusal, leaving its delivery pending.
+    assert!(writing.as_mut().now_or_never().is_none());
+    let handled = future::ready(Err(Fault::upstream("handling failed"))).boxed();
+    let (response, _) = respan_gateway_http::__private::drive(handled, answer)
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+}
