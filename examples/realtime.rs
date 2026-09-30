@@ -17,8 +17,8 @@
 //!   client says anything (an input wrap opens it with a `session.update`
 //!   of `max_output_tokens`, and caps the client's own), and a
 //!   `response.create` is rewritten to ask for at most `TURN` output tokens.
-//!   A turn holds everything the session sends or receives except audio
-//!   (the `audio` strings of `input_audio` parts too), counted in bytes (a
+//!   A turn holds everything the session sends or receives, with validated
+//!   audio bounded by duration and text counted in bytes (a
 //!   token of text is at least a byte) and `IMAGE` tokens per `input_image`
 //!   (an image is billed by pixels, not bytes), plus that cap; it is
 //!   refused, closing the client with 1008, when the
@@ -29,7 +29,7 @@
 //!   `error` is released. So parallel sessions cannot overspend one wallet,
 //!   provided the provider honours `max_output_tokens` and the gateway saw
 //!   the context (what the provider adds on its own, such as default
-//!   instructions, and audio, are not counted). The
+//!   instructions, must be included in a deployment quote). The
 //!   key may come in any credential form.
 //! - `Vet` (use case 3 on a session): a remote classifier judges each thing
 //!   the client says before the provider reads it; a refusal closes the
@@ -51,13 +51,20 @@
 //! turn; the session's end recorded as `ok`, `abandoned` (the client left),
 //! `truncated` (the provider's connection broke) or `upstream`.
 //!
-//! Not covered: audio (`input_audio_buffer.append` events are text, and pass
-//! unread, but the placeholders and the meter read text turns only); draining sessions at shutdown (the SDK's `serve_ws_until`, given a
-//! future per session, or `MaxLength` with a shared signal); Gemini Live and
-//! Responses over WebSocket, which only need another `JsonEvents` and plugins
-//! that know their events; PII other than e-mail addresses (see `pii`).
+//! Audio requires explicit `gateway_with_audio(..., true)`: valid PCM24k/G.711
+//! payloads are preserved and included in reservations and per-turn usage. Capped
+//! sessions reject separately billed transcription and disable automatic VAD responses:
+//! commit input audio, then send response.create to reserve before generation.
+//! The default text-PII policy
+//! rejects opaque audio; it does not pretend a transcript filter redacts speech.
+//! Gemini Live and Responses WebSocket flows have their own examples. Shared
+//! shutdown signals use `serve_ws_until`; no connection is silently resumed.
+//! Sources: https://developers.openai.com/api/docs/guides/voice-latency-cost
 //!
 //! `cargo run -p respan-gateway-examples --example realtime`
+
+#[path = "realtime/audio.rs"]
+mod audio;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -216,6 +223,13 @@ impl Plugin for Pii {
         let vault = Placeholders::default();
         let hide = vault.clone();
         cx.filter(move |event: &mut ClientEvent| {
+            if audio::contains_audio(&event.json) {
+                return Err(Fault::new(
+                    "audio_requires_redaction",
+                    "text PII policy cannot inspect audio",
+                )
+                .with(CloseCode(1008)));
+            }
             edit_texts(&mut event.json, SAID, &mut |text| {
                 *text = hide_emails(text, &hide)
             });
@@ -234,6 +248,8 @@ pub struct Turn {
     pub status: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub input_audio_tokens: u64,
+    pub output_audio_tokens: u64,
 }
 
 /// How a session ended and how many turns it had metered.
@@ -272,6 +288,7 @@ const HOLD: u64 = 256;
 struct Said {
     /// Bytes of text. Every turn reads the whole context, so this only grows.
     bytes: AtomicU64,
+    audio: AtomicU64,
     /// A `response.create` is waiting for its `response.done`.
     asked: AtomicBool,
 }
@@ -289,12 +306,21 @@ struct TurnMeter {
 }
 
 impl TurnMeter {
-    fn record(&self, status: &str, input_tokens: u64, output_tokens: u64) {
+    fn record(
+        &self,
+        status: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        input_audio_tokens: u64,
+        output_audio_tokens: u64,
+    ) {
         lock(&self.turns).push(Turn {
             session: self.session,
             status: status.to_owned(),
             input_tokens,
             output_tokens,
+            input_audio_tokens,
+            output_audio_tokens,
         });
         self.count.fetch_add(1, Ordering::SeqCst);
     }
@@ -310,14 +336,29 @@ impl Filter<ProviderEvent> for TurnMeter {
         {
             // About four bytes a token: an estimate, never zero for a delta.
             let delta = event.json["delta"].as_str().unwrap_or_default();
-            *estimate += delta.len() as u64 / 4 + 1;
+            *estimate += if kind.ends_with("audio.delta") {
+                audio::tokens(delta)? as u64
+            } else {
+                delta.len() as u64 / 4 + 1
+            };
         } else if kind == "response.done" {
             self.open = None;
             self.said.asked.store(false, Ordering::SeqCst);
             let response = &event.json["response"];
             let used = |name: &str| response["usage"][name].as_u64().unwrap_or_default();
             let status = response["status"].as_str().unwrap_or_default();
-            self.record(status, used("input_tokens"), used("output_tokens"));
+            let usage = &response["usage"];
+            self.record(
+                status,
+                used("input_tokens"),
+                used("output_tokens"),
+                usage["input_token_details"]["audio_tokens"]
+                    .as_u64()
+                    .unwrap_or_default(),
+                usage["output_token_details"]["audio_tokens"]
+                    .as_u64()
+                    .unwrap_or_default(),
+            );
         }
         out.push(event);
         Ok(())
@@ -332,7 +373,14 @@ impl Filter<ProviderEvent> for TurnMeter {
         let asked = self.said.asked.swap(false, Ordering::SeqCst);
         if let Some(estimate) = self.open.take().or(asked.then_some(0)) {
             let input = self.said.bytes.load(Ordering::SeqCst) / 4 + 1;
-            self.record("cut", input, estimate.max(HOLD));
+            let audio = self.said.audio.load(Ordering::SeqCst);
+            self.record(
+                "cut",
+                input.saturating_add(audio),
+                estimate.max(HOLD),
+                audio,
+                0,
+            );
         }
         Ok(())
     }
@@ -354,6 +402,9 @@ impl Plugin for Meter {
             let mut bytes = 0;
             edit_texts(&mut event.json, SAID, &mut |text| bytes += text.len());
             heard.bytes.fetch_add(bytes as u64, Ordering::SeqCst);
+            heard
+                .audio
+                .fetch_add(audio_in(&event.json)? as u64, Ordering::SeqCst);
             if event.json["type"] == "response.create" {
                 heard.asked.store(true, Ordering::SeqCst);
             }
@@ -432,7 +483,7 @@ struct Wallet<L> {
 #[derive(Default)]
 struct Turns {
     /// Bound on the tokens of everything the session sent or received
-    /// except audio: see `context`.
+    /// including audio: see `context`.
     bytes: Amount,
     /// Holds of turns not yet done, oldest first, with what each holds.
     holds: VecDeque<(HoldId, Amount)>,
@@ -471,14 +522,20 @@ impl<L: Ledger> Wallet<L> {
         Ok(hold)
     }
 
-    /// What the client says (audio aside) is counted; a `response.create` is
+    /// What the client says is counted; a `response.create` is
     /// capped at `TURN` output tokens and holds a turn first; a
     /// `session.update` is capped the same, for the turns the provider starts.
     async fn before(self: Arc<Self>, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
-        // Everything but audio is counted, so a new kind of context is too.
-        if event.json["type"] != "input_audio_buffer.append" {
-            let said = context(&event.json);
-            lock(&self.turns).bytes += said;
+        let said = context(&event.json)?;
+        {
+            let mut turns = lock(&self.turns);
+            turns.bytes = turns.bytes.saturating_add(said);
+            if turns.bytes > 128_000 {
+                return Err(
+                    Fault::new("context_limit", "session context exceeds its bound")
+                        .with(CloseCode(1008)),
+                );
+            }
         }
         if event.json["type"] == "response.create" {
             let response = &mut event.json["response"];
@@ -486,7 +543,7 @@ impl<L: Ledger> Wallet<L> {
                 *response = json!({});
             }
             let cap = &mut response["max_output_tokens"];
-            if cap.as_i64().is_none_or(|n| n > TURN) {
+            if cap.as_i64().is_none_or(|n| !(1..=TURN).contains(&n)) {
                 *cap = TURN.into();
             }
             // The provider's `error` names the event it refuses by this id.
@@ -504,7 +561,7 @@ impl<L: Ledger> Wallet<L> {
         } else if event.json["type"] == "session.update" {
             // The cap of the turns the provider starts on its own.
             let cap = &mut event.json["session"]["max_output_tokens"];
-            if cap.as_i64().is_none_or(|n| n > TURN) {
+            if cap.as_i64().is_none_or(|n| !(1..=TURN).contains(&n)) {
                 *cap = TURN.into();
             }
         }
@@ -556,10 +613,9 @@ impl<L: Ledger> Wallet<L> {
                 turns.holds.retain(|(h, _)| *h != hold);
             }
         }
-        if !kind.ends_with("audio.delta") {
-            let seen = context(&event.json);
-            lock(&self.turns).bytes += seen;
-        }
+        let seen = context(&event.json)?;
+        let mut turns = lock(&self.turns);
+        turns.bytes = turns.bytes.saturating_add(seen);
         Ok(event)
     }
 
@@ -602,14 +658,50 @@ fn account(credential: &Credential) -> Option<String> {
 const IMAGE: Amount = 1_445;
 
 /// What an event adds to the context, as a bound on its tokens: its bytes
-/// (a token of text is at least a byte) without its audio (base64 in an
-/// `audio` string), and `IMAGE` for each image.
-fn context(event: &Value) -> Amount {
+/// (a token of text is at least a byte), an audio-duration bound, and
+/// `IMAGE` for each image.
+fn audio_in(event: &Value) -> Result<Amount, Fault> {
+    match event {
+        Value::Object(fields) => {
+            let mut amount = 0_i64;
+            for (key, value) in fields {
+                if key == "audio" && value.is_string() {
+                    amount =
+                        amount.saturating_add(audio::tokens(value.as_str().unwrap_or_default())?);
+                } else {
+                    amount = amount.saturating_add(audio_in(value)?);
+                }
+            }
+            if fields
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.ends_with("audio.delta"))
+            {
+                amount = amount
+                    .saturating_add(audio::tokens(event["delta"].as_str().unwrap_or_default())?);
+            }
+            Ok(amount)
+        }
+        Value::Array(items) => items
+            .iter()
+            .try_fold(0_i64, |sum, item| Ok(sum.saturating_add(audio_in(item)?))),
+        _ => Ok(0),
+    }
+}
+
+fn context(event: &Value) -> Result<Amount, Fault> {
     fn strip(v: &mut Value, images: &mut Amount) {
         match v {
             Value::Object(fields) => {
                 if fields.get("audio").is_some_and(Value::is_string) {
                     fields.remove("audio");
+                }
+                if fields
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.ends_with("audio.delta"))
+                {
+                    fields.remove("delta");
                 }
                 *images += Amount::from(fields.get("type").is_some_and(|t| t == "input_image"));
                 fields.values_mut().for_each(|v| strip(v, images));
@@ -618,16 +710,19 @@ fn context(event: &Value) -> Amount {
             _ => {}
         }
     }
+    let audio = audio_in(event)?;
     let (mut event, mut images) = (event.clone(), 0);
     strip(&mut event, &mut images);
     let bytes = Amount::try_from(event.to_string().len()).unwrap_or(Amount::MAX);
-    bytes.saturating_add(images.saturating_mul(IMAGE))
+    Ok(bytes
+        .saturating_add(images.saturating_mul(IMAGE))
+        .saturating_add(audio))
 }
 
 /// Holds each turn on the client's wallet before the provider sees it. The
 /// hold reads the whole session, so a turn cannot cost more than its hold
 /// as long as the provider keeps to the cap and the gateway saw the context
-/// (audio, and what the provider adds on its own, are not counted).
+/// (a deployment must also quote context the provider adds on its own).
 struct Reserve<L>(L);
 
 #[async_trait]
@@ -718,7 +813,19 @@ fn gateway(
     wallets: &MemoryLedger,
     longest: Duration,
 ) -> Result<Gateway, Fault> {
-    Gateway::new()
+    gateway_with_audio(provider, meter, ends, wallets, longest, false)
+}
+
+/// Audio permission is explicit: a text-redaction policy must never silently pass audio.
+fn gateway_with_audio(
+    provider: &str,
+    meter: &Meter,
+    ends: &Outcomes,
+    wallets: &MemoryLedger,
+    longest: Duration,
+    allow_audio: bool,
+) -> Result<Gateway, Fault> {
+    let gw = Gateway::new()
         .client::<ClientEvent, _, _>(realtime())?
         .provider::<ClientEvent, _, _>(
             "openai",
@@ -727,8 +834,13 @@ fn gateway(
         )?
         .target("openai")?
         .plugin("ends", ends.clone())?
-        .plugin("pii", Pii)?
-        .plugin("meter", meter.clone())?
+        .plugin("audio", audio::Validate(allow_audio))?;
+    let gw = if allow_audio {
+        gw
+    } else {
+        gw.plugin("pii", Pii)?
+    };
+    gw.plugin("meter", meter.clone())?
         .plugin("vet", Vet)?
         .plugin("reserve", Reserve(wallets.clone()))?
         .plugin("max", MaxLength(longest))

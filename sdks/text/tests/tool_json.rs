@@ -275,3 +275,95 @@ fn a_unicode_escape_in_streamed_arguments_is_kept_whole() {
     let parsed: Value = serde_json::from_str(&args(&out)).unwrap_or_default();
     assert_eq!(parsed["note"], "don\u{2019}t call ****", "{}", args(&out));
 }
+
+#[test]
+fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Result<(), Fault> {
+    use respan_gateway_formats::conversation::Content;
+    let mut chat = Conversation::default();
+    let mut message = Message::new(Role::Assistant, "");
+    message.content = vec![
+        Content::other(
+            "anthropic-messages",
+            json!({"type":"tool_use","id":"tool-1","name":"lookup","input":{"email":"alice@example.com","nested":[{"note":"alice@example.com"}]}}),
+        ),
+        Content::other(
+            "anthropic-messages",
+            json!({"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"alice@example.com"}]}),
+        ),
+    ];
+    chat.messages.push(message);
+    chat.edit_all(|text| {
+        *text = text.replace("alice@example.com", "<EMAIL_1>");
+        Ok(())
+    })?;
+    let Content::Other { raw, .. } = &chat.messages[0].content[0] else {
+        panic!("tool input")
+    };
+    assert_eq!(raw["input"]["email"], "<EMAIL_1>");
+    assert_eq!(raw["input"]["nested"][0]["note"], "<EMAIL_1>");
+    assert_eq!(raw["id"], "tool-1");
+    let Content::Other { raw, .. } = &chat.messages[0].content[1] else {
+        panic!("tool result")
+    };
+    assert_eq!(raw["content"][0]["text"], "<EMAIL_1>");
+    assert_eq!(raw["tool_use_id"], "tool-1");
+    Ok(())
+}
+
+#[test]
+fn an_image_inside_a_tool_result_is_refused_before_any_edit() {
+    use respan_gateway_formats::conversation::Content;
+    let mut chat = Conversation::default();
+    let mut message = Message::new(Role::User, "keep this");
+    message.content.push(Content::other("anthropic-messages", json!({
+        "type":"tool_result","tool_use_id":"tool-1","content":[{"type":"image","source":{"type":"base64","data":"opaque"}}]
+    })));
+    chat.messages.push(message);
+    let before = chat.clone();
+    let result = chat.edit_all(|text| {
+        text.clear();
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert_eq!(chat, before);
+}
+
+#[test]
+fn tool_indexes_do_not_delay_argument_tails_until_after_the_finish() -> Result<(), Fault> {
+    use respan_gateway_core::Filter;
+    use respan_gateway_formats::conversation::Finish;
+
+    for (format, raw) in [
+        (
+            "anthropic-messages",
+            json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"to\":\"<NA"}}),
+        ),
+        (
+            "openai",
+            json!([{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"to\":\"<NA"}}]}}]),
+        ),
+    ] {
+        let vault = Placeholders::default();
+        vault.hide("NAME", "alice");
+        let mut filter = Holdback::new(vault);
+        let mut out = Vec::new();
+        filter.edit(Reply::other(format, raw), &mut out)?;
+        filter.edit(Reply::finished(Finish::Length), &mut out)?;
+        let finished = out.last().expect("finish is forwarded");
+        assert!(finished.finish.is_some());
+        assert!(
+            finished.content.iter().any(|piece| match piece {
+                Piece::Other { raw, .. } => raw.to_string().contains("<NA"),
+                _ => false,
+            }),
+            "{format} must flush the tool argument tail with the finish"
+        );
+        let mut after = Vec::new();
+        filter.end(&Ok(()), &mut after)?;
+        assert!(
+            after.is_empty(),
+            "{format} emitted arguments after the finish"
+        );
+    }
+    Ok(())
+}

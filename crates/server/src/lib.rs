@@ -3,11 +3,11 @@
 //! through the HTTP adapter ([`respan_gateway_http::handle`]), and a
 //! [`Transport`](respan_gateway_http::Transport) that reaches a provider over HTTP.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::Request;
 use axum::response::Response;
 use http::header;
 use http::{HeaderMap, HeaderValue, StatusCode};
@@ -30,16 +30,32 @@ const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// ignores `Upgrade` and reads every body whole: over 32 MiB is refused 413
 /// `too_large`, one that breaks off 400 `bad_request`.
 pub fn router(gateway: Gateway) -> Router {
-    Router::new().fallback(handle).with_state(gateway)
+    router_with_limit(gateway, |_| MAX_BODY_BYTES)
 }
 
-async fn handle(State(gateway): State<Gateway>, mut req: Request) -> Response {
+/// An HTTP router with a per-request body limit in bytes. The callback sees
+/// the HTTP head before the body is read, so paths or authenticated adapter
+/// extensions can select a limit. Oversized bodies receive a 413 fault.
+/// Decoding and protocol recognition still belong to the gateway's formats.
+pub fn router_with_limit(
+    gateway: Gateway,
+    limit: impl Fn(&RequestHead) -> usize + Send + Sync + 'static,
+) -> Router {
+    let limit = Arc::new(limit);
+    Router::new().fallback(move |req: Request| {
+        let gateway = gateway.clone();
+        let limit = limit.clone();
+        async move {
+            let (head, body) = req.into_parts();
+            let max = limit(&head);
+            handle(gateway, Request::from_parts(head, body), max).await
+        }
+    })
+}
+
+async fn handle(gateway: Gateway, mut req: Request, max: usize) -> Response {
     ignore_upgrade(req.headers_mut());
-    let req = req.map(|body| {
-        Limited::new(body, MAX_BODY_BYTES)
-            .map_err(body_fault)
-            .boxed_unsync()
-    });
+    let req = req.map(|body| Limited::new(body, max).map_err(body_fault).boxed_unsync());
     let (resp, _ended) = respan_gateway_http::handle(&gateway, req, false).await;
     let (parts, body) = resp.into_parts();
     Response::from_parts(parts, axum::body::Body::new(body))

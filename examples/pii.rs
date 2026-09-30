@@ -11,9 +11,8 @@
 //! whole or streamed: `Holdback` also holds the tail of each streamed call's
 //! arguments (OpenAI's chunks, Anthropic's `partial_json` fragments), so a
 //! placeholder split across their fragments is restored, and the restored
-//! value is escaped as JSON text. A streamed call asking for several choices
-//! (`n` other than 1) is refused: choices after the first come as other
-//! content, which the restore cannot hold per choice.
+//! value is escaped as JSON text. Interleaved OpenAI choices retain separate
+//! text and tool-argument tails, so one choice finishing does not release another.
 //!
 //! So it is two plugins, and order is registration order: `pii` registered
 //! first restores every response the client gets, whoever answers;
@@ -76,16 +75,6 @@ fn uncovered() -> Fault {
     Fault::new(UNCOVERED, "no redaction reads this kind").with(Status(403))
 }
 
-/// `Err` for a streamed call of several choices, whose placeholders the
-/// restore cannot hold per choice.
-fn one_streamed_choice(chat: &Conversation) -> Result<(), Fault> {
-    if chat.stream && chat.unsupported.get("n").is_some_and(|n| *n != json!(1)) {
-        let message = "placeholders cannot be restored in several streamed choices";
-        return Err(Fault::new(UNCOVERED, message).with(Status(422)));
-    }
-    Ok(())
-}
-
 #[async_trait]
 impl Plugin for Pii {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
@@ -114,10 +103,7 @@ impl Plugin for PiiInput {
                 vault
             }
         };
-        px.filter(move |chat: &mut Conversation| {
-            one_streamed_choice(chat)?;
-            redact(chat, &vault)
-        })
+        px.filter(move |chat: &mut Conversation| redact(chat, &vault))
     }
 }
 

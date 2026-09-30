@@ -10,8 +10,8 @@
 //! winning. A provider that fails is left out of the list; only when every
 //! one fails does the request fail.
 //!
-//! The plugin is given the provider names: the gateway has no list of them
-//! for a plugin to read.
+//! Registration and the plugin's provider list come from the same configuration,
+//! so every configured provider is included without exposing gateway internals.
 //!
 //! Not covered: another provider's list shape than OpenAI's
 //! (`{"data": [{"id": ..}]}`); prefixing ids with their provider; caching the
@@ -147,19 +147,19 @@ fn key(value: &'static str) -> HeaderMap {
 }
 
 fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
-    Gateway::new()
-        .client::<Sent<Models>, _, _>(Models)?
-        .provider::<Sent<Models>, _, _>(
-            "a",
+    let providers = [("a", A, "Bearer key-a"), ("b", B, "Bearer key-b")];
+    let mut gateway = Gateway::new().client::<Sent<Models>, _, _>(Models)?;
+    for (name, base, token) in providers {
+        gateway = gateway.provider::<Sent<Models>, _, _>(
+            name,
             Models,
-            respan_gateway_http::connect(mock.at(A).with_headers(key("Bearer key-a"))),
-        )?
-        .provider::<Sent<Models>, _, _>(
-            "b",
-            Models,
-            respan_gateway_http::connect(mock.at(B).with_headers(key("Bearer key-b"))),
-        )?
-        .plugin("merge", MergeModels(vec!["a", "b"]))
+            respan_gateway_http::connect(mock.at(base).with_headers(key(token))),
+        )?;
+    }
+    gateway.plugin(
+        "merge",
+        MergeModels(providers.iter().map(|(name, ..)| *name).collect()),
+    )
 }
 
 fn request() -> http::Request<respan_gateway_http::Body> {

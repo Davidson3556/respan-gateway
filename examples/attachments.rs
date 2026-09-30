@@ -4,17 +4,16 @@
 //! attempt: when the text-only model fails, the fallback that reads PDFs
 //! gets the client's original bytes.
 //!
-//! Parsing is slow work on untrusted bytes: after a size check, it runs on
-//! a blocking thread under a time budget for the whole request, all its
-//! PDFs and attempts together. A conversion that runs out of time fails the
-//! call but keeps its thread until it returns (a thread cannot be killed),
-//! so give a real extractor its own limit or run it in a subprocess.
+//! Parsing untrusted bytes runs in a Poppler `pdftotext` subprocess, killed
+//! on timeout or cancellation. Input and extracted text are bounded, under
+//! one budget for the whole request, all its PDFs and attempts together.
+//! Install Poppler to run this example; tests can inject a blocking extractor.
 //! Agents resend the same PDF every turn, so the text is remembered per
-//! tenant and content hash, here in a bounded map; in production, a shared
-//! store keyed by tenant and SHA-256. There is no single-flight: two turns
+//! tenant and SHA-256 in a bounded SQLite cache. `with_store` opens a shared
+//! file; the default is an isolated in-memory database. Two turns
 //! in flight at once each convert the same PDF. A zero-retention request
-//! (marked `NoContent`, as in `logging.rs`) is converted but not remembered.
-//! Swap `fake_pdf_to_text` for a real extractor.
+//! (marked `NoContent`, as in `logging.rs`) deletes that tenant's cached
+//! content and converts without reading or writing cached text.
 //!
 //! A fallback in another format gets the PDF too: for an Anthropic target the
 //! filter rewrites the file part into Anthropic's own `document` part
@@ -28,18 +27,19 @@
 //! the tenant's own key, not the gateway's, so a tenant reads only its own
 //! files. The file is read within the size limit and the time budget, and
 //! replaces its reference in the conversation as an inline part, so it is then
-//! converted like any other PDF, in every call. A stored file is taken to be a
-//! PDF, as only PDFs are converted here; a real resolver reads the file's type
-//! from `GET /v1/files/{id}`.
+//! converted like any other PDF, in every call. The resolver checks metadata
+//! from `GET /v1/files/{id}` and the PDF signature before conversion.
 //!
-//! **Partial:** the body limit is the server's, the same for all.
+//! The HTTP adapter can allow 80 MiB on this route while keeping smaller
+//! limits elsewhere: `respan_gateway_server::router_with_limit(gateway,
+//! |head| if head.uri.path() == "/v1/chat/completions" { 80 << 20 } else { 1 << 20 })`.
+//! The converter allows 72 MiB of base64, enough for a 50 MiB PDF.
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
 use std::collections::HashMap;
-use std::hash::{BuildHasher, RandomState};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use base64::Engine;
@@ -49,6 +49,11 @@ use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 use respan_gateway_examples::rest::{Ask, Rest};
+use respan_gateway_examples::store::{
+    Database,
+    rusqlite::{OptionalExtension, params},
+    sql,
+};
 use respan_gateway_formats::conversation::{Content, Conversation};
 use respan_gateway_formats::opaque::Got;
 use respan_gateway_formats::{AnthropicMessages, OpenAiChat};
@@ -58,15 +63,83 @@ use respan_gateway_http::{Asked, CallHeaders, Credential};
 use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 /// How many texts the memo keeps, across tenants.
 const MEMO_SIZE: usize = 1024;
 
 /// Stands in for a real extractor: slow, blocking work on untrusted bytes.
+#[cfg(test)]
 fn fake_pdf_to_text(base64: &str) -> Result<String, Fault> {
     std::thread::sleep(Duration::from_millis(20));
     Ok(format!("[text of a {}-byte PDF]", base64.len() * 3 / 4))
+}
+
+/// Poppler runs outside the gateway process and is killed on timeout or
+/// cancellation. Input and extracted text are bounded independently.
+async fn extract_pdf(encoded: &str, limit: usize) -> Result<String, Fault> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|_| Fault::bad_request("invalid PDF base64"))?;
+    if !bytes.starts_with(b"%PDF-") {
+        return Err(Fault::bad_request("not a PDF"));
+    }
+    let mut child = tokio::process::Command::new("pdftotext")
+        .args(["-enc", "UTF-8", "-", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            Fault::config("install Poppler pdftotext for PDF conversion").with_source(e)
+        })?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| Fault::internal("PDF stdin"))?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| Fault::internal("PDF stdout"))?;
+    let write = async move {
+        input
+            .write_all(&bytes)
+            .await
+            .map_err(|e| Fault::bad_request("the PDF could not be read").with_source(e))?;
+        input
+            .shutdown()
+            .await
+            .map_err(|e| Fault::bad_request("the PDF could not be read").with_source(e))
+    };
+    let read = async move {
+        let mut text = Vec::new();
+        output
+            .take(limit as u64 + 1)
+            .read_to_end(&mut text)
+            .await
+            .map_err(|e| Fault::internal("the PDF text could not be read").with_source(e))?;
+        if text.len() > limit {
+            return Err(too_large());
+        }
+        String::from_utf8(text).map_err(|_| Fault::bad_request("the PDF text is not UTF-8"))
+    };
+    let wait = async {
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| Fault::internal("PDF process failed").with_source(e))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(Fault::bad_request("the PDF is malformed or encrypted"))
+        }
+    };
+    let (_, text, _) = tokio::try_join!(write, read, wait)?;
+    Ok(text)
 }
 
 /// The `file` of `part` if it is a file part.
@@ -106,40 +179,75 @@ const FILES: Rest = Rest::new("files", "/v1/files");
 #[derive(Clone, Copy)]
 struct Deadline(Instant);
 
+/// Completion hooks can record how many attachments this attempt converted.
+#[derive(Debug, Clone, Copy)]
+pub struct Converted(pub usize);
+
 /// Marks a zero-retention request; your tenancy plugin sets it.
 #[derive(Clone)]
 struct NoContent;
 
-/// Texts by tenant and content hash.
-type Memo = HashMap<(String, u64), Arc<str>>;
-
 struct PdfToText {
     text_only: &'static [&'static str],
+    /// Tests inject a blocking extractor; normal use runs a killable process.
+    #[cfg(test)]
     convert: fn(&str) -> Result<String, Fault>,
     budget: Duration,
     /// The largest PDF read, in base64 bytes.
     max: usize,
-    /// Keyed at random, so no one can craft a PDF whose hash matches another's.
-    hasher: RandomState,
-    memo: Mutex<Memo>,
+    /// The same SQLite file shares cached conversions across gateway processes.
+    cache: Database,
     conversions: AtomicUsize,
 }
 
 impl PdfToText {
-    fn new(text_only: &'static [&'static str]) -> Self {
-        Self {
-            text_only,
-            convert: fake_pdf_to_text,
-            budget: Duration::from_secs(10),
-            max: 40 << 20,
-            hasher: RandomState::new(),
-            memo: Mutex::default(),
-            conversions: AtomicUsize::new(0),
-        }
+    async fn new(text_only: &'static [&'static str]) -> Result<Self, Fault> {
+        Self::with_store(text_only, Database::memory()?).await
     }
 
-    fn memo(&self) -> MutexGuard<'_, Memo> {
-        self.memo.lock().unwrap_or_else(PoisonError::into_inner)
+    async fn with_store(
+        text_only: &'static [&'static str],
+        cache: Database,
+    ) -> Result<Self, Fault> {
+        cache
+            .transact(|tx| {
+                tx.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS attachment_text (
+                tenant TEXT NOT NULL, digest BLOB NOT NULL, text TEXT NOT NULL,
+                PRIMARY KEY(tenant,digest));
+                CREATE TABLE IF NOT EXISTS attachment_epochs (
+                    tenant TEXT PRIMARY KEY, generation INTEGER NOT NULL)",
+                )
+                .map_err(sql)
+            })
+            .await?;
+        Ok(Self {
+            text_only,
+            #[cfg(test)]
+            convert: fake_pdf_to_text,
+            budget: Duration::from_secs(10),
+            max: 72 << 20,
+            cache,
+            conversions: AtomicUsize::new(0),
+        })
+    }
+
+    /// Remove content when a tenant enables zero retention or requests deletion.
+    async fn forget(&self, tenant: &str) -> Result<(), Fault> {
+        let tenant = tenant.to_owned();
+        self.cache
+            .transact(move |tx| {
+                tx.execute("DELETE FROM attachment_text WHERE tenant=?", [&tenant])
+                    .map_err(sql)?;
+                tx.execute(
+                    "INSERT INTO attachment_epochs VALUES(?,1) ON CONFLICT(tenant)
+                DO UPDATE SET generation=generation+1",
+                    [&tenant],
+                )
+                .map_err(sql)?;
+                Ok(())
+            })
+            .await
     }
 
     /// The text of `base64`, a PDF of `tenant`'s, remembered or converted;
@@ -154,27 +262,86 @@ impl PdfToText {
         if base64.len() > self.max {
             return Err(too_large());
         }
-        let key = (tenant.to_owned(), self.hasher.hash_one(&base64));
-        if keep && let Some(text) = self.memo().get(&key) {
-            return Ok(text.clone());
-        }
-        let convert = self.convert;
-        let work = tokio::task::spawn_blocking(move || convert(&base64));
-        let panicked = |e| Fault::internal("the PDF converter panicked").with_source(e);
-        let text = tokio::time::timeout_at(until, work).await;
-        let text: Arc<str> = text.map_err(|_| too_slow())?.map_err(panicked)??.into();
+        let tenant = tenant.to_owned();
+        let (base64, digest) = tokio::task::spawn_blocking(move || {
+            let bytes = STANDARD
+                .decode(&base64)
+                .map_err(|_| Fault::bad_request("invalid PDF base64"))?;
+            Ok::<_, Fault>((base64, Sha256::digest(bytes).to_vec()))
+        })
+        .await
+        .map_err(|e| Fault::internal("PDF hashing failed").with_source(e))??;
+        let generation = if keep {
+            let (tenant, digest) = (tenant.clone(), digest.clone());
+            let (cached, generation) = self
+                .cache
+                .transact(move |tx| {
+                    let generation = tx
+                        .query_row(
+                            "SELECT generation FROM attachment_epochs WHERE tenant=?",
+                            [&tenant],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .optional()
+                        .map_err(sql)?
+                        .unwrap_or(0);
+                    let cached = tx
+                        .query_row(
+                            "SELECT text FROM attachment_text WHERE tenant=? AND digest=?",
+                            params![tenant, digest],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .map_err(sql)?;
+                    Ok((cached, generation))
+                })
+                .await?;
+            if let Some(text) = cached {
+                return Ok(text.into());
+            }
+            generation
+        } else {
+            0
+        };
+        let work = async {
+            #[cfg(test)]
+            {
+                let convert = self.convert;
+                tokio::task::spawn_blocking(move || convert(&base64))
+                    .await
+                    .map_err(|e| Fault::internal("the PDF converter panicked").with_source(e))?
+            }
+            #[cfg(not(test))]
+            {
+                extract_pdf(&base64, self.max).await
+            }
+        };
+        let text: Arc<str> = tokio::time::timeout_at(until, work)
+            .await
+            .map_err(|_| too_slow())??
+            .into();
         self.conversions.fetch_add(1, Ordering::Relaxed);
         if !keep {
             return Ok(text);
         }
-        let mut memo = self.memo();
-        // Full: drop any one. A shared cache would drop the least recently used.
-        if memo.len() >= MEMO_SIZE
-            && let Some(any) = memo.keys().next().cloned()
-        {
-            memo.remove(&any);
-        }
-        memo.insert(key, text.clone());
+        let stored = text.to_string();
+        self.cache
+            .transact(move |tx| {
+                tx.execute(
+                    "INSERT OR REPLACE INTO attachment_text SELECT ?,?,?
+                WHERE COALESCE((SELECT generation FROM attachment_epochs WHERE tenant=?),0)=?",
+                    params![tenant, digest, stored, tenant, generation],
+                )
+                .map_err(sql)?;
+                tx.execute(
+                    "DELETE FROM attachment_text WHERE rowid NOT IN
+                (SELECT rowid FROM attachment_text ORDER BY rowid DESC LIMIT ?)",
+                    [MEMO_SIZE as i64],
+                )
+                .map_err(sql)?;
+                Ok(())
+            })
+            .await?;
         Ok(text)
     }
 }
@@ -188,27 +355,65 @@ impl PdfToText {
         id: &str,
         until: Instant,
     ) -> Result<String, Fault> {
-        let key = cx.extensions().get::<Credential>();
-        let key = key.map(|c| CallHeaders(c.headers().clone()));
-        let call = cx
-            .call("files")
-            .with_input(Ask::get(format!("/v1/files/{id}/content")));
-        let call = key
-            .into_iter()
-            .fold(call, |call, key| call.with_extension(key));
-        let read = async {
-            let mut bytes = Vec::new();
-            let mut chunks = call.await?.outputs::<Got<Rest>>();
-            while let Some(chunk) = chunks.try_next().await? {
-                bytes.extend_from_slice(&chunk.0);
-                if bytes.len() > self.max / 4 * 3 {
-                    return Err(too_large());
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err(Fault::bad_request("invalid stored file id"));
+        }
+        let key = cx
+            .extensions()
+            .get::<Credential>()
+            .map(|c| CallHeaders(c.headers().clone()));
+        let mut read = |path: String, limit: usize| {
+            let call = cx.call("files").with_input(Ask::get(path));
+            let call = key
+                .clone()
+                .into_iter()
+                .fold(call, |call, key| call.with_extension(key));
+            async move {
+                let mut bytes = Vec::new();
+                let mut chunks = call.await?.outputs::<Got<Rest>>();
+                while let Some(chunk) = chunks.try_next().await? {
+                    if chunk.0.len() > limit.saturating_sub(bytes.len()) {
+                        return Err(too_large());
+                    }
+                    bytes.extend_from_slice(&chunk.0);
                 }
+                Ok(bytes)
+            }
+        };
+        let fetch = async {
+            let metadata = read(format!("/v1/files/{id}"), 16 * 1024).await?;
+            let metadata: serde_json::Value = serde_json::from_slice(&metadata)
+                .map_err(|_| Fault::upstream("invalid stored file metadata"))?;
+            let pdf = metadata["mime_type"].as_str().map_or_else(
+                || {
+                    metadata["filename"]
+                        .as_str()
+                        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".pdf"))
+                },
+                |mime| mime == "application/pdf",
+            );
+            if !pdf {
+                return Err(
+                    Fault::new("unsupported_file", "only PDF attachments are supported")
+                        .with(Status(415)),
+                );
+            }
+            let bytes = read(format!("/v1/files/{id}/content"), self.max / 4 * 3).await?;
+            if !bytes.starts_with(b"%PDF-") {
+                return Err(
+                    Fault::new("unsupported_file", "the stored file is not a PDF")
+                        .with(Status(415)),
+                );
             }
             Ok(bytes)
         };
-        let bytes = tokio::time::timeout_at(until, read).await;
-        let bytes = bytes.map_err(|_| too_slow())??;
+        let bytes = tokio::time::timeout_at(until, fetch)
+            .await
+            .map_err(|_| too_slow())??;
         Ok(format!(
             "data:application/pdf;base64,{}",
             STANDARD.encode(bytes)
@@ -220,12 +425,22 @@ impl PdfToText {
 impl Plugin for PdfToText {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let deadline = Instant::now() + self.budget;
+        if cx.extensions().get::<NoContent>().is_some() {
+            let tenant = cx
+                .extensions()
+                .get::<Asked>()
+                .and_then(|asked| asked.headers.get("x-tenant")?.to_str().ok())
+                .unwrap_or_default();
+            tokio::time::timeout_at(deadline, self.forget(tenant))
+                .await
+                .map_err(|_| too_slow())??;
+        }
         cx.extensions_mut().insert(Deadline(deadline));
         let ids = cx.input::<Conversation>().map(stored).unwrap_or_default();
         if ids.is_empty() {
             return Ok(None);
         }
-        // Resolved here, in `on_client`, which may call: the provider edge cannot.
+        // Resolve once before provider attempts so every fallback sees the same file.
         let mut inline = HashMap::new();
         for id in ids {
             let data = self.fetch(cx, &id, deadline).await?;
@@ -268,8 +483,13 @@ impl Plugin for PdfToText {
         // Filters are synchronous: convert here, then swap the parts in.
         let mut texts = Vec::with_capacity(pdfs.len());
         for base64 in pdfs {
-            texts.push(self.text(&tenant, base64, until, keep).await?);
+            texts.push(
+                tokio::time::timeout_at(until, self.text(&tenant, base64, until, keep))
+                    .await
+                    .map_err(|_| too_slow())??,
+            );
         }
+        px.extensions_mut().insert(Converted(texts.len()));
         let mut texts = texts.into_iter();
         px.filter(move |chat: &mut Conversation| {
             for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
@@ -318,6 +538,7 @@ impl Plugin for Fallback {
 
 const TEXT: &str = "http://text-only.test/v1";
 const PDF: &str = "http://reads-pdf.test/v1";
+const CLAUDE: &str = "http://reads-pdf.test";
 const STORE: &str = "http://files.test";
 
 fn gateway(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
@@ -363,7 +584,7 @@ fn gateway_claude(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway,
         .provider::<Conversation, _, _>(
             "reads-pdf",
             AnthropicMessages,
-            respan_gateway_http::connect(mock.at(PDF)),
+            respan_gateway_http::connect(mock.at(CLAUDE)),
         )?
         .provider::<Ask, _, _>("files", FILES, respan_gateway_http::connect(mock.at(STORE)))?
         .client::<Conversation, _, _>(OpenAiChat)?
@@ -381,16 +602,20 @@ async fn main() -> Result<(), Fault> {
         let mock = MockTransport::new();
         mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
         mock.reply(
-            PDF,
+            if claude { CLAUDE } else { PDF },
             mock::json(StatusCode::OK, if claude { CLAUDE_OK } else { OK }),
         );
-        let pdfs = Arc::new(PdfToText::new(&["text-only"]));
+        let pdfs = Arc::new(PdfToText::new(&["text-only"]).await?);
         let gw = if claude {
             gateway_claude(&mock, pdfs)?
         } else {
             gateway(&mock, pdfs)?
         };
-        let status = send(&gw, "acme", REQUEST).await;
+        let request = REQUEST.replace(
+            "JVBERi0xLjcKJcfsj6IKMSAwIG9iago=",
+            include_str!("fixtures/report.pdf.b64"),
+        );
+        let status = send(&gw, "acme", &request).await;
         for sent in mock.sent() {
             println!("{}\n  {}", sent.uri(), String::from_utf8_lossy(sent.body()));
         }

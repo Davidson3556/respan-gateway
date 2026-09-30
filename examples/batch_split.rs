@@ -15,17 +15,18 @@
 //! The embeddings kind and its codec are `custom_format`'s, included as a
 //! module.
 //!
-//! Not covered: a chunk that fails fails the request (no partial answer, no
-//! retry of one chunk; see `fallback` for retries); a bound on how many
-//! chunks run at once.
+//! At most eight chunks run concurrently. Each retries transient failures
+//! up to three times before any merged response is committed. A permanent
+//! failure or exhausted retries fails the request, with no partial answer.
 //!
 //! `cargo run -p respan-gateway-examples --example batch_split`
 
-use respan_gateway_core::futures::future::try_join_all;
-use respan_gateway_core::futures::{TryStreamExt, stream};
+use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::http::StatusCode;
+use respan_gateway_routing::{Backoff, Until, first_success};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use std::time::Duration;
 
 #[allow(dead_code)]
 #[path = "custom_format.rs"]
@@ -47,23 +48,31 @@ impl Plugin for Split {
         if request.input.len() <= self.0 {
             return Ok(None);
         }
-        let calls = request.input.chunks(self.0).map(|chunk| {
-            let mut part = request.clone();
-            part.input = chunk.to_vec();
-            (chunk.len(), cx.call(target.clone()).with_input(part))
-        });
-        let answers = try_join_all(calls.map(|(expected, call)| async move {
-            let answers = call
-                .await?
-                .outputs::<Embeddings>()
-                .try_collect::<Vec<_>>()
-                .await?;
-            if answers.len() != 1 || answers[0].vectors.len() != expected {
-                return Err(Fault::upstream("the provider omitted embedding vectors"));
-            }
-            Ok(answers)
-        }))
-        .await?;
+        let calls: Vec<_> = request
+            .input
+            .chunks(self.0)
+            .map(|chunk| {
+                let mut part = request.clone();
+                part.input = chunk.to_vec();
+                (chunk.len(), cx.call(target.clone()).with_input(part))
+            })
+            .collect();
+        let answers = stream::iter(calls)
+            .map(|(expected, call)| async move {
+                let backoff = Backoff::new(3, Duration::from_millis(10), Duration::from_secs(1));
+                let answers = first_success([call], &backoff, Until::End)
+                    .await?
+                    .outputs::<Embeddings>()
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                if answers.len() != 1 || answers[0].vectors.len() != expected {
+                    return Err(Fault::upstream("the provider omitted embedding vectors"));
+                }
+                Ok(answers)
+            })
+            .buffered(8)
+            .try_collect::<Vec<_>>()
+            .await?;
         let mut merged = Embeddings::default();
         for answer in answers.iter().flatten() {
             merged.vectors.extend(answer.vectors.iter().cloned());

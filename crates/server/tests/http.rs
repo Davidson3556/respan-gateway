@@ -786,3 +786,27 @@ async fn l6_real_heads_and_204s_end_ok() {
 async fn l6_a_real_304_ends_ok() {
     l6_bodiless(true).await;
 }
+
+#[tokio::test]
+async fn body_limits_can_differ_by_route_before_decoding() {
+    let provider = spawn(Router::new().fallback(|| async { r#"{"choices":[]}"# })).await;
+    let app = respan_gateway_server::router_with_limit(openai_gateway(provider), |head| {
+        if head.uri.path().starts_with("/large/") {
+            1024
+        } else {
+            8
+        }
+    });
+    for (path, expected) in [
+        ("/v1/chat/completions", 413),
+        ("/large/chat/completions", 200),
+    ] {
+        let request = http::Request::post(path)
+            .body(axum::body::Body::from(r#"{"model":"m","messages":[]}"#))
+            .unwrap_or_else(|error| panic!("request: {error}"));
+        let response = tower::ServiceExt::oneshot(app.clone(), request)
+            .await
+            .unwrap_or_else(|error| match error {});
+        assert_eq!(response.status(), expected, "{path}");
+    }
+}

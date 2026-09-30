@@ -116,15 +116,51 @@ async fn an_agent_request_is_redacted_and_its_tool_call_restored() -> Result<(),
     Ok(())
 }
 
-/// `n: 2` streamed: OpenAI interleaves the choices' deltas, and choice 1
-/// comes as other content, which would release choice 0's held `<EMA`
-/// unrestored. So it is refused before any call; unstreamed, it passes.
 #[tokio::test]
-async fn several_streamed_choices_are_refused() -> Result<(), Fault> {
+async fn several_choices_restore_independently_whole_or_streamed() -> Result<(), Fault> {
     let mock = MockTransport::new();
-    let (status, body, _) = ask(&mock, chat(PROMPT.into(), json!({ "n": 2 }))).await?;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(body.contains(UNCOVERED) && mock.sent().is_empty(), "{body}");
+    let events = [
+        json!([{"index":0,"delta":{"content":"a <EMA"}},{"index":1,"delta":{"content":"b <EM"}}]),
+        json!([{"index":1,"delta":{"content":"AIL_2>"}},{"index":0,"delta":{"content":"IL_"}}]),
+        json!([{"index":0,"delta":{"content":"1>"},"finish_reason":"stop"}]),
+        json!([{"index":1,"delta":{"content":" and <EMA"}}]),
+        json!([{"index":1,"delta":{"content":"IL_1>"},"finish_reason":"stop"}]),
+    ]
+    .map(|choices| {
+        format!(
+            "data: {}\n\n",
+            json!({"id":"c1","object":"chat.completion.chunk","model":"gpt","choices":choices})
+        )
+    });
+    let mut chunks: Vec<_> = events.iter().map(String::as_str).collect();
+    chunks.push("data: [DONE]\n\n");
+    mock.reply(OPENAI, mock::sse(&chunks));
+    let (status, _, body) = read_whole(
+        serve(&gateway(&mock)?, chat(PROMPT.into(), json!({"n":2})))
+            .await
+            .0,
+    )
+    .await;
+    let body = String::from_utf8_lossy(&body?).into_owned();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut texts = [String::new(), String::new()];
+    let mut finishes = [0, 0];
+    for data in body.lines().filter_map(|l| l.strip_prefix("data: ")) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        for choice in value["choices"].as_array().into_iter().flatten() {
+            let index = choice["index"].as_u64().unwrap_or(0) as usize;
+            texts[index].push_str(choice["delta"]["content"].as_str().unwrap_or_default());
+            finishes[index] += usize::from(choice["finish_reason"].is_string());
+        }
+    }
+    assert_eq!(
+        texts,
+        ["a bob@x.io", "b alice@y.org and bob@x.io"],
+        "{body}"
+    );
+    assert_eq!(finishes, [1, 1], "{body}");
     let answer = json!({ "id": "c1", "model": "gpt", "choices": [
         { "index": 0, "message": { "role": "assistant", "content": "a <EMAIL_1>" } },
         { "index": 1, "message": { "role": "assistant", "content": "b <EMAIL_1>" } }] });
@@ -386,5 +422,92 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
     assert_eq!(status, StatusCode::OK, "{body}");
     let (args, _) = joined_args(&body, 0);
     assert_eq!(args, r#"{"to":"bob@x.io"}"#, "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn anthropic_tool_history_is_redacted_and_its_reply_restored() -> Result<(), Fault> {
+    const AT: &str = "http://anthropic.test";
+    let mock = MockTransport::new();
+    mock.reply(AT, mock::json(StatusCode::OK, r#"{"id":"m","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"<EMAIL_1>"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#));
+    let gateway = Gateway::new()
+        .client::<Conversation, _, _>(AnthropicMessages)?
+        .provider::<Conversation, _, _>(
+            "p",
+            AnthropicMessages,
+            respan_gateway_http::connect(mock.at(AT)),
+        )?
+        .plugin("pii", Pii)?
+        .plugin("pii-input", PiiInput)?
+        .target("p")?;
+    let body = json!({"model":"c","max_tokens":10,"messages":[
+        {"role":"assistant","content":[{"type":"tool_use","id":"call1","name":"send","input":{"to":"bob@x.io"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"call1","content":"sent to bob@x.io"}]}
+    ]});
+    let (status, _, body) = read_whole(
+        serve(&gateway, post("/v1/messages", body.to_string()))
+            .await
+            .0,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body?).contains("bob@x.io"));
+    let sent: serde_json::Value =
+        serde_json::from_slice(mock.sent()[0].body()).map_err(|_| Fault::internal("test JSON"))?;
+    assert_eq!(
+        sent["messages"][0]["content"][0]["input"]["to"],
+        "<EMAIL_1>"
+    );
+    assert_eq!(
+        sent["messages"][1]["content"][0]["content"],
+        "sent to <EMAIL_1>"
+    );
+    assert_eq!(sent["messages"][0]["content"][0]["id"], "call1");
+    assert_eq!(sent["messages"][1]["content"][0]["tool_use_id"], "call1");
+    Ok(())
+}
+
+#[tokio::test]
+async fn finishing_one_choice_does_not_release_another_choices_tool_arguments() -> Result<(), Fault>
+{
+    let chunks = [
+        json!([{"index":1,"delta":{"tool_calls":[{"index":0,"id":"t","type":"function","function":{"name":"send","arguments":"{\"to\":\"<EMA"}}]}}]),
+        json!([{"index":0,"delta":{},"finish_reason":"stop"}]),
+        json!([{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"IL_1>"}}]}}]),
+        json!([{"index":1,"delta":{},"finish_reason":"length"}]),
+    ].map(|choices| format!("data: {}\n\n", json!({"id":"c1","object":"chat.completion.chunk","model":"gpt","choices":choices})));
+    let mut chunks = chunks.to_vec();
+    chunks.push("data: [DONE]\n\n".into());
+    let (status, body) = stream_of(chunks).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut arguments = String::new();
+    let mut finished = false;
+    for data in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        for choice in value["choices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|c| c["index"] == 1)
+        {
+            for call in choice["delta"]["tool_calls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let text = call["function"]["arguments"].as_str().unwrap_or_default();
+                assert!(
+                    !finished || text.is_empty(),
+                    "arguments after finish: {body}"
+                );
+                arguments.push_str(text);
+            }
+            finished |= choice["finish_reason"].is_string();
+        }
+    }
+    assert!(finished, "{body}");
+    assert_eq!(arguments, "{\"to\":\"bob@x.io", "{body}");
     Ok(())
 }

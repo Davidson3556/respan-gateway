@@ -21,8 +21,14 @@ respan-gateway-core.workspace = true
 respan-gateway-formats.workspace = true
 respan-gateway-http.workspace = true
 serde_json.workspace = true
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 
 [dev-dependencies]
+sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.3"
+reqwest.workspace = true
 respan-gateway-plugins.workspace = true
 respan-gateway-server.workspace = true
 respan-gateway-testkit.workspace = true
@@ -131,6 +137,16 @@ test = true
 [[example]]
 name = "realtime"
 path = "realtime.rs"
+test = true
+
+[[example]]
+name = "gemini_live"
+path = "gemini_live.rs"
+test = true
+
+[[example]]
+name = "responses_ws"
+path = "responses_ws.rs"
 test = true
 
 [[example]]

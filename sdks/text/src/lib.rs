@@ -11,6 +11,7 @@
 //! - [`Placeholders`]: hide values behind `<LABEL_n>` and restore them, a
 //!   placeholder split across deltas included.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_core::{Fault, Filter};
@@ -256,24 +257,76 @@ fn edit_json_text(text: &mut String, edit: &mut Edit) -> Result<(), Fault> {
     Ok(())
 }
 
+/// Tool results may contain text blocks, but images and other opaque payloads
+/// must be refused before any edits occur.
+fn text_result(value: &Value) -> bool {
+    value.is_string()
+        || value.as_array().is_some_and(|parts| {
+            parts
+                .iter()
+                .all(|part| part["type"] == "text" && part["text"].is_string())
+        })
+}
+
+fn readable_part(part: &Content) -> bool {
+    match part {
+        Content::Text { .. } => true,
+        Content::Other { format, raw, .. } if format.as_ref() == "anthropic-messages" => {
+            match raw["type"].as_str() {
+                Some("tool_use") => raw["name"].is_string() && raw["input"].is_object(),
+                Some("tool_result") => text_result(&raw["content"]),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn edit_content(part: &mut Content, edit: &mut Edit) -> Result<(), Fault> {
+    match part {
+        Content::Text { text, .. } => edit(text),
+        Content::Other { raw, .. } => {
+            let raw = Arc::make_mut(raw);
+            if raw["type"] == "tool_use" {
+                if let Some(Value::String(name)) = raw.get_mut("name") {
+                    edit(name)?;
+                }
+                edit_json(&mut raw["input"], true, edit)
+            } else {
+                match &mut raw["content"] {
+                    Value::String(text) => edit_string(text, edit),
+                    Value::Array(parts) => {
+                        parts
+                            .iter_mut()
+                            .try_for_each(|part| match &mut part["text"] {
+                                Value::String(text) => edit(text),
+                                _ => Err(unreadable("a tool result")),
+                            })
+                    }
+                    _ => Err(unreadable("a tool result")),
+                }
+            }
+        }
+        _ => Err(unreadable("a part with no text form")),
+    }
+}
+
 /// Every text part of every message, the system prompt included, the
 /// messages' and the request's fields the kind has no place for (a tool
-/// call, tools), the stop sequences and the end user's id. A part other
-/// than text, such as an image, is refused.
+/// call, tools), Anthropic tool inputs and text results, the stop sequences
+/// and the end user's id. Content with no text form, such as an image, is refused.
 impl Readable for Conversation {
     fn edit_all(
         &mut self,
         mut edit: impl FnMut(&mut String) -> Result<(), Fault>,
     ) -> Result<(), Fault> {
         let parts = self.messages.iter().flat_map(|m| &m.content);
-        if !parts.clone().all(|c| matches!(c, Content::Text { .. })) {
+        if !parts.clone().all(readable_part) {
             return Err(unreadable("a part other than text, such as an image"));
         }
         for message in &mut self.messages {
             for part in &mut message.content {
-                if let Content::Text { text, .. } = part {
-                    edit(text)?;
-                }
+                edit_content(part, &mut edit)?;
             }
             edit_fields(&mut message.unsupported, &mut edit)?;
         }
@@ -369,7 +422,9 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
 /// them) are held per call like text, so a match split across their
 /// fragments is seen whole and what replaces it is escaped as JSON text; the
 /// tail held at a finish or the end is released as a chunk of just that call's
-/// arguments. Anthropic's `partial_json` is held the same way.
+/// arguments. Anthropic's `partial_json` is held the same way. OpenAI
+/// choices retain independent text and argument tails, including when their
+/// chunks interleave or one choice finishes before the others.
 #[derive(Debug)]
 pub struct Holdback<R> {
     rewrite: R,
@@ -377,6 +432,8 @@ pub struct Holdback<R> {
     held: Option<(u32, String)>,
     /// The tails of tool-call arguments held, by call.
     arguments: Vec<Tail>,
+    /// Text tails of OpenAI choices other than choice zero (the typed text).
+    choices: BTreeMap<u64, (Arc<str>, String)>,
     /// Replies that show nothing yet, in order.
     waiting: Vec<Reply>,
 }
@@ -388,6 +445,7 @@ impl<R: Rewrite> Holdback<R> {
             rewrite,
             held: None,
             arguments: Vec::new(),
+            choices: BTreeMap::new(),
             waiting: Vec::new(),
         }
     }
@@ -415,16 +473,68 @@ impl<R: Rewrite> Holdback<R> {
         Ok(())
     }
 
+    /// Choice zero may arrive as typed text or inside a later array entry.
+    /// Both share `held`; other choices retain independent tails.
+    fn hold_choices(&mut self, format: &Arc<str>, raw: &mut Arc<Value>) {
+        let Some(choices) = Arc::make_mut(raw).as_array_mut() else {
+            return;
+        };
+        for choice in choices {
+            let index = choice["index"].as_u64().unwrap_or(0);
+            let finished = choice["finish_reason"].is_string();
+            if !choice["delta"]["content"].is_string() && !finished {
+                continue;
+            }
+            let before = if index == 0 {
+                self.held.take().map(|(_, text)| text)
+            } else {
+                self.choices.remove(&index).map(|(_, text)| text)
+            }
+            .unwrap_or_default();
+            let text = choice["delta"]["content"].as_str().unwrap_or_default();
+            let mut text = before + text;
+            let keep = if finished {
+                0
+            } else {
+                self.rewrite.pending(&text)
+            };
+            let mut cut = text.len().saturating_sub(keep);
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let tail = text.split_off(cut);
+            if !tail.is_empty() {
+                if index == 0 {
+                    self.held = Some((0, tail));
+                } else {
+                    self.choices.insert(index, (format.clone(), tail));
+                }
+            }
+            if !text.is_empty() || choice["delta"]["content"].is_string() {
+                choice["delta"]["content"] = text.into();
+            }
+        }
+    }
+
     /// Hold back the tail of each tool call's arguments in `raw` that may
     /// start a match or is a cut-off escape, with what was held of the call
     /// before in front. With `open` false nothing is held: the message ends
     /// the response.
     fn hold_arguments(&mut self, format: &Arc<str>, raw: &mut Arc<Value>, open: bool) {
+        let finished: Vec<_> = raw
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|choice| choice["finish_reason"].is_string())
+            .filter_map(|choice| choice["index"].as_u64())
+            .collect();
         let (rewrite, tails) = (&self.rewrite, &mut self.arguments);
         for_arguments(Arc::make_mut(raw), &mut |path, arguments| {
             let at = tails.iter().position(|t| t.path == path);
             let before = at.map(|i| tails.remove(i).text).unwrap_or_default();
             let mut text = before + arguments;
+            let choice = choice_index(path);
+            let open = (open || choice != 0) && !finished.contains(&choice);
             let cut = if open {
                 held_from(&text, |t| rewrite.pending(t))
             } else {
@@ -444,8 +554,11 @@ impl<R: Rewrite> Holdback<R> {
     }
 
     /// Release the arguments held, rewritten, as one piece for each call.
-    fn release_arguments(&mut self) -> Result<Vec<Piece>, Fault> {
-        let tails = std::mem::take(&mut self.arguments);
+    fn release_arguments(&mut self, choice: Option<u64>) -> Result<Vec<Piece>, Fault> {
+        let (tails, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.arguments)
+            .into_iter()
+            .partition(|tail| choice.is_none_or(|index| choice_index(&tail.path) == index));
+        self.arguments = kept;
         let mut pieces = Vec::with_capacity(tails.len());
         for Tail {
             format,
@@ -513,6 +626,14 @@ enum Step {
     Element,
     /// The `index` the object being entered names itself by.
     Index(u64),
+}
+
+fn choice_index(path: &[Step]) -> u64 {
+    // Only the outer choices array identifies a choice; deeper indexes name tools.
+    match path {
+        [Step::Element, Step::Index(index), ..] => *index,
+        _ => 0,
+    }
 }
 
 /// Runs `visit` on each streamed tool call's arguments in `v` (a chunk's
@@ -591,14 +712,36 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
             let (block, text) = match piece {
                 Piece::Text { block, text, .. } => (block, text),
                 mut other => {
-                    self.release_into(&mut reply)?;
+                    let choices = matches!(&other, Piece::Other { raw, .. } if raw.is_array());
+                    if !choices {
+                        self.release_into(&mut reply)?;
+                    }
                     if let Piece::Other { format, raw, .. } = &mut other {
+                        self.hold_choices(format, raw);
                         self.hold_arguments(format, raw, open);
                     }
                     edit_piece(&mut other, &mut |text| {
                         *text = self.rewritten(text)?;
                         Ok(())
                     })?;
+                    if let Piece::Other { raw, .. } = &other {
+                        let finished: Vec<_> = raw
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|choice| choice["finish_reason"].is_string())
+                            .filter_map(|choice| choice["index"].as_u64())
+                            .collect();
+                        for index in finished {
+                            let content = self.release_arguments(Some(index))?;
+                            if !content.is_empty() {
+                                out.append(&mut self.waiting);
+                                let mut tail = Reply::default();
+                                tail.content = content;
+                                out.push(tail);
+                            }
+                        }
+                    }
                     reply.content.push(other);
                     continue;
                 }
@@ -608,7 +751,7 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
             }
             let mut text = self.held.take().map(|(_, t)| t).unwrap_or_default() + &text;
             // Only the reply's last text can continue in the next reply.
-            let keep = if open && i + 1 == last {
+            let keep = if open && (i + 1 == last || block == 0) {
                 self.rewrite.pending(&text)
             } else {
                 0
@@ -624,7 +767,7 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         }
         if !open {
             self.release_into(&mut reply)?;
-            reply.content.extend(self.release_arguments()?);
+            reply.content.extend(self.release_arguments(Some(0))?);
         }
         // No content, such as a keep-alive or usage alone, is not delayed
         // unless replies wait before it.
@@ -643,9 +786,16 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
             out.push(Reply::text(block, text));
         }
         let mut arguments = Reply::default();
-        arguments.content = self.release_arguments()?;
+        arguments.content = self.release_arguments(None)?;
         if !arguments.content.is_empty() {
             out.push(arguments);
+        }
+        for (index, (format, text)) in std::mem::take(&mut self.choices) {
+            let text = self.rewritten(&text)?;
+            out.push(Reply::other(
+                format,
+                json!([{ "index": index, "delta": { "content": text } }]),
+            ));
         }
         Ok(())
     }

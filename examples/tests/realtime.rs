@@ -175,6 +175,8 @@ async fn each_turn_is_metered_when_it_completes_not_when_the_session_ends() -> R
         status: "completed".into(),
         input_tokens: 10,
         output_tokens: 2,
+        input_audio_tokens: 0,
+        output_audio_tokens: 0,
     };
     assert_eq!(s.meter.turns(), std::slice::from_ref(&one));
     assert!(s.meter.ended().is_empty());
@@ -185,6 +187,8 @@ async fn each_turn_is_metered_when_it_completes_not_when_the_session_ends() -> R
         status: "completed".into(),
         input_tokens: 30,
         output_tokens: 5,
+        input_audio_tokens: 0,
+        output_audio_tokens: 0,
     };
     assert_eq!(s.meter.turns(), [one, two]);
     close(&mut ws).await;
@@ -1102,8 +1106,8 @@ async fn a_tool_output_is_held_like_text() {
     assert_eq!(wallets.spent("sk-demo"), 0);
 }
 
-/// Audio is not text: base64 audio deltas are not what a turn reads, so
-/// after turns of 60 KB of audio, a small wallet still holds the next one.
+/// Audio is bounded by decoded duration, so after 60 KB of base64 audio
+/// a small wallet still holds the next turn.
 #[tokio::test(flavor = "multi_thread")]
 async fn audio_deltas_are_not_counted_as_text() {
     let at = answering(|_| {
@@ -1714,15 +1718,12 @@ async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<
     Ok(())
 }
 
-/// The doc says a hold counts "everything the session sends or receives
-/// except audio". Audio the client sends inside an item (an `input_audio`
-/// part of a `conversation.item.create`, which the Realtime API takes) is
-/// counted byte for byte: 60 KB of base64 audio (under 2 s of 24 kHz PCM)
-/// makes a wallet of 5,000 refuse a turn that costs 30.
+/// Inline input_audio receives the same duration bound as streamed audio;
+/// encoding 60 KB of base64 does not pretend it is 60,000 text tokens.
 #[tokio::test(flavor = "multi_thread")]
-async fn audio_the_client_sends_in_an_item_is_not_counted() {
+async fn audio_the_client_sends_in_an_item_is_bounded_by_duration() {
     let at = answering(|_| script(&["ok"], usage(20, 10))).await;
-    let (gw, wallets, addr) = front(at, 5_000).await;
+    let (gw, wallets, addr) = audio_front(at, 5_000).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
     let audio = "A".repeat(60_000);
@@ -1847,4 +1848,128 @@ async fn l9_provider_turns_and_a_client_that_leaves_at_any_moment_leave_no_hold(
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
     Ok(())
+}
+
+async fn audio_front(
+    at: std::net::SocketAddr,
+    tokens: Amount,
+) -> (Gateway, MemoryLedger, std::net::SocketAddr) {
+    let wallets = MemoryLedger::new();
+    wallets.open("sk-demo", None, tokens);
+    let gw = gateway_with_audio(
+        &format!("ws://{at}"),
+        &Meter::default(),
+        &Outcomes::default(),
+        &wallets,
+        HOUR,
+        true,
+    )
+    .expect("gateway");
+    let addr = listen(&gw).await;
+    (gw, wallets, addr)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_redaction_refuses_audio_before_the_provider_receives_it() {
+    let s = start().await.expect("session");
+    let mut ws = client(s.addr).await;
+    heard(&mut ws).await;
+    say(
+        &mut ws,
+        json!({"type":"input_audio_buffer.append","audio":"AAAA"}),
+    )
+    .await;
+    assert_eq!(
+        done_or_closed(&mut ws).await,
+        Err(Some((1008, "audio_requires_redaction".into())))
+    );
+    s.gateway.idle().await;
+    assert!(read_by_provider(&s.openai).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_usage_is_metered_per_turn_and_charged() {
+    let at = answering(|_| {
+        vec![
+            json!({"type":"response.created","response":{"id":"audio1"}}),
+            json!({"type":"response.output_audio.delta","delta":"AAAA"}),
+            json!({"type":"response.done","response":{"id":"audio1","status":"completed","usage":{
+            "input_tokens":32,"output_tokens":12,"total_tokens":44,
+            "input_token_details":{"audio_tokens":30,"text_tokens":2},
+            "output_token_details":{"audio_tokens":10,"text_tokens":2}}}}),
+        ]
+    })
+    .await;
+    let meter = Meter::default();
+    let wallets = MemoryLedger::new();
+    wallets.open("sk-demo", None, 100_000);
+    let gw = gateway_with_audio(
+        &format!("ws://{at}"),
+        &meter,
+        &Outcomes::default(),
+        &wallets,
+        HOUR,
+        true,
+    )
+    .expect("gateway");
+    let addr = listen(&gw).await;
+    let mut ws = client(addr).await;
+    heard(&mut ws).await;
+    for _ in 0..2 {
+        say(
+            &mut ws,
+            json!({"type":"input_audio_buffer.append","audio":"AAAA"}),
+        )
+        .await;
+        say(&mut ws, json!({"type":"input_audio_buffer.commit"})).await;
+        say(&mut ws, json!({"type":"response.create"})).await;
+        assert_eq!(last(&turn(&mut ws).await)["type"], "response.done");
+    }
+    close(&mut ws).await;
+    gw.idle().await;
+    assert_eq!(meter.turns().len(), 2);
+    assert!(
+        meter
+            .turns()
+            .iter()
+            .all(|t| t.input_audio_tokens == 30 && t.output_audio_tokens == 10)
+    );
+    assert_eq!(wallets.spent("sk-demo"), 88);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capped_audio_refuses_unmetered_transcription_and_invalid_audio() {
+    for event in [
+        json!({"type":"session.update","session":{"audio":{"input":{"transcription":{"model":"x"}}}}}),
+        json!({"type":"session.update","session":{"input_audio_format":"mp3"}}),
+        json!({"type":"session.update","session":4}),
+        json!({"type":"session.update","session":{"audio":{"input":[]}}}),
+        json!({"type":"input_audio_buffer.append","audio":"not base64!"}),
+    ] {
+        let at = answering(|_| script(&["ok"], usage(20, 10))).await;
+        let (gw, wallets, addr) = audio_front(at, 5_000).await;
+        let mut ws = client(addr).await;
+        heard(&mut ws).await;
+        say(&mut ws, event).await;
+        let Err(Some((code, _))) = done_or_closed(&mut ws).await else {
+            panic!("must refuse")
+        };
+        assert_eq!(code, 1008);
+        gw.idle().await;
+        assert_eq!(wallets.spent("sk-demo"), 0);
+    }
+}
+
+#[test]
+fn audio_bounds_use_validated_samples_instead_of_base64_text_tokens() {
+    assert_eq!(
+        audio::tokens(&"A".repeat(60_000)).expect("valid audio"),
+        113
+    );
+    assert!(audio::tokens("not base64").is_err());
+    assert!(
+        context(&json!({"type":"input_audio_buffer.append","audio":"A".repeat(60_000)}))
+            .expect("valid audio")
+            < 200
+    );
 }

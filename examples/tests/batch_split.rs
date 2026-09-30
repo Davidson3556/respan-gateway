@@ -121,3 +121,19 @@ async fn missing_or_duplicate_vectors_fail_the_split_request() -> Result<(), Fau
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn only_a_failed_chunk_is_retried_before_the_merged_answer() -> Result<(), Fault> {
+    let mock = MockTransport::new();
+    mock.reply(AT, answer(&[0.0, 1.0], 2))
+        .reply(AT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"))
+        .reply(AT, answer(&[2.0], 1));
+    let (status, body) = embed(&gateway(&mock, 2)?, r#"{"input":["a","b","c"]}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body?["data"][2]["embedding"][0], json!(2.0));
+    let sent = mock.sent();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[1].body(), sent[2].body());
+    assert_ne!(sent[0].body(), sent[1].body());
+    Ok(())
+}

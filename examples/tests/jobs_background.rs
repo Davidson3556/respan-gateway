@@ -160,8 +160,8 @@ async fn malformed_unicode_ids_are_refused_before_any_call() -> Result<(), Fault
     // The signed-id byte length is valid, but either numeric slice would
     // end inside a multibyte character.
     for forged in [
-        format!("resp_é{}", "0".repeat(31)),
-        format!("resp_1{}é{}", "0".repeat(15), "0".repeat(15)),
+        format!("resp_é{}", "0".repeat(47)),
+        format!("resp_1{}é{}", "0".repeat(15), "0".repeat(31)),
     ] {
         let body = json!({ "previous_response_id": forged });
         let req = request("POST", "/v1/responses", &body.to_string());
@@ -208,7 +208,7 @@ async fn response_json_split_across_frames_is_mapped_whole() -> Result<(), Fault
     let id = body["id"].as_str().unwrap_or_default();
     assert!(id.starts_with("resp_"), "{body}");
     assert_eq!(body["status"], "completed");
-    assert_eq!(jobs.native(id).as_deref(), Some("native-1"));
+    assert_eq!(jobs.native(id).await?.as_deref(), Some("native-1"));
 
     // A bodyless response stays bodyless; buffering must not synthesize
     // an empty JSON event for the mapping filter.
@@ -323,7 +323,11 @@ async fn a_jobs_own_run_is_not_a_background_request() -> Result<(), Fault> {
     let job = send(&gateway, request("POST", "/v1/responses", post)).await?;
     gateway.idle().await;
     let sent = body_of(&mock, 0);
-    assert_eq!(sent, json!({ "input": "hi" }), "sent: {sent}");
+    assert_eq!(
+        sent,
+        json!({ "input": "hi", "max_output_tokens": 1024 }),
+        "sent: {sent}"
+    );
     let polled = send(&gateway, get(job["id"].as_str().unwrap_or_default())).await?;
     assert_eq!(polled["status"], "completed");
     Ok(())
@@ -422,7 +426,7 @@ async fn the_paths_under_a_signed_id_reach_the_provider_with_its_own() -> Result
         ]
     );
 
-    // Another tenant's, and a job still running (no provider id yet), are 404.
+    // Another tenant's id is refused; a running job can be cancelled before its provider id arrives.
     let (status, ..) = read_whole(
         serve(&gateway, as_other(request("POST", &cancel, "")))
             .await
@@ -436,8 +440,10 @@ async fn the_paths_under_a_signed_id_reach_the_provider_with_its_own() -> Result
         "/v1/responses/{}/cancel",
         job["id"].as_str().unwrap_or_default()
     );
-    let (status, ..) = read_whole(serve(&gateway, request("POST", &cancel, "")).await.0).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, body) = read_whole(serve(&gateway, request("POST", &cancel, "")).await.0).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body?).map_err(|e| Fault::internal(e.to_string()))?;
+    assert_eq!(body["status"], "cancelled");
     Ok(())
 }
 

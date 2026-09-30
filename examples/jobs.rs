@@ -19,13 +19,22 @@
 //! reads to the end (`tokio::spawn` of `Gateway::handle`), and let clients
 //! wait on the store. `jobs_background` does it, with signed ids.
 //!
+//! The runnable example uses SQLite (`JOBS_DB`, default `jobs.sqlite3`).
+//! Completed replies survive restart. Renewable claims prevent concurrent
+//! duplicates; lease loss cancels a live call. Recovery retries use a stable
+//! provider Idempotency-Key; remote exactly-once execution requires provider
+//! support. Stored results currently have no expiration or tenant purge.
+//!
 //! `cargo run -p respan-gateway-examples --example jobs`
 
+use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_core::futures::stream;
+use respan_gateway_core::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_formats::OpenAiChat;
 use respan_gateway_formats::conversation::{Conversation, Reply};
@@ -34,23 +43,36 @@ use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Asked, Credential};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 use tokio::sync::watch;
+use tokio::time::Instant;
+
+#[path = "jobs_store.rs"]
+mod persistent;
+use persistent::Sqlite;
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Hashes of the tenant's credential and of the body, around the
-/// idempotency key. A durable store hashes with SHA-256.
-type Key = (u64, String, u64);
+/// idempotency key. SHA-256 is stable across process restarts.
+type Key = (String, String, String);
 
+#[cfg(test)]
 fn hash(value: impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
 }
 
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Include every credential form, keeping repeated values in their wire order.
-fn tenant(cx: &ClientContext) -> u64 {
+fn tenant(cx: &ClientContext) -> String {
     let credential = cx.extensions().get::<Credential>();
     let parts = credential.map(|credential| {
         let mut headers: Vec<_> = credential
@@ -61,7 +83,7 @@ fn tenant(cx: &ClientContext) -> u64 {
         headers.sort_by_key(|(name, _)| *name);
         (headers, credential.query().collect::<Vec<_>>())
     });
-    hash(parts)
+    digest(&serde_json::to_vec(&parts).expect("credential fields serialize"))
 }
 
 /// Marks a zero-retention request; your tenancy plugin sets it.
@@ -73,7 +95,7 @@ type Replies = Arc<Vec<Reply>>;
 
 /// What a request with a key does.
 enum Claim {
-    Run,
+    Run(u64, Option<Instant>),
     Done(Replies),
 }
 
@@ -86,19 +108,28 @@ enum Claim {
 trait Store: Send + Sync + 'static {
     /// `Run` for the first request with `key`; else its result, waiting
     /// while another request runs it.
-    async fn claim(&self, key: &Key) -> Claim;
+    async fn claim(&self, key: &Key) -> Result<Claim, Fault>;
     /// Keep a run's result, or with `None` release `key` to the next request.
-    async fn finish(&self, key: &Key, result: Option<Replies>);
+    async fn finish(&self, key: &Key, owner: u64, result: Option<Replies>) -> Result<(), Fault>;
+    /// Durable stores renew a live claim; memory stores need no lease.
+    async fn renew(&self, _key: &Key, _owner: u64) -> Result<Instant, Fault> {
+        Err(Fault::internal("this store has no lease"))
+    }
+    fn heartbeat(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// In memory: each key's result, `None` while it runs. Keeps every result
 /// forever; a real store expires them.
 #[derive(Default)]
+#[cfg(test)]
 struct Memory(Mutex<HashMap<Key, watch::Sender<Option<Replies>>>>);
 
 #[async_trait]
+#[cfg(test)]
 impl Store for Memory {
-    async fn claim(&self, key: &Key) -> Claim {
+    async fn claim(&self, key: &Key) -> Result<Claim, Fault> {
         loop {
             let mut result = {
                 let mut all = locked(&self.0);
@@ -106,18 +137,18 @@ impl Store for Memory {
                     Some(running) => running.subscribe(),
                     None => {
                         all.insert(key.clone(), watch::channel(None).0);
-                        return Claim::Run;
+                        return Ok(Claim::Run(0, None));
                     }
                 }
             };
             // `Err` if the run was released: claim again.
             if let Ok(Some(done)) = result.wait_for(Option::is_some).await.map(|r| r.clone()) {
-                return Claim::Done(done);
+                return Ok(Claim::Done(done));
             }
         }
     }
 
-    async fn finish(&self, key: &Key, result: Option<Replies>) {
+    async fn finish(&self, key: &Key, _owner: u64, result: Option<Replies>) -> Result<(), Fault> {
         let mut all = locked(&self.0);
         if let Some(done) = result {
             if let Some(run) = all.get(key) {
@@ -126,12 +157,99 @@ impl Store for Memory {
         } else {
             all.remove(key);
         }
+        Ok(())
     }
 }
 
 /// The key of the run this request is, and the replies it sent.
 #[derive(Clone)]
-struct Running(Key, Arc<Mutex<Vec<Reply>>>);
+struct Running {
+    key: Key,
+    sent: Arc<Mutex<Vec<Reply>>>,
+    owner: u64,
+    stop: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    deadline: Option<watch::Receiver<Instant>>,
+}
+
+impl Running {
+    async fn lost(&self) {
+        let Some(mut deadline) = self.deadline.clone() else {
+            return std::future::pending().await;
+        };
+        loop {
+            let until = *deadline.borrow_and_update();
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(until) => return,
+                changed = deadline.changed() => if changed.is_err() { return; },
+            }
+        }
+    }
+
+    async fn guard<T>(
+        &self,
+        work: impl std::future::Future<Output = Result<T, Fault>>,
+    ) -> Result<T, Fault> {
+        tokio::select! {
+            biased;
+            _ = self.lost() => Err(Fault::new("lease_lost", "the idempotent operation lost its lease")),
+            result = work => result,
+        }
+    }
+
+    fn bounded<T: Send + 'static>(
+        &self,
+        input: BoxStream<'static, Result<T, Fault>>,
+    ) -> BoxStream<'static, Result<T, Fault>> {
+        let running = self.clone();
+        stream::unfold((input, false), move |(mut input, ended)| {
+            let running = running.clone();
+            async move {
+                if ended {
+                    return None;
+                }
+                match running
+                    .guard(async { input.next().await.transpose() })
+                    .await
+                {
+                    Ok(Some(value)) => Some((Ok(value), (input, false))),
+                    Ok(None) => None,
+                    Err(fault) => Some((Err(fault), (input, true))),
+                }
+            }
+        })
+        .boxed()
+    }
+}
+
+/// A stable upstream key handles crash ambiguity when the provider supports
+/// idempotency. Losing a lease stops local work; it cannot undo remote compute.
+fn supervised(
+    transport: impl Into<respan_gateway_http::Transport>,
+) -> respan_gateway_http::Transport {
+    let transport = transport.into();
+    respan_gateway_http::Transport::new(move |mut call| {
+        let transport = transport.clone();
+        async move {
+            let Some(running) = call.extensions.get::<Running>().cloned() else {
+                return transport.send(call).await;
+            };
+            let key = digest(&serde_json::to_vec(&running.key).expect("key serializes"));
+            call.head.headers.insert(
+                "idempotency-key",
+                HeaderValue::from_str(&key)
+                    .map_err(|_| Fault::internal("invalid operation key"))?,
+            );
+            call.body = running.bounded(call.body);
+            let mut response = running.guard(transport.send(call)).await?;
+            response.body = running.bounded(response.body);
+            response.write_completion = response
+                .write_completion
+                .map(|work| async move { running.guard(work).await }.boxed());
+            Ok(response)
+        }
+    })
+}
 
 /// Runs each keyed request once. Register it after the plugin that marks
 /// zero-retention requests, and before any that edits the request or takes
@@ -150,15 +268,50 @@ impl<S: Store> Plugin for Idempotent<S> {
         // The body as it came: the bytes the client's conversation came in.
         let chat = cx.input::<Conversation>()?;
         let body = chat.came_in(cx.format()).map_or(&[][..], |o| &o.bytes);
-        let key = (tenant(cx), key.to_owned(), hash(body));
-        if let Claim::Done(replies) = self.0.claim(&key).await {
-            let replies = Arc::unwrap_or_clone(replies).into_iter().map(Ok);
-            return Ok(Some(Response::stream(stream::iter(replies))));
-        }
+        let key = (tenant(cx), key.to_owned(), digest(body));
+        let (owner, deadline) = match self.0.claim(&key).await? {
+            Claim::Done(replies) => {
+                let replies = Arc::unwrap_or_clone(replies).into_iter().map(Ok);
+                return Ok(Some(Response::stream(stream::iter(replies))));
+            }
+            Claim::Run(owner, deadline) => (owner, deadline),
+        };
         // In the extensions first, so `on_client_end` releases it whatever follows.
         let sent = Arc::default();
-        let running = Running(key, Arc::clone(&sent));
-        cx.extensions_mut().insert(running);
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let lease = deadline.map(watch::channel);
+        let running = Running {
+            key: key.clone(),
+            sent: Arc::clone(&sent),
+            owner,
+            stop: Arc::new(Mutex::new(Some(stop))),
+            deadline: lease.as_ref().map(|(_, receiver)| receiver.clone()),
+        };
+        cx.extensions_mut().insert(running.clone());
+        cx.wrap(move |outputs: respan_gateway_core::Events<Reply>| {
+            running.bounded(outputs.boxed())
+        })?;
+        if let (Some(interval), Some((renewed, _))) = (self.0.heartbeat(), lease) {
+            let store = self.0.clone();
+            tokio::spawn(async move {
+                loop {
+                    let previous = *renewed.borrow();
+                    let next = async {
+                        tokio::time::sleep(interval).await;
+                        store.renew(&key, owner).await
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = &mut stopped => return,
+                        result = tokio::time::timeout_at(previous, next) => match result {
+                            Ok(Ok(until)) if until > Instant::now() => { renewed.send_replace(until); },
+                            _ => break,
+                        },
+                    }
+                }
+                renewed.send_replace(Instant::now());
+            });
+        }
         cx.filter(move |reply: &mut Reply| {
             locked(&sent).push(reply.clone());
             Ok(())
@@ -167,22 +320,27 @@ impl<S: Store> Plugin for Idempotent<S> {
     }
 
     async fn on_client_end(&self, cx: &ClientContext, end: &Result<(), Fault>) {
-        let Some(Running(key, sent)) = cx.extensions().get::<Running>() else {
+        let Some(running) = cx.extensions().get::<Running>() else {
             return;
         };
-        let result = end.is_ok().then(|| locked(sent).clone().into());
-        self.0.finish(key, result).await;
+        let live = running
+            .deadline
+            .as_ref()
+            .is_none_or(|deadline| *deadline.borrow() > Instant::now());
+        let result = (end.is_ok() && live).then(|| locked(&running.sent).clone().into());
+        locked(&running.stop).take();
+        let _ = self.0.finish(&running.key, running.owner, result).await;
     }
 }
 
 const OPENAI: &str = "http://openai.test/v1";
 
-fn gateway(mock: &MockTransport, store: &Arc<Memory>) -> Result<Gateway, Fault> {
+fn gateway<S: Store>(mock: &MockTransport, store: &Arc<S>) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
+            respan_gateway_http::connect(supervised(mock.at(OPENAI))),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("idempotent", Idempotent(store.clone()))?
@@ -218,7 +376,9 @@ const ACME: &str = "Bearer acme-key";
 async fn main() -> Result<(), Fault> {
     let mock = MockTransport::new();
     mock.reply(OPENAI, mock::sse(STREAM));
-    let gw = gateway(&mock, &Arc::default())?;
+    let path = std::env::var("JOBS_DB").unwrap_or_else(|_| "jobs.sqlite3".into());
+    let store = Arc::new(Sqlite::open(path)?);
+    let gw = gateway(&mock, &store)?;
     println!("first:\n{}", send(&gw, keyed(ACME, "op-1", BODY)).await?);
     println!("retry:\n{}", send(&gw, keyed(ACME, "op-1", BODY)).await?);
     println!("provider calls: {}", mock.sent().len());

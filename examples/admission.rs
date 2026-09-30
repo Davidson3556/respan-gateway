@@ -5,23 +5,27 @@
 //!
 //! Within a priority, end users share fairly: the queue is round-robin over
 //! users (`x-user` here; your auth plugin in practice), each with its own
-//! first-come queue. A user with fifty requests parked gets one slot, then
-//! the next user gets one, so a heavy user cannot starve a light one.
+//! first-come queue. Configured weights give a user several turns per round;
+//! equal weights give ordinary round-robin. Priority is considered first.
 //!
 //! The slot is held until the request ends, its response included, and
 //! released in `on_client_end`: core keeps a request's context until its
 //! end hooks run. A request that leaves while parked just drops out.
 //!
-//! Not covered: weighted shares (a user's share is one turn in the ring); a
-//! limit per user on how many requests may park; a queue shared by several
-//! gateway processes.
+//! `Slots::open` shares the queue across processes using a SQLite file.
+//! Renewable leases recover capacity after a crash. Live requests stop when
+//! renewal fails, including while waiting for a provider head; capacity is
+//! reclaimed after a grace period. Already-dispatched upstream computation
+//! cannot be recalled. The database file needs local SQLite-compatible locks.
+//! The default in-memory store uses the same scheduling rules.
 //!
 //! `cargo run -p respan-gateway-examples --example admission`
 
-use respan_gateway_formats::conversation::Conversation;
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
+use respan_gateway_core::futures::{future::BoxFuture, stream::BoxStream};
+use respan_gateway_examples::admission::{Slot, Slots};
+use respan_gateway_formats::conversation::{Conversation, Reply};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
@@ -30,91 +34,76 @@ use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
-use tokio::sync::oneshot;
 use tokio::time::Instant;
-
-/// A counting semaphore whose waiters are served by priority, then by user
-/// in turn, then in order. Clones share it.
-#[derive(Clone)]
-struct Slots(Arc<Mutex<Queue>>);
-
-/// One user's waiters, earliest first.
-type Line = VecDeque<oneshot::Sender<Slot>>;
-
-struct Queue {
-    free: usize,
-    /// Highest priority first; in each, the users in the order of their turns.
-    waiting: BTreeMap<Reverse<u8>, VecDeque<(String, Line)>>,
-}
-
-/// A slot held; dropped, it goes to the next waiter. One sent to a waiter
-/// that just gave up is dropped with the channel, so it is never lost.
-struct Slot(Slots);
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        self.0.release();
-    }
-}
-
-impl Slots {
-    fn new(free: usize) -> Self {
-        let waiting = BTreeMap::new();
-        Self(Arc::new(Mutex::new(Queue { free, waiting })))
-    }
-
-    fn queue(&self) -> MutexGuard<'_, Queue> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// A slot for `user`, waiting until `deadline` at most.
-    async fn acquire(&self, priority: u8, user: &str, deadline: Instant) -> Option<Slot> {
-        let woken = {
-            let mut q = self.queue();
-            if q.free > 0 && q.waiting.is_empty() {
-                q.free -= 1;
-                return Some(Slot(self.clone()));
-            }
-            let (wake, woken) = oneshot::channel();
-            let ring = q.waiting.entry(Reverse(priority)).or_default();
-            match ring.iter_mut().find(|(name, _)| name == user) {
-                Some((_, line)) => line.push_back(wake),
-                None => ring.push_back((user.to_owned(), VecDeque::from([wake]))),
-            }
-            woken
-        };
-        tokio::time::timeout_at(deadline, woken).await.ok()?.ok()
-    }
-
-    fn release(&self) {
-        let mut q = self.queue();
-        // The first user of the best priority has the turn; waiters that
-        // gave up are skipped. A user with more waiting goes to the back.
-        while let Some(mut tier) = q.waiting.first_entry() {
-            let Some((user, mut line)) = tier.get_mut().pop_front() else {
-                tier.remove();
-                continue;
-            };
-            while let Some(wake) = line.pop_front() {
-                if wake.is_closed() {
-                    continue;
-                }
-                if !line.is_empty() {
-                    tier.get_mut().push_back((user, line));
-                }
-                drop(q);
-                // Refused, the slot drops and is released again.
-                let _ = wake.send(Slot(self.clone()));
-                return;
-            }
-        }
-        q.free += 1;
-    }
-}
 
 /// The request's slot, taken back at its end.
 #[derive(Clone)]
 struct Held(Arc<Mutex<Option<Slot>>>);
+
+impl Held {
+    fn lost(&self) -> BoxFuture<'static, ()> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|slot| slot.lost().boxed())
+            .unwrap_or_else(|| std::future::ready(()).boxed())
+    }
+}
+
+async fn guarded<T>(
+    held: &Held,
+    work: impl std::future::Future<Output = Result<T, Fault>>,
+) -> Result<T, Fault> {
+    tokio::select! {
+        biased;
+        _ = held.lost() => Err(Fault::new("busy", "admission lease expired").with(Status(429))),
+        result = work => result,
+    }
+}
+
+fn bounded<T: Send + 'static>(
+    input: BoxStream<'static, Result<T, Fault>>,
+    held: Held,
+) -> BoxStream<'static, Result<T, Fault>> {
+    stream::unfold((input, false), move |(mut input, ended)| {
+        let held = held.clone();
+        async move {
+            if ended {
+                return None;
+            }
+            let next = guarded(&held, async { input.next().await.transpose() }).await;
+            match next {
+                Ok(Some(value)) => Some((Ok(value), (input, false))),
+                Ok(None) => None,
+                Err(fault) => Some((Err(fault), (input, true))),
+            }
+        }
+    })
+    .boxed()
+}
+
+/// Keep lease loss observable while opening a provider or transferring bytes.
+fn supervised(
+    transport: impl Into<respan_gateway_http::Transport>,
+) -> respan_gateway_http::Transport {
+    let transport = transport.into();
+    respan_gateway_http::Transport::new(move |mut call| {
+        let transport = transport.clone();
+        async move {
+            let Some(held) = call.extensions.get::<Held>().cloned() else {
+                return transport.send(call).await;
+            };
+            call.body = bounded(call.body, held.clone());
+            let mut response = guarded(&held, transport.send(call)).await?;
+            response.body = bounded(response.body, held.clone());
+            response.write_completion = response
+                .write_completion
+                .map(|writing| async move { guarded(&held, writing).await }.boxed());
+            Ok(response)
+        }
+    })
+}
 
 /// Admits each request into `slots`: `x-tier: paid` first, waiting up to
 /// `paid`; others up to `free`.
@@ -135,19 +124,26 @@ impl Plugin for Admission {
         let user = asked.and_then(|a| a.headers.get("x-user")?.to_str().ok());
         let user = user.unwrap_or_default().to_owned();
         let until = Instant::now() + wait;
-        let Some(slot) = self.slots.acquire(priority, &user, until).await else {
+        let Some(slot) = self.slots.acquire(priority, &user, until).await? else {
             let busy = "every slot is busy; retry later";
             let fault = Fault::new("busy", busy).with(Status(429));
             return Err(fault.with_retry_after(Duration::from_secs(1)));
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));
+        let monitoring = held.clone();
+        cx.wrap(move |outputs: respan_gateway_core::Events<Reply>| {
+            bounded(outputs.boxed(), monitoring)
+        })?;
         cx.extensions_mut().insert(held);
         Ok(None)
     }
 
     async fn on_client_end(&self, cx: &ClientContext, _end: &Result<(), Fault>) {
         if let Some(Held(slot)) = cx.extensions().get::<Held>() {
-            slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            let slot = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+            if let Some(slot) = slot {
+                let _ = slot.release().await;
+            }
         }
     }
 }
@@ -166,7 +162,7 @@ fn gateway(mock: &MockTransport, slots: &Slots, free: Duration) -> Result<Gatewa
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
+            respan_gateway_http::connect(supervised(mock.at(OPENAI))),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("admission", admission)?
@@ -185,7 +181,7 @@ fn request(model: &str, tier: &'static str) -> http::Request<respan_gateway_http
 async fn main() -> Result<(), Fault> {
     let mock = MockTransport::new();
     mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
-    let gw = gateway(&mock, &Slots::new(1), Duration::from_millis(200))?;
+    let gw = gateway(&mock, &Slots::new(1)?, Duration::from_millis(200))?;
     // The only slot is held while this response is unread.
     let (held, _) = serve(&gw, request("a", "paid")).await;
     let (status, headers, _) = read_whole(serve(&gw, request("b", "free")).await.0).await;
