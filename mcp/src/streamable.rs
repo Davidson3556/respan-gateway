@@ -31,6 +31,10 @@ use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, reques
 pub const SESSION: &str = "mcp-session-id";
 
 const NAME: &str = "mcp";
+// Output provenance includes wire framing: a rebuilt response may be written
+// with a different content type than the provider answer it collected.
+const JSON_ORIGIN: &str = "mcp/json";
+const SSE_ORIGIN: &str = "mcp/sse";
 const JSON: &str = "application/json";
 const SSE: &str = "text/event-stream";
 
@@ -164,16 +168,18 @@ fn response_events(
         return stream::empty().boxed();
     }
     let (head, body) = answer.into_parts();
-    let on_message = |raw: Bytes, out: &mut Vec<ToClient>| {
+    let is_event = sse::is_stream(&head);
+    let origin = Arc::from(if is_event { SSE_ORIGIN } else { JSON_ORIGIN });
+    let on_message = move |raw: Bytes, out: &mut Vec<ToClient>| {
         if !raw.is_empty() {
             let mut output = ToClient::new(Vec::new());
             (output.messages, output.batch) = read(&raw).unwrap_or_default();
-            output.origin = Relayed::came(&Arc::from(NAME), raw, output.clone());
+            output.origin = Relayed::came(&origin, raw, output.clone());
             out.push(output);
         }
         Ok(())
     };
-    let inner = if sse::is_stream(&head) {
+    let inner = if is_event {
         sse::read(
             body,
             (),
@@ -243,19 +249,19 @@ fn response_body(
 
 /// An output as an event: its bytes while it says the same.
 fn event(output: &ToClient) -> Bytes {
-    if let Some(bytes) = output.origin.bytes(NAME, output) {
+    if let Some(bytes) = output.origin.bytes(SSE_ORIGIN, output) {
         return bytes.clone();
     } else if output.messages.is_empty() {
         return Bytes::new();
     }
-    let like = output.origin.came_in(NAME).map(|o| &o.bytes);
+    let like = output.origin.came_in(SSE_ORIGIN).map(|o| &o.bytes);
     sse::event_as(like, None, body(&output.messages, output.batch)).into()
 }
 
 /// Outputs as one JSON body: the one's bytes while it says the same.
 fn whole(outputs: &[ToClient]) -> Bytes {
     if let [one] = outputs
-        && let Some(bytes) = one.origin.bytes(NAME, one)
+        && let Some(bytes) = one.origin.bytes(JSON_ORIGIN, one)
     {
         return bytes.clone();
     }

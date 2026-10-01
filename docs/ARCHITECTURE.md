@@ -530,6 +530,13 @@ decoding reuse framing/parser operations directly, never blocking on an async
 stream. This permits stored-response conversion inside synchronous database
 transactions.
 
+Per-message raw-byte reuse must also match the destination framing. A fresh
+plugin-created response can retain a value's origin without retaining the
+original response's transfer metadata. MCP therefore distinguishes JSON and SSE
+origins privately: unchanged same-framing output stays byte-exact, while a
+framing change serializes the parsed messages instead of reusing incompatible
+wire bytes.
+
 The response reader receives the actual sent request head and initial bytes,
 not the original client request. This matters for rewritten correlation IDs
 and protocol framing. Client negotiation and refusal formatting still use the
@@ -604,4 +611,5 @@ boundaries. Build public documentation with
 | Synchronous raw/value/live preparation, explicit response opening and offline encoding | HTTP binding and framing tests; formats and custom-format examples. |
 | Edited usage totals, SSE envelopes and bounded content provenance | Provider unit tests and `translate`; text filtering suites. |
 | Supported text/tool block order and explicit failure for unrepresentable finish reasons | Provider unit tests and generated-mock `translate` cases. |
+| JSON/SSE reframing without incompatible raw-byte reuse | MCP integration tests and provider unit tests. |
 | WS backpressure, closure and handshake behavior | WebSocket integration, Axum adapter and HTTP driver tests. |

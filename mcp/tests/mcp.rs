@@ -15,7 +15,7 @@ use respan_gateway_http::{
 use respan_gateway_mcp::{
     Owner, SESSION, StdioTransport, StreamableHttp, TIMED_OUT, ToClient, ToServer,
 };
-use respan_gateway_sdk::futures::stream;
+use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
 use respan_gateway_sdk::{async_trait, codes};
 use serde_json::{Value, json};
@@ -234,6 +234,63 @@ data: {"jsonrpc":"2.0","id":1,"result":{"edited":true}}
     assert_eq!(sse, format!(": hi\n\n{edited}"));
 }
 
+/// A plugin-created response has no provider response head; the format must
+/// choose the client's framing rather than copying the value's original wire.
+struct Rebuild;
+
+#[async_trait]
+impl Plugin for Rebuild {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let outputs = cx
+            .call("mcp")
+            .await?
+            .outputs::<ToClient>()
+            .collect::<Vec<_>>()
+            .await;
+        Ok(Some(Response::stream(stream::iter(outputs))))
+    }
+}
+
+#[tokio::test]
+async fn a_rebuilt_sse_answer_is_json_when_posted() {
+    let mock = ScriptedMcp::new();
+    let event = "id: 7\ndata: {\"jsonrpc\":\"2.0\", \"id\":1,\"result\":{}}\n\n";
+    mock.reply(sse(&[event]));
+    let gw = gateway(mock.connect(), None)
+        .plugin("rebuild", Rebuild)
+        .expect("rebuild plugin");
+    let (status, headers, body, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[CONTENT_TYPE], "application/json");
+    assert_eq!(
+        messages(&body),
+        [json!({"jsonrpc":"2.0","id":1,"result":{}})]
+    );
+    assert!(!body.contains("data:"), "{body}");
+    assert!(outcome.is_ok());
+}
+
+#[tokio::test]
+async fn a_rebuilt_json_answer_is_framed_for_get() {
+    let mock = ScriptedMcp::new();
+    mock.reply(json_reply(
+        StatusCode::OK,
+        r#"{"jsonrpc":"2.0", "method":"notifications/message"}"#,
+    ));
+    let gw = gateway(mock.connect(), None)
+        .plugin("rebuild", Rebuild)
+        .expect("rebuild plugin");
+    let (status, headers, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[CONTENT_TYPE], "text/event-stream");
+    assert_eq!(
+        messages(&body),
+        [json!({"jsonrpc":"2.0","method":"notifications/message"})]
+    );
+    assert!(body.starts_with(": stream\n\ndata: "), "{body}");
+    assert!(outcome.is_ok());
+}
+
 #[tokio::test]
 async fn a_batch_answer_is_complete_only_once_every_id_is_answered() {
     let batch = r#"[{"jsonrpc":"2.0","id":1,"method":"a"},{"jsonrpc":"2.0","id":2,"method":"b"}]"#;
@@ -366,6 +423,134 @@ async fn an_mcp_servers_error_is_written_as_a_json_rpc_error() {
     assert_eq!(
         (status, &body[..]),
         (StatusCode::INTERNAL_SERVER_ERROR, own)
+    );
+}
+
+type RefusalEntry = (String, bool, bool, String, Option<Duration>);
+
+#[derive(Clone, Default)]
+struct RefusalProbe(Arc<Mutex<Vec<RefusalEntry>>>);
+
+#[async_trait]
+impl Plugin for RefusalProbe {
+    async fn on_provider_end(
+        &self,
+        px: &respan_gateway_sdk::ProviderContext,
+        end: &Result<(), Fault>,
+    ) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).push((
+            px.provider().to_owned(),
+            px.is_sent(),
+            px.is_refused(),
+            end.as_ref().err().map_or("ok", Fault::code).to_owned(),
+            end.as_ref().err().and_then(Fault::retry_after),
+        ));
+    }
+}
+
+struct Fallback;
+
+#[async_trait]
+impl Plugin for Fallback {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let mut first = cx.call("first").await?;
+        if first.until_end().await.is_err() {
+            return cx.call("second").await.map(Some);
+        }
+        Ok(Some(first))
+    }
+}
+
+#[tokio::test]
+async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_back() {
+    let failed = ScriptedMcp::new();
+    let event = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+    let mut refusal = sse(&[event]);
+    *refusal.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    refusal
+        .headers_mut()
+        .insert("retry-after", http::HeaderValue::from_static("7"));
+    failed.reply(refusal);
+    let probe = RefusalProbe::default();
+    let gw = gateway(failed.clone().connect(), None)
+        .plugin("probe", probe.clone())
+        .expect("probe plugin");
+    let (status, headers, body, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
+    gw.idle().await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(headers["retry-after"], "7");
+    assert_eq!(body, event);
+    assert_eq!(
+        outcome.expect_err("provider refusal").code(),
+        codes::UPSTREAM
+    );
+    assert_eq!(failed.sent().len(), 1);
+    assert_eq!(
+        *probe.0.lock().unwrap_or_else(PoisonError::into_inner),
+        [(
+            "mcp".to_owned(),
+            true,
+            true,
+            codes::UPSTREAM.to_owned(),
+            Some(Duration::from_secs(7))
+        )]
+    );
+
+    let first = ScriptedMcp::new();
+    let second = ScriptedMcp::new();
+    let mut refusal = sse(&[event]);
+    *refusal.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    refusal
+        .headers_mut()
+        .insert("retry-after", http::HeaderValue::from_static("7"));
+    first.reply(refusal);
+    second.reply(json_reply(
+        StatusCode::OK,
+        r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+    ));
+    let probe = RefusalProbe::default();
+    let gw = Gateway::new()
+        .client::<ToServer, _, _>(StreamableHttp::default())
+        .expect("client")
+        .provider::<ToServer, _, _>("first", StreamableHttp::default(), first.clone().connect())
+        .expect("first")
+        .provider::<ToServer, _, _>(
+            "second",
+            StreamableHttp::default(),
+            second.clone().connect(),
+        )
+        .expect("second")
+        .plugin("fallback", Fallback)
+        .expect("fallback")
+        .plugin("probe", probe.clone())
+        .expect("probe");
+    let (status, _, body, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
+    gw.idle().await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        messages(&body),
+        [json!({"jsonrpc":"2.0","id":1,"result":{}})]
+    );
+    assert!(outcome.is_ok());
+    assert_eq!((first.sent().len(), second.sent().len()), (1, 1));
+    let events = probe
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert!(
+        events.contains(&(
+            "first".to_owned(),
+            true,
+            true,
+            codes::UPSTREAM.to_owned(),
+            Some(Duration::from_secs(7))
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.contains(&("second".to_owned(), true, false, "ok".to_owned(), None)),
+        "{events:?}"
     );
 }
 
