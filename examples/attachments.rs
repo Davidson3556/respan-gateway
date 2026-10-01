@@ -87,6 +87,10 @@ fn fake_pdf_to_text(base64: &str) -> Result<String, Fault> {
 /// Poppler runs outside the gateway process and is killed on timeout or
 /// cancellation. Input and extracted text are bounded independently.
 async fn extract_pdf(encoded: &str, limit: usize) -> Result<String, Fault> {
+    extract_pdf_with("pdftotext", encoded, limit).await
+}
+
+async fn extract_pdf_with(converter: &str, encoded: &str, limit: usize) -> Result<String, Fault> {
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let bytes = STANDARD
@@ -95,7 +99,7 @@ async fn extract_pdf(encoded: &str, limit: usize) -> Result<String, Fault> {
     if !bytes.starts_with(b"%PDF-") {
         return Err(Fault::bad_request("not a PDF"));
     }
-    let mut child = tokio::process::Command::new("pdftotext")
+    let mut child = tokio::process::Command::new(converter)
         .args(["-enc", "UTF-8", "-", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

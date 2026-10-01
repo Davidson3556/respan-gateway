@@ -4,6 +4,80 @@ use serde_json::Value;
 #[path = "../live/test.rs"]
 mod support;
 use support::*;
+#[tokio::test]
+async fn production_shutdown_closes_active_socket_and_settles_before_exit() {
+    use futures::SinkExt;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("ws://{}", provider.local_addr().unwrap());
+    let scripted = tokio::spawn(async move {
+        let (socket, _) = provider.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let _request = socket.next().await.unwrap().unwrap();
+        socket
+            .send(Message::Text(
+                json!({"type":"response.in_progress"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        while let Some(Ok(message)) = socket.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    });
+    let sessions = configured(1_000_000);
+    let observed = sessions.clone();
+    let gw = gateway(WsTransport::new(upstream).unwrap(), sessions).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        serve::serve_until(gw, listener, async move {
+            let _ = shutdown.await;
+        })
+        .await
+    });
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}{PATH}"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({"type":"response.create","input":"x"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(reply, Message::Text(_)), "{reply:?}");
+    stop.send(()).unwrap();
+    let closing = tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap();
+    assert!(
+        closing.is_none() || matches!(closing, Some(Ok(Message::Close(_)))),
+        "{closing:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.ledger.spent("demo"), budget::QUOTE);
+    assert_eq!(budget::lock(&observed.completed)[0]["status"], "cut");
+    tokio::time::timeout(Duration::from_secs(3), scripted)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 fn configured(balance: i64) -> Sessions {
     let ledger = MemoryLedger::new();
     ledger.open("demo", None, balance);

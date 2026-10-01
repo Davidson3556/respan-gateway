@@ -422,6 +422,23 @@ async fn cached_text_survives_reopening_and_can_be_deleted_per_tenant() -> Resul
     Ok(())
 }
 
+#[tokio::test]
+async fn extractor_rejects_invalid_input_and_reports_missing_poppler() {
+    let missing = "/this/path/has/no/pdftotext";
+    let bad_base64 = extract_pdf_with(missing, "!not-base64!", 1024)
+        .await
+        .expect_err("converter must reject invalid input or be unavailable");
+    assert_eq!(bad_base64.code(), "bad_request");
+    let not_pdf = extract_pdf_with(missing, &STANDARD.encode("plain text"), 1024)
+        .await
+        .expect_err("converter must reject invalid input or be unavailable");
+    assert_eq!(not_pdf.code(), "bad_request");
+    let unavailable = extract_pdf_with(missing, &pdf_document("hello"), 1024)
+        .await
+        .expect_err("converter must reject invalid input or be unavailable");
+    assert_eq!(unavailable.code(), "config");
+}
+
 /// A small real PDF with a complete cross-reference table.
 fn pdf_document(text: &str) -> String {
     let content = format!("BT /F1 12 Tf 10 100 Td ({text}) Tj ET");

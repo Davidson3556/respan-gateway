@@ -9,7 +9,9 @@
 //!
 //! `cargo run -p respan-gateway-examples --example local_proxy` runs offline
 //! against a one-response fixture; add `-- --serve 127.0.0.1:8080` to listen for real, then
-//! `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude`.
+//! `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude`. Set
+//! `RESPAN_ANTHROPIC_UPSTREAM=http://127.0.0.1:PORT` to use a local provider
+//! instead of the default Anthropic upstream.
 
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
@@ -82,19 +84,39 @@ fn gateway(
         .target("anthropic")
 }
 
+fn serve_address(args: &[String]) -> Result<Option<&str>, &'static str> {
+    match args {
+        [] => Ok(None),
+        [flag, address] if flag == "--serve" && !address.is_empty() => Ok(Some(address)),
+        _ => Err("usage: local_proxy [--serve ADDRESS]"),
+    }
+}
+
+fn upstream_gateway(upstream: &str) -> Result<Gateway, Fault> {
+    // No `with_headers`: each request carries the developer's own key.
+    gateway(HttpClient::new(upstream)?.connect())
+}
+
+async fn serve_upstream(
+    listener: tokio::net::TcpListener,
+    gw: Gateway,
+) -> Result<(), std::io::Error> {
+    axum::serve(listener, router(gw)).await
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(addr) = args
-        .iter()
-        .position(|a| a == "--serve")
-        .and_then(|i| args.get(i + 1))
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(addr) = serve_address(&args)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?
     {
-        // No `with_headers`: each request carries the developer's own key.
-        let gw = gateway(HttpClient::new(ANTHROPIC)?.connect())?;
+        let upstream =
+            std::env::var("RESPAN_ANTHROPIC_UPSTREAM").unwrap_or_else(|_| ANTHROPIC.to_owned());
+        let gw = upstream_gateway(&upstream)?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        println!("listening on {addr}; ANTHROPIC_BASE_URL=http://{addr}");
-        axum::serve(listener, router(gw)).await?;
+        let bound = listener.local_addr()?;
+        println!("listening on {bound}; ANTHROPIC_BASE_URL=http://{bound}");
+        serve_upstream(listener, gw).await?;
         return Ok(());
     }
     let sent = Sent::default();

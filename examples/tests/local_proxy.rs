@@ -1,5 +1,76 @@
 use super::*;
 
+#[test]
+fn invalid_serve_arguments_fail_instead_of_running_the_offline_demo() {
+    let args = |parts: &[&str]| {
+        parts
+            .iter()
+            .map(|part| (*part).to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(serve_address(&[]), Ok(None));
+    assert_eq!(
+        serve_address(&args(&["--serve", "127.0.0.1:8080"])),
+        Ok(Some("127.0.0.1:8080"))
+    );
+    for parts in [
+        vec!["--serve"],
+        vec!["--serve", ""],
+        vec!["--serve", "127.0.0.1:8080", "extra"],
+        vec!["--unknown"],
+        vec!["127.0.0.1:8080"],
+    ] {
+        assert!(serve_address(&args(&parts)).is_err(), "{parts:?}");
+    }
+}
+
+#[test]
+fn malformed_upstream_is_rejected_before_binding_or_announcing_readiness() {
+    let Err(error) = upstream_gateway("not-a-url") else {
+        panic!("malformed upstream must fail");
+    };
+    assert_eq!(error.code(), "config");
+}
+
+#[tokio::test]
+async fn serve_mode_uses_local_upstream_and_relays_client_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    use mockllm::{Answer, FakeAnthropic};
+    let provider = FakeAnthropic::start().await;
+    let reply = r#"{"id":"m1","type":"message","role":"assistant","model":"test","content":[{"type":"text","text":"local reply"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+    provider.answer(Answer::raw(reply));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let gw = upstream_gateway(&provider.base_url())?;
+    let server = tokio::spawn(async move { serve_upstream(listener, gw).await });
+    let request = r#"{"model":"test","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}"#;
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?
+        .post(format!("http://{addr}/v1/messages"))
+        .header("x-api-key", "sk-ant-test")
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .body(request)
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await?, reply);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/messages");
+    assert_eq!(&requests[0].raw[..], request.as_bytes());
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok()),
+        Some("sk-ant-test")
+    );
+    server.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn credentials_beta_headers_and_unknown_fields_pass_untouched() -> Result<(), Fault> {
     let sent = Sent::default();
