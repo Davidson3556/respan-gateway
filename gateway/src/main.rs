@@ -77,6 +77,7 @@ fn http(
 #[tokio::main]
 async fn main() -> ExitCode {
     let mut config_path = "gateway.yaml".to_owned();
+    let mut explicit_config = false;
     let mut check_only = false;
     // `proxy`: which vendor (true for Anthropic), its URL, where to listen.
     let (mut proxy, mut vendor, mut url, mut listen) = (false, None, None, None);
@@ -84,7 +85,10 @@ async fn main() -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" | "-c" => match args.next() {
-                Some(p) => config_path = p,
+                Some(p) => {
+                    config_path = p;
+                    explicit_config = true;
+                }
                 None => return fail(USAGE),
             },
             "check" => check_only = true,
@@ -108,6 +112,10 @@ async fn main() -> ExitCode {
             }
             _ => return fail(USAGE),
         }
+    }
+
+    if proxy && explicit_config {
+        return fail("proxy cannot be used with --config; proxy builds its own configuration");
     }
 
     let loaded = match (proxy, vendor) {

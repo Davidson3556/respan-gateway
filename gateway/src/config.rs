@@ -1,6 +1,7 @@
 //! The YAML config: providers, the formats served, plugins in order, and
 //! the default target.
 
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use respan_gateway_http::{Incoming, Outgoing};
 use respan_gateway_plugins::ModelRouter;
-use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::{
     ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
@@ -75,6 +76,7 @@ type Connect = Arc<dyn Fn(Extensions) -> Outgoing + Send + Sync>;
 /// provider that speaks it or serve its clients.
 pub struct KnownFormat {
     pub name: String,
+    kind: (TypeId, TypeId),
     pub provider: fn(Gateway, String, Connect) -> Result<Gateway, Fault>,
     pub serve: fn(Gateway) -> Result<Gateway, Fault>,
 }
@@ -89,6 +91,7 @@ impl KnownFormat {
     {
         Self {
             name: <F as Format<Incoming, I, O>>::name(&F::default()).to_owned(),
+            kind: (TypeId::of::<I>(), TypeId::of::<O>()),
             provider: |gateway, name, transport| {
                 gateway.provider::<I, O, _>(name, F::default(), move |extensions| {
                     transport(extensions)
@@ -145,13 +148,21 @@ impl Config {
                     "no plugin given; compiled-in plugins: [models]",
                 )));
             };
-            // An unknown provider in a route fails here, not per request.
-            if let Some(m) = models
-                .iter()
-                .find(|m| !self.providers.contains_key(&m.provider))
-            {
-                let unknown = format!("unknown provider '{}'", m.provider);
-                return Err(bad(Fault::config(unknown)));
+            // ModelRouter reads Conversation; its targets must accept that kind.
+            for m in models {
+                let Some(provider) = self.providers.get(&m.provider) else {
+                    return Err(bad(Fault::config(format!(
+                        "unknown provider '{}'",
+                        m.provider
+                    ))));
+                };
+                let kind = format(&provider.format, &format!("provider '{}'", m.provider))?.kind;
+                if kind != (TypeId::of::<Conversation>(), TypeId::of::<Reply>()) {
+                    return Err(bad(Fault::config(format!(
+                        "provider '{}' uses format '{}', incompatible with conversation models routes",
+                        m.provider, provider.format
+                    ))));
+                }
             }
             let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
             let router = models.iter().fold(router, |router, m| {

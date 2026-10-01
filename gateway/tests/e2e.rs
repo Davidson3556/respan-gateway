@@ -933,6 +933,65 @@ async fn sigterm_finishes_an_open_stream_then_exits() {
     assert!(client().get(gw.url("/")).send().await.is_err());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_cuts_a_stream_still_open_at_the_shutdown_deadline() {
+    let openai = FakeOpenAi::start().await;
+    let mut gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    // The first event opens the response; the next is delayed beyond the
+    // binary's 30-second shutdown deadline.
+    openai.answer(script(&OPENAI_STREAM[1..]).pace(60_000));
+    // The client must outlive the server deadline: its own timeout must not
+    // masquerade as a server-induced truncation.
+    let mut resp = client()
+        .post(gw.url(CHAT))
+        .header(OPENAI_KEY.0, OPENAI_KEY.1)
+        .body(openai_request(r#", "stream":true"#))
+        .timeout(std::time::Duration::from_secs(50))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let first = tokio::time::timeout(support::BOUND, resp.chunk())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!first.is_empty());
+
+    let pid = gw.child.id().unwrap().to_string();
+    let start = tokio::time::Instant::now();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = tokio::time::timeout(std::time::Duration::from_secs(38), gw.child.wait())
+        .await
+        .expect("the binary must exit after the 30-second shutdown deadline")
+        .unwrap();
+    assert!(status.success(), "{status}");
+    assert!(start.elapsed() >= std::time::Duration::from_secs(28));
+    let mut body = first.to_vec();
+    let ended = tokio::time::timeout(support::BOUND, async {
+        while let Some(chunk) = resp.chunk().await? {
+            body.extend_from_slice(&chunk);
+        }
+        Ok::<_, reqwest::Error>(())
+    })
+    .await
+    .expect("the response must end after the server exits");
+    let error = ended.expect_err("the server must cut the unfinished HTTP body");
+    assert!(
+        !error.is_timeout(),
+        "the client timed out instead: {error:?}"
+    );
+    let body = String::from_utf8_lossy(&body);
+    assert!(!body.contains("data: [DONE]"), "{body}");
+}
+
 // The binary's command line.
 
 #[test]
@@ -1122,6 +1181,50 @@ async fn proxy_relays_codex_the_responses_api_stream_byte_exact() {
 }
 
 #[test]
+fn models_cannot_route_conversations_to_a_passthrough_provider() {
+    let config = support::write_config(
+        "providers:
+  chat: { format: openai-chat, base_url: 'http://127.0.0.1:1/v1' }
+  any: { format: passthrough, base_url: 'http://127.0.0.1:1' }
+serve: [openai-chat, passthrough]
+plugins:
+  - name: models
+    models: [{ prefix: gpt, provider: any }]
+target: chat
+",
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        .args(["--config", config.to_str().unwrap(), "check"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("plugin 'models'"), "{error}");
+    assert!(error.contains("provider 'any'"), "{error}");
+    assert!(error.contains("passthrough"), "{error}");
+    assert!(error.contains("conversation"), "{error}");
+}
+
+#[test]
+fn proxy_rejects_explicit_config_in_either_argument_order() {
+    let config = support::write_config("serve: []\n");
+    let path = config.to_str().unwrap();
+    for args in [
+        vec!["--config", path, "proxy", "--openai", "--listen", "invalid"],
+        vec!["proxy", "--anthropic", "-c", path, "--listen", "invalid"],
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert!(error.contains("--config"), "{args:?}: {error}");
+        assert!(error.contains("proxy"), "{args:?}: {error}");
+    }
+}
+
+#[test]
 fn proxy_without_a_vendor_or_with_a_bad_address_is_a_usage_error() {
     let bin = env!("CARGO_BIN_EXE_respan-gateway");
     for args in [
@@ -1129,6 +1232,9 @@ fn proxy_without_a_vendor_or_with_a_bad_address_is_a_usage_error() {
         &["proxy", "--anthropic", "--listen", "nowhere"],
         &["proxy", "--anthropic", "check", "--listen"],
         &["proxy", "--openai", "check", "--url"],
+        &["proxy", "--openai", "--anthropic"],
+        &["--config"],
+        &["-c"],
     ] {
         let out = std::process::Command::new(bin).args(args).output().unwrap();
         assert!(!out.status.success(), "{args:?}");
