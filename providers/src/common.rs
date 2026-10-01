@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{RequestHead, ResponseHead, Status, bodiless};
+use respan_gateway_http::{
+    Status, bodiless, http::request::Parts as RequestHead, http::response::Parts as ResponseHead,
+};
 use respan_gateway_sdk::Fault;
 use serde_json::{self, Map, Value, json};
 

@@ -184,7 +184,7 @@ async fn response_json_split_across_frames_is_mapped_whole() -> Result<(), Fault
         async move {
             let (response, completion) = west.send(call).await?;
             let response = response.map(|body| {
-                respan_gateway_http::into_http_body(
+                respan_gateway_http::Body::stream(
                     body.flat_map(|frame| {
                         let pieces = match frame {
                             Ok(bytes) => bytes
@@ -606,7 +606,7 @@ async fn an_echoed_id_is_mapped_back_within_its_own_tenant() -> Result<(), Fault
             .method("POST")
             .uri("/v1/responses")
             .header("authorization", format!("Bearer {key}"))
-            .body(full(body.to_owned()))
+            .body(respan_gateway_http::Body::full(body.to_owned()))
             .expect("a request")
     };
     let (east, west) = deployments().await?;

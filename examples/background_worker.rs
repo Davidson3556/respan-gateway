@@ -49,7 +49,7 @@ impl Jobs {
             return Ok(());
         };
         let mut req = http::Request::post(uri)
-            .body(full(body))
+            .body(respan_gateway_http::Body::full(body))
             .map_err(built_wrong)?;
         let headers: Vec<(String, Vec<u8>)> =
             serde_json::from_str(&headers).map_err(|e| Fault::internal(e.to_string()))?;

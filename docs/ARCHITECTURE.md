@@ -8,6 +8,10 @@ to these contracts must update this document and their tests together.
 
 ## Design constraints
 
+- **RC-like core stability.** The core is half-frozen: its public contracts are
+  stable by default. Changes require a demonstrated correctness issue or an
+  unavoidable contract gap, not an outer-layer cleanup. Preserve compatibility
+  where possible and update the contract documentation and tests together.
 - **Feature-neutral kernel.** Routing policy, fallback, guardrails, redaction,
   caching, logging and accounting belong outside the core. Do not add kernel
   traits or types named after features. The kernel does not count usage or
@@ -476,9 +480,23 @@ and sinks. Protocol callbacks choose paths, headers, parsing, success predicates
 and refusal formatting; plugins decide which decoded events count as content.
 Each body has fresh framing state.
 
+HTTP structure and byte storage use `http` and `bytes` directly: request/response
+builders, `http::request::Parts`, `http::response::Parts`, `Bytes` and `BytesMut`.
+Standard `http-body-util` adapters handle external body data streams.
+Converting an external body to a data stream intentionally discards trailers;
+HTTP gateway framing carries data only. There are no parallel head
+aliases or request/response conversion helpers. The gateway's `Body` retains
+only the distinctions needed for inspectable finite bytes, initial-prefix
+snapshots and upload ownership; it implements the standard HTTP body contract.
+Boxing an arbitrary body is not a substitute for its synchronous finite-byte
+access during preparation.
+
 `Incoming` owns a request and its response handoff. Ordinary HTTP requests are
-collected before opening and decoded lazily. Explicitly live/message inputs
-remain streaming; network chunk boundaries never select semantic input shape.
+collected before opening and decoded lazily. Collection copies each streamed
+frame into `BytesMut` and releases it before polling again, allowing producers
+to recycle their buffers; finite bodies retain their clone-only fast path.
+Explicitly live/message inputs remain streaming; network chunk boundaries never
+select semantic input shape.
 The read callback returns an `EventStream`, so an advanced protocol can supply
 its own parser instead of using the common message reader.
 
@@ -536,7 +554,11 @@ handshakes wait for the selected response's opening, so provider refusal
 can still be delivered before upgrade. A provider's non-success response
 is classified before its incoming stream opens; a later stream failure is
 not a refusal. Status, close codes, framing, redirects, pings and keys are
-protocol concerns.
+protocol concerns. Outbound WebSocket handshake refusals are collected before
+handoff so malformed or incomplete bodies fail rather than relay a partial
+answer. Standard `http-body-util::Limited` enforces a hard 1 MiB body limit;
+exceeding it fails as `upstream`. The existing 10-second handshake deadline
+includes this collection. Neither bound applies to an upgraded live session.
 
 A relayed WebSocket uses one provider call and one pair of live event streams.
 A WS-to-SSE bridge reads application inputs and makes a separate call per

@@ -28,7 +28,7 @@ use respan_gateway_http::formats::opaque::{self, Got, Sent};
 
 use respan_gateway_http::Encoder;
 use respan_gateway_http::formats::set_path;
-use respan_gateway_http::{Asked, Completion, Incoming, Outgoing, fresh_response_head};
+use respan_gateway_http::{Asked, Completion, Incoming, Outgoing};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::conversation::{Conversation, Message, Reply, Role};
@@ -304,7 +304,10 @@ impl Echo {
             let v: Value = serde_json::from_slice(&frame).unwrap_or_default();
             Bytes::from(json!({ "heard": v["say"] }).to_string())
         });
-        let mut resp = http::Response::from_parts(fresh_response_head(), Body::stream(echoed));
+        let mut resp = http::Response::from_parts(
+            respan_gateway_http::http::Response::new(()).into_parts().0,
+            Body::stream(echoed),
+        );
         if head.headers.contains_key(UPGRADE) {
             *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
             let websocket = HeaderValue::from_static("websocket");
@@ -422,7 +425,7 @@ impl OpenAiFixture {
                         .unwrap_or_else(|p| p.into_inner())
                         .pop_front()
                         .ok_or_else(|| Fault::upstream("unexpected chat call"))?;
-                    let mut head = fresh_response_head();
+                    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
                     head.headers.insert(
                         http::header::CONTENT_TYPE,
                         HeaderValue::from_static(if streamed {
@@ -792,7 +795,10 @@ impl Early {
             }
         });
         let empty = futures::stream::empty::<Result<Bytes, Fault>>();
-        let mut resp = http::Response::from_parts(fresh_response_head(), Body::stream(empty));
+        let mut resp = http::Response::from_parts(
+            respan_gateway_http::http::Response::new(()).into_parts().0,
+            Body::stream(empty),
+        );
         *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
         let websocket = HeaderValue::from_static("websocket");
         resp.headers_mut().insert(UPGRADE, websocket);
@@ -1305,8 +1311,10 @@ async fn a_101_goes_only_to_a_request_that_asked() {
 
     impl Switches {
         pub async fn send(&self, _call: http::Request<Body>) -> WireResult {
-            let mut resp =
-                http::Response::from_parts(fresh_response_head(), Body::full(Bytes::new()));
+            let mut resp = http::Response::from_parts(
+                respan_gateway_http::http::Response::new(()).into_parts().0,
+                Body::full(Bytes::new()),
+            );
             *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
             Ok((resp, None))
         }
@@ -1609,7 +1617,7 @@ async fn a_head_request_to_an_endless_stream_gets_its_head() {
 async fn a_calls_empty_bodyless_response_ends_ok() {
     let calls = Calls::default();
     let empty = sender(|_call| async {
-        let mut head = fresh_response_head();
+        let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
         head.status = StatusCode::NO_CONTENT;
         Ok((
             http::Response::from_parts(head, Body::full(Bytes::new())),

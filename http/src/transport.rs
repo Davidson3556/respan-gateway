@@ -5,7 +5,7 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
-use http::{HeaderMap, HeaderValue};
+use http::{HeaderMap, HeaderValue, request::Parts as RequestHead};
 use respan_gateway_sdk::{Extensions, Fault};
 
 use crate::credential::{Credential, is_credential, take_protocol_keys, take_query};
@@ -140,7 +140,7 @@ pub fn credentials(call: &mut http::Request<crate::Body>, headers: &HeaderMap) {
 
 /// [`credentials`] for a call of `head` and `extensions`, `relayed` or not.
 pub(crate) fn keys(
-    head: &mut crate::RequestHead,
+    head: &mut RequestHead,
     extensions: &Extensions,
     relayed: bool,
     headers: &HeaderMap,
@@ -180,7 +180,6 @@ pub(crate) fn keys(
 mod tests {
 
     use super::*;
-    use crate::RequestHead;
 
     fn head(headers: &[(&'static str, &'static str)]) -> http::request::Parts {
         let mut req = http::Request::new(());

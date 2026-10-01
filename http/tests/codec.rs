@@ -123,9 +123,9 @@ impl Format<Outgoing, Out, In> for Msg {
         Ok(io.bind(
             "msg",
             |source: &mut EventStream<In>| {
-                let mut head = respan_gateway_http::formats::call_head(
-                    respan_gateway_http::request_head("msg", source),
-                );
+                let mut head = respan_gateway_http::request_head("msg", source)
+                    .cloned()
+                    .unwrap_or_else(|| http::Request::new(()).into_parts().0);
                 let raw = respan_gateway_http::raw_body("msg", source).cloned();
                 if raw.is_none()
                     && let Some(value) = source.value().transpose()?
@@ -252,7 +252,7 @@ impl Echo {
             seen.lock().map(|mut s| s.push(noted)).ok();
             frame
         });
-        let mut resp = respan_gateway_http::fresh_response_head();
+        let mut resp = respan_gateway_http::http::Response::new(()).into_parts().0;
         if head.headers.contains_key(UPGRADE) {
             resp.status = StatusCode::SWITCHING_PROTOCOLS;
         }
@@ -451,7 +451,7 @@ fn response(
     kind: &'static str,
     frames: Vec<Result<Bytes, Fault>>,
 ) -> http::Response<Body> {
-    let mut head = respan_gateway_http::fresh_response_head();
+    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
     head.status = status;
     head.headers
         .insert(http::header::CONTENT_TYPE, HeaderValue::from_static(kind));

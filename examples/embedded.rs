@@ -62,7 +62,7 @@ async fn ask(
         .map_err(respan_gateway_http::built_wrong)?
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
-    let request = http::Request::from_parts(head, respan_gateway_http::into_http_body(body));
+    let request = http::Request::from_parts(head, respan_gateway_http::Body::stream(body));
     let (wire, answer) = respan_gateway_http::Incoming::accept(request, false);
     let handled = gw.handle(wire, Extensions::new());
     let consume = async {

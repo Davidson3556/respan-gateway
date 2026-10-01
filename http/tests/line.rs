@@ -131,9 +131,11 @@ fn line_outputs(
 
 /// A call's head as Line writes it: the client's, or a fresh one, at `/line`.
 fn line_head(
-    client: Option<&respan_gateway_http::RequestHead>,
-) -> respan_gateway_http::RequestHead {
-    let mut head = respan_gateway_http::formats::call_head(client);
+    client: Option<&respan_gateway_http::http::request::Parts>,
+) -> respan_gateway_http::http::request::Parts {
+    let mut head = client
+        .cloned()
+        .unwrap_or_else(|| http::Request::new(()).into_parts().0);
     respan_gateway_http::formats::set_path(&mut head, "/line");
     head
 }
@@ -272,7 +274,7 @@ impl Script {
         let (status, frames) = lock(&self.0).pop_front().expect("scripted");
         let frames =
             futures::stream::iter(frames).map(|f| Ok::<_, Fault>(Bytes::from_static(f.as_bytes())));
-        let mut head = respan_gateway_http::fresh_response_head();
+        let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
         head.status = status;
         Ok((http::Response::from_parts(head, Body::stream(frames)), None))
     }
@@ -1305,9 +1307,9 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Pa
         Ok(io.bind(
             "pathed",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let mut head = respan_gateway_http::formats::call_head(
-                    respan_gateway_http::request_head("pathed", source),
-                );
+                let mut head = respan_gateway_http::request_head("pathed", source)
+                    .cloned()
+                    .unwrap_or_else(|| http::Request::new(()).into_parts().0);
                 let model = if source.is_single() {
                     source.value().expect("single input")?.0.as_str()
                 } else {

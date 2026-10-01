@@ -183,13 +183,13 @@ where
 async fn stall(_: http::Request<Body>) -> Answered {
     let first = stream::iter([Ok(Bytes::from(ROLE))]);
     let body = first.chain(stream::pending()).boxed();
-    let mut head = respan_gateway_http::fresh_response_head();
+    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
     head.headers.insert(
         http::header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
     Ok((
-        http::Response::from_parts(head, respan_gateway_http::into_http_body(body)),
+        http::Response::from_parts(head, respan_gateway_http::Body::stream(body)),
         None,
     ))
 }
@@ -203,13 +203,13 @@ async fn dribble(_: http::Request<Body>) -> Answered {
         stream::iter([frame(STOP), frame(DONE)])
     });
     let body = first.chain(rest.flatten()).boxed();
-    let mut head = respan_gateway_http::fresh_response_head();
+    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
     head.headers.insert(
         http::header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
     Ok((
-        http::Response::from_parts(head, respan_gateway_http::into_http_body(body)),
+        http::Response::from_parts(head, respan_gateway_http::Body::stream(body)),
         None,
     ))
 }

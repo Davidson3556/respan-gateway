@@ -59,7 +59,12 @@ async fn raw_skips_semantic_encoding_but_finalizes_and_prefix_is_one_initial_bod
                 panic!("raw relay must stay lazy")
             })
         },
-        |reply, source: &mut EventStream<u8>| Ok(reply.empty(h::fresh_response_head(), source)),
+        |reply, source: &mut EventStream<u8>| {
+            Ok(reply.empty(
+                respan_gateway_http::http::Response::new(()).into_parts().0,
+                source,
+            ))
+        },
         h::plain_refusal,
     );
     let mut source = read.await.expect("expected value");
@@ -138,10 +143,13 @@ async fn empty_does_not_encode_and_open_keeps_prefix_through_decorator() {
             |request| h::messages(request, |_, _| Ok(0_u8)),
             move |reply, source| {
                 let sink = if empty {
-                    reply.empty(h::fresh_response_head(), source)
+                    reply.empty(
+                        respan_gateway_http::http::Response::new(()).into_parts().0,
+                        source,
+                    )
                 } else {
                     reply.open(
-                        h::fresh_response_head(),
+                        respan_gateway_http::http::Response::new(()).into_parts().0,
                         Bytes::from_static(b"prefix:"),
                         Box::new(encode),
                     )

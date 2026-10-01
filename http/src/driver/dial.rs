@@ -3,12 +3,13 @@
 use super::reader::Observation;
 use super::upload::Upload;
 use super::{RequestMetadata, ResponseMetadata};
-use crate::{Body, Completion, RequestHead, ResponseHead};
+use crate::{Body, Completion};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{Future, FutureExt, Stream, stream};
+use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
 use respan_gateway_sdk::{Connection, EventSink, EventStream, Extensions, Fault};
 use std::pin::Pin;
 use std::sync::Arc;

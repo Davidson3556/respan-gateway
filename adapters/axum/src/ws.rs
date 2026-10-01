@@ -14,7 +14,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{body_of, http_body, http_body_util};
+use respan_gateway_http::{http_body, http_body_util};
 use respan_gateway_sdk::futures::channel::{mpsc, oneshot};
 use respan_gateway_sdk::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_sdk::futures::{SinkExt, StreamExt, TryStreamExt};
@@ -118,7 +118,14 @@ pub async fn serve_ws_until(
         ws = ws.protocols([chosen.to_str().unwrap_or_default().to_owned()]);
     }
     let mut upgraded = ws
-        .on_upgrade(move |socket| pump(socket, input, body_of(body), Box::pin(until)))
+        .on_upgrade(move |socket| {
+            pump(
+                socket,
+                input,
+                body.into_data_stream().boxed(),
+                Box::pin(until),
+            )
+        })
         .into_response();
     // The provider's other headers go with the upgrade; the handshake's are axum's.
     let own = |name: &HeaderName| {

@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use respan_gateway_sdk::Fault;
 
 use crate::{
-    Body, Completion, Outgoing, credentials, from_response, is_connection_header, proxy_call,
+    Body, Completion, Outgoing, credentials, is_connection_header, proxy_call,
     strip_client_origin_headers, strip_origin_headers,
 };
 
@@ -136,8 +136,8 @@ impl HttpClient {
                 false => Fault::upstream("the provider could not be reached").with_source(e),
             })?;
         let broke = |e| Fault::upstream("the provider's body broke off").with_source(e);
-        let resp = http::Response::from(resp).map(|body| body.map_err(broke));
-        let mut resp = from_response(resp);
+        let mut resp = http::Response::from(resp)
+            .map(|body| Body::stream(body.map_err(broke).into_data_stream()));
         strip_origin_headers(resp.headers_mut());
         Ok((resp, None))
     }

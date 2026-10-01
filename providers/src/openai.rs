@@ -2,7 +2,10 @@
 //! conversation kind.
 
 use bytes::{Bytes, BytesMut};
-use respan_gateway_http::{Body, Incoming, Outgoing, RequestHead, ResponseHead};
+use respan_gateway_http::{
+    Body, Incoming, Outgoing, http::request::Parts as RequestHead,
+    http::response::Parts as ResponseHead,
+};
 use respan_gateway_http::{bytes, http};
 use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
@@ -176,7 +179,7 @@ impl Format<Incoming, Conversation, Reply> for OpenAiChat {
         OPENAI
     }
     fn matches(&self, io: &Incoming) -> bool {
-        let mut head = respan_gateway_http::fresh_request_head();
+        let mut head = respan_gateway_http::http::Request::new(()).into_parts().0;
         head.method = io.request().method().clone();
         head.uri = io.request().uri().clone();
         self.accepts(&head)

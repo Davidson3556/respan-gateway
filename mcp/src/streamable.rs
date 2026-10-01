@@ -16,7 +16,9 @@ use respan_gateway_http::formats::{self as formats, sse, whole::Relay};
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
-use respan_gateway_http::{self as h, Body, Incoming, Outgoing, ResponseHead, bodiless};
+use respan_gateway_http::{
+    self as h, Body, Incoming, Outgoing, bodiless, http::response::Parts as ResponseHead,
+};
 use respan_gateway_sdk::futures::stream::BoxStream;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::relayed::Relayed;
@@ -113,7 +115,9 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
                         "a call in mcp carries one body, not streamed inputs",
                     ));
                 }
-                let mut head = formats::call_head(h::request_head(NAME, source));
+                let mut head = h::request_head(NAME, source)
+                    .cloned()
+                    .unwrap_or_else(|| Request::new(()).into_parts().0);
                 if h::raw_body(NAME, source).is_none() {
                     formats::body_changed(&mut head);
                     if let Some(value) = source.value() {

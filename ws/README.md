@@ -71,8 +71,11 @@ A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
 - A provider's refusal of the upgrade (a 401) is a complete answer: the
   provider edge reads its body before the gateway answers, and on a relay the
   client gets the provider's status and body as they came. An incomplete or malformed
-  refusal body fails as `truncated`. `serve_ws` writes
-  it whole and sized, not chunked.
+  refusal body fails as `truncated`. Refusal bodies have a hard **1 MiB** limit,
+  enforced during collection with `http-body-util::Limited`; exceeding it fails
+  as `upstream`, never as a successful partial answer. The handshake's 10 s
+  deadline includes collection. `serve_ws` writes accepted refusals whole and
+  sized, not chunked.
 - No reconnection or session resumption.
 
 ## Design notes

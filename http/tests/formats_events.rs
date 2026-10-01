@@ -20,7 +20,7 @@ use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::opaque::{self, Got, Sent};
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::{Body, HttpClient, Incoming, Outgoing, connect, fresh_response_head};
+use respan_gateway_http::{Body, HttpClient, Incoming, Outgoing, connect};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::conversation::{Conversation, Reply, units};
@@ -146,7 +146,7 @@ fn local(
             sent.lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(Bytes::from(body));
-            let mut head = fresh_response_head();
+            let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
             head.status = status;
             head.headers
                 .insert("content-type", HeaderValue::from_static(mime));

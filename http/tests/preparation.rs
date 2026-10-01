@@ -21,7 +21,7 @@ async fn preparation_failure(opening: Opening, panic: bool) {
         "preparation",
         |_| Ok(EventStream::single(String::new())),
         move |reply, source: &mut EventStream<u8>| {
-            let head = h::fresh_response_head();
+            let head = respan_gateway_http::http::Response::new(()).into_parts().0;
             let encoder = h::formats::each(|_: &u8| Ok(Bytes::new()));
             let _sink = match opening {
                 Opening::Delayed => reply.write(head, encoder),
@@ -108,7 +108,7 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
             |_| Ok(EventStream::single(String::new())),
             move |reply, source: &mut EventStream<u8>| {
                 drop(answer);
-                let head = h::fresh_response_head();
+                let head = respan_gateway_http::http::Response::new(()).into_parts().0;
                 Ok(if explicit_empty {
                     reply.empty(head, source)
                 } else {

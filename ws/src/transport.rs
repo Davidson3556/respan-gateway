@@ -8,7 +8,9 @@ use std::time::Duration;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
-use respan_gateway_http::{Body, Completion, full};
+use respan_gateway_http::http_body::Frame;
+use respan_gateway_http::http_body_util::{BodyExt, LengthLimitError, Limited, StreamBody};
+use respan_gateway_http::{Body, Completion};
 use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
@@ -29,6 +31,9 @@ use crate::{CLOSE_WAIT, CloseCode, MAX_MESSAGE};
 use respan_gateway_http::Frames;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+// A non-upgrade answer must be complete before handoff so malformed wire
+// responses fail the call; cap that eager read independently of refusal parsing.
+const MAX_REFUSAL_BODY: usize = 1 << 20;
 
 type Socket = WebSocketStream<reqwest::Upgraded>;
 
@@ -254,7 +259,7 @@ impl WsTransport {
         call = http::Request::from_parts(head, body);
         credentials(&mut call, &self.headers);
         let (head, body) = call.into_parts();
-        let body = respan_gateway_http::body_of(body);
+        let body = body.into_data_stream().boxed();
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
         let mut req = format!("{}{path}", self.base)
             .into_client_request()
@@ -274,19 +279,28 @@ impl WsTransport {
                 .send()
                 .await
                 .map_err(|e| Fault::upstream("the provider could not be reached").with_source(e))?;
-            let mut head = respan_gateway_http::fresh_response_head();
+            let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
             head.status = resp.status();
             head.version = resp.version();
             head.headers = resp.headers().clone();
             if head.status != StatusCode::SWITCHING_PROTOCOLS {
-                let body = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| Fault::truncated().with_source(e))?;
                 head.headers.remove(header::TRANSFER_ENCODING);
                 head.headers.remove(header::CONTENT_LENGTH);
                 strip_origin_headers(&mut head.headers);
-                return Ok((http::Response::from_parts(head, full(body)), None));
+                let body = StreamBody::new(resp.bytes_stream().map(|chunk| chunk.map(Frame::data)));
+                let bytes = Limited::new(body, MAX_REFUSAL_BODY)
+                    .collect()
+                    .await
+                    .map_err(|error| {
+                        if error.is::<LengthLimitError>() {
+                            Fault::upstream("the provider's WebSocket refusal body is too large")
+                                .with_source(error)
+                        } else {
+                            Fault::truncated().with_source(error)
+                        }
+                    })?
+                    .to_bytes();
+                return Ok((http::Response::from_parts(head, Body::full(bytes)), None));
             }
             validate_upgrade(&expected, &head.headers)?;
             let upgraded = resp.upgrade().await.map_err(|e| {
@@ -652,6 +666,130 @@ mod tests {
                 dropped.load(Ordering::SeqCst),
                 "unread upload was cancelled"
             );
+            server.join().expect("handshake server");
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_non_upgrade_answer_times_out_before_handoff() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local handshake server");
+        let address = listener.local_addr().expect("local address");
+        let (release, released) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("receive handshake");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("read timeout");
+            let mut headers = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let n = socket.read(&mut chunk).expect("read handshake");
+                assert!(n > 0 && headers.len() + n < 16 * 1024);
+                headers.extend_from_slice(&chunk[..n]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 1000000\r\nX-Provider: original\r\n\r\npartial")
+                .expect("write partial refusal");
+            // Keep the advertised body incomplete even through the deadline.
+            released
+                .recv_timeout(CONNECT_TIMEOUT + Duration::from_secs(3))
+                .expect("release server");
+        });
+        let transport = WsTransport::new(format!("ws://{address}")).expect("transport");
+        let request = http::Request::get("/events")
+            .body(Body::full(Bytes::new()))
+            .expect("request");
+        let fault = tokio::time::timeout(
+            CONNECT_TIMEOUT + Duration::from_secs(2),
+            transport.send(request),
+        )
+        .await
+        .expect("incomplete refusal must stop at the connection deadline")
+        .err()
+        .expect("incomplete refusal must fail before handoff");
+        assert_eq!(fault.code(), "upstream");
+        release.send(()).expect("release server");
+        server.join().expect("handshake server");
+    }
+
+    #[tokio::test]
+    async fn refusal_body_accepts_exact_limit_and_rejects_oversize_before_handoff() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        for (chunks, advertised) in [(32, MAX_REFUSAL_BODY), (34, 10_000_000)] {
+            let too_large = chunks > 32;
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local handshake server");
+            let address = listener.local_addr().expect("local address");
+            let (release, released) = mpsc::channel();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().expect("receive handshake");
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .expect("read timeout");
+                let mut headers = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let n = socket.read(&mut chunk).expect("read handshake");
+                    assert!(n > 0 && headers.len() + n < 16 * 1024);
+                    headers.extend_from_slice(&chunk[..n]);
+                }
+                let head = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: {advertised}\r\nX-Provider: original\r\n\r\n"
+                );
+                socket
+                    .write_all(head.as_bytes())
+                    .expect("write refusal head");
+                for _ in 0..chunks {
+                    if let Err(error) = socket.write_all(&[b'x'; 32 * 1024]) {
+                        assert!(
+                            too_large
+                                && matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::BrokenPipe
+                                        | std::io::ErrorKind::ConnectionReset
+                                ),
+                            "unexpected refusal write error: {error}"
+                        );
+                        break;
+                    }
+                }
+                if too_large {
+                    // Neither the advertised 10 MB nor the response EOF is sent.
+                    released
+                        .recv_timeout(Duration::from_secs(3))
+                        .expect("release server");
+                }
+            });
+            let transport = WsTransport::new(format!("ws://{address}")).expect("transport");
+            let request = http::Request::get("/events")
+                .body(Body::full(Bytes::new()))
+                .expect("request");
+            let answer = tokio::time::timeout(Duration::from_secs(2), transport.send(request))
+                .await
+                .expect("refusal must settle without an unbounded read");
+            if too_large {
+                let fault = answer
+                    .err()
+                    .expect("oversize body must fail before handoff");
+                assert_eq!(fault.code(), "upstream");
+                assert!(fault.message().contains("too large"));
+                release.send(()).expect("release server");
+            } else {
+                let (response, completion) = answer.expect("exact-limit body is accepted");
+                assert!(completion.is_none());
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert_eq!(response.headers()["x-provider"], "original");
+                let body = response.into_body();
+                let bytes = body.full_bytes().expect("complete response is finite");
+                assert_eq!(bytes.len(), MAX_REFUSAL_BODY);
+                assert!(bytes.iter().all(|b| *b == b'x'));
+            }
             server.join().expect("handshake server");
         }
     }

@@ -2,12 +2,11 @@
 
 use super::writer::Writer;
 use super::{End, PANICKED, RequestMetadata, Written};
-use crate::{
-    Body, Encoder, Frames, ResponseHead, Unwritten, answered, bodiless, fresh_response_head, plain,
-};
+use crate::{Body, Encoder, Frames, Unwritten, answered, bodiless, plain};
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
-use futures::{FutureExt, Sink, StreamExt};
+use futures::{FutureExt, Sink, TryStreamExt};
+use http::response::Parts as ResponseHead;
 use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
@@ -248,7 +247,7 @@ impl Reply {
         EventSink::new(client)
     }
     fn failure<T: 'static>(self, fault: Fault, plain: bool) -> EventSink<T> {
-        let mut client = Client::new(self, fresh_response_head(), None);
+        let mut client = Client::new(self, http::Response::new(()).into_parts().0, None);
         if plain {
             client.unwritable(fault);
         } else {
@@ -258,15 +257,17 @@ impl Reply {
     }
 }
 
-async fn read_whole(mut body: Body) -> Result<Bytes, Fault> {
+async fn read_whole(body: Body) -> Result<Bytes, Fault> {
     if let Some(bytes) = body.full_bytes() {
         return Ok(bytes.clone());
     }
-    let mut all = BytesMut::new();
-    while let Some(bytes) = body.next().await {
-        all.extend_from_slice(&bytes?);
-    }
-    Ok(all.freeze())
+    // Release each frame before polling again: a producer may recycle its buffer.
+    body.try_fold(BytesMut::new(), |mut all, frame| {
+        all.extend_from_slice(&frame);
+        futures::future::ready(Ok(all))
+    })
+    .await
+    .map(BytesMut::freeze)
 }
 
 struct Client<T> {
@@ -317,7 +318,7 @@ impl<T: 'static> Client<T> {
             .publish((response, end));
     }
     fn refuse(&mut self, fault: Fault) {
-        let mut head = fresh_response_head();
+        let mut head = http::Response::new(()).into_parts().0;
         let answer = answered(&self.reply.name, &fault, &mut head);
         let bytes = std::panic::catch_unwind(AssertUnwindSafe(|| {
             answer.unwrap_or_else(|| (self.reply.refuse)(&fault, &self.reply.request, &mut head))

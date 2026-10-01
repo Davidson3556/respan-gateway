@@ -46,7 +46,7 @@ use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::formats::opaque::Got;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Asked, Body, Credential, HttpClient, built_wrong, full};
+use respan_gateway_http::{Asked, Body, Credential, HttpClient, built_wrong};
 use respan_gateway_sdk::futures::{TryStreamExt, future, stream};
 use respan_gateway_sdk::{
     ClientContext, EventStream, Extensions, Fault, Gateway, Plugin, Response, async_trait,
@@ -693,7 +693,7 @@ fn request(method: &str, path: &str, body: &str) -> http::Request<Body> {
         .method(method)
         .uri(path)
         .header("authorization", "Bearer tenant-key")
-        .body(full(body.to_owned()))
+        .body(respan_gateway_http::Body::full(body.to_owned()))
         .expect("a request")
 }
 

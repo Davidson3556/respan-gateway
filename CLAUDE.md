@@ -5,6 +5,9 @@ is being designed.
 
 ## Hard rules
 
+- Treat the core as half-frozen, like a release candidate: preserve its public
+  contracts by default. Changes need a demonstrated correctness issue or an
+  unavoidable contract gap, not merely an outer-layer cleanup.
 - Read `docs/ARCHITECTURE.md` before changing the core.
 - The core is feature-neutral. Never add a trait or type named after a
   feature to the core crate.

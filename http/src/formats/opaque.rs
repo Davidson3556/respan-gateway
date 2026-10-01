@@ -4,10 +4,10 @@
 //!
 use std::marker::PhantomData;
 
-use crate::{Body, Encoder, Incoming, Outgoing, Reply, RequestHead, bodiless};
+use crate::{Body, Encoder, Incoming, Outgoing, Reply, bodiless};
 use futures::{StreamExt, stream::BoxStream};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::http::{self, StatusCode};
+use respan_gateway_http::http::{self, StatusCode, request::Parts as RequestHead};
 use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format};
 
 /// A request's message in format `F`, as the client sent it.
@@ -193,8 +193,8 @@ mod tests {
 
     #[tokio::test]
     async fn bytes_pass_as_they_came() {
-        let head = respan_gateway_http::fresh_response_head();
-        let call = respan_gateway_http::fresh_request_head();
+        let head = http::Response::new(()).into_parts().0;
+        let call = http::Request::new(()).into_parts().0;
         let got: Vec<_> = read_response::<Raw>(
             "raw",
             http::Response::from_parts(head, Body::full("a")),
@@ -215,7 +215,7 @@ mod tests {
     async fn a_101_no_one_asked_for_fails_the_call() {
         let (mut head, ()) = http::Response::new(()).into_parts();
         head.status = StatusCode::SWITCHING_PROTOCOLS;
-        let call = respan_gateway_http::fresh_request_head();
+        let call = http::Request::new(()).into_parts().0;
         let fault = read_response::<Raw>(
             "raw",
             http::Response::from_parts(head, Body::full("a")),

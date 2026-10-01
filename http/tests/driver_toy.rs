@@ -13,8 +13,8 @@ use bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, Completion, Encoder, Frames, Incoming, Outgoing, RequestHead, fresh_request_head,
-    fresh_response_head, http,
+    Body, Completion, Encoder, Frames, Incoming, Outgoing, http,
+    http::request::Parts as RequestHead,
 };
 use respan_gateway_sdk::futures::channel::mpsc;
 use respan_gateway_sdk::futures::future::{self, BoxFuture};
@@ -84,7 +84,7 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
                 }
             },
             move |reply, source| {
-                let mut head = fresh_response_head();
+                let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
                 head.status = StatusCode::from_u16(toy.answers.unwrap_or(200)).unwrap();
                 let _ = source;
                 Ok(reply.write(head, Box::new(RespEnc)))
@@ -373,7 +373,7 @@ fn send(tx: &Upload, text: &'static str) {
 }
 
 fn ask() -> RequestHead {
-    let mut head = fresh_request_head();
+    let mut head = respan_gateway_http::http::Request::new(()).into_parts().0;
     head.method = http::Method::POST;
     head
 }
@@ -708,7 +708,7 @@ async fn a_refusal_no_codec_can_write_keeps_its_body_even_to_a_head() {
     let gw = Gateway::new().client::<In, _, _>(toy).unwrap();
     for method in [http::Method::POST, http::Method::HEAD] {
         let req = http::Request::builder().method(method.clone()).uri("/x");
-        let req = req.body(respan_gateway_http::full("q")).unwrap();
+        let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
         let (resp, _) = respan_gateway_http::serve(&gw, req).await;
         let got = read(Some(resp)).await.unwrap();
         assert_eq!(got.0, 500, "{method}");
@@ -763,7 +763,7 @@ async fn a_bodiless_answer_ends_with_its_client() {
         });
         let (gw, calls, _) = gateway_of(Toy::default(), transport);
         let req = http::Request::builder().method(method.clone()).uri("/x");
-        let req = req.body(respan_gateway_http::full("q")).unwrap();
+        let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
         let (resp, _ended) = respan_gateway_http::serve(&gw, req).await;
         assert_eq!(resp.status(), 200);
         drop(resp); // the client leaves
@@ -790,7 +790,7 @@ async fn a_bodiless_answer_whose_end_is_not_ready_ends_abandoned() {
     let req = http::Request::builder()
         .method(http::Method::HEAD)
         .uri("/x");
-    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
     let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     drop(resp);
@@ -949,7 +949,7 @@ async fn a_complete_bodiless_answer_ends_ok() {
     let req = http::Request::builder()
         .method(http::Method::HEAD)
         .uri("/x");
-    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
     let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let got = read(Some(resp)).await;
@@ -980,7 +980,7 @@ async fn a_complete_bodiless_answer_with_a_large_ready_body_ends_ok() {
     let req = http::Request::builder()
         .method(http::Method::HEAD)
         .uri("/x");
-    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
     let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let _ = read(Some(resp)).await;
@@ -1028,7 +1028,7 @@ fn a_bodiless_answer_whose_body_never_settles_does_not_hold_the_adapter() {
                     .method(http::Method::HEAD)
                     .uri("/x")
                     .header("upgrade", "websocket");
-                let req = req.body(respan_gateway_http::full("q")).unwrap();
+                let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
                 let (resp, _ended) = respan_gateway_http::serve(&gw, req).await;
                 resp.status()
             });
@@ -1066,7 +1066,7 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
                 return;
             }
             let mut job = http::Request::post("/x")
-                .body(respan_gateway_http::full("job"))
+                .body(respan_gateway_http::Body::full("job"))
                 .unwrap();
             let mut marked = Extensions::new();
             marked.insert(Job);
@@ -1086,7 +1086,7 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
         let (gw, _, _) = gateway_of(Toy::default(), transport);
         let gw = gw.plugin("detach", Detach(done.clone())).unwrap();
         let req = http::Request::post("/x")
-            .body(respan_gateway_http::full("q"))
+            .body(respan_gateway_http::Body::full("q"))
             .unwrap();
         let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
         let _ = BodyExt::collect(resp.into_body()).await;
@@ -1112,7 +1112,7 @@ async fn a_complete_bodiless_answer_of_many_ready_frames_ends_ok() {
     let req = http::Request::builder()
         .method(http::Method::HEAD)
         .uri("/x");
-    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
     let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let _ = read(Some(resp)).await;
@@ -1151,7 +1151,7 @@ async fn a_bodiless_answer_of_frames_sent_apart_ends_abandoned() {
     let req = http::Request::builder()
         .method(http::Method::HEAD)
         .uri("/x");
-    let req = req.body(respan_gateway_http::full("q")).unwrap();
+    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
     let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let _ = read(Some(resp)).await;
@@ -1193,7 +1193,7 @@ fn l6_an_endless_ready_bodiless_answer_never_holds_the_thread() {
             let req = http::Request::builder()
                 .method(http::Method::HEAD)
                 .uri("/x");
-            let req = req.body(respan_gateway_http::full("q")).unwrap();
+            let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
             let (resp, _ended) =
                 tokio::task::unconstrained(respan_gateway_http::serve(&gw, req)).await;
             let _ = tx.send(resp.status());

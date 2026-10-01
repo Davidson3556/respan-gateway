@@ -266,10 +266,10 @@ where
                     .map_err(|_| Fault::internal("invalid operation key"))?,
             );
             let call =
-                call.map(|body| respan_gateway_http::into_http_body(running.bounded(body.boxed())));
+                call.map(|body| respan_gateway_http::Body::stream(running.bounded(body.boxed())));
             let (response, completion) = running.guard(send(call)).await?;
             let response = response
-                .map(|body| respan_gateway_http::into_http_body(running.bounded(body.boxed())));
+                .map(|body| respan_gateway_http::Body::stream(running.bounded(body.boxed())));
             let completion =
                 completion.map(|writing| async move { running.guard(writing).await }.boxed());
             Ok((response, completion))

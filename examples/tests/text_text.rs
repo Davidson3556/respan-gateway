@@ -664,7 +664,7 @@ fn local(
         let chunks = chunks.clone();
         async move {
             call.into_body().try_collect::<Vec<_>>().await?;
-            let mut head = respan_gateway_http::fresh_response_head();
+            let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
             head.headers.insert(
                 "content-type",
                 HeaderValue::from_static("text/event-stream"),
@@ -672,7 +672,7 @@ fn local(
             Ok((
                 http::Response::from_parts(
                     head,
-                    respan_gateway_http::into_http_body(stream::iter(chunks).boxed()),
+                    respan_gateway_http::Body::stream(stream::iter(chunks).boxed()),
                 ),
                 None,
             ))

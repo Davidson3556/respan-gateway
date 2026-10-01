@@ -8,7 +8,9 @@ use respan_gateway_http::formats::{self as formats, whole};
 use respan_gateway_http::http::header::{CONNECTION, UPGRADE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
-use respan_gateway_http::{self as h, Body, Encoder, Incoming, Outgoing, RequestHead};
+use respan_gateway_http::{
+    self as h, Body, Encoder, Incoming, Outgoing, http::request::Parts as RequestHead,
+};
 use respan_gateway_sdk::futures::{StreamExt, stream::BoxStream};
 use respan_gateway_sdk::relayed::Relayed;
 use respan_gateway_sdk::{Connection, Fault, Format};
@@ -120,7 +122,7 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
 
     fn matches(&self, io: &Incoming) -> bool {
         let head = io.request();
-        let mut path = h::fresh_request_head();
+        let mut path = respan_gateway_http::http::Request::new(()).into_parts().0;
         path.uri = head.uri().clone();
         head.method() == Method::GET
             && head
@@ -187,7 +189,9 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
                     ));
                 }
                 let client = h::request_head(&writer_name, source);
-                let mut head = formats::call_head(client);
+                let mut head = client
+                    .cloned()
+                    .unwrap_or_else(|| Request::new(()).into_parts().0);
                 if client.is_none() {
                     head.method = Method::GET;
                     formats::set_path(&mut head, &path);

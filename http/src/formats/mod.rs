@@ -12,8 +12,8 @@ pub mod whole;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{
     self, HeaderValue, header::CONTENT_ENCODING, header::CONTENT_TYPE,
+    request::Parts as RequestHead, response::Parts as ResponseHead,
 };
-use respan_gateway_http::{RequestHead, ResponseHead};
 use respan_gateway_sdk::Fault;
 use serde_json::{self, Value};
 
@@ -141,21 +141,6 @@ pub fn set_path(head: &mut RequestHead, path: &str) {
 /// client's, goes.
 pub fn body_changed(head: &mut RequestHead) {
     head.headers.remove(CONTENT_ENCODING);
-}
-
-/// A call's head: the client's for a relay, else a fresh one.
-pub fn call_head(client: Option<&RequestHead>) -> RequestHead {
-    client
-        .cloned()
-        .unwrap_or_else(respan_gateway_http::fresh_request_head)
-}
-
-/// A response's head: the provider's for a response in the client's
-/// format, else a fresh `200`.
-pub fn response_head(answer: Option<&ResponseHead>) -> ResponseHead {
-    answer
-        .cloned()
-        .unwrap_or_else(respan_gateway_http::fresh_response_head)
 }
 
 /// Set a response's content type to `value` if it has none (RFC 9110 8.3).

@@ -46,13 +46,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::FutureExt;
 use futures::future::{BoxFuture, ready};
-use futures::{FutureExt, StreamExt, TryStreamExt};
 use http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
     RETRY_AFTER, SEC_WEBSOCKET_PROTOCOL, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
-use http::{HeaderMap, HeaderValue, Method, StatusCode};
+use http::{
+    HeaderMap, HeaderValue, Method, StatusCode, request::Parts as RequestHead,
+    response::Parts as ResponseHead,
+};
 use http_body_util::BodyExt;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::{Extensions, Fault, Gateway, codes};
@@ -91,61 +94,6 @@ pub use transport::{
     proxy_call, strip_client_origin_headers, strip_origin_headers,
 };
 pub use watchdog::watchdog;
-
-/// The head of an HTTP request.
-pub type RequestHead = http::request::Parts;
-
-/// The head of an HTTP response.
-pub type ResponseHead = http::response::Parts;
-
-/// A request head with nothing set: a `GET /`, for a format to fill.
-pub fn fresh_request_head() -> RequestHead {
-    http::Request::new(()).into_parts().0
-}
-
-/// A response head with nothing set: a `200`, for a format to fill.
-pub fn fresh_response_head() -> ResponseHead {
-    http::Response::new(()).into_parts().0
-}
-
-/// The [`Frames`] of an HTTP `body`: its data frames, trailers dropped.
-pub fn body_of<B>(body: B) -> Frames
-where
-    B: http_body::Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<Fault>,
-{
-    let frames = http_body_util::BodyStream::new(body.map_err(Into::into));
-    let data = frames.try_filter_map(|frame| futures::future::ready(Ok(frame.into_data().ok())));
-    data.boxed()
-}
-
-/// An HTTP [`Body`] of `body`'s frames, one data frame per item.
-pub fn into_http_body(body: Frames) -> Body {
-    Body::stream(body)
-}
-
-/// Complete bytes as an HTTP body.
-pub fn full(bytes: impl Into<Bytes>) -> Body {
-    Body::full(bytes)
-}
-
-/// Convert an external body to gateway wire frames, retaining native headers.
-pub fn from_request<B>(req: http::Request<B>) -> http::Request<Body>
-where
-    B: http_body::Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<Fault>,
-{
-    req.map(|body| Body::stream(body_of(body)))
-}
-
-/// Convert an external response body to gateway wire frames.
-pub fn from_response<B>(resp: http::Response<B>) -> http::Response<Body>
-where
-    B: http_body::Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<Fault>,
-{
-    resp.map(|body| Body::stream(body_of(body)))
-}
 
 /// Default HTTP success: 2xx, or a requested protocol switch.
 pub fn success(answer: &ResponseHead, call: &RequestHead) -> bool {
@@ -266,10 +214,7 @@ where
     B::Error: Into<Fault>,
 {
     let (Arrived { head, body, to }, extensions) = arrive(req);
-    let (wire, answer) = Incoming::accept(
-        http::Request::from_parts(head, Body::stream(body)),
-        streaming,
-    );
+    let (wire, answer) = Incoming::accept(http::Request::from_parts(head, body), streaming);
     let handled = gateway.handle(wire, extensions);
     async move {
         let (resp, ended) = match driver::drive(handled.boxed(), answer).await {
@@ -288,7 +233,7 @@ pub(crate) struct Unwritten;
 /// A request as the adapter hands it on, and what its answer needs of it.
 pub(crate) struct Arrived {
     pub(crate) head: RequestHead,
-    pub(crate) body: Frames,
+    pub(crate) body: Body,
     pub(crate) to: Asking,
 }
 
@@ -311,7 +256,7 @@ where
     let (mut head, body) = req.into_parts();
     let mut extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
     head.extensions = http::Extensions::new();
-    let body = body_of(body);
+    let body = Body::stream(body.map_err(Into::into).into_data_stream());
     let method = head.method.clone();
     let path = head.uri.path().to_owned();
     strip_hops(&mut head.headers, true);
@@ -392,7 +337,7 @@ pub(crate) fn depart(
                 // with its client (rule 4), never when a provider's stream
                 // does.
                 drain_ready(&mut body);
-                body = full(Bytes::new());
+                body = Body::default();
             }
             http::Response::from_parts(head, body)
         }
@@ -509,7 +454,7 @@ pub fn outgoing(head: &mut http::response::Parts) {
 /// `fault` as a text/plain response with its status and message, for what
 /// no format can write.
 pub fn plain(fault: &Fault) -> http::Response<Body> {
-    let mut resp = http::Response::new(full(fault.message().to_owned()));
+    let mut resp = http::Response::new(Body::full(fault.message().to_owned()));
     *resp.status_mut() = status(fault);
     let text = HeaderValue::from_static("text/plain; charset=utf-8");
     resp.headers_mut().insert(CONTENT_TYPE, text);
@@ -517,11 +462,13 @@ pub fn plain(fault: &Fault) -> http::Response<Body> {
 }
 
 /// Write `fault`'s status and retry, as `Retry-After` in whole seconds, into
-/// `head`: a format's refusal.
+/// `head`: a format's refusal. Fractional seconds round up, saturating at `u64::MAX`.
 pub fn error_head(head: &mut http::response::Parts, fault: &Fault) {
     head.status = status(fault);
     if let Some(wait) = fault.retry_after() {
-        let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+        let secs = wait
+            .as_secs()
+            .saturating_add(u64::from(wait.subsec_nanos() > 0));
         head.headers.insert(RETRY_AFTER, HeaderValue::from(secs));
     }
 }

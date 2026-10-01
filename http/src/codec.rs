@@ -1,8 +1,9 @@
 //! Synchronous body encoding and lazy message input.
 
-use crate::{Body, RequestHead, ResponseHead};
+use crate::Body;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
+use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
 use respan_gateway_sdk::{EventSink, EventStream, Fault};
 
 /// Stateful values-to-bytes encoding, independent of heads and transport I/O.
@@ -50,7 +51,7 @@ pub fn response_head<T>(name: &str, source: &EventStream<T>) -> ResponseHead {
     source
         .metadata::<crate::driver::ResponseMetadata>(name)
         .map(|m| m.0.clone())
-        .unwrap_or_else(crate::fresh_response_head)
+        .unwrap_or_else(|| http::Response::new(()).into_parts().0)
 }
 
 /// Prepare the actual request and per-item sink. Finite input is encoded now;
@@ -65,7 +66,7 @@ pub fn request<T: Clone + Send + Sync + 'static>(
     }
     let mut head = request_head(name, source)
         .cloned()
-        .unwrap_or_else(crate::fresh_request_head);
+        .unwrap_or_else(|| http::Request::new(()).into_parts().0);
     let raw = raw_body(name, source).cloned();
     if raw.is_none() {
         crate::formats::body_changed(&mut head);

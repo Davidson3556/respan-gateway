@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::http_body_util;
+use respan_gateway_http::http_body_util::{self, BodyExt};
 use respan_gateway_http::{Asked, Body, CallHeaders, Credential, Outgoing};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::conversation::Conversation;
@@ -564,7 +564,10 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
             let headers = resp.headers_mut();
             headers.insert("content-type", HeaderValue::from_static("application/json"));
             headers.insert("set-cookie", HeaderValue::from_static("a=1"));
-            Ok((respan_gateway_http::from_response(resp), None))
+            Ok((
+                resp.map(|body| Body::stream(body.map_err(Into::into).into_data_stream())),
+                None,
+            ))
         }
     }
 

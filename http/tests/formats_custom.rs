@@ -20,11 +20,10 @@ use respan_gateway_http::formats::{self as formats, default_content_type, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{
-    Asked, Body, HttpClient, Incoming, Outgoing, RequestHead, ResponseHead as Head, Status,
+    Asked, Body, HttpClient, Incoming, Outgoing, Status, http::request::Parts as RequestHead,
+    http::response::Parts as Head,
 };
-use respan_gateway_http::{
-    Encoder, credentials, fresh_response_head, proxy_call, strip_client_origin_headers,
-};
+use respan_gateway_http::{Encoder, credentials, proxy_call, strip_client_origin_headers};
 use respan_gateway_sdk::async_trait;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures;
@@ -45,7 +44,7 @@ fn to(format: &str, body: impl Into<Bytes>) -> http::Request<respan_gateway_http
 }
 
 fn matches_post(io: &Incoming, path: &str) -> bool {
-    let mut head = respan_gateway_http::fresh_request_head();
+    let mut head = respan_gateway_http::http::Request::new(()).into_parts().0;
     head.method = io.request().method().clone();
     head.uri = io.request().uri().clone();
     formats::posts_to(&head, path)
@@ -143,7 +142,7 @@ fn response(
     mime: Option<&'static str>,
     frames: Vec<Result<Bytes, Fault>>,
 ) -> http::Response<Body> {
-    let mut head = fresh_response_head();
+    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
     head.status = status;
     if let Some(mime) = mime {
         head.headers
@@ -306,7 +305,9 @@ impl JevFormat {
         &self,
         source: &mut EventStream<Jev>,
     ) -> Result<(http::Request<Body>, EventSink<Jev>), Fault> {
-        let mut head = formats::call_head(respan_gateway_http::request_head(self.name, source));
+        let mut head = respan_gateway_http::request_head(self.name, source)
+            .cloned()
+            .unwrap_or_else(|| http::Request::new(()).into_parts().0);
         head.method = http::Method::POST;
         formats::set_path(&mut head, "/complete");
         head.headers
@@ -1400,8 +1401,9 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
             Ok(io.bind(
                 "jev-headed",
                 |source| {
-                    let mut head =
-                        formats::call_head(respan_gateway_http::request_head("jev-headed", source));
+                    let mut head = respan_gateway_http::request_head("jev-headed", source)
+                        .cloned()
+                        .unwrap_or_else(|| http::Request::new(()).into_parts().0);
                     head.method = http::Method::POST;
                     formats::set_path(&mut head, "/complete");
                     head.headers

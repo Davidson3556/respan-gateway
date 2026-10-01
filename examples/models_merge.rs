@@ -238,7 +238,7 @@ fn gateway(a: &LocalModels, b: &LocalModels) -> Result<Gateway, Fault> {
 }
 
 fn request() -> http::Request<respan_gateway_http::Body> {
-    let body = respan_gateway_http::full("");
+    let body = respan_gateway_http::Body::full("");
     match http::Request::get("/v1/models")
         .header("authorization", "Bearer client")
         .body(body)

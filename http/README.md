@@ -110,6 +110,25 @@ SSE helpers for common framing.
 not semantic messages: accepted ordinary HTTP requests are collected before
 opening, while explicitly live/message ingress remains streaming.
 
+Use the native `http::request::Parts` and `http::response::Parts` for heads;
+`http::Request::new(()).into_parts().0` and
+`http::Response::new(()).into_parts().0` make empty heads. For an external
+HTTP body, `http_body_util::BodyExt` supplies the standard data-frame stream:
+`request.map(|body| Body::stream(body.map_err(Into::into).into_data_stream()))`
+(and likewise for a response). This drops trailers, as gateway wire frames
+carry data only. `BodyExt::collect(body).await?.to_bytes()` collects a streamed
+body, retaining its frames until EOF. Incoming request accumulation instead
+folds frames into `BytesMut`, releasing each before polling again so pooled
+buffer producers can progress. A `Body` with `full_bytes()` can be cloned
+without polling.
+
+Keep `Body::full` for finite, inspectable and editable bytes, and `Body::stream`
+for pull-driven frames. Unlike a generic full or stream adapter, `Body` also
+retains a prependable opening prefix, exposes its initial-byte snapshot during
+request preparation, and carries a private upload handoff for delivery and
+cancellation. Those gateway semantics are not replaced by standard body
+utilities; ordinary conversions and collection need no additional facade.
+
 `messages` decodes a complete body lazily or maps explicitly live message frames.
 `request` constructs an actual `Request<Body>` and working `EventSink`:
 

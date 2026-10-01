@@ -19,7 +19,7 @@ use support::*;
 /// the body when dropped (or `Err` if given one).
 fn call(path: &str) -> (mpsc::UnboundedSender<Result<Bytes, Fault>>, Request<Body>) {
     let (tx, rx) = mpsc::unbounded();
-    let mut head = respan_gateway_http::fresh_request_head();
+    let mut head = respan_gateway_http::http::Request::new(()).into_parts().0;
     head.uri = path.parse().unwrap();
     head.headers.insert("upgrade", "websocket".parse().unwrap());
     let call = Request::from_parts(head, Body::stream(rx));

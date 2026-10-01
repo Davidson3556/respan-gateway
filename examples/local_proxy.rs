@@ -11,9 +11,9 @@
 //! against a one-response fixture; add `-- --serve 127.0.0.1:8080` to listen for real, then
 //! `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude`.
 
+use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::http_body_util::Full;
 use respan_gateway_providers::AnthropicMessages;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{Fault, Gateway, futures::TryStreamExt};
@@ -62,9 +62,9 @@ fn fixture(
             let response = http::Response::builder()
                 .status(status)
                 .header("content-type", content_type)
-                .body(Full::new(body))
+                .body(Body::full(body))
                 .map_err(|e| Fault::internal(e.to_string()))?;
-            Ok((respan_gateway_http::from_response(response), None))
+            Ok((response, None))
         }
     })
 }

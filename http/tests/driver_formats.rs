@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
-use respan_gateway_http::{Body, Completion, ResponseHead};
+use respan_gateway_http::{Body, Completion, http::response::Parts as ResponseHead};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures::{StreamExt, stream};

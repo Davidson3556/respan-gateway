@@ -121,13 +121,11 @@ where
             else {
                 return send(call).await;
             };
-            let call = call.map(|body| {
-                respan_gateway_http::into_http_body(bounded(body.boxed(), held.clone()))
-            });
+            let call = call
+                .map(|body| respan_gateway_http::Body::stream(bounded(body.boxed(), held.clone())));
             let (response, completion) = guarded(&held, send(call)).await?;
-            let response = response.map(|body| {
-                respan_gateway_http::into_http_body(bounded(body.boxed(), held.clone()))
-            });
+            let response = response
+                .map(|body| respan_gateway_http::Body::stream(bounded(body.boxed(), held.clone())));
             let completion =
                 completion.map(|writing| async move { guarded(&held, writing).await }.boxed());
             Ok((response, completion))

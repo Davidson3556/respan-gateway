@@ -6,7 +6,8 @@ everything else built as modules on one public API.
 
 > **Status: pre-alpha.** Relays OpenAI and Anthropic chat traffic and
 > translates text and tools between them; images come in M5. APIs will
-> change.
+> change. The core is now treated as half-frozen, like a release candidate:
+> its contracts are stable by default while the surrounding APIs continue to evolve.
 
 ## Ground rules
 
@@ -111,7 +112,8 @@ the provider edge own them
 
 Goal for 0.1: all 14 [use cases](docs/use-cases.md) pass as integration
 tests, and a 10-minute plugin really takes 10 minutes. Each use case becomes a
-test when its milestone lands. The kernel API is frozen after M2.
+test when its milestone lands. The kernel is already treated as RC-like; M2
+closes remaining contract gaps rather than reopening its design.
 
 | Milestone | Delivers |
 |---|---|
@@ -166,6 +168,10 @@ before sending; untouched lazy inputs can relay raw bytes without decoding.
 `Encoder<T>` only writes values and terminal framing; it does not choose heads,
 open responses or act as a transport. Stateful parsers and encoders remain
 protocol code, while HTTP helpers own backpressure and response handoff.
+Use `http` builders and request/response parts directly, `http-body-util`
+for data-stream conversion, and `bytes` for buffer storage. The gateway body
+retains inspectable finite bytes and upload ownership; it is not a replacement
+for standard HTTP structure or byte buffers.
 
 ## Development
 

@@ -6,10 +6,12 @@ mod reader;
 pub(crate) mod upload;
 mod writer;
 
-use crate::{Body, RequestHead, ResponseHead};
+use crate::Body;
 use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
+use http_body_util::BodyExt;
 use respan_gateway_sdk::Fault;
 use std::sync::Arc;
 
@@ -53,7 +55,7 @@ pub async fn drive(
             })
             .await;
             let response =
-                response.map(|body| Body::stream(crate::body_of(Pump { handled, body })));
+                response.map(|body| Body::stream(Pump { handled, body }.into_data_stream()));
             Ok((response, ended))
         }
         None => match pending {

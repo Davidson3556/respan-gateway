@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use respan_gateway_examples::store::{Database, rusqlite::OptionalExtension, sql};
-use respan_gateway_http::{bytes::Bytes, fresh_request_head, fresh_response_head};
+use respan_gateway_http::bytes::Bytes;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS idempotency (
     key TEXT PRIMARY KEY, owner TEXT NOT NULL, lease INTEGER NOT NULL, result BLOB
@@ -48,7 +48,7 @@ fn key(key: &Key) -> Result<String, Fault> {
 // Persist the format's encoding rather than teaching canonical events a
 // second serialization schema. Replay uses the same format to decode it.
 fn encode(replies: &[Reply]) -> Result<Vec<u8>, Fault> {
-    let head = fresh_request_head();
+    let head = respan_gateway_http::http::Request::new(()).into_parts().0;
     let request = Bytes::from_static(br#"{"stream":true}"#);
     let request = http::Request::from_parts(head, request);
     Ok(OpenAiChat
@@ -58,15 +58,16 @@ fn encode(replies: &[Reply]) -> Result<Vec<u8>, Fault> {
 }
 
 fn decode(bytes: Vec<u8>) -> Result<Replies, Fault> {
-    let mut head = fresh_response_head();
+    let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
     head.headers.insert(
         http::header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
     let response = http::Response::from_parts(head, Bytes::from(bytes));
-    Ok(Arc::new(
-        OpenAiChat.decode_response(response, &fresh_request_head())?,
-    ))
+    Ok(Arc::new(OpenAiChat.decode_response(
+        response,
+        &respan_gateway_http::http::Request::new(()).into_parts().0,
+    )?))
 }
 
 #[async_trait]
