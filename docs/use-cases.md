@@ -8,7 +8,8 @@ implemented cases and remaining gaps.
 
 Core supplies typed event streams, per-edge contexts, plugin hooks, calls,
 response buffering, and lifecycle completion. Adapters own hosting details;
-SDKs supply protocol and storage mechanisms and attempt orchestration, while
+The SDK supplies core contracts and shared messages; protocols and integrations
+supply wire mechanisms, and plugins own attempt orchestration, while
 plugins compose them into routing, accounting, and other policies.
 Ordinary features (routing, rate limits, logging) are not listed separately;
 the design must support them.

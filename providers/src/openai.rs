@@ -2,23 +2,26 @@
 //! conversation kind.
 
 use bytes::{Bytes, BytesMut};
-use respan_gateway_core::Fault;
-use respan_gateway_http::bytes;
-use respan_gateway_http::{RequestHead, ResponseHead};
+use respan_gateway_http::{Body, Incoming, Outgoing, RequestHead, ResponseHead};
+use respan_gateway_http::{bytes, http};
+use respan_gateway_sdk::EventStream as TypedStream;
+use respan_gateway_sdk::futures::stream::BoxStream;
+use respan_gateway_sdk::{Connection, EventSink, Fault, Format};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
+use crate::common::ReplyParser;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, holding_start, patch_messages,
-    patch_sampling, post_json, probe, read_message, reads_back, refusal, request_decoder,
-    response_decoder, response_encoder, says, set, split_around, stop_json, unix_now,
-    unreadable_event, unsupported_fields, unwritable_content, write_message,
+    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, patch_messages, patch_sampling,
+    post_json, probe, read_message, reads_back, refusal, says, set, split_around, stop_json,
+    supported_usage, unix_now, unpatchable, unreadable_event, unsupported_fields,
+    unwritable_content, usage_step, write_message,
 };
 use crate::conversation::{Conversation, Finish, Piece, Reply, Role, Start, units};
 use crate::formats::errors::{merge_details, says_error};
-use crate::formats::sse::{Events, SseDecoder, event, event_as, event_data, event_json, is_stream};
+use crate::formats::sse::{event, event_as, event_data, event_json, is_stream};
 use crate::tools::{Fragment, fragments};
-use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
+use respan_gateway_http::Encoder;
 
 pub(crate) const OPENAI: &str = "openai-chat";
 
@@ -36,53 +39,69 @@ const FINISH: Names<Finish> = Names(&[
     ("content_filter", Finish::Filtered),
 ]);
 
-impl Codec for OpenAiChat {
-    type Input = Conversation;
-    type Output = Reply;
-
-    fn name(&self) -> &str {
+impl OpenAiChat {
+    /// This wire format's name.
+    pub fn name(&self) -> &str {
         OPENAI
     }
 
-    fn accepts(&self, head: &RequestHead) -> bool {
+    /// Whether the HTTP request targets this API.
+    pub fn accepts(&self, head: &RequestHead) -> bool {
         crate::formats::posts_to(head, "/chat/completions")
     }
 
-    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Conversation>> {
-        request_decoder::<Self>()
+    /// Read a request lazily, retaining bytes for an unchanged relay.
+    pub fn read_request(
+        &self,
+        request: http::Request<Body>,
+    ) -> Result<TypedStream<Conversation>, Fault> {
+        respan_gateway_http::messages(request, |_, raw| Self.decode_request(raw))
     }
 
-    fn request_encoder(
-        &self,
-        client: Option<&RequestHead>,
-        body: &mut Bytes,
-        streams: bool,
-    ) -> Box<dyn Encoder<Conversation, RequestHead>> {
-        post_json::<Self>(
-            crate::formats::call_head(client),
-            body,
-            "/chat/completions",
-            streams,
-        )
+    /// Decode a finite request synchronously, retaining relay provenance.
+    pub fn decode_request(&self, bytes: Bytes) -> Result<Conversation, Fault> {
+        crate::common::read_request::<Self>(bytes)
     }
 
-    fn response_decoder(
+    /// Prepare a finite provider request before any transport I/O.
+    pub fn write_request(
         &self,
-        head: &ResponseHead,
-        call: &RequestHead,
-        _: &Bytes,
-    ) -> Box<dyn Decoder<Reply>> {
-        let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
-        response_decoder::<Self>(head, call, stream)
+        source: &mut TypedStream<Conversation>,
+    ) -> Result<(http::Request<Body>, EventSink<Conversation>), Fault> {
+        post_json::<Self>(source, "/chat/completions")
     }
 
-    fn response_encoder(
+    fn parser(&self, hold_start: bool) -> ReplyParser<Self> {
+        ReplyParser::new(Reading::<Self>::event, Reading::<Self>::end, hold_start)
+    }
+
+    /// Read provider response events with fresh per-body parser state.
+    pub fn read_response(
         &self,
-        answer: Option<&ResponseHead>,
-        ask: &RequestHead,
-        body: &Bytes,
-    ) -> Box<dyn Encoder<Reply, ResponseHead>> {
-        response_encoder::<Self>(answer, ask, body, |head, relayed, asked| {
+        response: http::Response<Body>,
+        call: http::Request<Bytes>,
+    ) -> BoxStream<'static, Result<Reply, Fault>> {
+        let parser = self.parser(true);
+        crate::common::read_response::<Self>(response, &call.into_parts().0, |body| {
+            crate::formats::read(
+                body,
+                parser,
+                |parser, bytes, out| parser.push(bytes, out),
+                |parser, wire, out| {
+                    wire?;
+                    parser.finish(out)
+                },
+            )
+        })
+    }
+
+    /// Select response framing and its encoder; bodyless responses have none.
+    pub fn response_encoder(
+        &self,
+        head: &mut ResponseHead,
+        request: &http::Request<Bytes>,
+    ) -> Option<Box<dyn Encoder<Reply>>> {
+        crate::common::response_encoder(head, request, |head, relayed, asked| {
             match is_stream(head) {
                 false => Box::new(UnaryEncoder::<Self>::new(relayed)),
                 true => Box::new(Chunks::new(relayed, asked.usage)),
@@ -90,12 +109,101 @@ impl Codec for OpenAiChat {
         })
     }
 
-    fn refusal(&self, fault: &Fault, _body: &Bytes, head: &mut ResponseHead) -> Bytes {
+    /// Bind response delivery, preserving delayed heads and bodyless handling.
+    pub fn write_response(
+        &self,
+        reply: respan_gateway_http::Reply,
+        source: &mut TypedStream<Reply>,
+    ) -> Result<EventSink<Reply>, Fault> {
+        let mut head = respan_gateway_http::response_head(OPENAI, source);
+        Ok(match self.response_encoder(&mut head, reply.request()) {
+            Some(encoder) => reply.write(head, encoder),
+            None => reply.empty(head, source),
+        })
+    }
+
+    /// Render an HTTP refusal in this provider's error schema.
+    pub fn refusal(
+        &self,
+        fault: &Fault,
+        _request: &http::Request<Bytes>,
+        head: &mut ResponseHead,
+    ) -> Bytes {
         refusal::<Self>(fault, head)
+    }
+
+    /// Encode a finite answer synchronously, including finalization errors.
+    pub fn encode_response(
+        &self,
+        request: &http::Request<Bytes>,
+        replies: &[Reply],
+    ) -> Result<http::Response<Bytes>, Fault> {
+        let mut head = http::Response::new(()).into_parts().0;
+        let encoder = self.response_encoder(&mut head, request);
+        crate::common::encode_response(head, encoder, replies)
+    }
+
+    /// Decode a finite answer synchronously, without polling an async stream.
+    pub fn decode_response(
+        &self,
+        response: http::Response<Bytes>,
+        call: &RequestHead,
+    ) -> Result<Vec<Reply>, Fault> {
+        let (mut head, bytes) = response.into_parts();
+        if head.status.is_success() && respan_gateway_http::bodiless(&call.method, head.status) {
+            return Ok(Vec::new());
+        }
+        if is_stream(&head) {
+            let mut parser = self.parser(true);
+            let mut out = Vec::new();
+            parser.push(bytes, &mut out)?;
+            parser.finish(&mut out)?;
+            return Ok(out);
+        }
+        crate::formats::default_content_type(&mut head, "application/json");
+        if !head.status.is_success() {
+            return Err(crate::formats::whole::answer(OPENAI, &head, bytes));
+        }
+        Ok(vec![crate::common::unary_reply::<Self>(
+            head.status,
+            bytes,
+        )?])
     }
 }
 
-impl_format!(OpenAiChat);
+impl Format<Incoming, Conversation, Reply> for OpenAiChat {
+    fn name(&self) -> &str {
+        OPENAI
+    }
+    fn matches(&self, io: &Incoming) -> bool {
+        let mut head = respan_gateway_http::fresh_request_head();
+        head.method = io.request().method().clone();
+        head.uri = io.request().uri().clone();
+        self.accepts(&head)
+    }
+    fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+        Ok(io.bind(
+            OPENAI,
+            |request| Self.read_request(request),
+            |reply, source| Self.write_response(reply, source),
+            |fault, request, head| Self.refusal(fault, request, head),
+        ))
+    }
+}
+
+impl Format<Outgoing, Reply, Conversation> for OpenAiChat {
+    fn name(&self) -> &str {
+        OPENAI
+    }
+    fn bind(&self, io: Outgoing) -> Result<Connection<Reply, Conversation>, Fault> {
+        Ok(io.bind(
+            OPENAI,
+            |source| Self.write_request(source),
+            |response, call| Self.read_response(response, call),
+            respan_gateway_http::success,
+        ))
+    }
+}
 
 /// Keys a conversation has a place for, or that change no output; `user`
 /// too, when it is a string.
@@ -268,7 +376,66 @@ impl Wire for OpenAiChat {
         body
     }
 
+    fn patch_usage(
+        v: &mut Value,
+        total: &Usage,
+        said: &Usage,
+        edited: &Usage,
+    ) -> Result<(), Fault> {
+        check_usage(total)?;
+        let path = if v["usage"].is_object() {
+            "/usage"
+        } else {
+            "/x_groq/usage"
+        };
+        let u = v
+            .pointer_mut(path)
+            .filter(|u| u.is_object())
+            .ok_or_else(|| unpatchable("this response has no place for edited usage"))?;
+        let changed = |unit| said.get(unit) != edited.get(unit);
+        let input = total.get(units::INPUT_TOKENS).unwrap_or_default();
+        let output = total.get(units::OUTPUT_TOKENS).unwrap_or_default();
+        if u.get("prompt_tokens").is_some()
+            || changed(units::INPUT_TOKENS)
+            || changed(units::CACHED_INPUT_TOKENS)
+        {
+            u["prompt_tokens"] = json!(input as u64);
+        }
+        if u.get("completion_tokens").is_some()
+            || changed(units::OUTPUT_TOKENS)
+            || changed(units::REASONING_TOKENS)
+        {
+            u["completion_tokens"] = json!(output as u64);
+        }
+        if u.get("total_tokens").is_some() {
+            u["total_tokens"] = json!((input + output) as u64);
+        }
+        for (unit, details, key) in [
+            (
+                units::CACHED_INPUT_TOKENS,
+                "prompt_tokens_details",
+                "cached_tokens",
+            ),
+            (
+                units::REASONING_TOKENS,
+                "completion_tokens_details",
+                "reasoning_tokens",
+            ),
+        ] {
+            if u[details].get(key).is_some() || changed(unit) {
+                if !u[details].is_null() && !u[details].is_object() {
+                    return Err(unpatchable(
+                        "this response has no place for edited usage details",
+                    ));
+                }
+                u[details][key] = json!(total.get(unit).unwrap_or_default() as u64);
+            }
+        }
+        Ok(())
+    }
+
     fn render(so_far: &SoFar) -> Result<Value, Fault> {
+        check_usage(&so_far.usage)?;
         let text: String = so_far.text.values().map(String::as_str).collect();
         let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
         let (id, model) = so_far.start.clone().unwrap_or_default();
@@ -336,6 +503,27 @@ impl Wire for OpenAiChat {
             None => *options = json!({ "include_usage": true }),
         }
     }
+}
+
+fn check_usage(usage: &Usage) -> Result<(), Fault> {
+    supported_usage(
+        usage,
+        &[
+            units::INPUT_TOKENS,
+            units::OUTPUT_TOKENS,
+            units::CACHED_INPUT_TOKENS,
+            units::REASONING_TOKENS,
+        ],
+    )?;
+    let input = usage.get(units::INPUT_TOKENS).unwrap_or_default();
+    let output = usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
+    if usage.get(units::CACHED_INPUT_TOKENS).unwrap_or_default() > input
+        || usage.get(units::REASONING_TOKENS).unwrap_or_default() > output
+        || input + output >= u64::MAX as f64
+    {
+        return Err(unpatchable("this format cannot represent the edited usage"));
+    }
+    Ok(())
 }
 
 /// Put an edited reply back into a response's choices, under `message`, or
@@ -452,7 +640,7 @@ fn rest_of(v: &Value, key: &str) -> Value {
     rest
 }
 
-impl Events<Reply> for Reading<OpenAiChat> {
+impl Reading<OpenAiChat> {
     fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
         let data = event_data(&raw);
         if self.done || data.as_deref().map(str::trim) == Some("[DONE]") {
@@ -550,10 +738,17 @@ fn without_usage(raw: &Bytes) -> Option<Bytes> {
         return Some(raw.clone());
     }
     let mut v = event_json(raw).unwrap_or_default();
-    let Some(field) = v.as_object_mut().and_then(|o| o.shift_remove("usage")) else {
+    let direct = v.as_object_mut().and_then(|o| o.shift_remove("usage"));
+    let nested = v
+        .pointer_mut("/x_groq")
+        .and_then(Value::as_object_mut)
+        .and_then(|o| o.shift_remove("usage"));
+    if direct.is_none() && nested.is_none() {
         return Some(raw.clone());
-    };
-    if field.is_object() && v["choices"].as_array().is_none_or(Vec::is_empty) {
+    }
+    let reports = direct.as_ref().is_some_and(Value::is_object)
+        || nested.as_ref().is_some_and(Value::is_object);
+    if reports && v["choices"].as_array().is_none_or(Vec::is_empty) {
         return None;
     }
     Some(event_as(Some(raw), None, &v).into())
@@ -561,21 +756,34 @@ fn without_usage(raw: &Bytes) -> Option<Bytes> {
 
 /// A chunk `raw` with its edited reply put back; `None` if nothing of it
 /// is left.
-fn rebuild(raw: &Bytes, said: &Reply, reply: &Reply) -> Result<Option<Bytes>, Fault> {
+fn rebuild(
+    raw: &Bytes,
+    said: &Reply,
+    reply: &Reply,
+    before: &Usage,
+) -> Result<Option<Bytes>, Fault> {
     let mut chunk = event_json(raw).unwrap_or_default();
     put_choice(&mut chunk, reply, "delta")?;
-    if reply.usage != said.usage && chunk["usage"].is_object() {
-        chunk["usage"] = OpenAiChat::usage_body(&reply.usage);
+    let mut after = before.clone();
+    after += &reply.usage;
+    check_usage(&after)?;
+    let reported = OpenAiChat::usage(&chunk);
+    let different_total = reported.iter().any(|(unit, n)| after.get(&unit) != Some(n));
+    if different_total || usage_step(before, &reported) != reply.usage {
+        OpenAiChat::patch_usage(&mut chunk, &after, &said.usage, &reply.usage)?;
     }
     let silent = reply.content.is_empty()
         && reply.finish.is_none()
         && chunk["usage"].is_null()
+        && chunk["x_groq"]["usage"].is_null()
         && chunk.pointer("/choices/0/delta/role").is_none();
     if silent {
         return Ok(None);
     }
-    reads_back::<OpenAiChat>(reply, &chunk_reply(&chunk))?;
-    Ok(Some(event(None, &chunk).into()))
+    let mut again = chunk_reply(&chunk);
+    again.usage = usage_step(before, &OpenAiChat::usage(&chunk));
+    reads_back::<OpenAiChat>(reply, &again)?;
+    Ok(Some(event_as(Some(raw), None, &chunk).into()))
 }
 
 /// Writes OpenAI chunks: the provider's as they came, with edits written
@@ -583,6 +791,8 @@ fn rebuild(raw: &Bytes, said: &Reply, reply: &Reply) -> Result<Option<Bytes>, Fa
 #[derive(Debug, Default)]
 struct Chunks {
     so_far: SoFar,
+    /// Earlier edits may make the provider's later cumulative snapshots stale.
+    usage_changed: bool,
     /// Whether the client asked for the usage chunk; else it is hidden.
     show_usage: bool,
     /// When the opening chunk was written, at the first content.
@@ -741,16 +951,33 @@ impl Chunks {
     }
 }
 
-impl Encoder<Reply, ()> for Chunks {
-    fn head(&mut self, _first: Option<&Reply>) {}
-
+impl Encoder<Reply> for Chunks {
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+        let before = self.so_far.usage.clone();
         self.so_far.note(reply);
+        check_usage(&self.so_far.usage)?;
         let own = reply.came_in(OPENAI).filter(|_| self.so_far.relayed);
         let Some(own) = own else {
+            self.usage_changed |= !reply.usage.is_empty();
             return self.write(reply, out);
         };
+        self.usage_changed |= own.said.usage != reply.usage;
         if own.said == *reply {
+            let chunk = event_json(&own.bytes).unwrap_or_default();
+            let reported = OpenAiChat::usage(&chunk);
+            self.usage_changed |= usage_step(&before, &reported) != reply.usage;
+            if self.usage_changed {
+                let different = reported
+                    .iter()
+                    .any(|(unit, n)| self.so_far.usage.get(&unit) != Some(n))
+                    || usage_step(&before, &reported) != reply.usage;
+                if different {
+                    if let Some(bytes) = rebuild(&own.bytes, &own.said, reply, &before)? {
+                        self.relay(&bytes, reply, out);
+                    }
+                    return Ok(());
+                }
+            }
             self.relay(&own.bytes, reply, out);
             return Ok(());
         }
@@ -761,7 +988,7 @@ impl Encoder<Reply, ()> for Chunks {
         let (ahead, inside, after) = split_around(reply, holds, first);
         let mut all = BytesMut::new();
         self.write(&ahead, &mut all)?;
-        if let Some(bytes) = rebuild(&own.bytes, &own.said, &inside)? {
+        if let Some(bytes) = rebuild(&own.bytes, &own.said, &inside, &before)? {
             self.relay(&bytes, &inside, &mut all);
         }
         self.write(&after, &mut all)?;
@@ -800,7 +1027,6 @@ impl Encoder<Reply, ()> for Chunks {
 mod tests {
 
     use super::*;
-    use respan_gateway_http::http::{self, HeaderValue};
 
     use crate::common::{patch_request, write_request};
     use crate::conversation::Message;
@@ -812,44 +1038,35 @@ mod tests {
 
     /// The rebuilt event, or empty bytes.
     fn rebuilt(raw: &Bytes, reply: &Reply) -> Result<Bytes, Fault> {
-        rebuild(raw, &said(raw), reply).map(Option::unwrap_or_default)
+        rebuild(raw, &said(raw), reply, &Usage::default()).map(Option::unwrap_or_default)
     }
 
     /// The replies of `chunks`, and how the stream ended.
     fn decode_all(chunks: &[&str]) -> (Vec<Reply>, Result<(), Fault>) {
-        let mut d = SseDecoder::new(Reading::<OpenAiChat>::new());
+        let mut d = OpenAiChat.parser(false);
         let mut out = Vec::new();
         for c in chunks {
-            if let Err(f) = d.decode(Bytes::from(c.to_string()), &mut out) {
+            if let Err(f) = d.push(Bytes::from(c.to_string()), &mut out) {
                 return (out, Err(f));
             }
         }
-        let end = d.end(&mut out);
+        let end = d.finish(&mut out);
         (out, end)
-    }
-
-    fn head(content_type: &'static str) -> http::response::Parts {
-        let mut head = http::Response::new(()).into_parts().0;
-        let value = HeaderValue::from_static(content_type);
-        head.headers.insert(http::header::CONTENT_TYPE, value);
-        head
     }
 
     #[test]
     fn a_start_is_pushed_only_with_the_first_content_and_dropped_at_a_failure() {
-        let call = respan_gateway_http::fresh_request_head();
         let role = "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":2}}\n\n";
         let text =
             "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";
         let error = "data: {\"error\":{\"message\":\"Overloaded\"}}\n\n";
         let batches = |events: &[&str]| {
-            let mut d =
-                OpenAiChat.response_decoder(&head("text/event-stream"), &call, &Bytes::new());
+            let mut d = OpenAiChat.parser(true);
             let batches: Vec<(Vec<Reply>, bool)> = events
                 .iter()
                 .map(|e| {
                     let mut out = Vec::new();
-                    let failed = d.decode(Bytes::from(e.to_string()), &mut out).is_err();
+                    let failed = d.push(Bytes::from(e.to_string()), &mut out).is_err();
                     (out, failed)
                 })
                 .collect();
@@ -1159,6 +1376,132 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_usage_edits_fail_instead_of_disappearing() {
+        let raw = Bytes::from_static(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        );
+        let mut edited = said(&raw);
+        edited.usage.add(units::OUTPUT_TOKENS, 2.0);
+        assert!(rebuilt(&raw, &edited).is_err(), "no usage object to patch");
+        let with_usage =
+            Bytes::from_static(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\n");
+        let mut unknown = said(&with_usage);
+        unknown.usage.add("credits", 3.0);
+        assert!(
+            rebuilt(&with_usage, &unknown).is_err(),
+            "unknown usage unit"
+        );
+        let mut synthetic = Reply::text(0, "ok");
+        synthetic.usage.add("credits", 3.0);
+        let mut out = BytesMut::new();
+        assert!(
+            Chunks::new(false, true)
+                .encode(&synthetic, &mut out)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn groq_stream_usage_rebuilds_in_its_nested_location() {
+        let events = [
+            "data: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"vendor\":\"a\"},\"queue_time\":0.2}}\n\n",
+            "id: groq\nevent: completion.chunk\ndata: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"vendor\":\"b\"},\"queue_time\":0.3}}\n\n",
+            "data: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"vendor\":\"c\"}}}\n\n",
+        ];
+        let (mut replies, _) = decode_all(&[events[0], events[1], events[2], "data: [DONE]\n\n"]);
+        replies[1].usage = Usage::default();
+        replies[1].usage.add(units::OUTPUT_TOKENS, 3.0);
+        let mut encoder = Chunks::new(true, true);
+        let mut out = BytesMut::new();
+        for reply in &replies {
+            encoder.encode(reply, &mut out).expect("encode chat chunk");
+        }
+        encoder.end(&Ok(()), &mut out).expect("finish chat stream");
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains(events[0]) && text.contains("id: groq"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7"),
+            "{text}"
+        );
+        let (again, _) = decode_all(&[&text]);
+        assert_eq!(
+            again
+                .iter()
+                .map(|r| r.usage.get(units::OUTPUT_TOKENS))
+                .collect::<Vec<_>>(),
+            [Some(1.0), Some(3.0), None]
+        );
+        let rebuilt = text
+            .split("\n\n")
+            .find(|event| event.contains("id: groq"))
+            .expect("Groq event with id survives");
+        let v: Value = event_json(rebuilt.as_bytes()).expect("parse rebuilt Groq event");
+        assert_eq!(v["x_groq"]["usage"]["completion_tokens"], 4);
+        assert_eq!(v["x_groq"]["usage"]["vendor"], "b");
+        assert_eq!(v["x_groq"]["queue_time"], 0.3);
+    }
+
+    #[test]
+    fn edited_whole_usage_keeps_nested_details_and_groq_usage() {
+        for usage_path in ["usage", "x_groq"] {
+            let u = json!({
+                "prompt_tokens": 4, "completion_tokens": 7, "total_tokens": 11,
+                "prompt_tokens_details": {"cached_tokens": 2, "audio_tokens": 1},
+                "completion_tokens_details": {"reasoning_tokens": 3, "accepted_prediction_tokens": 2},
+                "vendor": {"keep": true},
+            });
+            let mut response = json!({"id":"c", "model":"m", "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]});
+            if usage_path == "usage" {
+                response["usage"] = u.clone();
+            } else {
+                response["x_groq"] = json!({"usage":u.clone(),"elapsed":12});
+            }
+            let raw = Bytes::from(response.to_string());
+            let mut said = OpenAiChat::reply(&response);
+            said.usage = OpenAiChat::usage(&response);
+            let mut edited = said.clone();
+            edited.usage = Usage::default();
+            for (unit, value) in [
+                (units::INPUT_TOKENS, 4.0),
+                (units::OUTPUT_TOKENS, 3.0),
+                (units::CACHED_INPUT_TOKENS, 0.0),
+                (units::REASONING_TOKENS, 0.0),
+            ] {
+                // Zero totals are represented by absent usage units in the
+                // typed value; the wire fields themselves must become zero.
+                if value > 0.0 {
+                    edited.usage.add(unit, value);
+                }
+            }
+            let bytes = crate::common::rebuild_whole::<OpenAiChat>(&raw, &said, &edited)
+                .expect("rebuild whole chat usage");
+            let got: Value = serde_json::from_slice(&bytes).expect("parse rebuilt chat response");
+            let usage = if usage_path == "usage" {
+                &got["usage"]
+            } else {
+                &got["x_groq"]["usage"]
+            };
+            assert_eq!(usage["completion_tokens"], 3);
+            assert_eq!(usage["total_tokens"], 7);
+            assert_eq!(
+                usage["prompt_tokens_details"],
+                json!({"cached_tokens":0,"audio_tokens":1})
+            );
+            assert_eq!(
+                usage["completion_tokens_details"],
+                json!({"reasoning_tokens":0,"accepted_prediction_tokens":2})
+            );
+            assert_eq!(usage["vendor"], json!({"keep":true}));
+            if usage_path == "x_groq" {
+                assert_eq!(got["x_groq"]["elapsed"], 12);
+            }
+        }
+    }
+
+    #[test]
     fn a_usage_chunk_the_client_did_not_ask_for_is_not_relayed() {
         let first = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3}}\n\n";
         // OpenAI repeats the totals in a usage chunk the client did not ask
@@ -1181,11 +1524,163 @@ mod tests {
         assert!(out.ends_with("data: [DONE]\n\n"));
     }
 
+    #[test]
+    fn nested_groq_usage_is_hidden_when_not_requested() {
+        let content = Bytes::from_static(b"id: groq\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"x_groq\":{\"usage\":{\"prompt_tokens\":1},\"trace\":\"x\"}}\n\n");
+        let filtered = without_usage(&content).expect("content remains after hiding usage");
+        let text = String::from_utf8_lossy(&filtered);
+        assert!(
+            text.contains("id: groq") && text.contains("\"trace\":\"x\""),
+            "{text}"
+        );
+        assert!(!text.contains("\"usage\""), "{text}");
+        let only = Bytes::from_static(
+            b"data: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1}}}\n\n",
+        );
+        assert!(without_usage(&only).is_none());
+    }
+
+    #[test]
+    fn edited_text_keeps_the_sse_envelope_and_unedited_bytes() {
+        let raw = Bytes::from_static(b"id: 7\nevent: completion.chunk\nretry: 1500\n: preserve\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"secret\"}}]}\n\n");
+        let mut edited = said(&raw);
+        edited.content = vec![Piece::text(0, "public")];
+        let rebuilt = rebuilt(&raw, &edited).expect("rebuild edited chat event");
+        let text = String::from_utf8_lossy(&rebuilt);
+        for line in [
+            "id: 7",
+            "event: completion.chunk",
+            "retry: 1500",
+            ": preserve",
+        ] {
+            assert!(text.contains(line), "{text}");
+        }
+        assert!(
+            text.contains("public") && !text.contains("secret"),
+            "{text}"
+        );
+        let mut encoder = Chunks::new(true, true);
+        let mut out = BytesMut::new();
+        encoder
+            .encode(
+                &said(&raw).came(&std::sync::Arc::from(OPENAI), raw.clone()),
+                &mut out,
+            )
+            .expect("relay unchanged chat event");
+        assert_eq!(&out[..], &raw[..]);
+    }
+
+    #[test]
+    fn edited_stream_usage_remains_cumulative_and_keeps_vendor_fields() {
+        let events = [
+            "id: first\n: vendor comment\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"vendor\":9}}\n\n",
+            "id: second\nevent: completion.chunk\nretry: 3000\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"total_tokens\":8,\"vendor\":10}}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"total_tokens\":8,\"vendor\":11}}\n\n",
+        ];
+        let (mut replies, _) = decode_all(&[events[0], events[1], events[2], "data: [DONE]\n\n"]);
+        assert_eq!(replies[1].usage.get(units::OUTPUT_TOKENS), Some(6.0));
+        replies[1].usage = Usage::default();
+        replies[1].usage.add(units::OUTPUT_TOKENS, 3.0);
+        let mut encoder = Chunks::new(true, true);
+        let mut out = BytesMut::new();
+        for reply in &replies {
+            encoder.encode(reply, &mut out).expect("encode chat chunk");
+        }
+        encoder.end(&Ok(()), &mut out).expect("finish chat stream");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(events[0]), "{text}");
+        assert!(
+            text.contains("id: second")
+                && text.contains("retry: 3000")
+                && text.contains(": vendor comment"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"vendor\":10") && text.contains("\"vendor\":11"),
+            "{text}"
+        );
+        let (again, _) = decode_all(&[&text]);
+        assert_eq!(
+            again
+                .iter()
+                .map(|r| r.usage.get(units::OUTPUT_TOKENS))
+                .collect::<Vec<_>>(),
+            [Some(1.0), Some(3.0), None]
+        );
+    }
+
+    #[test]
+    fn dropped_usage_does_not_reappear_in_later_totals() {
+        for groq in [false, true] {
+            let events: Vec<_> = [1, 7, 7]
+                .map(|n| {
+                    let usage = json!({"completion_tokens": n, "vendor": 9});
+                    let event = if groq {
+                        json!({"choices": [], "x_groq": {"usage": usage}})
+                    } else {
+                        json!({"choices": [], "usage": usage})
+                    };
+                    format!("data: {event}\n\n")
+                })
+                .into();
+            let (replies, _) =
+                decode_all(&[&events[0], &events[1], &events[2], "data: [DONE]\n\n"]);
+            let mut encoder = Chunks::new(true, true);
+            let mut out = BytesMut::new();
+            for (index, reply) in replies.iter().enumerate() {
+                if index != 1 {
+                    encoder.encode(reply, &mut out).expect("encode chat chunk");
+                }
+            }
+            encoder.end(&Ok(()), &mut out).expect("finish chat stream");
+            let text = String::from_utf8_lossy(&out);
+            let (again, _) = decode_all(&[&text]);
+            let total: f64 = again
+                .iter()
+                .filter_map(|r| r.usage.get(units::OUTPUT_TOKENS))
+                .sum();
+            assert_eq!(total, 1.0, "groq={groq}: {text}");
+            assert!(text.contains("\"vendor\":9"), "{text}");
+        }
+    }
+
+    #[test]
+    fn usage_correction_preserves_unchanged_decreases_and_upward_edits() {
+        for (totals, edited, expected) in [
+            ([7, 1, 0], None, [7.0, 1.0, 0.0]),
+            ([1, 7, 7], Some(3.0), [3.0, 9.0, 9.0]),
+        ] {
+            let events = totals.map(|n| {
+                format!("data: {{\"choices\":[],\"usage\":{{\"completion_tokens\":{n}}}}}\n\n")
+            });
+            let (mut replies, _) =
+                decode_all(&[&events[0], &events[1], &events[2], "data: [DONE]\n\n"]);
+            if let Some(amount) = edited {
+                replies[0].usage = Usage::default();
+                replies[0].usage.add(units::OUTPUT_TOKENS, amount);
+            }
+            let mut encoder = Chunks::new(true, true);
+            let mut out = BytesMut::new();
+            for reply in &replies {
+                encoder.encode(reply, &mut out).expect("encode chat chunk");
+            }
+            encoder.end(&Ok(()), &mut out).expect("finish chat stream");
+            let text = String::from_utf8_lossy(&out);
+            let reported: Vec<_> = text
+                .split("\n\n")
+                .filter_map(|e| event_json(&Bytes::copy_from_slice(e.as_bytes())))
+                .filter_map(|v| OpenAiChat::usage(&v).get(units::OUTPUT_TOKENS))
+                .collect();
+            assert_eq!(reported, expected, "{text}");
+            if edited.is_none() {
+                assert_eq!(text, format!("{}data: [DONE]\n\n", events.concat()));
+            }
+        }
+    }
+
     /// `body`, relayed unread, as it goes to a provider.
     fn with_usage(body: &'static str) -> Bytes {
-        let mut body = Bytes::from_static(body.as_bytes());
-        let _ = OpenAiChat.request_encoder(None, &mut body, false);
-        body
+        crate::common::finish_raw::<OpenAiChat>(Bytes::from_static(body.as_bytes()))
     }
 
     #[test]

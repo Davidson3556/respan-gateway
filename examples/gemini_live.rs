@@ -10,9 +10,13 @@ mod budget;
 #[path = "live/serve.rs"]
 mod serve;
 use budget::{Budget, OUTPUT};
-use respan_gateway_core::futures::{StreamExt, TryStreamExt};
-use respan_gateway_core::{ClientContext, Events, Fault, Gateway, Plugin, Response, async_trait};
-use respan_gateway_ledger::MemoryLedger;
+use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
+use respan_gateway_sdk::{
+    ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
+};
+#[path = "billing/ledger.rs"]
+mod ledger;
+use ledger::MemoryLedger;
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -37,7 +41,7 @@ impl Plugin for Sessions {
         )?);
         let incoming = session.clone();
         let model = self.model.clone();
-        cx.wrap(move |events: Events<ClientEvent>| {
+        cx.wrap(move |events: EventStream<ClientEvent>| {
             events.and_then(move |mut event| {
                 let session = incoming.clone();
                 let model = model.clone();
@@ -93,7 +97,7 @@ impl Plugin for Sessions {
         })?;
         let outgoing = session.clone();
         let usage = Arc::new(Mutex::new((Value::Null, false)));
-        cx.wrap(move |events: Events<ProviderEvent>| {
+        cx.wrap(move |events: EventStream<ProviderEvent>| {
             events.and_then(move |event| {
                 let session = outgoing.clone();
                 let usage = usage.clone();
@@ -118,7 +122,7 @@ impl Plugin for Sessions {
                 }
             })
         })?;
-        cx.wrap(|events: Events<ProviderEvent>| {
+        cx.wrap(|events: EventStream<ProviderEvent>| {
             events.take_until(tokio::time::sleep(budget::SESSION_MAX))
         })?;
         cx.extensions_mut().insert(session);
@@ -134,7 +138,7 @@ fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault>
     let format = || JsonEvents::new("gemini-live", PATH);
     Gateway::new()
         .client::<ClientEvent, _, _>(format())?
-        .provider::<ClientEvent, _, _>("gemini", format(), respan_gateway_http::connect(transport))?
+        .provider::<ClientEvent, _, _>("gemini", format(), transport.connect())?
         .plugin("turns", sessions)?
         .target("gemini")
 }

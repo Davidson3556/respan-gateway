@@ -3,11 +3,12 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use respan_gateway_axum::router;
-use respan_gateway_core::Fault;
-use respan_gateway_formats::opaque::Passthrough;
-use respan_gateway_http::HttpTransport;
+use respan_gateway_http::formats::opaque::{Got, Passthrough, Sent};
 use respan_gateway_http::http::HeaderMap;
+use respan_gateway_http::{HttpClient, Outgoing};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_sdk::conversation::{Conversation, Reply};
+use respan_gateway_sdk::{Extensions, Fault};
 
 mod config;
 
@@ -28,9 +29,9 @@ const SHUTDOWN: Duration = Duration::from_secs(30);
 /// `Gateway` in its own `main.rs`.
 fn formats() -> [KnownFormat; 3] {
     [
-        KnownFormat::of::<OpenAiChat>(),
-        KnownFormat::of::<AnthropicMessages>(),
-        KnownFormat::of::<Passthrough>(),
+        KnownFormat::of::<OpenAiChat, Conversation, Reply>(),
+        KnownFormat::of::<AnthropicMessages, Conversation, Reply>(),
+        KnownFormat::of::<Passthrough, Sent<Passthrough>, Got<Passthrough>>(),
     ]
 }
 
@@ -66,8 +67,11 @@ fn proxy_config(anthropic: bool, url: Option<&str>) -> config::Config {
 }
 
 /// A provider's transport: HTTP to `base_url`, sending `auth`.
-fn http(base_url: &str, auth: HeaderMap) -> Result<HttpTransport, Fault> {
-    HttpTransport::new(base_url)?.with_headers(auth)
+fn http(
+    base_url: &str,
+    auth: HeaderMap,
+) -> Result<impl Fn(Extensions) -> Outgoing + Send + Sync + use<>, Fault> {
+    Ok(HttpClient::new(base_url)?.with_headers(auth)?.connect())
 }
 
 #[tokio::main]

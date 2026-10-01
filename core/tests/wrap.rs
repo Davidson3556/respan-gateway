@@ -100,7 +100,7 @@ struct Guard;
 impl Plugin for Guard {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let check = cx.call("classifier");
-        cx.wrap(move |inputs: Events<In>| {
+        cx.wrap(move |inputs: EventStream<In>| {
             inputs.and_then(move |input| {
                 let check = check.clone().with_input(input.clone());
                 async move {
@@ -124,7 +124,7 @@ struct Deadline(Duration);
 impl Plugin for Deadline {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let limit = self.0;
-        cx.wrap(move |outputs: Events<Out>| outputs.take_until(tokio::time::sleep(limit)))?;
+        cx.wrap(move |outputs: EventStream<Out>| outputs.take_until(tokio::time::sleep(limit)))?;
         Ok(None)
     }
 }
@@ -284,7 +284,9 @@ async fn a_wrap_that_swallows_the_cut_still_ends_abandoned() {
     #[async_trait]
     impl Plugin for Swallow {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|inputs: Events<In>| inputs.take_while(|i| std::future::ready(i.is_ok())))?;
+            cx.wrap(|inputs: EventStream<In>| {
+                inputs.take_while(|i| std::future::ready(i.is_ok()))
+            })?;
             Ok(None)
         }
     }
@@ -309,7 +311,7 @@ async fn a_cut_ends_a_plugins_own_stream_abandoned() {
     #[async_trait]
     impl Plugin for Own {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|_client: Events<In>| {
+            cx.wrap(|_client: EventStream<In>| {
                 stream::once(async { Ok(In("x".into())) }).chain(stream::pending())
             })?;
             Ok(None)
@@ -335,7 +337,7 @@ async fn a_stream_that_fails_ends_the_inputs_and_the_call_with_its_fault() {
     #[async_trait]
     impl Plugin for Fails {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|_client: Events<In>| {
+            cx.wrap(|_client: EventStream<In>| {
                 stream::iter([Ok(In("x".into())), Err(Fault::upstream("gone"))])
             })?;
             Ok(None)
@@ -360,7 +362,7 @@ async fn a_panicking_stream_is_a_failure_and_hooks_end_once() {
     #[async_trait]
     impl Plugin for Panics {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|_client: Events<In>| {
+            cx.wrap(|_client: EventStream<In>| {
                 stream::iter([1, 2]).map(|i| match i {
                     2 => panic!("a plugin's stream panics"),
                     _ => Ok(In("x".into())),
@@ -403,8 +405,8 @@ async fn a_wrap_of_another_type_or_of_a_whole_input_is_refused() {
     impl Plugin for Wrong {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             match self.0 {
-                true => cx.wrap(|s: Events<String>| s)?,
-                false => cx.wrap(|s: Events<In>| s)?,
+                true => cx.wrap(|s: EventStream<String>| s)?,
+                false => cx.wrap(|s: EventStream<In>| s)?,
             }
             Ok(None)
         }
@@ -425,14 +427,13 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
     #[async_trait]
     impl Plugin for Fallback {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|inputs: Events<In>| inputs.map_ok(|In(text)| In(text.to_uppercase())))?;
-            match cx
-                .call("refuses")
-                .await?
+            cx.wrap(|inputs: EventStream<In>| inputs.map_ok(|In(text)| In(text.to_uppercase())))?;
+            let mut resp = cx.call("refuses").await?;
+            match resp
                 .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                 .await
             {
-                Ok(resp) => Ok(Some(resp)),
+                Ok(()) => Ok(Some(resp)),
                 Err(_) => Ok(Some(cx.call("p").await?)),
             }
         }
@@ -486,15 +487,14 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
     #[async_trait]
     impl Plugin for Retry {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|inputs: Events<In>| inputs)?;
+            cx.wrap(|inputs: EventStream<In>| inputs)?;
             let call = cx.call("p");
-            match call
-                .clone()
-                .await?
+            let mut resp = call.clone().await?;
+            match resp
                 .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                 .await
             {
-                Ok(resp) => Ok(Some(resp)),
+                Ok(()) => Ok(Some(resp)),
                 Err(_) => Ok(Some(call.await?)),
             }
         }
@@ -571,7 +571,7 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
     #[async_trait]
     impl Plugin for Cut {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|outputs: Events<Out>| {
+            cx.wrap(|outputs: EventStream<Out>| {
                 let over = stream::once(async { Err(Fault::new("max_length", "over")) });
                 outputs.take(1).chain(over)
             })?;
@@ -609,7 +609,7 @@ async fn l5_a_refusal_before_the_providers_head_is_the_refusal() {
     #[async_trait]
     impl Plugin for Gate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|i: Events<In>| {
+            cx.wrap(|i: EventStream<In>| {
                 i.and_then(|x| async move {
                     match x.0.as_str() {
                         "evil" => Err(Fault::bad_request("flagged")),
@@ -688,8 +688,10 @@ async fn wraps_and_filters_apply_in_plugin_order() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             let name = self.0;
             if self.1 {
-                cx.wrap(move |s: Events<In>| s.map_ok(move |In(t)| In(format!("{t}{name}"))))?;
-                cx.wrap(move |s: Events<Out>| s.map_ok(move |Out(t)| Out(format!("{t}{name}"))))?;
+                cx.wrap(move |s: EventStream<In>| s.map_ok(move |In(t)| In(format!("{t}{name}"))))?;
+                cx.wrap(move |s: EventStream<Out>| {
+                    s.map_ok(move |Out(t)| Out(format!("{t}{name}")))
+                })?;
             } else {
                 cx.filter(move |i: &mut In| {
                     i.0.push_str(name);
@@ -741,7 +743,7 @@ async fn a_wrap_that_panics_fails_the_reply_internal() {
     #[async_trait]
     impl Plugin for Panics {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|_: Events<Out>| -> Events<Out> { panic!("a buggy wrap") })?;
+            cx.wrap(|_: EventStream<Out>| -> EventStream<Out> { panic!("a buggy wrap") })?;
             Ok(None)
         }
     }

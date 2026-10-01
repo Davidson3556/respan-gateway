@@ -81,22 +81,29 @@ the provider edge own them
   own instead (`cx.wrap`).
 - **Format<T, R, W>**: one protocol's binding to owned I/O `T`, receiving
   `R` and sending `W`. Its `bind(io)` returns a `Connection<R, W>` tuple:
-  an incoming opening future and an outgoing sink. The gateway chooses
-  the type order for each edge; Format has no client/provider methods.
-  `Events<T>` implements the standard `Stream` trait. Formats with the
-  same name and transport can relay each message as its original bytes;
-  formats of one kind translate. An HTTP format is a **Codec** (`sdks/http`),
-  made a `Format` in both orientations by `impl_format!`. Its **Transport**
-  holds an accepted exchange or a shared outbound sender. `Transport::accept`
-  serves the incoming edge; `connect(transport)` supplies each outgoing
-  attempt with its extensions after its hooks.
+  an incoming opening future and an outgoing `EventSink<W>`.
+  `EventStream<T>` implements `Stream<Item = Result<T, Fault>>`, and
+  `EventSink<T>` implements `Sink<Result<T, Fault>, Error = Fault>`.
+  An optional synchronous preparation step configures the sink from stream
+  metadata or a finite input before delivery. The kernel pumps events with
+  backpressure concurrently with receiving, then closes the sink. The gateway
+  chooses the type order for each edge; Format has no client/provider methods.
+  Formats with the same name can relay original bytes and compatible
+  metadata even across different concrete transports;
+  formats of one kind translate. HTTP formats implement this same contract
+  directly: `Format<Incoming, Input, Output>` accepts a client exchange and
+  `Format<Outgoing, Output, Input>` makes a provider call. The HTTP crate
+  supplies native HTTP bodies and stream/sink construction helpers, not a
+  second format trait or an implementation macro.
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, as filters and wraps left them, or
   one input of its own (`with_input`). Only a call of the request's inputs
   to a provider of the client's format name is a relay, and carries the
   client's protocol metadata and key.
 - **Response**: what a call, or `Response::stream`, gives back: read
-  (`outputs`), held (`buffer_until`, `until_end`) or sent.
+  (`outputs`), held (`buffer_until`, `until_end`) or sent. Holding borrows the
+  response mutably; buffered events, errors and call ownership remain available
+  for replay even when inspection fails.
 - **Fault**: the one error: a code that says whose fault it is, a message,
   a retry and typed hints such as HTTP's `Status`.
 
@@ -111,7 +118,7 @@ test when its milestone lands. The kernel API is frozen after M2.
 | M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
 | M2 Plugin API | Calls of their own input, async stream filters, unread bodies; API fixes before the freeze |
 | M3 Formats | Gemini, Responses, embeddings |
-| M4 Plugins | Fallback, hedge, limits, memo, ledger |
+| M4 Plugins and examples | Fallback, hedge, limits, memo, application billing |
 | M5 Translation | Tool calls, images and reasoning across formats |
 | M6 Hard cases | Realtime relay and bridges, jobs, PII rewriting, admission |
 | M7 0.1 release | Docs, examples, benchmarks |
@@ -120,7 +127,7 @@ test when its milestone lands. The kernel API is frozen after M2.
 
 ## Structure
 
-The kernel defines extension contracts; SDKs help authors implement them;
+The kernel defines extension contracts; one SDK exposes them to plugin authors;
 first-party plugins and providers use those same public APIs. Adapters host
 the gateway, and the binary chooses what to compose. See the
 [repository layers](docs/ARCHITECTURE.md#repository-layers).
@@ -128,28 +135,37 @@ the gateway, and the binary chooses what to compose. See the
 | Path | What it is |
 |---|---|
 | `core/` | The neutral kernel: typed streams, plugins and lifecycle; no HTTP or message kinds. |
-| `sdks/messages/` | HTTP-free conversation/usage types, byte provenance and JSON fault details. |
-| `sdks/http/` | HTTP codec/transport contracts, driver, credentials, watchdog, retry classification and optional Reqwest backend. |
-| `sdks/formats/` | HTTP-aware framing/error helpers and vendor-neutral passthrough; no vendor codecs. |
-| `sdks/{routing,text,ledger,mcp,ws}/` | Reusable attempt orchestration, text, ledger and protocol mechanisms. |
-| `plugins/` | Concrete first-party policies: model routing and conservative accounting. |
+| `sdk/` | One plugin-author facade: core contracts, conversation/usage types and basic typed text accessors; no HTTP dependency. |
+| `http/` | Owned HTTP edges, native request/response bodies, stream/sink helpers, credentials, retry classification and optional Reqwest backend; framing/error helpers in `formats`. |
+| `plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
+| `{mcp,ws}/` | Optional MCP and WebSocket protocol/transport integrations. |
 | `providers/` | First-party OpenAI Chat and Anthropic Messages codecs, reusable on both edges. |
 | `adapters/axum/` | Axum HTTP ingress and optional WebSocket hosting. |
 | `gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
-| `testkit/` | Mock transport and public-API integration testing helpers. |
+| `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
 
-SDKs provide building blocks, not production `Plugin` implementations, and
-do not depend on concrete providers, plugins or hosting adapters in production.
-Ledger storage and tallies stay in the SDK; the accounting plugin owns its
-charging policy. Application-specific pricing and billing integrations live in
-examples. Routing takes an explicit retry classifier, with HTTP classification
-available from the HTTP SDK. A future first-party PyO3 embedding adapter will
+The SDK exposes contracts and shared types, not production `Plugin` implementations.
+It does not depend on protocol infrastructure, providers, plugins or adapters.
+Specialized provider-aware text reading, holdback and placeholders are private
+[example support](examples/support/README.md), not another SDK.
+Billing policies, priced tallies, reservations and settlement live in private
+[example support](examples/README.md#billing-policies), not in a ledger SDK or
+public accounting plugin. Generic `Usage` remains in the SDK; applications own
+prices, accounts and durable billing stores. Routing takes an explicit retry classifier, with HTTP classification
+available from the HTTP protocol module. A future first-party PyO3 embedding adapter will
 live at `adapters/python/`; it is not implemented yet.
 
-The HTTP SDK's `reqwest` feature enables `HttpTransport`. The Axum adapter's
+The HTTP protocol module's `reqwest` feature enables `HttpClient`. The Axum adapter's
 `ws` feature enables its `ws` hosting module. Both are opt-in, so codec authors
 and ordinary HTTP hosts do not need unrelated hosting or transport code.
+
+HTTP formats prepare actual requests and event sinks synchronously, then let
+core drive delivery. Response readers return streams. Finite inputs are encoded
+before sending; untouched lazy inputs can relay raw bytes without decoding.
+`Encoder<T>` only writes values and terminal framing; it does not choose heads,
+open responses or act as a transport. Stateful parsers and encoders remain
+protocol code, while HTTP helpers own backpressure and response handoff.
 
 ## Development
 

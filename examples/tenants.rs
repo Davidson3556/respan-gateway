@@ -12,19 +12,24 @@
 //!
 //! `cargo run -p respan-gateway-examples --example tenants`
 
-use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_sdk::conversation::Conversation;
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
+use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_http::HttpClient;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_sdk::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
 
 /// One tenant's policy, at one version.
 #[derive(Debug, Clone, Default)]
@@ -91,21 +96,20 @@ impl Plugin for Tenants {
     }
 }
 
-const OPENAI: &str = "http://openai.test/v1";
-const AZURE: &str = "http://azure.test/v1";
-
-fn gateway(mock: &MockTransport, tenants: Tenants) -> Result<Gateway, Fault> {
+fn gateway(
+    openai: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    azure: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    tenants: Tenants,
+) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
-        .provider::<Conversation, _, _>(
-            "azure",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(AZURE)),
-        )?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, openai)?
+        .provider::<Conversation, _, _>("azure", OpenAiChat, azure)?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("tenants", tenants)
 }
@@ -127,7 +131,7 @@ fn tenant(version: u64, target: &str, key: &str) -> Result<Tenant, Fault> {
 }
 
 async fn send(gw: &Gateway, gateway_key: &str) -> Result<StatusCode, Fault> {
-    let body = r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#;
+    let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
     let mut req = post("/v1/chat/completions", body);
     req.headers_mut()
         .insert(AUTHORIZATION, bearer(gateway_key)?);
@@ -139,23 +143,23 @@ const OK: &str =
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    for base in [OPENAI, AZURE] {
-        mock.reply(base, mock::json(StatusCode::OK, OK));
-    }
+    let (openai, azure) = (FakeOpenAi::start().await, FakeOpenAi::start().await);
+    openai.answer(Answer::raw(OK));
+    azure.answer(Answer::raw(OK));
     let tenants = Tenants::default();
-    let gw = gateway(&mock, tenants.clone())?;
+    let gw = gateway(
+        HttpClient::new(openai.base_url())?.connect(),
+        HttpClient::new(azure.base_url())?.connect(),
+        tenants.clone(),
+    )?;
     tenants.upsert("gw-acme", tenant(1, "openai", "sk-acme-1")?);
     println!("v1: {}", send(&gw, "gw-acme").await?);
     // The control plane moves acme to Azure while the gateway runs.
     tenants.upsert("gw-acme", tenant(2, "azure", "az-acme-2")?);
     println!("v2: {}", send(&gw, "gw-acme").await?);
-    for sent in mock.sent() {
-        println!(
-            "{} with {:?}",
-            sent.uri(),
-            sent.headers().get(AUTHORIZATION)
-        );
+    for (name, requests) in [("openai", openai.requests()), ("azure", azure.requests())] {
+        assert_eq!(requests.len(), 1);
+        println!("{name} with {:?}", requests[0].header("authorization"));
     }
     Ok(())
 }

@@ -213,13 +213,12 @@ async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
     impl Plugin for Retry {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             let call = cx.call("a");
-            match call
-                .clone()
-                .await?
+            let mut resp = call.clone().await?;
+            match resp
                 .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                 .await
             {
-                Ok(resp) => Ok(Some(resp)),
+                Ok(()) => Ok(Some(resp)),
                 Err(_) => Ok(Some(call.await?)),
             }
         }

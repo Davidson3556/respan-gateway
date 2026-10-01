@@ -3,27 +3,29 @@
 
 use bytes::{Bytes, BytesMut};
 use http::HeaderValue;
-use respan_gateway_core::Fault;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
-use respan_gateway_http::{RequestHead, ResponseHead};
+use respan_gateway_http::{Body, Incoming, Outgoing, RequestHead, ResponseHead};
+use respan_gateway_sdk::EventStream as TypedStream;
+use respan_gateway_sdk::futures::stream::BoxStream;
+use respan_gateway_sdk::{Connection, EventSink, Fault, Format};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
+use crate::common::ReplyParser;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, holding_start, patch_content,
-    patch_messages, patch_sampling, post_json, read_content, read_message, reads_back, refusal,
-    replace, request_decoder, response_decoder, response_encoder, says, set, split_around,
-    stop_json, unpatchable, unreadable_event, unsupported_fields, unwritable_content,
-    write_content, write_message,
+    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, patch_content, patch_messages,
+    patch_sampling, post_json, read_content, read_message, reads_back, refusal, replace, says, set,
+    split_around, stop_json, supported_usage, unpatchable, unreadable_event, unsupported_fields,
+    unwritable_content, usage_step, write_content, write_message,
 };
 use crate::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
 };
 use crate::formats::errors::{merge_details, says_error};
-use crate::formats::sse::{Events, SseDecoder, event, event_json, is_stream};
+use crate::formats::sse::{event, event_json, is_stream};
 use crate::tools::{Fragment, fragments};
-use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
+use respan_gateway_http::Encoder;
 
 /// The API version sent when the client names none.
 const VERSION: &str = "2023-06-01";
@@ -49,65 +51,176 @@ pub(crate) const ANTHROPIC: &str = "anthropic-messages";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AnthropicMessages;
 
-impl Codec for AnthropicMessages {
-    type Input = Conversation;
-    type Output = Reply;
-
-    fn name(&self) -> &str {
+impl AnthropicMessages {
+    /// This wire format's name.
+    pub fn name(&self) -> &str {
         ANTHROPIC
     }
 
-    fn accepts(&self, head: &RequestHead) -> bool {
+    /// Whether the HTTP request targets this API.
+    pub fn accepts(&self, head: &RequestHead) -> bool {
         crate::formats::posts_to(head, "/v1/messages")
     }
 
-    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Conversation>> {
-        request_decoder::<Self>()
+    /// Read a request lazily, retaining bytes for an unchanged relay.
+    pub fn read_request(
+        &self,
+        request: http::Request<Body>,
+    ) -> Result<TypedStream<Conversation>, Fault> {
+        respan_gateway_http::messages(request, |_, raw| Self.decode_request(raw))
     }
 
-    /// The `anthropic-version` a relay passed, or the default.
-    fn request_encoder(
-        &self,
-        client: Option<&RequestHead>,
-        body: &mut Bytes,
-        streams: bool,
-    ) -> Box<dyn Encoder<Conversation, RequestHead>> {
-        let mut head = crate::formats::call_head(client);
-        let version = head.headers.entry(VERSION_HEADER);
-        version.or_insert(HeaderValue::from_static(VERSION));
-        post_json::<Self>(head, body, "/v1/messages", streams)
+    /// Decode a finite request synchronously, retaining relay provenance.
+    pub fn decode_request(&self, bytes: Bytes) -> Result<Conversation, Fault> {
+        crate::common::read_request::<Self>(bytes)
     }
 
-    fn response_decoder(
+    /// Prepare a finite provider request before any transport I/O.
+    pub fn write_request(
         &self,
-        head: &ResponseHead,
-        call: &RequestHead,
-        _: &Bytes,
-    ) -> Box<dyn Decoder<Reply>> {
-        let stream = || holding_start(SseDecoder::new(Reading::<Self>::new()));
-        response_decoder::<Self>(head, call, stream)
+        source: &mut TypedStream<Conversation>,
+    ) -> Result<(http::Request<Body>, EventSink<Conversation>), Fault> {
+        let (mut request, sink) = post_json::<Self>(source, "/v1/messages")?;
+        request
+            .headers_mut()
+            .entry(VERSION_HEADER)
+            .or_insert(HeaderValue::from_static(VERSION));
+        Ok((request, sink))
     }
 
-    fn response_encoder(
+    fn parser(&self, hold_start: bool) -> ReplyParser<Self> {
+        ReplyParser::new(Reading::<Self>::event, Reading::<Self>::end, hold_start)
+    }
+
+    /// Read provider response events with fresh per-body parser state.
+    pub fn read_response(
         &self,
-        answer: Option<&ResponseHead>,
-        ask: &RequestHead,
-        body: &Bytes,
-    ) -> Box<dyn Encoder<Reply, ResponseHead>> {
-        response_encoder::<Self>(answer, ask, body, |head, relayed, _| {
+        response: http::Response<Body>,
+        call: http::Request<Bytes>,
+    ) -> BoxStream<'static, Result<Reply, Fault>> {
+        let parser = self.parser(true);
+        crate::common::read_response::<Self>(response, &call.into_parts().0, |body| {
+            crate::formats::read(
+                body,
+                parser,
+                |parser, bytes, out| parser.push(bytes, out),
+                |parser, wire, out| {
+                    wire?;
+                    parser.finish(out)
+                },
+            )
+        })
+    }
+
+    /// Select response framing and its encoder; bodyless responses have none.
+    pub fn response_encoder(
+        &self,
+        head: &mut ResponseHead,
+        request: &http::Request<Bytes>,
+    ) -> Option<Box<dyn Encoder<Reply>>> {
+        crate::common::response_encoder(head, request, |head, relayed, _asked| {
             match is_stream(head) {
-                true => Box::new(EventStream::new(relayed)),
                 false => Box::new(UnaryEncoder::<Self>::new(relayed)),
+                true => Box::new(EventStream::new(relayed)),
             }
         })
     }
 
-    fn refusal(&self, fault: &Fault, _body: &Bytes, head: &mut ResponseHead) -> Bytes {
+    /// Bind response delivery, preserving delayed heads and bodyless handling.
+    pub fn write_response(
+        &self,
+        reply: respan_gateway_http::Reply,
+        source: &mut TypedStream<Reply>,
+    ) -> Result<EventSink<Reply>, Fault> {
+        let mut head = respan_gateway_http::response_head(ANTHROPIC, source);
+        Ok(match self.response_encoder(&mut head, reply.request()) {
+            Some(encoder) => reply.write(head, encoder),
+            None => reply.empty(head, source),
+        })
+    }
+
+    /// Render an HTTP refusal in this provider's error schema.
+    pub fn refusal(
+        &self,
+        fault: &Fault,
+        _request: &http::Request<Bytes>,
+        head: &mut ResponseHead,
+    ) -> Bytes {
         refusal::<Self>(fault, head)
+    }
+
+    /// Encode a finite answer synchronously, including finalization errors.
+    pub fn encode_response(
+        &self,
+        request: &http::Request<Bytes>,
+        replies: &[Reply],
+    ) -> Result<http::Response<Bytes>, Fault> {
+        let mut head = http::Response::new(()).into_parts().0;
+        let encoder = self.response_encoder(&mut head, request);
+        crate::common::encode_response(head, encoder, replies)
+    }
+
+    /// Decode a finite answer synchronously, without polling an async stream.
+    pub fn decode_response(
+        &self,
+        response: http::Response<Bytes>,
+        call: &RequestHead,
+    ) -> Result<Vec<Reply>, Fault> {
+        let (mut head, bytes) = response.into_parts();
+        if head.status.is_success() && respan_gateway_http::bodiless(&call.method, head.status) {
+            return Ok(Vec::new());
+        }
+        if is_stream(&head) {
+            let mut parser = self.parser(true);
+            let mut out = Vec::new();
+            parser.push(bytes, &mut out)?;
+            parser.finish(&mut out)?;
+            return Ok(out);
+        }
+        crate::formats::default_content_type(&mut head, "application/json");
+        if !head.status.is_success() {
+            return Err(crate::formats::whole::answer(ANTHROPIC, &head, bytes));
+        }
+        Ok(vec![crate::common::unary_reply::<Self>(
+            head.status,
+            bytes,
+        )?])
     }
 }
 
-impl_format!(AnthropicMessages);
+impl Format<Incoming, Conversation, Reply> for AnthropicMessages {
+    fn name(&self) -> &str {
+        ANTHROPIC
+    }
+    fn matches(&self, io: &Incoming) -> bool {
+        let mut head = respan_gateway_http::fresh_request_head();
+        head.method = io.request().method().clone();
+        head.uri = io.request().uri().clone();
+        self.accepts(&head)
+    }
+    fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+        Ok(io.bind(
+            ANTHROPIC,
+            |request| Self.read_request(request),
+            |reply, source| Self.write_response(reply, source),
+            |fault, request, head| Self.refusal(fault, request, head),
+        ))
+    }
+}
+
+impl Format<Outgoing, Reply, Conversation> for AnthropicMessages {
+    fn name(&self) -> &str {
+        ANTHROPIC
+    }
+    fn bind(&self, io: Outgoing) -> Result<Connection<Reply, Conversation>, Fault> {
+        Ok(io.bind(
+            ANTHROPIC,
+            |source| Self.write_request(source),
+            |response, call| Self.read_response(response, call),
+            respan_gateway_http::success,
+        ))
+    }
+}
 
 /// Keys a conversation has a place for, or that change no output.
 const KNOWN: &[&str] = &[
@@ -351,7 +464,58 @@ impl Wire for AnthropicMessages {
         body
     }
 
+    fn patch_usage(
+        v: &mut Value,
+        total: &Usage,
+        said: &Usage,
+        edited: &Usage,
+    ) -> Result<(), Fault> {
+        check_usage(total)?;
+        let path = match v["type"].as_str() {
+            Some("message_start") => "/message/usage",
+            _ => "/usage",
+        };
+        let u = v
+            .pointer_mut(path)
+            .filter(|u| u.is_object())
+            .ok_or_else(|| unpatchable("this response has no place for edited usage"))?;
+        let changed = |unit| said.get(unit) != edited.get(unit);
+        let cached = total.get(units::CACHED_INPUT_TOKENS).unwrap_or_default();
+        let written = total
+            .get(units::CACHE_WRITE_INPUT_TOKENS)
+            .unwrap_or_default();
+        let input = total.get(units::INPUT_TOKENS).unwrap_or_default();
+        if u.get("input_tokens").is_some()
+            || changed(units::INPUT_TOKENS)
+            || changed(units::CACHED_INPUT_TOKENS)
+            || changed(units::CACHE_WRITE_INPUT_TOKENS)
+        {
+            u["input_tokens"] = json!((input - cached - written) as u64);
+        }
+        if u.get("output_tokens").is_some() || changed(units::OUTPUT_TOKENS) {
+            u["output_tokens"] = json!(total.get(units::OUTPUT_TOKENS).unwrap_or_default() as u64);
+        }
+        for (unit, field, amount) in [
+            (
+                units::CACHED_INPUT_TOKENS,
+                "cache_read_input_tokens",
+                cached,
+            ),
+            (
+                units::CACHE_WRITE_INPUT_TOKENS,
+                "cache_creation_input_tokens",
+                written,
+            ),
+        ] {
+            if u.get(field).is_some() || changed(unit) {
+                u[field] = json!(amount as u64);
+            }
+        }
+        Ok(())
+    }
+
     fn render(so_far: &SoFar) -> Result<Value, Fault> {
+        check_usage(&so_far.usage)?;
         let mut content: Vec<Value> = so_far
             .text
             .values()
@@ -410,6 +574,27 @@ impl Wire for AnthropicMessages {
     }
 }
 
+fn check_usage(usage: &Usage) -> Result<(), Fault> {
+    supported_usage(
+        usage,
+        &[
+            units::INPUT_TOKENS,
+            units::OUTPUT_TOKENS,
+            units::CACHED_INPUT_TOKENS,
+            units::CACHE_WRITE_INPUT_TOKENS,
+        ],
+    )?;
+    let input = usage.get(units::INPUT_TOKENS).unwrap_or_default();
+    let cached = usage.get(units::CACHED_INPUT_TOKENS).unwrap_or_default();
+    let written = usage
+        .get(units::CACHE_WRITE_INPUT_TOKENS)
+        .unwrap_or_default();
+    if cached + written > input || cached + written >= u64::MAX as f64 {
+        return Err(unpatchable("this format cannot represent the edited usage"));
+    }
+    Ok(())
+}
+
 /// Puts an edited reply back into a stream event.
 fn put_event(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
     if reply
@@ -446,6 +631,16 @@ fn put_event(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
     Ok(())
 }
 
+/// The usage snapshot in an Anthropic event, including message_start's
+/// nested message rather than only the top-level delta.
+fn event_usage(v: &Value) -> Usage {
+    match v["type"].as_str() {
+        Some("message_start") => usage_of(&v["message"]["usage"]),
+        Some("message_delta") => usage_of(&v["usage"]),
+        _ => Usage::default(),
+    }
+}
+
 /// Usage totals; [`units::INPUT_TOKENS`] includes the cache reads and
 /// writes Anthropic counts apart.
 fn usage_of(u: &Value) -> Usage {
@@ -468,7 +663,7 @@ fn usage_of(u: &Value) -> Usage {
     usage
 }
 
-impl Events<Reply> for Reading<AnthropicMessages> {
+impl Reading<AnthropicMessages> {
     fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
         if self.done {
             return Ok(());
@@ -480,18 +675,12 @@ impl Events<Reply> for Reading<AnthropicMessages> {
         if says_error(&v) || v["type"] == "error" {
             return Err(error_event(&self.name, &raw, &v));
         }
-        let usage = match v["type"].as_str() {
-            Some("message_start") => &v["message"]["usage"],
-            Some("message_delta") => &v["usage"],
-            // Its end, which the encoder writes.
-            Some("message_stop") => {
-                self.done = true;
-                return Ok(());
-            }
-            _ => &Value::Null,
-        };
+        if v["type"] == "message_stop" {
+            self.done = true;
+            return Ok(());
+        }
         let mut reply = event_reply(&v);
-        reply.usage = self.totals.increment(&usage_of(usage));
+        reply.usage = self.totals.increment(&event_usage(&v));
         out.push(reply.came(&self.name, raw));
         Ok(())
     }
@@ -547,6 +736,8 @@ fn event_reply(v: &Value) -> Reply {
 #[derive(Debug, Default)]
 struct EventStream {
     so_far: SoFar,
+    /// Earlier edits may make the provider's later cumulative snapshots stale.
+    usage_changed: bool,
     /// Whether `message_start` is written, at the first content.
     started: bool,
     /// The open block and its index, numbered in the order blocks open: the
@@ -565,7 +756,7 @@ struct EventStream {
     /// Text for a block the provider has not opened: it goes in when it
     /// opens, or else into a new block at the end.
     waiting: Vec<(u32, String)>,
-    /// The provider's events from `message_delta` on.
+    /// The provider's events from its terminal `message_delta` on.
     held: Option<BytesMut>,
     /// The provider's events before its `message_start`, or that say
     /// nothing after a stop kept back: relayed once that goes out.
@@ -715,7 +906,9 @@ impl EventStream {
         let name = v["type"].as_str();
         match name {
             Some("message_start") => self.started = true,
-            Some("message_delta") => _ = self.held.get_or_insert_default(),
+            Some("message_delta") if event_reply(&v).finish.is_some() => {
+                _ = self.held.get_or_insert_default();
+            }
             _ => {}
         }
         if let Some(held) = &mut self.held {
@@ -858,35 +1051,71 @@ fn holds(v: &Value, piece: &Piece) -> bool {
 
 /// An event `raw`, which said `said`, with its edited reply put back;
 /// `None` if nothing is left, unless it opens a message or a block.
-fn rebuild(raw: &Bytes, said: &Reply, reply: &Reply) -> Result<Option<Bytes>, Fault> {
+fn rebuild(
+    raw: &Bytes,
+    said: &Reply,
+    reply: &Reply,
+    before: &Usage,
+) -> Result<Option<Bytes>, Fault> {
     let mut v = event_json(raw).unwrap_or_default();
     let opens = matches!(
         v["type"].as_str(),
         Some("message_start" | "content_block_start")
     );
-    if !opens && reply.content.is_empty() && reply.finish.is_none() {
+    let mut after = before.clone();
+    after += &reply.usage;
+    check_usage(&after)?;
+    let reported = event_usage(&v);
+    let different_total = reported.iter().any(|(unit, n)| after.get(&unit) != Some(n));
+    if different_total || usage_step(before, &reported) != reply.usage {
+        AnthropicMessages::patch_usage(&mut v, &after, &said.usage, &reply.usage)?;
+    }
+    // A filter may defer the finish until its end callback. Its usage has
+    // already been counted; retaining the original terminal event would
+    // finish the message before that callback can append content.
+    if !opens
+        && reply.content.is_empty()
+        && reply.finish.is_none()
+        && (said.finish.is_some() || !v["usage"].is_object())
+    {
         return Ok(None);
     }
     put_event(&mut v, reply)?;
-    if reply.usage != said.usage && v["usage"].is_object() {
-        v["usage"] = AnthropicMessages::usage_body(&reply.usage);
-    }
-    reads_back::<AnthropicMessages>(reply, &event_reply(&v))?;
-    // It read back as an event, so it has its type.
-    let name = v["type"].as_str().unwrap_or_default().to_owned();
-    Ok(Some(event(Some(&name), &v).into()))
+    let mut again = event_reply(&v);
+    again.usage = usage_step(before, &event_usage(&v));
+    reads_back::<AnthropicMessages>(reply, &again)?;
+    Ok(Some(
+        crate::formats::sse::event_as(Some(raw), v["type"].as_str(), &v).into(),
+    ))
 }
 
-impl Encoder<Reply, ()> for EventStream {
-    fn head(&mut self, _first: Option<&Reply>) {}
-
+impl Encoder<Reply> for EventStream {
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+        let before = self.so_far.usage.clone();
         self.so_far.note(reply);
+        check_usage(&self.so_far.usage)?;
         let own = reply.came_in(ANTHROPIC).filter(|_| self.so_far.relayed);
         let Some(own) = own else {
+            self.usage_changed |= !reply.usage.is_empty();
             return self.write(reply, out);
         };
+        self.usage_changed |= own.said.usage != reply.usage;
         if own.said == *reply {
+            let v = event_json(&own.bytes).unwrap_or_default();
+            let reported = event_usage(&v);
+            self.usage_changed |= usage_step(&before, &reported) != reply.usage;
+            if self.usage_changed {
+                let different = reported
+                    .iter()
+                    .any(|(unit, n)| self.so_far.usage.get(&unit) != Some(n))
+                    || usage_step(&before, &reported) != reply.usage;
+                if different {
+                    if let Some(bytes) = rebuild(&own.bytes, &own.said, reply, &before)? {
+                        self.relay(&bytes, out);
+                    }
+                    return Ok(());
+                }
+            }
             self.relay(&own.bytes, out);
             return Ok(());
         }
@@ -900,7 +1129,7 @@ impl Encoder<Reply, ()> for EventStream {
         }
         let mut all = BytesMut::new();
         self.write(&ahead, &mut all)?;
-        if let Some(bytes) = rebuild(&own.bytes, &own.said, &inside)? {
+        if let Some(bytes) = rebuild(&own.bytes, &own.said, &inside, &before)? {
             self.relay(&bytes, &mut all);
         }
         self.write(&after, &mut all)?;
@@ -950,7 +1179,7 @@ mod tests {
     /// The rebuilt event, or empty bytes.
     fn rebuilt(raw: &Bytes, reply: &Reply) -> Result<Bytes, Fault> {
         let said = event_reply(&event_json(raw).unwrap_or_default());
-        rebuild(raw, &said, reply).map(Option::unwrap_or_default)
+        rebuild(raw, &said, reply, &Usage::default()).map(Option::unwrap_or_default)
     }
     use crate::common::patch_request;
 
@@ -1225,6 +1454,317 @@ mod tests {
             Some(
                 json!([{ "type": "text", "text": "key [x]", "cache_control": { "type": "ephemeral" } }])
             )
+        );
+    }
+
+    #[test]
+    fn edited_text_keeps_the_sse_envelope_and_unedited_bytes() {
+        let raw = Bytes::from_static(b"id: 7\nevent: content_block_delta\nretry: 1500\n: preserve\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"secret\"}}\n\n");
+        let changed =
+            rebuilt(&raw, &Reply::text(0, "public")).expect("rebuild edited Anthropic event");
+        let text = String::from_utf8_lossy(&changed);
+        for line in [
+            "id: 7",
+            "event: content_block_delta",
+            "retry: 1500",
+            ": preserve",
+        ] {
+            assert!(text.contains(line), "{text}");
+        }
+        assert!(
+            text.contains("public") && !text.contains("secret"),
+            "{text}"
+        );
+        let mut encoder = EventStream::new(true);
+        let mut out = BytesMut::new();
+        let start = Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\n");
+        let name = std::sync::Arc::from(ANTHROPIC);
+        encoder
+            .encode(&Reply::start("m", "c").came(&name, start.clone()), &mut out)
+            .expect("relay Anthropic message start");
+        let said = event_reply(&event_json(&raw).expect("parse source Anthropic event"))
+            .came(&name, raw.clone());
+        encoder
+            .encode(&said, &mut out)
+            .expect("relay Anthropic text event");
+        assert_eq!(&out[..], &[&start[..], &raw[..]].concat());
+    }
+
+    #[test]
+    fn edited_stream_usage_rewrites_nested_start_and_later_totals() {
+        let events = [
+            "id: start\n: keep\nevent: message_start\nretry: 500\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"vendor\":8}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":7,\"vendor\":9}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"input_tokens\":1,\"output_tokens\":7,\"vendor\":10}}\n\n",
+        ];
+        let mut replies = decode(&events);
+        assert_eq!(replies[1].usage.get(units::OUTPUT_TOKENS), Some(6.0));
+        replies[1].usage = Usage::default();
+        replies[1].usage.add(units::OUTPUT_TOKENS, 3.0);
+        let mut encoder = EventStream::new(true);
+        let mut out = BytesMut::new();
+        for reply in &replies {
+            encoder
+                .encode(reply, &mut out)
+                .expect("encode Anthropic event");
+        }
+        encoder
+            .end(&Ok(()), &mut out)
+            .expect("finish Anthropic stream");
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(events[0]), "{text}");
+        assert!(
+            text.contains("\"vendor\":9") && text.contains("\"vendor\":10"),
+            "{text}"
+        );
+        let mut reader = AnthropicMessages.parser(false);
+        let mut again = Vec::new();
+        reader
+            .push(out.freeze(), &mut again)
+            .expect("decode rebuilt Anthropic stream");
+        assert_eq!(
+            again
+                .iter()
+                .map(|r| r.usage.get(units::OUTPUT_TOKENS))
+                .collect::<Vec<_>>(),
+            [Some(1.0), Some(3.0), None]
+        );
+    }
+
+    #[test]
+    fn deferred_finish_after_nonterminal_usage_keeps_final_totals() {
+        let events = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"output_tokens\":1}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":4,\"vendor\":9}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+        ];
+        let mut replies = decode(&events);
+        let finish = replies[2].finish.take();
+        let mut encoder = EventStream::new(true);
+        let mut out = BytesMut::new();
+        for reply in &replies {
+            encoder
+                .encode(reply, &mut out)
+                .expect("encode Anthropic event");
+        }
+        let mut footer = Reply::text(0, "footer");
+        footer.finish = finish;
+        encoder
+            .encode(&footer, &mut out)
+            .expect("write deferred finish");
+        encoder
+            .end(&Ok(()), &mut out)
+            .expect("finish Anthropic stream");
+        let text = String::from_utf8_lossy(&out).into_owned();
+        let mut reader = AnthropicMessages.parser(false);
+        let mut again = Vec::new();
+        reader
+            .push(out.freeze(), &mut again)
+            .expect("decode rebuilt Anthropic stream");
+        let total: f64 = again
+            .iter()
+            .filter_map(|r| r.usage.get(units::OUTPUT_TOKENS))
+            .sum();
+        assert_eq!(total, 7.0, "{text}");
+        assert!(
+            again.iter().any(|r| r.finish == Some(Finish::Stop)),
+            "{text}"
+        );
+        assert!(
+            text.contains("footer") && text.contains("\"vendor\":9"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn dropped_usage_does_not_reappear_in_later_totals() {
+        let events = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"output_tokens\":1}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":7}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7,\"vendor\":9}}\n\n",
+        ];
+        let replies = decode(&events);
+        let mut encoder = EventStream::new(true);
+        let mut out = BytesMut::new();
+        for (index, reply) in replies.iter().enumerate() {
+            if index != 1 {
+                encoder
+                    .encode(reply, &mut out)
+                    .expect("encode Anthropic event");
+            }
+        }
+        encoder
+            .end(&Ok(()), &mut out)
+            .expect("finish Anthropic stream");
+        let text = String::from_utf8_lossy(&out);
+        let mut reader = AnthropicMessages.parser(false);
+        let mut again = Vec::new();
+        reader
+            .push(out.clone().freeze(), &mut again)
+            .expect("decode corrected Anthropic totals");
+        let total: f64 = again
+            .iter()
+            .filter_map(|r| r.usage.get(units::OUTPUT_TOKENS))
+            .sum();
+        assert_eq!(total, 1.0, "{text}");
+        assert!(text.contains("\"vendor\":9"), "{text}");
+    }
+
+    #[test]
+    fn usage_correction_preserves_unchanged_decreases_and_upward_edits() {
+        for (totals, edited, expected) in [
+            ([7, 1, 0], None, [7.0, 1.0, 0.0]),
+            ([1, 7, 7], Some(3.0), [3.0, 9.0, 9.0]),
+        ] {
+            let events = [
+                format!(
+                    "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"model\":\"c\",\"usage\":{{\"output_tokens\":{}}}}}}}\n\n",
+                    totals[0]
+                ),
+                format!(
+                    "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{}},\"usage\":{{\"output_tokens\":{}}}}}\n\n",
+                    totals[1]
+                ),
+                format!(
+                    "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{}}}}}\n\n",
+                    totals[2]
+                ),
+            ];
+            let mut replies = decode(&[&events[0], &events[1], &events[2]]);
+            if let Some(amount) = edited {
+                replies[0].usage = Usage::default();
+                replies[0].usage.add(units::OUTPUT_TOKENS, amount);
+            }
+            let mut encoder = EventStream::new(true);
+            let mut out = BytesMut::new();
+            for reply in &replies {
+                encoder
+                    .encode(reply, &mut out)
+                    .expect("encode Anthropic event");
+            }
+            encoder
+                .end(&Ok(()), &mut out)
+                .expect("finish Anthropic stream");
+            let text = String::from_utf8_lossy(&out);
+            let reported: Vec<_> = text
+                .split("\n\n")
+                .filter_map(|e| event_json(&Bytes::copy_from_slice(e.as_bytes())))
+                .filter_map(|v| event_usage(&v).get(units::OUTPUT_TOKENS))
+                .collect();
+            assert_eq!(reported, expected, "{text}");
+            if edited.is_none() {
+                assert!(text.starts_with(&events.concat()), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_usage_edits_fail_instead_of_disappearing() {
+        let ping = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
+        let mut edited = Reply::default();
+        edited.usage.add(units::OUTPUT_TOKENS, 2.0);
+        assert!(rebuilt(&ping, &edited).is_err(), "no usage object to patch");
+        let start = Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":1}}}\n\n");
+        let mut unknown = event_reply(&event_json(&start).expect("parse source message start"));
+        unknown.usage.add("credits", 3.0);
+        assert!(rebuilt(&start, &unknown).is_err(), "unknown usage unit");
+        let mut synthetic = Reply::text(0, "ok");
+        synthetic.usage.add("credits", 3.0);
+        let mut out = BytesMut::new();
+        assert!(
+            EventStream::new(false)
+                .encode(&synthetic, &mut out)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cache_usage_edit_removes_old_cache_value_without_losing_vendor_fields() {
+        let events = [
+            "id: begin\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":1,\"cache_read_input_tokens\":2,\"cache_creation_input_tokens\":1,\"output_tokens\":1,\"vendor\":7}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1,\"cache_read_input_tokens\":2,\"cache_creation_input_tokens\":1,\"output_tokens\":7,\"vendor\":8}}\n\n",
+        ];
+        let mut replies = decode(&events);
+        assert_eq!(replies[0].usage.get(units::INPUT_TOKENS), Some(4.0));
+        replies[0].usage = Usage::default();
+        replies[0].usage.add(units::INPUT_TOKENS, 2.0);
+        replies[0].usage.add(units::CACHE_WRITE_INPUT_TOKENS, 1.0);
+        replies[0].usage.add(units::OUTPUT_TOKENS, 1.0);
+        let mut encoder = EventStream::new(true);
+        let mut out = BytesMut::new();
+        for reply in &replies {
+            encoder
+                .encode(reply, &mut out)
+                .expect("encode Anthropic event");
+        }
+        encoder
+            .end(&Ok(()), &mut out)
+            .expect("finish Anthropic stream");
+        let text = String::from_utf8_lossy(&out).into_owned();
+        assert!(
+            text.contains("id: begin")
+                && text.contains("\"vendor\":7")
+                && text.contains("\"vendor\":8"),
+            "{text}"
+        );
+        let mut reader = AnthropicMessages.parser(false);
+        let mut again = Vec::new();
+        reader
+            .push(out.freeze(), &mut again)
+            .expect("decode rebuilt Anthropic stream");
+        assert_eq!(
+            again
+                .iter()
+                .map(|r| r.usage.get(units::INPUT_TOKENS))
+                .collect::<Vec<_>>(),
+            [Some(2.0), None]
+        );
+        assert_eq!(
+            again
+                .iter()
+                .map(|r| r.usage.get(units::CACHED_INPUT_TOKENS))
+                .collect::<Vec<_>>(),
+            [None, None]
+        );
+        for raw in text.split("\n\n").filter(|e| e.contains("\"usage\"")) {
+            let v = event_json(raw.as_bytes()).expect("parse corrected cache-usage event");
+            let u = if v["type"] == "message_start" {
+                &v["message"]["usage"]
+            } else {
+                &v["usage"]
+            };
+            assert_eq!(u["input_tokens"], 1);
+            assert_eq!(u["cache_read_input_tokens"], 0);
+            assert_eq!(u["cache_creation_input_tokens"], 1);
+        }
+    }
+
+    #[test]
+    fn whole_usage_edit_keeps_cache_arithmetic_and_vendor_keys() {
+        let v = json!({
+            "id":"m", "model":"c", "content":[], "stop_reason":"end_turn",
+            "usage":{"input_tokens":2,"cache_read_input_tokens":3,
+                "cache_creation_input_tokens":1,"output_tokens":7,
+                "server_tool_use":{"web_search_requests":4}}
+        });
+        let raw = Bytes::from(v.to_string());
+        let mut said = AnthropicMessages::reply(&v);
+        said.usage = AnthropicMessages::usage(&v);
+        let mut edited = said.clone();
+        edited.usage = Usage::default();
+        edited.usage.add(units::INPUT_TOKENS, 3.0);
+        edited.usage.add(units::CACHE_WRITE_INPUT_TOKENS, 1.0);
+        edited.usage.add(units::OUTPUT_TOKENS, 4.0);
+        let bytes = crate::common::rebuild_whole::<AnthropicMessages>(&raw, &said, &edited)
+            .expect("rebuild whole Anthropic usage");
+        let got: Value = serde_json::from_slice(&bytes).expect("parse rebuilt Anthropic response");
+        assert_eq!(got["usage"]["input_tokens"], 2);
+        assert_eq!(got["usage"]["cache_read_input_tokens"], 0);
+        assert_eq!(got["usage"]["cache_creation_input_tokens"], 1);
+        assert_eq!(got["usage"]["output_tokens"], 4);
+        assert_eq!(
+            got["usage"]["server_tool_use"],
+            json!({"web_search_requests":4})
         );
     }
 

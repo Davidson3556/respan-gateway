@@ -1,0 +1,36 @@
+[package]
+name = "respan-gateway-http"
+description = "Native HTTP bindings and stream/sink helpers for protocol authors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+reqwest = ["dep:reqwest"]
+
+[dependencies]
+respan-gateway-sdk.workspace = true
+reqwest = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+respan-gateway-plugins.workspace = true
+respan-gateway-providers.workspace = true
+respan-gateway-sdk.workspace = true
+serde_json.workspace = true
+mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

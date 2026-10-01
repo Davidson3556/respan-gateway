@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-examples"
-description = "Runnable examples: how to build the use cases on the core and the SDKs."
+description = "Runnable examples: how to build the use cases on the public SDK and protocol APIs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,9 +17,7 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-respan-gateway-core.workspace = true
-respan-gateway-formats.workspace = true
-respan-gateway-messages.workspace = true
+respan-gateway-sdk.workspace = true
 respan-gateway-http.workspace = true
 serde_json.workspace = true
 rusqlite = { version = "0.32.1", features = ["bundled"] }
@@ -34,10 +32,6 @@ respan-gateway-plugins.workspace = true
 respan-gateway-axum = { workspace = true, features = ["ws"] }
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-providers.workspace = true
-respan-gateway-testkit.workspace = true
-respan-gateway-routing.workspace = true
-respan-gateway-text.workspace = true
-respan-gateway-ledger.workspace = true
 respan-gateway-mcp.workspace = true
 respan-gateway-ws.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
@@ -166,3 +160,19 @@ test = true
 name = "jobs_background"
 path = "jobs_background.rs"
 test = true
+
+[[test]]
+name = "text_anthropic_partial_json"
+path = "tests/text_anthropic_partial_json.rs"
+
+[[test]]
+name = "text_split_escapes"
+path = "tests/text_split_escapes.rs"
+
+[[test]]
+name = "text_text"
+path = "tests/text_text.rs"
+
+[[test]]
+name = "text_tool_json"
+path = "tests/text_tool_json.rs"

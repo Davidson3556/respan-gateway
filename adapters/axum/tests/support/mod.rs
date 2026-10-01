@@ -10,12 +10,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use respan_gateway_core::{Fault, Gateway};
-use respan_gateway_formats::opaque::{self, Got, Sent};
-use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::formats::opaque::{self, Got, Sent};
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
-use respan_gateway_http::{RequestHead, ResponseHead};
+use respan_gateway_http::{self as h, Incoming, Outgoing};
+use respan_gateway_sdk::{Connection, Fault, Format, Gateway};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -33,51 +32,39 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct Raw;
 
-impl Codec for Raw {
-    type Input = Sent<Raw>;
-    type Output = Got<Raw>;
-
+impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
-
-    fn accepts(&self, head: &RequestHead) -> bool {
-        head.method == Method::GET && head.headers.contains_key(UPGRADE)
+    fn matches(&self, io: &Incoming) -> bool {
+        io.request().method() == Method::GET && io.request().headers().contains_key(UPGRADE)
     }
-
-    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Sent<Raw>>> {
-        opaque::request_decoder::<Raw>()
-    }
-
-    fn request_encoder(
-        &self,
-        client: Option<&RequestHead>,
-        _body: &mut Bytes,
-        streams: bool,
-    ) -> Box<dyn Encoder<Sent<Raw>, RequestHead>> {
-        opaque::request_encoder::<Raw>(client, streams)
-    }
-
-    fn response_decoder(
-        &self,
-        answer: &ResponseHead,
-        call: &RequestHead,
-        _sent: &Bytes,
-    ) -> Box<dyn Decoder<Got<Raw>>> {
-        opaque::response_decoder::<Raw>("raw", answer, call)
-    }
-
-    fn response_encoder(
-        &self,
-        answer: Option<&ResponseHead>,
-        ask: &RequestHead,
-        _body: &Bytes,
-    ) -> Box<dyn Encoder<Got<Raw>, ResponseHead>> {
-        opaque::response_encoder::<Raw>(answer, ask)
+    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Raw>, Got<Raw>>, Fault> {
+        Ok(io.bind(
+            "raw",
+            opaque::read_request::<Raw>,
+            |reply, source| Ok(opaque::write_response::<Raw>("raw", reply, source)),
+            h::plain_refusal,
+        ))
     }
 }
 
-impl_format!(Raw);
+impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
+    fn name(&self) -> &str {
+        "raw"
+    }
+    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Raw>, Sent<Raw>>, Fault> {
+        Ok(io.bind(
+            "raw",
+            |source| opaque::write_request::<Raw>("raw", source),
+            |answer, sent| opaque::read_response::<Raw>("raw", answer, &sent.into_parts().0),
+            |answer, call| {
+                answer.status.is_success()
+                    || (answer.status == 101 && call.headers.contains_key(UPGRADE))
+            },
+        ))
+    }
+}
 
 /// A gateway serving over real sockets.
 pub struct Server {
@@ -582,8 +569,9 @@ async fn tap(
     }
 }
 
-use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
-pub use respan_gateway_testkit::{Calls, Outcomes};
+#[path = "../../../../tests/support/hooks.rs"]
+mod hooks;
+pub use hooks::{Calls, Outcomes};
 use respan_gateway_ws::WsTransport;
 
 /// A gateway that relays every session to the provider at `base` in format
@@ -594,7 +582,7 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
     let gateway = Gateway::new()
         .client::<Sent<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<Sent<Raw>, _, _>("p", Raw, respan_gateway_http::connect(transport))
+        .provider::<Sent<Raw>, _, _>("p", Raw, transport.connect())
         .unwrap()
         .plugin("ends", ends.clone())
         .unwrap()

@@ -16,20 +16,29 @@
 //!
 //! `cargo run -p respan-gateway-examples --example guardrail`
 
-use respan_gateway_core::futures::stream;
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
-use respan_gateway_core::{Response, async_trait};
+#[path = "support/text.rs"]
+mod text;
+
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
-use respan_gateway_messages::conversation::{Conversation, Piece, Reply};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
-use respan_gateway_text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};
+use respan_gateway_sdk::conversation::{Conversation, Piece, Reply};
+use respan_gateway_sdk::futures::stream;
+use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
+use respan_gateway_sdk::{Response, async_trait};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
+use http_support::{post, read_whole, serve};
 use serde_json::{Value, json};
+use text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};
 
-const OPENAI: &str = "http://openai.test/v1";
 const BLOCKED: &str = "content_blocked";
 const UNCOVERED: &str = "guard_uncovered";
 
@@ -123,14 +132,15 @@ impl Plugin for Cache {
 
 /// The providers and formats, before any plugin. For real use, the
 /// transport is
-/// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
-fn base(mock: &MockTransport) -> Result<Gateway, Fault> {
+/// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
+fn base(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
         .client::<Conversation, _, _>(AnthropicMessages)
 }
@@ -149,14 +159,22 @@ fn guarded(
 /// The guard around a cache, and `extra` registered after the cache and
 /// before `guard-input`.
 fn gateway_with(
-    mock: &MockTransport,
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
     extra: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
 ) -> Result<Gateway, Fault> {
-    guarded(base(mock)?, |gw| extra(gw.plugin("cache", Cache)?))
+    guarded(base(transport)?, |gw| extra(gw.plugin("cache", Cache)?))
 }
 
-fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
-    gateway_with(mock, Ok)
+fn gateway(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+) -> Result<Gateway, Fault> {
+    gateway_with(transport, Ok)
 }
 
 /// A streamed OpenAI chat of one user message.
@@ -167,13 +185,13 @@ fn chat(model: &str, content: Value) -> Request<Body> {
 }
 
 /// The provider streams `deltas` as OpenAI chunks.
-fn deltas(deltas: &[&str]) -> mock::Reply {
+fn deltas(deltas: &[&str]) -> Answer {
     let chunk = |d| json!({ "id": "c1", "choices": [{ "index": 0, "delta": { "content": d } }] });
     let events: String = deltas
         .iter()
         .map(|d| format!("data: {}\n\n", chunk(d)))
         .collect();
-    mock::sse(&[&events, "data: [DONE]\n\n"])
+    provider_support::sse(&[&events, "data: [DONE]\n\n"])
 }
 
 async fn send(gw: &Gateway, req: Request<Body>) -> (StatusCode, String) {
@@ -184,9 +202,9 @@ async fn send(gw: &Gateway, req: Request<Body>) -> (StatusCode, String) {
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let gw = gateway(&mock)?;
-    mock.reply(OPENAI, deltas(&["Chemistry is fun. A bo", "mb is not."]));
+    let fake = FakeOpenAi::start().await;
+    let gw = gateway(provider_support::openai(&fake.base_url())?.connect())?;
+    fake.answer(deltas(&["Chemistry is fun. A bo", "mb is not."]));
     for (what, req) in [
         ("term split across deltas", chat("gpt", "chemistry?".into())),
         ("poisoned cache", chat("cached", "hi".into())),

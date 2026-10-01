@@ -1,12 +1,12 @@
 use super::*;
-use respan_gateway_messages::conversation::units;
+use respan_gateway_sdk::conversation::units;
 
 #[tokio::test]
 async fn handle_returns_the_response_and_its_outcome_with_no_server() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::json(http::StatusCode::OK, ANSWER));
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::raw(ANSWER));
     let tally = Meter::default();
-    let gw = gateway(&mock, tally.clone())?;
+    let gw = gateway(scripted_provider(&openai)?.connect(), tally.clone())?;
     let (status, body, outcome) = ask(&gw, "Say hi").await?;
     assert_eq!(body, ANSWER, "a relay passes the provider's bytes");
     assert!(outcome.is_ok());
@@ -16,18 +16,21 @@ async fn handle_returns_the_response_and_its_outcome_with_no_server() -> Result<
     let usage = tally.usage();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(3.0));
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(1.0));
+    assert_eq!(openai.requests().len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn a_provider_failure_is_an_outcome_not_a_panic() -> Result<(), Fault> {
-    // Nothing queued: the mock answers 502 upstream.
-    let mock = MockTransport::new();
-    let gw = gateway(&mock, Meter::default())?;
+    // The scripted provider refuses rather than producing a completion.
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::error(502).message("upstream unavailable"));
+    let gw = gateway(scripted_provider(&openai)?.connect(), Meter::default())?;
     let (_, _, outcome) = ask(&gw, "Say hi").await?;
     assert_eq!(
         outcome.err().map(|f| f.code().to_owned()),
-        Some("upstream".into())
+        Some("server_error".into())
     );
+    assert_eq!(openai.requests().len(), 1);
     Ok(())
 }

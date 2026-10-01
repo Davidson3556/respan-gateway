@@ -7,21 +7,18 @@ use futures::{Stream, StreamExt, stream};
 use tokio::runtime::Handle;
 
 use crate::call::OpenCalls;
-use crate::events::Metadata;
 use crate::format::{AnyEvents, AnyFormat, AnyValue, erase, is_input, typed};
 use crate::gateway::Inner;
 use crate::input::Input;
 use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard};
 use crate::plugin::Filters;
-use crate::{Call, Events, Extensions, Fault, Filter, Gateway, Plugin, Result};
+use crate::{Call, EventStream, Extensions, Fault, Filter, Gateway, Plugin, Result};
 
 /// One client request, as the client edge's hooks see it.
 pub struct ClientContext {
     /// The first client format that accepted the request.
     pub(crate) format: Arc<dyn AnyFormat>,
-    /// Format-owned metadata; only a relay hands it on.
-    pub(crate) metadata: Metadata,
     pub(crate) extensions: Extensions,
     /// The provider called if every plugin passes.
     pub(crate) target: Option<String>,
@@ -87,7 +84,7 @@ impl Edge for ClientContext {
 impl ClientContext {
     pub(crate) fn new(
         format: Arc<dyn AnyFormat>,
-        mut incoming: Events<AnyValue>,
+        mut incoming: EventStream<AnyValue>,
         extensions: Extensions,
         gateway: Arc<Inner>,
     ) -> Self {
@@ -105,9 +102,8 @@ impl ClientContext {
             Later::new(Some(events))
         };
         Self {
-            input: Input::new(format.clone(), single, metadata.clone()),
+            input: Input::new(format.clone(), single, metadata),
             format,
-            metadata,
             extensions,
             target: gateway.target.clone(),
             later: Arc::new(later),
@@ -167,7 +163,7 @@ impl ClientContext {
         if is_input::<T>(&*self.format) != Ok(true) {
             return stream::once(async { Err(Fault::wrong_kind::<T>()) }).boxed();
         }
-        if self.later.ended {
+        if !self.input.is_live() {
             return stream::once(ready(self.input.get::<T>().cloned())).boxed();
         }
         let items = inputs(self.later.clone(), self.format.clone(), None, &self.cut);
@@ -211,7 +207,6 @@ impl ClientContext {
     pub(crate) fn copy(&self) -> Self {
         Self {
             format: self.format.clone(),
-            metadata: self.metadata.clone(),
             extensions: self.extensions.clone(),
             target: self.target.clone(),
             input: self.input.clone(),
@@ -248,7 +243,7 @@ impl ClientContext {
     ) -> Result<()> {
         match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
-            true if self.later.ended => self.input.filter(Filters::of(filter)),
+            true if !self.input.is_live() => self.input.filter(Filters::of(filter)),
             true => locked(&self.later.filters).add(filter, true),
         }
     }
@@ -261,7 +256,7 @@ impl ClientContext {
     ///
     /// ```
     /// # use respan_gateway_core::futures::{StreamExt, TryStreamExt};
-    /// # use respan_gateway_core::{ClientContext, Events, Result};
+    /// # use respan_gateway_core::{ClientContext, EventStream, Result};
     /// # use tokio::time::{Duration, sleep};
     /// # #[derive(Clone)]
     /// # struct Turn;
@@ -273,8 +268,8 @@ impl ClientContext {
     /// }
     ///
     /// fn on_client(cx: &mut ClientContext, limit: Duration) -> Result<()> {
-    ///     cx.wrap(|turns: Events<Turn>| turns.and_then(check))?;
-    ///     cx.wrap(move |events: Events<Event>| events.take_until(sleep(limit)))
+    ///     cx.wrap(|turns: EventStream<Turn>| turns.and_then(check))?;
+    ///     cx.wrap(move |events: EventStream<Event>| events.take_until(sleep(limit)))
     /// }
     /// ```
     ///
@@ -297,23 +292,26 @@ impl ClientContext {
     /// `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL) for another
     /// type, or for the inputs of a whole request, whose one input came with
     /// its head: vet it here and edit it with a filter.
-    pub fn wrap<T, S>(&mut self, wrap: impl FnOnce(Events<T>) -> S + Send + 'static) -> Result<()>
+    pub fn wrap<T, S>(
+        &mut self,
+        wrap: impl FnOnce(EventStream<T>) -> S + Send + 'static,
+    ) -> Result<()>
     where
         T: Any + Clone + Send + Sync,
         S: Stream<Item = Result<T>> + Send + 'static,
     {
         if !is_input::<T>(&*self.format)? {
             let wrap: Wrap =
-                Box::new(|outputs| erase(wrap(Events::stream(typed(outputs))).boxed()));
+                Box::new(|outputs| erase(wrap(EventStream::stream(typed(outputs))).boxed()));
             let before = std::mem::take(&mut self.outputs);
             locked(&self.wrapped).push((Some(wrap), before));
             return Ok(());
         }
-        if self.later.ended {
+        if !self.input.is_live() {
             let whole = "a whole request's one input came with its head: edit it with a filter";
             return Err(Fault::internal(whole));
         }
-        let inputs = erase(wrap(Events::stream(self.take_inputs::<T>())).boxed());
+        let inputs = erase(wrap(EventStream::stream(self.take_inputs::<T>())).boxed());
         self.later = Arc::new(Later::wrapping(inputs, self.later.clone()));
         Ok(())
     }

@@ -34,14 +34,21 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_core::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+use mockllm::FakeOpenAi;
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Asked, Credential};
-use respan_gateway_messages::conversation::{Conversation, Reply};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_sdk::conversation::{Conversation, Reply};
+use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
+use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -223,32 +230,52 @@ impl Running {
 }
 
 /// A stable upstream key handles crash ambiguity when the provider supports
+type HttpReply = (
+    http::Response<respan_gateway_http::Body>,
+    Option<respan_gateway_http::Completion>,
+);
+
 /// idempotency. Losing a lease stops local work; it cannot undo remote compute.
-fn supervised(
-    transport: impl Into<respan_gateway_http::Transport>,
-) -> respan_gateway_http::Transport {
-    let transport = transport.into();
-    respan_gateway_http::Transport::new(move |mut call| {
-        let transport = transport.clone();
+fn supervised<F, Fut>(
+    send: F,
+) -> impl Fn(
+    http::Request<respan_gateway_http::Body>,
+) -> respan_gateway_sdk::futures::future::BoxFuture<'static, Result<HttpReply, Fault>>
++ Send
++ Sync
++ 'static
+where
+    F: Fn(http::Request<respan_gateway_http::Body>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<HttpReply, Fault>> + Send + 'static,
+{
+    move |mut call| {
+        let send = send.clone();
         async move {
-            let Some(running) = call.extensions.get::<Running>().cloned() else {
-                return transport.send(call).await;
+            let Some(running) = call
+                .extensions()
+                .get::<respan_gateway_sdk::Extensions>()
+                .and_then(|extensions| extensions.get::<Running>())
+                .cloned()
+            else {
+                return send(call).await;
             };
             let key = digest(&serde_json::to_vec(&running.key).expect("key serializes"));
-            call.head.headers.insert(
+            call.headers_mut().insert(
                 "idempotency-key",
                 HeaderValue::from_str(&key)
                     .map_err(|_| Fault::internal("invalid operation key"))?,
             );
-            call.body = running.bounded(call.body);
-            let mut response = running.guard(transport.send(call)).await?;
-            response.body = running.bounded(response.body);
-            response.write_completion = response
-                .write_completion
-                .map(|work| async move { running.guard(work).await }.boxed());
-            Ok(response)
+            let call =
+                call.map(|body| respan_gateway_http::into_http_body(running.bounded(body.boxed())));
+            let (response, completion) = running.guard(send(call)).await?;
+            let response = response
+                .map(|body| respan_gateway_http::into_http_body(running.bounded(body.boxed())));
+            let completion =
+                completion.map(|writing| async move { running.guard(writing).await }.boxed());
+            Ok((response, completion))
         }
-    })
+        .boxed()
+    }
 }
 
 /// Runs each keyed request once. Register it after the plugin that marks
@@ -288,7 +315,7 @@ impl<S: Store> Plugin for Idempotent<S> {
             deadline: lease.as_ref().map(|(_, receiver)| receiver.clone()),
         };
         cx.extensions_mut().insert(running.clone());
-        cx.wrap(move |outputs: respan_gateway_core::Events<Reply>| {
+        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Reply>| {
             running.bounded(outputs.boxed())
         })?;
         if let (Some(interval), Some((renewed, _))) = (self.0.heartbeat(), lease) {
@@ -333,14 +360,18 @@ impl<S: Store> Plugin for Idempotent<S> {
     }
 }
 
-const OPENAI: &str = "http://openai.test/v1";
-
-fn gateway<S: Store>(mock: &MockTransport, store: &Arc<S>) -> Result<Gateway, Fault> {
+fn gateway<S: Store>(
+    transport: respan_gateway_http::HttpClient,
+    store: &Arc<S>,
+) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(supervised(mock.at(OPENAI))),
+            respan_gateway_http::connect(supervised(move |request| {
+                let client = transport.clone();
+                async move { client.send(request).await }
+            })),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("idempotent", Idempotent(store.clone()))?
@@ -353,7 +384,8 @@ const STREAM: &[&str] = &[
     "data: [DONE]\n\n",
 ];
 
-const BODY: &str = r#"{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+const BODY: &str =
+    r#"{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
 
 /// A request with idempotency key `key` from the tenant whose credential is `token`.
 fn keyed(token: &'static str, key: &'static str, body: &'static str) -> http::Request<Body> {
@@ -374,14 +406,14 @@ const ACME: &str = "Bearer acme-key";
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::sse(STREAM));
+    let provider = FakeOpenAi::start().await;
+    provider.answer(provider_support::sse(STREAM));
     let path = std::env::var("JOBS_DB").unwrap_or_else(|_| "jobs.sqlite3".into());
     let store = Arc::new(Sqlite::open(path)?);
-    let gw = gateway(&mock, &store)?;
+    let gw = gateway(provider_support::openai(&provider.base_url())?, &store)?;
     println!("first:\n{}", send(&gw, keyed(ACME, "op-1", BODY)).await?);
     println!("retry:\n{}", send(&gw, keyed(ACME, "op-1", BODY)).await?);
-    println!("provider calls: {}", mock.sent().len());
+    println!("provider calls: {}", provider.requests().len());
     Ok(())
 }
 

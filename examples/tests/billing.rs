@@ -1,14 +1,18 @@
 use super::*;
-use respan_gateway_messages::conversation::Conversation;
-use respan_gateway_messages::conversation::units;
+use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_sdk::conversation::units;
 
 #[tokio::test]
 async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
-    let (mock, store) = (MockTransport::new(), Memory::default());
-    let gw = gateway(&mock, store.clone())?;
-    ask(&gw, &mock, "acme", "small", Some((1_000, 500))).await;
-    ask(&gw, &mock, "acme", "large", Some((1_000, 500))).await;
-    ask(&gw, &mock, "globex", "unpriced", Some((10, 10))).await;
+    let (openai, store) = (FakeOpenAi::start().await, Memory::default());
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?.connect(),
+        store.clone(),
+    )?;
+    ask(&gw, &openai, "acme", SMALL, Some((1_000, 500))).await;
+    ask(&gw, &openai, "acme", LARGE, Some((1_000, 500))).await;
+    ask(&gw, &openai, "globex", UNPRICED, Some((10, 10))).await;
+    assert_eq!(openai.requests().len(), 3);
     let rows = store.rows();
     let billed: Vec<_> = rows
         .iter()
@@ -25,10 +29,14 @@ async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
 
 #[tokio::test]
 async fn a_failed_call_with_no_usage_writes_no_row() -> Result<(), Fault> {
-    let (mock, store) = (MockTransport::new(), Memory::default());
-    let gw = gateway(&mock, store.clone())?;
-    ask(&gw, &mock, "acme", "small", None).await;
+    let (openai, store) = (FakeOpenAi::start().await, Memory::default());
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?.connect(),
+        store.clone(),
+    )?;
+    ask(&gw, &openai, "acme", SMALL, None).await;
     assert!(store.rows().is_empty());
+    assert_eq!(openai.requests().len(), 1);
     Ok(())
 }
 
@@ -38,7 +46,7 @@ struct Refuses;
 #[async_trait]
 impl Plugin for Refuses {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        px.filter(|_: &mut respan_gateway_messages::conversation::Reply| {
+        px.filter(|_: &mut respan_gateway_sdk::conversation::Reply| {
             Err(Fault::bad_request("refused"))
         })
     }
@@ -48,13 +56,13 @@ impl Plugin for Refuses {
 // plugin's filter fails on it, so the usage in it is still billed.
 #[tokio::test]
 async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<(), Fault> {
-    let (mock, store) = (MockTransport::new(), Memory::default());
-    let prices = HashMap::from([("small", Price::new(150_000, 600_000))]);
+    let (openai, store) = (FakeOpenAi::start().await, Memory::default());
+    let prices = HashMap::from([(SMALL, Price::new(150_000, 600_000))]);
     let gw = Gateway::new()
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
+            provider_support::openai(&openai.base_url())?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("refuses", Refuses)?
@@ -66,7 +74,8 @@ async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<
             },
         )?
         .target("openai")?;
-    ask(&gw, &mock, "acme", "small", Some((1_000, 500))).await;
+    ask(&gw, &openai, "acme", SMALL, Some((1_000, 500))).await;
+    assert_eq!(openai.requests().len(), 1);
     let billed: Vec<_> = store.rows().iter().map(|r| r.micros).collect();
     assert_eq!(billed, [Some(450)]);
     Ok(())

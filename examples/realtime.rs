@@ -5,7 +5,7 @@
 //!   before the provider reads it (`conversation.item.create`,
 //!   `session.update` and `response.create` text), and restored in every
 //!   text the provider sends back, a placeholder split across deltas
-//!   included (the text SDK's `Placeholders`, with its `Rewrite`; its
+//!   included (the private text support's `Placeholders`, with its `Rewrite`; its
 //!   `Holdback` filters the chat kind, so a session holds its own).
 //! - `MaxLength`: a session is cut at a deadline a plugin chose, with a normal
 //!   close (1000, reason `max_length`); the turns metered before it stay
@@ -13,7 +13,7 @@
 //!   makes no call: the relay, and the provider's head with its subprotocol,
 //!   stay, and it composes with every other plugin.
 //! - `Reserve` (use case 9): every turn is bounded, held and settled on the
-//!   client's wallet (the ledger SDK). The session is capped before the
+//!   client's wallet (private example bookkeeping). The session is capped before the
 //!   client says anything (an input wrap opens it with a `session.update`
 //!   of `max_output_tokens`, and caps the client's own), and a
 //!   `response.create` is rewritten to ask for at most `TURN` output tokens.
@@ -42,10 +42,10 @@
 //!   `HOLD` output tokens (use case 9: a cut is never billed as $0); the
 //!   session's end is recorded once.
 //!
-//! The SDK (`respan-gateway-ws`) carries the session: `WsTransport` to the
+//! The integration (`respan-gateway-ws`) carries the session: `WsTransport` to the
 //! provider, `serve_ws` for the client, `JsonEvents` as the format, one JSON
 //! event per text frame. Everything about Realtime's events is here, none in
-//! the SDK.
+//! the integration.
 //!
 //! Covered: text events both ways; a wallet that caps, holds and settles each turn; a classifier per input; a placeholder split across deltas; usage per
 //! turn; the session's end recorded as `ok`, `abandoned` (the client left),
@@ -66,21 +66,26 @@
 #[path = "realtime/audio.rs"]
 mod audio;
 
+#[path = "support/text.rs"]
+mod text;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::futures::{Stream, StreamExt, TryStreamExt, stream};
-use respan_gateway_core::{
-    ClientContext, Events, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
 use respan_gateway_http::{Credential, Status};
-use respan_gateway_ledger::{Amount, HoldId, Ledger, MemoryLedger};
-use respan_gateway_testkit::Outcomes;
-use respan_gateway_text::{Placeholders, Rewrite};
+use respan_gateway_sdk::futures::{Stream, StreamExt, TryStreamExt, stream};
+use respan_gateway_sdk::{
+    ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
+};
+#[path = "billing/ledger.rs"]
+mod ledger;
+use ledger::{Amount, HoldId, Ledger, MemoryLedger};
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
 use serde_json::{Value, json};
+use text::{Placeholders, Rewrite};
 
 /// The longest a session may last, unless a plugin says otherwise.
 const HOUR: Duration = Duration::from_secs(3600);
@@ -444,7 +449,7 @@ struct MaxLength(Duration);
 /// `events` until `limit` has passed, then a fault that closes normally.
 fn until(
     limit: Duration,
-    events: Events<ProviderEvent>,
+    events: EventStream<ProviderEvent>,
 ) -> impl Stream<Item = Result<ProviderEvent, Fault>> {
     let state = Some((events, Box::pin(tokio::time::sleep(limit))));
     stream::unfold(state, |state| async {
@@ -738,7 +743,7 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
         let asks = wallet.clone();
         let cap = format!("cap_{}", HoldId::new());
         let capped = cap.clone();
-        cx.wrap(move |events: Events<ClientEvent>| {
+        cx.wrap(move |events: EventStream<ClientEvent>| {
             // The session is capped before the client says anything, so the
             // turns the provider starts (voice detection) are bounded too.
             let open = json!({ "type": "session.update", "event_id": capped,
@@ -748,7 +753,7 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
                 .and_then(move |event| asks.clone().before(event))
         })?;
         let answers = wallet.clone();
-        cx.wrap(move |events: Events<ProviderEvent>| {
+        cx.wrap(move |events: EventStream<ProviderEvent>| {
             // The provider's answer to the session's cap is not the client's:
             // its `session.updated` is the first (the client speaks after the
             // cap), and an `error` naming the cap ends a session that cannot
@@ -795,10 +800,31 @@ struct Vet;
 #[async_trait]
 impl Plugin for Vet {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.wrap(|events: Events<ClientEvent>| {
+        cx.wrap(|events: EventStream<ClientEvent>| {
             events.and_then(|event| async move { classify(&event).await.map(|()| event) })
         })?;
         Ok(None)
+    }
+}
+
+/// A local probe for session-end outcomes; production records these in its
+/// own telemetry instead of depending on a testkit plugin.
+#[derive(Clone, Default)]
+struct Outcomes(Arc<Mutex<Vec<Result<(), Fault>>>>);
+
+impl Outcomes {
+    #[cfg(test)]
+    fn only(&self) -> Result<(), Fault> {
+        let mut all = lock(&self.0).clone();
+        assert_eq!(all.len(), 1, "expected exactly one end: {all:?}");
+        all.remove(0)
+    }
+}
+
+#[async_trait]
+impl Plugin for Outcomes {
+    async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
+        lock(&self.0).push(end.clone());
     }
 }
 
@@ -827,11 +853,7 @@ fn gateway_with_audio(
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
         .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>(
-            "openai",
-            realtime(),
-            respan_gateway_http::connect(WsTransport::new(provider)?),
-        )?
+        .provider::<ClientEvent, _, _>("openai", realtime(), WsTransport::new(provider)?.connect())?
         .target("openai")?
         .plugin("ends", ends.clone())?
         .plugin("audio", audio::Validate(allow_audio))?;
@@ -877,7 +899,7 @@ async fn client(addr: std::net::SocketAddr) -> Client {
 }
 
 async fn say(ws: &mut Client, event: Value) {
-    use respan_gateway_core::futures::SinkExt;
+    use respan_gateway_sdk::futures::SinkExt;
     let text = event.to_string().into();
     ws.send(tokio_tungstenite::tungstenite::Message::Text(text))
         .await
@@ -886,7 +908,7 @@ async fn say(ws: &mut Client, event: Value) {
 
 /// The next event the client hears; `None` at a Close, or a break.
 async fn hear(ws: &mut Client) -> Option<Value> {
-    use respan_gateway_core::futures::StreamExt;
+    use respan_gateway_sdk::futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     let next = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await;
     match next.expect("an event in time") {
@@ -895,7 +917,7 @@ async fn hear(ws: &mut Client) -> Option<Value> {
     }
 }
 
-/// Events up to and including a `response.done`.
+/// EventStream up to and including a `response.done`.
 async fn turn(ws: &mut Client) -> Vec<Value> {
     let mut events = Vec::new();
     while let Some(event) = hear(ws).await {
@@ -988,7 +1010,7 @@ async fn main() -> Result<(), Fault> {
     println!("provider read: {}", sent[0]["item"]["content"][0]["text"]);
     println!("client heard:  {}", said(&events));
     println!("metered:       {:?}", meter.turns());
-    use respan_gateway_core::futures::SinkExt;
+    use respan_gateway_sdk::futures::SinkExt;
     let close = tokio_tungstenite::tungstenite::Message::Close(None);
     let _ = ws.send(close).await;
     gw.idle().await;

@@ -7,7 +7,7 @@ use std::task::{Poll, Waker};
 
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, pending};
-use futures::{FutureExt, SinkExt, StreamExt, stream};
+use futures::{FutureExt, StreamExt, stream};
 
 use crate::events::Metadata;
 use crate::fault::{PANICKED, guarded};
@@ -18,7 +18,7 @@ use crate::leg::{self, Later, cut, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::response::Batch;
-use crate::{ClientContext, Events, Extensions, Fault, ProviderContext, Response, Result};
+use crate::{ClientContext, EventStream, Extensions, Fault, ProviderContext, Response, Result};
 
 /// A call from [`ClientContext::call`], sent when first awaited; it may
 /// outlive the hook. A clone is an unsent copy.
@@ -120,9 +120,8 @@ impl Future for Call {
 /// abandoned when its request ends. Only the request's end runs then, so it
 /// needs a synchronous handle to drop the future ([`Open::abandon`]); wrapping
 /// `Call::poll` in `take_until` cannot, as that runs only when polled. It was
-/// tried and reverted; the test
-/// `a_pending_call_left_unpolled_still_ends_with_its_request`
-/// (`testkit/tests/streams.rs`) pins it.
+/// tried and reverted; cancellation tests exercise a parked call abandoned
+/// by the request's end without another poll.
 type Sending = Mutex<(Option<BoxFuture<'static, Result<Response>>>, Option<Waker>)>;
 
 async fn send(
@@ -154,7 +153,10 @@ async fn send(
     })?;
     let (input, later) = match own {
         None => {
-            let later = (!cx.later.ended).then(|| (cx.later.clone(), cx.format.clone()));
+            let later = cx
+                .input
+                .is_live()
+                .then(|| (cx.later.clone(), cx.format.clone()));
             (cx.input.clone(), later)
         }
         Some(input) => {
@@ -214,33 +216,27 @@ async fn dial(
     edge: &mut CallEdge,
 ) -> Result<(Metadata, AnyEvents)> {
     let px = edge.cx();
-    let relay = !px.input.own
-        && cx.format.name() == p.format.name()
-        && cx.format.transport() == p.format.transport();
+    let relay = !px.input.own && cx.format.name() == p.format.name();
     let (fail, mut failed) = oneshot::channel();
     let mut outgoing = match later {
         Some((later, format)) => {
             let call = Some((px.inputs.clone(), fail));
-            Events::stream(inputs(later, format, call, &px.cut))
+            EventStream::stream(inputs(later, format, call, &px.cut))
         }
         None => px.input.events(relay)?,
     };
     if relay {
-        outgoing.set_metadata(cx.metadata.clone());
+        outgoing.set_metadata(cx.input.metadata_copy());
     }
     let (opening, mut sink) = guarded(|| {
         let io = (p.factory)(px.client.extensions.clone());
         p.format.bind(io)
     })?;
-    // Submit one sequence, then close the sink to drive it through delivery.
-    // Opening progresses alongside sink readiness, preparation, and closing.
-    let submitted = px.sent.clone();
-    let writing = async move {
-        sink.feed(outgoing).await?;
-        submitted.store(true, std::sync::atomic::Ordering::Release);
-        sink.close().await
-    }
-    .boxed();
+    // Preparation is synchronous: a failure here has not sent the call.
+    // The pump progresses alongside opening and response reads.
+    guarded(|| sink.prepare(&mut outgoing))?;
+    px.sent.store(true, std::sync::atomic::Ordering::Release);
+    let writing = crate::events::deliver(outgoing, sink);
     let opened = match futures::future::select(writing, opening).await {
         futures::future::Either::Left((written, opening)) => match written {
             Ok(()) => opening.await.map(|incoming| (incoming, None)),
@@ -255,6 +251,9 @@ async fn dial(
         Err(fault) => return Err(failed.try_recv().ok().flatten().unwrap_or(fault)),
     };
     px.refused = incoming.refusal().is_some();
+    // A refusal never consumes the outgoing half. Release it before the
+    // response is handed to routing, which may retain this attempt.
+    let writing = if px.refused { None } else { writing };
     if !relay {
         incoming.clear_metadata();
     }
@@ -296,7 +295,7 @@ fn drive_writer(events: AnyEvents, writing: Option<BoxFuture<'static, Result<()>
                     }
                     futures::future::Either::Right((Some(event), write)) => {
                         let done = event.is_err();
-                        return Some((event, (events, Some(write), done)));
+                        return Some((event, (events, (!done).then_some(write), done)));
                     }
                     futures::future::Either::Right((None, write)) => {
                         // The receiving direction can finish before the

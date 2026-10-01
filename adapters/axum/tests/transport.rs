@@ -7,27 +7,22 @@ mod support;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
-use respan_gateway_core::Fault;
-use respan_gateway_http::Exchange;
 use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http::{Request, Response};
+use respan_gateway_http::{Body, Completion};
+use respan_gateway_sdk::Fault;
 use respan_gateway_ws::WsTransport;
 use std::sync::atomic::Ordering;
 use support::*;
 
 /// A call carrying `frames` sent through the returned sender, which ends
 /// the body when dropped (or `Err` if given one).
-fn call(
-    path: &str,
-) -> (
-    mpsc::UnboundedSender<Result<Bytes, Fault>>,
-    Exchange<respan_gateway_http::RequestHead>,
-) {
+fn call(path: &str) -> (mpsc::UnboundedSender<Result<Bytes, Fault>>, Request<Body>) {
     let (tx, rx) = mpsc::unbounded();
     let mut head = respan_gateway_http::fresh_request_head();
     head.uri = path.parse().unwrap();
     head.headers.insert("upgrade", "websocket".parse().unwrap());
-    let mut call = Exchange::new(head, rx.boxed());
-    call.streams = true;
+    let call = Request::from_parts(head, Body::stream(rx));
     (tx, call)
 }
 
@@ -39,24 +34,30 @@ fn text(t: &'static str) -> Result<Bytes, Fault> {
 async fn a_101_answer_carries_the_providers_frames_in_order() {
     let probe = Probe::echoing().await;
     let (tx, call) = call("/x");
-    let mut answer = WsTransport::new(probe.base())
+    let (mut answer, _completion) = WsTransport::new(probe.base())
         .unwrap()
         .send(call)
         .await
         .unwrap();
-    assert_eq!(answer.head.status, 101);
-    assert!(answer.streams);
+    assert_eq!(answer.status(), 101);
+    assert!(
+        _completion.is_some(),
+        "upgrade has independent write completion"
+    );
     // The handshake's own headers are not the answer's.
-    assert!(answer.head.headers.get("sec-websocket-accept").is_none());
+    assert!(answer.headers().get("sec-websocket-accept").is_none());
     for t in ["a", "b", "c"] {
         tx.unbounded_send(text(t)).unwrap();
     }
     for t in ["echo:a", "echo:b", "echo:c"] {
-        assert_eq!(answer.body.next().await.unwrap().unwrap(), t.as_bytes());
+        assert_eq!(
+            answer.body_mut().next().await.unwrap().unwrap(),
+            t.as_bytes()
+        );
     }
     // A clean end sends Close, and the provider's part of it ends the answer clean.
     drop(tx);
-    assert!(answer.body.next().await.is_none());
+    assert!(answer.body_mut().next().await.is_none());
     assert_eq!(probe.seen().last(), Some(&Seen::Close(Some(1000))));
 }
 
@@ -64,7 +65,7 @@ async fn a_101_answer_carries_the_providers_frames_in_order() {
 async fn a_call_that_ends_in_an_err_drops_the_connection_and_the_answer_ends_with_it() {
     let probe = Probe::start().await;
     let (tx, call) = call("/x");
-    let mut answer = WsTransport::new(probe.base())
+    let (mut answer, _completion) = WsTransport::new(probe.base())
         .unwrap()
         .send(call)
         .await
@@ -72,7 +73,7 @@ async fn a_call_that_ends_in_an_err_drops_the_connection_and_the_answer_ends_wit
     tx.unbounded_send(text("a")).unwrap();
     tx.unbounded_send(Err(Fault::new("policy", "an input was refused")))
         .unwrap();
-    let end = answer.body.next().await.unwrap().unwrap_err();
+    let end = answer.body_mut().next().await.unwrap().unwrap_err();
     assert_eq!(end.code(), "policy");
     eventually("the connection dropped", || {
         probe.live.load(Ordering::SeqCst) == 0
@@ -107,14 +108,14 @@ async fn dropping_the_answer_drops_the_connection() {
 async fn a_frame_that_is_not_text_fails_the_call() {
     let probe = Probe::start().await;
     let (tx, call) = call("/x");
-    let mut answer = WsTransport::new(probe.base())
+    let (mut answer, _completion) = WsTransport::new(probe.base())
         .unwrap()
         .send(call)
         .await
         .unwrap();
     tx.unbounded_send(Ok(Bytes::from_static(&[0xff, 0xfe])))
         .unwrap();
-    let end = answer.body.next().await.unwrap().unwrap_err();
+    let end = answer.body_mut().next().await.unwrap().unwrap_err();
     assert_eq!(end.code(), "config");
     assert!(probe.texts().is_empty());
 }
@@ -123,7 +124,7 @@ async fn a_frame_that_is_not_text_fails_the_call() {
 async fn a_message_over_the_limit_breaks_the_answer() {
     let probe = Probe::start().await;
     let (_tx, call) = call("/x");
-    let mut answer = WsTransport::new(probe.base())
+    let (mut answer, _completion) = WsTransport::new(probe.base())
         .unwrap()
         .max_message(1024)
         .send(call)
@@ -131,7 +132,7 @@ async fn a_message_over_the_limit_breaks_the_answer() {
         .unwrap();
     probe.connected(0).await;
     probe.tell(0, Cmd::Send("x".repeat(4096)));
-    let end = answer.body.next().await.unwrap().unwrap_err();
+    let end = answer.body_mut().next().await.unwrap().unwrap_err();
     assert_eq!(end.code(), "upstream");
     assert!(end.message().contains("too large"), "{end}");
 }
@@ -154,15 +155,15 @@ async fn a_provider_that_refuses_the_upgrade_is_an_answer_not_an_error() {
         s.write_all(head.as_bytes()).await.unwrap();
     });
     let (_tx, call) = call("/x");
-    let mut answer = WsTransport::new(format!("ws://{addr}"))
+    let (mut answer, _completion) = WsTransport::new(format!("ws://{addr}"))
         .unwrap()
         .send(call)
         .await
         .unwrap();
-    assert_eq!(answer.head.status, 403);
-    assert_eq!(answer.head.headers["x-why"], "full");
-    assert!(!answer.streams);
-    assert_eq!(answer.body.next().await.unwrap().unwrap(), "no room");
+    assert_eq!(answer.status(), 403);
+    assert_eq!(answer.headers()["x-why"], "full");
+    assert!(_completion.is_none(), "refusal has no live session");
+    assert_eq!(answer.body_mut().next().await.unwrap().unwrap(), "no room");
 }
 
 // The connector for `wss` builds and fails as a connection failure does: a
@@ -181,7 +182,8 @@ async fn wss_fails_cleanly_against_a_server_that_is_not_tls() {
         .unwrap()
         .send(call)
         .await
-        .unwrap_err();
+        .err()
+        .expect("connection failure");
     assert_eq!(refused.code(), "upstream");
     assert!(!refused.message().contains(&addr.to_string()));
 }
@@ -190,7 +192,7 @@ async fn wss_fails_cleanly_against_a_server_that_is_not_tls() {
 async fn delayed_refusal(
     headers: &str,
     body: &[&str],
-) -> Result<Exchange<respan_gateway_http::ResponseHead>, Fault> {
+) -> Result<(Response<Body>, Option<Completion>), Fault> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -227,10 +229,11 @@ async fn a_refused_upgrade_reads_the_body_after_the_headers() {
         ),
         ("Connection: close\r\n", vec!["no ", "room"]),
     ] {
-        let answer = delayed_refusal(headers, &fragments).await.unwrap();
-        assert_eq!(answer.head.status, 403);
+        let (answer, completion) = delayed_refusal(headers, &fragments).await.unwrap();
+        assert!(completion.is_none());
+        assert_eq!(answer.status(), 403);
         let bytes = answer
-            .body
+            .into_body()
             .map(|chunk| chunk.unwrap())
             .collect::<Vec<_>>()
             .await
@@ -251,7 +254,8 @@ async fn a_truncated_or_malformed_refusal_fails_instead_of_relaying_a_partial_bo
     ] {
         let fault = delayed_refusal(headers, &fragments)
             .await
-            .expect_err("invalid body");
+            .err()
+            .expect("invalid body");
         assert_eq!(fault.code(), "truncated", "{headers}");
     }
 }

@@ -9,13 +9,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::task::Poll;
+use std::task::{Context, Poll};
 
-use respan_gateway_core::futures::Sink;
 use respan_gateway_core::futures::channel::{mpsc, oneshot};
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::stream::BoxStream;
-use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
+use respan_gateway_core::futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, stream};
 use respan_gateway_core::*;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -139,24 +138,91 @@ impl Format<Io, Out, In> for Toy {
             return Err(Fault::config("a provider needs outgoing I/O"));
         };
         let dial = dialer.0;
-        let (answer, answered) = oneshot::channel();
-        let incoming = async move { answered.await.map_err(|_| Fault::abandoned()) };
-        let outgoing = respan_gateway_core::write(move |flow: Events<In>| {
+        let (answer, answered) = oneshot::channel::<BoxFuture<'static, Result<Answer>>>();
+        let incoming = async move {
+            let result = answered.await.map_err(|_| Fault::abandoned())?.await?;
+            let status = result.status;
+            Ok(if status != 200 {
+                EventStream::refused(
+                    Fault::new("x", "x")
+                        .with(Wire(status))
+                        .with_answer("toy", ()),
+                )
+            } else {
+                EventStream::stream(events(result.body))
+            }
+            .with_metadata("toy", status))
+        };
+        let outgoing = EventSink::preparing(move |flow: &mut EventStream<In>| {
             if extensions.get::<Unsendable>().is_some() {
                 return Err(Fault::config("the toy cannot send this call"));
             }
             let relayed = flow.metadata::<ToyOrigin>("toy");
-            let text = if flow.is_lazy() {
-                relayed.and_then(|o| o.body.clone())
-            } else {
-                flow.value().transpose()?.map(|v| v.0.clone())
-            };
+            let raw = flow
+                .is_lazy()
+                .then(|| relayed.and_then(|o| o.body.clone()))
+                .flatten();
             let streams = !flow.is_single();
             let relayed = relayed.is_some();
-            let body = if streams {
-                written(flow)
+            let prefix = if let Some(raw) = raw {
+                flow.stop();
+                Some(format!("{raw}<END>"))
+            } else if flow.is_single() {
+                let text = flow
+                    .value()
+                    .transpose()?
+                    .map_or_else(String::new, |v| v.0.clone());
+                flow.stop();
+                Some(format!("{text}<END>"))
             } else {
-                stream::iter([Ok(format!("{}<END>", text.unwrap_or_default()))]).boxed()
+                None
+            };
+            let (tx, rx) = mpsc::channel(0);
+            let (body, demand): (Text, _) = if let Some(prefix) = prefix {
+                (
+                    stream::once(async move { Ok(prefix) }).chain(rx).boxed(),
+                    None,
+                )
+            } else {
+                let (ask, demand) = mpsc::channel(0);
+                let (dropped, canceled) = oneshot::channel();
+                let original = std::mem::replace(flow, EventStream::empty());
+                *flow = EventStream::stream(stream::unfold(
+                    Some((original, canceled)),
+                    |state| async move {
+                        let (mut original, canceled) = state?;
+                        match respan_gateway_core::futures::future::select(
+                            canceled,
+                            original.next(),
+                        )
+                        .await
+                        {
+                            respan_gateway_core::futures::future::Either::Right((
+                                Some(item),
+                                canceled,
+                            )) => Some((item, Some((original, canceled)))),
+                            _ => None,
+                        }
+                    },
+                ));
+                let body = stream::unfold(
+                    Some((rx, ask, BodyGuard(Some(dropped)))),
+                    |state| async move {
+                        let (mut rx, mut ask, guard) = state?;
+                        let _ = ask.send(()).await;
+                        match rx.next().await {
+                            Some(frame) => {
+                                let last =
+                                    frame.is_err() || matches!(&frame, Ok(text) if text == "<END>");
+                                Some((frame, (!last).then_some((rx, ask, guard))))
+                            }
+                            // A dropped, unfinished upload is never a clean EOF.
+                            None => Some((Err(Fault::abandoned()), None)),
+                        }
+                    },
+                )
+                .boxed();
+                (body, Some(demand))
             };
             let call = ToyCall {
                 relayed,
@@ -164,37 +230,23 @@ impl Format<Io, Out, In> for Toy {
                 body,
                 extensions,
             };
-            let answering = dial(call);
-            Ok(async move {
-                let result = answering.await?;
-                let status = result.status;
-                let flow = if status != 200 {
-                    Events::refused(
-                        Fault::new("x", "x")
-                            .with(Wire(status))
-                            .with_answer("toy", ()),
-                    )
-                } else {
-                    Events::stream(events(result.body))
-                }
-                .with_metadata("toy", status);
-                let _ = answer.send(flow);
-                Ok(())
+            answer.send(dial(call)).map_err(|_| Fault::abandoned())?;
+            Ok(TextSink {
+                tx,
+                demand,
+                permitted: false,
+                ending: if streams { Some("<END>") } else { None },
+                ended: false,
+                discarded: false,
             })
         });
-        Ok((incoming.boxed(), Box::pin(outgoing)))
+        Ok((incoming.boxed(), outgoing))
     }
 }
 
 /// Build the toy edge, optionally counting lazy decodes for the relay test.
 #[allow(clippy::type_complexity)]
-pub fn accept_toy(
-    io: Io,
-    decodes: Option<Arc<AtomicUsize>>,
-) -> Result<(
-    BoxFuture<'static, Result<Events<In>>>,
-    Pin<Box<dyn Sink<Events<Out>, Error = Fault> + Send>>,
-)> {
+pub fn accept_toy(io: Io, decodes: Option<Arc<AtomicUsize>>) -> Result<Connection<In, Out>> {
     boom(18);
     let Io::Client(wire) = io else {
         return Err(Fault::config("a client needs incoming I/O"));
@@ -208,7 +260,7 @@ pub fn accept_toy(
     let incoming = async move {
         boom(19);
         if streams {
-            return Ok(Events::stream(inputs(frames)).with_metadata(
+            return Ok(EventStream::stream(inputs(frames)).with_metadata(
                 "toy",
                 ToyOrigin {
                     head: "/".into(),
@@ -221,7 +273,7 @@ pub fn accept_toy(
             all.push_str(&frame?);
         }
         let body = all.clone();
-        Ok(Events::lazy(move || {
+        Ok(EventStream::lazy(move || {
             boom(14);
             if let Some(decodes) = &decodes {
                 decodes.fetch_add(1, Ordering::SeqCst);
@@ -239,32 +291,55 @@ pub fn accept_toy(
             },
         ))
     };
-    let outgoing = respan_gateway_core::write(move |flow| {
-        Ok(async move {
-            let (reply, end) = write(flow, streams, quirk).await;
-            let (observe, observed) = oneshot::channel();
-            if slot
-                .send(
-                    async move {
-                        (
-                            reply,
-                            observed
-                                .map(|e| e.unwrap_or_else(|_| Err(Fault::abandoned())))
-                                .boxed(),
-                        )
+    let outgoing = EventSink::preparing(move |flow: &mut EventStream<Out>| {
+        let head = flow.metadata::<u16>("toy").copied();
+        let refusal = flow.refusal().cloned();
+        if quirk == 2 {
+            if streams {
+                // Head-only replies retain the unread source until sink completion;
+                // its bounded drop probe then sees any immediately ready end.
+                flow.stop();
+            } else {
+                // A non-streaming edge reads its first item before dropping
+                // the rest, so a first fault still becomes its refusal.
+                let mut original = std::mem::replace(flow, EventStream::empty());
+                let mut first = true;
+                *flow = EventStream::stream(stream::poll_fn(move |cx| {
+                    if !first {
+                        return Poll::Ready(None);
                     }
-                    .boxed(),
-                )
-                .is_err()
-            {
-                return Err(Fault::abandoned());
+                    match Pin::new(&mut original).poll_next(cx) {
+                        Poll::Ready(item) => {
+                            first = false;
+                            Poll::Ready(item)
+                        }
+                        Poll::Pending => Poll::Pending,
+                    }
+                }));
             }
-            let result = end.await;
-            let _ = observe.send(result.clone());
-            result
+        }
+        let (tx, rx) = mpsc::channel(0);
+        let (finished, completion) = oneshot::channel();
+        let (observe, observed) = oneshot::channel();
+        Ok(ReplySink {
+            tx,
+            receiver: Some(rx),
+            slot: Some(slot),
+            finished: Some(finished),
+            completion,
+            observe: Some(observe),
+            observed: Some(observed),
+            head,
+            refusal,
+            streams,
+            quirk,
+            opened: false,
+            ending: false,
+            closed: false,
+            broken: false,
         })
     });
-    Ok((incoming.boxed(), Box::pin(outgoing)))
+    Ok((incoming.boxed(), outgoing))
 }
 
 /// A call's extension that makes the toy's `dial` fail at once, unsent.
@@ -287,18 +362,117 @@ fn inputs(frames: Text) -> BoxStream<'static, Result<In>> {
         .boxed()
 }
 
-/// A call's inputs inputs as text frames: each its text, then `<END>` if
-/// they ended cleanly, else the failure.
-fn written(inputs: Events<In>) -> Text {
-    stream::unfold(Some(inputs), |inputs| async move {
-        let mut inputs = inputs?;
-        match inputs.next().await {
-            Some(Ok(input)) => Some((Ok(input.0), Some(inputs))),
-            Some(Err(fault)) => Some((Err(fault), None)),
-            None => Some((Ok("<END>".into()), None)),
+/// Wake the caller-owned source if a dialer ignores or drops its body.
+struct BodyGuard(Option<oneshot::Sender<()>>);
+
+impl Drop for BodyGuard {
+    fn drop(&mut self) {
+        if let Some(signal) = self.0.take() {
+            let _ = signal.send(());
         }
-    })
-    .boxed()
+    }
+}
+
+/// A bounded, per-input toy encoder. Closing supplies the clean trailer;
+/// an input fault is forwarded as the terminal body item instead.
+struct TextSink {
+    tx: mpsc::Sender<Result<String>>,
+    demand: Option<mpsc::Receiver<()>>,
+    permitted: bool,
+    ending: Option<&'static str>,
+    ended: bool,
+    discarded: bool,
+}
+
+impl Sink<Result<In>> for TextSink {
+    type Error = Fault;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.discarded {
+            return Poll::Ready(Ok(()));
+        }
+        if !self.permitted
+            && let Some(demand) = &mut self.demand
+        {
+            match Pin::new(demand).poll_next(cx) {
+                Poll::Ready(Some(())) => self.permitted = true,
+                Poll::Ready(None) => {
+                    // The dialer answered without requesting further inputs.
+                    self.discarded = true;
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        match Pin::new(&mut self.tx).poll_ready(cx) {
+            Poll::Ready(Err(_)) => {
+                self.discarded = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Result<In>) -> Result<()> {
+        if item.is_err() {
+            self.ending = None;
+        }
+        if !self.discarded
+            && Pin::new(&mut self.tx)
+                .start_send(item.map(|input| input.0))
+                .is_err()
+        {
+            self.discarded = true;
+        }
+        self.permitted = false;
+        Ok(())
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.discarded {
+            return Poll::Ready(Ok(()));
+        }
+        match Pin::new(&mut self.tx).poll_flush(cx) {
+            Poll::Ready(Err(_)) => {
+                self.discarded = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if !self.ended {
+            if self.ending.is_some() && !self.discarded {
+                match self.as_mut().poll_ready(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(fault)) => return Poll::Ready(Err(fault)),
+                    Poll::Pending => return Poll::Pending,
+                }
+                if !self.discarded {
+                    let ending = self.ending.take().unwrap();
+                    if Pin::new(&mut self.tx)
+                        .start_send(Ok(ending.into()))
+                        .is_err()
+                    {
+                        self.discarded = true;
+                    }
+                }
+            }
+            self.ended = true;
+        }
+        if self.discarded {
+            Poll::Ready(Ok(()))
+        } else {
+            match Pin::new(&mut self.tx).poll_close(cx) {
+                Poll::Ready(Err(_)) => Poll::Ready(Ok(())),
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
 }
 
 /// A provider's text frames as events.
@@ -327,120 +501,221 @@ fn events(body: Text) -> BoxStream<'static, Result<Out>> {
     .boxed()
 }
 
-/// Writes a reply, and how it ended once told: a refusal as one; an open
-/// answer's head at once if it streams, else with its first bytes, a
-/// failure before any refused.
-async fn write(flow: Events<Out>, streams: bool, quirk: Quirk) -> (ToyReply, End) {
-    let head = flow.metadata::<u16>("toy").copied();
-    let refusal = flow.refusal().cloned();
-    let (tell, told) = oneshot::channel();
-    let complete: Completion = Box::new(move |end| {
-        let _ = tell.send(end);
-    });
-    let outputs = match refusal {
-        Some(fault) => Err(fault),
-        None => Ok(flow),
-    };
-    let reply = written_reply(head, outputs, complete, streams, quirk).await;
-    (
-        reply,
-        told.map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())))
-            .boxed(),
-    )
+/// Only encoded text crosses this bounded push-to-pull handoff. Its receiver
+/// never retains or reads the original typed event source.
+struct ReplyFrame {
+    text: String,
+    end: Option<Result<()>>,
 }
 
-type Completion = Box<dyn FnOnce(Result<()>) + Send>;
-
-async fn written_reply(
+struct ReplySink {
+    tx: mpsc::Sender<ReplyFrame>,
+    receiver: Option<mpsc::Receiver<ReplyFrame>>,
+    slot: Option<oneshot::Sender<BoxFuture<'static, (ToyReply, End)>>>,
+    finished: Option<oneshot::Sender<Result<()>>>,
+    completion: oneshot::Receiver<Result<()>>,
+    observe: Option<oneshot::Sender<Result<()>>>,
+    observed: Option<oneshot::Receiver<Result<()>>>,
     head: Option<u16>,
-    outputs: Result<Events<Out>>,
-    complete: Completion,
+    refusal: Option<Fault>,
     streams: bool,
     quirk: Quirk,
-) -> ToyReply {
-    let mut writer = Writer {
-        outputs: Events::stream(stream::empty()),
-        ended: Some(complete),
-        peeked: None,
-        done: false,
-        head,
-    };
-    let outputs = match outputs {
-        Ok(outputs) => outputs,
-        Err(fault) => {
-            let status = number(&fault);
-            writer.peeked = Some(Some(Err(fault)));
-            return writer.reply(status);
-        }
-    };
-    writer.outputs = outputs;
-    if quirk == 1 {
-        drop(writer.ended.take());
-    }
-    if !streams {
-        let first = writer.outputs.next().await;
-        if let Some(Err(fault)) = &first {
-            let status = number(fault);
-            writer.peeked = Some(first);
-            return writer.reply(status);
-        }
-        writer.peeked = Some(first);
-    }
-    if quirk == 2 {
-        writer.outputs = Events::stream(stream::empty());
-        writer.peeked = None;
-        writer.done = true;
-        writer.end(Ok(()));
-    }
-    writer.reply(200)
+    opened: bool,
+    ending: bool,
+    closed: bool,
+    broken: bool,
 }
 
-struct Writer {
-    outputs: Events<Out>,
-    ended: Option<Completion>,
-    peeked: Option<Option<Result<Out>>>,
-    done: bool,
-    head: Option<u16>,
-}
-
-impl Writer {
-    fn reply(self, status: u16) -> ToyReply {
-        let head = self.head;
-        let body = stream::unfold(self, |mut w| async move { w.frame().await.map(|f| (f, w)) });
-        ToyReply {
-            status,
-            body: body.boxed(),
-            head,
+impl ReplySink {
+    fn open(&mut self, status: u16) -> Result<()> {
+        if self.opened {
+            return Ok(());
         }
-    }
-
-    async fn frame(&mut self) -> Option<Result<String>> {
-        if self.done {
-            return None;
-        }
-        let item = match self.peeked.take() {
-            Some(item) => item,
-            None => self.outputs.next().await,
+        self.opened = true;
+        let body = self.receiver.take().expect("toy body opened only once");
+        let mut finished = if self.quirk == 1 {
+            None
+        } else {
+            self.finished.take()
         };
-        Some(Ok(match item {
-            Some(Ok(out)) => format!("{};", out.0),
-            Some(Err(fault)) => {
-                self.done = true;
-                let text = format!("ERR {}", fault.code());
-                self.end(Err(fault));
-                text
+        let body: Text = if self.quirk == 2 {
+            drop(body);
+            if let Some(finished) = finished.take() {
+                let _ = finished.send(Ok(()));
             }
-            None => {
-                self.done = true;
-                self.end(Ok(()));
-                "!".into()
-            }
-        }))
+            stream::empty().boxed()
+        } else {
+            stream::unfold((body, finished), |(mut body, mut finished)| async move {
+                match body.next().await {
+                    Some(frame) => {
+                        if let Some(end) = frame.end
+                            && let Some(finished) = finished.take()
+                        {
+                            let _ = finished.send(end);
+                        }
+                        Some((Ok(frame.text), (body, finished)))
+                    }
+                    None => {
+                        if let Some(finished) = finished.take() {
+                            let _ = finished.send(Err(Fault::abandoned()));
+                        }
+                        None
+                    }
+                }
+            })
+            .boxed()
+        };
+        let observed = self.observed.take().expect("toy reply opened only once");
+        let reply = ToyReply {
+            status,
+            body,
+            head: self.head,
+        };
+        self.slot
+            .take()
+            .expect("toy reply has one sender")
+            .send(
+                async move {
+                    (
+                        reply,
+                        observed
+                            .map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())))
+                            .boxed(),
+                    )
+                }
+                .boxed(),
+            )
+            .map_err(|_| Fault::abandoned())
     }
 
-    fn end(&mut self, end: Result<()>) {
-        if let Some(ended) = self.ended.take() {
-            ended(end);
+    fn complete(&mut self, result: Result<()>) -> Poll<Result<()>> {
+        if let Some(observe) = self.observe.take() {
+            let _ = observe.send(result.clone());
+        }
+        Poll::Ready(result)
+    }
+}
+
+impl Sink<Result<Out>> for ReplySink {
+    type Error = Fault;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.quirk == 2 && self.streams {
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.tx)
+            .poll_ready(cx)
+            .map_err(|_| Fault::abandoned())
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Result<Out>) -> Result<()> {
+        if self.quirk == 2 && self.streams {
+            return Ok(());
+        }
+        if self.quirk == 2 && !self.opened && item.is_err() {
+            // The old edge sends a first fault even in head-only mode.
+            self.quirk = 0;
+        }
+        if !self.opened {
+            let status = self
+                .refusal
+                .as_ref()
+                .map(number)
+                .or_else(|| item.as_ref().err().filter(|_| !self.streams).map(number))
+                .unwrap_or(200);
+            self.open(status)?;
+        }
+        let frame = match item {
+            Ok(out) => ReplyFrame {
+                text: format!("{};", out.0),
+                end: None,
+            },
+            Err(fault) => {
+                self.ending = true;
+                ReplyFrame {
+                    text: format!("ERR {}", fault.code()),
+                    end: Some(Err(fault)),
+                }
+            }
+        };
+        if self.quirk == 2 {
+            // The edge wrote its head and discarded outputs after the first.
+            return Ok(());
+        }
+        Pin::new(&mut self.tx)
+            .start_send(frame)
+            .map_err(|_| Fault::abandoned())
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if self.streams && !self.opened {
+            let status = self.refusal.as_ref().map_or(200, number);
+            self.open(status)?;
+        }
+        if self.quirk == 1 && self.opened {
+            if !self.broken {
+                match Pin::new(&mut self.tx).poll_ready(cx) {
+                    Poll::Ready(Ok(())) => {}
+                    Poll::Ready(Err(_)) => return Poll::Ready(Err(Fault::abandoned())),
+                    Poll::Pending => return Poll::Pending,
+                }
+                Pin::new(&mut self.tx)
+                    .start_send(ReplyFrame {
+                        text: "ERR abandoned".into(),
+                        end: None,
+                    })
+                    .map_err(|_| Fault::abandoned())?;
+                self.broken = true;
+            }
+            return Poll::Ready(Err(Fault::abandoned()));
+        }
+        if self.quirk == 2 {
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.tx)
+            .poll_flush(cx)
+            .map_err(|_| Fault::abandoned())
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        if !self.opened {
+            let status = self.refusal.as_ref().map_or(200, number);
+            self.open(status)?;
+        }
+        if self.quirk == 1 {
+            return self.complete(Err(Fault::abandoned()));
+        }
+        if self.quirk == 2 {
+            return self.complete(Ok(()));
+        }
+        if !self.ending {
+            match Pin::new(&mut self.tx).poll_ready(cx) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(_)) => return self.complete(Err(Fault::abandoned())),
+                Poll::Pending => return Poll::Pending,
+            }
+            self.ending = true;
+            if Pin::new(&mut self.tx)
+                .start_send(ReplyFrame {
+                    text: "!".into(),
+                    end: Some(Ok(())),
+                })
+                .is_err()
+            {
+                return self.complete(Err(Fault::abandoned()));
+            }
+        }
+        if !self.closed {
+            match Pin::new(&mut self.tx).poll_close(cx) {
+                Poll::Ready(Ok(())) => self.closed = true,
+                Poll::Ready(Err(_)) => return self.complete(Err(Fault::abandoned())),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        match Pin::new(&mut self.completion).poll(cx) {
+            Poll::Ready(Ok(end)) => self.complete(end),
+            Poll::Ready(Err(_)) => self.complete(Err(Fault::abandoned())),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -508,11 +783,25 @@ pub fn ok_resp(v: Vec<&'static str>) -> Answer {
 
 pub type End = BoxFuture<'static, Result<()>>;
 
+/// Dropping the toy reply cancels the adapter's concurrent gateway driver.
+struct CancelHandle(tokio::task::AbortHandle);
+
+impl Drop for CancelHandle {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// `Gateway::handle` on the toy wire, as its adapter does it: the reply and
 /// its end, or the fault the adapter writes plainly if no edge replies.
 pub async fn handle(gw: &Gateway, req: Req) -> (Result<ToyReply>, End) {
     let (wire, reply) = Io::accept(req);
-    let handled = gw.handle(wire, Extensions::new()).boxed();
+    // Like a transport that owns a separate I/O task, the toy adapter keeps
+    // forwarding an upload while a client holds its first reply frame unread.
+    let handling = gw.handle(wire, Extensions::new());
+    let task = tokio::spawn(handling);
+    let mut cancel = Some(CancelHandle(task.abort_handle()));
+    let handled = async move { task.await.map_err(|_| Fault::abandoned())? }.boxed();
     let (result, pending) = match futures::future::select(handled, reply).await {
         futures::future::Either::Left((end, remaining)) => (remaining.await, Err(end)),
         futures::future::Either::Right((reply, remaining)) => (reply, Ok(remaining)),
@@ -520,11 +809,11 @@ pub async fn handle(gw: &Gateway, req: Req) -> (Result<ToyReply>, End) {
     match result {
         Some((mut reply, end)) => {
             if let Ok(handle) = pending {
-                // The body owns and drives the gateway until delivery finishes.
-                // Dropping the body therefore cancels the entire exchange.
+                // The transport driver runs independently, but the reply
+                // owns its cancellation guard throughout body consumption.
                 reply.body = stream::unfold(
-                    (reply.body, Some(handle)),
-                    |(mut body, mut handle)| async move {
+                    (reply.body, Some(handle), cancel.take()),
+                    |(mut body, mut handle, cancel)| async move {
                         let item = if let Some(work) = handle.take() {
                             match futures::future::select(work, body.next()).await {
                                 futures::future::Either::Left((_, next)) => next.await,
@@ -540,7 +829,7 @@ pub async fn handle(gw: &Gateway, req: Req) -> (Result<ToyReply>, End) {
                         } else {
                             body.next().await
                         };
-                        item.map(|item| (item, (body, handle)))
+                        item.map(|item| (item, (body, handle, cancel)))
                     },
                 )
                 .boxed();
@@ -826,9 +1115,10 @@ impl Plugin for Racer {
         let race = ["a", "b"].map(|p| {
             let call = cx.call(p);
             Box::pin(async move {
-                call.await?
-                    .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
-                    .await
+                let mut resp = call.await?;
+                resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                    .await?;
+                Ok::<_, Fault>(resp)
             })
         });
         let (resp, _) = futures::future::select_ok(race).await?;
@@ -842,15 +1132,20 @@ pub struct Mode(pub u8);
 #[async_trait]
 impl Plugin for Mode {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        let resp = cx.call("a").await?;
-        Ok(Some(match self.0 {
-            0 => resp,
+        let mut resp = cx.call("a").await?;
+        match self.0 {
+            0 => {}
             1 => {
                 resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                     .await?
             }
-            _ => resp.until_end().await?.0,
-        }))
+            _ => {
+                if let Err(fault) = resp.until_end().await {
+                    assert_eq!(resp.buffered_end(), Some(&Err(fault)));
+                }
+            }
+        }
+        Ok(Some(resp))
     }
 }
 

@@ -1,7 +1,7 @@
 use std::any::Any;
 
-use respan_gateway_core::async_trait;
-use respan_gateway_core::{ClientContext, Fault, Plugin, Response};
+use respan_gateway_sdk::async_trait;
+use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response};
 
 /// Targets each request at the provider of the first prefix its model
 /// matches, read by `model` from its input of type `I`. A request without a

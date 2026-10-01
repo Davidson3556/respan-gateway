@@ -1,7 +1,7 @@
 //! Use case 14, the gateway as a library: another Rust service runs the
 //! pipeline in-process, with no server and no second hop. It builds a
 //! [`Gateway`], hands [`Gateway::handle`] a request on the HTTP wire (an
-//! [`Transport`] `http` request head and its body, whole), reads the answer
+//! owned `Incoming` native HTTP request and its whole body), reads the answer
 //! and awaits how the request ended. With no HTTP hop, it needs none of the
 //! adapter's rules (`respan_gateway_http::serve` applies them); no answer
 //! means no format took the request, and the end says why.
@@ -12,27 +12,38 @@
 //!
 //! `cargo run -p respan-gateway-examples --example embedded`
 
-use respan_gateway_core::futures::future::join;
-use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::{Extensions, Fault, Gateway};
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_examples::Meter;
 use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http::HeaderValue;
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Transport, connect, http};
-use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_http::{HttpClient, http};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock};
-
-const OPENAI: &str = "http://openai.test/v1";
+use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_sdk::futures::future::join;
+use respan_gateway_sdk::futures::{StreamExt, stream};
+use respan_gateway_sdk::{Extensions, Fault, Gateway};
 
 /// The gateway, with no server. For real use, the transport is
-/// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
-fn gateway(mock: &MockTransport, tally: Meter) -> Result<Gateway, Fault> {
+/// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
+fn gateway(
+    provider: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    tally: Meter,
+) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, connect(mock.at(OPENAI)))?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, provider)?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("tally", tally)?
         .target("openai")
+}
+
+fn scripted_provider(openai: &FakeOpenAi) -> Result<HttpClient, Fault> {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("authorization", HeaderValue::from_static("Bearer sk-test"));
+    HttpClient::new(openai.base_url())?.with_headers(headers)
 }
 
 /// One chat request through the pipeline: the answer's status and body,
@@ -51,14 +62,15 @@ async fn ask(
         .map_err(respan_gateway_http::built_wrong)?
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
-    let (wire, answer) = Transport::accept(head, body, false);
+    let request = http::Request::from_parts(head, respan_gateway_http::into_http_body(body));
+    let (wire, answer) = respan_gateway_http::Incoming::accept(request, false);
     let handled = gw.handle(wire, Extensions::new());
     let consume = async {
         let Some((resp, end)) = answer.await else {
             return Ok::<_, Fault>(None);
         };
         let (head, body) = resp.into_parts();
-        let body = body.collect().await?.to_bytes();
+        let body = BodyExt::collect(body).await?.to_bytes();
         Ok(Some((head.status, body, end.await)))
     };
     // The handle includes delivery, so drive it while consuming the reply.
@@ -72,10 +84,10 @@ async fn ask(
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::json(http::StatusCode::OK, ANSWER));
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::raw(ANSWER));
     let tally = Meter::default();
-    let gw = gateway(&mock, tally.clone())?;
+    let gw = gateway(scripted_provider(&openai)?.connect(), tally.clone())?;
     let (status, body, end) = ask(&gw, "Say hi").await?;
     // End hooks run detached; wait for them before reading the tally.
     gw.idle().await;

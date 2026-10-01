@@ -4,14 +4,16 @@
 //! make a call of its own to any path under the API's prefix:
 //! `cx.call("files").with_input(Ask::get("/v1/files/f1/content"))`. Its output
 //! is the answer's bytes, a [`Got`]. Used by `attachments.rs` (a files
-//! endpoint) and `jobs_background.rs` (Responses).
+//! endpoint) and `jobs_background.rs` (Responses). Calls take one finite
+//! [`Ask`] (or relay an already complete raw body); live input streams have
+//! no method or path to put in the request head and are rejected before dialing.
 
-use respan_gateway_core::Fault;
-use respan_gateway_formats::opaque::{self, Got};
-use respan_gateway_formats::{body_changed, call_head, headed, message_decoder, set_path};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
+use respan_gateway_http::formats::opaque::{self, Got};
+use respan_gateway_http::formats::set_path;
 use respan_gateway_http::http::Method;
-use respan_gateway_http::{Codec, Decoder, Encoder, RequestHead, ResponseHead, impl_format};
+use respan_gateway_http::{self as h, Body, Encoder, Incoming, Outgoing};
+use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format};
 
 /// The API named `name` at paths starting with `prefix`.
 #[derive(Clone, Debug)]
@@ -49,12 +51,10 @@ impl Ask {
     }
 }
 
-/// Writes an `Ask`'s body; the codec writes its head.
+/// Writes an `Ask`'s body; the format writes its head.
 struct WriteBody;
 
-impl Encoder<Ask, ()> for WriteBody {
-    fn head(&mut self, _: Option<&Ask>) {}
-
+impl Encoder<Ask> for WriteBody {
     fn encode(&mut self, ask: &Ask, out: &mut BytesMut) -> Result<(), Fault> {
         out.extend_from_slice(&ask.body);
         Ok(())
@@ -65,61 +65,99 @@ impl Encoder<Ask, ()> for WriteBody {
     }
 }
 
-impl Codec for Rest {
-    type Input = Ask;
-    type Output = Got<Rest>;
+impl Rest {
+    fn request(
+        &self,
+        source: &mut EventStream<Ask>,
+    ) -> Result<(h::http::Request<Body>, EventSink<Ask>), Fault> {
+        if !source.is_single() {
+            return Err(Fault::config(
+                "a REST call carries one finite request, not streamed inputs",
+            ));
+        }
+        // Raw relay does not need to decode the original body. Otherwise the
+        // typed request owns its method and path, including plugin edits.
+        let ask = if h::raw_body(self.name, source).is_none() {
+            source.value().transpose()?.cloned()
+        } else {
+            None
+        };
+        let (request, sink) = h::request(self.name, source, Box::new(WriteBody))?;
+        let (mut head, body) = request.into_parts();
+        if let Some(ask) = ask {
+            head.method = ask.method;
+            set_path(&mut head, &ask.path);
+        }
+        Ok((h::http::Request::from_parts(head, body), sink))
+    }
+}
 
+impl Format<Incoming, Ask, Got<Rest>> for Rest {
     fn name(&self) -> &str {
         self.name
     }
 
-    fn accepts(&self, head: &RequestHead) -> bool {
-        head.uri.path().starts_with(self.prefix)
+    fn matches(&self, io: &Incoming) -> bool {
+        io.request().uri().path().starts_with(self.prefix)
     }
 
-    fn request_decoder(&self, head: &RequestHead) -> Box<dyn Decoder<Ask>> {
-        let (method, path) = (head.method.clone(), head.uri.path().to_owned());
-        message_decoder(move |body| {
-            let (method, path) = (method.clone(), path.clone());
-            Ok(Ask { method, path, body })
-        })
-    }
-
-    fn request_encoder(
-        &self,
-        client: Option<&RequestHead>,
-        _body: &mut Bytes,
-        _streams: bool,
-    ) -> Box<dyn Encoder<Ask, RequestHead>> {
-        let mut head = call_head(client);
-        let write_head = move |ask: Option<&Ask>| {
-            if let Some(ask) = ask {
-                head.method = ask.method.clone();
-                set_path(&mut head, &ask.path);
-                body_changed(&mut head);
-            }
-            head
-        };
-        headed(write_head, Box::new(WriteBody))
-    }
-
-    fn response_decoder(
-        &self,
-        head: &ResponseHead,
-        call: &RequestHead,
-        _: &Bytes,
-    ) -> Box<dyn Decoder<Got<Rest>>> {
-        opaque::response_decoder(self.name, head, call)
-    }
-
-    fn response_encoder(
-        &self,
-        answer: Option<&ResponseHead>,
-        ask: &RequestHead,
-        _: &Bytes,
-    ) -> Box<dyn Encoder<Got<Rest>, ResponseHead>> {
-        opaque::response_encoder(answer, ask)
+    fn bind(&self, io: Incoming) -> Result<Connection<Ask, Got<Rest>>, Fault> {
+        let name = self.name;
+        Ok(io.bind(
+            name,
+            |request| {
+                h::messages(request, |head, body| {
+                    Ok(Ask {
+                        method: head.method.clone(),
+                        path: head.uri.path().to_owned(),
+                        body,
+                    })
+                })
+            },
+            move |reply, source| Ok(opaque::write_response(name, reply, source)),
+            h::plain_refusal,
+        ))
     }
 }
 
-impl_format!(Rest);
+impl Format<Outgoing, Got<Rest>, Ask> for Rest {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Rest>, Ask>, Fault> {
+        let (format, name) = (self.clone(), self.name);
+        Ok(io.bind(
+            name,
+            move |source| format.request(source),
+            move |response, request| opaque::read_response(name, response, &request.into_parts().0),
+            |head, _| head.status.is_success(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rest_call_requires_one_finite_ask_and_preserves_its_method_and_path() {
+        let codec = Rest::new("files", "/v1/files");
+        let live = codec.request(&mut EventStream::stream(
+            respan_gateway_sdk::futures::stream::pending(),
+        ));
+        assert!(live.is_err(), "live input has no Ask head to encode");
+
+        let ask = Ask {
+            method: Method::DELETE,
+            path: "/v1/files/file-1?permanent=true".into(),
+            body: Bytes::from_static(b"payload"),
+        };
+        let (request, _) = codec
+            .request(&mut EventStream::single(ask))
+            .expect("finite Ask is supported");
+        assert_eq!(request.method(), Method::DELETE);
+        assert_eq!(request.uri().path(), "/v1/files/file-1");
+        assert_eq!(request.uri().query(), Some("permanent=true"));
+    }
+}

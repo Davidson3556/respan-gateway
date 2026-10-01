@@ -1,6 +1,6 @@
 //! Shared example bookkeeping: one reservation per in-flight turn, no protocol knowledge.
-use respan_gateway_core::Fault;
-use respan_gateway_ledger::{Amount, HoldId, Ledger, MemoryLedger};
+use crate::ledger::{Amount, HoldId, Ledger, MemoryLedger};
+use respan_gateway_sdk::Fault;
 use respan_gateway_ws::CloseCode;
 use serde_json::Value;
 use std::collections::HashMap;

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use respan_gateway_core::{Fault, Result};
+use respan_gateway_sdk::{Fault, Result};
 pub use rusqlite;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 

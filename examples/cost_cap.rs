@@ -22,16 +22,27 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use respan_gateway_core::{Fault, Filter, Gateway, Plugin, ProviderContext, async_trait};
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_http::Status;
-use respan_gateway_ledger::{MemoryLedger, Tally};
-use respan_gateway_messages::Usage;
-use respan_gateway_messages::conversation::{Conversation, Piece, Reply, units};
-use respan_gateway_plugins::{Accounting, Quote};
+use respan_gateway_sdk::{Fault, Filter, Gateway, Plugin, ProviderContext, async_trait};
+#[path = "billing/ledger.rs"]
+mod ledger;
+use ledger::MemoryLedger;
+use respan_gateway_sdk::Usage;
+use respan_gateway_sdk::conversation::{Conversation, Piece, Reply, units};
+#[path = "billing/accounting.rs"]
+mod accounting;
+use accounting::{Accounting, Quote, Tally};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
+use http_support::{post, read_whole, serve};
 
 /// The most output tokens an answer may have.
 const CAP: u64 = 100;
@@ -146,16 +157,16 @@ fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
     Ok(Quote::new(["team"], reserve))
 }
 
-const OPENAI: &str = "http://openai.test/v1";
-
-fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault> {
+fn gateway(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    ledger: MemoryLedger,
+) -> Result<Gateway, Fault> {
     let accounting = Accounting::new(ledger, quote);
     Gateway::new()
-        .provider::<Conversation, _, _>(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("cap", Cap)? // before accounting
         .plugin("accounting", accounting)?
@@ -163,14 +174,14 @@ fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault>
 }
 
 /// A stream of these events.
-fn sse(data: &[&str]) -> mock::Reply {
+fn sse(data: &[&str]) -> Answer {
     let events: Vec<String> = data.iter().map(|d| format!("data: {d}\n\n")).collect();
-    mock::sse(&events.iter().map(String::as_str).collect::<Vec<_>>())
+    provider_support::sse(&events.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// A provider ignoring `max_tokens`: 30 deltas of 20 characters, about 150
 /// tokens, with its usage at the end.
-fn runaway() -> mock::Reply {
+fn runaway() -> Answer {
     let say = r#"{"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"twenty characters.. "}}]}"#;
     let usage = r#"{"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":150}}"#;
     let mut data = vec![say; 30];
@@ -199,9 +210,12 @@ fn team() -> MemoryLedger {
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let (mock, ledger) = (MockTransport::new(), team());
-    mock.reply(OPENAI, runaway());
-    let gw = gateway(&mock, ledger.clone())?;
+    let (fake, ledger) = (FakeOpenAi::start().await, team());
+    fake.answer(runaway());
+    let gw = gateway(
+        provider_support::openai(&fake.base_url())?.connect(),
+        ledger.clone(),
+    )?;
     let body = ask(&gw, true).await;
     println!(
         "client got {} bytes, ending: {:?}",

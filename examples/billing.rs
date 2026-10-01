@@ -18,14 +18,21 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_http::Asked;
-use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_messages::Usage;
-use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_http::http::HeaderValue;
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_sdk::Usage;
+use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_sdk::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
 
 /// One billed call.
 #[derive(Debug, Clone, PartialEq)]
@@ -117,19 +124,23 @@ impl<S: UsageStore> Plugin for Billing<S> {
     }
 }
 
-const OPENAI: &str = "http://openai.test/v1";
+const SMALL: &str = "gpt-4o-mini";
+const LARGE: &str = "gpt-4o";
+const UNPRICED: &str = "gpt-4.1";
 
-fn gateway(mock: &MockTransport, store: Memory) -> Result<Gateway, Fault> {
+fn gateway(
+    provider: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    store: Memory,
+) -> Result<Gateway, Fault> {
     let prices = HashMap::from([
-        ("small", Price::new(150_000, 600_000)),
-        ("large", Price::new(2_500_000, 10_000_000)),
+        (SMALL, Price::new(150_000, 600_000)),
+        (LARGE, Price::new(2_500_000, 10_000_000)),
     ]);
     Gateway::new()
-        .provider::<Conversation, _, _>(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, provider)?
         .client::<Conversation, _, _>(OpenAiChat)?
         // Last, so its filter sees each reply first.
         .plugin("billing", Billing { prices, store })?
@@ -140,7 +151,7 @@ fn gateway(mock: &MockTransport, store: Memory) -> Result<Gateway, Fault> {
 /// `(input, output)` usage, or with a 502 if `None`.
 async fn ask(
     gw: &Gateway,
-    mock: &MockTransport,
+    openai: &FakeOpenAi,
     account: &'static str,
     model: &str,
     usage: Option<(u32, u32)>,
@@ -149,7 +160,9 @@ async fn ask(
         let answer = format!(
             r#"{{"id":"c1","object":"chat.completion","model":"{model}","choices":[{{"index":0,"finish_reason":"stop","message":{{"role":"assistant","content":"hi"}}}}],"usage":{{"prompt_tokens":{input},"completion_tokens":{output}}}}}"#
         );
-        mock.reply(OPENAI, mock::json(StatusCode::OK, &answer));
+        openai.answer(Answer::raw(answer));
+    } else {
+        openai.answer(Answer::error(502).message("upstream unavailable"));
     }
     let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#);
     let mut req = post("/v1/chat/completions", body);
@@ -157,15 +170,26 @@ async fn ask(
     req.headers_mut().insert("x-account", account);
     let _ = read_whole(serve(gw, req).await.0).await;
     gw.idle().await;
+    assert_eq!(
+        openai
+            .requests()
+            .last()
+            .and_then(|r| r.body["model"].as_str())
+            .map(str::to_owned),
+        Some(model.to_owned())
+    );
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let (mock, store) = (MockTransport::new(), Memory::default());
-    let gw = gateway(&mock, store.clone())?;
-    ask(&gw, &mock, "acme", "small", Some((1_000, 500))).await;
-    ask(&gw, &mock, "acme", "large", Some((1_000, 500))).await;
-    ask(&gw, &mock, "globex", "unpriced", Some((10, 10))).await;
+    let (openai, store) = (FakeOpenAi::start().await, Memory::default());
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?.connect(),
+        store.clone(),
+    )?;
+    ask(&gw, &openai, "acme", SMALL, Some((1_000, 500))).await;
+    ask(&gw, &openai, "acme", LARGE, Some((1_000, 500))).await;
+    ask(&gw, &openai, "globex", UNPRICED, Some((10, 10))).await;
     for Row {
         account,
         model,

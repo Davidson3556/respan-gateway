@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Request, State};
-use respan_gateway_core::Gateway;
+use respan_gateway_sdk::Gateway;
 use support::*;
 
 const PATH: &str = "/v1/realtime";

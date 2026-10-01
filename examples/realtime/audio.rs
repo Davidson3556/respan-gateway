@@ -1,8 +1,8 @@
 //! Audio validation and a conservative token bound for PCM24k and G.711.
 //! Rates: https://developers.openai.com/api/docs/guides/voice-latency-cost
 use base64::{Engine, engine::general_purpose::STANDARD};
-use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::{ClientContext, Events, Fault, Plugin, Response, async_trait};
+use respan_gateway_sdk::futures::{StreamExt, stream};
+use respan_gateway_sdk::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use respan_gateway_ws::{ClientEvent, CloseCode};
 use serde_json::{Value, json};
 
@@ -32,7 +32,7 @@ impl Plugin for Validate {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let manual = self.0;
         if manual {
-            cx.wrap(|events: Events<ClientEvent>| {
+            cx.wrap(|events: EventStream<ClientEvent>| {
                 let manual = ClientEvent::new(json!({
                     "type": "session.update", "session": {"type": "realtime",
                     "audio": {"input": {"turn_detection": null}}}

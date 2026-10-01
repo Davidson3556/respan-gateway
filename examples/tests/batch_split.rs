@@ -9,17 +9,27 @@ async fn embed(gw: &Gateway, body: &str) -> (StatusCode, Result<Value, Fault>) {
     (status, parsed)
 }
 
+async fn provider() -> Result<(FakeOpenAi, respan_gateway_http::HttpClient), Fault> {
+    let openai = FakeOpenAi::start().await;
+    let transport = provider_support::openai(&openai.base_url())?;
+    Ok((openai, transport))
+}
+
 #[tokio::test]
 async fn a_batch_over_the_cap_is_split_and_merged_in_order_with_usage_summed() -> Result<(), Fault>
 {
-    let mock = MockTransport::new();
-    mock.reply(AT, answer(&[0.0, 1.0], 2))
-        .reply(AT, answer(&[2.0, 3.0], 2))
-        .reply(AT, answer(&[4.0], 1));
-    let gw = gateway(&mock, 2)?;
-    let body = r#"{"model":"m","dimensions":1,"input":["a","b","c","d","e"]}"#;
+    let (openai, transport) = provider().await?;
+    for scripted in [
+        answer(&[0.0, 1.0], 2),
+        answer(&[2.0, 3.0], 2),
+        answer(&[4.0], 1),
+    ] {
+        openai.answer(scripted);
+    }
+    let gw = gateway(transport.connect(), 2)?;
+    let body = r#"{"model":"text-embedding-3-small","dimensions":1,"input":["a","b","c","d","e"]}"#;
     let (status, answered) = embed(&gw, body).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{:?}", openai.requests());
     let answered = answered?;
     let firsts: Vec<_> = answered["data"]
         .as_array()
@@ -35,11 +45,8 @@ async fn a_batch_over_the_cap_is_split_and_merged_in_order_with_usage_summed() -
         "every call's usage"
     );
     // Three calls of at most two inputs, each keeping the client's other fields.
-    let sent: Vec<Value> = mock
-        .sent()
-        .iter()
-        .filter_map(|r| serde_json::from_slice(r.body()).ok())
-        .collect();
+    let sent: Vec<Value> = openai.requests().into_iter().map(|r| r.body).collect();
+    assert_eq!(sent.len(), 3);
     let inputs: Vec<&Value> = sent.iter().map(|s| &s["input"]).collect();
     assert_eq!(
         inputs,
@@ -47,62 +54,72 @@ async fn a_batch_over_the_cap_is_split_and_merged_in_order_with_usage_summed() -
     );
     assert!(
         sent.iter()
-            .all(|s| s["dimensions"] == 1 && s["model"] == "m")
+            .all(|s| s["dimensions"] == 1 && s["model"] == MODEL)
     );
     Ok(())
 }
 
 #[tokio::test]
 async fn a_batch_within_the_cap_is_relayed_byte_for_byte() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(AT, answer(&[0.5, 1.5], 2));
-    let gw = gateway(&mock, 2)?;
-    let body = r#"{"model": "m",  "input": ["a","b"]}"#;
+    let (openai, transport) = provider().await?;
+    openai.answer(answer(&[0.5, 1.5], 2));
+    let gw = gateway(transport.connect(), 2)?;
+    let body = r#"{"model": "text-embedding-3-small",  "input": ["a","b"]}"#;
     let (status, _) = embed(&gw, body).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(mock.sent().len(), 1);
-    assert_eq!(mock.sent()[0].body(), body.as_bytes());
+    let requests = openai.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(&requests[0].raw[..], body.as_bytes());
     Ok(())
 }
 
 #[tokio::test]
 async fn a_chunk_that_fails_fails_the_request() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(AT, answer(&[0.0, 1.0], 2)).reply(
-        AT,
-        mock::json(
-            StatusCode::SERVICE_UNAVAILABLE,
-            r#"{"error":{"message":"busy"}}"#,
-        ),
-    );
-    let gw = gateway(&mock, 2)?;
-    let (status, _) = embed(&gw, r#"{"model":"m","input":["a","b","c"]}"#).await;
+    let (openai, transport) = provider().await?;
+    openai.answer(answer(&[0.0, 1.0], 2));
+    for _ in 0..3 {
+        openai.answer(Answer::error(503).message("busy"));
+    }
+    let gw = gateway(transport.connect(), 2)?;
+    let (status, _) = embed(
+        &gw,
+        &format!(r#"{{"model":"{MODEL}","input":["a","b","c"]}}"#),
+    )
+    .await;
     assert_ne!(status, StatusCode::OK);
+    assert_eq!(
+        openai.requests().len(),
+        4,
+        "the failed chunk exhausts three tries"
+    );
     Ok(())
 }
 
-#[test]
-fn a_zero_batch_cap_is_rejected() {
-    assert!(gateway(&MockTransport::new(), 0).is_err());
+#[tokio::test]
+async fn a_zero_batch_cap_is_rejected() -> Result<(), Fault> {
+    let (_, transport) = provider().await?;
+    assert!(gateway(transport.connect(), 0).is_err());
+    Ok(())
 }
 
 #[tokio::test]
 async fn out_of_order_vectors_are_merged_by_their_input_index() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(
-        AT,
-        mock::json(
-            StatusCode::OK,
-            r#"{"data":[{"index":1,"embedding":[1.0]},{"index":0,"embedding":[0.0]}]}"#,
-        ),
+    let (openai, transport) = provider().await?;
+    openai.answer(Answer::raw(
+        r#"{"data":[{"index":1,"embedding":[1.0]},{"index":0,"embedding":[0.0]}]}"#,
+    ));
+    openai.answer(answer(&[2.0], 1));
+    let (status, body) = embed(
+        &gateway(transport.connect(), 2)?,
+        &format!(r#"{{"model":"{MODEL}","input":["a","b","c"]}}"#),
     )
-    .reply(AT, answer(&[2.0], 1));
-    let (status, body) = embed(&gateway(&mock, 2)?, r#"{"input":["a","b","c"]}"#).await;
+    .await;
     assert_eq!(status, StatusCode::OK);
     let body = body?;
     for i in 0..3 {
         assert_eq!(body["data"][i]["embedding"][0], json!(i as f64));
     }
+    assert_eq!(openai.requests().len(), 2);
     Ok(())
 }
 
@@ -113,27 +130,48 @@ async fn missing_or_duplicate_vectors_fail_the_split_request() -> Result<(), Fau
         r#"{"data":[{"index":0,"embedding":[0.0]},{"index":0,"embedding":[1.0]}]}"#,
         r#"{"data":[{"index":0,"embedding":"base64"},{"index":1,"embedding":[1.0]}]}"#,
     ] {
-        let mock = MockTransport::new();
-        mock.reply(AT, mock::json(StatusCode::OK, bad))
-            .reply(AT, answer(&[2.0], 1));
-        let (status, _) = embed(&gateway(&mock, 2)?, r#"{"input":["a","b","c"]}"#).await;
-        assert_ne!(status, StatusCode::OK, "{bad}");
+        let (openai, transport) = provider().await?;
+        openai.answer(Answer::raw(bad));
+        openai.answer(answer(&[2.0], 1));
+        // If decoding the malformed answer is classified retryable, each
+        // retry must still receive malformed data, never a fake default.
+        openai.answer(Answer::raw(bad));
+        openai.answer(Answer::raw(bad));
+        let (status, _) = embed(
+            &gateway(transport.connect(), 2)?,
+            &format!(r#"{{"model":"{MODEL}","input":["a","b","c"]}}"#),
+        )
+        .await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "{bad}; requests: {:?}",
+            openai.requests()
+        );
+        assert!(
+            (2..=4).contains(&openai.requests().len()),
+            "each chunk was called, with at most three attempts per bad chunk"
+        );
     }
     Ok(())
 }
 
 #[tokio::test]
 async fn only_a_failed_chunk_is_retried_before_the_merged_answer() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(AT, answer(&[0.0, 1.0], 2))
-        .reply(AT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"))
-        .reply(AT, answer(&[2.0], 1));
-    let (status, body) = embed(&gateway(&mock, 2)?, r#"{"input":["a","b","c"]}"#).await;
+    let (openai, transport) = provider().await?;
+    openai.answer(answer(&[0.0, 1.0], 2));
+    openai.answer(Answer::error(503).message("busy"));
+    openai.answer(answer(&[2.0], 1));
+    let (status, body) = embed(
+        &gateway(transport.connect(), 2)?,
+        &format!(r#"{{"model":"{MODEL}","input":["a","b","c"]}}"#),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body?["data"][2]["embedding"][0], json!(2.0));
-    let sent = mock.sent();
+    let sent = openai.requests();
     assert_eq!(sent.len(), 3);
-    assert_eq!(sent[1].body(), sent[2].body());
-    assert_ne!(sent[0].body(), sent[1].body());
+    assert_eq!(sent[1].raw, sent[2].raw);
+    assert_ne!(sent[0].raw, sent[1].raw);
     Ok(())
 }

@@ -2,14 +2,17 @@
 //! the default target.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
-use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Response, async_trait};
-use respan_gateway_http::{Codec, Transport};
-use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_http::{Incoming, Outgoing};
 use respan_gateway_plugins::ModelRouter;
+use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_sdk::{
+    ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response, async_trait,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -66,33 +69,32 @@ pub struct ModelRoute {
     pub provider: String,
 }
 
+type Connect = Arc<dyn Fn(Extensions) -> Outgoing + Send + Sync>;
+
 /// A format compiled into the binary: its name, and how to add a
 /// provider that speaks it or serve its clients.
 pub struct KnownFormat {
     pub name: String,
-    pub provider: fn(Gateway, name: String, transport: Transport) -> Result<Gateway, Fault>,
+    pub provider: fn(Gateway, String, Connect) -> Result<Gateway, Fault>,
     pub serve: fn(Gateway) -> Result<Gateway, Fault>,
 }
 
 impl KnownFormat {
     /// An HTTP format, as every provider the binary knows speaks.
-    pub fn of<F>() -> Self
+    pub fn of<F, I, O>() -> Self
     where
-        F: Codec
-            + Default
-            + Format<Transport, F::Input, F::Output>
-            + Format<Transport, F::Output, F::Input>,
+        F: Default + Format<Incoming, I, O> + Format<Outgoing, O, I>,
+        I: Clone + Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
     {
         Self {
-            name: Codec::name(&F::default()).to_owned(),
+            name: <F as Format<Incoming, I, O>>::name(&F::default()).to_owned(),
             provider: |gateway, name, transport| {
-                gateway.provider::<F::Input, F::Output, _>(
-                    name,
-                    F::default(),
-                    respan_gateway_http::connect(transport),
-                )
+                gateway.provider::<I, O, _>(name, F::default(), move |extensions| {
+                    transport(extensions)
+                })
             },
-            serve: |gateway| gateway.client::<F::Input, F::Output, _>(F::default()),
+            serve: |gateway| gateway.client::<I, O, _>(F::default()),
         }
     }
 }
@@ -104,7 +106,7 @@ impl Config {
 
     /// Builds the gateway: each provider's transport comes from `transport`,
     /// given its base URL and auth headers; formats are found in `formats`.
-    pub fn build<T: Into<Transport>>(
+    pub fn build<T: Fn(Extensions) -> Outgoing + Send + Sync + 'static>(
         &self,
         transport: impl Fn(&str, HeaderMap) -> Result<T, Fault>,
         formats: &[KnownFormat],
@@ -124,7 +126,7 @@ impl Config {
             let auth = auth_headers(name, p.auth.as_ref())?;
             let reach = transport(&p.base_url, auth)
                 .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
-            gateway = (format.provider)(gateway, name.clone(), reach.into())?;
+            gateway = (format.provider)(gateway, name.clone(), Arc::new(reach))?;
         }
         let after = (self.serve.iter().skip_while(|n| *n != PASSTHROUGH)).nth(1);
         if let Some(after) = after {
@@ -261,9 +263,15 @@ fn auth_headers(provider: &str, auth: Option<&Auth>) -> Result<HeaderMap, Fault>
 }
 
 #[cfg(test)]
+#[allow(dead_code, unused_imports)]
+#[path = "../../tests/support/http.rs"]
+mod http_helpers;
+
+#[cfg(test)]
 mod tests {
+    use super::http_helpers::{post, read_whole, serve};
+    use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
     use respan_gateway_http::http::StatusCode;
-    use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
 
     use super::*;
 
@@ -274,26 +282,35 @@ mod tests {
             .map_err(|e| e.message().to_owned())
     }
 
-    /// A gateway from `yaml` whose providers answer from `mock`.
-    fn mocked(yaml: &str, mock: &MockTransport) -> Gateway {
-        let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
-        let transport = |url: &str, auth| Ok(mock.at(url).with_headers(auth));
-        config
-            .build(transport, &crate::formats())
-            .unwrap_or_else(|e| panic!("gateway: {e}"))
+    /// Build the actual HTTP configuration against two strict local providers.
+    async fn local(yaml: &str) -> (Gateway, FakeOpenAi, FakeOpenAi) {
+        let a = FakeOpenAi::start().await;
+        let b = FakeOpenAi::start().await;
+        a.answer(Answer::text("a"));
+        b.answer(Answer::text("b"));
+        let yaml = yaml
+            .replace("https://a.test/v1", &a.base_url())
+            .replace("https://b.test/v1", &b.base_url());
+        let gateway = resolve(&yaml).unwrap_or_else(|e| panic!("gateway: {e}"));
+        (gateway, a, b)
     }
 
     const TWO: &str = "providers:
-  a: { format: openai-chat, base_url: 'https://a.test/v1' }
-  b: { format: openai-chat, base_url: 'https://b.test/v1' }
+  a: { format: openai-chat, base_url: 'https://a.test/v1', auth: { type: bearer, key: sk-test } }
+  b: { format: openai-chat, base_url: 'https://b.test/v1', auth: { type: bearer, key: sk-test } }
 serve: [openai-chat]
 ";
 
-    /// The URLs `gateway` called for an OpenAI Chat `request`.
-    async fn sent_to(gateway: &Gateway, mock: &MockTransport, request: &str) -> Vec<String> {
-        let req = post("/v1/chat/completions", request.to_owned());
-        drop(serve(gateway, req).await);
-        mock.sent().iter().map(|s| s.uri().to_string()).collect()
+    async fn request(gateway: &Gateway, model: &str) {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let (response, _) = serve(gateway, post("/v1/chat/completions", body.to_string())).await;
+        let (status, _, body) = read_whole(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_ok(), "{body:?}");
+        gateway.idle().await;
     }
 
     #[tokio::test]
@@ -304,12 +321,11 @@ serve: [openai-chat]
     models: [{{ prefix: claude, provider: a }}, {{ prefix: claude-3, provider: b }}]
 "
         );
-        let mock = MockTransport::new();
-        let gateway = mocked(&yaml, &mock);
-        mock.reply("https://a.test/v1", mock::json(StatusCode::OK, "{}"));
-
-        let urls = sent_to(&gateway, &mock, r#"{"model":"claude-3-x","messages":[]}"#).await;
-        assert_eq!(urls, ["https://a.test/v1/chat/completions"]);
+        let (gateway, a, b) = local(&yaml).await;
+        request(&gateway, "claude-3-x").await;
+        assert_eq!(a.requests().len(), 1);
+        assert_eq!(a.requests()[0].path, "/v1/chat/completions");
+        assert!(b.requests().is_empty());
     }
 
     #[tokio::test]
@@ -322,12 +338,11 @@ serve: [openai-chat]
   - {{ name: second, models: [{{ prefix: gpt, provider: b }}] }}
 "
         );
-        let mock = MockTransport::new();
-        let gateway = mocked(&yaml, &mock);
-        mock.reply("https://a.test/v1", mock::json(StatusCode::OK, "{}"));
-
-        let urls = sent_to(&gateway, &mock, r#"{"model":"gpt-x","messages":[]}"#).await;
-        assert_eq!(urls, ["https://a.test/v1/chat/completions"]);
+        let (gateway, a, b) = local(&yaml).await;
+        request(&gateway, "gpt-x").await;
+        assert_eq!(a.requests().len(), 1);
+        assert_eq!(a.requests()[0].path, "/v1/chat/completions");
+        assert!(b.requests().is_empty());
     }
 
     #[tokio::test]
@@ -337,28 +352,25 @@ serve: [openai-chat]
 plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
 "
         );
-        let mock = MockTransport::new();
-        let gateway = mocked(&yaml, &mock);
-        mock.reply("https://b.test/v1", mock::json(StatusCode::OK, "{}"));
-
-        let urls = sent_to(&gateway, &mock, r#"{"model":"gpt-x","messages":[]}"#).await;
-        assert_eq!(urls, ["https://b.test/v1/chat/completions"]);
+        let (gateway, a, b) = local(&yaml).await;
+        request(&gateway, "gpt-x").await;
+        assert!(a.requests().is_empty());
+        assert_eq!(b.requests().len(), 1);
+        assert_eq!(b.requests()[0].path, "/v1/chat/completions");
     }
 
     #[tokio::test]
     async fn the_example_config_routes_by_model_both_ways() {
+        let openai = FakeOpenAi::start().await;
+        let anthropic = FakeAnthropic::start().await;
+        openai.answer(Answer::text("hi"));
+        anthropic.answer(Answer::text("hi"));
         let yaml = include_str!("../../gateway.example.yaml")
             .replace("env:OPENAI_API_KEY", "sk")
-            .replace("env:ANTHROPIC_API_KEY", "sk");
-        let mock = MockTransport::new();
-        let gateway = mocked(&yaml, &mock);
-        let claude = r#"{"id":"msg_1","type":"message","role":"assistant","model":"claude-x","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
-        let gpt = r#"{"id":"c1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
-        mock.reply(
-            "https://api.anthropic.com",
-            mock::json(StatusCode::OK, claude),
-        );
-        mock.reply("https://api.openai.com/v1", mock::json(StatusCode::OK, gpt));
+            .replace("env:ANTHROPIC_API_KEY", "sk")
+            .replace("https://api.openai.com/v1", &openai.base_url())
+            .replace("https://api.anthropic.com", &anthropic.base_url());
+        let gateway = resolve(&yaml).unwrap_or_else(|e| panic!("gateway: {e}"));
 
         let openai_client = r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#;
         let anthropic_client =
@@ -368,21 +380,20 @@ plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
         let to_gpt = serve(&gateway, post("/v1/messages", anthropic_client));
         let (_, _, to_gpt) = read_whole(to_gpt.await.0).await;
 
-        let urls: Vec<String> = mock.sent().iter().map(|s| s.uri().to_string()).collect();
-        assert_eq!(
-            urls,
-            [
-                "https://api.anthropic.com/v1/messages",
-                "https://api.openai.com/v1/chat/completions"
-            ]
-        );
+        gateway.idle().await;
+        assert_eq!(anthropic.requests().len(), 1);
+        assert_eq!(anthropic.requests()[0].path, "/v1/messages");
+        assert_eq!(openai.requests().len(), 1);
+        assert_eq!(openai.requests()[0].path, "/v1/chat/completions");
         let json = |b: Result<respan_gateway_http::bytes::Bytes, Fault>| {
             b.ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or(serde_json::Value::Null)
         };
-        assert_eq!(json(to_claude)["object"], "chat.completion");
-        assert_eq!(json(to_gpt)["type"], "message");
+        let to_claude = json(to_claude);
+        let to_gpt = json(to_gpt);
+        assert_eq!(to_claude["object"], "chat.completion", "{to_claude}");
+        assert_eq!(to_gpt["type"], "message", "{to_gpt}");
     }
 
     #[test]

@@ -12,20 +12,24 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_core::futures::TryStreamExt;
-use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
+#[cfg(test)]
 use respan_gateway_http::http;
-use respan_gateway_messages::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
-
-const JUDGE: &str = "http://judge.test/v1";
-const CHEAP: &str = "http://cheap.test/v1";
-const STRONG: &str = "http://strong.test/v1";
+use respan_gateway_sdk::conversation::{Conversation, Message, Reply, Role};
+use respan_gateway_sdk::futures::TryStreamExt;
+use respan_gateway_sdk::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
+use http_support::{post, read_whole, serve};
 
 /// Routes each conversation by a small model's verdict on its last message.
 struct Judge;
@@ -86,22 +90,27 @@ impl Egress {
     }
 }
 
-fn gateway(mock: &MockTransport, egress: Egress) -> Result<Gateway, Fault> {
+fn gateway(
+    judge: &FakeOpenAi,
+    cheap: &FakeOpenAi,
+    strong: &FakeOpenAi,
+    egress: Egress,
+) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider::<Conversation, _, _>(
             "judge",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(JUDGE)),
+            provider_support::openai(&judge.base_url())?.connect(),
         )?
         .provider::<Conversation, _, _>(
             "cheap",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(CHEAP)),
+            provider_support::openai(&cheap.base_url())?.connect(),
         )?
         .provider::<Conversation, _, _>(
             "strong",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(STRONG)),
+            provider_support::openai(&strong.base_url())?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("egress", egress)?
@@ -109,10 +118,10 @@ fn gateway(mock: &MockTransport, egress: Egress) -> Result<Gateway, Fault> {
         .target("cheap")
 }
 
-fn answer(text: &str) -> mock::Reply {
+fn answer(text: &str) -> Answer {
     let body = serde_json::json!({"id": "c", "choices": [{"index": 0, "finish_reason": "stop",
         "message": {"role": "assistant", "content": text}}], "usage": {"prompt_tokens": 9, "completion_tokens": 1}});
-    mock::json(http::StatusCode::OK, &body.to_string())
+    Answer::raw(body.to_string())
 }
 
 const REQUEST: &str =
@@ -120,20 +129,26 @@ const REQUEST: &str =
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(JUDGE, answer("HARD"))
-        .reply(STRONG, answer("Working on it."));
+    let (judge, cheap, strong) = tokio::join!(
+        FakeOpenAi::start(),
+        FakeOpenAi::start(),
+        FakeOpenAi::start()
+    );
+    judge.answer(answer("HARD"));
+    strong.answer(answer("Working on it."));
     let egress = Egress::default();
-    let gw = gateway(&mock, egress.clone())?;
+    let gw = gateway(&judge, &cheap, &strong, egress.clone())?;
     let (status, _, body) =
         read_whole(serve(&gw, post("/v1/chat/completions", REQUEST)).await.0).await;
     println!("{status} {}", String::from_utf8_lossy(&body?));
-    for sent in mock.sent() {
-        println!(
-            "called {}: {}",
-            sent.uri(),
-            String::from_utf8_lossy(sent.body())
-        );
+    for (name, fake) in [("judge", &judge), ("strong", &strong)] {
+        for sent in fake.requests() {
+            println!(
+                "called {name}{}: {}",
+                sent.path,
+                String::from_utf8_lossy(&sent.raw)
+            );
+        }
     }
     println!("provider edge saw: {:?}", *egress.seen());
     Ok(())

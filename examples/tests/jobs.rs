@@ -8,20 +8,20 @@ async fn a_completed_result_survives_reopening_the_database() -> Result<(), Faul
         std::process::id(),
         hash(std::time::SystemTime::now())
     ));
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::sse(STREAM));
+    let mock = FakeOpenAi::start().await;
+    mock.answer(provider_support::sse(STREAM));
     {
         let store = Arc::new(Sqlite::open(&path)?);
-        let gateway = gateway(&mock, &store)?;
+        let gateway = gateway(provider_support::openai(&mock.base_url())?, &store)?;
         assert!(whole(&send(&gateway, keyed(ACME, "durable", BODY)).await?));
     }
     {
         let store = Arc::new(Sqlite::open(&path)?);
-        let gateway = gateway(&mock, &store)?;
+        let gateway = gateway(provider_support::openai(&mock.base_url())?, &store)?;
         assert!(whole(&send(&gateway, keyed(ACME, "durable", BODY)).await?));
     }
     assert_eq!(
-        mock.sent().len(),
+        mock.requests().len(),
         1,
         "reopening replays, without another provider call"
     );
@@ -40,11 +40,11 @@ fn whole(sse: &str) -> bool {
 #[tokio::test]
 async fn a_duplicate_waits_for_the_run_in_flight_and_the_provider_is_called_once()
 -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::sse(STREAM))
-        .reply(OPENAI, mock::sse(STREAM));
+    let mock = FakeOpenAi::start().await;
+    mock.answer(provider_support::sse(STREAM));
+    mock.answer(provider_support::sse(STREAM));
     let store = Arc::new(Memory::default());
-    let gw = gateway(&mock, &store)?;
+    let gw = gateway(provider_support::openai(&mock.base_url())?, &store)?;
     // The first is in flight while its body is unread.
     let (first, _) = serve(&gw, keyed(ACME, "op-1", BODY)).await;
     let duplicate = tokio::spawn({
@@ -67,17 +67,20 @@ async fn a_duplicate_waits_for_the_run_in_flight_and_the_provider_is_called_once
     assert!(whole(&duplicate), "{duplicate}");
     let retry = send(&gw, keyed(ACME, "op-1", BODY)).await?;
     assert!(whole(&retry), "a later retry too");
-    assert_eq!(mock.sent().len(), 1);
+    assert_eq!(mock.requests().len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn the_key_is_bound_to_the_credential_and_the_body() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let mock = FakeOpenAi::start().await;
     for _ in 0..3 {
-        mock.reply(OPENAI, mock::sse(STREAM));
+        mock.answer(provider_support::sse(STREAM));
     }
-    let gw = gateway(&mock, &Arc::<Memory>::default())?;
+    let gw = gateway(
+        provider_support::openai(&mock.base_url())?,
+        &Arc::<Memory>::default(),
+    )?;
     send(&gw, keyed(ACME, "op-1", BODY)).await?;
     // Another credential with the same key, even claiming acme in a
     // header, runs on its own.
@@ -86,21 +89,25 @@ async fn the_key_is_bound_to_the_credential_and_the_body() -> Result<(), Fault> 
         .headers_mut()
         .insert("x-tenant", HeaderValue::from_static("acme"));
     send(&gw, spoof).await?;
-    assert_eq!(mock.sent().len(), 2);
+    assert_eq!(mock.requests().len(), 2);
     // The same key with another body runs too.
-    let other = r#"{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"bye"}]}"#;
+    let other =
+        r#"{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"bye"}]}"#;
     send(&gw, keyed(ACME, "op-1", other)).await?;
-    assert_eq!(mock.sent().len(), 3);
+    assert_eq!(mock.requests().len(), 3);
     Ok(())
 }
 
 #[tokio::test]
 async fn every_credential_form_isolates_cached_results() -> Result<(), Fault> {
     for form in ["x-api-key", "api-key", "query", "subprotocol"] {
-        let mock = MockTransport::new();
-        mock.reply(OPENAI, mock::sse(STREAM))
-            .reply(OPENAI, mock::sse(STREAM));
-        let gw = gateway(&mock, &Arc::<Memory>::default())?;
+        let mock = FakeOpenAi::start().await;
+        mock.answer(provider_support::sse(STREAM));
+        mock.answer(provider_support::sse(STREAM));
+        let gw = gateway(
+            provider_support::openai(&mock.base_url())?,
+            &Arc::<Memory>::default(),
+        )?;
         for token in ["acme", "beta", "acme", "beta"] {
             let mut req = keyed(ACME, "op-1", BODY);
             req.headers_mut().remove(AUTHORIZATION);
@@ -124,36 +131,39 @@ async fn every_credential_form_isolates_cached_results() -> Result<(), Fault> {
             }
             assert!(whole(&send(&gw, req).await?));
         }
-        assert_eq!(mock.sent().len(), 2, "each {form} tenant runs once");
+        assert_eq!(mock.requests().len(), 2, "each {form} tenant runs once");
     }
     Ok(())
 }
 
 #[tokio::test]
 async fn a_zero_retention_request_stores_nothing() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::sse(STREAM))
-        .reply(OPENAI, mock::sse(STREAM));
+    let mock = FakeOpenAi::start().await;
+    mock.answer(provider_support::sse(STREAM));
+    mock.answer(provider_support::sse(STREAM));
     let store = Arc::new(Memory::default());
-    let gw = gateway(&mock, &store)?;
+    let gw = gateway(provider_support::openai(&mock.base_url())?, &store)?;
     for _ in 0..2 {
         let mut req = keyed(ACME, "op-1", BODY);
-        let mut values = respan_gateway_core::Extensions::new();
+        let mut values = respan_gateway_sdk::Extensions::new();
         values.insert(NoContent);
         req.extensions_mut().insert(values);
         assert!(whole(&send(&gw, req).await?));
     }
     assert!(locked(&store.0).is_empty(), "nothing stored");
-    assert_eq!(mock.sent().len(), 2, "so each request runs");
+    assert_eq!(mock.requests().len(), 2, "so each request runs");
     Ok(())
 }
 
 #[tokio::test]
 async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::sse(STREAM))
-        .reply(OPENAI, mock::sse(STREAM));
-    let gw = gateway(&mock, &Arc::<Memory>::default())?;
+    let mock = FakeOpenAi::start().await;
+    mock.answer(provider_support::sse(STREAM));
+    mock.answer(provider_support::sse(STREAM));
+    let gw = gateway(
+        provider_support::openai(&mock.base_url())?,
+        &Arc::<Memory>::default(),
+    )?;
     let (resp, outcome) = serve(&gw, keyed(ACME, "op-1", BODY)).await;
     let mut body = resp.into_body();
     let frame = body.frame().await.transpose()?;
@@ -165,12 +175,12 @@ async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(),
 
     let retry = send(&gw, keyed(ACME, "op-1", BODY)).await?;
     assert!(whole(&retry), "not half an answer: {retry}");
-    assert_eq!(mock.sent().len(), 2, "the cut run cost a second call");
+    assert_eq!(mock.requests().len(), 2, "the cut run cost a second call");
     assert!(
         whole(&send(&gw, keyed(ACME, "op-1", BODY)).await?),
         "now it is stored"
     );
-    assert_eq!(mock.sent().len(), 2);
+    assert_eq!(mock.requests().len(), 2);
     Ok(())
 }
 
@@ -178,7 +188,6 @@ async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(),
 async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstream_key()
 -> Result<(), Fault> {
     use respan_gateway_examples::store::Database;
-    use respan_gateway_http::Transport;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -194,15 +203,15 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
         hash(std::time::SystemTime::now())
     ));
     let store = Arc::new(Sqlite::with_lease(&path, Duration::from_millis(600))?);
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::sse(STREAM));
+    let mock = FakeOpenAi::start().await;
+    mock.answer(provider_support::sse(STREAM));
     let calls = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
     let keys = Arc::new(Mutex::new(Vec::new()));
-    let transport = Transport::new({
+    let transport = {
         let (calls, dropped, keys) = (calls.clone(), dropped.clone(), keys.clone());
-        let transport: Transport = mock.at(OPENAI).into();
-        move |call| {
+        let transport = provider_support::openai(&mock.base_url())?;
+        move |call: respan_gateway_http::http::Request<respan_gateway_http::Body>| {
             let (calls, dropped, keys, transport) = (
                 calls.clone(),
                 dropped.clone(),
@@ -210,7 +219,7 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
                 transport.clone(),
             );
             async move {
-                locked(&keys).push(call.head.headers.get("idempotency-key").cloned());
+                locked(&keys).push(call.headers().get("idempotency-key").cloned());
                 if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     let _dropped = Dropped(dropped);
                     let _call = call;
@@ -220,7 +229,7 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
                 }
             }
         }
-    });
+    };
     let gw = Gateway::new()
         .client::<Conversation, _, _>(OpenAiChat)?
         .provider::<Conversation, _, _>(

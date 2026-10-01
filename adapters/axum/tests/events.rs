@@ -11,11 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_core::{
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_sdk::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_http::Codec;
-use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
 use serde_json::{Value, json};
 use support::*;
@@ -42,11 +41,7 @@ fn gateway_of(base: &str, plugins: Vec<(&str, Arc<dyn Plugin>)>) -> (Gateway, Ou
     let mut gateway = Gateway::new()
         .client::<ClientEvent, _, _>(events())
         .unwrap()
-        .provider::<ClientEvent, _, _>(
-            "p",
-            events(),
-            respan_gateway_http::connect(WsTransport::new(base).unwrap()),
-        )
+        .provider::<ClientEvent, _, _>("p", events(), WsTransport::new(base).unwrap().connect())
         .unwrap()
         .plugin("ends", ends.clone())
         .unwrap()
@@ -331,25 +326,45 @@ async fn it_serves_only_its_path() {
 
 // A call the format writes itself is an upgrade request to its path; one
 // that carries no session cannot be written.
-#[test]
-fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
+#[tokio::test]
+async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
+    use futures::{SinkExt, StreamExt, TryStreamExt, stream};
+    use respan_gateway_http::{Body, Outgoing};
+    use respan_gateway_sdk::{EventStream, Extensions, Format};
     let format = events();
-    let mut body = Bytes::new();
-    let mut encoder = format.request_encoder(None, &mut body, true);
-    let head = encoder.head(None);
-    assert_eq!(head.method, "GET");
-    assert_eq!(head.uri.path(), "/v1/realtime");
-    assert_eq!(head.headers["upgrade"], "websocket");
-    let mut out = BytesMut::new();
-    assert_eq!(encoder.open(&mut out), Ok(false));
-    encoder
-        .encode(&ClientEvent::new(json!({ "type": "x", "n": 1 })), &mut out)
-        .unwrap();
-    assert_eq!(&out[..], br#"{"type":"x","n":1}"#);
-
-    let mut encoder = format.request_encoder(None, &mut body, false);
-    let refused = encoder.open(&mut BytesMut::new()).unwrap_err();
-    assert_eq!(refused.code(), "config");
+    let factory = respan_gateway_http::connect(|call| async move {
+        assert_eq!(call.method(), "GET");
+        assert_eq!(call.uri().path(), "/v1/realtime");
+        assert_eq!(call.headers()["upgrade"], "websocket");
+        let frames: Vec<Bytes> = call.into_body().try_collect().await?;
+        assert_eq!(frames, [Bytes::from_static(br#"{"type":"x","n":1}"#)]);
+        let answer = http::Response::builder()
+            .status(101)
+            .body(Body::stream(stream::empty()))
+            .unwrap();
+        Ok((answer, None))
+    });
+    let (_, mut refusal) = <JsonEvents as Format<Outgoing, ProviderEvent, ClientEvent>>::bind(
+        &format,
+        factory(Extensions::new()),
+    )
+    .unwrap();
+    let mut finite = EventStream::single(ClientEvent::new(json!({"type":"x"})));
+    assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.code() == "config"));
+    let (opening, mut write) = <JsonEvents as Format<Outgoing, ProviderEvent, ClientEvent>>::bind(
+        &format,
+        factory(Extensions::new()),
+    )
+    .unwrap();
+    let mut input = EventStream::stream(stream::iter([Ok(ClientEvent::new(
+        json!({"type":"x", "n":1}),
+    ))]));
+    write.prepare(&mut input).unwrap();
+    while let Some(item) = input.next().await {
+        write.send(item).await.unwrap();
+    }
+    write.close().await.unwrap();
+    assert!(opening.await.is_ok());
 }
 
 // A plugin refuses a session before it is upgraded: the client gets an

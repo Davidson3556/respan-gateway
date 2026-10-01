@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use respan_gateway_core::Fault;
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{RequestHead, ResponseHead, Status, bodiless};
+use respan_gateway_sdk::Fault;
 use serde_json::{self, Map, Value, json};
 
 use crate::Usage;
@@ -16,7 +16,8 @@ use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, 
 use crate::formats::errors::{provider_error, says_error};
 use crate::formats::sse::{content_type, event_data};
 use crate::tools::{Calls, fragments};
-use respan_gateway_http::{Decoder, Encoder};
+use respan_gateway_http::{Body, Encoder};
+use respan_gateway_sdk::{EventSink, EventStream};
 
 /// What a conversation format supplies; the plumbing around it is shared.
 pub(crate) trait Wire: Send + Sync + 'static {
@@ -42,6 +43,9 @@ pub(crate) trait Wire: Send + Sync + 'static {
     fn usage(v: &Value) -> Usage;
     /// Usage as this format reports it.
     fn usage_body(u: &Usage) -> Value;
+    /// Write edited totals into existing usage, preserving vendor fields.
+    fn patch_usage(v: &mut Value, total: &Usage, said: &Usage, edited: &Usage)
+    -> Result<(), Fault>;
     /// A whole response from the replies of another format, or a plugin.
     fn render(so_far: &SoFar) -> Result<Value, Fault>;
     /// Put an edited reply back into a whole response of this format.
@@ -60,65 +64,67 @@ pub(crate) trait Wire: Send + Sync + 'static {
     fn finish(_v: &mut Map<String, Value>) {}
 }
 
-/// Decodes each JSON request into a conversation that keeps its bytes.
-pub(crate) fn request_decoder<W: Wire>() -> Box<dyn Decoder<Conversation>> {
-    let name: Arc<str> = Arc::from(W::NAME);
-    crate::formats::message_decoder(
-        move |raw: Bytes| match serde_json::from_slice::<Value>(&raw) {
-            Ok(v) if v.is_object() => {
-                let mut chat = W::read(&v);
-                chat.model = v["model"].as_str().map(Into::into);
-                Ok(chat.came(&name, raw))
-            }
-            _ => Err(not_an_object()),
-        },
-    )
+/// Reads a finite JSON request while retaining its original bytes.
+pub(crate) fn read_request<W: Wire>(raw: Bytes) -> Result<Conversation, Fault> {
+    match serde_json::from_slice::<Value>(&raw) {
+        Ok(v) if v.is_object() => {
+            let mut chat = W::read(&v);
+            chat.model = v["model"].as_str().map(Into::into);
+            Ok(chat.came(&Arc::from(W::NAME), raw))
+        }
+        _ => Err(not_an_object()),
+    }
 }
 
 fn not_an_object() -> Fault {
     Fault::bad_request("request body is not a JSON object")
 }
 
-/// Make `head` a JSON `POST` to `path`, adding to a relayed `body` what
-/// the format needs ([`Wire::finish`]); a call whose inputs stream fails.
+/// Make `head` a JSON `POST` to `path`, adding what the format needs
+/// without decoding an unread relay into a conversation.
 pub(crate) fn post_json<W: Wire>(
-    mut head: RequestHead,
-    body: &mut Bytes,
+    source: &mut EventStream<Conversation>,
     path: &str,
-    streams: bool,
-) -> Box<dyn Encoder<Conversation, RequestHead>> {
+) -> Result<(http::Request<Body>, EventSink<Conversation>), Fault> {
+    if !source.is_single() {
+        return Err(Fault::config(format!(
+            "{} does not accept streaming inputs",
+            W::NAME
+        )));
+    }
+    let (request, sink) =
+        respan_gateway_http::request(W::NAME, source, Box::new(RequestEncoder::<W>(PhantomData)))?;
+    let (mut head, mut body) = request.into_parts();
     head.method = http::Method::POST;
     crate::formats::set_path(&mut head, path);
-    let json = HeaderValue::from_static("application/json");
-    head.headers.insert(CONTENT_TYPE, json);
-    let mut changed = streams;
-    if W::unfinished(body)
-        && let Ok(mut v) = object(body)
+    head.headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if let Some(raw) = body.full_bytes_mut() {
+        let finished = finish_raw::<W>(raw.clone());
+        if finished != *raw {
+            crate::formats::body_changed(&mut head);
+            *raw = finished;
+        }
+    }
+    Ok((http::Request::from_parts(head, body), sink))
+}
+
+/// Add protocol requirements while preserving unread malformed relay bytes.
+pub(crate) fn finish_raw<W: Wire>(body: Bytes) -> Bytes {
+    if W::unfinished(&body)
+        && let Ok(mut v) = object(&body)
     {
         W::finish(&mut v);
-        *body = to_bytes(&v).unwrap_or_else(|_| body.clone());
-        changed = true;
+        return to_bytes(&v).unwrap_or(body);
     }
-    let head = move |first: Option<&Conversation>| {
-        if changed || first.is_some() {
-            crate::formats::body_changed(&mut head);
-        }
-        head
-    };
-    let encoder = match streams {
-        true => crate::formats::whole::unstreamable(W::NAME),
-        false => Box::new(RequestEncoder::<W>(PhantomData)),
-    };
-    crate::formats::headed(head, encoder)
+    body
 }
 
 /// Writes a conversation as the client's bytes, with changes written in, or
 /// anew; then what the format adds ([`Wire::finish`]).
 struct RequestEncoder<W>(PhantomData<W>);
 
-impl<W: Wire> Encoder<Conversation, ()> for RequestEncoder<W> {
-    fn head(&mut self, _first: Option<&Conversation>) {}
-
+impl<W: Wire> Encoder<Conversation> for RequestEncoder<W> {
     /// What cannot be written is the client's fault if its own request
     /// cannot be written either; else an edit caused it, a plugin's.
     fn encode(&mut self, chat: &Conversation, out: &mut BytesMut) -> Result<(), Fault> {
@@ -274,40 +280,61 @@ fn made_head(head: &mut ResponseHead, asks_stream: bool) -> bool {
 
 /// A response of format `W` to the call `call`: nothing if it has no body,
 /// else SSE events decoded by `stream` for a stream, else one JSON message.
-pub(crate) fn response_decoder<W: Wire>(
-    head: &ResponseHead,
+pub(crate) fn read_response<W: Wire>(
+    response: http::Response<Body>,
     call: &RequestHead,
-    stream: impl FnOnce() -> Box<dyn Decoder<Reply>>,
-) -> Box<dyn Decoder<Reply>> {
+    stream: impl FnOnce(
+        Body,
+    )
+        -> respan_gateway_sdk::futures::stream::BoxStream<'static, Result<Reply, Fault>>,
+) -> respan_gateway_sdk::futures::stream::BoxStream<'static, Result<Reply, Fault>> {
+    let (mut head, body) = response.into_parts();
     if head.status.is_success() && bodiless(&call.method, head.status) {
-        return crate::formats::whole::nothing();
+        return Box::pin(respan_gateway_sdk::futures::stream::empty());
     }
-    match crate::formats::sse::is_stream(head) {
-        true => stream(),
-        false => unary_decoder::<W>(head),
+    if crate::formats::sse::is_stream(&head) {
+        return stream(body);
     }
+    crate::formats::default_content_type(&mut head, "application/json");
+    let status = head.status;
+    crate::formats::whole::read(
+        W::NAME,
+        http::Response::from_parts(head, body),
+        move |raw, out| {
+            out.push(unary_reply::<W>(status, raw)?);
+            Ok(())
+        },
+    )
 }
 
 /// A response of format `W` to the client's request `ask` with `body`, from
 /// the provider's head `answer` if relayed: nothing for a bodiless one, else
 /// `encoder` of the head, whether it relays the provider's bytes, and what
 /// the client [`Asked`].
-pub(crate) fn response_encoder<W: Wire>(
-    answer: Option<&ResponseHead>,
-    ask: &RequestHead,
-    body: &Bytes,
-    encoder: impl FnOnce(&ResponseHead, bool, Asked) -> Box<dyn Encoder<Reply, ()>>,
-) -> Box<dyn Encoder<Reply, ResponseHead>> {
-    let mut head = crate::formats::response_head(answer);
-    let body = match bodiless(&ask.method, head.status) {
-        true => crate::formats::whole::no_body(),
-        false => {
-            let asked = probe(body);
-            let relayed = made_head(&mut head, asked.stream);
-            encoder(&head, relayed, asked)
-        }
+pub(crate) fn response_encoder(
+    head: &mut ResponseHead,
+    request: &http::Request<Bytes>,
+    encoder: impl FnOnce(&ResponseHead, bool, Asked) -> Box<dyn Encoder<Reply>>,
+) -> Option<Box<dyn Encoder<Reply>>> {
+    if bodiless(request.method(), head.status) {
+        return None;
+    }
+    let asked = probe(request.body());
+    let relayed = made_head(head, asked.stream);
+    Some(encoder(head, relayed, asked))
+}
+
+/// Finite response encoding uses the exact same encoder as HTTP delivery.
+pub(crate) fn encode_response(
+    head: ResponseHead,
+    encoder: Option<Box<dyn Encoder<Reply>>>,
+    replies: &[Reply],
+) -> Result<http::Response<Bytes>, Fault> {
+    let bytes = match encoder {
+        Some(encoder) => respan_gateway_http::encode_all(encoder, replies)?,
+        None => Bytes::new(),
     };
-    crate::formats::with_head(head, body)
+    Ok(http::Response::from_parts(head, bytes))
 }
 
 /// A refusal in format `W`: its own words as this format's JSON error.
@@ -331,28 +358,19 @@ pub(crate) fn refusal<W: Wire>(fault: &Fault, head: &mut ResponseHead) -> Bytes 
 
 /// One JSON message, decoded whole: one reply on success, else the
 /// provider's error.
-fn unary_decoder<W: Wire>(head: &ResponseHead) -> Box<dyn Decoder<Reply>> {
-    let (name, status): (Arc<str>, _) = (Arc::from(W::NAME), head.status);
-    // An error answer is relayed as it came, under this format's content
-    // type if it has none.
-    let mut head = head.clone();
-    crate::formats::default_content_type(&mut head, "application/json");
-    crate::formats::whole::decoder(W::NAME, &head, move |raw, out| {
-        let v = serde_json::from_slice::<Value>(&raw).ok();
-        if let Some(v) = v.as_ref().filter(|v| W::is_response(v)) {
-            let mut reply = W::reply(v);
-            reply.usage = W::usage(v);
-            out.push(reply.came(&name, raw));
-            return Ok(());
-        }
-        // An error in a success goes as it came to a client of this format.
-        Err(
-            match crate::formats::sse::failure_json(&raw).filter(says_error) {
-                Some(v) => provider_error(status, &v).with_answer(W::NAME, raw),
-                None => Fault::upstream("the provider's success is not a response of its format"),
-            },
-        )
-    })
+pub(crate) fn unary_reply<W: Wire>(status: StatusCode, raw: Bytes) -> Result<Reply, Fault> {
+    let v = serde_json::from_slice::<Value>(&raw).ok();
+    if let Some(v) = v.as_ref().filter(|v| W::is_response(v)) {
+        let mut reply = W::reply(v);
+        reply.usage = W::usage(v);
+        return Ok(reply.came(&Arc::from(W::NAME), raw));
+    }
+    Err(
+        match crate::formats::sse::failure_json(&raw).filter(says_error) {
+            Some(v) => provider_error(status, &v).with_answer(W::NAME, raw),
+            None => Fault::upstream("the provider's success is not a response of its format"),
+        },
+    )
 }
 
 /// Writes one message at its end: the provider's with edits put back, or
@@ -375,9 +393,7 @@ impl<W: Wire> UnaryEncoder<W> {
     }
 }
 
-impl<W: Wire> Encoder<Reply, ()> for UnaryEncoder<W> {
-    fn head(&mut self, _first: Option<&Reply>) {}
-
+impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
     fn encode(&mut self, reply: &Reply, _out: &mut BytesMut) -> Result<(), Fault> {
         self.replies.push(reply.clone());
         Ok(())
@@ -429,10 +445,14 @@ pub(crate) fn rebuild_whole<W: Wire>(
 ) -> Result<Bytes, Fault> {
     let mut v: Value = serde_json::from_slice(raw).unwrap_or_default();
     W::put(&mut v, reply)?;
-    if reply.usage != said.usage && v["usage"].is_object() {
-        v["usage"] = W::usage_body(&reply.usage);
+    if reply.usage != said.usage {
+        // The concrete format patches known fields without replacing vendor
+        // fields in the usage object.
+        W::patch_usage(&mut v, &reply.usage, &said.usage, &reply.usage)?;
     }
-    reads_back::<W>(reply, &W::reply(&v))?;
+    let mut again = W::reply(&v);
+    again.usage = W::usage(&v);
+    reads_back::<W>(reply, &again)?;
     Ok(v.to_string().into())
 }
 
@@ -441,7 +461,11 @@ pub(crate) fn rebuild_whole<W: Wire>(
 pub(crate) fn reads_back<W: Wire>(reply: &Reply, again: &Reply) -> Result<(), Fault> {
     let start = reply.start.is_none() || reply.start == again.start;
     let content = |r: &Reply| by_position(&W::in_order(&join(r.content.clone())));
-    if start && reply.finish == again.finish && content(reply) == content(again) {
+    if start
+        && reply.finish == again.finish
+        && content(reply) == content(again)
+        && same_usage(&reply.usage, &again.usage)
+    {
         return Ok(());
     }
     Err(unpatchable("the provider's message has no place for it"))
@@ -521,7 +545,11 @@ impl SoFar {
                     self.text.entry(*block).or_default().push_str(text)
                 }
                 Piece::Other { format, raw, .. } => match fragments(format, raw) {
-                    Some(all) => all.into_iter().for_each(|f| self.calls.add(f)),
+                    Some(all) => {
+                        for fragment in all {
+                            self.calls.add(fragment)?;
+                        }
+                    }
                     None => return Err(unwritable_content()),
                 },
                 _ => return Err(unwritable_content()),
@@ -537,31 +565,63 @@ fn shows(reply: &Reply) -> bool {
     reply.finish.is_some() || reply.content.iter().any(|p| !empty(p))
 }
 
-/// Wraps a stream's decoder to hold replies before the first content, such
-/// as the start, until it comes. A failure first drops them but for their
-/// usage, pushed as one reply that is no content, so it can be refused.
-pub(crate) fn holding_start(decoder: impl Decoder<Reply>) -> Box<dyn Decoder<Reply>> {
-    Box::new(HoldStart {
-        decoder,
-        held: Vec::new(),
-        through: false,
-    })
-}
+type ReadEvent<W> = fn(&mut Reading<W>, Bytes, &mut Vec<Reply>) -> Result<(), Fault>;
 
-struct HoldStart<D> {
-    decoder: D,
+/// Incremental provider response parsing, shared by streaming and finite reads.
+/// Semantic failures retain held usage; wire failures never finalize the parser.
+pub(crate) struct ReplyParser<W> {
+    frames: crate::formats::sse::Parser,
+    reading: Reading<W>,
+    event: ReadEvent<W>,
+    end: fn(&mut Reading<W>, &mut Vec<Reply>) -> Result<(), Fault>,
     held: Vec<Reply>,
-    /// Whether content came: later replies pass through.
     through: bool,
 }
 
-impl<D> HoldStart<D> {
-    /// Keep back what `out` got from `from` on until the first content.
+impl<W: Wire> ReplyParser<W> {
+    pub(crate) fn new(
+        event: ReadEvent<W>,
+        end: fn(&mut Reading<W>, &mut Vec<Reply>) -> Result<(), Fault>,
+        hold_start: bool,
+    ) -> Self {
+        Self {
+            frames: crate::formats::sse::Parser::new(),
+            reading: Reading::new(),
+            event,
+            end,
+            held: Vec::new(),
+            through: !hold_start,
+        }
+    }
+
+    pub(crate) fn push(&mut self, bytes: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let from = out.len();
+        let result = self
+            .frames
+            .push(bytes)
+            .into_iter()
+            .try_for_each(|raw| (self.event)(&mut self.reading, raw, out));
+        self.hold(out, from, result.is_err());
+        result
+    }
+
+    pub(crate) fn finish(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let from = out.len();
+        let result = self
+            .frames
+            .finish()
+            .into_iter()
+            .try_for_each(|raw| (self.event)(&mut self.reading, raw, out))
+            .and_then(|()| (self.end)(&mut self.reading, out));
+        self.hold(out, from, result.is_err());
+        out.append(&mut self.held);
+        result
+    }
+
     fn hold(&mut self, out: &mut Vec<Reply>, from: usize, failed: bool) {
         for reply in out.split_off(from) {
             match reply {
                 _ if self.through => out.push(reply),
-                // Framing passes, unless behind what is held.
                 ref r if !r.is_content() && self.held.is_empty() => out.push(reply),
                 ref r if !r.is_content() || !shows(r) => self.held.push(reply),
                 _ => {
@@ -580,23 +640,6 @@ impl<D> HoldStart<D> {
                 out.push(usage);
             }
         }
-    }
-}
-
-impl<D: Decoder<Reply>> Decoder<Reply> for HoldStart<D> {
-    fn decode(&mut self, bytes: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let from = out.len();
-        let decoded = self.decoder.decode(bytes, out);
-        self.hold(out, from, decoded.is_err());
-        decoded
-    }
-
-    fn end(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let from = out.len();
-        let ended = self.decoder.end(out);
-        self.hold(out, from, ended.is_err());
-        out.append(&mut self.held);
-        ended
     }
 }
 
@@ -741,10 +784,44 @@ pub(crate) fn patch_content(
     else {
         return write_content(format, now);
     };
-    // Parts in the longest common subsequence keep their JSON. A gap
-    // between them with as many parts as before is edited part by part;
-    // otherwise which became which is unknown, so it is written anew.
     let (n, m) = (was.len(), now.len());
+    // Trimming an equal suffix changes LCS tie-breaking when a duplicate
+    // appears earlier in `now`: [A] -> [B, A, A] must keep the first A's
+    // source, not the last. Match the full sequence while it is affordable.
+    // A large, unambiguous one-part edit needs only positional replacement;
+    // refuse every other oversized case instead of guessing provenance.
+    if (n + 1)
+        .checked_mul(m + 1)
+        .is_none_or(|cells| cells > 262_144)
+    {
+        let mut changed = was.iter().zip(now).enumerate().filter(|(_, (a, b))| a != b);
+        let Some((at, _)) = changed.next() else {
+            return if n == m {
+                Ok(old.clone().into())
+            } else {
+                Err(unpatchable("too many ambiguous content parts to match"))
+            };
+        };
+        let unique = n == m
+            && changed.next().is_none()
+            && !now
+                .iter()
+                .enumerate()
+                .any(|(i, p)| i != at && p == &was[at])
+            && !was
+                .iter()
+                .enumerate()
+                .any(|(i, p)| i != at && p == &now[at]);
+        if !unique {
+            return Err(unpatchable("too many ambiguous content parts to match"));
+        }
+        let mut out = old.clone();
+        out[at] = part_update(format, &old[at], &was[at], &now[at])?;
+        return Ok(out.into());
+    }
+    let mut out = Vec::with_capacity(m);
+    // Parts in the longest common subsequence keep their JSON. Equal-sized
+    // gaps are edited part by part; unmatched insertions are written anew.
     let mut kept = vec![vec![0_usize; m + 1]; n + 1];
     for i in (0..n).rev() {
         for j in (0..m).rev() {
@@ -754,7 +831,6 @@ pub(crate) fn patch_content(
             };
         }
     }
-    let mut out = Vec::with_capacity(m);
     let gap = |out: &mut Vec<Value>,
                from: std::ops::Range<usize>,
                into: std::ops::Range<usize>|
@@ -822,6 +898,34 @@ fn part_update(format: &str, value: &Value, was: &Content, now: &Content) -> Res
 /// Turns a provider's running usage totals into increments.
 #[derive(Debug, Default)]
 pub(crate) struct Totals(Usage);
+
+/// An explicitly reported zero and an absent counter both add no usage.
+pub(crate) fn same_usage(a: &Usage, b: &Usage) -> bool {
+    a.iter()
+        .chain(b.iter())
+        .all(|(unit, _)| a.get(&unit).unwrap_or_default() == b.get(&unit).unwrap_or_default())
+}
+
+/// Decode one wire snapshot against the totals already sent to this client.
+/// A stream event may report only some units, leaving the others unchanged.
+pub(crate) fn usage_step(previous: &Usage, reported: &Usage) -> Usage {
+    Totals(previous.clone()).increment(reported)
+}
+
+/// A provider can only express its known token counters as integral counts.
+pub(crate) fn supported_usage(usage: &Usage, units: &[&str]) -> Result<(), Fault> {
+    for (unit, amount) in usage.iter() {
+        if (!units.contains(&unit.as_ref()) && amount != 0.0)
+            || !amount.is_finite()
+            || amount < 0.0
+            || amount.fract() != 0.0
+            || amount >= u64::MAX as f64
+        {
+            return Err(unpatchable("this format cannot represent the edited usage"));
+        }
+    }
+    Ok(())
+}
 
 impl Totals {
     /// What `total` adds to the totals seen so far; usage only grows.
@@ -1029,7 +1133,266 @@ pub(crate) fn set(v: &mut Map<String, Value>, key: &str, value: Option<Value>) {
 mod tests {
     use super::*;
     use crate::{AnthropicMessages, OpenAiChat};
-    use respan_gateway_messages::Details;
+    use respan_gateway_sdk::Details;
+
+    #[tokio::test]
+    async fn held_usage_survives_semantic_failure_but_not_a_wire_failure() {
+        use respan_gateway_sdk::futures::{StreamExt, stream};
+        let fixtures = [
+            (
+                "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":2}}\n\n",
+                "data: {\"error\":{\"message\":\"semantic\"}}\n\n",
+            ),
+            (
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+                "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"semantic\"}}\n\n",
+            ),
+        ];
+        for (provider, (start, error)) in fixtures.into_iter().enumerate() {
+            for wire in [false, true] {
+                let ending = if wire {
+                    Err(Fault::upstream("wire"))
+                } else {
+                    Ok(Bytes::from(error))
+                };
+                let body = Body::stream(stream::iter([Ok(Bytes::from(start)), ending]));
+                let mut response = http::Response::new(body);
+                response
+                    .headers_mut()
+                    .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+                let request = http::Request::new(Bytes::new());
+                let values = if provider == 0 {
+                    OpenAiChat.read_response(response, request)
+                } else {
+                    AnthropicMessages.read_response(response, request)
+                }
+                .collect::<Vec<_>>()
+                .await;
+                let error = values
+                    .last()
+                    .expect("terminal fault")
+                    .as_ref()
+                    .expect_err("stream failed");
+                assert_eq!(error.message(), if wire { "wire" } else { "semantic" });
+                if wire {
+                    assert_eq!(
+                        values.len(),
+                        1,
+                        "wire failure must not finalize held starts"
+                    );
+                } else {
+                    assert_eq!(
+                        values.len(),
+                        2,
+                        "semantic failure retains one usage-only event"
+                    );
+                    let usage = values[0].as_ref().expect("salvaged usage");
+                    assert!(!usage.is_content());
+                    assert_eq!(
+                        usage.usage.get(crate::conversation::units::INPUT_TOKENS),
+                        Some(2.0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finite_and_streamed_response_reads_share_framing_and_errors() {
+        use respan_gateway_sdk::futures::{TryStreamExt, stream};
+
+        for anthropic in [false, true] {
+            for streamed in [false, true] {
+                let request = http::Request::new(Bytes::from(
+                    json!({
+                        "stream": streamed, "stream_options": {"include_usage": true}
+                    })
+                    .to_string(),
+                ));
+                let mut reply = Reply::text(0, "hello");
+                reply.finish = Some(Finish::Stop);
+                let response = if anthropic {
+                    AnthropicMessages.encode_response(&request, &[reply])
+                } else {
+                    OpenAiChat.encode_response(&request, &[reply])
+                }
+                .expect("encode finite answer");
+                let (head, bytes) = response.into_parts();
+                let mut refused = head.clone();
+                refused.status = StatusCode::TOO_MANY_REQUESTS;
+                let mut empty = head.clone();
+                empty.status = StatusCode::NO_CONTENT;
+                // Whole values, byte-split SSE, incomplete SSE, malformed JSON,
+                // HTTP refusal, and bodyless answers all use the same semantics.
+                let cases = [
+                    (head.clone(), bytes.clone()),
+                    (head.clone(), bytes.slice(..bytes.len() / 2)),
+                    (head, Bytes::from_static(b"not-json")),
+                    (
+                        refused,
+                        Bytes::from_static(b"{\"error\":{\"message\":\"busy\"}}"),
+                    ),
+                    (empty, Bytes::from_static(b"unread bodyless garbage")),
+                ];
+                for (head, bytes) in cases {
+                    let call = request.clone().into_parts().0;
+                    let finite = http::Response::from_parts(head.clone(), bytes.clone());
+                    let finite = if anthropic {
+                        AnthropicMessages.decode_response(finite, &call)
+                    } else {
+                        OpenAiChat.decode_response(finite, &call)
+                    };
+                    let chunks: Vec<_> = bytes
+                        .iter()
+                        .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
+                        .collect();
+                    let live = http::Response::from_parts(head, Body::stream(stream::iter(chunks)));
+                    let live = if anthropic {
+                        AnthropicMessages.read_response(live, request.clone())
+                    } else {
+                        OpenAiChat.read_response(live, request.clone())
+                    }
+                    .try_collect::<Vec<_>>()
+                    .await;
+                    match (finite, live) {
+                        (Ok(finite), Ok(live)) => assert_eq!(finite, live),
+                        (Err(finite), Err(live)) => {
+                            assert_eq!(finite.code(), live.code());
+                            assert_eq!(finite.message(), live.message());
+                        }
+                        (finite, live) => panic!("finite/live mismatch: {finite:?} / {live:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orphan_tool_arguments_fail_in_unary_and_streaming_responses() {
+        let fragments = [
+            Piece::other(
+                "openai-chat",
+                json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]),
+            ),
+            Piece::other(
+                "anthropic-messages",
+                json!({"type": "input_json_delta", "partial_json": "{}"}),
+            ),
+        ];
+        let ask = http::Request::new(()).into_parts().0;
+        for piece in fragments {
+            let mut reply = Reply::default();
+            reply.content = vec![piece];
+            for stream in [false, true] {
+                let body: Bytes =
+                    json!({"stream": stream, "stream_options": {"include_usage": true}})
+                        .to_string()
+                        .into();
+                let request = http::Request::from_parts(ask.clone(), body);
+                assert!(
+                    OpenAiChat
+                        .encode_response(&request, std::slice::from_ref(&reply))
+                        .is_err(),
+                    "OpenAI stream={stream}"
+                );
+                assert!(
+                    AnthropicMessages
+                        .encode_response(&request, std::slice::from_ref(&reply))
+                        .is_err(),
+                    "Anthropic stream={stream}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_calls_and_repeated_starts_remain_writable() {
+        let fragments = [
+            json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"alpha","arguments":"{\"a\":"}}]}}]),
+            json!([{"index":0,"delta":{"tool_calls":[{"index":1,"id":"b","type":"function","function":{"name":"beta","arguments":"{\"b\":"}}]}}]),
+            json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]),
+            json!([{"index":0,"delta":{"tool_calls":[{"index":1,"id":"b","type":"function","function":{"name":"beta","arguments":"2}"}}]}}]),
+        ];
+        let replies: Vec<_> = fragments
+            .into_iter()
+            .map(|raw| Reply::other("openai-chat", raw))
+            .collect();
+        let mut all = SoFar::default();
+        for reply in &replies {
+            all.add(reply).expect("accumulate tool fragments");
+        }
+        assert_eq!(all.calls.openai()[0]["function"]["arguments"], "{\"a\":1}");
+        assert_eq!(all.calls.openai()[1]["function"]["arguments"], "{\"b\":2}");
+        assert_eq!(
+            all.calls.anthropic().expect("assembled Anthropic calls")[1]["input"],
+            json!({"b":2})
+        );
+        let ask = http::Request::new(()).into_parts().0;
+        for stream in [false, true] {
+            let body: Bytes = json!({"stream":stream,"stream_options":{"include_usage":true}})
+                .to_string()
+                .into();
+            let request = http::Request::from_parts(ask.clone(), body);
+            assert!(
+                OpenAiChat.encode_response(&request, &replies).is_ok(),
+                "OpenAI stream={stream}"
+            );
+            assert!(
+                AnthropicMessages
+                    .encode_response(&request, &replies)
+                    .is_ok(),
+                "Anthropic stream={stream}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_suffix_does_not_move_a_cache_marker_to_the_last_match() {
+        let old = json!([{
+            "type": "text", "text": "A", "cache_control": {"type": "ephemeral"}
+        }]);
+        let was = read_content("anthropic-messages", &old);
+        let now = [Content::from("B"), Content::from("A"), Content::from("A")];
+        let patched = patch_content("anthropic-messages", Some(&old), &was, &now)
+            .expect("patch Anthropic content");
+        assert_eq!(patched[0], json!({"type":"text","text":"B"}));
+        assert_eq!(patched[1], old[0], "the first A keeps the original marker");
+        assert_eq!(patched[2], json!({"type":"text","text":"A"}));
+    }
+
+    #[test]
+    fn a_large_content_edit_preserves_part_metadata_without_quadratic_matching() {
+        let old: Value = (0..10_000)
+            .map(|n| {
+                json!({
+                    "type": "text", "text": n.to_string(), "cache_control": {"type": "ephemeral"}
+                })
+            })
+            .collect();
+        let was = read_content("anthropic-messages", &old);
+        let mut now = was.clone();
+        now[5_000] = Content::from("edited");
+        let patched = patch_content("anthropic-messages", Some(&old), &was, &now)
+            .expect("patch Anthropic content");
+        assert_eq!(
+            patched.as_array().expect("patched content array").len(),
+            10_000
+        );
+        assert_eq!(patched[5_000]["text"], "edited");
+        assert_eq!(patched[5_000]["cache_control"], old[5_000]["cache_control"]);
+        assert_eq!(patched[4_999], old[4_999]);
+        assert_eq!(patched[5_001], old[5_001]);
+    }
+
+    #[test]
+    fn ambiguous_large_content_edits_fail_before_allocating_a_matching_matrix() {
+        let old: Value = (0..1_000)
+            .map(|n| json!({"type": "text", "text": n.to_string()}))
+            .collect();
+        let was = read_content("anthropic-messages", &old);
+        let now: Vec<_> = was.iter().rev().cloned().collect();
+        assert!(patch_content("anthropic-messages", Some(&old), &was, &now).is_err());
+    }
 
     #[test]
     fn a_translated_error_keeps_each_formats_schema() {

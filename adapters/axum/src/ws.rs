@@ -10,15 +10,15 @@ use axum::body::Body as AxumBody;
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
-use respan_gateway_core::futures::channel::{mpsc, oneshot};
-use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
-use respan_gateway_core::futures::{SinkExt, StreamExt, TryStreamExt};
-use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{body_of, http_body, http_body_util};
+use respan_gateway_sdk::futures::channel::{mpsc, oneshot};
+use respan_gateway_sdk::futures::stream::{SplitSink, SplitStream};
+use respan_gateway_sdk::futures::{SinkExt, StreamExt, TryStreamExt};
+use respan_gateway_sdk::{Fault, Gateway};
 
 use respan_gateway_http::Frames;
 use respan_gateway_ws::{CLOSE_WAIT, CloseCode, MAX_MESSAGE};
@@ -140,7 +140,7 @@ async fn refusal(
     head: respan_gateway_http::http::response::Parts,
     body: respan_gateway_http::Body,
 ) -> Response {
-    match body.collect().await {
+    match BodyExt::collect(body).await {
         Ok(all) => Response::from_parts(head, AxumBody::from(all.to_bytes())),
         Err(fault) => {
             let (mut head, body) = respan_gateway_http::plain(&fault).into_parts();

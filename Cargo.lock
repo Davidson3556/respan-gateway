@@ -1239,13 +1239,10 @@ dependencies = [
  "mockllm",
  "reqwest",
  "respan-gateway-axum",
- "respan-gateway-core",
- "respan-gateway-formats",
  "respan-gateway-http",
- "respan-gateway-messages",
  "respan-gateway-plugins",
  "respan-gateway-providers",
- "respan-gateway-testkit",
+ "respan-gateway-sdk",
  "serde",
  "serde_json",
  "serde_norway",
@@ -1264,12 +1261,9 @@ dependencies = [
  "http-body-util",
  "mockllm",
  "reqwest",
- "respan-gateway-core",
- "respan-gateway-formats",
  "respan-gateway-http",
- "respan-gateway-messages",
  "respan-gateway-providers",
- "respan-gateway-testkit",
+ "respan-gateway-sdk",
  "respan-gateway-ws",
  "serde_json",
  "tokio",
@@ -1301,17 +1295,11 @@ dependencies = [
  "mockllm",
  "reqwest",
  "respan-gateway-axum",
- "respan-gateway-core",
- "respan-gateway-formats",
  "respan-gateway-http",
- "respan-gateway-ledger",
  "respan-gateway-mcp",
- "respan-gateway-messages",
  "respan-gateway-plugins",
  "respan-gateway-providers",
- "respan-gateway-routing",
- "respan-gateway-testkit",
- "respan-gateway-text",
+ "respan-gateway-sdk",
  "respan-gateway-ws",
  "rusqlite",
  "serde_json",
@@ -1323,17 +1311,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "respan-gateway-formats"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-messages",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "respan-gateway-http"
 version = "0.0.0"
 dependencies = [
@@ -1342,22 +1319,12 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "mockllm",
  "reqwest",
- "respan-gateway-core",
- "respan-gateway-formats",
- "respan-gateway-messages",
+ "respan-gateway-plugins",
  "respan-gateway-providers",
- "respan-gateway-testkit",
- "tokio",
-]
-
-[[package]]
-name = "respan-gateway-ledger"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-messages",
+ "respan-gateway-sdk",
+ "serde",
  "serde_json",
  "tokio",
 ]
@@ -1366,17 +1333,40 @@ dependencies = [
 name = "respan-gateway-mcp"
 version = "0.0.0"
 dependencies = [
- "respan-gateway-core",
- "respan-gateway-formats",
  "respan-gateway-http",
- "respan-gateway-messages",
- "respan-gateway-testkit",
+ "respan-gateway-sdk",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "respan-gateway-messages"
+name = "respan-gateway-plugins"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "mockllm",
+ "respan-gateway-http",
+ "respan-gateway-providers",
+ "respan-gateway-sdk",
+ "tokio",
+]
+
+[[package]]
+name = "respan-gateway-providers"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "mockllm",
+ "respan-gateway-http",
+ "respan-gateway-plugins",
+ "respan-gateway-sdk",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "respan-gateway-sdk"
 version = "0.0.0"
 dependencies = [
  "bytes",
@@ -1385,79 +1375,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "respan-gateway-plugins"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-ledger",
- "respan-gateway-messages",
- "respan-gateway-providers",
- "respan-gateway-testkit",
- "tokio",
-]
-
-[[package]]
-name = "respan-gateway-providers"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
- "respan-gateway-formats",
- "respan-gateway-http",
- "respan-gateway-messages",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "respan-gateway-routing"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
- "respan-gateway-formats",
- "respan-gateway-http",
- "respan-gateway-messages",
- "respan-gateway-providers",
- "respan-gateway-testkit",
- "tokio",
-]
-
-[[package]]
-name = "respan-gateway-testkit"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
- "respan-gateway-formats",
- "respan-gateway-http",
- "respan-gateway-messages",
- "respan-gateway-plugins",
- "respan-gateway-providers",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "respan-gateway-text"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-messages",
- "respan-gateway-providers",
- "respan-gateway-testkit",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "respan-gateway-ws"
 version = "0.0.0"
 dependencies = [
  "reqwest",
- "respan-gateway-core",
- "respan-gateway-formats",
  "respan-gateway-http",
- "respan-gateway-messages",
+ "respan-gateway-sdk",
  "rustls",
  "rustls-native-certs",
  "serde_json",

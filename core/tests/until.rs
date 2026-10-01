@@ -175,10 +175,8 @@ async fn until_content_holds_a_response_without_content_to_its_end() {
     #[async_trait]
     impl Plugin for Probe {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            let resp = cx
-                .call("a")
-                .await?
-                .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+            let mut resp = cx.call("a").await?;
+            resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                 .await?;
             self.1
                 .store(self.0.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -208,9 +206,8 @@ async fn a_buffer_predicate_panic_settles_both_edges_as_internal() {
     #[async_trait]
     impl Plugin for Panic {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            let response = cx
-                .call("a")
-                .await?
+            let mut response = cx.call("a").await?;
+            response
                 .buffer_until(|_: &Out| panic!("predicate failed"))
                 .await?;
             Ok(Some(response))
@@ -269,7 +266,8 @@ async fn buffered_filter_end_is_known_before_hooks_and_replayed_once() {
             })
         }
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            let (response, end) = cx.call("a").await?.until_end().await?;
+            let mut response = cx.call("a").await?;
+            let end = response.until_end().await;
             assert_eq!(
                 end,
                 if self.fail {
@@ -281,7 +279,7 @@ async fn buffered_filter_end_is_known_before_hooks_and_replayed_once() {
             assert_eq!(self.ends.load(Ordering::SeqCst), 1);
             assert!(self.rec.log().prov_end.is_empty(), "hooks stay deferred");
             // Repeated buffering must not run Filter::end again or lose its tail.
-            let (response, again) = response.until_end().await?;
+            let again = response.until_end().await;
             assert_eq!(again, end);
             if self.discard {
                 drop(response);

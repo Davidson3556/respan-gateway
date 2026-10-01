@@ -5,9 +5,9 @@
 use std::time::Duration;
 
 use respan_gateway_core::futures::FutureExt;
-use respan_gateway_core::futures::channel::{mpsc, oneshot};
+use respan_gateway_core::futures::channel::mpsc;
 use respan_gateway_core::futures::{SinkExt, StreamExt};
-use respan_gateway_core::{Connection, Events, Extensions, Fault, Format, Gateway};
+use respan_gateway_core::{Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway};
 
 #[derive(Clone, Debug)]
 struct Input(u32);
@@ -15,7 +15,7 @@ struct Input(u32);
 struct Output(u32);
 
 struct Wire {
-    incoming: Events<Input>,
+    incoming: EventStream<Input>,
     outgoing: mpsc::Sender<Output>,
 }
 
@@ -41,19 +41,11 @@ impl Format<Io, Input, Output> for Echo {
         };
         Ok((
             futures::future::ready(Ok(wire.incoming)).boxed(),
-            Box::pin(respan_gateway_core::write(move |flow: Events<Output>| {
-                let mut outgoing = wire.outgoing;
-                Ok(async move {
-                    let mut events = flow;
-                    while let Some(event) = events.next().await {
-                        outgoing
-                            .send(event?)
-                            .await
-                            .map_err(|_| Fault::abandoned())?;
-                    }
-                    Ok(())
-                })
-            })),
+            EventSink::new(
+                wire.outgoing
+                    .sink_map_err(|_| Fault::abandoned())
+                    .with(|event: Result<Output, Fault>| futures::future::ready(event)),
+            ),
         ))
     }
 }
@@ -64,18 +56,16 @@ impl Format<Io, Output, Input> for Echo {
     }
 
     fn bind(&self, _: Io) -> Result<Connection<Output, Input>, Fault> {
-        let (ready, opening) = oneshot::channel();
+        // The channel is this in-process echo's actual wire, not a wrapper
+        // around a callback that consumes the source stream.
+        let (outgoing, incoming) = mpsc::channel(0);
         Ok((
-            async move { opening.await.map_err(|_| Fault::abandoned()) }.boxed(),
-            Box::pin(respan_gateway_core::write(move |flow: Events<Input>| {
-                Ok(async move {
-                    let replies = flow.map(|event| event.map(|Input(n)| Output(n)));
-                    ready
-                        .send(Events::stream(replies))
-                        .map_err(|_| Fault::abandoned())?;
-                    Ok(())
-                })
-            })),
+            futures::future::ready(Ok(EventStream::stream(incoming))).boxed(),
+            EventSink::new(outgoing.sink_map_err(|_| Fault::abandoned()).with(
+                |event: Result<Input, Fault>| {
+                    futures::future::ready(Ok(event.map(|Input(n)| Output(n))))
+                },
+            )),
         ))
     }
 }
@@ -94,7 +84,7 @@ async fn both_directions_progress_before_either_is_closed() {
         let (outgoing, mut output) = mpsc::channel(0);
         let handled = tokio::spawn(gateway.handle(
             Io::Client(Wire {
-                incoming: Events::stream(incoming.map(Ok)),
+                incoming: EventStream::stream(incoming.map(Ok)),
                 outgoing,
             }),
             Extensions::new(),

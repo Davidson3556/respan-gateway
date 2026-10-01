@@ -2,36 +2,46 @@ use super::*;
 
 #[tokio::test]
 async fn only_the_text_only_attempt_gets_text_and_the_fallback_the_original() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-    mock.reply(PDF, mock::json(StatusCode::OK, OK));
-    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let fixture = Fixture::start().await;
+    fixture
+        .text
+        .answer(Answer::error(503).message("unavailable"));
+    fixture.pdf.answer(Answer::raw(OK));
+    let gw = gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
     assert_eq!(send(&gw, "acme", REQUEST).await, StatusCode::OK);
-    let sent = mock.sent();
-    let converted = String::from_utf8_lossy(sent[0].body());
+    let (text, pdf) = (fixture.text.requests(), fixture.pdf.requests());
+    assert_eq!((text.len(), pdf.len()), (1, 1));
+    let converted = String::from_utf8_lossy(&text[0].raw);
     assert!(converted.contains("[text of a 24-byte PDF]"), "{converted}");
     assert!(!converted.contains("file_data"), "{converted}");
-    assert_eq!(sent[1].body(), REQUEST, "the fallback, the original");
+    assert_eq!(
+        &pdf[0].raw[..],
+        REQUEST.as_bytes(),
+        "the fallback, the original"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn a_fallback_in_another_format_gets_the_pdf_in_its_own_shape() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-    mock.reply(CLAUDE, mock::json(StatusCode::OK, CLAUDE_OK));
-    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let fixture = Fixture::start().await;
+    fixture
+        .text
+        .answer(Answer::error(503).message("unavailable"));
+    fixture.claude.answer(Answer::raw(CLAUDE_OK));
+    let gw = gateway_claude(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
     let mut req = post("/v1/chat/completions", REQUEST.to_owned());
     req.headers_mut()
         .insert("x-tenant", HeaderValue::from_static("acme"));
     let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body?).contains("Revenue is up."));
-    let sent = mock.sent();
-    assert!(String::from_utf8_lossy(sent[0].body()).contains("[text of a 24-byte PDF]"));
-    assert_eq!(sent[1].uri().path(), "/v1/messages");
+    let (text, claude) = (fixture.text.requests(), fixture.claude.requests());
+    assert_eq!((text.len(), claude.len()), (1, 1));
+    assert!(String::from_utf8_lossy(&text[0].raw).contains("[text of a 24-byte PDF]"));
+    assert_eq!(claude[0].path, "/v1/messages");
     let body: serde_json::Value =
-        serde_json::from_slice(sent[1].body()).map_err(|_| Fault::internal("json"))?;
+        serde_json::from_slice(&claude[0].raw).map_err(|_| Fault::internal("json"))?;
     let part = &body["messages"][0]["content"][1];
     assert_eq!(part["type"], "document");
     assert_eq!(part["source"]["media_type"], "application/pdf");
@@ -41,39 +51,47 @@ async fn a_fallback_in_another_format_gets_the_pdf_in_its_own_shape() -> Result<
 
 #[tokio::test]
 async fn a_part_in_neither_shape_is_never_sent_to_the_other_format() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let fixture = Fixture::start().await;
     // The text-only target fails, and no plugin rewrites the image for Claude.
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
-    let image = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}"#;
+    fixture
+        .text
+        .answer(Answer::error(503).message("unavailable"));
+    let gw = gateway_claude(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let image = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}"#;
     // The client gets the provider's answer, not the fallback's refusal.
     assert_eq!(
         send(&gw, "acme", image).await,
         StatusCode::SERVICE_UNAVAILABLE
     );
-    assert_eq!(mock.sent().len(), 1, "nothing was sent to Claude");
+    assert_eq!(fixture.text.requests().len(), 1);
+    assert!(
+        fixture.claude.requests().is_empty(),
+        "nothing was sent to Claude"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn the_same_pdf_is_converted_once_per_tenant() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let fixture = Fixture::start().await;
     for _ in 0..3 {
-        mock.reply(TEXT, mock::json(StatusCode::OK, OK));
+        fixture.text.answer(Answer::raw(OK));
     }
     let pdfs = Arc::new(PdfToText::new(&["text-only"]).await?);
-    let gw = gateway(&mock, pdfs.clone())?;
+    let gw = gateway(&fixture, pdfs.clone())?;
     for tenant in ["acme", "acme", "beta"] {
         assert_eq!(send(&gw, tenant, REQUEST).await, StatusCode::OK);
     }
     assert_eq!(pdfs.conversions.load(Ordering::Relaxed), 2, "once each");
-    assert_eq!(mock.sent()[0].body(), mock.sent()[1].body());
+    let sent = fixture.text.requests();
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[0].raw, sent[1].raw);
     Ok(())
 }
 
 #[tokio::test]
 async fn oversized_and_slow_pdfs_fail_before_any_call() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let fixture = Fixture::start().await;
     // Real time: a blocking thread does not see tokio's paused clock.
     let strict = PdfToText {
         convert: |_| {
@@ -84,47 +102,50 @@ async fn oversized_and_slow_pdfs_fail_before_any_call() -> Result<(), Fault> {
         max: 8,
         ..PdfToText::new(&["text-only", "reads-pdf"]).await?
     };
-    let gw = gateway(&mock, Arc::new(strict))?;
+    let gw = gateway(&fixture, Arc::new(strict))?;
     let large = send(&gw, "acme", REQUEST).await;
     assert_eq!(large, StatusCode::PAYLOAD_TOO_LARGE);
     let small = REQUEST.replace("JVBERi0xLjcKJcfsj6IKMSAwIG9iago=", "JVBE");
     let slow = send(&gw, "acme", &small).await;
     assert_eq!(slow, StatusCode::GATEWAY_TIMEOUT);
-    assert!(mock.sent().is_empty());
+    assert!(fixture.text.requests().is_empty());
+    assert!(fixture.pdf.requests().is_empty());
+    assert!(fixture.claude.requests().is_empty());
+    assert!(fixture.files.requests().is_empty());
     Ok(())
 }
 
 /// A request naming a stored file, and the file: 12 bytes.
-const STORED: &str = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"file_id":"file-abc"}}]}]}"#;
+const STORED: &str = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"file_id":"file-abc"}}]}]}"#;
 const FILE: &str = "%PDF-1.7 abc";
 
 #[tokio::test]
 async fn a_stored_file_is_fetched_under_the_tenants_key_and_converted() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(
-        STORE,
-        mock::json(StatusCode::OK, r#"{"filename":"report.pdf"}"#),
-    );
-    mock.reply(STORE, mock::json(StatusCode::OK, FILE));
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-    mock.reply(PDF, mock::json(StatusCode::OK, OK));
-    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let fixture = Fixture::start().await;
+    fixture
+        .files
+        .answer(StatusCode::OK, r#"{"filename":"report.pdf"}"#);
+    fixture.files.answer(StatusCode::OK, FILE);
+    fixture
+        .text
+        .answer(Answer::error(503).message("unavailable"));
+    fixture.pdf.answer(Answer::raw(OK));
+    let gw = gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
     assert_eq!(send(&gw, "acme", STORED).await, StatusCode::OK);
 
-    let sent = mock.sent();
-    assert_eq!(
-        sent[0].uri().to_string(),
-        "http://files.test/v1/files/file-abc"
-    );
-    assert_eq!(
-        sent[0].headers()["authorization"],
-        "Bearer tenant-key",
-        "the tenant's own key"
-    );
-    let text_only = String::from_utf8_lossy(sent[2].body());
+    let files = fixture.files.requests();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].0, "/v1/files/file-abc");
+    assert_eq!(files[1].0, "/v1/files/file-abc/content");
+    assert_eq!(files[0].1, "Bearer tenant-key", "the tenant's own key");
+    let text = fixture.text.requests();
+    assert_eq!(text.len(), 1);
+    let text_only = String::from_utf8_lossy(&text[0].raw);
     assert!(text_only.contains("[text of a 12-byte PDF]"), "{text_only}");
     // The fallback that reads PDFs gets the file inline, not its id.
-    let inline = String::from_utf8_lossy(sent[3].body());
+    let pdf = fixture.pdf.requests();
+    assert_eq!(pdf.len(), 1);
+    let inline = String::from_utf8_lossy(&pdf[0].raw);
     assert!(
         inline.contains("data:application/pdf;base64,JVBERi0xLjcgYWJj"),
         "{inline}"
@@ -135,18 +156,19 @@ async fn a_stored_file_is_fetched_under_the_tenants_key_and_converted() -> Resul
 
 #[tokio::test]
 async fn a_stored_file_reaches_an_anthropic_fallback_as_a_document() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(
-        STORE,
-        mock::json(StatusCode::OK, r#"{"filename":"report.pdf"}"#),
-    );
-    mock.reply(STORE, mock::json(StatusCode::OK, FILE));
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-    mock.reply(CLAUDE, mock::json(StatusCode::OK, CLAUDE_OK));
-    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let fixture = Fixture::start().await;
+    fixture
+        .files
+        .answer(StatusCode::OK, r#"{"filename":"report.pdf"}"#);
+    fixture.files.answer(StatusCode::OK, FILE);
+    fixture
+        .text
+        .answer(Answer::error(503).message("unavailable"));
+    fixture.claude.answer(Answer::raw(CLAUDE_OK));
+    let gw = gateway_claude(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
     assert_eq!(send(&gw, "acme", STORED).await, StatusCode::OK);
-    let claude: serde_json::Value =
-        serde_json::from_slice(mock.sent()[3].body()).map_err(|_| Fault::internal("json"))?;
+    let claude: serde_json::Value = serde_json::from_slice(&fixture.claude.requests()[0].raw)
+        .map_err(|_| Fault::internal("json"))?;
     let part = &claude["messages"][0]["content"][1];
     assert_eq!(part["source"]["data"], "JVBERi0xLjcgYWJj");
     Ok(())
@@ -154,33 +176,29 @@ async fn a_stored_file_reaches_an_anthropic_fallback_as_a_document() -> Result<(
 
 #[tokio::test]
 async fn a_stored_file_that_is_missing_or_too_large_fails_before_any_call() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(
-        STORE,
-        mock::json(StatusCode::NOT_FOUND, r#"{"error":"no file"}"#),
-    );
-    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let fixture = Fixture::start().await;
+    fixture
+        .files
+        .answer(StatusCode::NOT_FOUND, r#"{"error":"no file"}"#);
+    let gw = gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
     assert_eq!(send(&gw, "acme", STORED).await, StatusCode::NOT_FOUND);
 
     let strict = PdfToText {
         max: 8,
         ..PdfToText::new(&["text-only"]).await?
     };
-    mock.reply(
-        STORE,
-        mock::json(StatusCode::OK, r#"{"filename":"report.pdf"}"#),
-    );
-    mock.reply(STORE, mock::json(StatusCode::OK, FILE));
-    let gw = gateway(&mock, Arc::new(strict))?;
+    fixture
+        .files
+        .answer(StatusCode::OK, r#"{"filename":"report.pdf"}"#);
+    fixture.files.answer(StatusCode::OK, FILE);
+    let gw = gateway(&fixture, Arc::new(strict))?;
     assert_eq!(
         send(&gw, "acme", STORED).await,
         StatusCode::PAYLOAD_TOO_LARGE
     );
-    assert!(
-        mock.sent()
-            .iter()
-            .all(|c| c.uri().host() == Some("files.test"))
-    );
+    assert_eq!(fixture.files.requests().len(), 3);
+    assert!(fixture.text.requests().is_empty());
+    assert!(fixture.pdf.requests().is_empty());
     Ok(())
 }
 
@@ -190,8 +208,8 @@ async fn the_budget_is_for_the_whole_request() -> Result<(), Fault> {
     static CONVERSIONS: AtomicUsize = AtomicUsize::new(0);
     static RELEASED: AtomicBool = AtomicBool::new(false);
 
-    let mock = MockTransport::new();
-    mock.reply(TEXT, mock::json(StatusCode::OK, OK));
+    let fixture = Fixture::start().await;
+    fixture.text.answer(Answer::raw(OK));
     // Virtual time: a conversion takes 80 ms by moving the paused clock, so
     // each PDF fits the 120 ms budget and the two do not, whatever the
     // load. The third conversion (the second PDF of the second request)
@@ -215,7 +233,7 @@ async fn the_budget_is_for_the_whole_request() -> Result<(), Fault> {
         budget: Duration::from_millis(120),
         ..PdfToText::new(&["text-only", "reads-pdf"]).await?
     };
-    let gw = gateway(&mock, Arc::new(pdfs))?;
+    let gw = gateway(&fixture, Arc::new(pdfs))?;
     let one = send(&gw, "acme", REQUEST).await;
     assert_eq!(one, StatusCode::OK);
     let part = r#"{"type":"file","file":{"filename":"q3.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjcKJcfsj6IKMSAwIG9iago="}}"#;
@@ -225,23 +243,28 @@ async fn the_budget_is_for_the_whole_request() -> Result<(), Fault> {
     let timed_out = send(&gw, "beta", &two).await;
     RELEASED.store(true, Ordering::SeqCst);
     assert_eq!(timed_out, StatusCode::GATEWAY_TIMEOUT);
-    assert_eq!(mock.sent().len(), 1, "only the first request's call");
+    assert_eq!(
+        fixture.text.requests().len(),
+        1,
+        "only the first request's call"
+    );
+    assert!(fixture.pdf.requests().is_empty());
     Ok(())
 }
 
 #[tokio::test]
 async fn a_zero_retention_pdf_is_converted_but_never_remembered() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let fixture = Fixture::start().await;
     for _ in 0..3 {
-        mock.reply(TEXT, mock::json(StatusCode::OK, OK));
+        fixture.text.answer(Answer::raw(OK));
     }
     let pdfs = Arc::new(PdfToText::new(&["text-only"]).await?);
-    let gw = gateway(&mock, pdfs.clone())?;
+    let gw = gateway(&fixture, pdfs.clone())?;
     for _ in 0..2 {
         let mut req = post("/v1/chat/completions", REQUEST.to_owned());
         req.headers_mut()
             .insert("x-tenant", HeaderValue::from_static("acme"));
-        let mut values = respan_gateway_core::Extensions::new();
+        let mut values = respan_gateway_sdk::Extensions::new();
         values.insert(NoContent);
         req.extensions_mut().insert(values);
         assert_eq!(read_whole(serve(&gw, req).await.0).await.0, StatusCode::OK);
@@ -272,15 +295,17 @@ async fn a_zero_retention_pdf_is_converted_but_never_remembered() -> Result<(), 
 
 #[tokio::test]
 async fn an_agent_request_with_tools_and_a_pdf_falls_back_to_claude() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-    mock.reply(CLAUDE, mock::json(StatusCode::OK, CLAUDE_OK));
-    let gw = gateway_claude(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let fixture = Fixture::start().await;
+    fixture
+        .text
+        .answer(Answer::error(503).message("unavailable"));
+    fixture.claude.answer(Answer::raw(CLAUDE_OK));
+    let gw = gateway_claude(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
     let tool = r#"{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}"#;
     let body = REQUEST.replace(r#"{"model""#, &format!(r#"{{"tools":[{tool}],"model""#));
     assert_eq!(send(&gw, "acme", &body).await, StatusCode::OK);
-    let sent: serde_json::Value =
-        serde_json::from_slice(mock.sent()[1].body()).map_err(|_| Fault::internal("json"))?;
+    let sent: serde_json::Value = serde_json::from_slice(&fixture.claude.requests()[0].raw)
+        .map_err(|_| Fault::internal("json"))?;
     assert_eq!(sent["tools"][0]["name"], "read");
     assert_eq!(sent["tools"][0]["input_schema"]["type"], "object");
     assert_eq!(sent["messages"][0]["content"][1]["type"], "document");
@@ -298,27 +323,31 @@ async fn stored_file_types_and_ids_are_validated_before_conversion() -> Result<(
             1,
         ),
     ] {
-        let mock = MockTransport::new();
-        mock.reply(STORE, mock::json(StatusCode::OK, metadata));
+        let fixture = Fixture::start().await;
+        fixture.files.answer(StatusCode::OK, metadata);
         if let Some(bytes) = bytes {
-            mock.reply(STORE, mock::json(StatusCode::OK, bytes));
+            fixture.files.answer(StatusCode::OK, bytes);
         }
-        let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+        let gw = gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
         assert_eq!(
             send(&gw, "acme", STORED).await,
             StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
-        assert_eq!(mock.sent().len(), calls);
+        assert_eq!(fixture.files.requests().len(), calls);
+        assert!(fixture.text.requests().is_empty());
     }
-    let mock = MockTransport::new();
-    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?;
+    let fixture = Fixture::start().await;
+    let gw = gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
     for id in ["../other", "file-abc?key=other", "file-abc/content"] {
         assert_eq!(
             send(&gw, "acme", &STORED.replace("file-abc", id)).await,
             StatusCode::BAD_REQUEST
         );
     }
-    assert!(mock.sent().is_empty());
+    assert!(fixture.text.requests().is_empty());
+    assert!(fixture.pdf.requests().is_empty());
+    assert!(fixture.claude.requests().is_empty());
+    assert!(fixture.files.requests().is_empty());
     Ok(())
 }
 
@@ -451,11 +480,13 @@ async fn completion_hooks_see_conversion_facts_for_each_attempt() -> Result<(), 
                 ));
         }
     }
-    let mock = MockTransport::new();
-    mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"))
-        .reply(PDF, mock::json(StatusCode::OK, OK));
+    let fixture = Fixture::start().await;
+    fixture
+        .text
+        .answer(Answer::error(503).message("unavailable"));
+    fixture.pdf.answer(Answer::raw(OK));
     let records = Record(Arc::default());
-    let gw = gateway(&mock, Arc::new(PdfToText::new(&["text-only"]).await?))?
+    let gw = gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?
         .plugin("records", records.clone())?;
     assert_eq!(send(&gw, "acme", REQUEST).await, StatusCode::OK);
     gw.idle().await;

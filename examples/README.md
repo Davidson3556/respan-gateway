@@ -36,8 +36,33 @@ Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
 | [tenants](tenants.rs) | 13 | Versioned tenant config edited while requests run; per-tenant provider keys. |
 | [embedded](embedded.rs) | 14 | The gateway as a library in another Rust service. |
 | [billing](billing.rs) | - | Price each call's usage from your table into your store. |
-| [custom_format](custom_format.rs) | - | Add a protocol (OpenAI embeddings) as a kind and a `Codec` (`impl_format!` makes it a `Format`). |
+| [custom_format](custom_format.rs) | - | Add a protocol (OpenAI embeddings) as a kind and direct `Format` implementations over owned HTTP messages. |
 | [custom_transport](custom_transport.rs) | - | A model in this process as a dial-only provider `Format`, no bytes. |
+
+## Billing policies
+
+Billing is application code, not a supported SDK or first-party plugin API.
+[billing](billing.rs) records priced usage without reservations;
+[wallet](wallet.rs) and [cost cap](cost_cap.rs) share private source modules in
+`billing/`, also used for reservations by the realtime examples. These modules
+are not exported by `src/lib.rs`:
+
+- [accounting.rs](billing/accounting.rs) holds each provider attempt's `Quote`
+  before sending and invokes settlement once at its end. A filter prices generic
+  message `Usage` into a shared `Tally`. Register `Accounting` last so its filter
+  sees provider outputs before earlier filters can reject them. Unsent calls and
+  uncut provider refusals cost nothing; sent calls cut off or lacking complete
+  usage cost at least their reserve. An empty account quote is refused with 401.
+- [ledger.rs](billing/ledger.rs) demonstrates atomic nested-account reservations,
+  idempotent settlement and bounded hold retention in memory. It is not a durable
+  billing store. Settlement errors do not change the response or trigger policy
+  retries; applications must provide durable charging and recovery. Hold expiry
+  releases reserved funds but cannot recover a lost charge.
+
+The wallet target also runs the migrated ledger, accounting, non-HTTP wire and
+atomic tally tests under `tests/`, preserving concurrency, cancellation, refusal,
+TTL, late settlement and failure-recovery coverage. Run them with
+`cargo test -p respan-gateway-examples --example wallet`.
 
 ## Remaining gaps
 
@@ -70,3 +95,10 @@ text-PII mode refuses opaque input audio. A deployment requiring speech redactio
 must transcribe, redact, and synthesize before permitting that audio path.
 Protocol tests use real local sockets and scripted providers; they do not claim
 credentialed interoperability with a live external model.
+
+## Private text support
+
+Guardrail, PII and realtime share `support/text.rs` as a private source module.
+It owns provider-aware readable-text checks, streaming holdback and placeholders;
+these are application examples, not part of the plugin SDK. The four `text_*`
+regression targets preserve the reader, tool-JSON and split-escape coverage.

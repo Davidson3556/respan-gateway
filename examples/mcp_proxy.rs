@@ -9,18 +9,21 @@
 //!
 //! Not built: realtime WebSocket sessions and per-turn billing (use case 7).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::futures::stream;
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::http::{HeaderValue, StatusCode};
+use respan_gateway_sdk::futures::stream;
+use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use serde_json::{Value, json};
 
-use respan_gateway_http::Transport;
+use respan_gateway_http::HttpClient;
 use respan_gateway_mcp::{
     self as mcp, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer,
 };
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
 
 /// Lets clients see and call only these tools.
 struct ToolAllowList(Arc<[&'static str]>);
@@ -64,40 +67,88 @@ impl Plugin for ToolAllowList {
     }
 }
 
-fn gateway(server: impl Into<Transport>) -> Result<Gateway, Fault> {
+fn gateway(
+    server: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<ToServer, _, _>(
-            "tools",
-            StreamableHttp::default(),
-            respan_gateway_http::connect(server),
-        )?
+        .provider::<ToServer, _, _>("tools", StreamableHttp::default(), server)?
         .client::<ToServer, _, _>(StreamableHttp::default())?
         .plugin("allow", ToolAllowList(Arc::from(["echo"])))?
         .target("tools")
 }
 
-const AT: &str = "http://mcp.local";
+/// A small real MCP HTTP server for this example's three methods. Unlike a
+/// transport registry, it checks the request method and session and returns
+/// JSON-RPC responses derived from the received request id.
+type McpRequests = Arc<Mutex<Vec<(Value, Option<String>)>>>;
 
-/// A mock MCP server's answers to `initialize`, `tools/list` and a call of
-/// `echo`, in order.
-fn mock_server() -> MockTransport {
-    let mock = MockTransport::new();
-    let tools =
-        json!([{ "name": "echo", "inputSchema": {} }, { "name": "wipe", "inputSchema": {} }]);
-    let results = [
-        json!({ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} } }),
-        json!({ "tools": tools }),
-        json!({ "content": [{ "type": "text", "text": "hi" }] }),
-    ];
-    for (id, result) in (1..).zip(results) {
-        let body = json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string();
-        let mut reply = mock::json(StatusCode::OK, &body);
-        reply
-            .headers_mut()
-            .insert(SESSION, HeaderValue::from_static("s1"));
-        mock.reply(AT, reply);
+struct McpServer {
+    url: String,
+    #[allow(dead_code)]
+    seen: McpRequests,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl McpServer {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind MCP provider");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("MCP provider address")
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let requests = seen.clone();
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::post(move |req: respan_gateway_http::http::Request<axum::body::Body>| {
+                let requests = requests.clone();
+                async move {
+                    let session = req.headers().get(SESSION)
+                        .and_then(|v| v.to_str().ok()).map(str::to_owned);
+                    let raw = axum::body::to_bytes(req.into_body(), 1_048_576).await
+                        .unwrap_or_default();
+                    let body: Value = serde_json::from_slice(&raw).unwrap_or_default();
+                    let method = body["method"].as_str().unwrap_or_default();
+                    let result = match method {
+                        "initialize" if session.is_none() => json!({ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} } }),
+                        "tools/list" if session.as_deref() == Some("s1") => json!({ "tools": [
+                            { "name": "echo", "inputSchema": {} },
+                            { "name": "wipe", "inputSchema": {} }
+                        ] }),
+                        "tools/call" if session.as_deref() == Some("s1") && body["params"]["name"] == "echo" =>
+                            json!({ "content": [{ "type": "text", "text": "hi" }] }),
+                        _ => return (StatusCode::BAD_REQUEST, [("content-type", "application/json"), ("mcp-session-id", "s1")], "invalid method or session".to_owned()),
+                    };
+                    requests.lock().unwrap_or_else(PoisonError::into_inner).push((body.clone(), session));
+                    let answer = json!({ "jsonrpc": "2.0", "id": body["id"], "result": result });
+                    (StatusCode::OK, [("content-type", "application/json"), ("mcp-session-id", "s1")], answer.to_string())
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self { url, seen, task }
     }
-    mock
+
+    #[cfg(test)]
+    fn requests(&self) -> Vec<(Value, Option<String>)> {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Drop for McpServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 /// An MCP client's request, in `session` if given: the status, the session
@@ -122,7 +173,7 @@ async fn send(
     let body = String::from_utf8_lossy(&body?).into_owned();
     let first = body
         .split_inclusive("\n\n")
-        .find_map(respan_gateway_formats::json);
+        .find_map(respan_gateway_http::formats::json);
     Ok((status, session, first.unwrap_or_default()))
 }
 
@@ -146,14 +197,20 @@ async fn session(gw: &Gateway) -> Result<Vec<(StatusCode, Value)>, Fault> {
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let fixture = match args.iter().position(|a| a == "--stdio") {
+        Some(_) => None,
+        None => Some(McpServer::start().await),
+    };
     let gw = match args.iter().position(|a| a == "--stdio") {
         Some(i) => {
             let (program, rest) = args[i + 1..]
                 .split_first()
                 .ok_or_else(|| Fault::config("--stdio PROGRAM"))?;
-            gateway(StdioTransport::new(program, rest))?
+            gateway(StdioTransport::new(program, rest).connect())?
         }
-        None => gateway(mock_server().at(AT))?,
+        None => {
+            gateway(HttpClient::new(&fixture.as_ref().expect("started fixture").url)?.connect())?
+        }
     };
     let methods = [
         "initialize",

@@ -37,13 +37,13 @@ impl Plugin for Meter {
     }
 }
 
-struct OutWrap(fn(Events<Out>) -> BoxStream<'static, Result<Out>>);
+struct OutWrap(fn(EventStream<Out>) -> BoxStream<'static, Result<Out>>);
 
 #[async_trait]
 impl Plugin for OutWrap {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let f = self.0;
-        cx.wrap(move |outputs: Events<Out>| f(outputs))?;
+        cx.wrap(move |outputs: EventStream<Out>| f(outputs))?;
         Ok(None)
     }
 }
@@ -228,15 +228,14 @@ async fn l5_a_retry_after_part_of_a_wrapped_session_was_read() {
     #[async_trait]
     impl Plugin for Retry {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|i: Events<In>| i.map_ok(|x| In(x.0.to_uppercase())))?;
+            cx.wrap(|i: EventStream<In>| i.map_ok(|x| In(x.0.to_uppercase())))?;
             let call = cx.call("p");
-            match call
-                .clone()
-                .await?
+            let mut resp = call.clone().await?;
+            match resp
                 .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                 .await
             {
-                Ok(resp) => Ok(Some(resp)),
+                Ok(()) => Ok(Some(resp)),
                 Err(_) => Ok(Some(call.await?)),
             }
         }
@@ -298,7 +297,7 @@ async fn l5_a_fallback_mid_check_gets_each_input_once() {
     #[async_trait]
     impl Plugin for Gate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|i: Events<In>| {
+            cx.wrap(|i: EventStream<In>| {
                 i.and_then(|x| async move {
                     CHECKS.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -308,10 +307,10 @@ async fn l5_a_fallback_mid_check_gets_each_input_once() {
             // The first call is given 10ms, then dropped for a second.
             let first = cx.call("p");
             let raced = tokio::time::timeout(Duration::from_millis(10), async {
-                first
-                    .await?
-                    .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
-                    .await
+                let mut resp = first.await?;
+                resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                    .await?;
+                Ok::<_, Fault>(resp)
             })
             .await;
             match raced {

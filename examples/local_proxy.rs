@@ -8,29 +8,76 @@
 //! --anthropic`.
 //!
 //! `cargo run -p respan-gateway-examples --example local_proxy` runs offline
-//! against a mock; add `-- --serve 127.0.0.1:8080` to listen for real, then
+//! against a one-response fixture; add `-- --serve 127.0.0.1:8080` to listen for real, then
 //! `ANTHROPIC_BASE_URL=http://127.0.0.1:8080 claude`.
 
-use respan_gateway_core::{Fault, Gateway};
-use respan_gateway_http::http::{self, HeaderValue};
-use respan_gateway_messages::conversation::Conversation;
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_http::http_body_util::Full;
 use respan_gateway_providers::AnthropicMessages;
+use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_sdk::{Fault, Gateway, futures::TryStreamExt};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_axum::router;
-use respan_gateway_http::HttpTransport;
-use respan_gateway_http::Transport;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_http::HttpClient;
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
 
 const ANTHROPIC: &str = "https://api.anthropic.com";
 
+type Sent = Arc<Mutex<Vec<(http::Uri, HeaderMap, Bytes)>>>;
+
+/// A single offline response for the runnable demonstration and byte-exact tests.
+/// The production --serve path uses HttpClient instead.
+fn fixture(
+    status: StatusCode,
+    body: impl Into<Bytes>,
+    sent: Sent,
+) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
+{
+    let body = body.into();
+    respan_gateway_http::connect(move |mut call| {
+        let (body, sent) = (body.clone(), Arc::clone(&sent));
+        async move {
+            respan_gateway_http::credentials(&mut call, &HeaderMap::new());
+            let (head, body_in) = call.into_parts();
+            let chunks: Vec<Bytes> = body_in.try_collect().await?;
+            let mut bytes = Vec::new();
+            for chunk in chunks {
+                bytes.extend_from_slice(&chunk);
+            }
+            sent.lock().unwrap_or_else(PoisonError::into_inner).push((
+                head.uri,
+                head.headers,
+                Bytes::from(bytes),
+            ));
+            let content_type = if status.is_success() {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
+            let response = http::Response::builder()
+                .status(status)
+                .header("content-type", content_type)
+                .body(Full::new(body))
+                .map_err(|e| Fault::internal(e.to_string()))?;
+            Ok((respan_gateway_http::from_response(response), None))
+        }
+    })
+}
+
 /// The whole setup, in code: serve Anthropic Messages, relay to Anthropic.
-fn gateway(transport: impl Into<Transport>) -> Result<Gateway, Fault> {
+fn gateway(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>(
-            "anthropic",
-            AnthropicMessages,
-            respan_gateway_http::connect(transport),
-        )?
+        .provider::<Conversation, _, _>("anthropic", AnthropicMessages, transport)?
         .client::<Conversation, _, _>(AnthropicMessages)?
         .target("anthropic")
 }
@@ -44,18 +91,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
     {
         // No `with_headers`: each request carries the developer's own key.
-        let gw = gateway(HttpTransport::new(ANTHROPIC)?)?;
+        let gw = gateway(HttpClient::new(ANTHROPIC)?.connect())?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         println!("listening on {addr}; ANTHROPIC_BASE_URL=http://{addr}");
         axum::serve(listener, router(gw)).await?;
         return Ok(());
     }
-    let mock = MockTransport::new();
-    mock.reply(ANTHROPIC, mock::sse(STREAM));
-    let gw = gateway(mock.at(ANTHROPIC))?;
+    let sent = Sent::default();
+    let gw = gateway(fixture(StatusCode::OK, STREAM.concat(), sent.clone()))?;
     let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
-    let sent = &mock.sent()[0];
-    println!("provider got: {} {:?}", sent.uri(), sent.headers());
+    let requests = sent.lock().unwrap_or_else(PoisonError::into_inner);
+    let (uri, headers, _) = &requests[0];
+    println!("provider got: {uri} {headers:?}");
     println!(
         "client got:   {status}\n{}",
         String::from_utf8_lossy(&body?)

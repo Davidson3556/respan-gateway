@@ -19,78 +19,75 @@
 //!
 //! `cargo run -p respan-gateway-examples --example models_merge`
 
-use respan_gateway_core::futures::future::join_all;
-use respan_gateway_core::futures::{TryStreamExt, stream};
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
-use respan_gateway_formats as formats;
-use respan_gateway_formats::opaque::{self, Got, Sent};
-use respan_gateway_formats::whole::Relay;
-use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::HttpClient;
+use respan_gateway_http::formats;
+use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_http::formats::whole::Relay;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::{Codec, Decoder, Encoder, RequestHead, ResponseHead, impl_format};
-use respan_gateway_testkit::{MockTransport, mock, read_whole, serve};
+use respan_gateway_http::{self as h, Incoming, Outgoing};
+use respan_gateway_sdk::futures::future::join_all;
+use respan_gateway_sdk::futures::{TryStreamExt, stream};
+use respan_gateway_sdk::{
+    ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
+};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{read_whole, serve};
 use serde_json::{Value, json};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// `GET /v1/models`, relayed unread by one provider, merged by the plugin.
 #[derive(Clone)]
 struct Models;
 
-impl Codec for Models {
-    type Input = Sent<Models>;
-    type Output = Got<Models>;
-
+impl Format<Incoming, Sent<Models>, Got<Models>> for Models {
     fn name(&self) -> &str {
         "models"
     }
 
-    fn accepts(&self, head: &RequestHead) -> bool {
-        head.method == http::Method::GET && head.uri.path() == "/v1/models"
+    fn matches(&self, io: &Incoming) -> bool {
+        io.request().method() == http::Method::GET && io.request().uri().path() == "/v1/models"
     }
 
-    fn request_decoder(&self, _head: &RequestHead) -> Box<dyn Decoder<Sent<Models>>> {
-        opaque::request_decoder()
-    }
-
-    fn request_encoder(
-        &self,
-        client: Option<&RequestHead>,
-        _body: &mut Bytes,
-        streams: bool,
-    ) -> Box<dyn Encoder<Sent<Models>, RequestHead>> {
-        opaque::request_encoder(client, streams)
-    }
-
-    fn response_decoder(
-        &self,
-        head: &ResponseHead,
-        call: &RequestHead,
-        _body: &Bytes,
-    ) -> Box<dyn Decoder<Got<Models>>> {
-        opaque::response_decoder("models", head, call)
-    }
-
-    /// The answer's bytes under a JSON content type, as a merged list has
-    /// no provider's head to borrow it from.
-    fn response_encoder(
-        &self,
-        answer: Option<&ResponseHead>,
-        _ask: &RequestHead,
-        _body: &Bytes,
-    ) -> Box<dyn Encoder<Got<Models>, ResponseHead>> {
-        let mut head = formats::response_head(answer);
-        formats::default_content_type(&mut head, "application/json");
-        let write =
-            |one: &[Got<Models>]| Ok(one.iter().flat_map(|g| g.0.to_vec()).collect::<Vec<u8>>());
-        let fail = |fault: &Fault| {
-            json!({ "error": { "message": fault.message() } })
-                .to_string()
-                .into_bytes()
-        };
-        formats::with_head(head, Box::new(Relay::new(write, fail, false)))
+    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Models>, Got<Models>>, Fault> {
+        Ok(io.bind(
+            "models",
+            opaque::read_request,
+            |reply, source| {
+                // A merged list has no provider's head to borrow a content type from.
+                let mut head = h::response_head("models", source);
+                formats::default_content_type(&mut head, "application/json");
+                let write = |one: &[Got<Models>]| {
+                    Ok(one.iter().flat_map(|g| g.0.to_vec()).collect::<Vec<u8>>())
+                };
+                let fail = |fault: &Fault| {
+                    json!({ "error": { "message": fault.message() } })
+                        .to_string()
+                        .into_bytes()
+                };
+                Ok(reply.write(head, Box::new(Relay::new(write, fail, false))))
+            },
+            h::plain_refusal,
+        ))
     }
 }
 
-impl_format!(Models);
+impl Format<Outgoing, Got<Models>, Sent<Models>> for Models {
+    fn name(&self) -> &str {
+        "models"
+    }
+
+    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Models>, Sent<Models>>, Fault> {
+        Ok(io.bind(
+            "models",
+            |source| opaque::write_request("models", source),
+            |response, request| opaque::read_response("models", response, &request.into_parts().0),
+            |head, _| head.status.is_success(),
+        ))
+    }
+}
 
 /// Answers `GET /v1/models` with the lists of `providers` merged.
 struct MergeModels(Vec<&'static str>);
@@ -136,8 +133,89 @@ impl Plugin for MergeModels {
     }
 }
 
-const A: &str = "http://a.test";
-const B: &str = "http://b.test";
+/// This endpoint is deliberately served directly: mockllm models chat and
+/// embeddings, but not OpenAI's `GET /v1/models` list. One server models one
+/// upstream, with its own queue and captured requests, not URL dispatch.
+struct LocalModels {
+    url: String,
+    answers: Arc<Mutex<VecDeque<(StatusCode, String)>>>,
+    #[allow(dead_code)]
+    seen: Arc<Mutex<Vec<(String, String, String)>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LocalModels {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind models provider");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("models provider address")
+        );
+        let answers = Arc::new(Mutex::new(VecDeque::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let queue = answers.clone();
+        let requests = seen.clone();
+        let app = axum::Router::new().route(
+            "/v1/models",
+            axum::routing::get(move |req: http::Request<axum::body::Body>| {
+                let (queue, requests) = (queue.clone(), requests.clone());
+                async move {
+                    let key = req
+                        .headers()
+                        .get("authorization")
+                        .and_then(|h| h.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned();
+                    requests
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push((req.method().to_string(), req.uri().path().to_owned(), key));
+                    let (status, body) = queue
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .pop_front()
+                        .unwrap_or((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "no scripted answer".into(),
+                        ));
+                    (status, [("content-type", "application/json")], body)
+                }
+            }),
+        );
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self {
+            url,
+            answers,
+            seen,
+            task,
+        }
+    }
+
+    fn answer(&self, answer: (StatusCode, String)) {
+        self.answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back(answer);
+    }
+
+    #[cfg(test)]
+    fn requests(&self) -> Vec<(String, String, String)> {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Drop for LocalModels {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
 
 /// A key set on a provider's own transport, so the client's is not sent.
 fn key(value: &'static str) -> HeaderMap {
@@ -146,15 +224,12 @@ fn key(value: &'static str) -> HeaderMap {
     headers
 }
 
-fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
-    let providers = [("a", A, "Bearer key-a"), ("b", B, "Bearer key-b")];
+fn gateway(a: &LocalModels, b: &LocalModels) -> Result<Gateway, Fault> {
+    let providers = [("a", a, "Bearer key-a"), ("b", b, "Bearer key-b")];
     let mut gateway = Gateway::new().client::<Sent<Models>, _, _>(Models)?;
-    for (name, base, token) in providers {
-        gateway = gateway.provider::<Sent<Models>, _, _>(
-            name,
-            Models,
-            respan_gateway_http::connect(mock.at(base).with_headers(key(token))),
-        )?;
+    for (name, server, token) in providers {
+        let transport = HttpClient::new(&server.url)?.with_headers(key(token))?;
+        gateway = gateway.provider::<Sent<Models>, _, _>(name, Models, transport.connect())?;
     }
     gateway.plugin(
         "merge",
@@ -173,23 +248,23 @@ fn request() -> http::Request<respan_gateway_http::Body> {
     }
 }
 
-fn list(ids: &[&str]) -> mock::Reply {
+fn list(ids: &[&str]) -> (StatusCode, String) {
     let data: Vec<Value> = ids
         .iter()
         .map(|id| json!({ "id": id, "object": "model" }))
         .collect();
-    mock::json(
+    (
         StatusCode::OK,
-        &json!({ "object": "list", "data": data }).to_string(),
+        json!({ "object": "list", "data": data }).to_string(),
     )
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(A, list(&["gpt-x", "shared"]))
-        .reply(B, list(&["llama", "shared"]));
-    let gw = gateway(&mock)?;
+    let (a, b) = (LocalModels::start().await, LocalModels::start().await);
+    a.answer(list(&["gpt-x", "shared"]));
+    b.answer(list(&["llama", "shared"]));
+    let gw = gateway(&a, &b)?;
     let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
     println!("{status} {}", String::from_utf8_lossy(&body?));
     Ok(())

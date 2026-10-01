@@ -21,19 +21,28 @@
 //!
 //! `cargo run -p respan-gateway-examples --example admission`
 
-use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
-use respan_gateway_core::futures::{future::BoxFuture, stream::BoxStream};
 use respan_gateway_examples::admission::{Slot, Slots};
-use respan_gateway_messages::conversation::{Conversation, Reply};
+use respan_gateway_sdk::conversation::{Conversation, Reply};
+use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream};
+use respan_gateway_sdk::futures::{future::BoxFuture, stream::BoxStream};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
-use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
+#[cfg(test)]
+use respan_gateway_http::http::StatusCode;
+use respan_gateway_http::http::{self, HeaderValue, header::RETRY_AFTER};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
 use tokio::time::Instant;
 
 /// The request's slot, taken back at its end.
@@ -83,26 +92,48 @@ fn bounded<T: Send + 'static>(
     .boxed()
 }
 
+type HttpReply = (
+    http::Response<respan_gateway_http::Body>,
+    Option<respan_gateway_http::Completion>,
+);
+
 /// Keep lease loss observable while opening a provider or transferring bytes.
-fn supervised(
-    transport: impl Into<respan_gateway_http::Transport>,
-) -> respan_gateway_http::Transport {
-    let transport = transport.into();
-    respan_gateway_http::Transport::new(move |mut call| {
-        let transport = transport.clone();
+fn supervised<F, Fut>(
+    send: F,
+) -> impl Fn(
+    http::Request<respan_gateway_http::Body>,
+) -> respan_gateway_sdk::futures::future::BoxFuture<'static, Result<HttpReply, Fault>>
++ Send
++ Sync
++ 'static
+where
+    F: Fn(http::Request<respan_gateway_http::Body>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<HttpReply, Fault>> + Send + 'static,
+{
+    move |call| {
+        let send = send.clone();
         async move {
-            let Some(held) = call.extensions.get::<Held>().cloned() else {
-                return transport.send(call).await;
+            let Some(held) = call
+                .extensions()
+                .get::<respan_gateway_sdk::Extensions>()
+                .and_then(|extensions| extensions.get::<Held>())
+                .cloned()
+            else {
+                return send(call).await;
             };
-            call.body = bounded(call.body, held.clone());
-            let mut response = guarded(&held, transport.send(call)).await?;
-            response.body = bounded(response.body, held.clone());
-            response.write_completion = response
-                .write_completion
-                .map(|writing| async move { guarded(&held, writing).await }.boxed());
-            Ok(response)
+            let call = call.map(|body| {
+                respan_gateway_http::into_http_body(bounded(body.boxed(), held.clone()))
+            });
+            let (response, completion) = guarded(&held, send(call)).await?;
+            let response = response.map(|body| {
+                respan_gateway_http::into_http_body(bounded(body.boxed(), held.clone()))
+            });
+            let completion =
+                completion.map(|writing| async move { guarded(&held, writing).await }.boxed());
+            Ok((response, completion))
         }
-    })
+        .boxed()
+    }
 }
 
 /// Admits each request into `slots`: `x-tier: paid` first, waiting up to
@@ -131,7 +162,7 @@ impl Plugin for Admission {
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));
         let monitoring = held.clone();
-        cx.wrap(move |outputs: respan_gateway_core::Events<Reply>| {
+        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Reply>| {
             bounded(outputs.boxed(), monitoring)
         })?;
         cx.extensions_mut().insert(held);
@@ -148,11 +179,14 @@ impl Plugin for Admission {
     }
 }
 
-const OPENAI: &str = "http://openai.test/v1";
 const OK: &str =
     r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}"#;
 
-fn gateway(mock: &MockTransport, slots: &Slots, free: Duration) -> Result<Gateway, Fault> {
+fn gateway(
+    provider: respan_gateway_http::HttpClient,
+    slots: &Slots,
+    free: Duration,
+) -> Result<Gateway, Fault> {
     let admission = Admission {
         slots: slots.clone(),
         paid: Duration::from_secs(5),
@@ -162,26 +196,35 @@ fn gateway(mock: &MockTransport, slots: &Slots, free: Duration) -> Result<Gatewa
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(supervised(mock.at(OPENAI))),
+            respan_gateway_http::connect(supervised(move |request| {
+                let client = provider.clone();
+                async move { client.send(request).await }
+            })),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("admission", admission)?
         .target("openai")
 }
 
-fn request(model: &str, tier: &'static str) -> http::Request<respan_gateway_http::Body> {
-    let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#);
+fn request(label: &'static str, tier: &'static str) -> http::Request<respan_gateway_http::Body> {
+    let body = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
     let mut req = post("/v1/chat/completions", body);
     req.headers_mut()
         .insert("x-tier", HeaderValue::from_static(tier));
+    req.headers_mut()
+        .insert("x-case-label", HeaderValue::from_static(label));
     req
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
-    let gw = gateway(&mock, &Slots::new(1)?, Duration::from_millis(200))?;
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::raw(OK));
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?,
+        &Slots::new(1)?,
+        Duration::from_millis(200),
+    )?;
     // The only slot is held while this response is unread.
     let (held, _) = serve(&gw, request("a", "paid")).await;
     let (status, headers, _) = read_whole(serve(&gw, request("b", "free")).await.0).await;

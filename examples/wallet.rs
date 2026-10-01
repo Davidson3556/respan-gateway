@@ -8,17 +8,28 @@
 
 use std::collections::HashMap;
 
-use respan_gateway_core::{Fault, Gateway, ProviderContext, futures};
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_http::Credential;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_ledger::{MemoryLedger, Tally};
-use respan_gateway_messages::conversation::{Conversation, Reply};
-use respan_gateway_plugins::{Accounting, Quote};
+use respan_gateway_sdk::{Fault, Gateway, ProviderContext, futures};
+#[path = "billing/ledger.rs"]
+mod ledger;
+use ledger::MemoryLedger;
+use respan_gateway_sdk::conversation::{Conversation, Reply};
+#[path = "billing/accounting.rs"]
+mod accounting;
+use accounting::{Accounting, Quote, Tally};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
+use http_support::{post, read_whole, serve};
 
 /// Your table; a model not in it has no cost bound.
 fn prices() -> HashMap<String, Price> {
@@ -77,17 +88,17 @@ fn wallets() -> MemoryLedger {
     ledger
 }
 
-const OPENAI: &str = "http://openai.test/v1";
-
-fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault> {
+fn gateway(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    ledger: MemoryLedger,
+) -> Result<Gateway, Fault> {
     let prices = prices();
     let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
-        .provider::<Conversation, _, _>(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
         // Register it last, so it prices the call as other plugins left it.
         .plugin("accounting", accounting)?
@@ -95,9 +106,9 @@ fn gateway(mock: &MockTransport, ledger: MemoryLedger) -> Result<Gateway, Fault>
 }
 
 /// A reply reporting 10 input and 10,000 output tokens: 80,020 micro-dollars.
-fn answer() -> mock::Reply {
+fn answer() -> Answer {
     let body = r#"{"id":"c1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"..."}}],"usage":{"prompt_tokens":10,"completion_tokens":10000}}"#;
-    mock::json(StatusCode::OK, body)
+    Answer::raw(body)
 }
 
 /// `key` sends `body`.
@@ -119,9 +130,9 @@ async fn ask(gw: &Gateway, key: &str) -> Result<StatusCode, Fault> {
 }
 
 /// Fifty requests at once from `key`: how many were served.
-async fn fifty(gw: &Gateway, mock: &MockTransport, key: &'static str) -> usize {
+async fn fifty(gw: &Gateway, fake: &FakeOpenAi, key: &'static str) -> usize {
     let calls = (0..50).map(|_| {
-        mock.reply(OPENAI, answer());
+        fake.answer(answer());
         let gw = gw.clone();
         tokio::spawn(async move { ask(&gw, key).await })
     });
@@ -134,9 +145,12 @@ async fn fifty(gw: &Gateway, mock: &MockTransport, key: &'static str) -> usize {
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let (mock, ledger) = (MockTransport::new(), wallets());
-    let gw = gateway(&mock, ledger.clone())?;
-    let served = fifty(&gw, &mock, "sk-b1").await;
+    let (fake, ledger) = (FakeOpenAi::start().await, wallets());
+    let gw = gateway(
+        provider_support::openai(&fake.base_url())?.connect(),
+        ledger.clone(),
+    )?;
+    let served = fifty(&gw, &fake, "sk-b1").await;
     println!(
         "served {served} of 50; acme spent {} of 1,000,000",
         ledger.spent("acme")
@@ -148,3 +162,15 @@ async fn main() -> Result<(), Fault> {
 #[cfg(test)]
 #[path = "tests/wallet.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/ledger.rs"]
+mod ledger_tests;
+
+#[cfg(test)]
+#[path = "tests/accounting.rs"]
+mod accounting_tests;
+
+#[cfg(test)]
+#[path = "tests/accounting_wire.rs"]
+mod accounting_wire_tests;

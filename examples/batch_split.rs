@@ -9,7 +9,7 @@
 //! call like any other: every plugin's `on_provider` runs before it, and a
 //! plugin that meters calls sees each one. A call built with `with_input` is
 //! not a relay, so the client's key does not go with it: the provider has
-//! its own key (`HttpTransport::new(url)?.with_headers(key)?`), or set the
+//! its own key (`HttpClient::new(url)?.with_headers(key)?`), or set the
 //! call's `CallHeaders` from the request's `Credential`.
 //!
 //! The embeddings kind and its codec are `custom_format`'s, included as a
@@ -21,12 +21,23 @@
 //!
 //! `cargo run -p respan-gateway-examples --example batch_split`
 
-use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
-use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+// This example includes custom_format, which includes its own test helpers.
+#![allow(clippy::duplicate_mod)]
+
+use mockllm::{Answer, FakeOpenAi};
+#[cfg(test)]
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::retryable;
-use respan_gateway_routing::{Backoff, Until, first_success};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_plugins::routing::{Backoff, Until, first_success};
+use respan_gateway_sdk::futures::{StreamExt, TryStreamExt, stream};
+use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -83,47 +94,55 @@ impl Plugin for Split {
     }
 }
 
-const AT: &str = "https://api.openai.com/v1";
+const MODEL: &str = "text-embedding-3-small";
 
-fn gateway(mock: &MockTransport, cap: usize) -> Result<Gateway, Fault> {
+fn gateway(
+    provider: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    cap: usize,
+) -> Result<Gateway, Fault> {
     if cap == 0 {
         return Err(Fault::config("the embedding batch cap must be positive"));
     }
     Gateway::new()
-        .provider::<EmbedRequest, _, _>(
-            "openai",
-            OpenAiEmbeddings,
-            respan_gateway_http::connect(mock.at(AT)),
-        )?
+        .provider::<EmbedRequest, _, _>("openai", OpenAiEmbeddings, provider)?
         .client::<EmbedRequest, _, _>(OpenAiEmbeddings)?
         .plugin("split", Split(cap))?
         .target("openai")
 }
 
 /// An answer with a vector `[n]` for each of `firsts`, using `tokens`.
-fn answer(firsts: &[f64], tokens: u64) -> mock::Reply {
+fn answer(firsts: &[f64], tokens: u64) -> Answer {
     let data: Vec<_> = firsts
         .iter()
         .enumerate()
         .map(|(i, n)| serde_json::json!({ "index": i, "embedding": [n] }))
         .collect();
-    let body = serde_json::json!({ "object": "list", "data": data, "model": "m",
+    let body = serde_json::json!({ "object": "list", "data": data, "model": MODEL,
         "usage": { "prompt_tokens": tokens, "total_tokens": tokens } });
-    mock::json(StatusCode::OK, &body.to_string())
+    Answer::raw(body.to_string())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(AT, answer(&[0.0, 1.0], 2))
-        .reply(AT, answer(&[2.0, 3.0], 2))
-        .reply(AT, answer(&[4.0], 1));
-    let gw = gateway(&mock, 2)?;
-    let body = r#"{"model":"m","input":["a","b","c","d","e"]}"#;
+    let openai = FakeOpenAi::start().await;
+    for scripted in [
+        answer(&[0.0, 1.0], 2),
+        answer(&[2.0, 3.0], 2),
+        answer(&[4.0], 1),
+    ] {
+        openai.answer(scripted);
+    }
+    let gw = gateway(provider_support::openai(&openai.base_url())?.connect(), 2)?;
+    let body = r#"{"model":"text-embedding-3-small","input":["a","b","c","d","e"]}"#;
     let (status, _, answered) = read_whole(serve(&gw, post("/v1/embeddings", body)).await.0).await;
     println!("{status} {}", String::from_utf8_lossy(&answered?));
-    for sent in mock.sent() {
-        println!("call: {}", String::from_utf8_lossy(sent.body()));
+    let requests = openai.requests();
+    assert_eq!(requests.len(), 3);
+    for sent in requests {
+        println!("call: {}", String::from_utf8_lossy(&sent.raw));
     }
     Ok(())
 }

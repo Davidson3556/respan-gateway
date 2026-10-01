@@ -11,17 +11,22 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_core::{
+use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_http::http::{self, HeaderValue};
+use respan_gateway_http::{Asked, Body, retryable, watchdog};
+use respan_gateway_plugins::routing::{Attempt, Backoff, Until, first_success, race};
+use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_sdk::conversation::{Conversation, Reply, set_model};
+use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_http::{
-    Asked, Body, Exchange, RequestHead, ResponseHead, Transport, retryable, watchdog,
-};
-use respan_gateway_messages::conversation::{Conversation, Reply, set_model};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_routing::{Attempt, Backoff, Until, first_success, race};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
 
 /// Falls back from the target to Anthropic, or hedges it with `openai-eu`.
 struct Resilient;
@@ -88,33 +93,16 @@ impl Plugin for Log {
     }
 }
 
-/// A transport that answers after a delay, to show a hedge or a stall.
-struct Slow<T>(T, Duration);
-
-impl Slow<Transport> {
-    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
-        tokio::time::sleep(self.1).await;
-        self.0.send(call).await
-    }
+#[derive(Clone, Copy)]
+enum Provider {
+    OpenAi,
+    Europe,
 }
-impl<T: Into<Transport>> From<Slow<T>> for respan_gateway_http::Transport {
-    fn from(value: Slow<T>) -> Self {
-        let value = std::sync::Arc::new(Slow(value.0.into(), value.1));
-        Self::new(move |call| {
-            let value = value.clone();
-            async move { value.send(call).await }
-        })
-    }
-}
-
-const OPENAI: &str = "http://openai.test/v1";
-const OPENAI_EU: &str = "http://openai-eu.test/v1";
-const ANTHROPIC: &str = "http://anthropic.test/v1";
 
 /// The body the client got, and each attempt as logged, by provider.
-type Run = Result<(String, Vec<String>), Fault>;
+type Run = Result<(String, Vec<String>, [usize; 3]), Fault>;
 
-type Replies = Vec<(&'static str, mock::Reply)>;
+type Replies = Vec<(Provider, Answer)>;
 
 /// A streamed chat request.
 fn chat() -> http::Request<Body> {
@@ -126,30 +114,54 @@ fn chat() -> http::Request<Body> {
 /// the providers with `replies`.
 async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Replies) -> Run {
     println!("{name}");
-    let (mock, log) = (MockTransport::new(), Log::default());
+    let (openai, europe, claude) = (
+        FakeOpenAi::start().await,
+        FakeOpenAi::start().await,
+        FakeAnthropic::start().await,
+    );
+    let log = Log::default();
+    for (provider, answer) in replies {
+        match provider {
+            Provider::OpenAi => openai.answer(answer),
+            Provider::Europe => europe.answer(answer),
+        }
+    }
+    claude.answer(anthropic());
     // A whole answer's head comes only once it is done: a deployment waits
     // minutes for it, and seconds between stream events.
     let (head, idle) = (Duration::from_secs(2), Duration::from_secs(1));
-    let openai = watchdog(Slow(mock.at(OPENAI), delay), head, idle);
+    let backend = provider_support::openai(&openai.base_url())?;
+    let primary = watchdog(
+        move |request| {
+            let backend = backend.clone();
+            async move {
+                tokio::time::sleep(delay).await;
+                backend.send(request).await
+            }
+        },
+        head,
+        idle,
+    );
     let gw = Gateway::new()
         .client::<Conversation, _, _>(OpenAiChat)?
-        .provider::<Conversation, _, _>("openai", OpenAiChat, respan_gateway_http::connect(openai))?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(primary),
+        )?
         .provider::<Conversation, _, _>(
             "openai-eu",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI_EU)),
+            provider_support::openai(&europe.base_url())?.connect(),
         )?
         .provider::<Conversation, _, _>(
             "anthropic",
             AnthropicMessages,
-            respan_gateway_http::connect(mock.at(ANTHROPIC)),
+            provider_support::anthropic(&claude.base_url())?.connect(),
         )?
         .plugin("log", log.clone())?
         .plugin("resilient", Resilient)?
         .target("openai")?;
-    for (url, reply) in replies.into_iter().chain([(ANTHROPIC, anthropic())]) {
-        mock.reply(url, reply);
-    }
     let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
     gw.idle().await;
     let body = String::from_utf8_lossy(&body?).into_owned();
@@ -157,26 +169,26 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
     println!("  client: {status}, last event: {last}");
     let mut attempts = log.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
     attempts.sort();
-    Ok((body, attempts))
+    let counts = [
+        openai.requests().len(),
+        europe.requests().len(),
+        claude.requests().len(),
+    ];
+    Ok((body, attempts, counts))
 }
 
 /// An OpenAI stream saying `text`, then its usage; `cut` breaks it off
 /// after its first words.
-fn openai(text: &str, cut: bool) -> mock::Reply {
+fn openai(text: &str, cut: bool) -> Answer {
     let say = r#"{"choices":[{"index":0,"delta":{"content":"TEXT"}}]}"#.replace("TEXT", text);
     let usage = r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}"#;
     let events = [&say, usage, "[DONE]"].map(|data| format!("data: {data}\n\n"));
-    let mut reply = mock::sse(&events.each_ref().map(String::as_str));
-    if cut {
-        let body = reply.body_mut();
-        body.truncate(1);
-        body.push(Err(Fault::upstream("connection reset")));
-    }
-    reply
+    let reply = provider_support::sse(&events.each_ref().map(String::as_str));
+    if cut { reply.cut_after(1) } else { reply }
 }
 
-fn anthropic() -> mock::Reply {
-    mock::sse(&[
+fn anthropic() -> Answer {
+    provider_support::sse(&[
         "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi from Claude\"}}\n\n",
         "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
@@ -184,22 +196,24 @@ fn anthropic() -> mock::Reply {
     ])
 }
 
-fn rate_limited() -> mock::Reply {
-    let mut reply = mock::json(StatusCode::TOO_MANY_REQUESTS, "{}");
-    let one = HeaderValue::from_static("1");
-    reply.headers_mut().insert(RETRY_AFTER, one);
-    reply
+fn rate_limited() -> Answer {
+    Answer::error(429)
+        .message("rate limit exceeded")
+        .retry_after(1)
 }
 
 async fn rate_limited_then_fallback() -> Run {
-    let replies = vec![(OPENAI, rate_limited()), (OPENAI, rate_limited())];
+    let replies = vec![
+        (Provider::OpenAi, rate_limited()),
+        (Provider::OpenAi, rate_limited()),
+    ];
     let name = "OpenAI answers 429 with Retry-After: 1, twice; Anthropic answers";
     run(name, Duration::ZERO, chat(), replies).await
 }
 
 async fn cut_after_first_words() -> Run {
     let name = "OpenAI's stream breaks after its first words: committed, not retried";
-    let replies = vec![(OPENAI, openai("Hello", true))];
+    let replies = vec![(Provider::OpenAi, openai("Hello", true))];
     run(name, Duration::ZERO, chat(), replies).await
 }
 
@@ -210,7 +224,7 @@ async fn stalled_then_fallback() -> Run {
 
 async fn slow_whole_answer() -> Run {
     let ok = r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"an essay"}}]}"#;
-    let replies = vec![(OPENAI, mock::json(StatusCode::OK, ok))];
+    let replies = vec![(Provider::OpenAi, Answer::raw(ok))];
     let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"write an essay"}]}"#;
     let name = "OpenAI's whole answer takes 1.5 s: within the head bound, not cut";
     let req = post("/v1/chat/completions", body);
@@ -219,7 +233,7 @@ async fn slow_whole_answer() -> Run {
 
 async fn hedged() -> Run {
     let (late, fast) = (openai("late", false), openai("fast", false));
-    let replies = vec![(OPENAI, late), (OPENAI_EU, fast)];
+    let replies = vec![(Provider::OpenAi, late), (Provider::Europe, fast)];
     let name = "Hedged: OpenAI takes 900 ms; openai-eu starts 200 ms in and wins";
     let mut req = chat();
     req.headers_mut()

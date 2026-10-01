@@ -17,20 +17,26 @@ is being designed.
 - `core/` is the kernel. Nothing feature-specific goes here.
 - Every other crate may use only the public API of `core`. If a helper needs
   private access, the kernel API is missing something; fix that instead.
-- `sdks/*` contains reusable mechanisms and shared message types, not production
-  `Plugin` implementations. SDK production dependencies must not point to
-  providers, plugins, adapters or the binary.
-- `sdks/messages/` owns HTTP-free shared types; `sdks/formats/` owns HTTP-aware
-  codec helpers. Routing orchestration takes caller-supplied retry classification.
-- `plugins/` contains concrete first-party policies, including model routing and
-  accounting; `providers/` contains concrete provider codecs. Both use public
-  core/SDK APIs, just like external extensions. Application-specific plugins
-  belong in applications or examples.
+- `sdk/` is the one plugin-author facade: public core contracts and HTTP-free
+  shared LLM message types/basic accessors. Its production dependencies must not
+  point to HTTP, providers, plugins, MCP, WebSockets, adapters or the binary.
+- `http/` owns native HTTP bodies, owned incoming/outgoing bindings and
+  stream/sink helpers at its crate root; framing/error helpers live in its public
+  `formats` module. HTTP formats implement the core `Format` contract directly.
+  `mcp/` and `ws/` own optional integrations.
+- Routing attempt orchestration lives in `plugins::routing` with caller-supplied
+  retry classification. Specialized text rewriting stays in private example support.
+- `plugins/` contains concrete first-party policies such as model routing;
+  `providers/` contains concrete provider codecs. Both use public core/SDK APIs,
+  just like external extensions. Application-specific plugins belong in
+  applications or examples. Billing, pricing, accounts and ledger mechanisms
+  stay application-specific; usage types and lifecycle hooks remain reusable.
 - `adapters/*` hosts the gateway in an environment: Axum today, a planned PyO3
-  adapter in `adapters/python/` later. Hosting must not leak back into SDKs.
+  adapter in `adapters/python/` later. Hosting must not leak back into the SDK.
 - `gateway/` composes providers, plugins and adapters through CLI configuration.
-  `testkit/` supplies public-API testing helpers. Test-only dependencies may
-  use concrete implementations without reversing production dependencies.
+  Integration suites live with their owning crates; `tests/support/` holds
+  private source-only helpers. Test-only dependencies may use concrete
+  implementations without reversing production dependencies.
 - `examples/` demonstrates integrations, including application-specific billing.
   Every example has tests (`examples/tests/<name>.rs`) that `cargo test` runs.
 

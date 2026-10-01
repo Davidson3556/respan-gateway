@@ -1,0 +1,166 @@
+//! A bounded encoded-byte handoff. Events never enter this bridge: the HTTP
+//! sinks encode each item themselves, and transports pull the resulting frame.
+
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+
+use bytes::Bytes;
+use futures::channel::oneshot;
+use futures::{FutureExt, Stream, StreamExt};
+use respan_gateway_sdk::Fault;
+
+use super::End;
+use crate::Frames;
+
+#[derive(Default)]
+struct State {
+    frame: Option<Bytes>,
+    abort: Option<Fault>,
+    end: Option<Result<(), Fault>>,
+    delivered: Option<Result<(), Fault>>,
+    reader: Option<Waker>,
+    writer: Option<Waker>,
+    completion: Option<oneshot::Sender<Result<(), Fault>>>,
+}
+
+impl State {
+    fn acknowledge(&mut self, end: Result<(), Fault>) {
+        if self.delivered.is_none() {
+            self.delivered = Some(end.clone());
+            if let Some(completion) = self.completion.take() {
+                let _ = completion.send(end);
+            }
+        }
+        if let Some(waker) = self.writer.take() {
+            waker.wake();
+        }
+    }
+
+    fn drained(&mut self) {
+        if self.frame.is_none()
+            && self.abort.is_none()
+            && let Some(end) = self.end.clone()
+        {
+            self.acknowledge(end);
+        }
+    }
+}
+
+/// Exactly one outstanding byte frame, plus a terminal body error. The latter
+/// follows any error framing rather than replacing it with clean EOF.
+pub(crate) struct Writer(Arc<Mutex<State>>);
+
+impl Writer {
+    pub(crate) fn new() -> (Self, Frames, End) {
+        let (completion, ended) = oneshot::channel();
+        let state = Arc::new(Mutex::new(State {
+            completion: Some(completion),
+            ..State::default()
+        }));
+        let ended = ended
+            .map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())))
+            .boxed();
+        (Self(state.clone()), Body(state).boxed(), ended)
+    }
+
+    pub(crate) fn poll_ready(
+        &self,
+        cx: &mut Context<'_>,
+        requested: bool,
+    ) -> Poll<Result<(), Fault>> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(Err(fault)) = &state.delivered {
+            return Poll::Ready(Err(fault.clone()));
+        }
+        if state.frame.is_none() && state.abort.is_none() && (!requested || state.reader.is_some())
+        {
+            Poll::Ready(Ok(()))
+        } else {
+            state.writer = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    pub(crate) fn send(&self, bytes: Bytes) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        debug_assert!(state.frame.is_none());
+        state.frame = Some(bytes);
+        if let Some(waker) = state.reader.take() {
+            waker.wake();
+        }
+    }
+
+    pub(crate) fn end(&self, end: Result<(), Fault>, abort: Option<Fault>) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.end = Some(end);
+        state.abort = abort;
+        state.drained();
+        if let Some(waker) = state.reader.take() {
+            waker.wake();
+        }
+    }
+
+    pub(crate) fn poll_close(&self, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match state.delivered.clone() {
+            Some(end) => Poll::Ready(end),
+            None => {
+                state.writer = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.end.is_none() {
+            let fault = Fault::abandoned();
+            state.end = Some(Err(fault.clone()));
+            state.abort = Some(fault);
+            if let Some(waker) = state.reader.take() {
+                waker.wake();
+            }
+        }
+    }
+}
+
+struct Body(Arc<Mutex<State>>);
+
+impl Stream for Body {
+    type Item = Result<Bytes, Fault>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(bytes) = state.frame.take() {
+            state.drained();
+            if let Some(waker) = state.writer.take() {
+                waker.wake();
+            }
+            return Poll::Ready(Some(Ok(bytes)));
+        }
+        if let Some(fault) = state.abort.take() {
+            state.drained();
+            return Poll::Ready(Some(Err(fault)));
+        }
+        if state.end.is_some() {
+            state.drained();
+            Poll::Ready(None)
+        } else {
+            state.reader = Some(cx.waker().clone());
+            if let Some(waker) = state.writer.take() {
+                waker.wake();
+            }
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for Body {
+    fn drop(&mut self) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.acknowledge(Err(Fault::abandoned()));
+    }
+}

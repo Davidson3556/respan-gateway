@@ -13,7 +13,7 @@ use crate::format::{AnyFormat, AnyValue};
 use crate::leg::{Outgoing, cut, idle};
 use crate::lifecycle::EndHooks;
 use crate::response::{Batch, Source};
-use crate::{ClientContext, Events, Fault, Response, Result};
+use crate::{ClientContext, EventStream, Fault, Response, Result};
 
 /// Apply client output stages and retain the selected call until delivery ends.
 pub(crate) async fn reply(
@@ -21,7 +21,7 @@ pub(crate) async fn reply(
     resp: Result<Response>,
     hooks: &mut EndHooks<ClientContext>,
     discarded: &Arc<Mutex<Vec<Batch>>>,
-) -> (Events<AnyValue>, Option<SharedCall>) {
+) -> (EventStream<AnyValue>, Option<SharedCall>) {
     let cx = hooks.cx();
     // A call's response goes only to its own request; one of another kind
     // fails, even with no outputs.
@@ -36,12 +36,15 @@ pub(crate) async fn reply(
     });
     let mut resp = match resp {
         Ok(resp) => resp,
-        Err(fault) => return (Events::refused(fault), None),
+        Err(fault) => return (EventStream::refused(fault), None),
     };
     if resp.refused {
         // Its one batch is the refusal, through the call's filters.
         let read = AssertUnwindSafe(async {
-            let (mut batch, _) = resp.body.next().await;
+            let mut batch = match resp.ahead.pop_front() {
+                Some(batch) => batch,
+                None => resp.body.next().await,
+            };
             batch.read();
             batch.end
         });
@@ -54,7 +57,7 @@ pub(crate) async fn reply(
             true => fault,
             false => fault.unrelayed(),
         };
-        return (Events::refused(fault), None);
+        return (EventStream::refused(fault), None);
     }
     let call = resp.body.call().cloned();
     let Response {
@@ -95,7 +98,7 @@ pub(crate) async fn reply(
         };
         stream::iter(values)
     });
-    let mut flow = Events::stream(events);
+    let mut flow = EventStream::stream(events);
     flow.set_metadata(metadata);
     (flow, call)
 }

@@ -1,0 +1,177 @@
+//! Native HTTP sending bound to the kernel's symmetric event interface.
+
+use super::reader::Observation;
+use super::upload::Upload;
+use super::{RequestMetadata, ResponseMetadata};
+use crate::{Body, Completion, RequestHead, ResponseHead};
+use bytes::Bytes;
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
+use futures::{Future, FutureExt, Stream, stream};
+use respan_gateway_sdk::{Connection, EventSink, EventStream, Extensions, Fault};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Poll;
+
+pub(crate) type Sending = dyn Fn(
+        http::Request<Body>,
+    ) -> BoxFuture<'static, Result<(http::Response<Body>, Option<Completion>), Fault>>
+    + Send
+    + Sync;
+
+/// One provider attempt, owning its extensions and sharing only the sender.
+pub struct Outgoing {
+    pub(crate) send: Arc<Sending>,
+    pub(crate) extensions: Extensions,
+}
+impl Outgoing {
+    /// Bind synchronous request preparation and a standard response stream.
+    pub fn bind<I, O, P, R, S>(
+        self,
+        name: &str,
+        prepare: P,
+        read: R,
+        success: S,
+    ) -> Connection<O, I>
+    where
+        I: Clone + Send + Sync + 'static,
+        O: Clone + Send + Sync + 'static,
+        P: FnOnce(&mut EventStream<I>) -> Result<(http::Request<Body>, EventSink<I>), Fault>
+            + Send
+            + 'static,
+        R: FnOnce(
+                http::Response<Body>,
+                http::Request<Bytes>,
+            ) -> BoxStream<'static, Result<O, Fault>>
+            + Send
+            + 'static,
+        S: FnOnce(&ResponseHead, &RequestHead) -> bool + Send + 'static,
+    {
+        let (answer, answered) = oneshot::channel();
+        let incoming = async move { answered.await.map_err(|_| Fault::abandoned())? }.boxed();
+        let name = name.to_owned();
+        let outgoing = EventSink::preparing(move |events: &mut EventStream<I>| {
+            if let Some(fault) = events.refusal() {
+                return Err(fault.clone());
+            }
+            let relayed = events.metadata::<RequestMetadata>(&name).is_some();
+            let (mut request, mut sink) = prepare(events)?;
+            sink.prepare(events)?;
+            let streaming = request.body().is_streaming();
+            if !streaming {
+                events.stop();
+            }
+            let (head, mut body) = request.into_parts();
+            let sent = http::Request::from_parts(head.clone(), body.initial());
+            let mut handoff = body.upload.take();
+            if streaming && handoff.is_none() {
+                let (drained, draining) = oneshot::channel::<()>();
+                let mut drained = Some(drained);
+                let failed = super::reader::Failure::default();
+                let failure = failed.clone();
+                body = Body::stream(stream::poll_fn(move |cx| {
+                    let item = Pin::new(&mut body).poll_next(cx);
+                    if let Poll::Ready(Some(Err(fault))) = &item {
+                        let _ = failure.set(fault.clone());
+                    }
+                    if matches!(item, Poll::Ready(None | Some(Err(_)))) {
+                        drained.take();
+                    }
+                    item
+                }));
+                handoff = Some(super::upload::Handoff {
+                    draining: draining.map(|_| Ok(())).boxed(),
+                    failed,
+                    settled: Default::default(),
+                });
+            }
+            let failed = handoff
+                .as_ref()
+                .map(|h| h.failed.clone())
+                .unwrap_or_default();
+            request = http::Request::from_parts(head, body);
+            request.extensions_mut().insert(self.extensions);
+            request
+                .extensions_mut()
+                .insert(crate::transport::Relayed(relayed));
+            let failure = failed.clone();
+            let settled = handoff.as_ref().map(|h| h.settled.clone());
+            let delivery = async move {
+                let (ended, ending) = oneshot::channel::<()>();
+                let response = async move {
+                    let (response, completion) = (self.send)(request).await?;
+                    let (head, body) = response.into_parts();
+                    let decide = !success(&head, &sent.clone().into_parts().0);
+                    let (body, observation) = Observation::body(body, failure);
+                    let stream = read(http::Response::from_parts(head.clone(), body), sent);
+                    let (mut stream, refusal) = observation.open(stream, decide).await;
+                    let response = match refusal {
+                        Some(fault) => EventStream::refused(fault),
+                        None if streaming && completion.is_none() => {
+                            let mut ended = Some(ended);
+                            EventStream::stream(stream::poll_fn(move |cx| {
+                                let item = stream.as_mut().poll_next(cx);
+                                if matches!(item, Poll::Ready(None | Some(Err(_)))) {
+                                    ended.take();
+                                }
+                                item
+                            }))
+                        }
+                        None => EventStream::stream(stream),
+                    };
+                    Ok::<_, Fault>((
+                        response.with_metadata(&name, ResponseMetadata(head)),
+                        completion,
+                    ))
+                }
+                .await;
+                match response {
+                    Ok((response, completion)) => {
+                        let _ = answer.send(Ok(response));
+                        match completion {
+                            Some(completion) => completion.await,
+                            None => {
+                                if let Some(handoff) = handoff {
+                                    let _ = futures::future::select(handoff.draining, ending).await;
+                                }
+                                Ok(())
+                            }
+                        }
+                    }
+                    Err(fault) => {
+                        let _ = answer.send(Err(fault.clone()));
+                        Err(fault)
+                    }
+                }
+            };
+            let delivery = async move {
+                let end = delivery.await;
+                if let Some(settled) = settled {
+                    settled.store(true, std::sync::atomic::Ordering::Release);
+                }
+                end
+            }
+            .boxed()
+            .shared();
+            if streaming {
+                let mut completion = delivery.clone();
+                let mut source = std::mem::replace(events, EventStream::empty());
+                *events = EventStream::stream(stream::poll_fn(move |cx| {
+                    if let Poll::Ready(end) = Pin::new(&mut completion).poll(cx) {
+                        return Poll::Ready(end.err().map(Err));
+                    }
+                    Pin::new(&mut source).poll_next(cx)
+                }));
+            }
+            Ok(Upload::new(sink, delivery, failed))
+        });
+        (incoming, outgoing)
+    }
+}
+
+impl std::fmt::Debug for Outgoing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Outgoing").finish_non_exhaustive()
+    }
+}

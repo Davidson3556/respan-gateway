@@ -37,31 +37,39 @@
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use respan_gateway_core::futures::TryStreamExt;
-use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
+use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_examples::store::{
     Database,
     rusqlite::{OptionalExtension, params},
     sql,
 };
-use respan_gateway_formats::opaque::Got;
+use respan_gateway_http::HttpClient;
 use respan_gateway_http::Status;
+use respan_gateway_http::formats::opaque::Got;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_http::{Asked, CallHeaders, Credential, retryable};
-use respan_gateway_messages::conversation::{Content, Conversation, Reply};
+use respan_gateway_plugins::routing::{Backoff, Until, first_success};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_routing::{Backoff, Until, first_success};
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_sdk::conversation::{Content, Conversation, Reply};
+use respan_gateway_sdk::futures::TryStreamExt;
+use respan_gateway_sdk::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
@@ -537,30 +545,134 @@ impl Plugin for Fallback {
     }
 }
 
-const TEXT: &str = "http://text-only.test/v1";
-const PDF: &str = "http://reads-pdf.test/v1";
-const CLAUDE: &str = "http://reads-pdf.test";
-const STORE: &str = "http://files.test";
+/// An endpoint-specific file store for metadata and raw content. The fake
+/// model providers do not expose arbitrary stored file metadata, so this
+/// small real HTTP server supplies just the two GETs this example uses.
+type FileReplies = Arc<Mutex<VecDeque<(StatusCode, Vec<u8>)>>>;
 
-fn gateway(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
+struct FileServer {
+    url: String,
+    #[allow(dead_code)]
+    answers: FileReplies,
+    #[allow(dead_code)]
+    requests: Arc<Mutex<Vec<(String, String)>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FileServer {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind file store");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("file store address")
+        );
+        let answers = Arc::new(Mutex::new(VecDeque::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (queue, seen) = (answers.clone(), requests.clone());
+        let handler = move |req: respan_gateway_http::http::Request<axum::body::Body>| {
+            let (queue, seen) = (queue.clone(), seen.clone());
+            async move {
+                let path = req.uri().path().to_owned();
+                let auth = req
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                seen.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((path, auth));
+                let (status, body) = queue
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .pop_front()
+                    .unwrap_or((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        b"unscripted file request".to_vec(),
+                    ));
+                (status, [("content-type", "application/json")], body)
+            }
+        };
+        let app = axum::Router::new()
+            .route("/v1/files/{id}", axum::routing::get(handler.clone()))
+            .route("/v1/files/{id}/content", axum::routing::get(handler));
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self {
+            url,
+            answers,
+            requests,
+            task,
+        }
+    }
+
+    #[cfg(test)]
+    fn answer(&self, status: StatusCode, body: impl Into<Vec<u8>>) {
+        self.answers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back((status, body.into()));
+    }
+
+    #[cfg(test)]
+    fn requests(&self) -> Vec<(String, String)> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Drop for FileServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct Fixture {
+    text: FakeOpenAi,
+    pdf: FakeOpenAi,
+    claude: FakeAnthropic,
+    files: FileServer,
+}
+
+impl Fixture {
+    async fn start() -> Self {
+        Self {
+            text: FakeOpenAi::start().await,
+            pdf: FakeOpenAi::start().await,
+            claude: FakeAnthropic::start().await,
+            files: FileServer::start().await,
+        }
+    }
+}
+
+fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider::<Conversation, _, _>(
             "text-only",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(TEXT)),
+            provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
         .provider::<Conversation, _, _>(
             "reads-pdf",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(PDF)),
+            provider_support::openai(&fixture.pdf.base_url())?.connect(),
         )?
-        .provider::<Ask, _, _>("files", FILES, respan_gateway_http::connect(mock.at(STORE)))?
+        .provider::<Ask, _, _>(
+            "files",
+            FILES,
+            HttpClient::new(&fixture.files.url)?.connect(),
+        )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)
 }
 
-const REQUEST: &str = r#"{"model":"any","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"filename":"q3.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjcKJcfsj6IKMSAwIG9iago="}}]}]}"#;
+const REQUEST: &str = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"filename":"q3.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjcKJcfsj6IKMSAwIG9iago="}}]}]}"#;
 const OK: &str = r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"Revenue is up."}}]}"#;
 
 async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
@@ -575,19 +687,23 @@ async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
 }
 
 /// As `gateway`, with the PDF reader an Anthropic model.
-fn gateway_claude(mock: &MockTransport, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
+fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Gateway::new()
         .provider::<Conversation, _, _>(
             "text-only",
             OpenAiChat,
-            respan_gateway_http::connect(mock.at(TEXT)),
+            provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
         .provider::<Conversation, _, _>(
             "reads-pdf",
             AnthropicMessages,
-            respan_gateway_http::connect(mock.at(CLAUDE)),
+            provider_support::anthropic(&fixture.claude.base_url())?.connect(),
         )?
-        .provider::<Ask, _, _>("files", FILES, respan_gateway_http::connect(mock.at(STORE)))?
+        .provider::<Ask, _, _>(
+            "files",
+            FILES,
+            HttpClient::new(&fixture.files.url)?.connect(),
+        )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("pdf-to-text", pdfs)?
         .plugin("fallback", Fallback)
@@ -600,25 +716,36 @@ const CLAUDE_OK: &str = r#"{"id":"m","type":"message","role":"assistant","model"
 async fn main() -> Result<(), Fault> {
     // The fallback reads PDFs in OpenAI's format, then in Anthropic's.
     for claude in [false, true] {
-        let mock = MockTransport::new();
-        mock.reply(TEXT, mock::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
-        mock.reply(
-            if claude { CLAUDE } else { PDF },
-            mock::json(StatusCode::OK, if claude { CLAUDE_OK } else { OK }),
-        );
+        let fixture = Fixture::start().await;
+        fixture
+            .text
+            .answer(Answer::error(503).message("unavailable"));
+        if claude {
+            fixture.claude.answer(Answer::raw(CLAUDE_OK));
+        } else {
+            fixture.pdf.answer(Answer::raw(OK));
+        }
         let pdfs = Arc::new(PdfToText::new(&["text-only"]).await?);
         let gw = if claude {
-            gateway_claude(&mock, pdfs)?
+            gateway_claude(&fixture, pdfs)?
         } else {
-            gateway(&mock, pdfs)?
+            gateway(&fixture, pdfs)?
         };
         let request = REQUEST.replace(
             "JVBERi0xLjcKJcfsj6IKMSAwIG9iago=",
             include_str!("fixtures/report.pdf.b64"),
         );
         let status = send(&gw, "acme", &request).await;
-        for sent in mock.sent() {
-            println!("{}\n  {}", sent.uri(), String::from_utf8_lossy(sent.body()));
+        for sent in fixture
+            .text
+            .requests()
+            .into_iter()
+            .chain(fixture.pdf.requests())
+        {
+            println!("{}\n  {}", sent.path, String::from_utf8_lossy(&sent.raw));
+        }
+        for sent in fixture.claude.requests() {
+            println!("{}\n  {}", sent.path, String::from_utf8_lossy(&sent.raw));
         }
         println!("client got {status}");
     }

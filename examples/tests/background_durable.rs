@@ -16,18 +16,19 @@ fn account() -> [u8; 32] {
 #[tokio::test]
 async fn completed_jobs_and_signed_ids_survive_reopening() -> Result<(), Fault> {
     let path = database();
-    let mock = MockTransport::new();
-    mock.reply(
-        WEST,
-        mock::json(
-            StatusCode::OK,
-            r#"{"id":"native-durable","status":"completed","usage":{"total_tokens":7}}"#,
-        ),
+    let (east, west) = deployments().await?;
+    west.answer(
+        StatusCode::OK,
+        r#"{"id":"native-durable","status":"completed","usage":{"total_tokens":7}}"#,
     );
     let id = {
         let jobs = Jobs::open(&path)?;
         jobs.budget(account(), 10_000).await?;
-        let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+        let gateway = gateway(
+            east.transport()?.connect(),
+            west.transport()?.connect(),
+            &jobs,
+        )?;
         let queued = send(
             &gateway,
             request(
@@ -41,7 +42,11 @@ async fn completed_jobs_and_signed_ids_survive_reopening() -> Result<(), Fault> 
         queued["id"].as_str().expect("job id").to_owned()
     };
     let jobs = Jobs::open(&path)?;
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &jobs,
+    )?;
     let done = send(&gateway, request("GET", &format!("/v1/responses/{id}"), "")).await?;
     assert_eq!(done["status"], "completed");
     assert_eq!(done["id"], id);
@@ -55,7 +60,11 @@ async fn completed_jobs_and_signed_ids_survive_reopening() -> Result<(), Fault> 
         })
         .await?;
     assert_eq!(amounts, (0, 7));
-    assert_eq!(mock.sent().len(), 1);
+    assert_eq!(west.requests().len(), 1);
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
@@ -68,7 +77,7 @@ fn crash_child() -> Result<(), Fault> {
     runtime.block_on(async {
         let jobs = Jobs::open(path)?;
         jobs.budget(account(), 10_000).await?;
-        let pending = || Transport::new(|_| async { std::future::pending().await });
+        let pending = || respan_gateway_http::connect(|_| async { std::future::pending().await });
         let gateway = gateway(pending(), pending(), &jobs)?;
         let queued = send(
             &gateway,
@@ -112,20 +121,21 @@ async fn a_process_crash_preserves_its_hold_and_recovers_the_request() -> Result
                 .map_err(sql)
         })
         .await?;
-    let mock = MockTransport::new();
-    mock.reply(
-        WEST,
-        mock::json(
-            StatusCode::OK,
-            r#"{"id":"native-after-restart","status":"completed","usage":{"total_tokens":9}}"#,
-        ),
+    let (east, west) = deployments().await?;
+    west.answer(
+        StatusCode::OK,
+        r#"{"id":"native-after-restart","status":"completed","usage":{"total_tokens":9}}"#,
     );
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &jobs,
+    )?;
     jobs.resume(&gateway).await?;
     gateway.idle().await;
     let done = send(&gateway, request("GET", &format!("/v1/responses/{id}"), "")).await?;
     assert_eq!(done["status"], "completed");
-    assert_eq!(mock.sent()[0].headers()["idempotency-key"], id);
+    assert_eq!(west.requests()[0].headers["idempotency-key"], id);
     let amounts: (i64, i64) = jobs
         .db(|tx| {
             tx.query_row("SELECT held,spent FROM job_accounts", [], |r| {
@@ -142,8 +152,12 @@ async fn a_process_crash_preserves_its_hold_and_recovers_the_request() -> Result
 async fn durable_budget_refuses_an_unfunded_job_before_it_starts() -> Result<(), Fault> {
     let jobs = Jobs::default();
     jobs.budget(account(), 1).await?;
-    let mock = MockTransport::new();
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+    let (east, west) = deployments().await?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &jobs,
+    )?;
     let req = request(
         "POST",
         "/v1/responses",
@@ -151,7 +165,11 @@ async fn durable_budget_refuses_an_unfunded_job_before_it_starts() -> Result<(),
     );
     let (status, ..) = read_whole(serve(&gateway, req).await.0).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
-    assert!(mock.sent().is_empty());
+    assert!(west.requests().is_empty());
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
@@ -188,17 +206,18 @@ async fn finish_webhooks_retry_from_the_durable_outbox() -> Result<(), Fault> {
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let path = database();
-    let mock = MockTransport::new();
-    mock.reply(
-        WEST,
-        mock::json(
-            StatusCode::OK,
-            r#"{"id":"native-hook","status":"completed"}"#,
-        ),
+    let (east, west) = deployments().await?;
+    west.answer(
+        StatusCode::OK,
+        r#"{"id":"native-hook","status":"completed"}"#,
     );
     {
         let jobs = Jobs::open(&path)?;
-        let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+        let gateway = gateway(
+            east.transport()?.connect(),
+            west.transport()?.connect(),
+            &jobs,
+        )?;
         let body = json!({"background":true,"webhook":url}).to_string();
         send(&gateway, request("POST", "/v1/responses", &body)).await?;
         gateway.idle().await;

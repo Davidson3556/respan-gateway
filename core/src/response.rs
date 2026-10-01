@@ -12,7 +12,7 @@ use crate::call::{CallEdge, SharedCall};
 use crate::events::Metadata;
 use crate::fault::PANICKED;
 use crate::format::{AnyEvents, AnyFormat, Values, erase};
-use crate::leg::{cut, idle, locked};
+use crate::leg::{cut, idle, locked, yield_ready};
 
 /// Bound ready-event coalescing, including reads attempted during drop.
 const MAX_BATCH_EVENTS: usize = 128;
@@ -159,16 +159,17 @@ impl Response {
     /// Buffer outputs until `predicate` matches, the stream ends, or it fails.
     /// Values are inspected after provider filters. Buffered values are replayed
     /// when sent or read, retaining relay metadata and call ownership.
-    /// An error before a match is returned; an error after a match stays buffered.
-    /// A clean end returns the response even if no value matched.
+    /// A fault before a match is returned, with the response still owned by
+    /// the caller; a fault after a match stays buffered for replay.
+    /// A clean end succeeds even if no value matched.
     ///
     /// Streaming-input calls return unread to avoid deadlocking duplex peers.
     /// Bound the wait and buffered size in the calling policy if needed.
     /// A repeated call checks buffered values against its new predicate.
     pub async fn buffer_until<T: Any + Send + Sync>(
-        mut self,
+        &mut self,
         mut predicate: impl FnMut(&T) -> bool + Send,
-    ) -> Result<Self> {
+    ) -> Result<()> {
         if self
             .output
             .is_some_and(|output| output != TypeId::of::<T>())
@@ -176,12 +177,12 @@ impl Response {
             return Err(Fault::wrong_kind::<T>());
         }
         if self.streams && !self.refused {
-            return Ok(self);
+            return Ok(());
         }
         let mut index = 0;
         loop {
             if index == self.ahead.len() {
-                let batch = self.body.next().await.0;
+                let batch = self.body.next().await;
                 if batch.is_empty() {
                     continue;
                 }
@@ -197,7 +198,7 @@ impl Response {
                     .is_some_and(|values| values.iter().any(&mut predicate))
             }));
             match matched {
-                Ok(true) => return Ok(self),
+                Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(panic) => {
                     self.body.end(Err(Fault::internal(PANICKED)));
@@ -206,45 +207,54 @@ impl Response {
             }
             if let Some(end) = &batch.end {
                 end.clone()?;
-                return Ok(self);
+                return Ok(());
             }
             index += 1;
+            // Yield only after ownership of the batch has moved into ahead.
+            // Cancellation of this borrowed hold must never lose an event.
+            if matches!(self.body, Source::EventStream { .. }) || index % MAX_BATCH_EVENTS == 0 {
+                tokio::task::yield_now().await;
+            }
         }
     }
 
-    /// Buffer the entire response, retaining its metadata and eventual result.
-    /// Errors before any output are returned directly; later errors are held
-    /// for replay and also returned alongside the response. Streaming-input
+    /// Buffer the entire response, retaining its metadata, buffered events,
+    /// terminal result and call ownership even when it fails. Streaming-input
     /// calls return unread to avoid deadlocking duplex peers.
-    pub async fn until_end(mut self) -> Result<(Self, Result<()>)> {
+    pub async fn until_end(&mut self) -> Result<()> {
         if self.streams && !self.refused {
-            return Ok((self, Ok(())));
+            return Ok(());
         }
         if let Some(batch) = self.ahead.back_mut() {
             batch.prepare();
         }
-        let mut seen = self.ahead.iter().any(|batch| batch.values.is_some());
-        let mut end = self.end().cloned();
+        let mut batches = 0usize;
         loop {
-            if let Some(end) = end {
-                if !seen {
-                    end.clone()?;
-                }
-                return Ok((self, end));
+            if let Some(end) = self.buffered_end() {
+                return end.clone();
             }
-            let (mut batch, has_values) = self.body.next().await;
+            let mut batch = self.body.next().await;
             batch.prepare();
-            seen |= has_values || batch.values.is_some();
-            end = batch.end.clone();
             if !batch.is_empty() {
                 self.ahead.push_back(batch);
+                batches += 1;
+                // Store the batch before yielding so cancellation can resume
+                // inspection or replay without losing any provider events.
+                if self.buffered_end().is_none()
+                    && (matches!(self.body, Source::EventStream { .. })
+                        || batches.is_multiple_of(MAX_BATCH_EVENTS))
+                {
+                    tokio::task::yield_now().await;
+                }
             }
         }
     }
 
-    /// How it ended, if read to its end.
-    fn end(&self) -> Option<&Result<()>> {
-        self.ahead.iter().find_map(|batch| batch.end.as_ref())
+    /// The terminal result already buffered by an inspection, if any.
+    /// An inspection error without a buffered end (for example a wrong
+    /// predicate type) is not a provider failure that can be replayed.
+    pub fn buffered_end(&self) -> Option<&Result<()>> {
+        self.ahead.back().and_then(|batch| batch.end.as_ref())
     }
 
     /// Read it rather than send it, such as a judge's verdict: every output
@@ -258,31 +268,44 @@ impl Response {
             self.body.end(Err(fault.clone()));
             return stream::once(async { Err(fault) }).boxed();
         }
-        let read = (self, VecDeque::new(), false);
-        stream::unfold(read, |(mut resp, mut outputs, mut ended)| async move {
-            loop {
-                if let Some(output) = outputs.pop_front() {
-                    return Some((output, (resp, outputs, ended)));
+        let read = (self, VecDeque::new(), false, 0usize);
+        stream::unfold(
+            read,
+            |(mut resp, mut outputs, mut ended, mut batches)| async move {
+                loop {
+                    if let Some(output) = outputs.pop_front() {
+                        return Some((output, (resp, outputs, ended, batches)));
+                    }
+                    if ended {
+                        return None;
+                    }
+                    let mut batch = match resp.ahead.pop_front() {
+                        Some(batch) => batch,
+                        None => resp.body.next().await,
+                    };
+                    batch.read();
+                    if let Some(values) = batch.values {
+                        let read = values.downcast::<Vec<T>>().map(|v| *v);
+                        outputs.extend(read.unwrap_or_default().into_iter().map(Ok));
+                    }
+                    if let Some(end) = batch.end {
+                        resp.body.end(end.clone());
+                        outputs.extend(end.err().map(Err));
+                        ended = true;
+                    }
+                    batches += 1;
+                    // A batch has been read into the owned unfold state. Yield
+                    // even if its filters emitted no values, so an indefinitely
+                    // ready provider cannot monopolize one poll.
+                    if !ended
+                        && (matches!(resp.body, Source::EventStream { .. })
+                            || batches.is_multiple_of(MAX_BATCH_EVENTS))
+                    {
+                        yield_ready().await;
+                    }
                 }
-                if ended {
-                    return None;
-                }
-                let mut batch = match resp.ahead.pop_front() {
-                    Some(batch) => batch,
-                    None => resp.body.next().await.0,
-                };
-                batch.read();
-                if let Some(values) = batch.values {
-                    let read = values.downcast::<Vec<T>>().map(|v| *v);
-                    outputs.extend(read.unwrap_or_default().into_iter().map(Ok));
-                }
-                if let Some(end) = batch.end {
-                    resp.body.end(end.clone());
-                    outputs.extend(end.err().map(Err));
-                    ended = true;
-                }
-            }
-        })
+            },
+        )
         .boxed()
     }
 
@@ -298,7 +321,7 @@ impl Response {
         let (streams, refused) = (px.flowing, px.refused);
         let events = cut(events, idle(&px.cut));
         let output = Some(format.kind().1);
-        let body = Source::Events {
+        let body = Source::EventStream {
             events,
             format: format.clone(),
             call: Some(call.share()),
@@ -313,7 +336,7 @@ impl Response {
 
 /// A response's body: a provider's events and its call, or outputs made.
 pub(crate) enum Source {
-    Events {
+    EventStream {
         events: AnyEvents,
         format: Arc<dyn AnyFormat>,
         call: Option<SharedCall>,
@@ -333,39 +356,25 @@ impl Source {
             Err(fault) => Batch::end(Err(fault)),
         });
         let done = stream::once(async { Batch::end(Ok(())) });
-        Source::Made(
-            batches
-                .chain(done)
-                .enumerate()
-                .then(|(index, batch)| async move {
-                    // Synthetic streams may be continuously ready too. Let
-                    // timeouts and cancellation run without delaying a terminal end.
-                    if index % MAX_BATCH_EVENTS == MAX_BATCH_EVENTS - 1 && batch.end.is_none() {
-                        tokio::task::yield_now().await;
-                    }
-                    batch
-                })
-                .boxed(),
-        )
+        Source::Made(batches.chain(done).boxed())
     }
 
     /// Its call, if any.
     pub(crate) fn call(&self) -> Option<&SharedCall> {
         match self {
-            Source::Events { call, .. } => call.as_ref(),
+            Source::EventStream { call, .. } => call.as_ref(),
             Source::Made(..) => None,
         }
     }
 
     /// The next batch, eventually one with the end, not to be read past,
-    /// and whether it held values before any filter, filtered on its
-    /// call's provider edge if it has one. The call ends when the batch
+    /// filtered on its call's provider edge if it has one. The call ends when the batch
     /// with its end is read ([`Batch::read`]) or dropped. A panic of the
     /// provider's stream or a filter ends the call internal
     /// and unwinds on.
-    pub(crate) async fn next(&mut self) -> (Batch, bool) {
+    pub(crate) async fn next(&mut self) -> Batch {
         let (events, format, call) = match self {
-            Source::Events {
+            Source::EventStream {
                 events,
                 format,
                 call,
@@ -373,8 +382,7 @@ impl Source {
             Source::Made(made) => {
                 let truncated = || Batch::end(Err(Fault::truncated()));
                 let batch = made.next().await.unwrap_or_else(truncated);
-                let has_values = batch.values.is_some();
-                return (batch, has_values);
+                return batch;
             }
         };
         let item = AssertUnwindSafe(events.next()).catch_unwind().await;
@@ -405,23 +413,14 @@ impl Source {
                         Some(None) => batch.end = Some(Ok(())),
                     }
                 }
-                let has_values = batch.values.is_some();
                 if let Some(call) = call {
                     batch = std::mem::take(&mut batch).of(call);
                 }
-                (has_values, count == MAX_BATCH_EVENTS)
             });
-            std::panic::catch_unwind(of).map(|(has_values, full)| (batch, has_values, full))
+            std::panic::catch_unwind(of).map(|()| batch)
         });
         match read {
-            Ok(Ok((batch, has_values, full))) => {
-                // A terminal batch must reach its owner without suspension:
-                // its unread end is settled according to delivery's outcome.
-                if full && batch.end.is_none() {
-                    tokio::task::yield_now().await;
-                }
-                (batch, has_values)
-            }
+            Ok(Ok(batch)) => batch,
             Ok(Err(panic)) | Err(panic) => {
                 if let Some(call) = call {
                     locked(call).finish(Err(Fault::internal(PANICKED)));

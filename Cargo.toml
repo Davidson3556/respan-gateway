@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "sdks/*", "plugins", "providers", "adapters/*", "gateway", "testkit", "examples"]
+members = ["core", "sdk", "http", "mcp", "ws", "plugins", "providers", "adapters/*", "gateway", "examples"]
 resolver = "3"
 
 [workspace.package]
@@ -12,18 +12,13 @@ publish = false
 
 [workspace.dependencies]
 respan-gateway-core = { path = "core" }
-respan-gateway-formats = { path = "sdks/formats" }
-respan-gateway-messages = { path = "sdks/messages" }
-respan-gateway-http = { path = "sdks/http" }
+respan-gateway-sdk = { path = "sdk" }
+respan-gateway-http = { path = "http" }
 respan-gateway-plugins = { path = "plugins" }
 respan-gateway-axum = { path = "adapters/axum" }
 respan-gateway-providers = { path = "providers" }
-respan-gateway-testkit = { path = "testkit" }
-respan-gateway-routing = { path = "sdks/routing" }
-respan-gateway-text = { path = "sdks/text" }
-respan-gateway-ledger = { path = "sdks/ledger" }
-respan-gateway-mcp = { path = "sdks/mcp" }
-respan-gateway-ws = { path = "sdks/ws" }
+respan-gateway-mcp = { path = "mcp" }
+respan-gateway-ws = { path = "ws" }
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"

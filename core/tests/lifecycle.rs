@@ -103,10 +103,8 @@ impl Plugin for Steal {
         match taken {
             Some(resp) => Ok(Some(resp)),
             None => {
-                let resp = cx
-                    .call("a")
-                    .await?
-                    .buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
+                let mut resp = cx.call("a").await?;
+                resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
                     .await?;
                 *lock(&self.0) = Some(resp);
                 Err(Fault::not_found("stash"))
@@ -137,7 +135,7 @@ struct TwoCalls;
 impl Plugin for TwoCalls {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let own = cx.call("a").with_input(In("own".into()));
-        let _ = own.await?.until_end().await?;
+        own.await?.until_end().await?;
         Ok(Some(cx.call("a").await?))
     }
 }

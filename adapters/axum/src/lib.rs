@@ -10,8 +10,8 @@ use axum::response::Response;
 use http::header;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Limited};
-use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_http::{RequestHead, Status};
+use respan_gateway_sdk::{Fault, Gateway};
 
 #[cfg(feature = "ws")]
 pub mod ws;

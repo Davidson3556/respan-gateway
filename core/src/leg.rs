@@ -85,6 +85,22 @@ pub(crate) fn idle(cut: &Arc<InFlight>) -> BoxFuture<'static, Fault> {
     cut.idle().map(|()| Fault::abandoned()).boxed()
 }
 
+/// Yield one poll after a batch is safely retained. Wake synchronously so a
+/// bounded caller that probes immediately ready events can distinguish this
+/// cooperative pause from a genuinely pending source.
+pub(crate) async fn yield_ready() {
+    let mut yielded = false;
+    futures::future::poll_fn(move |cx| {
+        if std::mem::replace(&mut yielded, true) {
+            std::task::Poll::Ready(())
+        } else {
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
 /// The inputs after the head's, if any follow: read once, and their input
 /// filters. A plugin's [`wrap`](crate::ClientContext::wrap) puts a new one
 /// in front, whose events wrap the one `before` it.
@@ -92,8 +108,6 @@ pub(crate) struct Later {
     events: Mutex<Option<AnyEvents>>,
     /// Whether a reader read an input.
     read: AtomicBool,
-    /// Whether none follow the head.
-    pub(crate) ended: bool,
     pub(crate) filters: Layer,
     before: Option<Arc<Later>>,
 }
@@ -101,7 +115,6 @@ pub(crate) struct Later {
 impl Later {
     pub(crate) fn new(events: Option<AnyEvents>) -> Self {
         Self {
-            ended: events.is_none(),
             events: Mutex::new(events),
             read: AtomicBool::new(false),
             filters: Layer::default(),
@@ -277,6 +290,7 @@ pub(crate) struct Outgoing {
     relayed: bool,
     ready: VecDeque<Result<Values>>,
     done: bool,
+    batches: usize,
     /// An unread end discarded by the writer waits for its delivery result.
     discarded: Arc<Mutex<Vec<Batch>>>,
 }
@@ -297,6 +311,7 @@ impl Outgoing {
             relayed,
             ready,
             done,
+            batches: 0,
             discarded,
         }
     }
@@ -321,6 +336,16 @@ impl Outgoing {
                 self.ready.push_back(Err(fault));
                 self.done = true;
             }
+            self.batches += 1;
+            // Source::next never suspends after consuming a batch: borrowed
+            // response inspection can be canceled without losing it. Yield
+            // here instead, once the outgoing edge owns the buffered batch.
+            if !self.done
+                && (matches!(self.source, Source::EventStream { .. })
+                    || self.batches.is_multiple_of(128))
+            {
+                yield_ready().await;
+            }
         }
     }
 
@@ -329,7 +354,7 @@ impl Outgoing {
     async fn step(&mut self) {
         let mut batch = match self.ahead.pop_front() {
             Some(batch) => batch,
-            None => self.source.next().await.0,
+            None => self.source.next().await,
         };
         batch.read();
         let mut end = batch.end.take();
@@ -371,7 +396,7 @@ impl Drop for Outgoing {
             None => {
                 let next = AssertUnwindSafe(|| self.source.next().now_or_never());
                 match std::panic::catch_unwind(next) {
-                    Ok(Some((batch, _))) => batch,
+                    Ok(Some(batch)) => batch,
                     _ => return,
                 }
             }

@@ -7,11 +7,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use respan_gateway_examples::store::{Database, rusqlite::OptionalExtension, sql};
-use respan_gateway_http::{
-    Codec,
-    bytes::{Bytes, BytesMut},
-    fresh_request_head, fresh_response_head,
-};
+use respan_gateway_http::{bytes::Bytes, fresh_request_head, fresh_response_head};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS idempotency (
     key TEXT PRIMARY KEY, owner TEXT NOT NULL, lease INTEGER NOT NULL, result BLOB
@@ -50,18 +46,15 @@ fn key(key: &Key) -> Result<String, Fault> {
 }
 
 // Persist the format's encoding rather than teaching canonical events a
-// second serialization schema. Replay uses the same codec to decode it.
+// second serialization schema. Replay uses the same format to decode it.
 fn encode(replies: &[Reply]) -> Result<Vec<u8>, Fault> {
     let head = fresh_request_head();
     let request = Bytes::from_static(br#"{"stream":true}"#);
-    let mut encoder = OpenAiChat.response_encoder(None, &head, &request);
-    encoder.head(replies.first());
-    let mut bytes = BytesMut::new();
-    for reply in replies {
-        encoder.encode(reply, &mut bytes)?;
-    }
-    encoder.end(&Ok(()), &mut bytes)?;
-    Ok(bytes.to_vec())
+    let request = http::Request::from_parts(head, request);
+    Ok(OpenAiChat
+        .encode_response(&request, replies)?
+        .into_body()
+        .to_vec())
 }
 
 fn decode(bytes: Vec<u8>) -> Result<Replies, Fault> {
@@ -70,12 +63,10 @@ fn decode(bytes: Vec<u8>) -> Result<Replies, Fault> {
         http::header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
-    let request = Bytes::from_static(br#"{"stream":true}"#);
-    let mut decoder = OpenAiChat.response_decoder(&head, &fresh_request_head(), &request);
-    let mut replies = Vec::new();
-    decoder.decode(bytes.into(), &mut replies)?;
-    decoder.end(&mut replies)?;
-    Ok(Arc::new(replies))
+    let response = http::Response::from_parts(head, Bytes::from(bytes));
+    Ok(Arc::new(
+        OpenAiChat.decode_response(response, &fresh_request_head())?,
+    ))
 }
 
 #[async_trait]

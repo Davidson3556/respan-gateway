@@ -34,7 +34,8 @@ use crate::{ClientContext, Fault, ProviderContext, Response, Result};
 ///     let won = Won::default();
 ///     let call = cx.call(provider).with_extension(won.clone());
 ///     Box::pin(async move {
-///         let resp = call.await?.buffer_until(|_: &Reply| true).await?;
+///         let mut resp = call.await?;
+///         resp.buffer_until(|_: &Reply| true).await?;
 ///         won.0.store(true, Ordering::Relaxed);
 ///         Ok::<_, Fault>(resp)
 ///     })

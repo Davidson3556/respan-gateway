@@ -2,27 +2,6 @@ use super::*;
 use std::time::Duration;
 
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_http::{Exchange, RequestHead, ResponseHead};
-
-/// Answers after `.1`: a provider that takes its time.
-struct Slow<T>(T, Duration);
-
-impl Slow<Transport> {
-    pub async fn send(&self, call: Exchange<RequestHead>) -> Result<Exchange<ResponseHead>, Fault> {
-        tokio::time::sleep(self.1).await;
-        self.0.send(call).await
-    }
-}
-impl<T: Into<Transport>> From<Slow<T>> for respan_gateway_http::Transport {
-    fn from(value: Slow<T>) -> Self {
-        let value = std::sync::Arc::new(Slow(value.0.into(), value.1));
-        Self::new(move |call| {
-            let value = value.clone();
-            async move { value.send(call).await }
-        })
-    }
-}
-
 /// Notes, for each request that reaches it, whether it has a credential.
 /// Registered after `jobs`, it sees only what `jobs` lets through.
 #[derive(Clone, Default)]
@@ -41,10 +20,21 @@ impl Plugin for Seen {
 }
 
 /// A gateway whose west provider takes a minute, with `Seen` after `jobs`.
-fn slow_west(mock: &MockTransport, seen: &Seen) -> Result<Gateway, Fault> {
+fn slow_west(
+    east: &ResponsesServer,
+    west: &ResponsesServer,
+    seen: &Seen,
+) -> Result<Gateway, Fault> {
     let jobs = Jobs::default();
-    let west = Slow(mock.at(WEST), Duration::from_secs(60));
-    gateway(mock.at(EAST), west, &jobs)?.plugin("seen", seen.clone())
+    let backend = west.transport()?;
+    let slow = respan_gateway_http::connect(move |request| {
+        let backend = backend.clone();
+        async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            backend.send(request).await
+        }
+    });
+    gateway(east.transport()?.connect(), slow, &jobs)?.plugin("seen", seen.clone())
 }
 
 fn get(id: &str) -> http::Request<Body> {
@@ -53,10 +43,11 @@ fn get(id: &str) -> http::Request<Body> {
 
 #[tokio::test(start_paused = true)]
 async fn a_background_job_outlives_its_client_and_is_polled_later() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
     let done = r#"{"id":"native-1","output":"done"}"#;
-    mock.reply(WEST, mock::json(StatusCode::OK, done));
-    let gateway = slow_west(&mock, &seen)?;
+    west.answer(StatusCode::OK, done);
+    let gateway = slow_west(&east, &west, &seen)?;
 
     let queued = send(
         &gateway,
@@ -78,9 +69,9 @@ async fn a_background_job_outlives_its_client_and_is_polled_later() -> Result<()
     // One call, with the tenant's key, and from the re-entered run only
     // (the job's body says `background`, and is not started as a job again):
     // the later plugin never saw the client's request, `jobs` answered it.
-    let sent = mock.sent();
+    let sent = west.requests();
     assert_eq!(sent.len(), 1, "a poll is answered from the store");
-    assert_eq!(sent[0].headers()["authorization"], "Bearer tenant-key");
+    assert_eq!(sent[0].headers["authorization"], "Bearer tenant-key");
     assert_eq!(
         *seen.0.lock().unwrap_or_else(PoisonError::into_inner),
         [true]
@@ -90,12 +81,10 @@ async fn a_background_job_outlives_its_client_and_is_polled_later() -> Result<()
 
 #[tokio::test(start_paused = true)]
 async fn a_job_that_fails_is_polled_as_failed() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
-    mock.reply(
-        WEST,
-        mock::json(StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":"boom"}"#),
-    );
-    let gateway = slow_west(&mock, &seen)?;
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
+    west.answer(StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":"boom"}"#);
+    let gateway = slow_west(&east, &west, &seen)?;
 
     let queued = send(
         &gateway,
@@ -112,11 +101,12 @@ async fn a_job_that_fails_is_polled_as_failed() -> Result<(), Fault> {
 #[tokio::test(start_paused = true)]
 async fn a_signed_id_routes_a_later_get_to_its_deployment_with_the_native_id() -> Result<(), Fault>
 {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
     let reply = |status| format!(r#"{{"id":"native-77","status":"{status}"}}"#);
-    mock.reply(WEST, mock::json(StatusCode::OK, &reply("in_progress")));
-    mock.reply(WEST, mock::json(StatusCode::OK, &reply("completed")));
-    let gateway = slow_west(&mock, &seen)?;
+    west.answer(StatusCode::OK, &reply("in_progress"));
+    west.answer(StatusCode::OK, &reply("completed"));
+    let gateway = slow_west(&east, &west, &seen)?;
 
     let relayed = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
     let id = relayed["id"].as_str().unwrap_or_default();
@@ -126,20 +116,18 @@ async fn a_signed_id_routes_a_later_get_to_its_deployment_with_the_native_id() -
     );
     assert_eq!(send(&gateway, get(id)).await?["status"], "completed");
 
-    let sent = mock.sent();
-    assert_eq!(sent[1].method(), Method::GET);
-    assert_eq!(
-        sent[1].uri().to_string(),
-        "http://west.test/v1/responses/native-77"
-    );
+    let sent = west.requests();
+    assert_eq!(sent[1].method, Method::GET);
+    assert_eq!(sent[1].uri.to_string(), "/v1/responses/native-77");
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_forged_id_is_refused_before_any_call() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
-    mock.reply(WEST, mock::json(StatusCode::OK, r#"{"id":"native-1"}"#));
-    let gateway = slow_west(&mock, &seen)?;
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
+    west.answer(StatusCode::OK, r#"{"id":"native-1"}"#);
+    let gateway = slow_west(&east, &west, &seen)?;
     let relayed = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
     let id = relayed["id"].as_str().unwrap_or_default();
 
@@ -149,14 +137,22 @@ async fn a_forged_id_is_refused_before_any_call() -> Result<(), Fault> {
         let (status, ..) = read_whole(serve(&gateway, get(forged)).await.0).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{forged}");
     }
-    assert_eq!(mock.sent().len(), 1, "no call for a forged id");
+    assert_eq!(west.requests().len(), 1, "no call for a forged id");
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn malformed_unicode_ids_are_refused_before_any_call() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let (east, west) = deployments().await?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &Jobs::default(),
+    )?;
     // The signed-id byte length is valid, but either numeric slice would
     // end inside a multibyte character.
     for forged in [
@@ -168,42 +164,45 @@ async fn malformed_unicode_ids_are_refused_before_any_call() -> Result<(), Fault
         let (status, ..) = read_whole(serve(&gateway, req).await.0).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{forged}");
     }
-    assert!(mock.sent().is_empty());
+    assert!(west.requests().is_empty());
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn response_json_split_across_frames_is_mapped_whole() -> Result<(), Fault> {
-    use respan_gateway_core::futures::StreamExt;
+    use respan_gateway_sdk::futures::StreamExt;
 
-    let mock = MockTransport::new();
-    mock.reply(
-        WEST,
-        mock::json(StatusCode::OK, r#"{"id":"native-1","status":"completed"}"#),
-    );
-    let west: Transport = mock.at(WEST).into();
-    let split = Transport::new(move |call| {
-        let west = west.clone();
+    let (east, west) = deployments().await?;
+    west.answer(StatusCode::OK, r#"{"id":"native-1","status":"completed"}"#);
+    let west_http = west.transport()?;
+    let split = respan_gateway_http::connect(move |call| {
+        let west = west_http.clone();
         async move {
-            let mut response = west.send(call).await?;
-            response.body = response
-                .body
-                .flat_map(|frame| {
-                    let pieces = match frame {
-                        Ok(bytes) => bytes
-                            .iter()
-                            .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
-                            .collect(),
-                        Err(fault) => vec![Err(fault)],
-                    };
-                    stream::iter(pieces)
-                })
-                .boxed();
-            Ok(response)
+            let (response, completion) = west.send(call).await?;
+            let response = response.map(|body| {
+                respan_gateway_http::into_http_body(
+                    body.flat_map(|frame| {
+                        let pieces = match frame {
+                            Ok(bytes) => bytes
+                                .iter()
+                                .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
+                                .collect(),
+                            Err(fault) => vec![Err(fault)],
+                        };
+                        stream::iter(pieces)
+                    })
+                    .boxed(),
+                )
+            });
+            Ok((response, completion))
         }
     });
     let jobs = Jobs::default();
-    let gateway = gateway(mock.at(EAST), split, &jobs)?;
+    let gateway = gateway(east.transport()?.connect(), split, &jobs)?;
     let body = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
     let id = body["id"].as_str().unwrap_or_default();
     assert!(id.starts_with("resp_"), "{body}");
@@ -212,7 +211,7 @@ async fn response_json_split_across_frames_is_mapped_whole() -> Result<(), Fault
 
     // A bodyless response stays bodyless; buffering must not synthesize
     // an empty JSON event for the mapping filter.
-    mock.reply(WEST, mock::json(StatusCode::NO_CONTENT, ""));
+    west.answer(StatusCode::NO_CONTENT, "");
     let req = request("DELETE", &format!("/v1/responses/{id}"), "");
     let (status, _, body) = read_whole(serve(&gateway, req).await.0).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -229,11 +228,12 @@ fn as_other(mut req: http::Request<Body>) -> http::Request<Body> {
 
 #[tokio::test(start_paused = true)]
 async fn an_id_is_only_good_for_the_tenant_it_was_issued_to() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
     let done = r#"{"id":"native-1","output":"secret"}"#;
-    mock.reply(WEST, mock::json(StatusCode::OK, done));
-    mock.reply(WEST, mock::json(StatusCode::OK, r#"{"id":"native-2"}"#));
-    let gateway = slow_west(&mock, &seen)?;
+    west.answer(StatusCode::OK, done);
+    west.answer(StatusCode::OK, r#"{"id":"native-2"}"#);
+    let gateway = slow_west(&east, &west, &seen)?;
     let job = request("POST", "/v1/responses", r#"{"background":true}"#);
     let job = send(&gateway, job).await?;
     let relayed = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
@@ -244,33 +244,43 @@ async fn an_id_is_only_good_for_the_tenant_it_was_issued_to() -> Result<(), Faul
         let (status, ..) = read_whole(serve(&gateway, as_other(get(id))).await.0).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
     }
-    assert_eq!(mock.sent().len(), 2, "no call for another tenant's id");
+    assert_eq!(west.requests().len(), 2, "no call for another tenant's id");
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_zero_retention_tenant_is_refused_background_mode() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
-    let gateway = slow_west(&mock, &seen)?;
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
+    let gateway = slow_west(&east, &west, &seen)?;
     let mut req = request("POST", "/v1/responses", r#"{"background":true}"#);
-    let mut values = respan_gateway_core::Extensions::new();
+    let mut values = respan_gateway_sdk::Extensions::new();
     values.insert(NoContent);
     req.extensions_mut().insert(values);
     let (status, ..) = read_whole(serve(&gateway, req).await.0).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     gateway.idle().await;
-    assert!(mock.sent().is_empty(), "no job ran");
+    assert!(west.requests().is_empty(), "no job ran");
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
 // A poll of a response that was relayed, not a job, shows the signed id too.
 #[tokio::test(start_paused = true)]
 async fn a_poll_of_a_relayed_response_shows_the_signed_id() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
     let reply = |status| format!(r#"{{"id":"native-77","status":"{status}"}}"#);
-    mock.reply(WEST, mock::json(StatusCode::OK, &reply("in_progress")));
-    mock.reply(WEST, mock::json(StatusCode::OK, &reply("completed")));
-    let gateway = slow_west(&mock, &seen)?;
+    west.answer(StatusCode::OK, &reply("in_progress"));
+    west.answer(StatusCode::OK, &reply("completed"));
+    let gateway = slow_west(&east, &west, &seen)?;
     let relayed = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
     let id = relayed["id"].as_str().unwrap_or_default();
     assert_ne!(id, "native-77");
@@ -278,17 +288,18 @@ async fn a_poll_of_a_relayed_response_shows_the_signed_id() -> Result<(), Fault>
     assert_eq!(polled["id"], id);
     assert_eq!(polled["status"], "completed");
     // The provider was asked for its own id.
-    assert_eq!(mock.sent()[1].uri().path(), "/v1/responses/native-77");
+    assert_eq!(west.requests()[1].uri.path(), "/v1/responses/native-77");
     Ok(())
 }
 
 // Tenants are told apart by every credential they send, `x-api-key` included.
 #[tokio::test(start_paused = true)]
 async fn tenants_with_other_credential_headers_do_not_share_ids() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
     let body = r#"{"id":"native-1","output":"secret"}"#;
-    mock.reply(WEST, mock::json(StatusCode::OK, body));
-    let gateway = slow_west(&mock, &seen)?;
+    west.answer(StatusCode::OK, body);
+    let gateway = slow_west(&east, &west, &seen)?;
     let with_key = |key: &str, mut req: http::Request<Body>| {
         req.headers_mut().remove("authorization");
         req.headers_mut()
@@ -307,22 +318,23 @@ async fn tenants_with_other_credential_headers_do_not_share_ids() -> Result<(), 
 }
 
 /// The body of the `n`th request that reached a provider.
-fn body_of(mock: &MockTransport, n: usize) -> Value {
-    serde_json::from_slice(mock.sent()[n].body()).unwrap_or_default()
+fn body_of(west: &ResponsesServer, n: usize) -> Value {
+    serde_json::from_slice(&west.requests()[n].body).unwrap_or_default()
 }
 
 // The job's own run is a plain foreground request: a provider that honours
 // `background` would answer `queued`, and the job would never finish.
 #[tokio::test(start_paused = true)]
 async fn a_jobs_own_run_is_not_a_background_request() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
     let done = r#"{"id":"native-1","status":"completed","output":"done"}"#;
-    mock.reply(WEST, mock::json(StatusCode::OK, done));
-    let gateway = slow_west(&mock, &seen)?;
+    west.answer(StatusCode::OK, done);
+    let gateway = slow_west(&east, &west, &seen)?;
     let post = r#"{"background":true,"input":"hi"}"#;
     let job = send(&gateway, request("POST", "/v1/responses", post)).await?;
     gateway.idle().await;
-    let sent = body_of(&mock, 0);
+    let sent = body_of(&west, 0);
     assert_eq!(
         sent,
         json!({ "input": "hi", "max_output_tokens": 1024 }),
@@ -338,12 +350,13 @@ async fn a_jobs_own_run_is_not_a_background_request() -> Result<(), Fault> {
 // a finished job; the id of another tenant's, or a forged one, is a 404.
 #[tokio::test(start_paused = true)]
 async fn a_previous_response_id_reaches_the_provider_as_its_own() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
     for n in 1..=4 {
         let reply = format!(r#"{{"id":"native-{n}"}}"#);
-        mock.reply(WEST, mock::json(StatusCode::OK, &reply));
+        west.answer(StatusCode::OK, &reply);
     }
-    let gateway = slow_west(&mock, &seen)?;
+    let gateway = slow_west(&east, &west, &seen)?;
     let first = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
     let chain = |id: &Value| json!({ "previous_response_id": id, "input": "more" }).to_string();
     let second = send(
@@ -351,8 +364,8 @@ async fn a_previous_response_id_reaches_the_provider_as_its_own() -> Result<(), 
         request("POST", "/v1/responses", &chain(&first["id"])),
     )
     .await?;
-    assert_eq!(body_of(&mock, 1)["previous_response_id"], "native-1");
-    assert_eq!(body_of(&mock, 1)["input"], "more");
+    assert_eq!(body_of(&west, 1)["previous_response_id"], "native-1");
+    assert_eq!(body_of(&west, 1)["input"], "more");
     assert_ne!(second["id"], "native-2", "the client sees a signed id");
 
     // A finished job can be chained on too, after its provider id is known.
@@ -361,7 +374,7 @@ async fn a_previous_response_id_reaches_the_provider_as_its_own() -> Result<(), 
     gateway.idle().await;
     let third = request("POST", "/v1/responses", &chain(&job["id"]));
     send(&gateway, third).await?;
-    assert_eq!(body_of(&mock, 3)["previous_response_id"], "native-3");
+    assert_eq!(body_of(&west, 3)["previous_response_id"], "native-3");
 
     for forged in [json!("resp_1deadbeef"), first["id"].clone()] {
         let req = request("POST", "/v1/responses", &chain(&forged));
@@ -373,7 +386,11 @@ async fn a_previous_response_id_reaches_the_provider_as_its_own() -> Result<(), 
         let (status, ..) = read_whole(serve(&gateway, req).await.0).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{forged}");
     }
-    assert_eq!(mock.sent().len(), 4, "no call for a refused id");
+    assert_eq!(west.requests().len(), 4, "no call for a refused id");
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
@@ -381,16 +398,17 @@ async fn a_previous_response_id_reaches_the_provider_as_its_own() -> Result<(), 
 // with its own id; the answer says the signed one.
 #[tokio::test(start_paused = true)]
 async fn the_paths_under_a_signed_id_reach_the_provider_with_its_own() -> Result<(), Fault> {
-    let (mock, seen) = (MockTransport::new(), Seen::default());
-    mock.reply(WEST, mock::json(StatusCode::OK, r#"{"id":"native-9"}"#));
+    let (east, west) = deployments().await?;
+    let seen = Seen::default();
+    west.answer(StatusCode::OK, r#"{"id":"native-9"}"#);
     for reply in [
         r#"{"id":"native-9","status":"cancelled"}"#,
         r#"{"object":"list","data":[]}"#,
         r#"{"id":"native-9","deleted":true}"#,
     ] {
-        mock.reply(WEST, mock::json(StatusCode::OK, reply));
+        west.answer(StatusCode::OK, reply);
     }
-    let gateway = slow_west(&mock, &seen)?;
+    let gateway = slow_west(&east, &west, &seen)?;
     let first = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
     let id = first["id"].as_str().unwrap_or_default();
 
@@ -408,21 +426,21 @@ async fn the_paths_under_a_signed_id_reach_the_provider_with_its_own() -> Result
     .await?;
     assert_eq!(deleted["id"], first["id"]);
 
-    let sent = mock.sent();
+    let sent = west.requests();
     let seen: Vec<(String, String)> = sent[1..]
         .iter()
-        .map(|r| (r.method().to_string(), r.uri().to_string()))
+        .map(|r| (r.method.to_string(), r.uri.to_string()))
         .collect();
-    let west = |path: &str| format!("http://west.test{path}");
+    let west_path = str::to_owned;
     assert_eq!(
         seen,
         [
-            ("POST".into(), west("/v1/responses/native-9/cancel")),
+            ("POST".into(), west_path("/v1/responses/native-9/cancel")),
             (
                 "GET".into(),
-                west("/v1/responses/native-9/input_items?limit=5")
+                west_path("/v1/responses/native-9/input_items?limit=5")
             ),
-            ("DELETE".into(), west("/v1/responses/native-9")),
+            ("DELETE".into(), west_path("/v1/responses/native-9")),
         ]
     );
 
@@ -455,11 +473,15 @@ async fn the_paths_under_a_signed_id_reach_the_provider_with_its_own() -> Result
 async fn l5_idle_waits_for_a_background_job_on_a_multi_threaded_runtime() -> Result<(), Fault> {
     let mut early = 0;
     for _ in 0..200 {
-        let mock = MockTransport::new();
+        let (east, west) = deployments().await?;
         let done = r#"{"id":"native-1","output":"done"}"#;
-        mock.reply(WEST, mock::json(StatusCode::OK, done));
+        west.answer(StatusCode::OK, done);
         let jobs = Jobs::default();
-        let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+        let gateway = gateway(
+            east.transport()?.connect(),
+            west.transport()?.connect(),
+            &jobs,
+        )?;
         let queued = send(
             &gateway,
             request("POST", "/v1/responses", r#"{"background":true}"#),
@@ -482,8 +504,12 @@ async fn l5_idle_waits_for_a_background_job_on_a_multi_threaded_runtime() -> Res
 /// background post, and on a poll.
 #[tokio::test(start_paused = true)]
 async fn a_streamed_request_is_refused_before_any_call() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let (east, west) = deployments().await?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &Jobs::default(),
+    )?;
     let requests = [
         request("POST", "/v1/responses", r#"{"stream":true,"input":"hi"}"#),
         request(
@@ -499,7 +525,11 @@ async fn a_streamed_request_is_refused_before_any_call() -> Result<(), Fault> {
         let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
         assert!(body.contains("streaming is not supported"), "{body}");
     }
-    assert!(mock.sent().is_empty());
+    assert!(west.requests().is_empty());
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
@@ -507,16 +537,17 @@ async fn a_streamed_request_is_refused_before_any_call() -> Result<(), Fault> {
 /// the signed id it sent, never the provider's.
 #[tokio::test(start_paused = true)]
 async fn an_echoed_previous_response_id_is_signed_too() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(WEST, mock::json(StatusCode::OK, r#"{"id":"native-1"}"#));
-    mock.reply(
-        WEST,
-        mock::json(
-            StatusCode::OK,
-            r#"{"id":"native-2","previous_response_id":"native-1"}"#,
-        ),
+    let (east, west) = deployments().await?;
+    west.answer(StatusCode::OK, r#"{"id":"native-1"}"#);
+    west.answer(
+        StatusCode::OK,
+        r#"{"id":"native-2","previous_response_id":"native-1"}"#,
     );
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &Jobs::default(),
+    )?;
     let first = send(&gateway, request("POST", "/v1/responses", "{}")).await?;
     let chained = json!({ "previous_response_id": first["id"], "input": "more" }).to_string();
     let second = send(&gateway, request("POST", "/v1/responses", &chained)).await?;
@@ -529,30 +560,39 @@ async fn an_echoed_previous_response_id_is_signed_too() -> Result<(), Fault> {
 /// default deployment.
 #[tokio::test(start_paused = true)]
 async fn an_endpoint_under_the_prefix_that_is_not_an_id_passes_through() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let (east, west) = deployments().await?;
     let counted = r#"{"object":"response.input_tokens","input_tokens":3}"#;
-    mock.reply(WEST, mock::json(StatusCode::OK, counted));
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    west.answer(StatusCode::OK, counted);
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &Jobs::default(),
+    )?;
     let req = request("POST", "/v1/responses/input_tokens", r#"{"input":"hi"}"#);
     let answer = send(&gateway, req).await?;
     assert_eq!(answer["input_tokens"], 3);
-    assert_eq!(mock.sent().len(), 1);
+    assert_eq!(west.requests().len(), 1);
+    assert!(
+        east.requests().is_empty(),
+        "no requests to the east deployment"
+    );
     Ok(())
 }
 
 /// Whatever else lies under the prefix (`compact`) is the provider's too.
 #[tokio::test(start_paused = true)]
 async fn any_path_under_the_prefix_that_is_not_ours_passes_through() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(
-        WEST,
-        mock::json(StatusCode::OK, r#"{"object":"response.compaction"}"#),
-    );
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let (east, west) = deployments().await?;
+    west.answer(StatusCode::OK, r#"{"object":"response.compaction"}"#);
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &Jobs::default(),
+    )?;
     let req = request("POST", "/v1/responses/compact", r#"{"input":"hi"}"#);
     let answer = send(&gateway, req).await?;
     assert_eq!(answer["object"], "response.compaction");
-    assert_eq!(mock.sent()[0].uri().path(), "/v1/responses/compact");
+    assert_eq!(west.requests()[0].uri.path(), "/v1/responses/compact");
     Ok(())
 }
 
@@ -569,13 +609,17 @@ async fn an_echoed_id_is_mapped_back_within_its_own_tenant() -> Result<(), Fault
             .body(full(body.to_owned()))
             .expect("a request")
     };
-    let mock = MockTransport::new();
+    let (east, west) = deployments().await?;
     let same = r#"{"id":"native-1"}"#;
     let echo = r#"{"id":"native-2","previous_response_id":"native-1"}"#;
     for body in [same, same, echo] {
-        mock.reply(WEST, mock::json(StatusCode::OK, body));
+        west.answer(StatusCode::OK, body);
     }
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &Jobs::default())?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &Jobs::default(),
+    )?;
     let _a = send(&gateway, as_tenant("tenant-a", "{}")).await?;
     let b = send(&gateway, as_tenant("tenant-b", "{}")).await?;
     let chained = json!({ "previous_response_id": b["id"] }).to_string();

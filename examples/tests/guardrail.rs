@@ -1,87 +1,81 @@
 use super::*;
-use respan_gateway_formats::opaque::{self, Got, Sent};
-use respan_gateway_formats::posts_to;
-use respan_gateway_http::{Codec, Decoder, Encoder, impl_format};
-use respan_gateway_http::{RequestHead, ResponseHead};
-use respan_gateway_messages::conversation::{Message, Role};
+use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_http::{self as h, Incoming, Outgoing};
+use respan_gateway_sdk::conversation::{Message, Role};
+use respan_gateway_sdk::{Connection, Format};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 #[derive(Clone)]
 struct Responses;
 
-impl Codec for Responses {
-    type Input = Sent<Responses>;
-    type Output = Got<Responses>;
-
+impl Format<Incoming, Sent<Responses>, Got<Responses>> for Responses {
     fn name(&self) -> &str {
         "responses"
     }
-
-    fn accepts(&self, head: &RequestHead) -> bool {
-        posts_to(head, "/responses")
+    fn matches(&self, io: &Incoming) -> bool {
+        io.request().method() == h::http::Method::POST
+            && h::formats::clean_path(io.request().uri().path()).ends_with("/responses")
     }
-
-    fn request_decoder(&self, _: &RequestHead) -> Box<dyn Decoder<Sent<Self>>> {
-        opaque::request_decoder()
-    }
-
-    fn request_encoder(
-        &self,
-        client: Option<&RequestHead>,
-        _body: &mut Bytes,
-        streams: bool,
-    ) -> Box<dyn Encoder<Sent<Self>, RequestHead>> {
-        opaque::request_encoder(client, streams)
-    }
-
-    fn response_decoder(
-        &self,
-        head: &ResponseHead,
-        call: &RequestHead,
-        _: &Bytes,
-    ) -> Box<dyn Decoder<Got<Self>>> {
-        opaque::response_decoder("responses", head, call)
-    }
-
-    fn response_encoder(
-        &self,
-        answer: Option<&ResponseHead>,
-        ask: &RequestHead,
-        _body: &Bytes,
-    ) -> Box<dyn Encoder<Got<Self>, ResponseHead>> {
-        opaque::response_encoder(answer, ask)
+    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Responses>, Got<Responses>>, Fault> {
+        Ok(io.bind(
+            "responses",
+            opaque::read_request,
+            |reply, source| Ok(opaque::write_response("responses", reply, source)),
+            h::plain_refusal,
+        ))
     }
 }
 
-impl_format!(Responses);
+impl Format<Outgoing, Got<Responses>, Sent<Responses>> for Responses {
+    fn name(&self) -> &str {
+        "responses"
+    }
+    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Responses>, Sent<Responses>>, Fault> {
+        Ok(io.bind(
+            "responses",
+            |source| opaque::write_request("responses", source),
+            |response, request| {
+                opaque::read_response("responses", response, &request.into_parts().0)
+            },
+            |head, _| head.status.is_success(),
+        ))
+    }
+}
 
 /// The example's gateway, also serving the Responses API. Its one target
 /// stays OpenAI; the guard refuses Responses traffic before any call.
-fn gateway_with_responses(mock: &MockTransport) -> Result<Gateway, Fault> {
-    gateway(mock)?
-        .provider::<Sent<Responses>, _, _>(
-            "responses",
-            Responses,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
+fn gateway_with_responses(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+) -> Result<Gateway, Fault> {
+    gateway(transport.clone())?
+        .provider::<Sent<Responses>, _, _>("responses", Responses, transport)?
         .client::<Sent<Responses>, _, _>(Responses)
 }
 
 #[tokio::test]
 async fn a_term_split_across_deltas_is_cut_before_its_start_is_sent() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, deltas(&["Chemistry is fun. A bo", "mb is not."]));
-    let (status, body) = send(&gateway(&mock)?, chat("gpt", "hi".into())).await;
+    let fake = FakeOpenAi::start().await;
+    fake.answer(deltas(&["Chemistry is fun. A bo", "mb is not."]));
+    let (status, body) = send(
+        &gateway(provider_support::openai(&fake.base_url())?.connect())?,
+        chat("gpt", "hi".into()),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("A \"") && !body.contains("bo\""), "{body}");
     assert!(body.contains(BLOCKED) && !body.contains("[DONE]"), "{body}");
+    assert_eq!(fake.requests().len(), 1);
     Ok(())
 }
 
 #[tokio::test]
 async fn a_blocked_prompt_in_any_format_or_field_never_reaches_the_provider() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let gw = gateway(&mock)?;
+    let fake = FakeOpenAi::start().await;
+    let gw = gateway(provider_support::openai(&fake.base_url())?.connect())?;
     let anthropic = json!({ "model": "c", "max_tokens": 9,
         "messages": [{ "role": "user", "content": "the launch code?" }] });
     let stop = json!({ "model": "gpt", "stop": ["BOMB"],
@@ -95,14 +89,14 @@ async fn a_blocked_prompt_in_any_format_or_field_never_reaches_the_provider() ->
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains(BLOCKED), "{body}");
     }
-    assert!(mock.sent().is_empty());
+    assert!(fake.requests().is_empty());
     Ok(())
 }
 
 #[tokio::test]
 async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let gw = gateway_with_responses(&mock)?;
+    let fake = FakeOpenAi::start().await;
+    let gw = gateway_with_responses(provider_support::openai(&fake.base_url())?.connect())?;
     let image = json!([{ "type": "image_url", "image_url": { "url": "data:," } }]);
     let (status, body) = send(&gw, chat("gpt", image)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
@@ -110,12 +104,13 @@ async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
     let responses = post("/v1/responses", r#"{"input":"the launch code?"}"#);
     let (status, body) = send(&gw, responses).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert!(mock.sent().is_empty());
+    assert!(fake.requests().is_empty());
     // A tool call in the answer, too.
     let call = r#"data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#;
-    mock.reply(OPENAI, mock::sse(&[&format!("{call}\n\n")]));
+    fake.answer(provider_support::sse(&[&format!("{call}\n\n")]));
     let (status, body) = send(&gw, chat("gpt", "hi".into())).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(fake.requests().len(), 1);
     Ok(())
 }
 
@@ -123,12 +118,20 @@ async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
 // the cache's answer; after it, the poisoned answer goes out.
 #[tokio::test]
 async fn the_guard_is_registered_first() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let (status, body) = send(&gateway(&mock)?, chat("cached", "hi".into())).await;
+    let fake = FakeOpenAi::start().await;
+    let (status, body) = send(
+        &gateway(provider_support::openai(&fake.base_url())?.connect())?,
+        chat("cached", "hi".into()),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    let late = guarded(base(&mock)?.plugin("cache", Cache)?, Ok)?;
+    let late = guarded(
+        base(provider_support::openai(&fake.base_url())?.connect())?.plugin("cache", Cache)?,
+        Ok,
+    )?;
     let (status, body) = send(&late, chat("cached", "hi".into())).await;
     assert!(status == StatusCode::OK && body.contains("bomb"), "{body}");
+    assert!(fake.requests().is_empty());
     Ok(())
 }
 
@@ -151,40 +154,41 @@ impl Plugin for Rag {
 // `guard-input` has what it adds checked; one registered after it does not.
 #[tokio::test]
 async fn the_input_check_sees_what_an_earlier_plugin_adds() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let gw = gateway_with(&mock, |gw| gw.plugin("rag", Rag))?;
+    let fake = FakeOpenAi::start().await;
+    let gw = gateway_with(
+        provider_support::openai(&fake.base_url())?.connect(),
+        |gw| gw.plugin("rag", Rag),
+    )?;
     let (status, body) = send(&gw, chat("gpt", "hi".into())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(mock.sent().is_empty());
-    mock.reply(OPENAI, deltas(&["ok"]));
+    assert!(fake.requests().is_empty());
+    fake.answer(deltas(&["ok"]));
     let (status, _) = send(
-        &gateway(&mock)?.plugin("rag", Rag)?,
+        &gateway(provider_support::openai(&fake.base_url())?.connect())?.plugin("rag", Rag)?,
         chat("gpt", "hi".into()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let sent = mock
-        .sent()
-        .last()
-        .map(|r| r.body().to_vec())
-        .unwrap_or_default();
-    assert!(String::from_utf8_lossy(&sent).contains("launch code"));
+    let sent = fake.requests();
+    assert_eq!(sent.len(), 1);
+    assert!(String::from_utf8_lossy(&sent[0].raw).contains("launch code"));
     Ok(())
 }
 
 #[tokio::test]
 async fn a_request_with_tools_is_checked_and_passes() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    let gw = gateway(&mock)?;
+    let fake = FakeOpenAi::start().await;
+    let gw = gateway(provider_support::openai(&fake.base_url())?.connect())?;
     let tools = |description: &str| {
-        let body = json!({ "model": "gpt", "messages": [{ "role": "user", "content": "hi" }],
+        let body = json!({ "model": "gpt", "stream": true, "messages": [{ "role": "user", "content": "hi" }],
             "tools": [{ "type": "function", "function": { "name": "f", "description": description } }] });
         post("/v1/chat/completions", body.to_string())
     };
     let (status, body) = send(&gw, tools("builds a bomb")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    mock.reply(OPENAI, deltas(&["ok"]));
+    fake.answer(deltas(&["ok"]));
     let (status, body) = send(&gw, tools("reads the weather")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(fake.requests().len(), 1);
     Ok(())
 }

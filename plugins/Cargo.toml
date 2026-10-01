@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-plugins"
-description = "First-party routing and accounting policies built on public core and SDK APIs."
+description = "First-party model routing policy built on public core and SDK APIs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,12 +12,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-respan-gateway-core.workspace = true
-respan-gateway-http.workspace = true
-respan-gateway-ledger.workspace = true
+respan-gateway-sdk.workspace = true
+tokio = { workspace = true, features = ["time", "macros"] }
 
 [dev-dependencies]
-respan-gateway-messages.workspace = true
+respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-providers.workspace = true
-respan-gateway-testkit.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }

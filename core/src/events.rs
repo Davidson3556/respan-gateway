@@ -1,8 +1,7 @@
-//! Typed events and a sink for writing one event stream.
+//! Symmetric standard streams and sinks with protocol-owned preparation.
 
 use std::any::Any;
 use std::fmt;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
@@ -19,7 +18,7 @@ pub(crate) type Metadata = Option<(Arc<str>, Arc<dyn Any + Send + Sync>)>;
 /// Typed events: one replayable value or a live stream. The first fault
 /// ends the stream. Protocol implementations may retain private relay data.
 /// Opening and writing are ordinary futures, outside this stream.
-pub struct Events<T> {
+pub struct EventStream<T> {
     source: Source<T>,
     metadata: Metadata,
     ended: bool,
@@ -41,6 +40,27 @@ pub(crate) struct Single<T> {
 }
 
 impl<T> Single<T> {
+    pub(crate) fn ready(value: Result<T>, clone: fn(&T) -> T) -> Arc<Self> {
+        let decoded = OnceLock::new();
+        let _ = decoded.set(value);
+        Arc::new(Self {
+            decoded,
+            decode: Box::new(|| Err(Fault::internal("single value missing"))),
+            lazy: false,
+            clone,
+        })
+    }
+
+    pub(crate) fn known_error(&self) -> Option<Fault> {
+        // Inspection may memoize an original lazy decode failure without
+        // editing its raw input. Only an edited snapshot's failure prevents
+        // sending; an unchanged lazy input can still relay its original bytes.
+        (!self.lazy)
+            .then(|| self.decoded.get())
+            .flatten()
+            .and_then(|value| value.as_ref().err().cloned())
+    }
+
     pub(crate) fn value(&self) -> Result<&T> {
         self.decoded
             .get_or_init(|| guarded(|| (self.decode)()))
@@ -52,8 +72,8 @@ impl<T> Single<T> {
         self.value().map(self.clone)
     }
 
-    pub(crate) fn into_events(self: Arc<Self>) -> Events<T> {
-        Events {
+    pub(crate) fn into_events(self: Arc<Self>) -> EventStream<T> {
+        EventStream {
             source: Source::Single(self),
             metadata: None,
             ended: false,
@@ -61,7 +81,7 @@ impl<T> Single<T> {
     }
 }
 
-impl<T> fmt::Debug for Events<T> {
+impl<T> fmt::Debug for EventStream<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = match self.source {
             Source::Single(_) => "single",
@@ -69,14 +89,30 @@ impl<T> fmt::Debug for Events<T> {
             Source::Refused(_) => "refused",
             Source::Empty => "ended",
         };
-        f.debug_struct("Events")
+        f.debug_struct("EventStream")
             .field("state", &state)
             .field("format", &self.metadata.as_ref().map(|(format, _)| format))
             .finish()
     }
 }
 
-impl<T> Events<T> {
+impl<T> EventStream<T> {
+    /// An empty stream with no protocol metadata.
+    pub fn empty() -> Self {
+        Self {
+            source: Source::Empty,
+            metadata: None,
+            ended: false,
+        }
+    }
+
+    /// Stop yielding events without decoding or polling the source.
+    /// Retain its shape, metadata and ownership until this stream is dropped,
+    /// so already-encoded or bodyless delivery can finish before releasing it.
+    pub fn stop(&mut self) {
+        self.ended = true;
+    }
+
     /// A refusal classified before any events become available.
     pub fn refused(fault: Fault) -> Self {
         Self {
@@ -153,18 +189,10 @@ impl<T> Events<T> {
     }
 }
 
-impl<T: Clone + Send + Sync + 'static> Events<T> {
+impl<T: Clone + Send + Sync + 'static> EventStream<T> {
     /// A single value already available to the reader.
     pub fn single(value: T) -> Self {
-        let decoded = OnceLock::new();
-        let _ = decoded.set(Ok(value));
-        Arc::new(Single {
-            decoded,
-            decode: Box::new(|| Err(Fault::internal("single value missing"))),
-            lazy: false,
-            clone: T::clone,
-        })
-        .into_events()
+        Single::ready(Ok(value), T::clone).into_events()
     }
 
     /// A replayable value decoded only when a reader needs it.
@@ -180,7 +208,7 @@ impl<T: Clone + Send + Sync + 'static> Events<T> {
     }
 }
 
-impl<T> Events<T> {
+impl<T> EventStream<T> {
     /// A live stream whose first error is its last event.
     pub fn stream(events: impl Stream<Item = Result<T>> + Send + 'static) -> Self {
         Self {
@@ -191,12 +219,12 @@ impl<T> Events<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> Events<T> {
+impl<T: Send + Sync + 'static> EventStream<T> {
     /// Change representation without eagerly decoding a single value.
     pub(crate) fn map_values<U: Clone + Send + Sync + 'static>(
         self,
         map: impl Fn(T) -> Result<U> + Send + Sync + 'static,
-    ) -> Events<U> {
+    ) -> EventStream<U> {
         let source = match self.source {
             Source::Single(value) => {
                 let lazy = value.lazy;
@@ -213,7 +241,7 @@ impl<T: Send + Sync + 'static> Events<T> {
             Source::Refused(fault) => Source::Refused(fault),
             Source::Empty => Source::Empty,
         };
-        Events {
+        EventStream {
             source,
             metadata: self.metadata,
             ended: self.ended,
@@ -221,9 +249,9 @@ impl<T: Send + Sync + 'static> Events<T> {
     }
 }
 
-impl<T> Unpin for Events<T> {}
+impl<T> Unpin for EventStream<T> {}
 
-impl<T> Stream for Events<T> {
+impl<T> Stream for EventStream<T> {
     type Item = Result<T>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -248,77 +276,188 @@ impl<T> Stream for Events<T> {
     }
 }
 
-struct Writing<T> {
-    #[allow(clippy::type_complexity)]
-    prepare: Option<Box<dyn FnOnce(Events<T>) -> Result<BoxFuture<'static, Result<()>>> + Send>>,
-    writing: Option<BoxFuture<'static, Result<()>>>,
-    outcome: Option<Result<()>>,
+type BoxSink<T> = Pin<Box<dyn Sink<Result<T>, Error = Fault> + Send>>;
+type Prepare<T> = Box<dyn FnOnce(&mut EventStream<T>) -> Result<BoxSink<T>> + Send>;
+
+enum Sending<T> {
+    Preparing(Prepare<T>),
+    Ready(BoxSink<T>),
+    Failed(Fault),
+    Closed(Result<()>),
 }
 
-/// A sink that accepts one event stream and completes when it is written.
+/// A standard per-event sink. Source faults are items; sink faults are delivery
+/// failures. The first submitted source fault is terminal: it is passed to the
+/// concrete sink, then only flushing and closing are allowed.
 ///
-/// `start_send` runs synchronous preparation, so its failure means no write
-/// started. `poll_flush` and `poll_close` drive actual delivery. A second
-/// submitted stream is rejected. Dropping the sink cancels pending delivery.
-pub fn write<T, F, W>(prepare: W) -> impl Sink<Events<T>, Error = Fault> + Send + Unpin
-where
-    W: FnOnce(Events<T>) -> Result<F> + Send + 'static,
-    F: Future<Output = Result<()>> + Send + 'static,
-{
-    Writing {
-        prepare: Some(Box::new(move |events| {
-            prepare(events).map(FutureExt::boxed)
-        })),
-        writing: None,
-        outcome: None,
+/// `poll_flush` advances delivery without ending the transfer. `poll_close`
+/// completes final framing and actual delivery, including transport completion.
+/// Dropping the sink cancels outstanding delivery.
+pub struct EventSink<T> {
+    sending: Sending<T>,
+    terminal: bool,
+}
+
+impl<T> fmt::Debug for EventSink<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = match &self.sending {
+            Sending::Preparing(_) => "preparing",
+            Sending::Ready(_) => "ready",
+            Sending::Failed(_) => "failed",
+            Sending::Closed(_) => "closed",
+        };
+        f.debug_struct("EventSink")
+            .field("state", &state)
+            .field("terminal", &self.terminal)
+            .finish()
     }
 }
 
-impl<T> Sink<Events<T>> for Writing<T> {
+impl<T> EventSink<T> {
+    /// Wrap an ordinary sink. No preparation is required for direct SinkExt use.
+    pub fn new<S>(sink: S) -> Self
+    where
+        S: Sink<Result<T>, Error = Fault> + Send + 'static,
+    {
+        Self {
+            sending: Sending::Ready(Box::pin(sink)),
+            terminal: false,
+        }
+    }
+
+    /// Construct the real per-event sink synchronously from source metadata.
+    /// Call `prepare` before using the standard sink operations. Preparation
+    /// must not initiate I/O or retain a live source to read from the sink.
+    /// It may inspect/encode a finite value, stop an already-encoded or
+    /// bodyless source, or wrap a live source that remains owned by the caller.
+    pub fn preparing<S, F>(prepare: F) -> Self
+    where
+        S: Sink<Result<T>, Error = Fault> + Send + 'static,
+        F: FnOnce(&mut EventStream<T>) -> Result<S> + Send + 'static,
+    {
+        Self {
+            sending: Sending::Preparing(Box::new(move |source| {
+                prepare(source).map(|sink| Box::pin(sink) as BoxSink<T>)
+            })),
+            terminal: false,
+        }
+    }
+
+    /// Prepare once, before the kernel marks the call sent. Repeated calls do
+    /// nothing after success and retain the original failure after an error.
+    pub fn prepare(&mut self, source: &mut EventStream<T>) -> Result<()> {
+        if matches!(self.sending, Sending::Preparing(_)) {
+            let missing = Fault::internal("event sink preparation did not complete");
+            let Sending::Preparing(prepare) =
+                std::mem::replace(&mut self.sending, Sending::Failed(missing))
+            else {
+                unreachable!()
+            };
+            self.sending = match prepare(source) {
+                Ok(sink) => Sending::Ready(sink),
+                Err(fault) => Sending::Failed(fault),
+            };
+        }
+        self.sink().map(|_| ())
+    }
+
+    fn sink(&mut self) -> Result<&mut BoxSink<T>> {
+        match &mut self.sending {
+            Sending::Ready(sink) => Ok(sink),
+            Sending::Preparing(_) => Err(Fault::internal("event sink needs preparation")),
+            Sending::Failed(fault) => Err(fault.clone()),
+            Sending::Closed(_) => Err(Fault::internal("event sink is closed")),
+        }
+    }
+
+    fn writable(&self) -> Result<()> {
+        if self.terminal {
+            Err(Fault::internal(
+                "event sink is closed or received its terminal fault",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<T> Unpin for EventSink<T> {}
+
+impl<T> Sink<Result<T>> for EventSink<T> {
     type Error = Fault;
 
-    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
-        Poll::Ready(if self.prepare.is_some() {
-            Ok(())
-        } else {
-            Err(Fault::internal("a writer accepts exactly one event stream"))
-        })
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let this = self.get_mut();
+        this.writable()?;
+        this.sink()?.as_mut().poll_ready(cx)
     }
 
-    fn start_send(self: Pin<&mut Self>, events: Events<T>) -> Result<()> {
+    fn start_send(self: Pin<&mut Self>, item: Result<T>) -> Result<()> {
         let this = self.get_mut();
-        let prepare = this
-            .prepare
-            .take()
-            .ok_or_else(|| Fault::internal("a writer accepts exactly one event stream"))?;
-        match prepare(events) {
-            Ok(writing) => {
-                this.writing = Some(writing);
-                Ok(())
-            }
-            Err(fault) => {
-                this.outcome = Some(Err(fault.clone()));
-                Err(fault)
-            }
-        }
+        this.writable()?;
+        let terminal = item.is_err();
+        this.sink()?.as_mut().start_send(item)?;
+        this.terminal = terminal;
+        Ok(())
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let this = self.get_mut();
-        if let Some(writing) = &mut this.writing {
-            let outcome = std::task::ready!(writing.as_mut().poll(cx));
-            this.writing = None;
-            this.outcome = Some(outcome);
+        if let Sending::Closed(end) = &this.sending {
+            return Poll::Ready(end.clone());
         }
-        Poll::Ready(this.outcome.clone().unwrap_or(Ok(())))
+        this.sink()?.as_mut().poll_flush(cx)
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        if self.prepare.take().is_some() {
-            self.outcome = Some(Ok(()));
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        let this = self.get_mut();
+        this.terminal = true;
+        if let Sending::Closed(end) = &this.sending {
+            return Poll::Ready(end.clone());
         }
-        self.poll_flush(cx)
+        let end = futures::ready!(this.sink()?.as_mut().poll_close(cx));
+        this.sending = Sending::Closed(end.clone());
+        Poll::Ready(end)
     }
+}
+
+/// Forward source faults as sink items, not TryStream failures. Flush even
+/// before the first event so quiet duplex transfers can open. Bound each poll
+/// so an always-ready source/sink cannot starve receiving or cancellation.
+pub(crate) fn deliver<T: Send + Sync + 'static>(
+    mut source: EventStream<T>,
+    mut sink: EventSink<T>,
+) -> BoxFuture<'static, Result<()>> {
+    let mut ended = source.ended || matches!(source.source, Source::Empty);
+    // Retain the source after Ready, until the owner drops this future. The
+    // client delivery guard must mark failure before unread output is dropped.
+    futures::future::poll_fn(move |cx| {
+        for _ in 0..128 {
+            if ended {
+                return Pin::new(&mut sink).poll_close(cx);
+            }
+            match Pin::new(&mut sink).poll_ready(cx) {
+                Poll::Ready(Ok(())) => {}
+                other => return other,
+            }
+            match Pin::new(&mut source).poll_next(cx) {
+                Poll::Ready(Some(item)) => {
+                    ended = item.is_err();
+                    Pin::new(&mut sink).start_send(item)?;
+                }
+                Poll::Ready(None) => ended = true,
+                Poll::Pending => {
+                    if let Poll::Ready(Err(fault)) = Pin::new(&mut sink).poll_flush(cx) {
+                        return Poll::Ready(Err(fault));
+                    }
+                    return Poll::Pending;
+                }
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .boxed()
 }
 
 #[cfg(test)]
@@ -326,7 +465,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use futures::channel::oneshot;
-    use futures::{SinkExt, TryStreamExt, stream};
+    use futures::{TryStreamExt, stream};
 
     use super::*;
 
@@ -334,7 +473,7 @@ mod tests {
     fn snapshots_and_mapping_share_one_lazy_decode() {
         let decodes = Arc::new(AtomicUsize::new(0));
         let seen = decodes.clone();
-        let mut events = Events::lazy(move || {
+        let mut events = EventStream::lazy(move || {
             seen.fetch_add(1, Ordering::SeqCst);
             Ok(17_u8)
         });
@@ -357,7 +496,7 @@ mod tests {
     fn lazy_panic_is_memoized() {
         let decodes = Arc::new(AtomicUsize::new(0));
         let seen = decodes.clone();
-        let events = Events::<u8>::lazy(move || {
+        let events = EventStream::<u8>::lazy(move || {
             seen.fetch_add(1, Ordering::SeqCst);
             panic!("decoder broke");
         });
@@ -376,7 +515,7 @@ mod tests {
         let seen = polls.clone();
         let held = Arc::new(());
         let captured = held.clone();
-        let mut events = Events::stream(stream::poll_fn(move |_| {
+        let mut events = EventStream::stream(stream::poll_fn(move |_| {
             let _keep_alive = &captured;
             let read = seen.fetch_add(1, Ordering::SeqCst);
             Poll::Ready(Some(if read == 0 {
@@ -396,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn mapping_preserves_metadata_and_single_shape() {
-        let mut events = Events::single(7_u8)
+        let mut events = EventStream::single(7_u8)
             .with_metadata("toy", 201_u16)
             .map_values(|value| Ok(u16::from(value)));
         assert!(events.is_single());
@@ -412,58 +551,239 @@ mod tests {
     #[tokio::test]
     async fn refusal_is_yielded_once() {
         let fault = Fault::upstream("refused");
-        let mut events = Events::<u8>::refused(fault.clone());
+        let mut events = EventStream::<u8>::refused(fault.clone());
         assert_eq!(events.refusal(), Some(&fault));
         assert_eq!(events.next().await, Some(Err(fault)));
         assert_eq!(events.next().await, None);
     }
 
+    #[derive(Default)]
+    struct Probe {
+        items: Arc<std::sync::Mutex<Vec<Result<u8>>>>,
+        flushes: Arc<AtomicUsize>,
+        ready: Option<BoxFuture<'static, Result<()>>>,
+        close: Option<BoxFuture<'static, Result<()>>>,
+    }
+
+    impl Sink<Result<u8>> for Probe {
+        type Error = Fault;
+        fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+            if let Some(ready) = &mut self.ready {
+                futures::ready!(ready.as_mut().poll(cx))?;
+                self.ready = None;
+            }
+            Poll::Ready(Ok(()))
+        }
+        fn start_send(self: Pin<&mut Self>, item: Result<u8>) -> Result<()> {
+            self.items.lock().expect("items").push(item);
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+            match &mut self.close {
+                Some(close) => close.as_mut().poll(cx),
+                None => Poll::Ready(Ok(())),
+            }
+        }
+    }
+
     #[test]
-    fn preparation_failure_happens_in_start_send() {
+    fn preparation_failure_happens_on_submission() {
         let fault = Fault::bad_request("cannot encode");
         let expected = fault.clone();
-        let mut sink =
-            write(move |_: Events<u8>| Err::<std::future::Ready<Result<()>>, Fault>(fault));
+        let mut sink = EventSink::preparing(move |_: &mut EventStream<u8>| Err::<Probe, _>(fault));
         assert_eq!(
-            Pin::new(&mut sink).start_send(Events::single(1)),
+            sink.prepare(&mut EventStream::single(1)),
+            Err(expected.clone())
+        );
+        assert_eq!(sink.prepare(&mut EventStream::single(2)), Err(expected));
+    }
+
+    #[tokio::test]
+    async fn delivery_future_waits_for_completion_and_keeps_failure() {
+        let (finish, finished) = oneshot::channel();
+        let probe = Probe {
+            close: Some(async { finished.await.map_err(|_| Fault::abandoned())? }.boxed()),
+            ..Probe::default()
+        };
+        let items = probe.items.clone();
+        let mut delivering = deliver(EventStream::single(1), EventSink::new(probe));
+        assert!(delivering.as_mut().now_or_never().is_none());
+        assert_eq!(*items.lock().expect("items"), [Ok(1)]);
+        assert!(finish.send(Err(Fault::truncated())).is_ok());
+        assert_eq!(delivering.await, Err(Fault::truncated()));
+    }
+
+    #[test]
+    fn unused_writer_releases_resources_on_drop() {
+        let resource = Arc::new(());
+        let captured = resource.clone();
+        let sink = EventSink::preparing(move |_: &mut EventStream<u8>| {
+            drop(captured);
+            Ok(Probe::default())
+        });
+        assert_eq!(Arc::strong_count(&resource), 2);
+        drop(sink);
+        assert_eq!(Arc::strong_count(&resource), 1);
+    }
+
+    #[tokio::test]
+    async fn standard_sink_interoperability_and_terminal_source_fault() {
+        use futures::SinkExt;
+        let probe = Probe::default();
+        let items = probe.items.clone();
+        let mut sink = EventSink::new(probe);
+        sink.send(Ok(3)).await.expect("send value");
+        let fault = Fault::bad_request("source");
+        sink.send(Err(fault.clone()))
+            .await
+            .expect("send fault item");
+        assert!(sink.send(Ok(4)).await.is_err());
+        sink.close().await.expect("close delivery");
+        assert_eq!(*items.lock().expect("items"), [Ok(3), Err(fault)]);
+        let mut ordinary = EventSink::new(futures::sink::unfold((), |(), _: Result<u8>| async {
+            Ok::<_, Fault>(())
+        }));
+        ordinary.send(Ok(5)).await.expect("standard unfold sink");
+        ordinary.close().await.expect("close");
+        ordinary.close().await.expect("closed twice");
+        ordinary.flush().await.expect("flush closed sink");
+        assert!(ordinary.send(Ok(6)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pump_forwards_source_fault_but_returns_sink_fault() {
+        let probe = Probe::default();
+        let items = probe.items.clone();
+        let source_fault = Fault::bad_request("source");
+        deliver(
+            EventStream::refused(source_fault.clone()),
+            EventSink::new(probe),
+        )
+        .await
+        .expect("fault delivered");
+        assert_eq!(*items.lock().expect("items"), [Err(source_fault)]);
+        let sink_fault = Fault::upstream("sink");
+        let expected = sink_fault.clone();
+        let sink = futures::sink::unfold((), move |(), _: Result<u8>| {
+            futures::future::ready(Err::<(), _>(sink_fault.clone()))
+        });
+        assert_eq!(
+            deliver(EventStream::single(1), EventSink::new(sink)).await,
             Err(expected)
         );
     }
 
     #[tokio::test]
-    async fn flush_waits_for_actual_delivery_and_close_keeps_its_failure() {
-        let (finish, finished) = oneshot::channel();
-        let mut sink = write(move |events: Events<u8>| {
-            Ok(async move {
-                assert_eq!(events.try_collect::<Vec<_>>().await?, [1]);
-                finished.await.map_err(|_| Fault::abandoned())?
-            })
-        });
-        assert_eq!(Pin::new(&mut sink).start_send(Events::single(1)), Ok(()));
-        assert!(sink.flush().now_or_never().is_none());
-        assert!(finish.send(Err(Fault::truncated())).is_ok());
-        assert_eq!(sink.flush().await, Err(Fault::truncated()));
-        assert_eq!(sink.close().await, Err(Fault::truncated()));
-    }
-
-    #[tokio::test]
-    async fn close_before_sending_releases_resources_and_prevents_sending() {
+    async fn backpressure_prevents_source_reads_and_drop_cancels_both_halves() {
+        let (ready, readiness) = oneshot::channel();
+        let probe = Probe {
+            ready: Some(async { readiness.await.map_err(|_| Fault::abandoned()) }.boxed()),
+            ..Probe::default()
+        };
+        let polls = Arc::new(AtomicUsize::new(0));
+        let count = polls.clone();
         let resource = Arc::new(());
         let captured = resource.clone();
-        let mut sink = write(move |_: Events<u8>| {
-            drop(captured);
-            Ok(std::future::ready(Ok(())))
-        });
-        assert_eq!(Arc::strong_count(&resource), 2);
-        assert_eq!(sink.close().await, Ok(()));
+        let source = EventStream::stream(stream::poll_fn(move |_| {
+            let _held = &captured;
+            count.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Some(Ok(1)))
+        }));
+        let mut pump = deliver(source, EventSink::new(probe));
+        assert!(pump.as_mut().now_or_never().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        drop(pump);
         assert_eq!(Arc::strong_count(&resource), 1);
-        assert!(sink.send(Events::single(1)).await.is_err());
+        assert!(ready.send(()).is_err());
     }
 
     #[tokio::test]
-    async fn a_writer_rejects_second_submission() {
-        let mut sink = write(|_: Events<u8>| Ok(std::future::ready(Ok(()))));
-        assert_eq!(sink.send(Events::single(1)).await, Ok(()));
-        assert!(sink.send(Events::single(2)).await.is_err());
+    async fn pending_source_flushes_and_hot_source_yields() {
+        let probe = Probe::default();
+        let flushes = probe.flushes.clone();
+        let mut quiet = deliver(
+            EventStream::stream(stream::pending()),
+            EventSink::new(probe),
+        );
+        assert!(quiet.as_mut().now_or_never().is_none());
+        assert_eq!(flushes.load(Ordering::SeqCst), 1);
+        let probe = Probe::default();
+        let items = probe.items.clone();
+        let mut hot = deliver(
+            EventStream::stream(stream::repeat(Ok(1))),
+            EventSink::new(probe),
+        );
+        assert!(hot.as_mut().now_or_never().is_none());
+        assert_eq!(items.lock().expect("items").len(), 128);
+    }
+
+    #[tokio::test]
+    async fn stopped_and_empty_sources_close_without_waiting_for_readiness() {
+        let mut stopped = EventStream::stream(stream::poll_fn(|_| -> Poll<Option<Result<u8>>> {
+            panic!("stopped source was read");
+        }));
+        stopped.stop();
+        for source in [stopped, EventStream::empty()] {
+            let sink = EventSink::new(Probe {
+                ready: Some(futures::future::pending().boxed()),
+                ..Probe::default()
+            });
+            assert_eq!(deliver(source, sink).now_or_never(), Some(Ok(())));
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_source_is_retained_until_delivery_closes_or_is_cancelled() {
+        for cancel in [false, true] {
+            let held = Arc::new(());
+            let captured = held.clone();
+            let mut source =
+                EventStream::stream(stream::poll_fn(move |_| -> Poll<Option<Result<u8>>> {
+                    let _keep_alive = &captured;
+                    panic!("stopped source was read");
+                }))
+                .with_metadata("toy", 23_u16);
+            source.stop();
+            let source = source.map_values(Ok);
+            assert_eq!(source.metadata::<u16>("toy"), Some(&23));
+            let (finish, finished) = oneshot::channel();
+            let sink = EventSink::new(Probe {
+                close: Some(async { finished.await.map_err(|_| Fault::abandoned())? }.boxed()),
+                ..Probe::default()
+            });
+            let mut pump = deliver(source, sink);
+            assert!(pump.as_mut().now_or_never().is_none());
+            assert_eq!(
+                Arc::strong_count(&held),
+                2,
+                "close still owns the stopped source"
+            );
+            if cancel {
+                drop(pump);
+                assert!(finish.is_canceled());
+            } else {
+                finish.send(Ok(())).expect("complete");
+                pump.await.expect("delivered");
+            }
+            assert_eq!(Arc::strong_count(&held), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn preparation_can_relay_lazy_source_without_decoding() {
+        let mut source = EventStream::lazy(|| -> Result<u8> { panic!("raw relay decoded") })
+            .with_metadata("raw", "bytes");
+        let mut sink = EventSink::preparing(|source: &mut EventStream<u8>| {
+            assert!(source.is_lazy());
+            assert_eq!(source.metadata::<&str>("raw"), Some(&"bytes"));
+            source.stop();
+            Ok(Probe::default())
+        });
+        sink.prepare(&mut source).expect("prepare raw");
+        deliver(source, sink).await.expect("close raw");
     }
 }

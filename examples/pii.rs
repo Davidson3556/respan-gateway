@@ -22,19 +22,27 @@
 //!
 //! `cargo run -p respan-gateway-examples --example pii`
 
-use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
+#[path = "support/text.rs"]
+mod text;
+
+use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
-use respan_gateway_messages::conversation::Conversation;
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
-use respan_gateway_text::{Holdback, Placeholders, Readable};
+use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_sdk::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
+use http_support::{post, read_whole, serve};
 use serde_json::{self, json};
-
-const OPENAI: &str = "http://openai.test/v1";
+use text::{Holdback, Placeholders, Readable};
 
 /// `text` with every e-mail address hidden in `vault`. A plain word scan;
 /// put a real detector here (a regex set for phone numbers and more, an
@@ -109,24 +117,28 @@ impl Plugin for PiiInput {
 
 /// `pii` first, `pii-input` last, and `middle` between them. For real use,
 /// the transport is
-/// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
+/// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway_with(
-    mock: &MockTransport,
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
     middle: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("pii", Pii)?;
     middle(gw)?.plugin("pii-input", PiiInput)?.target("openai")
 }
 
-fn gateway(mock: &MockTransport) -> Result<Gateway, Fault> {
-    gateway_with(mock, Ok)
+fn gateway(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+) -> Result<Gateway, Fault> {
+    gateway_with(transport, Ok)
 }
 
 /// A streamed chat of one user message, with `more` fields.
@@ -140,7 +152,7 @@ fn chat(content: serde_json::Value, more: serde_json::Value) -> http::Request<Bo
 }
 
 /// The provider streams `deltas` as OpenAI chunks.
-fn deltas(deltas: &[&str]) -> mock::Reply {
+fn deltas(deltas: &[&str]) -> Answer {
     let mut chunks: Vec<String> = deltas
         .iter()
         .map(|d| {
@@ -150,20 +162,25 @@ fn deltas(deltas: &[&str]) -> mock::Reply {
         })
         .collect();
     chunks.push("data: [DONE]\n\n".into());
-    mock::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>())
+    provider_support::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// The status and the text the client got, and what the provider was sent.
 async fn ask(
-    mock: &MockTransport,
+    fake: &FakeOpenAi,
     req: http::Request<Body>,
 ) -> Result<(StatusCode, String, String), Fault> {
-    ask_via(&gateway(mock)?, mock, req).await
+    ask_via(
+        &gateway(provider_support::openai(&fake.base_url())?.connect())?,
+        fake,
+        req,
+    )
+    .await
 }
 
 async fn ask_via(
     gw: &Gateway,
-    mock: &MockTransport,
+    fake: &FakeOpenAi,
     req: http::Request<Body>,
 ) -> Result<(StatusCode, String, String), Fault> {
     let (status, _, body) = read_whole(serve(gw, req).await.0).await;
@@ -180,7 +197,7 @@ async fn ask_via(
     } else {
         body
     };
-    let sent = mock.sent().last().map(|r| r.body().to_vec());
+    let sent = fake.requests().last().map(|r| r.raw.to_vec());
     let sent = String::from_utf8(sent.unwrap_or_default()).unwrap_or_default();
     Ok((status, text, sent))
 }
@@ -189,9 +206,9 @@ const PROMPT: &str = "Mail bob@x.io, or <alice@y.org>.";
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, deltas(&["Sure: <EMA", "IL_", "1> and <EMAIL_2>."]));
-    let (status, text, sent) = ask(&mock, chat(PROMPT.into(), json!({}))).await?;
+    let fake = FakeOpenAi::start().await;
+    fake.answer(deltas(&["Sure: <EMA", "IL_", "1> and <EMAIL_2>."]));
+    let (status, text, sent) = ask(&fake, chat(PROMPT.into(), json!({}))).await?;
     println!("provider got: {sent}\nclient got:   {status} {text}");
     Ok(())
 }

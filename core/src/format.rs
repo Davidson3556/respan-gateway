@@ -1,20 +1,16 @@
 use std::any::{Any, TypeId};
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
-use futures::{FutureExt, Sink, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 
-use crate::{Events, Fault, Result};
+use crate::{EventSink, EventStream, Fault, Result};
 
-/// A tuple of a future yielding a stream of `R` and a sink accepting a stream of `W`.
-pub type Connection<R, W> = (
-    BoxFuture<'static, Result<Events<R>>>,
-    Pin<Box<dyn Sink<Events<W>, Error = Fault> + Send>>,
-);
+/// A receive future and a standard outgoing sink. Synchronous preparation
+/// may fail before sending; the event pump runs alongside receiving.
+pub type Connection<R, W> = (BoxFuture<'static, Result<EventStream<R>>>, EventSink<W>);
 
 /// A protocol that receives `R` and sends `W` over transport `T`.
 ///
@@ -33,7 +29,7 @@ pub trait Format<T, R, W>: Send + Sync + 'static {
         false
     }
 
-    /// Consume a transport and create its receive future and send sink.
+    /// Consume a transport and create its receive future and outgoing sink.
     /// The sink survives an opening failure. Opening and delivery may need
     /// to be driven concurrently, including while consuming their streams.
     fn bind(&self, io: T) -> Result<Connection<R, W>>;
@@ -49,7 +45,6 @@ pub(crate) type ValueStream = BoxStream<'static, Result<AnyValue>>;
 pub(crate) trait AnyFormat: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn kind(&self) -> (TypeId, TypeId);
-    fn transport(&self) -> TypeId;
     fn matches(&self, io: &dyn Any) -> bool;
     fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<AnyValue, AnyValue>>;
     fn values(&self, inputs: Vec<AnyValue>) -> Values;
@@ -87,7 +82,7 @@ fn owned<T: Clone + Send + Sync + 'static>(input: AnyValue) -> Result<T> {
     Ok(Arc::try_unwrap(input).unwrap_or_else(|shared| (*shared).clone()))
 }
 
-fn erase_connection<R, W>((opening, sink): Connection<R, W>) -> Connection<AnyValue, AnyValue>
+fn erase_connection<R, W>((opening, send): Connection<R, W>) -> Connection<AnyValue, AnyValue>
 where
     R: Clone + Send + Sync + 'static,
     W: Clone + Send + Sync + 'static,
@@ -98,29 +93,16 @@ where
             .map(|events| events.map_values(|value| Ok(Arc::new(value) as AnyValue)))
     }
     .boxed();
-    (opening, Box::pin(TypedSink(sink)))
-}
-
-struct TypedSink<T>(Pin<Box<dyn Sink<Events<T>, Error = Fault> + Send>>);
-
-impl<T: Clone + Send + Sync + 'static> Sink<Events<AnyValue>> for TypedSink<T> {
-    type Error = Fault;
-
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.0.as_mut().poll_ready(cx)
-    }
-
-    fn start_send(mut self: Pin<&mut Self>, events: Events<AnyValue>) -> Result<()> {
-        self.0.as_mut().start_send(events.map_values(owned::<T>))
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.0.as_mut().poll_flush(cx)
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.0.as_mut().poll_close(cx)
-    }
+    let send = EventSink::preparing(move |events: &mut EventStream<AnyValue>| {
+        let mut send = send;
+        let mut typed = std::mem::replace(events, EventStream::empty()).map_values(owned::<W>);
+        let prepared = send.prepare(&mut typed);
+        *events = typed.map_values(|value| Ok(Arc::new(value) as AnyValue));
+        prepared?;
+        Ok(send
+            .with(|event: Result<AnyValue>| futures::future::ready(Ok(event.and_then(owned::<W>)))))
+    });
+    (opening, send)
 }
 
 /// Pins the message types and transport at registration. Only the core
@@ -155,9 +137,6 @@ where
         } else {
             (TypeId::of::<R>(), TypeId::of::<W>())
         }
-    }
-    fn transport(&self) -> TypeId {
-        TypeId::of::<T>()
     }
     fn matches(&self, io: &dyn Any) -> bool {
         io.downcast_ref::<T>()
@@ -238,5 +217,44 @@ pub(crate) fn is_input<T: Any>(format: &dyn AnyFormat) -> Result<bool> {
         (input, _) if input == TypeId::of::<T>() => Ok(true),
         (_, output) if output == TypeId::of::<T>() => Ok(false),
         _ => Err(Fault::wrong_kind::<T>()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn erased_preparation_preserves_lazy_metadata_and_stopped_source() {
+        let held = Arc::new(());
+        let captured = held.clone();
+        let mut source = EventStream::lazy(move || -> Result<AnyValue> {
+            let _keep_alive = &captured;
+            panic!("raw relay decoded during erasure");
+        })
+        .with_metadata("toy", 23_u16);
+        let sink = EventSink::preparing(|source: &mut EventStream<u8>| {
+            assert!(source.is_single() && source.is_lazy());
+            assert_eq!(source.metadata::<u16>("toy"), Some(&23));
+            source.stop();
+            Ok(futures::sink::unfold(
+                (),
+                |(), _: Result<u8>| -> futures::future::Ready<Result<()>> {
+                    panic!("stopped source was submitted");
+                },
+            ))
+        });
+        let (_, mut sink) = erase_connection((
+            futures::future::ready(Ok(EventStream::<u16>::empty())).boxed(),
+            sink,
+        ));
+        sink.prepare(&mut source).expect("prepare");
+        assert!(source.is_single() && source.is_lazy());
+        assert_eq!(source.metadata::<u16>("toy"), Some(&23));
+        assert_eq!(Arc::strong_count(&held), 2);
+        crate::events::deliver(source, sink)
+            .await
+            .expect("deliver raw");
+        assert_eq!(Arc::strong_count(&held), 1);
     }
 }

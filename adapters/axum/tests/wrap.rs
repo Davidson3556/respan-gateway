@@ -7,8 +7,8 @@ mod support;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use respan_gateway_core::{ClientContext, Events, Fault, Plugin, Response, async_trait};
-use respan_gateway_formats::opaque::Sent;
+use respan_gateway_http::formats::opaque::Sent;
+use respan_gateway_sdk::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use support::*;
 
 const PATH: &str = "/v1/realtime";
@@ -20,7 +20,7 @@ struct Slow;
 #[async_trait]
 impl Plugin for Slow {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.wrap(|inputs: Events<Sent<Raw>>| {
+        cx.wrap(|inputs: EventStream<Sent<Raw>>| {
             inputs.then(|input| async move {
                 tokio::time::sleep(WAIT).await;
                 input
@@ -61,7 +61,7 @@ async fn a_client_that_leaves_during_a_wrap_ends_its_session_then() {
     assert_eq!(calls.all().len(), 1);
 }
 
-// ===== loop 7 audit: appended to sdks/ws/tests/wrap.rs =====
+// ===== loop 7 audit: WebSocket ingress wrapping =====
 
 /// A wrap that holds each input a little, per a seed.
 struct Jitter(u64);
@@ -70,7 +70,7 @@ struct Jitter(u64);
 impl Plugin for Jitter {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let seed = self.0;
-        cx.wrap(move |inputs: Events<Sent<Raw>>| {
+        cx.wrap(move |inputs: EventStream<Sent<Raw>>| {
             let mut s = seed;
             inputs.then(move |input| {
                 s = s

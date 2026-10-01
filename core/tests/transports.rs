@@ -2,15 +2,13 @@
 #![allow(clippy::unwrap_used, clippy::type_complexity)]
 
 use std::cell::Cell;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::channel::oneshot;
-use respan_gateway_core::futures::future::BoxFuture;
-use respan_gateway_core::futures::{FutureExt, Sink, StreamExt};
 use respan_gateway_core::{
-    ClientContext, Connection, Events, Extensions, Fault, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait, write,
+    ClientContext, Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway, Plugin,
+    ProviderContext, Response, async_trait,
 };
 
 #[derive(Clone)]
@@ -43,30 +41,25 @@ struct First(Io, Cell<u8>);
 struct Second(Io);
 struct Messages;
 
-type Receiving<T> = BoxFuture<'static, Result<Events<T>, Fault>>;
-type Sending<T> = Pin<Box<dyn Sink<Events<T>, Error = Fault> + Send>>;
-
-fn client(io: Io) -> Result<(Receiving<Input>, Sending<Output>), Fault> {
+fn client(io: Io) -> Result<Connection<Input, Output>, Fault> {
     let Io::Client(trace) = io else {
         return Err(Fault::config("wrong direction"));
     };
-    let incoming = Events::lazy(|| Ok(Input(7))).with_metadata("messages", PrivateMetadata);
-    let outgoing = write(move |mut outputs: Events<Output>| {
+    let incoming = EventStream::lazy(|| Ok(Input(7))).with_metadata("messages", PrivateMetadata);
+    let outgoing = EventSink::preparing(move |outputs: &mut EventStream<Output>| {
         let relayed = outputs.metadata::<PrivateMetadata>("messages").is_some();
-        Ok(async move {
-            while let Some(output) = outputs.next().await {
+        Ok(futures::sink::unfold(
+            trace,
+            move |trace, output: Result<Output, Fault>| async move {
                 trace.received.lock().unwrap().push((relayed, output?.0));
-            }
-            Ok(())
-        })
+                Ok::<_, Fault>(trace)
+            },
+        ))
     });
-    Ok((
-        futures::future::ready(Ok(incoming)).boxed(),
-        Box::pin(outgoing),
-    ))
+    Ok((futures::future::ready(Ok(incoming)).boxed(), outgoing))
 }
 
-fn provider(io: Io) -> Result<(Receiving<Output>, Sending<Input>), Fault> {
+fn provider(io: Io) -> Result<Connection<Output, Input>, Fault> {
     let Io::Provider {
         attempt,
         fail,
@@ -77,7 +70,7 @@ fn provider(io: Io) -> Result<(Receiving<Output>, Sending<Input>), Fault> {
     };
     let (answer, answered) = oneshot::channel();
     let incoming = async move { answered.await.map_err(|_| Fault::abandoned()) }.boxed();
-    let outgoing = write(move |inputs: Events<Input>| {
+    let outgoing = EventSink::preparing(move |inputs: &mut EventStream<Input>| {
         let relayed = inputs.metadata::<PrivateMetadata>("messages").is_some();
         let value = inputs
             .value()
@@ -85,16 +78,25 @@ fn provider(io: Io) -> Result<(Receiving<Output>, Sending<Input>), Fault> {
             .ok_or_else(|| Fault::bad_request("one input"))?
             .0;
         trace.sent.lock().unwrap().push((attempt, relayed, value));
-        Ok(async move {
-            if fail {
-                return Err(Fault::upstream("retry this attempt"));
-            }
-            let outputs = Events::single(Output(value)).with_metadata("messages", PrivateMetadata);
-            answer.send(outputs).map_err(|_| Fault::abandoned())?;
-            Ok(())
-        })
+        Ok(futures::sink::unfold(
+            Some(answer),
+            move |mut answer, input: Result<Input, Fault>| async move {
+                let input = input?;
+                if fail {
+                    return Err(Fault::upstream("retry this attempt"));
+                }
+                let outputs =
+                    EventStream::single(Output(input.0)).with_metadata("messages", PrivateMetadata);
+                answer
+                    .take()
+                    .ok_or_else(|| Fault::internal("extra input"))?
+                    .send(outputs)
+                    .map_err(|_| Fault::abandoned())?;
+                Ok(answer)
+            },
+        ))
     });
-    Ok((incoming, Box::pin(outgoing)))
+    Ok((incoming, outgoing))
 }
 
 impl Format<First, Input, Output> for Messages {
@@ -206,7 +208,7 @@ fn hooks(trace: &Arc<Trace>) -> Hooks {
 }
 
 #[tokio::test]
-async fn same_format_can_use_multiple_transports_without_relaying_metadata_between_them() {
+async fn same_format_relays_metadata_across_different_transports() {
     let trace = Arc::new(Trace::default());
     let factories = trace.clone();
     let gateway = Gateway::new()
@@ -230,8 +232,8 @@ async fn same_format_can_use_multiple_transports_without_relaying_metadata_betwe
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(false, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(true, 7)]);
     assert_eq!(*trace.factories.lock().unwrap(), [(1, true)]);
 
     // The first registered transport does not consume an incompatible
@@ -241,8 +243,8 @@ async fn same_format_can_use_multiple_transports_without_relaying_metadata_betwe
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7), (2, true, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(false, 7), (true, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 7), (2, true, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(true, 7), (true, 7)]);
 }
 
 #[tokio::test]

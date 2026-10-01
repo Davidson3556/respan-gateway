@@ -1,11 +1,10 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::future::{Future, poll_fn};
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
 
-use futures::{FutureExt, SinkExt};
+use futures::FutureExt;
 
 use crate::call::SharedCall;
 use crate::fault::PANICKED;
@@ -15,7 +14,7 @@ use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
 use crate::reply;
 use crate::response::Batch;
-use crate::{ClientContext, Events, Extensions, Fault, Format, Plugin, Response, Result};
+use crate::{ClientContext, EventStream, Extensions, Fault, Format, Plugin, Response, Result};
 
 /// A registered plugin and its name.
 #[derive(Clone)]
@@ -93,8 +92,8 @@ impl Gateway {
     /// over transport `T`. The first registered
     /// format whose `matches` accepts the transport handles it.
     /// Formats sharing a name must share their event types, but may use
-    /// different transports. Same-name formats on different transports
-    /// translate typed events without forwarding protocol metadata.
+    /// different transports. Same-name formats relay protocol metadata
+    /// regardless of transport type when carrying the original input.
     pub fn client<I, O, T>(self, format: impl Format<T, I, O>) -> Result<Gateway>
     where
         T: Send + 'static,
@@ -177,40 +176,24 @@ impl Gateway {
         });
         let inner = self.inner.clone();
         async move {
+            // End hooks may finish on another thread while delivery resources
+            // are being dropped. Keep the handle counted through that cleanup.
+            let _active = reading;
             let (format, (opening, mut outgoing)) = accepting?;
-            let mut opening = AssertUnwindSafe(opening)
+            let opened = AssertUnwindSafe(opening)
                 .catch_unwind()
-                .map(|opened| opened.unwrap_or_else(|_| Err(Fault::internal(PANICKED))));
-            // A binding may need send-side readiness to open receiving.
-            // Receiving may also open first and enable readiness later.
-            let mut ready = false;
-            let opened = poll_fn(|cx| {
-                if !ready {
-                    let readiness = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        outgoing.as_mut().poll_ready(cx)
-                    }))
-                    .unwrap_or_else(|_| Poll::Ready(Err(Fault::internal(PANICKED))));
-                    match readiness {
-                        Poll::Ready(Ok(())) => ready = true,
-                        Poll::Ready(Err(fault)) => return Poll::Ready(Err(fault)),
-                        Poll::Pending => {}
-                    }
-                }
-                opening.poll_unpin(cx).map(Ok)
-            })
-            .await?;
-            drop(opening);
-            let incoming = opened.unwrap_or_else(Events::refused);
+                .await
+                .unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
+            let incoming = opened.unwrap_or_else(EventStream::refused);
             let broken = incoming.refusal().cloned();
             let in_flight = inner.in_flight.clone();
             let cx = ClientContext::new(format.clone(), incoming, extensions, inner.clone());
             let settling = cx.settling.clone();
             let mut hooks = EndHooks::new(&in_flight, cx);
-            drop(reading);
             hooks.after = Some(settling);
             let discarded = Arc::new(Mutex::new(Vec::new()));
-            let (flow, call) = match broken {
-                Some(fault) => (Events::refused(fault), None),
+            let (mut flow, call) = match broken {
+                Some(fault) => (EventStream::refused(fault), None),
                 None => {
                     let ran = AssertUnwindSafe(run(&inner, &mut hooks)).catch_unwind();
                     let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
@@ -225,15 +208,21 @@ impl Gateway {
                 writing: None,
                 discarded,
             };
-            let writing = async move {
-                if ready {
-                    outgoing.as_mut().start_send(flow)?;
-                } else {
-                    outgoing.feed(flow).await?;
-                }
-                outgoing.close().await
-            };
-            delivery.writing = Some(writing.boxed());
+            delivery.writing = Some(
+                match std::panic::catch_unwind(AssertUnwindSafe(|| outgoing.prepare(&mut flow))) {
+                    Ok(Ok(())) => crate::events::deliver(flow, outgoing),
+                    result => {
+                        // Release unread output before settling the delivery so
+                        // its deferred provider ending observes preparation failure.
+                        drop(flow);
+                        let fault = match result {
+                            Ok(Err(fault)) => fault,
+                            _ => Fault::internal(PANICKED),
+                        };
+                        async move { Err(fault) }.boxed()
+                    }
+                },
+            );
             delivery.await
         }
     }
@@ -303,9 +292,15 @@ impl Delivery {
         if let (Err(fault), Some(call)) = (&end, &self.call) {
             locked(call).finish(Err(fault.clone()));
         }
-        // A writer may discard an unread body deliberately, or while
-        // failing preparation. Settle its ready provider end only after
-        // the delivery result is known; a write failure takes precedence.
+        // On failure/cancellation, cut both directions before releasing the
+        // pump's source. On success, an unread ready end may still settle its
+        // provider normally when dropping the source performs its bounded probe.
+        if end.is_err() {
+            self.hooks.finish(end.clone());
+        }
+        drop(self.writing.take());
+        // Settle discarded provider ends only after the delivery result is
+        // known; a write failure takes precedence over an unread ready end.
         let discarded = std::mem::take(&mut *locked(&self.discarded));
         for mut batch in discarded {
             let _ = std::panic::catch_unwind(AssertUnwindSafe(|| batch.read()));

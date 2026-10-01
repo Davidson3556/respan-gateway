@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use respan_gateway_core::Fault;
+use respan_gateway_sdk::Fault;
 use serde_json::{Value, json};
 
 use crate::anthropic::ANTHROPIC;
@@ -417,7 +417,7 @@ struct Pending {
 impl Calls {
     /// Add a fragment: a start makes a call, arguments go to the call they
     /// continue ([`Fragment::continues`]).
-    pub(crate) fn add(&mut self, fragment: Fragment) {
+    pub(crate) fn add(&mut self, fragment: Fragment) -> Result<(), Fault> {
         let at = fragment.continues(self.0.iter().map(|c| c.key));
         match (fragment.start, at) {
             (Some((id, name)), None) => self.0.push(Pending {
@@ -427,8 +427,9 @@ impl Calls {
                 arguments: fragment.arguments,
             }),
             (_, Some(at)) => self.0[at].arguments.push_str(&fragment.arguments),
-            (None, None) => {}
+            (None, None) => return Err(unwritable_content()),
         }
+        Ok(())
     }
 
     pub(crate) fn is_empty(&self) -> bool {

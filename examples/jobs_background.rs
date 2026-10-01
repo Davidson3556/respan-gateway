@@ -33,25 +33,28 @@
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_core::futures::{TryStreamExt, future, stream};
-use respan_gateway_core::{
-    ClientContext, Events, Extensions, Fault, Gateway, Plugin, Response, async_trait,
-};
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_examples::store::{
     Database,
     rusqlite::{OptionalExtension, Transaction},
     sql,
 };
-use respan_gateway_formats::opaque::Got;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::http::{self, Method};
+use respan_gateway_http::formats::opaque::Got;
+use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Asked, Body, Credential, Transport, built_wrong, full};
-use respan_gateway_testkit::{MockTransport, mock, read_whole, serve};
+use respan_gateway_http::{Asked, Body, Credential, HttpClient, built_wrong, full};
+use respan_gateway_sdk::futures::{TryStreamExt, future, stream};
+use respan_gateway_sdk::{
+    ClientContext, EventStream, Extensions, Fault, Gateway, Plugin, Response, async_trait,
+};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{read_whole, serve};
 use serde_json::{Value, json};
 
 #[path = "background_worker.rs"]
@@ -195,7 +198,7 @@ impl Jobs {
         remember: bool,
     ) -> Result<(), Fault> {
         let (jobs, home) = (self.clone(), (tenant(cx), deployment));
-        cx.wrap(move |events: Events<Got<Rest>>| {
+        cx.wrap(move |events: EventStream<Got<Rest>>| {
             stream::once(async move {
                 let body = events.try_fold(BytesMut::new(), |mut bytes, chunk| async move {
                     bytes.extend_from_slice(&chunk.0); Ok(bytes)
@@ -575,18 +578,113 @@ impl Plugin for Jobs {
     }
 }
 
-const EAST: &str = "http://east.test";
-const WEST: &str = "http://west.test";
+/// Local Responses endpoint: this protocol's native-id operations are not
+/// supported by the pinned provider fake. Each deployment has its own queue.
+struct ResponsesServer {
+    base: String,
+    state: Arc<Mutex<ResponsesState>>,
+    task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
+}
+
+#[derive(Default)]
+struct ResponsesState {
+    replies: VecDeque<(StatusCode, String)>,
+    requests: Vec<Recorded>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)] // Captured fields are inspected by the example's tests.
+struct Recorded {
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+impl ResponsesServer {
+    async fn start() -> Result<Self, Fault> {
+        let state = Arc::new(Mutex::new(ResponsesState::default()));
+        let app = axum::Router::new().fallback(axum::routing::any({
+            let state = state.clone();
+            move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+                let state = state.clone();
+                async move {
+                    let mut state = lock(&state);
+                    state.requests.push(Recorded {
+                        method,
+                        uri,
+                        headers,
+                        body,
+                    });
+                    let (status, body) = state.replies.pop_front().unwrap_or((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        r#"{"error":"unscripted Responses request"}"#.into(),
+                    ));
+                    (
+                        status,
+                        [(http::header::CONTENT_TYPE, "application/json")],
+                        body,
+                    )
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| Fault::internal(error.to_string()))?;
+        let base = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .map_err(|error| Fault::internal(error.to_string()))?
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, app).await });
+        Ok(Self { base, state, task })
+    }
+
+    fn answer(&self, status: StatusCode, body: &str) {
+        lock(&self.state)
+            .replies
+            .push_back((status, body.to_owned()));
+    }
+
+    #[cfg(test)]
+    fn requests(&self) -> Vec<Recorded> {
+        lock(&self.state).requests.clone()
+    }
+
+    fn transport(&self) -> Result<HttpClient, Fault> {
+        HttpClient::new(&self.base)
+    }
+}
+
+impl Drop for ResponsesServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn deployments() -> Result<(ResponsesServer, ResponsesServer), Fault> {
+    Ok((
+        ResponsesServer::start().await?,
+        ResponsesServer::start().await?,
+    ))
+}
 
 fn gateway(
-    east: impl Into<Transport>,
-    west: impl Into<Transport>,
+    east: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    west: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
     jobs: &Jobs,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
         .client::<Ask, _, _>(RESPONSES)?
-        .provider::<Ask, _, _>("east", RESPONSES, respan_gateway_http::connect(east))?
-        .provider::<Ask, _, _>("west", RESPONSES, respan_gateway_http::connect(west))?
+        .provider::<Ask, _, _>("east", RESPONSES, east)?
+        .provider::<Ask, _, _>("west", RESPONSES, west)?
         .plugin("jobs", jobs.clone())
 }
 
@@ -607,14 +705,18 @@ async fn send(gateway: &Gateway, req: http::Request<Body>) -> Result<Value, Faul
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let (east, west) = deployments().await?;
     let done = r#"{"id":"native-1","output":"done"}"#;
-    mock.reply(WEST, mock::json(http::StatusCode::OK, done));
+    west.answer(http::StatusCode::OK, done);
     let path = std::env::var("JOBS_DB").unwrap_or_else(|_| "background-jobs.sqlite3".into());
     let jobs = Jobs::open(path)?;
     let credential = Credential::of(request("POST", "/v1/responses", "{}").headers().clone());
     jobs.budget(identity(Some(&credential)), 1_000_000).await?;
-    let gateway = gateway(mock.at(EAST), mock.at(WEST), &jobs)?;
+    let gateway = gateway(
+        east.transport()?.connect(),
+        west.transport()?.connect(),
+        &jobs,
+    )?;
     jobs.resume(&gateway).await?;
 
     let queued = send(

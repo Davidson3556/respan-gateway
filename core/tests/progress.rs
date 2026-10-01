@@ -3,8 +3,8 @@
 use futures::channel::oneshot;
 use futures::{FutureExt, Sink, StreamExt, stream};
 use respan_gateway_core::{
-    ClientContext, Connection, Events, Extensions, Fault, Format, Gateway, Plugin, Response,
-    Result, async_trait, write,
+    ClientContext, Connection, EventSink, EventStream, Extensions, Fault, Filter, Format, Gateway,
+    Plugin, Response, Result, async_trait,
 };
 use std::pin::Pin;
 use std::sync::{
@@ -12,6 +12,52 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::task::{Context, Poll};
+
+fn drain<T: Send + 'static>() -> EventSink<T> {
+    EventSink::new(futures::sink::unfold(
+        (),
+        |(), event: Result<T>| async move {
+            event?;
+            Ok::<_, Fault>(())
+        },
+    ))
+}
+
+struct CompletionSink<T> {
+    close: futures::future::BoxFuture<'static, Result<()>>,
+    marker: std::marker::PhantomData<fn(T)>,
+}
+
+impl<T> CompletionSink<T> {
+    fn new(close: impl std::future::Future<Output = Result<()>> + Send + 'static) -> Self {
+        Self {
+            close: close.boxed(),
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> Sink<Result<T>> for CompletionSink<T> {
+    type Error = Fault;
+
+    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, event: Result<T>) -> Result<()> {
+        // Completion-only fixtures discard each submitted event, including refusals.
+        drop(event);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        self.get_mut().close.as_mut().poll(cx)
+    }
+}
 
 #[derive(Clone)]
 struct Input;
@@ -28,15 +74,8 @@ impl Format<Io, Input, Output> for Protocol {
     }
     fn bind(&self, _: Io) -> Result<Connection<Input, Output>> {
         Ok((
-            futures::future::ready(Ok::<_, Fault>(Events::single(Input))).boxed(),
-            Box::pin(write(|mut events: Events<Output>| {
-                Ok(async move {
-                    while let Some(event) = events.next().await {
-                        event?;
-                    }
-                    Ok(())
-                })
-            })),
+            futures::future::ready(Ok::<_, Fault>(EventStream::single(Input))).boxed(),
+            drain(),
         ))
     }
 }
@@ -51,11 +90,11 @@ impl Format<Io, Output, Input> for Protocol {
             Ok(Output(n))
         });
         Ok((
-            futures::future::ready(Ok(Events::stream(
+            futures::future::ready(Ok(EventStream::stream(
                 events.chain(stream::iter(self.1.then(Fault::truncated).map(Err))),
             )))
             .boxed(),
-            Box::pin(write(|_: Events<Input>| Ok(async { Ok(()) }))),
+            drain(),
         ))
     }
 }
@@ -66,7 +105,8 @@ struct Inspect {
 #[async_trait]
 impl Plugin for Inspect {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        let response = cx.call("p").await?.buffer_until(|_: &Output| true).await?;
+        let mut response = cx.call("p").await?;
+        response.buffer_until(|_: &Output| true).await?;
         self.at_first_content
             .store(self.read.load(Ordering::SeqCst), Ordering::SeqCst);
         Ok(Some(response))
@@ -98,33 +138,6 @@ async fn first_content_does_not_drain_every_ready_event() {
 }
 
 struct Handshake(Arc<AtomicUsize>);
-struct HandshakeSink {
-    opened: Option<oneshot::Sender<()>>,
-    polls: Arc<AtomicUsize>,
-}
-impl Sink<Events<Output>> for HandshakeSink {
-    type Error = Fault;
-    fn poll_ready(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
-        assert_eq!(
-            self.polls.fetch_add(1, Ordering::SeqCst),
-            0,
-            "readiness must be preserved until submission"
-        );
-        if let Some(opened) = self.opened.take() {
-            let _ = opened.send(());
-        }
-        Poll::Ready(Ok(()))
-    }
-    fn start_send(self: Pin<&mut Self>, _: Events<Output>) -> Result<()> {
-        Ok(())
-    }
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
 impl Format<Io, Input, Output> for Handshake {
     fn name(&self) -> &str {
         "handshake"
@@ -134,35 +147,41 @@ impl Format<Io, Input, Output> for Handshake {
     }
     fn bind(&self, _: Io) -> Result<Connection<Input, Output>> {
         let (opened, receive) = oneshot::channel();
+        // Binding establishes state without asynchronous readiness. Opening
+        // may use that state before the writer is prepared exactly once.
+        let _ = opened.send(());
+        let prepares = self.0.clone();
         Ok((
             async move {
                 receive.await.map_err(|_| Fault::abandoned())?;
-                Ok::<_, Fault>(Events::single(Input))
+                Ok::<_, Fault>(EventStream::single(Input))
             }
             .boxed(),
-            Box::pin(HandshakeSink {
-                opened: Some(opened),
-                polls: self.0.clone(),
+            EventSink::preparing(move |_: &mut EventStream<Output>| {
+                assert_eq!(prepares.fetch_add(1, Ordering::SeqCst), 0);
+                Ok(futures::sink::unfold(
+                    (),
+                    |(), event: Result<Output>| async move {
+                        event?;
+                        Ok::<_, Fault>(())
+                    },
+                ))
             }),
         ))
     }
 }
 #[tokio::test]
-async fn caller_opening_can_progress_with_sink_readiness() {
-    let polls = Arc::new(AtomicUsize::new(0));
-    let gateway = Gateway::new().client(Handshake(polls.clone())).unwrap();
+async fn caller_opening_uses_state_established_during_bind() {
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let gateway = Gateway::new().client(Handshake(prepares.clone())).unwrap();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         gateway.handle(Io, Extensions::new()),
     )
     .await;
     gateway.idle().await;
-    assert_eq!(polls.load(Ordering::SeqCst), 1);
-    assert!(
-        result.is_ok(),
-        "caller opening stalled; send sink was polled {} times",
-        polls.load(Ordering::SeqCst)
-    );
+    assert_eq!(prepares.load(Ordering::SeqCst), 1);
+    assert!(result.is_ok(), "caller opening stalled after binding");
 }
 
 struct RejectDelivery;
@@ -175,11 +194,11 @@ impl Format<Io, Input, Output> for RejectDelivery {
     }
     fn bind(&self, _: Io) -> Result<Connection<Input, Output>> {
         Ok((
-            futures::future::ready(Ok::<_, Fault>(Events::single(Input))).boxed(),
-            Box::pin(write(|events: Events<Output>| {
-                drop(events);
-                Err::<std::future::Ready<Result<()>>, _>(Fault::internal("cannot prepare delivery"))
-            })),
+            futures::future::ready(Ok::<_, Fault>(EventStream::single(Input))).boxed(),
+            EventSink::preparing(|events: &mut EventStream<Output>| {
+                events.stop();
+                Err::<CompletionSink<Output>, _>(Fault::internal("cannot prepare delivery"))
+            }),
         ))
     }
 }
@@ -219,7 +238,8 @@ impl Plugin for Observe {
         })
     }
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        let (response, end) = cx.call("p").await?.until_end().await?;
+        let mut response = cx.call("p").await?;
+        let end = response.until_end().await;
         *self.observed_end.lock().unwrap() = Some(end);
         let mut outputs = response.outputs::<Output>();
         while let Some(output) = outputs.next().await {
@@ -265,6 +285,96 @@ async fn batch_boundaries_preserve_order_filtering_and_the_final_outcome() {
     }
 }
 
+struct CancelHold(Arc<std::sync::Mutex<Vec<usize>>>);
+
+#[async_trait]
+impl Plugin for CancelHold {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+        let mut response = cx.call("p").await?;
+        let mut hold = response.until_end().boxed();
+        assert!(hold.as_mut().now_or_never().is_none());
+        drop(hold);
+        let values = response.outputs::<Output>().collect::<Vec<_>>().await;
+        *self.0.lock().unwrap() = values.into_iter().map(|v| v.unwrap().0).collect();
+        Ok(Some(Response::stream(stream::empty::<Result<Output>>())))
+    }
+}
+
+#[tokio::test]
+async fn cancelling_borrowed_hold_replays_the_full_provider_batch() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let gw = Gateway::new()
+        .client::<Input, Output, _>(Protocol(reads.clone(), false))
+        .unwrap()
+        .provider::<Input, Output, _>("p", Protocol(reads, false), |_| Io)
+        .unwrap()
+        .plugin("cancel-hold", CancelHold(seen.clone()))
+        .unwrap();
+    gw.handle(Io, Extensions::new()).await.unwrap();
+    gw.idle().await;
+    assert_eq!(*seen.lock().unwrap(), (0..10_000).collect::<Vec<_>>());
+}
+
+struct Suppress;
+impl Filter<Output> for Suppress {
+    fn edit(&mut self, _: Output, _: &mut Vec<Output>) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct CollectHot {
+    count: Arc<AtomicUsize>,
+    suppress: bool,
+}
+#[async_trait]
+impl Plugin for CollectHot {
+    async fn on_provider(&self, px: &mut respan_gateway_core::ProviderContext) -> Result<()> {
+        if self.suppress {
+            px.filter(Suppress)?;
+        }
+        Ok(())
+    }
+
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+        let response = cx.call("p").await?;
+        let mut collecting = response.outputs::<Output>().collect::<Vec<_>>().boxed();
+        assert!(
+            collecting.as_mut().now_or_never().is_none(),
+            "one poll drained every ready provider batch"
+        );
+        assert!(
+            (1..10_000).contains(&self.count.load(Ordering::SeqCst)),
+            "one poll must consume some, but not all, ready events"
+        );
+        drop(collecting);
+        Ok(Some(Response::stream(stream::empty::<Result<Output>>())))
+    }
+}
+
+#[tokio::test]
+async fn collecting_hot_outputs_yields_even_when_filters_suppress_all_values() {
+    for suppress in [false, true] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let gateway = Gateway::new()
+            .client::<Input, Output, _>(Protocol(count.clone(), false))
+            .unwrap()
+            .provider::<Input, Output, _>("p", Protocol(count.clone(), false), |_| Io)
+            .unwrap()
+            .plugin(
+                "collect-hot",
+                CollectHot {
+                    count: count.clone(),
+                    suppress,
+                },
+            )
+            .unwrap();
+        gateway.handle(Io, Extensions::new()).await.unwrap();
+        gateway.idle().await;
+        assert!(count.load(Ordering::SeqCst) < 10_000);
+    }
+}
+
 #[tokio::test]
 async fn a_hot_stream_yields_before_delivery_finishes_and_can_be_cancelled() {
     let read = Arc::new(AtomicUsize::new(0));
@@ -288,7 +398,7 @@ async fn a_hot_stream_yields_before_delivery_finishes_and_can_be_cancelled() {
 
 // Hand-built client bindings exercise ordering without a protocol adapter.
 struct Custom;
-type Sending = Pin<Box<dyn Sink<Events<Output>, Error = Fault> + Send>>;
+type Sending = EventSink<Output>;
 impl Format<Connection<Input, Output>, Input, Output> for Custom {
     fn name(&self) -> &str {
         "custom"
@@ -300,51 +410,23 @@ impl Format<Connection<Input, Output>, Input, Output> for Custom {
         Ok(io)
     }
 }
-struct Readiness {
-    ready: futures::future::BoxFuture<'static, Result<()>>,
-    held: Arc<()>,
-}
-impl Sink<Events<Output>> for Readiness {
-    type Error = Fault;
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        let _keep_alive = &self.held;
-        self.ready.as_mut().poll(cx)
-    }
-    fn start_send(self: Pin<&mut Self>, _: Events<Output>) -> Result<()> {
-        Ok(())
-    }
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
 #[tokio::test]
-async fn readiness_failure_or_panic_cancels_an_unopened_receiver() {
+async fn preparation_failure_or_panic_after_opening_releases_the_writer() {
     for panics in [false, true] {
-        let (sender, receiver) = oneshot::channel::<()>();
-        let opening = async move {
-            receiver.await.map_err(|_| Fault::abandoned())?;
-            Ok::<_, Fault>(Events::single(Input))
-        }
-        .boxed();
+        let opening = futures::future::ready(Ok::<_, Fault>(EventStream::single(Input))).boxed();
         let held = Arc::new(());
-        let sink: Sending = Box::pin(Readiness {
-            ready: async move {
-                assert!(!panics, "readiness panicked");
-                Err(Fault::config("cannot open"))
-            }
-            .boxed(),
-            held: held.clone(),
+        let captured = held.clone();
+        let send: Sending = EventSink::preparing(move |_: &mut EventStream<Output>| {
+            let _keep_alive = captured;
+            assert!(!panics, "preparation panicked");
+            Err::<CompletionSink<Output>, _>(Fault::config("cannot prepare"))
         });
         let gateway = Gateway::new().client(Custom).unwrap();
         let fault = gateway
-            .handle((opening, sink), Extensions::new())
+            .handle((opening, send), Extensions::new())
             .await
             .unwrap_err();
         assert_eq!(fault.code(), if panics { "internal" } else { "config" });
-        assert!(sender.is_canceled());
         assert_eq!(Arc::strong_count(&held), 1);
         gateway.idle().await;
     }
@@ -354,16 +436,17 @@ async fn cancelling_opening_drops_both_halves_and_releases_idle() {
     let (sender, receiver) = oneshot::channel::<()>();
     let opening = async move {
         receiver.await.map_err(|_| Fault::abandoned())?;
-        Ok::<_, Fault>(Events::single(Input))
+        Ok::<_, Fault>(EventStream::single(Input))
     }
     .boxed();
     let held = Arc::new(());
-    let sink: Sending = Box::pin(Readiness {
-        ready: futures::future::pending().boxed(),
-        held: held.clone(),
+    let captured = held.clone();
+    let send: Sending = EventSink::preparing(move |_: &mut EventStream<Output>| {
+        drop(captured);
+        Ok(CompletionSink::new(async { Ok(()) }))
     });
     let gateway = Gateway::new().client(Custom).unwrap();
-    let mut handled = gateway.handle((opening, sink), Extensions::new()).boxed();
+    let mut handled = gateway.handle((opening, send), Extensions::new()).boxed();
     assert!(handled.as_mut().now_or_never().is_none());
     assert!(gateway.idle().now_or_never().is_none());
     drop(handled);
@@ -380,13 +463,12 @@ impl Plugin for Release {
     }
 }
 #[tokio::test]
-async fn receiving_can_open_before_sink_readiness() {
+async fn receiving_can_open_before_delivery_completes() {
     let (send, receive) = oneshot::channel();
-    let opening = futures::future::ready(Ok::<_, Fault>(Events::single(Input))).boxed();
-    let sink: Sending = Box::pin(Readiness {
-        ready: async move { receive.await.map_err(|_| Fault::abandoned()) }.boxed(),
-        held: Arc::new(()),
-    });
+    let opening = futures::future::ready(Ok::<_, Fault>(EventStream::single(Input))).boxed();
+    let deliver: Sending = EventSink::new(CompletionSink::new(async move {
+        receive.await.map_err(|_| Fault::abandoned())
+    }));
     let gateway = Gateway::new()
         .client(Custom)
         .unwrap()
@@ -394,7 +476,7 @@ async fn receiving_can_open_before_sink_readiness() {
         .unwrap();
     let handled = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        gateway.handle((opening, sink), Extensions::new()),
+        gateway.handle((opening, deliver), Extensions::new()),
     )
     .await;
     assert_eq!(handled.unwrap(), Ok(()));
@@ -415,17 +497,16 @@ async fn a_completed_opening_is_released_before_delivery() {
     let held = OpeningDone(Some(send));
     let opening = futures::future::poll_fn(move |_| {
         let _keep_alive = &held;
-        Poll::Ready(Ok::<_, Fault>(Events::single(Input)))
+        Poll::Ready(Ok::<_, Fault>(EventStream::single(Input)))
     })
     .boxed();
-    let sink: Sending = Box::pin(Readiness {
-        ready: async move { receive.await.map_err(|_| Fault::abandoned()) }.boxed(),
-        held: Arc::new(()),
-    });
+    let send: Sending = EventSink::new(CompletionSink::new(async move {
+        receive.await.map_err(|_| Fault::abandoned())
+    }));
     let gateway = Gateway::new().client(Custom).unwrap();
     let handled = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        gateway.handle((opening, sink), Extensions::new()),
+        gateway.handle((opening, send), Extensions::new()),
     )
     .await;
     assert_eq!(handled.unwrap(), Ok(()));
@@ -471,8 +552,11 @@ struct BufferBeforeDelivery;
 #[async_trait]
 impl Plugin for BufferBeforeDelivery {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        let (response, end) = cx.call("p").await?.until_end().await?;
-        assert_eq!(end, Err(Fault::upstream("filter failed")));
+        let mut response = cx.call("p").await?;
+        assert_eq!(
+            response.until_end().await,
+            Err(Fault::upstream("filter failed"))
+        );
         Ok(Some(response))
     }
 }

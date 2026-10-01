@@ -86,7 +86,7 @@ fn usage(input: u64, output: u64) -> Value {
 }
 
 async fn close(ws: &mut Client) {
-    use respan_gateway_core::futures::SinkExt;
+    use respan_gateway_sdk::futures::SinkExt;
     let _ = ws
         .send(tokio_tungstenite::tungstenite::Message::Close(None))
         .await;
@@ -95,7 +95,7 @@ async fn close(ws: &mut Client) {
 
 /// Whether anything more came, of any kind.
 async fn hear_any(ws: &mut Client) -> bool {
-    use respan_gateway_core::futures::StreamExt;
+    use respan_gateway_sdk::futures::StreamExt;
     let next = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await;
     matches!(next, Ok(Some(Ok(_))))
 }
@@ -316,10 +316,10 @@ async fn a_client_that_leaves_is_recorded_abandoned() -> Result<(), Fault> {
     Ok(())
 }
 
-/// The Close the client is sent: its code and reason. Events before it are
+/// The Close the client is sent: its code and reason. EventStream before it are
 /// skipped; `None` if the connection broke without one.
 async fn closed(ws: &mut Client) -> Option<(u16, String)> {
-    use respan_gateway_core::futures::StreamExt;
+    use respan_gateway_sdk::futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     loop {
         let next = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
@@ -795,7 +795,7 @@ struct Remote {
     lag: Duration,
 }
 
-#[respan_gateway_core::async_trait]
+#[respan_gateway_sdk::async_trait]
 impl Ledger for Remote {
     async fn reserve(
         &self,
@@ -833,7 +833,7 @@ async fn remote_session(
         .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            respan_gateway_http::connect(WsTransport::new(provider.trim_end_matches("/v1"))?),
+            WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(remote))?;
@@ -895,7 +895,7 @@ async fn l5_a_turn_being_settled_as_the_client_left_is_settled() -> Result<(), F
 #[derive(Clone, Default)]
 struct EndAt(Arc<Mutex<Vec<(std::time::Instant, String)>>>);
 
-#[respan_gateway_core::async_trait]
+#[respan_gateway_sdk::async_trait]
 impl Plugin for EndAt {
     async fn on_client_end(&self, _: &ClientContext, end: &Result<(), Fault>) {
         let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
@@ -909,10 +909,10 @@ impl Plugin for EndAt {
 #[tokio::test(flavor = "multi_thread")]
 async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result<(), Fault> {
     struct Slow;
-    #[respan_gateway_core::async_trait]
+    #[respan_gateway_sdk::async_trait]
     impl Plugin for Slow {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.wrap(|events: Events<ClientEvent>| {
+            cx.wrap(|events: EventStream<ClientEvent>| {
                 events.and_then(|e| async move {
                     tokio::time::sleep(Duration::from_millis(400)).await;
                     Ok(e)
@@ -929,7 +929,7 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
         .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            respan_gateway_http::connect(WsTransport::new(provider.trim_end_matches("/v1"))?),
+            WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
         )?
         .target("openai")?
         .plugin("at", at.clone())?
@@ -1159,7 +1159,7 @@ async fn l6_a_refused_turn_being_released_as_the_client_left_is_settled() -> Res
         .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
+            WsTransport::new(format!("ws://{at}"))?.connect(),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(remote))?;
@@ -1219,10 +1219,10 @@ async fn l6_leave_during_a_wrap(
     items: usize,
 ) -> Result<(Option<(u128, String)>, Vec<Value>), Fault> {
     struct Slow;
-    #[respan_gateway_core::async_trait]
+    #[respan_gateway_sdk::async_trait]
     impl Plugin for Slow {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.wrap(|events: Events<ClientEvent>| {
+            cx.wrap(|events: EventStream<ClientEvent>| {
                 events.and_then(|e| async move {
                     tokio::time::sleep(Duration::from_millis(400)).await;
                     Ok(e)
@@ -1239,7 +1239,7 @@ async fn l6_leave_during_a_wrap(
         .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            respan_gateway_http::connect(WsTransport::new(provider.trim_end_matches("/v1"))?),
+            WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
         )?
         .target("openai")?
         .plugin("at", at.clone())?
@@ -1490,7 +1490,7 @@ async fn l7_a_turn_the_provider_starts_during_a_reserve_is_still_held() -> Resul
         .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
+            WsTransport::new(format!("ws://{at}"))?.connect(),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(remote))?;
@@ -1537,9 +1537,7 @@ async fn l7_a_client_that_leaves_at_any_moment_leaves_no_hold() -> Result<(), Fa
                 .provider::<ClientEvent, _, _>(
                     "openai",
                     realtime(),
-                    respan_gateway_http::connect(WsTransport::new(
-                        provider.trim_end_matches("/v1"),
-                    )?),
+                    WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
                 )?
                 .target("openai")?
                 .plugin("reserve", Reserve(remote))?;
@@ -1654,7 +1652,7 @@ struct Jitter {
     first: Arc<AtomicUsize>,
 }
 
-#[respan_gateway_core::async_trait]
+#[respan_gateway_sdk::async_trait]
 impl Ledger for Jitter {
     async fn reserve(
         &self,
@@ -1695,7 +1693,7 @@ async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<
         .provider::<ClientEvent, _, _>(
             "openai",
             realtime(),
-            respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
+            WsTransport::new(format!("ws://{at}"))?.connect(),
         )?
         .target("openai")?
         .plugin("reserve", Reserve(jitter))?;
@@ -1785,7 +1783,7 @@ async fn a_small_image_billed_more_than_its_bytes_cannot_overspend() {
 
 /// `Ok` at a `response.done`, or the Close the session ended with.
 async fn done_or_closed(ws: &mut Client) -> Result<(), Option<(u16, String)>> {
-    use respan_gateway_core::futures::StreamExt;
+    use respan_gateway_sdk::futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     loop {
         let next = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
@@ -1822,7 +1820,7 @@ async fn l9_provider_turns_and_a_client_that_leaves_at_any_moment_leave_no_hold(
             .provider::<ClientEvent, _, _>(
                 "openai",
                 realtime(),
-                respan_gateway_http::connect(WsTransport::new(format!("ws://{at}"))?),
+                WsTransport::new(format!("ws://{at}"))?.connect(),
             )?
             .target("openai")?
             .plugin("reserve", Reserve(remote))?;

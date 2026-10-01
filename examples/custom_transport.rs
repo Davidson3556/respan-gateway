@@ -12,14 +12,17 @@
 
 use std::sync::Arc;
 
-use respan_gateway_core::futures::FutureExt;
-use respan_gateway_core::futures::channel::oneshot;
-use respan_gateway_core::futures::{StreamExt, stream};
-use respan_gateway_core::{Connection, Events, Fault, Format, Gateway};
-use respan_gateway_messages::Usage;
-use respan_gateway_messages::conversation::{Conversation, Finish, Reply, units};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{post, read_whole, serve};
+use respan_gateway_sdk::Usage;
+use respan_gateway_sdk::conversation::{Conversation, Finish, Reply, units};
+use respan_gateway_sdk::futures::FutureExt;
+use respan_gateway_sdk::futures::channel::oneshot;
+use respan_gateway_sdk::futures::{sink, stream};
+use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format, Gateway};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+use http_support::{post, read_whole, serve};
 
 /// Your model: a conversation in, its answer out.
 type Model = Arc<dyn Fn(&Conversation) -> Result<String, Fault> + Send + Sync>;
@@ -41,7 +44,7 @@ impl Format<Model, Reply, Conversation> for Local {
     fn bind(&self, model: Model) -> Result<Connection<Reply, Conversation>, Fault> {
         let (send, receive) = oneshot::channel();
         let incoming = async move { receive.await.map_err(|_| Fault::abandoned()) };
-        let outgoing = respan_gateway_core::write(move |flow: Events<Conversation>| {
+        let outgoing = EventSink::preparing(move |flow: &mut EventStream<Conversation>| {
             let chat = flow
                 .value()
                 .transpose()?
@@ -61,13 +64,19 @@ impl Format<Model, Reply, Conversation> for Local {
             let mut last = Reply::finished(Finish::Stop);
             last.usage = usage;
             replies.push(last);
-            Ok(async move {
-                let outputs = stream::iter(replies.into_iter().map(Ok)).boxed();
-                let _ = send.send(Events::stream(outputs));
-                Ok(())
-            })
+            let outputs = EventStream::stream(stream::iter(replies.into_iter().map(Ok)));
+            Ok(sink::unfold(
+                Some((send, outputs)),
+                |state, item: Result<Conversation, Fault>| async move {
+                    item?;
+                    if let Some((send, outputs)) = state {
+                        let _ = send.send(outputs);
+                    }
+                    Ok::<_, Fault>(None)
+                },
+            ))
         });
-        Ok((incoming.boxed(), Box::pin(outgoing)))
+        Ok((incoming.boxed(), outgoing))
     }
 }
 

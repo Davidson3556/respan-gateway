@@ -6,8 +6,8 @@
 
 mod support;
 
-use respan_gateway_core::Gateway;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
+use respan_gateway_sdk::Gateway;
 use respan_gateway_ws::WsTransport;
 use support::*;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -21,12 +21,12 @@ fn keyed(probe: &Probe) -> Gateway {
         .with_headers(own)
         .unwrap();
     Gateway::new()
-        .client::<<Raw as respan_gateway_http::Codec>::Input, _, _>(Raw)
+        .client::<respan_gateway_http::formats::opaque::Sent<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<<Raw as respan_gateway_http::Codec>::Input, _, _>(
+        .provider::<respan_gateway_http::formats::opaque::Sent<Raw>, _, _>(
             "p",
             Raw,
-            respan_gateway_http::connect(transport),
+            transport.connect(),
         )
         .unwrap()
         .target("p")

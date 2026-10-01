@@ -22,17 +22,24 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::Extensions;
-use respan_gateway_core::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
+use mockllm::FakeOpenAi;
 use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_http::Asked;
 use respan_gateway_http::http::HeaderValue;
-use respan_gateway_messages::Usage;
-use respan_gateway_messages::conversation::{Conversation, Message, Reply};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_testkit::{MockTransport, mock, post, read_whole, serve};
+use respan_gateway_sdk::Extensions;
+use respan_gateway_sdk::Usage;
+use respan_gateway_sdk::conversation::{Conversation, Message, Reply};
+use respan_gateway_sdk::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
+#[allow(dead_code)]
+#[path = "../tests/support/http.rs"]
+mod http_support;
+#[allow(dead_code)]
+#[path = "tests/support.rs"]
+mod provider_support;
+use http_support::{post, read_whole, serve};
 
 /// One record: a request, or one of its calls (`call` names the provider).
 #[derive(Debug, Clone, PartialEq)]
@@ -172,19 +179,19 @@ impl Plugin for Tenancy {
     }
 }
 
-const OPENAI: &str = "http://openai.test/v1";
-
-fn gateway(mock: &MockTransport, sink: impl Sink) -> Result<Gateway, Fault> {
+fn gateway(
+    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    + Send
+    + Sync
+    + 'static,
+    sink: impl Sink,
+) -> Result<Gateway, Fault> {
     let log = Log {
         sink,
         next: AtomicU64::new(1),
     };
     Gateway::new()
-        .provider::<Conversation, _, _>(
-            "openai",
-            OpenAiChat,
-            respan_gateway_http::connect(mock.at(OPENAI)),
-        )?
+        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin("tenancy", Tenancy(&["zdr-bank"]))?
         .plugin("log", log)?
@@ -200,11 +207,14 @@ const STREAM: &[&str] = &[
 ];
 
 /// Logs a request from each tenant: `acme`, then zero-retention `zdr-bank`.
-async fn run(mock: &MockTransport) -> Result<Vec<Record>, Fault> {
+async fn run(fake: &FakeOpenAi) -> Result<Vec<Record>, Fault> {
     let memory = Memory::default();
-    let gw = gateway(mock, memory.clone())?;
+    let gw = gateway(
+        provider_support::openai(&fake.base_url())?.connect(),
+        memory.clone(),
+    )?;
     for tenant in ["acme", "zdr-bank"] {
-        mock.reply(OPENAI, mock::sse(STREAM));
+        fake.answer(provider_support::sse(STREAM));
         let mut req = post("/v1/chat/completions", REQUEST);
         req.headers_mut()
             .insert("x-tenant", HeaderValue::from_static(tenant));
@@ -217,7 +227,8 @@ async fn run(mock: &MockTransport) -> Result<Vec<Record>, Fault> {
 
 #[tokio::main]
 async fn main() -> Result<(), Fault> {
-    for record in run(&MockTransport::new()).await? {
+    let fake = FakeOpenAi::start().await;
+    for record in run(&fake).await? {
         println!("{record:?}");
     }
     Ok(())

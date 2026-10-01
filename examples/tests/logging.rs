@@ -1,9 +1,11 @@
 use super::*;
-use respan_gateway_messages::conversation::units;
+use respan_gateway_sdk::conversation::units;
 
 #[tokio::test]
 async fn content_is_logged_except_for_a_zero_retention_tenant() -> Result<(), Fault> {
-    let records = run(&MockTransport::new()).await?;
+    let fake = FakeOpenAi::start().await;
+    let records = run(&fake).await?;
+    assert_eq!(fake.requests().len(), 2);
     // Per request: its call first, then the request, sharing its id.
     let ids: Vec<_> = records
         .iter()

@@ -2,8 +2,9 @@
 //! The respan-gateway kernel: a [`Gateway`] runs each request through its
 //! [`Plugin`]s and streams the [`Response`] back (`docs/ARCHITECTURE.md`).
 //!
-//! Formats open ordinary receive futures and send sinks. [`Events`] implements
-//! [`futures::Stream`]; codecs and byte I/O live outside the kernel.
+//! Formats open receive futures and prepare per-event outgoing sinks.
+//! [`EventStream`] implements [`futures::Stream`] and [`EventSink`] implements
+//! [`futures::Sink`]; codecs and byte I/O live outside the kernel.
 
 mod call;
 mod context;
@@ -22,7 +23,7 @@ mod response;
 
 pub use call::Call;
 pub use context::ClientContext;
-pub use events::{Events, write};
+pub use events::{EventSink, EventStream};
 pub use extensions::Extensions;
 pub use fault::{Fault, codes};
 pub use format::{Connection, Format};

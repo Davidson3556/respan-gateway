@@ -3,7 +3,7 @@ use axum::{
     Router,
     extract::{Request, State, ws::WebSocketUpgrade},
 };
-use respan_gateway_core::Gateway;
+use respan_gateway_sdk::Gateway;
 use tokio::sync::watch;
 
 pub async fn run(gateway: Gateway, address: &str) -> Result<(), std::io::Error> {

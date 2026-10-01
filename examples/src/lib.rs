@@ -9,9 +9,9 @@ pub mod store;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
-use respan_gateway_messages::Usage;
-use respan_gateway_messages::conversation::{Conversation, Reply, units};
+use respan_gateway_sdk::Usage;
+use respan_gateway_sdk::conversation::{Conversation, Reply, units};
+use respan_gateway_sdk::{Fault, Plugin, ProviderContext, async_trait};
 
 /// A chat call's usage: every [`Reply::usage`] increment its provider
 /// reported, summed by the filter [`meter`] adds. Clones share it.
@@ -123,8 +123,8 @@ pub mod chat_bound {
     //! Bounds on what a chat call can cost, before it is sent. Used by
     //! `wallet.rs` and `cost_cap.rs`.
 
-    use respan_gateway_core::Fault;
-    use respan_gateway_messages::conversation::{Content, Conversation};
+    use respan_gateway_sdk::Fault;
+    use respan_gateway_sdk::conversation::{Content, Conversation};
     use serde_json::{self, Map, Value};
 
     /// The most input tokens `chat` can be. A token is at least a byte, so

@@ -1,11 +1,11 @@
 use super::*;
 
-fn models(mock: &MockTransport) -> Vec<String> {
-    let model = |b: &[u8]| {
-        let v: serde_json::Value = serde_json::from_slice(b).ok()?;
-        v["model"].as_str().map(Into::into)
-    };
-    mock.sent().iter().filter_map(|r| model(r.body())).collect()
+fn labels(openai: &FakeOpenAi) -> Vec<String> {
+    openai
+        .requests()
+        .iter()
+        .filter_map(|r| r.header("x-case-label").map(str::to_owned))
+        .collect()
 }
 
 /// Until `n` requests are parked.
@@ -19,9 +19,13 @@ async fn parked(slots: &Slots, n: usize) {
 
 #[tokio::test]
 async fn a_request_past_its_deadline_gets_429_with_retry_after() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
-    let gw = gateway(&mock, &Slots::new(1)?, Duration::from_millis(50))?;
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::raw(OK));
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?,
+        &Slots::new(1)?,
+        Duration::from_millis(50),
+    )?;
     let (held, _) = serve(&gw, request("a", "paid")).await;
     let started = Instant::now();
     let (status, headers, _) = read_whole(serve(&gw, request("b", "free")).await.0).await;
@@ -34,12 +38,16 @@ async fn a_request_past_its_deadline_gets_429_with_retry_after() -> Result<(), F
 
 #[tokio::test]
 async fn parked_requests_are_admitted_by_priority_when_a_slot_frees() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let openai = FakeOpenAi::start().await;
     for _ in 0..3 {
-        mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
+        openai.answer(Answer::raw(OK));
     }
     let slots = Slots::new(1)?;
-    let gw = gateway(&mock, &slots, Duration::from_secs(5))?;
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?,
+        &slots,
+        Duration::from_secs(5),
+    )?;
     let (held, _) = serve(&gw, request("first", "paid")).await;
     let park = |model: &'static str, tier| {
         let gw = gw.clone();
@@ -52,16 +60,24 @@ async fn parked_requests_are_admitted_by_priority_when_a_slot_frees() -> Result<
     drop(held);
     let statuses = (paid.await.ok(), free.await.ok());
     assert_eq!(statuses, (Some(StatusCode::OK), Some(StatusCode::OK)));
-    assert_eq!(models(&mock), ["first", "paid", "free"], "paid went first");
+    assert_eq!(
+        labels(&openai),
+        ["first", "paid", "free"],
+        "paid went first"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn a_parked_request_that_leaves_loses_no_slot() -> Result<(), Fault> {
-    let mock = MockTransport::new();
-    mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
+    let openai = FakeOpenAi::start().await;
+    openai.answer(Answer::raw(OK));
     let slots = Slots::new(1)?;
-    let gw = gateway(&mock, &slots, Duration::from_secs(5))?;
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?,
+        &slots,
+        Duration::from_secs(5),
+    )?;
     let (held, _) = serve(&gw, request("first", "paid")).await;
     let gone = tokio::spawn({
         let gw = gw.clone();
@@ -77,7 +93,7 @@ async fn a_parked_request_that_leaves_loses_no_slot() -> Result<(), Fault> {
 }
 
 /// A request for `model` from `user`, on the free tier.
-fn from(model: &str, user: &'static str) -> http::Request<respan_gateway_http::Body> {
+fn from(model: &'static str, user: &'static str) -> http::Request<respan_gateway_http::Body> {
     let mut req = request(model, "free");
     req.headers_mut()
         .insert("x-user", HeaderValue::from_static(user));
@@ -86,12 +102,16 @@ fn from(model: &str, user: &'static str) -> http::Request<respan_gateway_http::B
 
 #[tokio::test]
 async fn one_heavy_user_cannot_starve_another() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let openai = FakeOpenAi::start().await;
     for _ in 0..6 {
-        mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
+        openai.answer(Answer::raw(OK));
     }
     let slots = Slots::new(1)?;
-    let gw = gateway(&mock, &slots, Duration::from_secs(5))?;
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?,
+        &slots,
+        Duration::from_secs(5),
+    )?;
     let (held, _) = serve(&gw, from("first", "heavy")).await;
     let park = |model: &'static str, user| {
         let gw = gw.clone();
@@ -110,18 +130,22 @@ async fn one_heavy_user_cannot_starve_another() -> Result<(), Fault> {
         assert_eq!(done.await.ok(), Some(StatusCode::OK));
     }
     // Served in turns: the light user's one request is second, not last.
-    assert_eq!(models(&mock), ["first", "h1", "l1", "h2", "h3", "h4"]);
+    assert_eq!(labels(&openai), ["first", "h1", "l1", "h2", "h3", "h4"]);
     Ok(())
 }
 
 #[tokio::test]
 async fn priority_still_comes_before_fair_share() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let openai = FakeOpenAi::start().await;
     for _ in 0..3 {
-        mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
+        openai.answer(Answer::raw(OK));
     }
     let slots = Slots::new(1)?;
-    let gw = gateway(&mock, &slots, Duration::from_secs(5))?;
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?,
+        &slots,
+        Duration::from_secs(5),
+    )?;
     let (held, _) = serve(&gw, from("first", "a")).await;
     let park = |model: &'static str, user, tier| {
         let gw = gw.clone();
@@ -139,18 +163,22 @@ async fn priority_still_comes_before_fair_share() -> Result<(), Fault> {
         (paid.await.ok(), free.await.ok()),
         (Some(StatusCode::OK), Some(StatusCode::OK))
     );
-    assert_eq!(models(&mock), ["first", "paid", "free"]);
+    assert_eq!(labels(&openai), ["first", "paid", "free"]);
     Ok(())
 }
 
 #[tokio::test]
 async fn configured_weights_give_two_turns_then_one() -> Result<(), Fault> {
-    let mock = MockTransport::new();
+    let openai = FakeOpenAi::start().await;
     for _ in 0..7 {
-        mock.reply(OPENAI, mock::json(StatusCode::OK, OK));
+        openai.answer(Answer::raw(OK));
     }
     let slots = Slots::new(1)?.weight("heavy", 2)?;
-    let gw = gateway(&mock, &slots, Duration::from_secs(5))?;
+    let gw = gateway(
+        provider_support::openai(&openai.base_url())?,
+        &slots,
+        Duration::from_secs(5),
+    )?;
     let (held, _) = serve(&gw, from("first", "other")).await;
     let mut running = Vec::new();
     for (i, (model, user)) in [
@@ -174,7 +202,10 @@ async fn configured_weights_give_two_turns_then_one() -> Result<(), Fault> {
     for task in running {
         assert_eq!(task.await.ok(), Some(StatusCode::OK));
     }
-    assert_eq!(models(&mock), ["first", "h1", "h2", "l1", "h3", "h4", "l2"]);
+    assert_eq!(
+        labels(&openai),
+        ["first", "h1", "h2", "l1", "h3", "h4", "l2"]
+    );
     Ok(())
 }
 
@@ -273,9 +304,9 @@ async fn losing_the_store_cancels_a_call_waiting_for_its_provider_head() -> Resu
     let slots = Slots::open(&path, 1, Duration::from_millis(600))?;
     let started = Arc::new(AtomicBool::new(false));
     let dropped = Arc::new(AtomicBool::new(false));
-    let transport = respan_gateway_http::Transport::new({
+    let transport = {
         let (started, dropped) = (started.clone(), dropped.clone());
-        move |call| {
+        move |call: respan_gateway_http::http::Request<respan_gateway_http::Body>| {
             let (started, dropped) = (started.clone(), dropped.clone());
             async move {
                 let _call = call;
@@ -284,7 +315,7 @@ async fn losing_the_store_cancels_a_call_waiting_for_its_provider_head() -> Resu
                 std::future::pending().await
             }
         }
-    });
+    };
     let gw = Gateway::new()
         .client::<Conversation, _, _>(OpenAiChat)?
         .provider::<Conversation, _, _>(

@@ -122,7 +122,7 @@ async fn wrapped_sessions_dropped_at_random_end_once() {
     #[async_trait]
     impl Plugin for Both {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|inputs: Events<In>| {
+            cx.wrap(|inputs: EventStream<In>| {
                 inputs
                     .take_while(|i| std::future::ready(i.is_ok()))
                     .then(|i| async move {
@@ -130,7 +130,7 @@ async fn wrapped_sessions_dropped_at_random_end_once() {
                         i
                     })
             })?;
-            cx.wrap(|outputs: Events<Out>| {
+            cx.wrap(|outputs: EventStream<Out>| {
                 outputs.then(|o| async move {
                     tokio::task::yield_now().await;
                     o

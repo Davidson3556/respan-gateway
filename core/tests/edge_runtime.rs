@@ -1,17 +1,18 @@
 //! Cross-direction lifecycle guarantees of the symmetric edge contract.
 #![allow(clippy::unwrap_used)]
 
+use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::future::BoxFuture;
-use respan_gateway_core::futures::{FutureExt, Sink};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_core::futures::StreamExt;
+use respan_gateway_core::futures::Sink;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::{
-    ClientContext, Connection, Events, Extensions, Fault, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait,
+    ClientContext, Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway, Plugin,
+    ProviderContext, Response, async_trait,
 };
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 #[derive(Clone)]
 struct Input;
@@ -26,7 +27,25 @@ enum Io {
 
 struct Dialer {
     writing: Mutex<Option<BoxFuture<'static, Result<(), Fault>>>>,
-    incoming: Mutex<Option<Events<Output>>>,
+    incoming: Mutex<Option<EventStream<Output>>>,
+}
+
+/// Inputs are accepted per item; only closing waits for actual delivery.
+struct Completion(BoxFuture<'static, Result<(), Fault>>);
+impl Sink<Result<Input, Fault>> for Completion {
+    type Error = Fault;
+    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        Poll::Ready(Ok(()))
+    }
+    fn start_send(self: Pin<&mut Self>, item: Result<Input, Fault>) -> Result<(), Fault> {
+        item.map(|_| ())
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        self.0.as_mut().poll(cx)
+    }
 }
 
 struct Protocol;
@@ -44,22 +63,18 @@ impl Format<Io, Input, Output> for Protocol {
         let Io::Client { fail_writing } = io else {
             return Err(Fault::config("expected client I/O"));
         };
-        let outgoing = respan_gateway_core::write(move |flow: Events<Output>| {
+        let outgoing = EventSink::preparing(move |_: &mut EventStream<Output>| {
             if fail_writing {
-                drop(flow);
                 return Err(Fault::new("write_failed", "client delivery failed"));
             }
-            Ok(async move {
-                let mut events = flow;
-                while let Some(event) = events.next().await {
-                    event?;
-                }
-                Ok(())
-            })
+            Ok(futures::sink::unfold(
+                (),
+                |(), event: Result<Output, Fault>| futures::future::ready(event.map(|_| ())),
+            ))
         });
         Ok((
-            futures::future::ready(Ok(Events::single(Input))).boxed(),
-            Box::pin(outgoing),
+            futures::future::ready(Ok(EventStream::single(Input))).boxed(),
+            outgoing,
         ))
     }
 }
@@ -75,11 +90,8 @@ impl Format<Io, Output, Input> for Protocol {
         };
         let delivery = dialer.writing.lock().unwrap().take().unwrap();
         let incoming = dialer.incoming.lock().unwrap().take().unwrap();
-        let outgoing = respan_gateway_core::write(move |_: Events<Input>| Ok(delivery));
-        Ok((
-            futures::future::ready(Ok(incoming)).boxed(),
-            Box::pin(outgoing),
-        ))
+        let outgoing = EventSink::new(Completion(delivery));
+        Ok((futures::future::ready(Ok(incoming)).boxed(), outgoing))
     }
 }
 
@@ -95,7 +107,8 @@ struct Record {
 impl Plugin for Record {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         if self.hold {
-            let (response, _) = cx.call("provider").await?.until_end().await?;
+            let mut response = cx.call("provider").await?;
+            response.until_end().await?;
             Ok(Some(response))
         } else {
             Ok(None)
@@ -113,13 +126,13 @@ impl Plugin for Record {
 }
 
 fn gateway(record: &Record, writing: BoxFuture<'static, Result<(), Fault>>) -> Gateway {
-    gateway_with(record, writing, Events::single(Output))
+    gateway_with(record, writing, EventStream::single(Output))
 }
 
 fn gateway_with(
     record: &Record,
     writing: BoxFuture<'static, Result<(), Fault>>,
-    incoming: Events<Output>,
+    incoming: EventStream<Output>,
 ) -> Gateway {
     Gateway::new()
         .client::<Input, _, _>(Protocol)
@@ -187,7 +200,7 @@ async fn provider_refusal_cancels_pending_upload_without_waiting_for_it() {
     let writing = async move { finished.await.map_err(|_| Fault::abandoned())? }.boxed();
     let record = Record::default();
     let refusal = Fault::new("refused", "provider declined input");
-    let gw = gateway_with(&record, writing, Events::refused(refusal.clone()));
+    let gw = gateway_with(&record, writing, EventStream::refused(refusal.clone()));
     assert_eq!(
         gw.handle(
             Io::Client {
@@ -203,12 +216,55 @@ async fn provider_refusal_cancels_pending_upload_without_waiting_for_it() {
     assert_eq!(*record.provider.lock().unwrap(), [Err(refusal)]);
 }
 
+struct RefusalHeld(Arc<Mutex<oneshot::Sender<Result<(), Fault>>>>);
+
+#[async_trait]
+impl Plugin for RefusalHeld {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let mut response = cx.call("provider").await?;
+        assert!(
+            self.0.lock().unwrap().is_canceled(),
+            "a refused opening must release pending upload while response is held"
+        );
+        assert!(response.until_end().await.is_err());
+        Ok(Some(response))
+    }
+}
+
+#[tokio::test]
+async fn refused_opening_releases_upload_before_held_response_is_replayed() {
+    let (finish, finished) = oneshot::channel::<Result<(), Fault>>();
+    let finish = Arc::new(Mutex::new(finish));
+    let writing = async move { finished.await.map_err(|_| Fault::abandoned())? }.boxed();
+    let refusal = Fault::new("refused", "provider declined input");
+    let record = Record::default();
+    let gw = gateway_with(&record, writing, EventStream::refused(refusal.clone()))
+        .plugin("hold-refusal", RefusalHeld(finish.clone()))
+        .unwrap();
+    assert_eq!(
+        gw.handle(
+            Io::Client {
+                fail_writing: false
+            },
+            Extensions::new()
+        )
+        .await,
+        Err(refusal.clone())
+    );
+    gw.idle().await;
+    assert_eq!(*record.provider.lock().unwrap(), [Err(refusal)]);
+}
+
 #[tokio::test]
 async fn cancelling_exchange_drops_both_pending_provider_directions() {
     let (finish, finished) = oneshot::channel::<Result<(), Fault>>();
     let writing = async move { finished.await.map_err(|_| Fault::abandoned())? }.boxed();
     let record = Record::default();
-    let gw = gateway_with(&record, writing, Events::stream(futures::stream::pending()));
+    let gw = gateway_with(
+        &record,
+        writing,
+        EventStream::stream(futures::stream::pending()),
+    );
     let mut handled = gw
         .handle(
             Io::Client {
@@ -226,75 +282,119 @@ async fn cancelling_exchange_drops_both_pending_provider_directions() {
     assert_eq!(*record.client.lock().unwrap(), [Err(Fault::abandoned())]);
 }
 
-struct ReadyProtocol {
-    ready: Mutex<Option<oneshot::Receiver<Result<(), Fault>>>>,
-    submitted: Arc<std::sync::atomic::AtomicBool>,
+/// Make resource teardown observable after a sink has failed. With no plugins,
+/// detached-hook bookkeeping can otherwise become idle before this drop ends.
+struct BlockingSink {
+    entered: Option<oneshot::Sender<()>>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
-struct ReadySink {
-    ready: oneshot::Receiver<Result<(), Fault>>,
-    submitted: Arc<std::sync::atomic::AtomicBool>,
+impl Drop for BlockingSink {
+    fn drop(&mut self) {
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+            self.release
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }
+    }
 }
 
-impl Sink<Events<Input>> for ReadySink {
+impl Sink<Result<Output, Fault>> for BlockingSink {
     type Error = Fault;
-
-    fn poll_ready(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Fault>> {
-        use std::future::Future;
-        let ready = std::task::ready!(Pin::new(&mut self.ready).poll(cx));
-        std::task::Poll::Ready(ready.map_err(|_| Fault::abandoned())?)
+    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        Poll::Ready(Ok(()))
     }
-
-    fn start_send(self: Pin<&mut Self>, _: Events<Input>) -> Result<(), Fault> {
-        self.submitted
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+    fn start_send(self: Pin<&mut Self>, _: Result<Output, Fault>) -> Result<(), Fault> {
+        Err(Fault::upstream("delivery failed"))
     }
-
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Fault>> {
-        std::task::Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        Poll::Ready(Ok(()))
     }
-
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Fault>> {
-        self.poll_flush(cx)
+    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Fault>> {
+        Poll::Ready(Ok(()))
     }
 }
 
-#[allow(clippy::type_complexity)]
+struct BlockingProtocol;
+impl Format<BlockingSink, Input, Output> for BlockingProtocol {
+    fn name(&self) -> &str {
+        "blocked-drop"
+    }
+    fn matches(&self, _: &BlockingSink) -> bool {
+        true
+    }
+    fn bind(&self, sink: BlockingSink) -> Result<Connection<Input, Output>, Fault> {
+        Ok((
+            futures::future::ready(Ok(EventStream::single(Input))).boxed(),
+            EventSink::new(sink),
+        ))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_waits_for_delivery_resources_after_error_hooks_finish() {
+    let gateway = Gateway::new().client(BlockingProtocol).unwrap();
+    let (entered, dropping) = oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let handled = tokio::spawn(gateway.handle(
+        BlockingSink {
+            entered: Some(entered),
+            release: released,
+        },
+        Extensions::new(),
+    ));
+    dropping.await.unwrap();
+    let premature = gateway.idle().now_or_never().is_some();
+    release.send(()).unwrap();
+    assert!(
+        !premature,
+        "idle completed while delivery resources were being dropped"
+    );
+    assert_eq!(
+        handled.await.unwrap(),
+        Err(Fault::upstream("delivery failed"))
+    );
+    gateway.idle().await;
+}
+
+struct ReadyProtocol {
+    delivery: Mutex<Option<oneshot::Receiver<Result<(), Fault>>>>,
+    prepare: Result<(), Fault>,
+    submitted: Arc<std::sync::atomic::AtomicBool>,
+}
+
 impl Format<Io, Output, Input> for ReadyProtocol {
     fn name(&self) -> &str {
         "ready-lifecycle"
     }
 
     fn bind(&self, _: Io) -> Result<Connection<Output, Input>, Fault> {
-        let outgoing = ReadySink {
-            ready: self.ready.lock().unwrap().take().unwrap(),
-            submitted: self.submitted.clone(),
-        };
+        let delivery = self.delivery.lock().unwrap().take().unwrap();
+        let prepare = self.prepare.clone();
+        let submitted = self.submitted.clone();
         Ok((
-            futures::future::ready(Ok(Events::single(Output))).boxed(),
-            Box::pin(outgoing),
+            futures::future::ready(Ok(EventStream::single(Output))).boxed(),
+            EventSink::preparing(move |_: &mut EventStream<Input>| {
+                prepare?;
+                submitted.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Completion(
+                    async move { delivery.await.map_err(|_| Fault::abandoned())? }.boxed(),
+                ))
+            }),
         ))
     }
 }
 
 #[tokio::test]
-async fn sink_readiness_controls_submission_and_sent_status() {
+async fn synchronous_preparation_controls_sent_status_while_delivery_progresses() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    for readiness in [Ok(()), Err(Fault::config("cannot prepare input"))] {
-        let (ready, ready_receiver) = oneshot::channel();
+    for preparation in [Ok(()), Err(Fault::config("cannot prepare input"))] {
+        let (finish, delivery) = oneshot::channel();
         let submitted = Arc::new(AtomicBool::new(false));
         let protocol = ReadyProtocol {
-            ready: Mutex::new(Some(ready_receiver)),
+            delivery: Mutex::new(Some(delivery)),
+            prepare: preparation.clone(),
             submitted: submitted.clone(),
         };
         let record = Record::default();
@@ -315,12 +415,14 @@ async fn sink_readiness_controls_submission_and_sent_status() {
                 Extensions::new(),
             )
             .boxed();
-        assert!(handled.as_mut().now_or_never().is_none());
-        assert!(!submitted.load(Ordering::SeqCst));
-        ready.send(readiness.clone()).unwrap();
-        assert_eq!(handled.await, readiness);
+        if preparation.is_ok() {
+            assert!(handled.as_mut().now_or_never().is_none());
+            assert!(submitted.load(Ordering::SeqCst));
+            finish.send(Ok(())).unwrap();
+        }
+        assert_eq!(handled.await, preparation);
         gw.idle().await;
-        assert_eq!(submitted.load(Ordering::SeqCst), readiness.is_ok());
-        assert_eq!(*record.sent.lock().unwrap(), [readiness.is_ok()]);
+        assert_eq!(submitted.load(Ordering::SeqCst), preparation.is_ok());
+        assert_eq!(*record.sent.lock().unwrap(), [preparation.is_ok()]);
     }
 }

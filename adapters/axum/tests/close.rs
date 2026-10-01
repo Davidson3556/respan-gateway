@@ -6,7 +6,7 @@ mod support;
 
 use std::sync::atomic::Ordering;
 
-use respan_gateway_core::Gateway;
+use respan_gateway_sdk::Gateway;
 use support::*;
 
 const PATH: &str = "/v1/realtime";
@@ -248,7 +248,7 @@ async fn a_request_no_format_accepts_is_a_404_to_the_handshake() {
     let (gateway, ..) = relay(&probe.base());
     // A gateway that serves nothing.
     let _ = gateway;
-    let bare = respan_gateway_core::Gateway::new();
+    let bare = respan_gateway_sdk::Gateway::new();
     let server = serve(bare).await;
     let refused = connect(server.addr, PATH, &[]).await;
     let Err(tokio_tungstenite::tungstenite::Error::Http(resp)) = refused else {

@@ -5,10 +5,13 @@
 
 mod support;
 
-use respan_gateway_core::Fault;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_testkit::{read_whole, serve as serve_http, streamed};
+use respan_gateway_sdk::Fault;
+#[allow(dead_code, unused_imports)]
+#[path = "../../../tests/support/http.rs"]
+mod http_helpers;
+use http_helpers::{read_whole, serve as serve_http, streamed};
 use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

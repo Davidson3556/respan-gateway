@@ -27,8 +27,10 @@ impl Plugin for Mark {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         cx.extensions_mut().insert(Marker(self.0.clone()));
         match self.1 {
-            1 => cx.wrap(|o: Events<Out>| o.take(1).boxed() as BoxStream<'static, Result<Out>>)?,
-            2 => cx.wrap(|i: Events<In>| {
+            1 => {
+                cx.wrap(|o: EventStream<Out>| o.take(1).boxed() as BoxStream<'static, Result<Out>>)?
+            }
+            2 => cx.wrap(|i: EventStream<In>| {
                 i.and_then(|x| async move {
                     tokio::task::yield_now().await;
                     match x.0.as_str() {
@@ -38,7 +40,7 @@ impl Plugin for Mark {
                 })
                 .boxed()
             })?,
-            3 => cx.wrap(|_o: Events<Out>| {
+            3 => cx.wrap(|_o: EventStream<Out>| {
                 stream::pending().boxed() as BoxStream<'static, Result<Out>>
             })?,
             _ => {}
