@@ -148,7 +148,6 @@ impl Config {
                     "no plugin given; compiled-in plugins: [models]",
                 )));
             };
-            // ModelRouter reads Conversation; its targets must accept that kind.
             for m in models {
                 let Some(provider) = self.providers.get(&m.provider) else {
                     return Err(bad(Fault::config(format!(

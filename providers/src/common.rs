@@ -534,7 +534,6 @@ pub(crate) struct SoFar {
     pub(crate) text: BTreeMap<u32, String>,
     /// Tool calls, in the order they were made.
     pub(crate) calls: Calls,
-    /// Content order for formats with ordered text and tool blocks.
     pub(crate) encounters: Vec<Encounter>,
     pub(crate) finish: Option<Finish>,
     pub(crate) usage: Usage,
@@ -1029,8 +1028,7 @@ impl Names<Finish> {
             .unwrap_or_else(|| Finish::Other(reason.to_owned()))
     }
 
-    /// A [`Finish`] as a known destination reason. An unrecognized native
-    /// reason has no translation to a normal stop.
+    /// Map a finish without inventing normal completion.
     pub(crate) fn reason<'a>(&self, finish: &'a Finish) -> Result<&'a str, Fault> {
         match finish {
             Finish::Other(reason) if self.1.contains(&reason.as_str()) => Ok(reason),
