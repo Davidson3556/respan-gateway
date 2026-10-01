@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::formats::opaque::Passthrough;
 use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode,
     header::{AUTHORIZATION, RETRY_AFTER},
 };
 use respan_gateway_http::{Body, Completion, HttpClient, retryable};
+use respan_gateway_plugins::ModelRouter;
 use respan_gateway_plugins::routing::{Attempt, Backoff, Role, Until, first_success, race};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::futures::channel::oneshot;
@@ -391,6 +393,110 @@ impl Harness {
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
+}
+
+fn model(input: &Conversation) -> Option<&str> {
+    input.model.as_deref()
+}
+
+fn model_gateway(mock: &Fakes, router: ModelRouter<Conversation>) -> Gateway {
+    Gateway::new()
+        .client::<Conversation, _, _>(OpenAiChat)
+        .expect("chat client")
+        .provider::<Conversation, _, _>("a", OpenAiChat, respan_gateway_http::connect(mock.at(A)))
+        .expect("a provider")
+        .provider::<Conversation, _, _>("b", OpenAiChat, respan_gateway_http::connect(mock.at(B)))
+        .expect("b provider")
+        .plugin("model-router", router)
+        .expect("router")
+        .target("b")
+        .expect("default target")
+}
+
+async fn routed_post(gw: &Gateway, body: &'static str) -> (StatusCode, String) {
+    let (resp, outcome) = serve(gw, post("/v1/chat/completions", body)).await;
+    let (status, _, bytes) = read_whole(resp).await;
+    let text = String::from_utf8_lossy(&bytes.expect("response body")).into_owned();
+    assert_eq!(outcome.await, Ok(()));
+    (status, text)
+}
+
+#[tokio::test]
+async fn model_router_uses_first_registered_matching_prefix_not_the_longest() {
+    const ASK: &str = r#"{"model":"gpt-pro","messages":[{"role":"user","content":"hi"}]}"#;
+    for (first, first_target, second, second_target, selected) in [
+        ("gpt", "a", "gpt-pro", "b", A),
+        ("gpt-pro", "b", "gpt", "a", B),
+    ] {
+        let mock = Fakes::start().await;
+        mock.reply(selected, Answer::text("chosen provider"));
+        let router = ModelRouter::new(model)
+            .route(first, first_target)
+            .route(second, second_target);
+        let gw = model_gateway(&mock, router);
+        let (status, answer) = routed_post(&gw, ASK).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(answer.contains("chosen provider"), "{answer}");
+        assert_eq!(
+            mock.sent(),
+            [if selected == A { "a.test" } else { "b.test" }]
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_router_keeps_default_for_unmatched_and_missing_models() {
+    const UNMATCHED: &str = r#"{"model":"other","messages":[{"role":"user","content":"hi"}]}"#;
+    const MISSING: &str = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+    let mock = Fakes::start().await;
+    mock.reply(B, Answer::text("unmatched default"));
+    let gw = model_gateway(&mock, ModelRouter::new(model).route("gpt", "a"));
+    let (status, answer) = routed_post(&gw, UNMATCHED).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(answer.contains("unmatched default"), "{answer}");
+    // The pinned fake rejects the missing model, but only the default target
+    // receives it: the router does not invent a model or choose a route.
+    let (resp, outcome) = serve(&gw, post("/v1/chat/completions", MISSING)).await;
+    let _ = read_whole(resp).await;
+    assert!(outcome.await.is_err());
+    assert_eq!(mock.sent(), ["b.test", "b.test"]);
+}
+
+#[tokio::test]
+async fn model_router_leaves_unreadable_input_on_its_original_target() {
+    let mock = Fakes::start().await;
+    mock.reply(B, Answer::text("original target"));
+    let gw = model_gateway(&mock, ModelRouter::new(model).route("gpt", "a"));
+    let (resp, outcome) = serve(&gw, post("/v1/chat/completions", "not-json")).await;
+    let _ = read_whole(resp).await;
+    let _ = outcome.await;
+    assert_eq!(mock.sent(), ["b.test"]);
+}
+
+#[tokio::test]
+async fn model_router_passes_other_kinds_without_changing_their_target() {
+    let gw = Gateway::new()
+        .client::<Conversation, _, _>(OpenAiChat)
+        .expect("chat client")
+        .client::<respan_gateway_http::formats::opaque::Sent<Passthrough>, _, _>(Passthrough)
+        .expect("opaque client")
+        .provider::<respan_gateway_http::formats::opaque::Sent<Passthrough>, _, _>(
+            "raw",
+            Passthrough,
+            respan_gateway_http::connect(|_| async {
+                Ok((http::Response::new(Body::full("opaque answer")), None))
+            }),
+        )
+        .expect("opaque provider")
+        .plugin("model-router", ModelRouter::new(model).route("", "a"))
+        .expect("router")
+        .target("raw")
+        .expect("default target");
+    let (resp, outcome) = serve(&gw, post("/other", "opaque input")).await;
+    let (status, _, body) = read_whole(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body.expect("opaque body")[..], b"opaque answer");
+    assert_eq!(outcome.await, Ok(()));
 }
 
 /// Waits 5 s for a head, 1 s between body frames.
