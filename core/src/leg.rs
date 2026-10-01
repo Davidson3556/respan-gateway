@@ -15,11 +15,12 @@ use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use futures::{FutureExt, StreamExt};
 
+use crate::events::MAX_BATCH;
 use crate::fault::{PANICKED, guarded};
-use crate::format::{AnyEvents, AnyFormat, AnyValue, ValueStream, Values};
-use crate::lifecycle::InFlight;
+use crate::lifecycle::Latch;
 use crate::plugin::Filters;
-use crate::response::{Batch, Source};
+use crate::response::{Batch, Feed};
+use crate::values::{AnyEvents, Values};
 use crate::{Fault, Result};
 
 /// One stage's filters of one direction, shared by whoever runs or ends it.
@@ -41,7 +42,11 @@ pub(crate) fn run(layers: &[&Layer], values: &mut Values) -> Result<()> {
 /// End each of `layers` once, in order, with `end`: what one keeps back
 /// runs through those after it before they end, and joins `tail`. Returns
 /// the end.
-pub(crate) fn end(layers: &[&Layer], mut end: Result<()>, tail: &mut Option<Values>) -> Result<()> {
+pub(crate) fn end_layers(
+    layers: &[&Layer],
+    mut end: Result<()>,
+    tail: &mut Option<Values>,
+) -> Result<()> {
     for (i, layer) in layers.iter().enumerate() {
         end = locked(layer).end(end, tail);
         if let (Some(values), Some(next)) = (tail.as_mut(), layers.get(i + 1))
@@ -79,10 +84,10 @@ pub(crate) fn cut<T: Send + 'static>(
     .boxed()
 }
 
-/// Resolves [`codes::ABANDONED`](crate::codes::ABANDONED) once `cut` is
-/// idle, as when its request or call ended.
-pub(crate) fn idle(cut: &Arc<InFlight>) -> BoxFuture<'static, Fault> {
-    cut.idle().map(|()| Fault::abandoned()).boxed()
+/// Resolves [`codes::ABANDONED`](crate::codes::ABANDONED) once `ended`
+/// closes, as when its request or call ended.
+pub(crate) fn on_close(ended: &Latch) -> BoxFuture<'static, Fault> {
+    ended.closed().map(|()| Fault::abandoned()).boxed()
 }
 
 /// Yield one poll after a batch is safely retained. Wake synchronously so a
@@ -133,32 +138,30 @@ impl Later {
     /// The request ended: its filters end `end`, if they have not, and the
     /// events go, so nothing that outlives it keeps the client's connection;
     /// then those it wraps, so a reader sees the cut here first.
-    pub(crate) fn end(&self, end: Result<()>) {
+    pub(crate) fn close(&self, end: Result<()>) {
         let _ = locked(&self.filters).end(end.clone(), &mut None);
         locked(&self.events).take();
         if let Some(before) = &self.before {
-            before.end(end);
+            before.close(end);
         }
     }
 }
 
-/// `later`'s inputs through its input filters, then those of `call`, which
-/// is told the first failure; cut, when `until` is idle or either layer
-/// ended, with `Err(abandoned)`. Taken on the first poll; given back if none
-/// was read.
+/// `later`'s inputs, one per item, through its input filters, then those of
+/// `call`, which is told the first failure; cut, when `until` closes or
+/// either layer ended, with `Err(abandoned)`. Taken on the first poll; given
+/// back if none was read.
 pub(crate) fn inputs(
     later: Arc<Later>,
-    format: Arc<dyn AnyFormat>,
     call: Option<(Layer, oneshot::Sender<Fault>)>,
-    until: &Arc<InFlight>,
-) -> ValueStream {
+    until: &Latch,
+) -> AnyEvents {
     let (call, failed) = call.unzip();
     let mut layers = vec![later.filters.clone()];
     layers.extend(call);
     let reading = Reading {
         later,
         events: None,
-        format,
         layers,
         ready: VecDeque::new(),
         ended: false,
@@ -168,23 +171,23 @@ pub(crate) fn inputs(
         reading,
         |mut r| async move { r.next().await.map(|i| (i, r)) },
     );
-    cut(items.boxed(), idle(until))
+    cut(items.boxed(), on_close(until))
 }
 
 struct Reading {
     later: Arc<Later>,
     /// Taken from `later` on the first poll.
     events: Option<AnyEvents>,
-    format: Arc<dyn AnyFormat>,
     layers: Vec<Layer>,
-    ready: VecDeque<Result<AnyValue>>,
+    /// One value each.
+    ready: VecDeque<Result<Values>>,
     ended: bool,
     /// Told the first failure, which ends the call that reads them.
     failed: Option<oneshot::Sender<Fault>>,
 }
 
 impl Reading {
-    async fn next(&mut self) -> Option<Result<AnyValue>> {
+    async fn next(&mut self) -> Option<Result<Values>> {
         loop {
             if let Some(item) = self.ready.pop_front() {
                 if let Err(fault) = &item
@@ -240,14 +243,12 @@ impl Reading {
     /// they are cut.
     fn filter(&mut self, values: Values) -> Result<()> {
         let layers: Vec<&Layer> = self.layers.iter().collect();
-        for input in self.format.inputs(values) {
+        for mut input in values.split() {
             if layers.iter().any(|l| locked(l).ended()) {
                 return Err(Fault::abandoned());
             }
-            let mut values = self.format.values(vec![input]);
-            run(&layers, &mut values)?;
-            self.ready
-                .extend(self.format.inputs(values).into_iter().map(Ok));
+            run(&layers, &mut input)?;
+            self.ready.extend(input.split().into_iter().map(Ok));
         }
         Ok(())
     }
@@ -258,9 +259,9 @@ impl Reading {
         self.ended = true;
         let mut tail = None;
         let layers: Vec<&Layer> = self.layers.iter().collect();
-        let end = self::end(&layers, end, &mut tail);
+        let end = end_layers(&layers, end, &mut tail);
         if end.is_ok() {
-            let made = tail.map(|v| self.format.inputs(v)).unwrap_or_default();
+            let made = tail.map(|v| v.split()).unwrap_or_default();
             self.ready.extend(made.into_iter().map(Ok));
         }
         end
@@ -280,11 +281,11 @@ impl Drop for Reading {
 }
 
 /// A response on its way to the client: what was read ahead, then its
-/// source, each batch read (its call ends at its end) and run through the
+/// feed, each batch read (its call ends at its end) and run through the
 /// client's output filters, which end with it.
-pub(crate) struct Outgoing {
+pub(crate) struct ToClient {
     ahead: VecDeque<Batch>,
-    source: Source,
+    feed: Feed,
     layer: Layer,
     /// Whether it relays, so a provider's words go with a failure.
     relayed: bool,
@@ -295,10 +296,10 @@ pub(crate) struct Outgoing {
     discarded: Arc<Mutex<Vec<Batch>>>,
 }
 
-impl Outgoing {
+impl ToClient {
     pub(crate) fn new(
         ahead: VecDeque<Batch>,
-        source: Source,
+        feed: Feed,
         layer: Layer,
         relayed: bool,
         discarded: Arc<Mutex<Vec<Batch>>>,
@@ -306,7 +307,7 @@ impl Outgoing {
         let (ready, done) = (VecDeque::new(), false);
         Self {
             ahead,
-            source,
+            feed,
             layer,
             relayed,
             ready,
@@ -331,19 +332,16 @@ impl Outgoing {
             // A panic reading or filtering ends the call and the reply.
             if AssertUnwindSafe(self.step()).catch_unwind().await.is_err() {
                 let fault = Fault::internal(PANICKED);
-                self.source.end(Err(fault.clone()));
+                self.feed.finish(Err(fault.clone()));
                 let _ = locked(&self.layer).end(Err(fault.clone()), &mut None);
                 self.ready.push_back(Err(fault));
                 self.done = true;
             }
             self.batches += 1;
-            // Source::next never suspends after consuming a batch: borrowed
+            // Feed::next never suspends after consuming a batch: borrowed
             // response inspection can be canceled without losing it. Yield
             // here instead, once the outgoing edge owns the buffered batch.
-            if !self.done
-                && (matches!(self.source, Source::EventStream { .. })
-                    || self.batches.is_multiple_of(128))
-            {
+            if !self.done && (self.feed.is_call() || self.batches.is_multiple_of(MAX_BATCH)) {
                 yield_ready().await;
             }
         }
@@ -354,10 +352,10 @@ impl Outgoing {
     async fn step(&mut self) {
         let mut batch = match self.ahead.pop_front() {
             Some(batch) => batch,
-            None => self.source.next().await,
+            None => self.feed.next().await,
         };
         batch.read();
-        let mut end = batch.end.take().map(|end| end.outcome().clone());
+        let mut end = batch.ending.take().map(|ending| ending.outcome().clone());
         if let Some(mut values) = batch.values.take() {
             if let Err(fault) = run(&[&self.layer], &mut values) {
                 end = Some(Err(fault));
@@ -366,10 +364,10 @@ impl Outgoing {
         }
         let Some(end) = end else { return };
         self.done = true;
-        self.source.end(end.clone());
+        self.feed.finish(end.clone());
         // Filters see every end, a failure too.
         let mut tail = None;
-        let end = self::end(&[&self.layer], end, &mut tail);
+        let end = end_layers(&[&self.layer], end, &mut tail);
         self.ready.extend(tail.map(Ok));
         if let Err(fault) = end {
             // A provider's words go only where its head would.
@@ -385,16 +383,16 @@ impl Outgoing {
 /// Dropped before its end, unread: its call ends as its end says, if it is
 /// ready; else as its source goes, abandoned, or with its request if the
 /// reply holds it.
-impl Drop for Outgoing {
+impl Drop for ToClient {
     fn drop(&mut self) {
         if self.done {
             return;
         }
-        let ahead = self.ahead.iter_mut().find(|b| b.end.is_some());
+        let ahead = self.ahead.iter_mut().find(|b| b.ending.is_some());
         let batch = match ahead {
             Some(batch) => std::mem::take(batch),
             None => {
-                let next = AssertUnwindSafe(|| self.source.next().now_or_never());
+                let next = AssertUnwindSafe(|| self.feed.next().now_or_never());
                 match std::panic::catch_unwind(next) {
                     Ok(Some(batch)) => batch,
                     _ => return,
@@ -412,34 +410,17 @@ mod tests {
     use futures::StreamExt;
 
     use super::*;
-    use crate::Format;
-
-    struct Nil;
-
-    impl Format<(), String, String> for Nil {
-        fn name(&self) -> &str {
-            "nil"
-        }
-
-        fn bind(&self, _: ()) -> Result<crate::Connection<String, String>> {
-            Err(Fault::internal("unused"))
-        }
-    }
 
     /// Inputs cut by the request's end end `Err(abandoned)`, however
     /// the end and the first poll are ordered: here the request has ended
-    /// but its cut is not yet idle, as when the end lands in the middle of
-    /// a poll that already saw the cut open.
+    /// but its latch is not yet closed, as when the end lands in the middle
+    /// of a poll that already saw it open.
     #[tokio::test]
     async fn a_cut_before_the_first_poll_is_never_a_clean_end() {
-        let cut = Arc::<InFlight>::default();
-        let _running = InFlight::enter(&cut);
+        let ended = Latch::default();
         let later = Arc::new(Later::new(Some(stream::pending().boxed())));
-        later.end(Err(Fault::abandoned()));
-        let format = Arc::new(crate::format::Erased::<_, (), String, String, true>::new(
-            Nil,
-        ));
-        let mut inputs = inputs(later, format, None, &cut);
+        later.close(Err(Fault::abandoned()));
+        let mut inputs = inputs(later, None, &ended);
         let first = inputs
             .next()
             .await

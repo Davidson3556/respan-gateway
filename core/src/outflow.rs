@@ -9,27 +9,29 @@ use futures::{FutureExt, StreamExt, stream};
 
 use crate::call::SharedCall;
 use crate::fault::PANICKED;
-use crate::format::{AnyFormat, AnyValue};
-use crate::leg::{Outgoing, cut, idle};
+use crate::format::AnyFormat;
+use crate::leg::{ToClient, cut, on_close};
 use crate::lifecycle::EndHooks;
-use crate::response::{Batch, Source};
+use crate::response::{Batch, Feed};
+use crate::values::Values;
 use crate::{ClientContext, EventStream, Fault, Response, Result};
 
-/// Apply client output stages and retain the selected call until delivery ends.
-pub(crate) async fn reply(
+/// The client's response through its output stages, one value per item, and
+/// the selected call, retained until delivery ends.
+pub(crate) async fn outflow(
     format: &Arc<dyn AnyFormat>,
     resp: Result<Response>,
     hooks: &mut EndHooks<ClientContext>,
     discarded: &Arc<Mutex<Vec<Batch>>>,
-) -> (EventStream<AnyValue>, Option<SharedCall>) {
+) -> (EventStream<Values>, Option<SharedCall>) {
     let cx = hooks.cx();
     // A call's response goes only to its own request; one of another kind
     // fails, even with no outputs.
-    let resp = resp.and_then(|resp| match resp.body.call() {
+    let resp = resp.and_then(|resp| match resp.feed.call() {
         Some(c) if !cx.open.holds(c) => {
             Err(Fault::internal("a response to another request was sent"))
         }
-        _ if resp.output.is_some_and(|o| o != format.kind().1) => Err(Fault::another_kind(
+        _ if resp.output != format.kind().1 => Err(Fault::another_kind(
             "a response of another kind was sent".into(),
         )),
         _ => Ok(resp),
@@ -38,15 +40,15 @@ pub(crate) async fn reply(
         Ok(resp) => resp,
         Err(fault) => return (EventStream::refused(fault), None),
     };
-    if resp.refused {
+    if resp.is_refused() {
         // Its one batch is the refusal, through the call's filters.
         let read = AssertUnwindSafe(async {
             let mut batch = match resp.ahead.pop_front() {
                 Some(batch) => batch,
-                None => resp.body.next().await,
+                None => resp.feed.next().await,
             };
             batch.read();
-            batch.end.map(|end| end.outcome().clone())
+            batch.ending.map(|ending| ending.outcome().clone())
         });
         let fault = match read.catch_unwind().await {
             Ok(Some(Err(fault))) => fault,
@@ -59,44 +61,51 @@ pub(crate) async fn reply(
         };
         return (EventStream::refused(fault), None);
     }
-    let call = resp.body.call().cloned();
+    let call = resp.feed.call().cloned();
     let Response {
         metadata,
-        body,
+        feed,
         ahead,
         ..
     } = resp;
     let relayed = metadata.is_some();
-    let mut events =
-        Outgoing::new(ahead, body, cx.outputs.clone(), relayed, discarded.clone()).events();
+    let ended = cx.ended.clone();
+    let stages = match cx.stages() {
+        Ok(stages) => stages,
+        Err(fault) => return (EventStream::refused(fault), call),
+    };
+    let mut events = ToClient::new(
+        ahead,
+        feed,
+        stages.latest.clone(),
+        relayed,
+        discarded.clone(),
+    )
+    .events();
     // Each wrap, the last added first, then the filters added before it.
-    let wrapped = cx.wrapped.get_mut().unwrap_or_else(|e| e.into_inner());
-    for (wrap, layer) in wrapped.iter_mut().rev() {
+    for (wrap, layer) in stages.wrapped.iter_mut().rev() {
         let Some(wrap) = wrap.take() else { continue };
         let wrap = AssertUnwindSafe(move || wrap(events));
         // A panic is an internal fault.
         let panicked = || stream::once(ready(Err(Fault::internal(PANICKED)))).boxed();
         let outputs = std::panic::catch_unwind(wrap).unwrap_or_else(|_| panicked());
-        let source = Source::made(outputs);
-        events = Outgoing::new(
+        let feed = Feed::made(outputs);
+        events = ToClient::new(
             VecDeque::new(),
-            source,
+            feed,
             layer.clone(),
             relayed,
             discarded.clone(),
         )
         .events();
     }
-    // Once the client writer stops, its outputs
-    // are cut.
-    let events = cut(events, idle(&cx.cut));
-    let format = format.clone();
-    let events = events.flat_map(move |values| {
-        let values = match values {
-            Ok(values) => format.outputs(values).into_iter().map(Ok).collect(),
+    // Once the request ends, its outputs are cut.
+    let events = cut(events, on_close(&ended));
+    let events = events.flat_map(|values| {
+        stream::iter(match values {
+            Ok(values) => values.split().into_iter().map(Ok).collect(),
             Err(fault) => vec![Err(fault)],
-        };
-        stream::iter(values)
+        })
     });
     let mut flow = EventStream::stream(events);
     flow.set_metadata(metadata);

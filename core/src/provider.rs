@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use crate::format::{AnyFormat, is_input};
 use crate::input::Input;
 use crate::leg::{Layer, locked};
-use crate::lifecycle::{Edge, InFlight, InFlightGuard};
+use crate::lifecycle::{Edge, InFlight, InFlightGuard, Latch};
 use crate::plugin::Filters;
 use crate::{ClientContext, Extensions, Filter, Plugin, Result};
 
@@ -30,14 +30,14 @@ pub struct ProviderContext {
     pub(crate) outputs: Layer,
     /// Filters of the later inputs it sends, shared with their reader.
     pub(crate) inputs: Layer,
-    /// Whether it streams the request's inputs, still flowing.
-    pub(crate) flowing: bool,
-    /// Idle once it ends: its response's events and its inputs' reader
+    /// Whether it carries the request's live inputs.
+    pub(crate) live: bool,
+    /// Closed once it ends: its response's events and its inputs' reader
     /// stop, so a reader still waiting wakes.
-    pub(crate) cut: Arc<InFlight>,
-    /// In `cut` until it ends, then in its request's `settling` until its
-    /// end hooks finish, as its request's end hooks wait for them.
-    pub(crate) running: InFlightGuard,
+    pub(crate) ended: Latch,
+    /// Once it ended, in its request's `settling` until its end hooks
+    /// finish, as its request's end hooks wait for them.
+    pub(crate) settling: Option<InFlightGuard>,
     /// Set once its format took it to send.
     pub(crate) sent: bool,
     /// Set if the provider answered and refused it at its head.
@@ -65,7 +65,8 @@ impl Edge for ProviderContext {
     /// dropping what they keep back, before its end hooks run. Its end
     /// hooks settle for its request from here.
     fn close(&mut self, end: &Result<()>) {
-        self.running = InFlight::enter(&self.client.settling);
+        self.ended.close();
+        self.settling = Some(InFlight::enter(&self.client.settling));
         let _ = locked(&self.inputs).end(end.clone(), &mut None);
         let _ = locked(&self.outputs).end(end.clone(), &mut None);
     }
@@ -114,8 +115,8 @@ impl ProviderContext {
         match is_input::<T>(&*self.format)? {
             false => locked(&self.outputs).add(filter, false),
             // Later inputs follow only a session's head.
-            true if self.flowing => locked(&self.inputs).add(filter, true),
-            true => self.input.filter(Filters::of(filter)),
+            true if self.live => locked(&self.inputs).add(filter, true),
+            true => self.input.filter::<T>(Filters::of(filter)),
         }
     }
 

@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -29,21 +29,30 @@ pub(crate) struct EndHooks<E: Edge> {
     /// Kept until its end hooks finish, for `Gateway::idle`.
     live: Option<InFlightGuard>,
     /// How many plugins' `on_client` or `on_provider` started.
-    pub(crate) ran: usize,
+    ran: usize,
     /// Taken when the hooks start.
     cx: Option<E>,
-    /// End hooks that must finish before these start.
-    pub(crate) after: Option<Arc<InFlight>>,
+    /// Work that must finish before these hooks start.
+    after: Option<Arc<InFlight>>,
 }
 
 impl<E: Edge> EndHooks<E> {
-    pub(crate) fn new(in_flight: &Arc<InFlight>, cx: E) -> Self {
+    /// The end hooks of `cx`, counted in `in_flight`, which start once
+    /// `after`, if any, is idle.
+    pub(crate) fn new(in_flight: &Arc<InFlight>, cx: E, after: Option<Arc<InFlight>>) -> Self {
         Self {
             live: Some(InFlight::enter(in_flight)),
             ran: 0,
             cx: Some(cx),
-            after: None,
+            after,
         }
+    }
+
+    /// The context for the next plugin's start hook, whose end hook then
+    /// runs too.
+    pub(crate) fn begin(&mut self) -> &mut E {
+        self.ran += 1;
+        self.cx()
     }
 
     pub(crate) fn cx(&mut self) -> &mut E {
@@ -91,6 +100,39 @@ impl<E: Edge> EndHooks<E> {
 impl<E: Edge> Drop for EndHooks<E> {
     fn drop(&mut self) {
         self.finish(Err(Fault::abandoned()));
+    }
+}
+
+/// Closed once, and never reopened: whoever waits on it then wakes.
+#[derive(Clone, Default)]
+pub(crate) struct Latch(Arc<LatchState>);
+
+#[derive(Default)]
+struct LatchState {
+    closed: AtomicBool,
+    notify: Notify,
+}
+
+impl Latch {
+    pub(crate) fn close(&self) {
+        if !self.0.closed.swap(true, Ordering::SeqCst) {
+            self.0.notify.notify_waiters();
+        }
+    }
+
+    /// Resolves once it is closed.
+    pub(crate) fn closed(&self) -> impl Future<Output = ()> + Send + 'static {
+        let state = self.0.clone();
+        async move {
+            loop {
+                // Registered before the check, so a close in between wakes it.
+                let closed = state.notify.notified();
+                if state.closed.load(Ordering::SeqCst) {
+                    return;
+                }
+                closed.await;
+            }
+        }
     }
 }
 

@@ -85,10 +85,13 @@ impl Plugin for Cap {
             Ok(())
         })?;
         px.filter(move |reply: &mut Reply| {
-            // A tool call counts as its whole JSON: an overestimate, which
-            // errs toward cutting.
+            // A tool call counts its name and arguments; other content its
+            // whole JSON, an overestimate, which errs toward cutting.
             let chars = |piece: &Piece| match piece {
                 Piece::Text { text, .. } => text.len(),
+                Piece::ToolCall {
+                    name, arguments, ..
+                } => name.as_ref().map_or(0, String::len) + arguments.len(),
                 Piece::Other { raw, .. } => raw.to_string().len(),
                 _ => 0,
             };

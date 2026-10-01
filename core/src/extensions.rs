@@ -1,5 +1,6 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A value an [`Extensions`] can hold.
 trait Value: Any + Send + Sync {
@@ -71,5 +72,34 @@ impl Extensions {
     /// Put in every value of `other`, replacing those of its types.
     pub fn extend(&mut self, other: Extensions) {
         self.0.extend(other.0);
+    }
+}
+
+/// Data a format owns, under its name: readable only by code that knows
+/// both the name and the type. The kernel carries it unopened.
+#[derive(Clone)]
+pub(crate) struct FormatData {
+    format: Arc<str>,
+    data: Arc<dyn Any + Send + Sync>,
+}
+
+impl FormatData {
+    pub(crate) fn new(format: &str, data: impl Any + Send + Sync) -> Self {
+        Self {
+            format: Arc::from(format),
+            data: Arc::new(data),
+        }
+    }
+
+    /// The name of the format that owns it.
+    pub(crate) fn format(&self) -> &str {
+        &self.format
+    }
+
+    /// The data as `T`, if `format` owns it.
+    pub(crate) fn get<T: Any>(&self, format: &str) -> Option<&T> {
+        (*self.format == *format)
+            .then(|| self.data.downcast_ref())
+            .flatten()
     }
 }

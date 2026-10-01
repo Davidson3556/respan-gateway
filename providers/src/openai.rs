@@ -15,15 +15,18 @@ use serde_json::{Map, Value, json};
 use crate::Usage;
 use crate::common::ReplyParser;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, patch_messages, patch_sampling,
-    post_json, probe, read_message, reads_back, refusal, says, set, split_around, stop_json,
-    supported_usage, unix_now, unpatchable, unreadable_event, unsupported_fields,
-    unwritable_content, usage_step, write_message,
+    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, join, only, patch_messages,
+    patch_sampling, post_json, probe, read_message, reads_back, refusal, says, set, split_around,
+    stop_json, supported_usage, tools_of, unix_now, unpatchable, unreadable_event,
+    unsupported_fields, unwritable_content, update_message, usage_step,
 };
-use crate::conversation::{Conversation, Finish, Piece, Reply, Role, Start, units};
+use crate::conversation::{Conversation, Finish, Message, Piece, Reply, Role, Start, units};
 use crate::formats::errors::{merge_details, says_error};
 use crate::formats::sse::{event, event_as, event_data, event_json, is_stream};
-use crate::tools::{Fragment, fragments};
+use crate::tools::{
+    read_openai_message, read_openai_tools, start, update_openai_message, write_openai_message,
+    write_openai_tools,
+};
 use respan_gateway_http::Encoder;
 
 pub(crate) const OPENAI: &str = "openai-chat";
@@ -271,19 +274,22 @@ impl Wire for OpenAiChat {
             chat.unsupported.shift_remove("user");
         }
         for m in v["messages"].as_array().into_iter().flatten() {
-            chat.messages.push(read_message(OPENAI, m, &ROLES));
+            let mut message = read_message(OPENAI, m, &ROLES);
+            read_openai_message(m, &mut message);
+            chat.messages.push(message);
         }
+        read_openai_tools(v, &mut chat);
         chat
     }
 
     fn write(chat: &Conversation) -> Result<Value, Fault> {
         let mut v = Map::new();
-        let messages = chat
-            .messages
-            .iter()
-            .map(|m| write_message(OPENAI, m, &ROLES));
-        let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
+        let mut messages = Vec::new();
+        for m in &chat.messages {
+            messages.extend(write_openai_message(m, &ROLES)?);
+        }
         v.insert("messages".into(), messages.into());
+        write_openai_tools(chat, &mut v)?;
         set(&mut v, "stream", chat.stream.then_some(true.into()));
         set(
             &mut v,
@@ -318,8 +324,20 @@ impl Wire for OpenAiChat {
         if before.user != after.user {
             set(v, "user", after.user.clone().map(Into::into));
         }
+        if tools_of(before) != tools_of(after) {
+            write_openai_tools(after, v)?;
+        }
         if before.messages != after.messages {
-            let messages = patch_messages(OPENAI, &before.messages, &after.messages, &ROLES)?;
+            let write = |m: &Message| write_openai_message(m, &ROLES);
+            let update = |old: &Value, was: &Message, now: &Message| {
+                let update =
+                    |o: &Value, w: &Message, n: &Message| update_message(OPENAI, o, w, n, &ROLES);
+                match update_openai_message(old, was, now, update)? {
+                    Some(v) => Ok(vec![v]),
+                    None => write(now),
+                }
+            };
+            let messages = patch_messages(&before.messages, &after.messages, write, update)?;
             v.insert("messages".into(), messages.into());
         }
         Ok(())
@@ -469,7 +487,7 @@ impl Wire for OpenAiChat {
         }))
     }
 
-    /// One text of every block, then other content.
+    /// One text of every block, then the tool calls, then other content.
     fn in_order(content: &[Piece]) -> Vec<Piece> {
         let text: Vec<&str> = content
             .iter()
@@ -479,8 +497,12 @@ impl Wire for OpenAiChat {
             })
             .collect();
         let texts = (!text.is_empty()).then(|| Piece::text(0, text.concat()));
-        let others = content.iter().filter(|p| !matches!(p, Piece::Text { .. }));
-        texts.into_iter().chain(others.cloned()).collect()
+        let calls = content
+            .iter()
+            .filter(|p| matches!(p, Piece::ToolCall { .. }));
+        let others = content.iter().filter(|p| matches!(p, Piece::Other { .. }));
+        let rest = calls.chain(others).cloned();
+        texts.into_iter().chain(rest).collect()
     }
 
     fn put(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
@@ -538,11 +560,13 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
 /// Put an edited reply back into a response's choices, under `message`, or
 /// a chunk's, under `delta`; other content goes as it came.
 fn put_choice(v: &mut Value, reply: &Reply, key: &str) -> Result<(), Fault> {
-    if reply
-        .content
-        .iter()
-        .any(|piece| !matches!(piece, Piece::Text { .. } | Piece::Other { .. }))
-    {
+    let known = |p: &Piece| {
+        matches!(
+            p,
+            Piece::Text { .. } | Piece::ToolCall { .. } | Piece::Other { .. }
+        )
+    };
+    if !reply.content.iter().all(known) {
         return Err(unwritable_content());
     }
     // Every chunk may name them, though some leave the model out.
@@ -607,6 +631,33 @@ fn put_choice(v: &mut Value, reply: &Reply, key: &str) -> Result<(), Fault> {
     texts.sort_by_key(|(block, _)| *block);
     let joined: String = texts.iter().map(|(_, t)| *t).collect();
     let text = (!texts.is_empty()).then_some(joined.as_str());
+    // A whole message's calls are whole and in order; a chunk's are parts,
+    // numbered.
+    let whole = key == "message";
+    let pieces = match whole {
+        true => join(reply.content.clone()),
+        false => reply.content.clone(),
+    };
+    let calls: Vec<Value> = pieces
+        .iter()
+        .filter_map(|p| match p {
+            Piece::ToolCall {
+                call,
+                id,
+                name,
+                arguments,
+                ..
+            } => {
+                let arguments = match (whole, arguments.is_empty()) {
+                    (true, true) => "{}",
+                    _ => arguments,
+                };
+                let index = (!whole).then_some(*call);
+                Some(call_json(index, id.as_deref(), name.as_deref(), arguments))
+            }
+            _ => None,
+        })
+        .collect();
     if let Some(choice) = v.pointer_mut("/choices/0").and_then(Value::as_object_mut) {
         let body = choice.entry(key).or_insert_with(|| json!({}));
         if let Some(body) = body.as_object_mut() {
@@ -615,6 +666,9 @@ fn put_choice(v: &mut Value, reply: &Reply, key: &str) -> Result<(), Fault> {
                 (Some(text), _) => _ = body.insert("content".into(), text.into()),
                 (None, "message") => _ = body.insert("content".into(), Value::Null),
                 (None, _) => _ = body.shift_remove("content"),
+            }
+            if !calls.is_empty() {
+                body.insert("tool_calls".into(), calls.into());
             }
         }
         // The provider's spelling while unchanged; null if taken.
@@ -630,23 +684,81 @@ fn put_choice(v: &mut Value, reply: &Reply, key: &str) -> Result<(), Fault> {
     Ok(())
 }
 
-/// The choices without the first one's text and finish.
+/// The choices without the first one's text, tool calls and finish.
 fn rest_of(v: &Value, key: &str) -> Value {
     let mut rest = v["choices"].clone();
+    let typed_calls = first_choice(v).is_some_and(|c| tool_calls(&c[key]).is_some());
     if first_choice(v).is_some()
         && let Some(choice) = rest.get_mut(0).and_then(Value::as_object_mut)
     {
         choice.shift_remove("finish_reason");
-        // Content in parts stays: it is other content.
-        if let Some(body) = choice.get_mut(key).and_then(Value::as_object_mut)
-            && body
+        if let Some(body) = choice.get_mut(key).and_then(Value::as_object_mut) {
+            // Content in parts stays: it is other content.
+            if body
                 .get("content")
                 .is_none_or(|c| c.is_string() || c.is_null())
-        {
-            body.shift_remove("content");
+            {
+                body.shift_remove("content");
+            }
+            if typed_calls {
+                body.shift_remove("tool_calls");
+            }
         }
     }
     rest
+}
+
+/// The tool calls of a choice's `body`, if each is a function call the
+/// kind can say: numbered by their `index`, else by place. `None` leaves
+/// them other content.
+fn tool_calls(body: &Value) -> Option<Vec<Piece>> {
+    let calls = body.get("tool_calls")?.as_array()?;
+    if calls.is_empty() {
+        return None;
+    }
+    let piece = |(at, c): (usize, &Value)| {
+        let function = &c["function"];
+        let function_call = c["type"].is_null() || c["type"] == "function";
+        let known =
+            only(c, &["index", "id", "type", "function"]) && only(function, &["name", "arguments"]);
+        if !function_call || !known {
+            return None;
+        }
+        let arguments = match &function["arguments"] {
+            Value::Null => "",
+            arguments => arguments.as_str()?,
+        };
+        let call = match c.get("index") {
+            Some(index) => u32::try_from(index.as_u64()?).ok()?,
+            None => u32::try_from(at).ok()?,
+        };
+        let mut piece = Piece::tool_arguments(call, arguments);
+        if let Piece::ToolCall { id, name, .. } = &mut piece {
+            *id = c["id"].as_str().map(Into::into);
+            *name = function["name"].as_str().map(Into::into);
+        }
+        Some(piece)
+    };
+    calls.iter().enumerate().map(piece).collect()
+}
+
+/// A tool call as OpenAI writes it: in a chunk, numbered `index`, with its
+/// id and name if it starts there; in a whole message, unnumbered.
+fn call_json(index: Option<u32>, id: Option<&str>, name: Option<&str>, arguments: &str) -> Value {
+    let function = match name {
+        Some(name) => json!({ "name": name, "arguments": arguments }),
+        None => json!({ "arguments": arguments }),
+    };
+    let mut call = Map::new();
+    if let Some(index) = index {
+        call.insert("index".into(), index.into());
+    }
+    if let Some(id) = id {
+        call.insert("id".into(), id.into());
+        call.insert("type".into(), "function".into());
+    }
+    call.insert("function".into(), function);
+    call.into()
 }
 
 impl Reading<OpenAiChat> {
@@ -698,12 +810,15 @@ fn first_choice(v: &Value) -> Option<&Value> {
 }
 
 /// The content of a response's choices, under `message`, or a chunk's,
-/// under `delta`: the first choice's text as block 0, then anything else
-/// as one `Other` of the choices without that text and finish.
+/// under `delta`: the first choice's text as block 0 and its tool calls,
+/// then anything else as one `Other` of the choices without them.
 fn content(v: &Value, key: &str) -> Vec<Piece> {
-    let text = first_choice(v).and_then(|c| c[key]["content"].as_str());
+    let first = first_choice(v);
+    let text = first.and_then(|c| c[key]["content"].as_str());
+    let calls = first.and_then(|c| tool_calls(&c[key])).unwrap_or_default();
     let rest = rest_of(v, key);
     let mut content: Vec<Piece> = text.map(|t| Piece::text(0, t)).into_iter().collect();
+    content.extend(calls);
     let choices = rest.as_array().into_iter().flatten();
     if choices.clone().any(|c| says_more(c, key)) {
         content.push(Piece::other(OPENAI, rest));
@@ -712,7 +827,7 @@ fn content(v: &Value, key: &str) -> Vec<Piece> {
 }
 
 /// Choice fields that carry no content: OpenRouter's, vLLM's and Azure's.
-pub(crate) const INERT_CHOICE: &[&str] = &[
+const INERT_CHOICE: &[&str] = &[
     "native_finish_reason",
     "stop_reason",
     "content_filter_results",
@@ -810,8 +925,8 @@ struct Chunks {
     held: Option<BytesMut>,
     /// A written finish, kept back to the end and sent before those chunks.
     finish: Option<BytesMut>,
-    /// The tool calls written so far, by the number their maker gave them,
-    calls: Vec<usize>,
+    /// The tool calls written so far, by the number their maker gave them.
+    calls: Vec<u32>,
     /// The places of the calls that have no arguments yet.
     bare: Vec<usize>,
 }
@@ -849,30 +964,41 @@ impl Chunks {
         self.chunk(out, choices, None);
     }
 
-    /// Write a piece of a tool call another format made: its start opens
-    /// the next call, arguments go to the call they continue.
-    fn call(&mut self, fragment: Fragment, out: &mut BytesMut) -> Result<(), Fault> {
-        let at = fragment.continues(self.calls.iter().copied());
-        let arguments = &fragment.arguments;
-        let call = match (fragment.start, at) {
-            (Some((id, name)), None) => {
+    /// Write a piece of tool call `call`. Among the provider's own chunks
+    /// it keeps the provider's number; else a start opens the next call,
+    /// and arguments go to the call they continue.
+    fn call(
+        &mut self,
+        call: u32,
+        start: Option<(&str, &str)>,
+        arguments: &str,
+        out: &mut BytesMut,
+    ) -> Result<(), Fault> {
+        let (id, name) = start.unzip();
+        if self.so_far.relayed {
+            let call = call_json(Some(call), id, name, arguments);
+            self.choice(out, json!({ "tool_calls": [call] }));
+            return Ok(());
+        }
+        let at = self.calls.iter().position(|k| *k == call);
+        let json = match (start, at) {
+            (Some(_), None) => {
                 let at = self.calls.len();
-                self.calls.push(fragment.index.unwrap_or(at));
+                self.calls.push(call);
                 if arguments.is_empty() {
                     self.bare.push(at);
                 }
-                let function = json!({ "name": name, "arguments": arguments });
-                json!({ "index": at, "id": id, "type": "function", "function": function })
+                call_json(Some(at as u32), id, name, arguments)
             }
             (_, Some(at)) => {
                 if !arguments.is_empty() {
                     self.bare.retain(|b| *b != at);
                 }
-                json!({ "index": at, "function": { "arguments": arguments } })
+                call_json(Some(at as u32), None, None, arguments)
             }
             (None, None) => return Err(unwritable_content()),
         };
-        self.choice(out, json!({ "tool_calls": [call] }));
+        self.choice(out, json!({ "tool_calls": [json] }));
         Ok(())
     }
 
@@ -941,10 +1067,13 @@ impl Chunks {
                         choices => self.chunk(&mut all, choices.clone(), None),
                     }
                 }
-                Piece::Other { format, raw, .. } => match fragments(format, raw) {
-                    Some(calls) => calls.into_iter().try_for_each(|f| self.call(f, &mut all))?,
-                    None => return Err(unwritable_content()),
-                },
+                Piece::ToolCall {
+                    call,
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => self.call(*call, start(id, name), arguments, &mut all)?,
                 _ => return Err(unwritable_content()),
             }
         }
@@ -993,7 +1122,7 @@ impl Encoder<Reply> for Chunks {
         // What the chunk has no place for is written anew around it.
         let v = event_json(&own.bytes).unwrap_or_default();
         let first = first_choice(&v).is_some();
-        let holds = |p: &Piece| !matches!(p, Piece::Text { .. }) || first;
+        let holds = |p: &Piece| first || matches!(p, Piece::Other { .. });
         let (ahead, inside, after) = split_around(reply, holds, first);
         let mut all = BytesMut::new();
         self.write(&ahead, &mut all)?;
@@ -1038,7 +1167,7 @@ mod tests {
     use super::*;
 
     use crate::common::{patch_request, write_request};
-    use crate::conversation::Message;
+    use crate::conversation::{Content, Tool, ToolChoice};
 
     /// A chunk's reply, as decoded, for editing.
     fn said(raw: &Bytes) -> Reply {
@@ -1118,7 +1247,7 @@ mod tests {
 
     /// Chunks as OpenAI sends them, with the fields it sets to null.
     #[test]
-    fn real_openai_chunks_decode_to_text_and_other() {
+    fn real_openai_chunks_decode_to_text_and_tool_calls() {
         let (out, _) = decode_all(&[
             "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt\",\"system_fingerprint\":\"fp\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"refusal\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"logprobs\":null,\"finish_reason\":null}]}\n\n",
@@ -1131,7 +1260,6 @@ mod tests {
             start.finish = finish;
             start
         };
-        let call = json!([{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "id": "call_1", "type": "function", "function": { "name": "f", "arguments": "" } }] } }]);
         assert_eq!(
             out,
             [
@@ -1140,7 +1268,7 @@ mod tests {
                 with(Reply::start("c1", "gpt"), vec![Piece::text(0, "Hi")], None),
                 with(
                     Reply::start("c1", ""),
-                    vec![Piece::other(OPENAI, call)],
+                    vec![Piece::tool_call(0, "call_1", "f", "")],
                     None
                 ),
                 with(Reply::start("c1", ""), vec![], Some(Finish::ToolUse)),
@@ -1343,16 +1471,7 @@ mod tests {
             }}],
         });
         let mut whole = Reply::start("c1", "gpt");
-        whole.content = vec![
-            Piece::text(0, "ok"),
-            Piece::other(
-                OPENAI,
-                json!([{ "index": 0, "message": {
-                    "role": "assistant", "refusal": null,
-                    "tool_calls": [{ "id": "t", "type": "function", "function": { "name": "f", "arguments": "{}" } }],
-                }}]),
-            ),
-        ];
+        whole.content = vec![Piece::text(0, "ok"), Piece::tool_call(0, "t", "f", "{}")];
         whole.finish = Some(Finish::ToolUse);
         assert_eq!(OpenAiChat::reply(&v), whole);
         // Its text can be edited beside the tool call.
@@ -1762,6 +1881,79 @@ mod tests {
         );
     }
 
+    /// Hides an email in tool calls and results, as a PII plugin does.
+    fn hide_email(chat: &mut Conversation) {
+        for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
+            match part {
+                Content::ToolCall { arguments, .. } => {
+                    *arguments = arguments.replace("bob@x.io", "<EMAIL_1>");
+                }
+                Content::ToolResult { content, .. } => {
+                    *content = vec!["<EMAIL_1> is Bob".into()];
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn an_edited_tool_call_and_result_are_written_into_the_clients_json() {
+        let call = json!({ "id": "c1", "type": "function",
+            "function": { "name": "lookup", "arguments": "{\"email\":\"bob@x.io\"}" } });
+        let tool = json!({ "type": "function", "function": { "name": "lookup", "strict": true,
+            "parameters": { "type": "object" } } });
+        let body = json!({ "model": "m", "tools": [tool], "tool_choice": "required",
+        "messages": [
+            { "role": "user", "content": "find bob" },
+            { "role": "assistant", "content": null, "tool_calls": [call] },
+            { "role": "tool", "tool_call_id": "c1", "content": "bob@x.io is Bob" },
+        ]});
+        let chat = OpenAiChat::read(&body);
+        assert_eq!(
+            chat.messages[1].content,
+            [Content::tool_call(
+                "c1",
+                "lookup",
+                "{\"email\":\"bob@x.io\"}"
+            )]
+        );
+        assert_eq!(chat.tool_choice, Some(ToolChoice::Required));
+        assert_eq!(chat.tools[0].unsupported.get("strict"), Some(&json!(true)));
+        assert!(chat.unsupported.is_empty());
+        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
+        let mut expected = body.clone();
+        expected["messages"][1]["tool_calls"][0]["function"]["arguments"] =
+            "{\"email\":\"<EMAIL_1>\"}".into();
+        expected["messages"][2]["content"] = "<EMAIL_1> is Bob".into();
+        assert_eq!(patched(body, hide_email).ok(), Some(expected));
+    }
+
+    #[test]
+    fn tool_results_and_calls_are_written_as_openai_messages() {
+        let mut both = Message::new(Role::User, "and then?");
+        both.content
+            .insert(0, Content::tool_result("c1", vec!["42".into()], false));
+        let mut asked = Message::new(Role::Assistant, "");
+        asked.content = vec![Content::tool_call("c1", "f", "{}")];
+        let chat = Conversation::new([asked, both]);
+        let v = write_request::<OpenAiChat>(&chat).map(Value::Object);
+        assert_eq!(
+            v.ok().map(|v| v["messages"].clone()),
+            Some(json!([
+                { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "c1", "type": "function", "function": { "name": "f", "arguments": "{}" } },
+                ] },
+                { "role": "tool", "tool_call_id": "c1", "content": "42" },
+                { "role": "user", "content": "and then?" },
+            ]))
+        );
+        // OpenAI cannot say a call failed.
+        let failed = Message::new(Role::User, "");
+        let mut failed = failed;
+        failed.content = vec![Content::tool_result("c1", vec!["no".into()], true)];
+        assert!(write_request::<OpenAiChat>(&Conversation::new([failed])).is_err());
+    }
+
     #[test]
     fn what_a_conversation_cannot_hold_is_kept_or_refused() {
         let body = json!({ "model": "m", "messages": [
@@ -1770,10 +1962,10 @@ mod tests {
         let chat = OpenAiChat::read(&body);
         assert_eq!(
             chat.unsupported,
-            *json!({ "tools": [{ "type": "function", "function": { "name": "f" } }], "n": 2 })
-                .as_object()
-                .unwrap_or(&Map::new())
+            *json!({ "n": 2 }).as_object().unwrap_or(&Map::new())
         );
+        // A function tool is the kind's.
+        assert_eq!(chat.tools, [Tool::new("f", Value::Null)]);
         assert_eq!(chat.messages[0].text(), "hi");
         assert_eq!(
             chat.messages[0].unsupported.get("name"),
@@ -1942,11 +2134,13 @@ mod tests {
         ]});
         let chat = OpenAiChat::read(&body);
         assert_eq!(chat.messages[0].text(), "what is this?");
-        assert_eq!(chat.messages[1].role, Role::Other("tool".into()));
+        // A tool message is a user message of one result.
+        assert_eq!(chat.messages[1].role, Role::User);
         assert_eq!(
-            chat.messages[1].unsupported.get("tool_call_id"),
-            Some(&json!("t"))
+            chat.messages[1].content,
+            [Content::tool_result("t", vec!["42".into()], false)]
         );
+        assert!(chat.messages[1].unsupported.is_empty());
         // The text is edited in its part, beside the image and tool result.
         let edited = patched(body, |c| {
             c.messages[0].content[0] = "WHAT IS THIS?".into();

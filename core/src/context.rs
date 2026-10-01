@@ -7,12 +7,13 @@ use futures::{Stream, StreamExt, stream};
 use tokio::runtime::Handle;
 
 use crate::call::OpenCalls;
-use crate::format::{AnyEvents, AnyFormat, AnyValue, erase, is_input, typed};
-use crate::gateway::Inner;
+use crate::format::{AnyFormat, is_input};
+use crate::gateway::Registry;
 use crate::input::Input;
 use crate::leg::{Later, Layer, inputs, locked};
-use crate::lifecycle::{Edge, InFlight, InFlightGuard};
+use crate::lifecycle::{Edge, InFlight, Latch};
 use crate::plugin::Filters;
+use crate::values::{AnyEvents, Values, erase, take_one, typed};
 use crate::{Call, EventStream, Extensions, Fault, Filter, Gateway, Plugin, Result};
 
 /// One client request, as the client edge's hooks see it.
@@ -50,9 +51,8 @@ pub struct ClientContext {
     pub(crate) input: Input,
     /// The inputs that follow it.
     pub(crate) later: Arc<Later>,
-    /// Idle once the request ends, as `running` is dropped; copies share it.
-    pub(crate) cut: Arc<InFlight>,
-    running: Option<InFlightGuard>,
+    /// Closed once the request ends; copies share it.
+    pub(crate) ended: Latch,
     /// The runtime end hooks run on.
     pub(crate) runtime: Handle,
     /// Its calls that ended, until their end hooks finish; its own end
@@ -60,15 +60,22 @@ pub struct ClientContext {
     pub(crate) settling: Arc<InFlight>,
     /// Its calls being sent or with an open response, ended when it ends.
     pub(crate) open: Arc<OpenCalls>,
-    /// Filters of the response sent to the client added since the last
-    /// [`wrap`](ClientContext::wrap), which run first; they end with it, or
-    /// with the request if it ends first.
-    pub(crate) outputs: Layer,
-    /// Each wrap of the response sent to the client, in the order added,
-    /// with the filters added before it, which run after it; taken when
-    /// sent.
-    pub(crate) wrapped: Mutex<Vec<(Option<Wrap>, Layer)>>,
-    pub(crate) gateway: Arc<Inner>,
+    /// The stages of the response sent to the client; only the client edge
+    /// has them, never a call's copy.
+    pub(crate) stages: Option<Mutex<Stages>>,
+    pub(crate) gateway: Arc<Registry>,
+}
+
+/// The stages of the response sent to the client, which end with it, or
+/// with the request if it ends first.
+#[derive(Default)]
+pub(crate) struct Stages {
+    /// Filters added since the last [`wrap`](ClientContext::wrap), which
+    /// run first.
+    pub(crate) latest: Layer,
+    /// Each wrap, in the order added, with the filters added before it,
+    /// which run after it; taken when sent.
+    pub(crate) wrapped: Vec<(Option<Wrap>, Layer)>,
 }
 
 /// A plugin's wrap of the outputs sent to the client, erased.
@@ -95,11 +102,13 @@ impl Edge for ClientContext {
     /// as the one it wraps is cut ends after the cut; open calls end
     /// abandoned; output filters still open end as the request did.
     fn close(&mut self, end: &Result<()>) {
-        self.later.end(Err(Fault::abandoned()));
-        self.running = None;
+        self.later.close(Err(Fault::abandoned()));
+        self.ended.close();
         self.open.abandon();
-        let wrapped = locked(&self.wrapped);
-        for layer in std::iter::once(&self.outputs).chain(wrapped.iter().rev().map(|w| &w.1)) {
+        let Some(stages) = &self.stages else { return };
+        let stages = locked(stages);
+        let wrapped = stages.wrapped.iter().rev().map(|w| &w.1);
+        for layer in std::iter::once(&stages.latest).chain(wrapped) {
             let _ = locked(layer).end(end.clone(), &mut None);
         }
     }
@@ -108,22 +117,15 @@ impl Edge for ClientContext {
 impl ClientContext {
     pub(crate) fn new(
         format: Arc<dyn AnyFormat>,
-        mut incoming: EventStream<AnyValue>,
+        mut incoming: EventStream<Values>,
         extensions: Extensions,
-        gateway: Arc<Inner>,
+        gateway: Arc<Registry>,
     ) -> Self {
-        let cut = Arc::default();
         let metadata = incoming.metadata_copy();
         let single = incoming.take_single();
-        let later = if single.is_some() || incoming.refusal().is_some() {
-            Later::new(None)
-        } else {
-            let input_format = format.clone();
-            let events = incoming
-                .boxed()
-                .map(move |event| event.map(|event| input_format.values(vec![event])))
-                .boxed();
-            Later::new(Some(events))
+        let later = match single.is_some() || incoming.refusal().is_some() {
+            true => Later::new(None),
+            false => Later::new(Some(incoming.boxed())),
         };
         Self {
             input: Input::new(format.clone(), single, metadata),
@@ -131,15 +133,22 @@ impl ClientContext {
             extensions,
             target: gateway.target.clone(),
             later: Arc::new(later),
-            running: Some(InFlight::enter(&cut)),
-            cut,
+            ended: Latch::default(),
             runtime: Handle::current(),
             settling: Arc::default(),
             open: Arc::default(),
-            outputs: Layer::default(),
-            wrapped: Mutex::default(),
+            stages: Some(Mutex::default()),
             gateway,
         }
+    }
+
+    /// The stages of the response sent to the client, which only the client
+    /// edge has.
+    pub(crate) fn stages(&mut self) -> Result<&mut Stages> {
+        let stages = self.stages.as_mut().ok_or_else(|| {
+            Fault::internal("a call's copy of the request has no response stages")
+        })?;
+        Ok(stages.get_mut().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// The name of the client's format.
@@ -190,12 +199,8 @@ impl ClientContext {
         if !self.input.is_live() {
             return stream::once(ready(self.input.get::<T>().cloned())).boxed();
         }
-        let items = inputs(self.later.clone(), self.format.clone(), None, &self.cut);
-        let typed = |input: AnyValue| {
-            let typed = input.downcast_ref::<T>().cloned();
-            typed.ok_or_else(Fault::wrong_kind::<T>)
-        };
-        items.map(move |item| item.and_then(typed)).boxed()
+        let items = inputs(self.later.clone(), None, &self.ended);
+        items.map(|item| item.and_then(take_one::<T>)).boxed()
     }
 
     /// The provider called if every plugin passes; initially the gateway's
@@ -227,7 +232,8 @@ impl ClientContext {
         }
     }
 
-    /// A copy of it as it is now, for a call to keep.
+    /// A copy of it as it is now, for a call to keep: without the stages
+    /// of the response sent to the client.
     pub(crate) fn copy(&self) -> Self {
         Self {
             format: self.format.clone(),
@@ -235,13 +241,11 @@ impl ClientContext {
             target: self.target.clone(),
             input: self.input.clone(),
             later: self.later.clone(),
-            cut: self.cut.clone(),
-            running: None,
+            ended: self.ended.clone(),
             runtime: self.runtime.clone(),
             settling: self.settling.clone(),
             open: self.open.clone(),
-            outputs: Layer::default(),
-            wrapped: Mutex::default(),
+            stages: None,
             gateway: self.gateway.clone(),
         }
     }
@@ -266,8 +270,8 @@ impl ClientContext {
         filter: impl Filter<T>,
     ) -> Result<()> {
         match is_input::<T>(&*self.format)? {
-            false => locked(&self.outputs).add(filter, false),
-            true if !self.input.is_live() => self.input.filter(Filters::of(filter)),
+            false => locked(&self.stages()?.latest).add(filter, false),
+            true if !self.input.is_live() => self.input.filter::<T>(Filters::of(filter)),
             true => locked(&self.later.filters).add(filter, true),
         }
     }
@@ -327,8 +331,9 @@ impl ClientContext {
         if !is_input::<T>(&*self.format)? {
             let wrap: Wrap =
                 Box::new(|outputs| erase(wrap(EventStream::stream(typed(outputs))).boxed()));
-            let before = std::mem::take(&mut self.outputs);
-            locked(&self.wrapped).push((Some(wrap), before));
+            let stages = self.stages()?;
+            let before = std::mem::take(&mut stages.latest);
+            stages.wrapped.push((Some(wrap), before));
             return Ok(());
         }
         if !self.input.is_live() {

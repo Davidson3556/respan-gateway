@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::fault::guarded;
-use crate::format::Values;
+use crate::values::{Values, view_mut};
 use crate::{ClientContext, Fault, ProviderContext, Response, Result};
 
 /// The extension point, on two edges: the client edge once per request, the
@@ -128,25 +128,23 @@ impl<T, F: FnMut(&mut T) -> Result<()> + Send + 'static> Filter<T> for F {
 }
 
 /// One edge's filters of one direction, their values' type erased.
-trait AnyList: Any + Send {
+trait AnyChain: Any + Send {
     fn run(&mut self, values: &mut Values) -> Result<()>;
     fn end(&mut self, end: &Result<()>, values: &mut Option<Values>) -> Option<Fault>;
 }
 
-/// Filters of `T`, in reverse order of application, each with whether it
-/// failed.
-struct List<T>(Vec<(Box<dyn Filter<T>>, bool)>);
+/// A filter, and whether it failed.
+type Link<T> = (Box<dyn Filter<T>>, bool);
 
-impl<T: Send + 'static> AnyList for List<T> {
+/// Filters of `T`, in reverse order of application.
+impl<T: Clone + Send + Sync + 'static> AnyChain for Vec<Link<T>> {
     /// Each value in turn through every filter, so what one fails on leaves
     /// those before it written.
     fn run(&mut self, values: &mut Values) -> Result<()> {
-        let values = values
-            .downcast_mut::<Vec<T>>()
-            .ok_or_else(Fault::wrong_kind::<T>)?;
+        let values = view_mut::<T>(values)?;
         for value in std::mem::take(values) {
             let mut each = vec![value];
-            for (filter, failed) in self.0.iter_mut().rev() {
+            for (filter, failed) in self.iter_mut().rev() {
                 let mut out = Vec::with_capacity(each.len());
                 for value in each {
                     if let Err(f) = guarded(|| filter.edit(value, &mut out)) {
@@ -165,7 +163,7 @@ impl<T: Send + 'static> AnyList for List<T> {
     /// it, unless it failed, then what it keeps back joins them.
     fn end(&mut self, end: &Result<()>, values: &mut Option<Values>) -> Option<Fault> {
         let (mut tail, mut fault) = (Vec::new(), None);
-        for (filter, failed) in self.0.iter_mut().rev() {
+        for (filter, failed) in self.iter_mut().rev() {
             let was = *failed;
             let mut passed = Vec::new();
             let mut edited = Ok(());
@@ -191,11 +189,16 @@ impl<T: Send + 'static> AnyList for List<T> {
                 fault.get_or_insert(f);
             }
         }
-        if !tail.is_empty() {
-            match values.as_mut().and_then(|v| v.downcast_mut::<Vec<T>>()) {
-                Some(values) => values.append(&mut tail),
-                None => *values = Some(Box::new(tail)),
+        if tail.is_empty() {
+            return fault;
+        }
+        match values {
+            Some(values) => {
+                if let Err(f) = view_mut::<T>(values).map(|v| v.append(&mut tail)) {
+                    fault.get_or_insert(f);
+                }
             }
+            None => *values = Some(Box::new(tail)),
         }
         fault
     }
@@ -203,36 +206,41 @@ impl<T: Send + 'static> AnyList for List<T> {
 
 /// One edge's filters of one direction, and how they ended, once they did.
 #[derive(Default)]
-pub(crate) struct Filters(Option<Box<dyn AnyList>>, Option<Result<()>>);
+pub(crate) struct Filters {
+    chain: Option<Box<dyn AnyChain>>,
+    ended: Option<Result<()>>,
+}
 
 impl Filters {
     /// Add `filter`: of outputs, applied the last added first; of inputs,
     /// the first added first, so a plugin sees inputs after earlier plugins
     /// and outputs before them. Once they ended, it sees their end at once,
     /// and returns it.
-    pub(crate) fn add<T: Send + 'static>(
+    pub(crate) fn add<T: Clone + Send + Sync + 'static>(
         &mut self,
         filter: impl Filter<T>,
         input: bool,
     ) -> Result<()> {
-        if let Some(end) = self.1.clone() {
+        if let Some(end) = self.ended.clone() {
             return Self::of(filter).end(end, &mut None);
         }
-        let list = self
-            .0
-            .get_or_insert_with(|| Box::new(List::<T>(Vec::new())));
-        let list = &mut **list as &mut dyn Any;
-        let List(list) = list.downcast_mut().ok_or_else(Fault::wrong_kind::<T>)?;
-        let filter = (Box::new(filter) as Box<dyn Filter<T>>, false);
+        let chain = self
+            .chain
+            .get_or_insert_with(|| Box::new(Vec::<Link<T>>::new()));
+        let chain = &mut **chain as &mut dyn Any;
+        let chain = chain
+            .downcast_mut::<Vec<Link<T>>>()
+            .ok_or_else(Fault::wrong_kind::<T>)?;
+        let link = (Box::new(filter) as Box<dyn Filter<T>>, false);
         match input {
-            true => list.insert(0, filter),
-            false => list.push(filter),
+            true => chain.insert(0, link),
+            false => chain.push(link),
         }
         Ok(())
     }
 
-    /// A list of `filter` alone.
-    pub(crate) fn of<T: Send + 'static>(filter: impl Filter<T>) -> Self {
+    /// A chain of `filter` alone.
+    pub(crate) fn of<T: Clone + Send + Sync + 'static>(filter: impl Filter<T>) -> Self {
         let mut filters = Self::default();
         let _ = filters.add(filter, false);
         filters
@@ -240,18 +248,18 @@ impl Filters {
 
     /// How they ended, if they have.
     pub(crate) fn outcome(&self) -> Option<Result<()>> {
-        self.1.clone()
+        self.ended.clone()
     }
 
     pub(crate) fn ended(&self) -> bool {
-        self.1.is_some()
+        self.ended.is_some()
     }
 
     /// Run `values` through the filters until the first failure; `values`
     /// keeps what passed before it.
     pub(crate) fn run(&mut self, values: &mut Values) -> Result<()> {
-        match &mut self.0 {
-            Some(list) => guarded(|| list.run(values)),
+        match &mut self.chain {
+            Some(chain) => guarded(|| chain.run(values)),
             None => Ok(()),
         }
     }
@@ -260,14 +268,14 @@ impl Filters {
     /// panics: what they kept back is added to `values`, and the end comes
     /// back, failed with the first failure; again, just that end.
     pub(crate) fn end(&mut self, end: Result<()>, values: &mut Option<Values>) -> Result<()> {
-        if let Some(ended) = &self.1 {
+        if let Some(ended) = &self.ended {
             return ended.clone();
         }
-        let end = match self.0.take().and_then(|mut list| list.end(&end, values)) {
+        let end = match self.chain.take().and_then(|mut c| c.end(&end, values)) {
             None => end,
             Some(f) => failed(f, &end),
         };
-        self.1 = Some(end.clone());
+        self.ended = Some(end.clone());
         end
     }
 }
@@ -323,12 +331,12 @@ mod tests {
     }
 
     fn one(s: &str) -> Values {
-        Box::new(vec![s.to_owned()])
+        crate::values::one(s.to_owned())
     }
 
     fn strings(values: Option<Values>) -> Vec<String> {
-        let values = values.and_then(|v| v.downcast::<Vec<String>>().ok());
-        values.map(|v| *v).unwrap_or_default()
+        let values = values.map(crate::values::take::<String>);
+        values.and_then(Result::ok).unwrap_or_default()
     }
 
     #[test]

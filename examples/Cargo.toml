@@ -162,8 +162,8 @@ path = "jobs/jobs_background.rs"
 test = true
 
 [[test]]
-name = "text_anthropic_partial_json"
-path = "tests/text_anthropic_partial_json.rs"
+name = "text_streamed_arguments"
+path = "tests/text_streamed_arguments.rs"
 
 [[test]]
 name = "text_split_escapes"

@@ -17,17 +17,18 @@ use serde_json::{Map, Value, json};
 use crate::Usage;
 use crate::common::ReplyParser;
 use crate::common::{
-    Encounter, Names, Reading, SoFar, UnaryEncoder, Wire, error_event, patch_content,
+    Encounter, Names, Reading, SoFar, UnaryEncoder, Wire, error_event, only, patch_content,
     patch_messages, patch_sampling, post_json, read_content, read_message, reads_back, refusal,
-    replace, says, set, split_around, stop_json, supported_usage, unpatchable, unreadable_event,
-    unsupported_fields, unwritable_content, usage_step, write_content, write_message,
+    replace, says, set, split_around, stop_json, supported_usage, tools_of, unpatchable,
+    unreadable_event, unsupported_fields, unwritable_content, update_message, usage_step,
+    write_content, write_message,
 };
 use crate::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
 };
 use crate::formats::errors::{merge_details, says_error};
 use crate::formats::sse::{event, event_json, is_stream};
-use crate::tools::{Fragment, fragments};
+use crate::tools::{arguments_json, read_anthropic_tools, start, write_anthropic_tools};
 use respan_gateway_http::Encoder;
 
 /// The API version sent when the client names none.
@@ -299,6 +300,18 @@ fn patch_system(
     Ok(Value::Array(parts))
 }
 
+/// `m` without its empty text parts, which Anthropic refuses, if it says
+/// something else, such as a tool call.
+fn without_empty_text(m: &Message) -> std::borrow::Cow<'_, Message> {
+    let empty = |c: &Content| matches!(c, Content::Text { text, .. } if text.is_empty());
+    if !m.content.iter().any(empty) || m.content.iter().all(empty) {
+        return std::borrow::Cow::Borrowed(m);
+    }
+    let mut m = m.clone();
+    m.content.retain(|c| !empty(c));
+    std::borrow::Cow::Owned(m)
+}
+
 /// Whether a message says nothing: no content, or only empty text.
 fn is_empty(m: &Message) -> bool {
     let empty = |c: &Content| matches!(c, Content::Text { text, .. } if text.is_empty());
@@ -349,6 +362,7 @@ impl Wire for AnthropicMessages {
         for m in v["messages"].as_array().into_iter().flatten() {
             chat.messages.push(read_message(ANTHROPIC, m, &ROLES));
         }
+        read_anthropic_tools(v, &mut chat);
         chat
     }
 
@@ -382,7 +396,7 @@ impl Wire for AnthropicMessages {
             .iter()
             .enumerate()
             .filter(|&(i, m)| i == last || !is_empty(m));
-        let messages = kept.map(|(_, m)| write_message(ANTHROPIC, m, &ROLES));
+        let messages = kept.map(|(_, m)| write_message(ANTHROPIC, &without_empty_text(m), &ROLES));
         let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
         v.insert("messages".into(), messages.into());
         set(&mut v, "temperature", chat.temperature.map(Into::into));
@@ -390,6 +404,7 @@ impl Wire for AnthropicMessages {
         set(&mut v, "stop_sequences", stop_json(&chat.stop));
         let user = chat.user.as_ref().map(|u| json!({ "user_id": u }));
         set(&mut v, "metadata", user);
+        write_anthropic_tools(chat, &mut v)?;
         Ok(v.into())
     }
 
@@ -413,8 +428,15 @@ impl Wire for AnthropicMessages {
         if before.user != after.user {
             patch_user(v, after.user.as_deref());
         }
+        if tools_of(before) != tools_of(after) {
+            write_anthropic_tools(after, v)?;
+        }
         if before.messages != after.messages {
-            let messages = patch_messages(ANTHROPIC, &before.messages, rest, &ROLES)?;
+            let write = |m: &Message| Ok(vec![write_message(ANTHROPIC, m, &ROLES)?]);
+            let update = |old: &Value, was: &Message, now: &Message| {
+                Ok(vec![update_message(ANTHROPIC, old, was, now, &ROLES)?])
+            };
+            let messages = patch_messages(&before.messages, rest, write, update)?;
             v.insert("messages".into(), messages.into());
         }
         Ok(())
@@ -435,13 +457,12 @@ impl Wire for AnthropicMessages {
             // A text block with more, such as citations, is other content.
             let more = |(k, x): (&String, &Value)| k != "type" && k != "text" && says(x);
             let plain = !b.as_object().into_iter().flatten().any(more);
+            let block = u32::try_from(i).unwrap_or(u32::MAX);
             reply
                 .content
                 .push(match (b["type"].as_str(), b["text"].as_str()) {
-                    (Some("text"), Some(text)) if plain => {
-                        Piece::text(u32::try_from(i).unwrap_or(u32::MAX), text)
-                    }
-                    _ => Piece::other(ANTHROPIC, b.clone()),
+                    (Some("text"), Some(text)) if plain => Piece::text(block, text),
+                    _ => tool_use(block, b).unwrap_or_else(|| Piece::other(ANTHROPIC, b.clone())),
                 });
         }
         reply.finish = v["stop_reason"].as_str().map(|r| FINISH.finish(r));
@@ -569,6 +590,26 @@ impl Wire for AnthropicMessages {
                     b["text"] = text.as_str().into();
                     content.push(b.clone());
                 }
+                Piece::ToolCall {
+                    call,
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    let old = old.get(*call as usize).filter(|b| b["type"] == "tool_use");
+                    let mut b = old
+                        .cloned()
+                        .unwrap_or_else(|| json!({ "type": "tool_use" }));
+                    if let Some(id) = id {
+                        b["id"] = id.as_str().into();
+                    }
+                    if let Some(name) = name {
+                        b["name"] = name.as_str().into();
+                    }
+                    b["input"] = arguments_json(arguments).map_err(|_| unwritable_content())?;
+                    content.push(b);
+                }
                 Piece::Other { raw, .. } => content.push((**raw).clone()),
                 _ => return Err(unwritable_content()),
             }
@@ -604,13 +645,53 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
     Ok(())
 }
 
+/// A `tool_use` block numbered `block` as a tool call, if the kind can say
+/// all of it. A stream opens the block with an empty input.
+fn tool_use(block: u32, b: &Value) -> Option<Piece> {
+    if b["type"] != "tool_use" || !only(b, &["type", "id", "name", "input"]) {
+        return None;
+    }
+    let input = b["input"].as_object()?;
+    let arguments = match input.is_empty() {
+        true => String::new(),
+        false => b["input"].to_string(),
+    };
+    Some(Piece::tool_call(
+        block,
+        b["id"].as_str()?,
+        b["name"].as_str()?,
+        arguments,
+    ))
+}
+
+/// An `input_json_delta` of block `block` as the next part of its call's
+/// arguments.
+fn tool_arguments(block: u32, delta: &Value) -> Option<Piece> {
+    if delta["type"] != "input_json_delta" || !only(delta, &["type", "partial_json"]) {
+        return None;
+    }
+    Some(Piece::tool_arguments(
+        block,
+        delta["partial_json"].as_str()?,
+    ))
+}
+
+/// A reply of `piece` alone.
+fn reply_of(piece: Piece) -> Reply {
+    let mut reply = Reply::default();
+    reply.content.push(piece);
+    reply
+}
+
 /// Puts an edited reply back into a stream event.
 fn put_event(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
-    if reply
-        .content
-        .iter()
-        .any(|piece| !matches!(piece, Piece::Text { .. } | Piece::Other { .. }))
-    {
+    let known = |p: &Piece| {
+        matches!(
+            p,
+            Piece::Text { .. } | Piece::ToolCall { .. } | Piece::Other { .. }
+        )
+    };
+    if !reply.content.iter().all(known) {
         return Err(unwritable_content());
     }
     // A block that opened with text a filter took opens empty.
@@ -628,13 +709,38 @@ fn put_event(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
     if let Some(f) = &reply.finish {
         FINISH.rewrite(v, "/delta/stop_reason", f)?;
     }
+    let starts = v["type"] == "content_block_start";
     for piece in &reply.content {
-        if let Piece::Text { text, .. } = piece {
-            let at = match v["type"].as_str() {
-                Some("content_block_start") => "/content_block/text",
-                _ => "/delta/text",
-            };
-            replace(v, at, text.as_str());
+        match piece {
+            Piece::Text { text, .. } => {
+                let at = match starts {
+                    true => "/content_block/text",
+                    false => "/delta/text",
+                };
+                replace(v, at, text.as_str());
+            }
+            Piece::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } if starts => {
+                if let Some(id) = id {
+                    replace(v, "/content_block/id", id.as_str());
+                }
+                if let Some(name) = name {
+                    replace(v, "/content_block/name", name.as_str());
+                }
+                let input = match arguments.is_empty() {
+                    true => json!({}),
+                    false => arguments_json(arguments).map_err(|_| unwritable_content())?,
+                };
+                replace(v, "/content_block/input", input);
+            }
+            Piece::ToolCall { arguments, .. } => {
+                replace(v, "/delta/partial_json", arguments.as_str());
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -717,7 +823,8 @@ fn event_reply(v: &Value) -> Reply {
             match (content["type"].as_str(), content["text"].as_str()) {
                 (Some("text"), None | Some("")) => Reply::default(),
                 (Some("text"), Some(text)) => Reply::text(block, text),
-                _ => Reply::other(ANTHROPIC, content.clone()),
+                _ => tool_use(block, content)
+                    .map_or_else(|| Reply::other(ANTHROPIC, content.clone()), reply_of),
             }
         }
         Some("content_block_delta") => {
@@ -726,7 +833,8 @@ fn event_reply(v: &Value) -> Reply {
                 Some("text_delta") => {
                     Reply::text(block, delta["text"].as_str().unwrap_or_default())
                 }
-                _ => Reply::other(ANTHROPIC, delta.clone()),
+                _ => tool_arguments(block, delta)
+                    .map_or_else(|| Reply::other(ANTHROPIC, delta.clone()), reply_of),
             }
         }
         Some("message_delta") => {
@@ -755,10 +863,10 @@ struct EventStream {
     opened: u32,
     /// The tool call blocks not yet stopped, by the number their maker
     /// gave the call.
-    tools: Vec<(usize, u32)>,
-    /// Tool calls that started while a block was open, by number, with
+    tools: Vec<(u32, u32)>,
+    /// Tool calls that started while a tool block was open, by number, with
     /// their id, name and arguments so far.
-    queued: Vec<(usize, String, String, String)>,
+    queued: Vec<(u32, String, String, String)>,
     /// The provider's open text block and its stop, kept back until the
     /// next event so released text can still go in.
     provider_open: Option<(u32, Option<Bytes>)>,
@@ -872,38 +980,37 @@ impl EventStream {
         delta(index, text, out);
     }
 
-    /// Write a piece of a tool call another format made. A block stops
-    /// before the next starts, so a call that starts while another is open
-    /// and may still get arguments (its maker numbers calls, and streams
-    /// them interleaved) waits, with its arguments, for the open block to
-    /// stop; the open call's arguments go out as they come.
-    fn call(&mut self, fragment: Fragment, out: &mut BytesMut) -> Result<(), Fault> {
-        let keys: Vec<usize> = (self.tools.iter().map(|t| t.0))
-            .chain(self.queued.iter().map(|q| q.0))
-            .collect();
-        let at = fragment.continues(keys.iter().copied());
-        let Fragment {
-            index,
-            start,
-            arguments,
-        } = fragment;
+    /// Write a piece of tool call `call`, made by a plugin or another
+    /// format. A block stops before the next starts, so a call that starts
+    /// while a tool block is open, which may still get arguments (OpenAI
+    /// streams parallel calls interleaved), waits with its arguments for
+    /// that block to stop; the open call's arguments go out as they come.
+    fn call(
+        &mut self,
+        call: u32,
+        start: Option<(&str, &str)>,
+        arguments: &str,
+        out: &mut BytesMut,
+    ) -> Result<(), Fault> {
+        let keys = (self.tools.iter().map(|t| t.0)).chain(self.queued.iter().map(|q| q.0));
+        let at = keys.collect::<Vec<_>>().iter().position(|k| *k == call);
         match (start, at) {
             (Some((id, name)), None) => {
-                if index.is_some() && matches!(self.open, Some((None, _))) {
-                    let key = index.unwrap_or_default();
-                    self.queued.push((key, id, name, arguments));
+                if matches!(self.open, Some((None, _))) {
+                    let queued = (call, id.into(), name.into(), arguments.into());
+                    self.queued.push(queued);
                     return Ok(());
                 }
                 self.close_block(out);
-                let block = self.start_tool(&id, &name, out);
+                let block = self.start_tool(id, name, out);
                 self.open = Some((None, block));
-                self.tools.push((index.unwrap_or(block as usize), block));
-                delta_json(block, &arguments, out);
+                self.tools.push((call, block));
+                delta_json(block, arguments, out);
             }
             (_, Some(at)) if at < self.tools.len() => {
-                delta_json(self.tools[at].1, &arguments, out);
+                delta_json(self.tools[at].1, arguments, out);
             }
-            (_, Some(at)) => self.queued[at - self.tools.len()].3.push_str(&arguments),
+            (_, Some(at)) => self.queued[at - self.tools.len()].3.push_str(arguments),
             (None, None) => return Err(unwritable_content()),
         }
         Ok(())
@@ -958,8 +1065,11 @@ impl EventStream {
                 self.opened = self.opened.max(i.saturating_add(1));
                 let stop = self.parked.iter().position(|(block, _)| *block == i);
                 let stop = stop.map(|at| self.parked.remove(at).1);
-                // Written text waiting for this text block goes in first.
-                if v["content_block"]["type"] == "text" {
+                // Written text waiting for this text block goes in first;
+                // a tool block's stop waits too, for released arguments.
+                if v["content_block"]["type"] == "tool_use" {
+                    self.provider_open = Some((i, stop));
+                } else if v["content_block"]["type"] == "text" {
                     self.provider_open = Some((i, stop));
                     let now = self
                         .waiting
@@ -998,26 +1108,38 @@ impl EventStream {
                         self.text(*block, text, out);
                     }
                 },
-                // A provider block released has lost its position.
-                Piece::Other { .. } if self.so_far.relayed => {
-                    return Err(unpatchable(
-                        "Anthropic's own blocks other than text cannot be held",
-                    ));
-                }
-                Piece::Other { format, raw, .. } => match fragments(format, raw) {
-                    Some(calls) => {
-                        self.open(out);
-                        for call in calls {
-                            self.call(call, out)?;
-                        }
-                    }
-                    None => return Err(unwritable_content()),
+                // Released arguments go into the provider's tool block, if it
+                // has not stopped.
+                Piece::ToolCall {
+                    call,
+                    id: None,
+                    arguments,
+                    ..
+                } if self.so_far.relayed => match &self.provider_open {
+                    Some((open, _)) if open == call => delta_json(*call, arguments, out),
+                    _ => return Err(held_block()),
                 },
+                // A provider block released has lost its position.
+                _ if self.so_far.relayed => return Err(held_block()),
+                Piece::ToolCall {
+                    call,
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    self.open(out);
+                    self.call(*call, start(id, name), arguments, out)?;
+                }
                 _ => return Err(unwritable_content()),
             }
         }
         Ok(())
     }
+}
+
+fn held_block() -> Fault {
+    unpatchable("Anthropic's own blocks other than text cannot be held")
 }
 
 fn delta(index: u32, text: &str, out: &mut BytesMut) {
@@ -1051,8 +1173,10 @@ fn holds(v: &Value, piece: &Piece) -> bool {
         Some("content_block_start" | "content_block_delta")
     );
     let text = v["content_block"]["type"] == "text" || v["delta"]["type"] == "text_delta";
+    let index = v["index"].as_u64();
     match piece {
-        Piece::Text { block: b, .. } => block && text && v["index"].as_u64() == Some(u64::from(*b)),
+        Piece::Text { block: b, .. } => block && text && index == Some(u64::from(*b)),
+        Piece::ToolCall { call, .. } => block && !text && index == Some(u64::from(*call)),
         Piece::Other { .. } => block && !text,
         _ => false,
     }
@@ -1191,6 +1315,7 @@ mod tests {
         rebuild(raw, &said, reply, &Usage::default()).map(Option::unwrap_or_default)
     }
     use crate::common::patch_request;
+    use crate::conversation::ToolChoice;
 
     /// The replies of `events`, each decoded apart.
     fn decode(events: &[&str]) -> Vec<Reply> {
@@ -1208,6 +1333,56 @@ mod tests {
         edit(&mut chat);
         let raw = Bytes::from(body.to_string());
         Ok(patch_request::<AnthropicMessages>(&raw, &before, &chat)?.into())
+    }
+
+    #[test]
+    fn an_edited_tool_call_and_result_keep_their_blocks() {
+        let marker = json!({ "type": "ephemeral" });
+        let body = json!({ "model": "c", "max_tokens": 5,
+        "tools": [{ "name": "lookup", "input_schema": { "type": "object" }, "cache_control": marker }],
+        "tool_choice": { "type": "tool", "name": "lookup", "disable_parallel_tool_use": true },
+        "messages": [
+            { "role": "user", "content": "find bob" },
+            { "role": "assistant", "content": [
+                { "type": "tool_use", "id": "t1", "name": "lookup", "input": { "email": "bob@x.io" } },
+            ] },
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "t1", "content": "bob@x.io is Bob" },
+            ] },
+        ]});
+        let chat = AnthropicMessages::read(&body);
+        assert_eq!(
+            chat.tools[0].unsupported.get("cache_control"),
+            Some(&marker)
+        );
+        assert_eq!(chat.tool_choice, Some(ToolChoice::Tool("lookup".into())));
+        assert_eq!(chat.parallel_tool_calls, Some(false));
+        assert_eq!(
+            chat.messages[2].content,
+            [Content::tool_result(
+                "t1",
+                vec!["bob@x.io is Bob".into()],
+                false
+            )]
+        );
+        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
+        let edited = patched(body.clone(), |c| {
+            for part in c.messages.iter_mut().flat_map(|m| &mut m.content) {
+                match part {
+                    Content::ToolCall { arguments, .. } => {
+                        *arguments = arguments.replace("bob@x.io", "<EMAIL_1>");
+                    }
+                    Content::ToolResult { content, .. } => {
+                        *content = vec!["<EMAIL_1> is Bob".into()];
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut expected = body;
+        expected["messages"][1]["content"][0]["input"] = json!({ "email": "<EMAIL_1>" });
+        expected["messages"][2]["content"][0]["content"] = "<EMAIL_1> is Bob".into();
+        assert_eq!(edited.ok(), Some(expected));
     }
 
     #[test]
@@ -1427,13 +1602,7 @@ mod tests {
             ],
         });
         let mut whole = Reply::start("m", "c");
-        whole.content = vec![
-            Piece::text(0, "ok"),
-            Piece::other(
-                ANTHROPIC,
-                json!({ "type": "tool_use", "id": "t", "name": "f", "input": {} }),
-            ),
-        ];
+        whole.content = vec![Piece::text(0, "ok"), Piece::tool_call(1, "t", "f", "")];
         whole.finish = Some(Finish::ToolUse);
         assert_eq!(AnthropicMessages::reply(&v), whole);
         let mut patched = v.clone();

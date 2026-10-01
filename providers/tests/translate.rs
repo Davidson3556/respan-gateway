@@ -3375,3 +3375,136 @@ async fn parallel_openai_tool_calls_reach_an_anthropic_client_in_blocks_that_do_
         "{out}"
     );
 }
+
+/// Restores a hidden email in tool calls' arguments, as a PII plugin does.
+#[derive(Clone)]
+struct RestoreArguments;
+
+impl Filter<Reply> for RestoreArguments {
+    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        for piece in &mut reply.content {
+            if let Piece::ToolCall { arguments, .. } = piece {
+                *arguments = arguments.replace("<EMAIL_1>", "bob@x.io");
+            }
+        }
+        out.push(reply);
+        Ok(())
+    }
+}
+
+/// An edit of a streamed tool call's arguments is written into the
+/// provider's own events, which keep the rest of what they say.
+#[tokio::test]
+async fn an_edited_tool_call_is_written_into_anthropics_own_events() {
+    let event = |data: Value| {
+        format!(
+            "event: {}\ndata: {data}\n\n",
+            data["type"].as_str().unwrap_or("")
+        )
+    };
+    let mut stream: Vec<String> = ANTHROPIC_STREAM.iter().map(|s| s.to_string()).collect();
+    stream.splice(
+        5..5,
+        [
+            event(json!({"type": "content_block_start", "index": 1,
+                "content_block": {"type": "tool_use", "id": "t", "name": "send", "input": {}}})),
+            event(json!({"type": "content_block_delta", "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"to\":\"<EMAIL_1>\"}"}})),
+            event(json!({"type": "content_block_stop", "index": 1})),
+        ],
+    );
+    let h = Harness::new(vec![Arc::new(Adds(RestoreArguments))]).await;
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.anthropic.answer(sse(&chunks));
+    let body = json!({ "model": "claude-x", "max_tokens": 10, "stream": true,
+        "messages": [{ "role": "user", "content": "mail bob" }] });
+
+    let (status, out) = h.text(call(MESSAGES, body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let events = events(&out);
+    let arguments: String = events
+        .iter()
+        .filter_map(|(_, v)| v.pointer("/delta/partial_json").and_then(Value::as_str))
+        .collect();
+    assert_eq!(arguments, "{\"to\":\"bob@x.io\"}", "{out}");
+    let start = events
+        .iter()
+        .find(|(_, v)| v["content_block"]["type"] == "tool_use")
+        .map(|(_, v)| v["content_block"].clone());
+    assert_eq!(
+        start,
+        Some(json!({"type": "tool_use", "id": "t", "name": "send", "input": {}}))
+    );
+}
+
+/// Sends every request to OpenAI, so OpenAI's own chunks are relayed.
+struct ToOpenAi;
+
+#[async_trait]
+impl Plugin for ToOpenAi {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.set_target("openai");
+        Ok(None)
+    }
+}
+
+/// The same edit in OpenAI's chunks, streamed and whole.
+#[tokio::test]
+async fn an_edited_tool_call_is_written_into_openais_own_chunks() {
+    let chunk = |choices: Value| {
+        format!(
+            "data: {}\n\n",
+            json!({"id": "c1", "model": "gpt-x", "choices": choices})
+        )
+    };
+    let stream = [
+        chunk(
+            json!([{"index": 0, "delta": {"role": "assistant", "content": null,
+            "tool_calls": [{"index": 0, "id": "t", "type": "function",
+            "function": {"name": "send", "arguments": ""}}]}}]),
+        ),
+        chunk(json!([{"index": 0, "delta": {"tool_calls": [{"index": 0,
+            "function": {"arguments": "{\"to\":\"<EMAIL_1>\"}"}}]}}])),
+        chunk(json!([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}])),
+        "data: [DONE]\n\n".to_owned(),
+    ];
+    let plugins =
+        || -> Vec<Arc<dyn Plugin>> { vec![Arc::new(ToOpenAi), Arc::new(Adds(RestoreArguments))] };
+    let h = Harness::with(plugins()).await;
+    let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
+    h.openai.answer(sse(&chunks));
+    let body = json!({ "model": "gpt-x", "stream": true,
+        "messages": [{ "role": "user", "content": "mail bob" }] });
+
+    let (status, out) = h.text(call(CHAT, body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let calls: Vec<Value> = events(&out)
+        .into_iter()
+        .filter_map(|(_, v)| v.pointer("/choices/0/delta/tool_calls/0").cloned())
+        .collect();
+    let arguments: String = calls
+        .iter()
+        .filter_map(|c| c.pointer("/function/arguments").and_then(Value::as_str))
+        .collect();
+    assert_eq!(arguments, "{\"to\":\"bob@x.io\"}", "{out}");
+    assert_eq!(calls[0]["id"], "t", "{out}");
+
+    let whole = json!({"id": "c2", "model": "gpt-x", "choices": [{"index": 0,
+        "finish_reason": "tool_calls", "message": {"role": "assistant", "content": null,
+        "tool_calls": [{"id": "t", "type": "function",
+            "function": {"name": "send", "arguments": "{\"to\":\"<EMAIL_1>\"}"}}]}}]});
+    let h = Harness::with(plugins()).await;
+    h.openai
+        .answer(json_response(StatusCode::OK, &whole.to_string()));
+    let body = json!({ "model": "gpt-x", "messages": [{ "role": "user", "content": "mail bob" }] });
+
+    let (status, out) = h.text(call(CHAT, body.to_string())).await;
+
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let mut expected = whole;
+    expected["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
+        "{\"to\":\"bob@x.io\"}".into();
+    assert_eq!(serde_json::from_str::<Value>(&out).ok(), Some(expected));
+}

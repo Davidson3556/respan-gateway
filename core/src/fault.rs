@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::extensions::FormatData;
 use crate::{Extensions, Result};
 
 pub(crate) const PANICKED: &str = "a plugin or format panicked";
@@ -41,24 +42,24 @@ pub mod codes {
 /// writes and the kernel never reads. Implement
 /// `From<YourError> for Fault` so `?` works in hooks.
 #[derive(Clone)]
-pub struct Fault(Box<Inner>);
+pub struct Fault(Box<Fields>);
 
 #[derive(Clone)]
-struct Inner {
+struct Fields {
     code: Cow<'static, str>,
     message: String,
     retry_after: Option<Duration>,
     source: Option<Arc<dyn Error + Send + Sync>>,
     /// Hints for the edges, which the kernel never reads.
     hints: Extensions,
-    /// A provider's own words for it, and the format that read them.
-    answer: Option<(Arc<str>, Arc<dyn Any + Send + Sync>)>,
+    /// A provider's own words for it, owned by the format that read them.
+    answer: Option<FormatData>,
 }
 
 impl Fault {
     /// A fault of this code and message.
     pub fn new(code: impl Into<Cow<'static, str>>, message: impl Into<String>) -> Self {
-        Self(Box::new(Inner {
+        Self(Box::new(Fields {
             code: code.into(),
             message: message.into(),
             retry_after: None,
@@ -100,15 +101,14 @@ impl Fault {
     /// The provider's own words for this failure, as `format` read them,
     /// which that format writes as they came.
     pub fn with_answer<A: Any + Send + Sync>(mut self, format: &str, answer: A) -> Self {
-        self.0.answer = Some((Arc::from(format), Arc::new(answer)));
+        self.0.answer = Some(FormatData::new(format, answer));
         self
     }
 
     /// The provider's words as `A`, if they came in `format`
     /// ([`Fault::with_answer`]).
     pub fn answer<A: Any>(&self, format: &str) -> Option<&A> {
-        let (_, answer) = self.0.answer.as_ref().filter(|(of, _)| **of == *format)?;
-        answer.downcast_ref()
+        self.0.answer.as_ref()?.get(format)
     }
 
     /// The same fault with `other`'s answer and retry, if any.
@@ -192,7 +192,7 @@ impl fmt::Debug for Fault {
             .field("message", &self.0.message)
             .field("retry_after", &self.0.retry_after)
             .field("source", &self.0.source.as_ref().map(|s| s.to_string()))
-            .field("answer", &self.0.answer.as_ref().map(|(of, _)| &**of))
+            .field("answer", &self.0.answer.as_ref().map(FormatData::format))
             .finish()
     }
 }

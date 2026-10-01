@@ -127,3 +127,20 @@ async fn buffering_checks_each_new_value_once() {
         (0..1024).map(Ok).collect::<Vec<_>>()
     );
 }
+
+#[tokio::test]
+async fn buffering_moves_values_without_requiring_clone() {
+    struct Value(u32);
+    let mut response = Response::stream(stream::iter([Ok(Value(1)), Ok(Value(2))]));
+    response.buffer_until(|v: &Value| v.0 == 1).await.unwrap();
+    let mut seen = Vec::new();
+    response
+        .buffer_until(|v: &Value| {
+            seen.push(v.0);
+            false
+        })
+        .await
+        .unwrap();
+    assert_eq!(seen, [1, 2]);
+    assert_eq!(response.buffered_end(), Some(&Ok(())));
+}

@@ -30,13 +30,14 @@ Order: input filters run in registration order, so register any plugin
 that adds to the input BEFORE the plugin that checks or redacts it, or
 its text goes unchecked.
 
-With `Holdback`, matches split across OpenAI or Anthropic tool-argument
-fragments are handled, including split JSON escapes. Interleaved OpenAI
-choices retain independent text and tool-argument tails.
+With `Holdback`, matches split across a streamed tool call's argument
+pieces (`Piece::ToolCall`, held per call) are handled, including split JSON
+escapes. OpenAI choices beyond the first, which the formats keep as their own,
+retain independent text and tool-argument tails.
 
 Not handled: a match split across two text blocks (Anthropic's citations
 make many); an edit of a bare number in a streamed tool-argument fragment, which is written
-unquoted. Anthropic tool inputs and text tool results are readable in
-requests; a tool result containing an image or another opaque payload is refused.
+unquoted. Tool calls and text tool results are readable in requests; a tool
+result containing an image or another opaque payload is refused.
 
 Used by: [guardrail](../policies/guardrail.rs), [pii](../policies/pii.rs), [realtime](../realtime/realtime.rs).

@@ -10,21 +10,27 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Sink, Stream, StreamExt};
 
+use crate::extensions::FormatData;
 use crate::fault::guarded;
 use crate::{Fault, Result};
 
-pub(crate) type Metadata = Option<(Arc<str>, Arc<dyn Any + Send + Sync>)>;
+/// The most ready events one poll moves before yielding: Tokio's cooperative
+/// budget per task poll, so a hot stream yields no later than the runtime
+/// would make any other Tokio resource yield.
+pub(crate) const MAX_BATCH: usize = 128;
+
+pub(crate) type Metadata = Option<FormatData>;
 
 /// Typed events: one replayable value or a live stream. The first fault
 /// ends the stream. Protocol implementations may retain private relay data.
 /// Opening and writing are ordinary futures, outside this stream.
 pub struct EventStream<T> {
-    source: Source<T>,
+    shape: Shape<T>,
     metadata: Metadata,
     ended: bool,
 }
 
-enum Source<T> {
+enum Shape<T> {
     Single(Arc<Single<T>>),
     Stream(BoxStream<'static, Result<T>>),
     Refused(Fault),
@@ -102,7 +108,7 @@ impl<T> Single<T> {
 
     pub(crate) fn into_events(self: Arc<Self>) -> EventStream<T> {
         EventStream {
-            source: Source::Single(self),
+            shape: Shape::Single(self),
             metadata: None,
             ended: false,
         }
@@ -111,15 +117,15 @@ impl<T> Single<T> {
 
 impl<T> fmt::Debug for EventStream<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = match self.source {
-            Source::Single(_) => "single",
-            Source::Stream(_) => "stream",
-            Source::Refused(_) => "refused",
-            Source::Empty => "ended",
+        let state = match self.shape {
+            Shape::Single(_) => "single",
+            Shape::Stream(_) => "stream",
+            Shape::Refused(_) => "refused",
+            Shape::Empty => "ended",
         };
         f.debug_struct("EventStream")
             .field("state", &state)
-            .field("format", &self.metadata.as_ref().map(|(format, _)| format))
+            .field("format", &self.metadata.as_ref().map(FormatData::format))
             .finish()
     }
 }
@@ -128,7 +134,7 @@ impl<T> EventStream<T> {
     /// An empty stream with no protocol metadata.
     pub fn empty() -> Self {
         Self {
-            source: Source::Empty,
+            shape: Shape::Empty,
             metadata: None,
             ended: false,
         }
@@ -144,7 +150,7 @@ impl<T> EventStream<T> {
     /// A refusal classified before any events become available.
     pub fn refused(fault: Fault) -> Self {
         Self {
-            source: Source::Refused(fault),
+            shape: Shape::Refused(fault),
             metadata: None,
             ended: false,
         }
@@ -152,27 +158,27 @@ impl<T> EventStream<T> {
 
     /// Whether these events contain a replayable single value.
     pub fn is_single(&self) -> bool {
-        matches!(self.source, Source::Single(_))
+        matches!(self.shape, Shape::Single(_))
     }
 
     /// Whether this single value came from a lazy decoder.
     /// Inspecting it keeps this property; replacing it with `single` does not.
     pub fn is_lazy(&self) -> bool {
-        matches!(&self.source, Source::Single(value) if value.is_lazy())
+        matches!(&self.shape, Shape::Single(value) if value.is_lazy())
     }
 
     /// The refusal, before the stream has been read.
     pub fn refusal(&self) -> Option<&Fault> {
-        match &self.source {
-            Source::Refused(fault) => Some(fault),
+        match &self.shape {
+            Shape::Refused(fault) => Some(fault),
             _ => None,
         }
     }
 
     /// The single value, decoding it at most once. `None` for a live stream.
     pub fn value(&self) -> Option<Result<&T>> {
-        match &self.source {
-            Source::Single(value) => Some(value.value()),
+        match &self.shape {
+            Shape::Single(value) => Some(value.value()),
             _ => None,
         }
     }
@@ -181,17 +187,13 @@ impl<T> EventStream<T> {
     /// Use a private metadata type in the protocol implementation. The
     /// kernel carries this data unopened and removes it across translations.
     pub fn with_metadata<M: Any + Send + Sync>(mut self, format: &str, metadata: M) -> Self {
-        self.metadata = Some((Arc::from(format), Arc::new(metadata)));
+        self.metadata = Some(FormatData::new(format, metadata));
         self
     }
 
     /// Read private data when its format and concrete type both match.
     pub fn metadata<M: Any>(&self, format: &str) -> Option<&M> {
-        let (_, data) = self
-            .metadata
-            .as_ref()
-            .filter(|(name, _)| &**name == format)?;
-        data.downcast_ref()
+        self.metadata.as_ref()?.get(format)
     }
 
     pub(crate) fn metadata_copy(&self) -> Metadata {
@@ -210,8 +212,8 @@ impl<T> EventStream<T> {
         if !self.is_single() {
             return None;
         }
-        match std::mem::replace(&mut self.source, Source::Empty) {
-            Source::Single(value) => Some(value),
+        match std::mem::replace(&mut self.shape, Shape::Empty) {
+            Shape::Single(value) => Some(value),
             _ => unreachable!("source checked above"),
         }
     }
@@ -234,7 +236,7 @@ impl<T> EventStream<T> {
     /// A live stream whose first error is its last event.
     pub fn stream(events: impl Stream<Item = Result<T>> + Send + 'static) -> Self {
         Self {
-            source: Source::Stream(events.boxed()),
+            shape: Shape::Stream(events.boxed()),
             metadata: None,
             ended: false,
         }
@@ -243,27 +245,29 @@ impl<T> EventStream<T> {
 
 impl<T: Send + Sync + 'static> EventStream<T> {
     /// Change representation without eagerly decoding a single value.
-    pub(crate) fn map_values<U: Clone + Send + Sync + 'static>(
+    /// `clone` copies replayable snapshots; live values are moved.
+    pub(crate) fn map_values<U: Send + Sync + 'static>(
         self,
         map: impl Fn(T) -> Result<U> + Send + Sync + 'static,
+        clone: fn(&U) -> U,
     ) -> EventStream<U> {
-        let source = match self.source {
-            Source::Single(value) => {
+        let shape = match self.shape {
+            Shape::Single(value) => {
                 let lazy = value.is_lazy();
-                Source::Single(Single::deferred(
+                Shape::Single(Single::deferred(
                     move || value.cloned().and_then(&map),
                     lazy,
-                    U::clone,
+                    clone,
                 ))
             }
-            Source::Stream(events) => {
-                Source::Stream(events.map(move |event| event.and_then(&map)).boxed())
+            Shape::Stream(events) => {
+                Shape::Stream(events.map(move |event| event.and_then(&map)).boxed())
             }
-            Source::Refused(fault) => Source::Refused(fault),
-            Source::Empty => Source::Empty,
+            Shape::Refused(fault) => Shape::Refused(fault),
+            Shape::Empty => Shape::Empty,
         };
         EventStream {
-            source,
+            shape,
             metadata: self.metadata,
             ended: self.ended,
         }
@@ -280,15 +284,15 @@ impl<T> Stream for EventStream<T> {
         if this.ended {
             return Poll::Ready(None);
         }
-        let item = match &mut this.source {
-            Source::Single(value) => {
+        let item = match &mut this.shape {
+            Shape::Single(value) => {
                 let item = value.cloned();
                 this.ended = true;
                 return Poll::Ready(Some(item));
             }
-            Source::Stream(events) => events.as_mut().poll_next(cx),
-            Source::Refused(fault) => Poll::Ready(Some(Err(fault.clone()))),
-            Source::Empty => Poll::Ready(None),
+            Shape::Stream(events) => events.as_mut().poll_next(cx),
+            Shape::Refused(fault) => Poll::Ready(Some(Err(fault.clone()))),
+            Shape::Empty => Poll::Ready(None),
         };
         if matches!(item, Poll::Ready(None | Some(Err(_)))) {
             this.ended = true;
@@ -300,7 +304,7 @@ impl<T> Stream for EventStream<T> {
 type BoxSink<T> = Pin<Box<dyn Sink<Result<T>, Error = Fault> + Send>>;
 type Prepare<T> = Box<dyn FnOnce(&mut EventStream<T>) -> Result<BoxSink<T>> + Send>;
 
-enum Sending<T> {
+enum SinkState<T> {
     Preparing(Prepare<T>),
     Ready(BoxSink<T>),
     Failed(Fault),
@@ -315,17 +319,17 @@ enum Sending<T> {
 /// completes final framing and actual delivery, including transport completion.
 /// Dropping the sink cancels outstanding delivery.
 pub struct EventSink<T> {
-    sending: Sending<T>,
+    state: SinkState<T>,
     terminal: bool,
 }
 
 impl<T> fmt::Debug for EventSink<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = match &self.sending {
-            Sending::Preparing(_) => "preparing",
-            Sending::Ready(_) => "ready",
-            Sending::Failed(_) => "failed",
-            Sending::Closed(_) => "closed",
+        let state = match &self.state {
+            SinkState::Preparing(_) => "preparing",
+            SinkState::Ready(_) => "ready",
+            SinkState::Failed(_) => "failed",
+            SinkState::Closed(_) => "closed",
         };
         f.debug_struct("EventSink")
             .field("state", &state)
@@ -341,7 +345,7 @@ impl<T> EventSink<T> {
         S: Sink<Result<T>, Error = Fault> + Send + 'static,
     {
         Self {
-            sending: Sending::Ready(Box::pin(sink)),
+            state: SinkState::Ready(Box::pin(sink)),
             terminal: false,
         }
     }
@@ -357,7 +361,7 @@ impl<T> EventSink<T> {
         F: FnOnce(&mut EventStream<T>) -> Result<S> + Send + 'static,
     {
         Self {
-            sending: Sending::Preparing(Box::new(move |source| {
+            state: SinkState::Preparing(Box::new(move |source| {
                 prepare(source).map(|sink| Box::pin(sink) as BoxSink<T>)
             })),
             terminal: false,
@@ -367,27 +371,27 @@ impl<T> EventSink<T> {
     /// Prepare once, before the kernel marks the call sent. Repeated calls do
     /// nothing after success and retain the original failure after an error.
     pub fn prepare(&mut self, source: &mut EventStream<T>) -> Result<()> {
-        if matches!(self.sending, Sending::Preparing(_)) {
+        if matches!(self.state, SinkState::Preparing(_)) {
             let missing = Fault::internal("event sink preparation did not complete");
-            let Sending::Preparing(prepare) =
-                std::mem::replace(&mut self.sending, Sending::Failed(missing))
+            let SinkState::Preparing(prepare) =
+                std::mem::replace(&mut self.state, SinkState::Failed(missing))
             else {
                 unreachable!()
             };
-            self.sending = match prepare(source) {
-                Ok(sink) => Sending::Ready(sink),
-                Err(fault) => Sending::Failed(fault),
+            self.state = match prepare(source) {
+                Ok(sink) => SinkState::Ready(sink),
+                Err(fault) => SinkState::Failed(fault),
             };
         }
         self.sink().map(|_| ())
     }
 
     fn sink(&mut self) -> Result<&mut BoxSink<T>> {
-        match &mut self.sending {
-            Sending::Ready(sink) => Ok(sink),
-            Sending::Preparing(_) => Err(Fault::internal("event sink needs preparation")),
-            Sending::Failed(fault) => Err(fault.clone()),
-            Sending::Closed(_) => Err(Fault::internal("event sink is closed")),
+        match &mut self.state {
+            SinkState::Ready(sink) => Ok(sink),
+            SinkState::Preparing(_) => Err(Fault::internal("event sink needs preparation")),
+            SinkState::Failed(fault) => Err(fault.clone()),
+            SinkState::Closed(_) => Err(Fault::internal("event sink is closed")),
         }
     }
 
@@ -424,7 +428,7 @@ impl<T> Sink<Result<T>> for EventSink<T> {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let this = self.get_mut();
-        if let Sending::Closed(end) = &this.sending {
+        if let SinkState::Closed(end) = &this.state {
             return Poll::Ready(end.clone());
         }
         this.sink()?.as_mut().poll_flush(cx)
@@ -433,11 +437,11 @@ impl<T> Sink<Result<T>> for EventSink<T> {
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
         let this = self.get_mut();
         this.terminal = true;
-        if let Sending::Closed(end) = &this.sending {
+        if let SinkState::Closed(end) = &this.state {
             return Poll::Ready(end.clone());
         }
         let end = futures::ready!(this.sink()?.as_mut().poll_close(cx));
-        this.sending = Sending::Closed(end.clone());
+        this.state = SinkState::Closed(end.clone());
         Poll::Ready(end)
     }
 }
@@ -449,11 +453,11 @@ pub(crate) fn deliver<T: Send + Sync + 'static>(
     mut source: EventStream<T>,
     mut sink: EventSink<T>,
 ) -> BoxFuture<'static, Result<()>> {
-    let mut ended = source.ended || matches!(source.source, Source::Empty);
+    let mut ended = source.ended || matches!(source.shape, Shape::Empty);
     // Retain the source after Ready, until the owner drops this future. The
     // client delivery guard must mark failure before unread output is dropped.
     futures::future::poll_fn(move |cx| {
-        for _ in 0..128 {
+        for _ in 0..MAX_BATCH {
             if ended {
                 return Pin::new(&mut sink).poll_close(cx);
             }
@@ -504,7 +508,7 @@ mod tests {
         let mapped = single
             .clone()
             .into_events()
-            .map_values(|value| Ok(u16::from(value)));
+            .map_values(|value| Ok(u16::from(value)), Clone::clone);
         assert!(mapped.is_lazy());
         assert_eq!(decodes.load(Ordering::SeqCst), 0);
         assert_eq!(single.value(), Ok(&17));
@@ -525,10 +529,13 @@ mod tests {
             let seen = maps.clone();
             let fault = Fault::bad_request("mapping failed");
             let failure = fault.clone();
-            let mut mapped = events.map_values(move |_| -> Result<u16> {
-                seen.fetch_add(1, Ordering::SeqCst);
-                Err(failure.clone())
-            });
+            let mut mapped = events.map_values(
+                move |_| -> Result<u16> {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Err(failure.clone())
+                },
+                Clone::clone,
+            );
             assert_eq!(mapped.is_lazy(), lazy);
             assert_eq!(maps.load(Ordering::SeqCst), 0);
             let Some(single) = mapped.take_single() else {
@@ -589,7 +596,7 @@ mod tests {
     async fn mapping_preserves_metadata_and_single_shape() {
         let mut events = EventStream::single(7_u8)
             .with_metadata("toy", 201_u16)
-            .map_values(|value| Ok(u16::from(value)));
+            .map_values(|value| Ok(u16::from(value)), Clone::clone);
         assert!(events.is_single());
         assert!(!events.is_lazy());
         assert_eq!(events.metadata::<u16>("toy"), Some(&201));
@@ -800,7 +807,7 @@ mod tests {
                 }))
                 .with_metadata("toy", 23_u16);
             source.stop();
-            let source = source.map_values(Ok);
+            let source = source.map_values(Ok, Clone::clone);
             assert_eq!(source.metadata::<u16>("toy"), Some(&23));
             let (finish, finished) = oneshot::channel();
             let sink = EventSink::new(Probe {

@@ -6,10 +6,13 @@ core contracts (`Plugin`, `ClientContext`, `ProviderContext`, `Filter`, `Fault`,
 LLM vocabulary: `conversation::{Conversation, Reply, Message, …}`, `Usage` and
 `Details`. The reexports are the original core types, not wrappers.
 
+Tools are typed too: a request's `Tool`s and `ToolChoice`, an assistant's
+`Content::ToolCall` and its `Content::ToolResult`, and a response's
+`Piece::ToolCall`, whose arguments stream as JSON text numbered by call.
 `Message::text` and `Reply::texts`/`texts_mut` expose typed text, explicitly
-skipping other content; `Message::is_plain` checks whether all content is known
-text. Provider-aware inspection of opaque tool JSON, holdback and placeholder
-rewriting remain private example support, not SDK promises.
+skipping tool calls and other content; `Message::is_plain` checks whether all
+content is known text. Holdback, JSON-text rewriting and placeholders remain
+private example support, not SDK promises.
 
 The SDK depends on core, `bytes` and `serde_json`, not HTTP. Decoded values still
 retain their original bytes and snapshot through transport-neutral provenance

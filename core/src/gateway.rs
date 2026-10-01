@@ -11,8 +11,8 @@ use crate::fault::PANICKED;
 use crate::format::{AnyFormat, Erased};
 use crate::leg::locked;
 use crate::lifecycle::{EndHooks, InFlight};
+use crate::outflow::outflow;
 use crate::provider::Provider;
-use crate::reply;
 use crate::response::Batch;
 use crate::{ClientContext, EventStream, Extensions, Fault, Format, Plugin, Response, Result};
 
@@ -24,7 +24,7 @@ pub(crate) struct Registered {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Inner {
+pub(crate) struct Registry {
     /// The client formats, in the order they are tried.
     clients: Vec<Arc<dyn AnyFormat>>,
     /// In registration order, which is the order their hooks run, on both
@@ -42,7 +42,7 @@ pub(crate) struct Inner {
 /// given: `Gateway::new().provider(..)?.client(..)?.plugin(..)?.target(..)?`.
 #[derive(Clone, Default)]
 pub struct Gateway {
-    pub(crate) inner: Arc<Inner>,
+    pub(crate) inner: Arc<Registry>,
 }
 
 impl std::fmt::Debug for Gateway {
@@ -189,15 +189,14 @@ impl Gateway {
             let in_flight = inner.in_flight.clone();
             let cx = ClientContext::new(format.clone(), incoming, extensions, inner.clone());
             let settling = cx.settling.clone();
-            let mut hooks = EndHooks::new(&in_flight, cx);
-            hooks.after = Some(settling);
+            let mut hooks = EndHooks::new(&in_flight, cx, Some(settling));
             let discarded = Arc::new(Mutex::new(Vec::new()));
             let (mut flow, call) = match broken {
                 Some(fault) => (EventStream::refused(fault), None),
                 None => {
                     let ran = AssertUnwindSafe(run(&inner, &mut hooks)).catch_unwind();
                     let resp = ran.await.unwrap_or_else(|_| Err(Fault::internal(PANICKED)));
-                    reply::reply(&format, resp, &mut hooks, &discarded).await
+                    outflow(&format, resp, &mut hooks, &discarded).await
                 }
             };
             // This guard ends the exchange before a cancelled writer drops
@@ -229,7 +228,7 @@ impl Gateway {
 
     /// The settings, for a by-value method to change; a shared gateway is
     /// copied, with its own requests.
-    fn inner_mut(&mut self) -> &mut Inner {
+    fn inner_mut(&mut self) -> &mut Registry {
         if Arc::strong_count(&self.inner) > 1 {
             let mut inner = (*self.inner).clone();
             inner.in_flight = Arc::default();
@@ -340,10 +339,9 @@ impl Drop for Delivery {
     }
 }
 
-async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Response> {
+async fn run(gateway: &Registry, hooks: &mut EndHooks<ClientContext>) -> Result<Response> {
     for Registered { plugin, .. } in &gateway.plugins {
-        hooks.ran += 1;
-        if let Some(resp) = plugin.on_client(hooks.cx()).await? {
+        if let Some(resp) = plugin.on_client(hooks.begin()).await? {
             return Ok(resp);
         }
     }

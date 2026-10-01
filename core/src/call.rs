@@ -11,12 +11,12 @@ use futures::{FutureExt, StreamExt, stream};
 
 use crate::events::Metadata;
 use crate::fault::{PANICKED, guarded};
-use crate::format::{AnyEvents, AnyFormat, AnyValue};
 use crate::gateway::Registered;
 use crate::input::Input;
 use crate::leg::{Later, cut, inputs, locked};
-use crate::lifecycle::{EndHooks, InFlight};
+use crate::lifecycle::{EndHooks, Latch};
 use crate::provider::Provider;
+use crate::values::AnyEvents;
 use crate::{ClientContext, EventStream, Extensions, Fault, ProviderContext, Response, Result};
 
 /// A call from [`ClientContext::call`], sent when first awaited; it may
@@ -26,10 +26,10 @@ pub struct Call {
     request: Arc<ClientContext>,
     provider: String,
     /// Its own input, if any.
-    own: Option<AnyValue>,
+    own: Option<Arc<dyn Any + Send + Sync>>,
     extensions: Extensions,
     /// The call once sent, shared with its request, which drops it at its end.
-    sent: Option<Arc<Sending>>,
+    sent: Option<Arc<Mutex<CallSlot>>>,
 }
 
 impl std::fmt::Debug for Call {
@@ -92,21 +92,24 @@ impl Future for Call {
                 call.own.clone(),
                 call.extensions.clone(),
             );
-            let sent = Arc::new(Mutex::new((Some(sent.boxed()), None)));
-            if !call.request.open.add(&sent) {
+            let slot = Arc::new(Mutex::new(CallSlot {
+                sending: Some(sent.boxed()),
+                waker: None,
+            }));
+            if !call.request.open.add(&slot) {
                 let ended = "providers can be called until the request ends";
                 return Poll::Ready(Err(Fault::internal(ended)));
             }
-            call.sent = Some(sent);
+            call.sent = Some(slot);
         }
-        let mut sending = locked(call.sent.as_ref().expect("set above"));
-        let Some(sent) = &mut sending.0 else {
+        let mut slot = locked(call.sent.as_ref().expect("set above"));
+        let Some(sending) = &mut slot.sending else {
             return Poll::Ready(Err(Fault::abandoned()));
         };
-        let sent = sent.poll_unpin(cx);
+        let sent = sending.poll_unpin(cx);
         match sent {
-            Poll::Ready(_) => sending.0 = None,
-            Poll::Pending => sending.1 = Some(cx.waker().clone()),
+            Poll::Ready(_) => slot.sending = None,
+            Poll::Pending => slot.waker = Some(cx.waker().clone()),
         }
         sent
     }
@@ -120,12 +123,16 @@ impl Future for Call {
 /// needs a synchronous handle to drop the future ([`Open::abandon`]); wrapping
 /// `Call::poll` in `take_until` cannot do this, because it only runs when
 /// the call is polled again.
-type Sending = Mutex<(Option<BoxFuture<'static, Result<Response>>>, Option<Waker>)>;
+struct CallSlot {
+    /// Emptied when it resolves or its request ends.
+    sending: Option<BoxFuture<'static, Result<Response>>>,
+    waker: Option<Waker>,
+}
 
 async fn send(
     cx: Arc<ClientContext>,
     provider: String,
-    own: Option<AnyValue>,
+    own: Option<Arc<dyn Any + Send + Sync>>,
     extensions: Extensions,
 ) -> Result<Response> {
     // An own input sends nothing of the client's, so only its type must
@@ -151,10 +158,7 @@ async fn send(
     })?;
     let (input, later) = match own {
         None => {
-            let later = cx
-                .input
-                .is_live()
-                .then(|| (cx.later.clone(), cx.format.clone()));
+            let later = cx.input.is_live().then(|| cx.later.clone());
             (cx.input.clone(), later)
         }
         Some(input) => {
@@ -163,34 +167,35 @@ async fn send(
                     "a call's own input is not the input type of provider '{provider}'"
                 )));
             }
-            (Input::own(p.format.clone(), input), None)
+            (Input::own(p.format.clone(), p.format.input(&*input)?), None)
         }
     };
+    // The call keeps its snapshot for its unsent clones; its hooks get their
+    // own copy, with the call's extensions.
     let mut client = cx.copy();
     client.extensions.extend(extensions);
-    let cut = Arc::default();
     let px = ProviderContext {
         client,
         format: p.format.clone(),
         provider,
-        flowing: later.is_some(),
+        live: later.is_some(),
         input,
         outputs: Arc::default(),
         inputs: Arc::default(),
-        running: InFlight::enter(&cut),
-        cut,
+        ended: Latch::default(),
+        settling: None,
         sent: false,
         refused: false,
     };
-    let mut edge = EndHooks::new(&cx.gateway.in_flight, px);
+    let mut edge = EndHooks::new(&cx.gateway.in_flight, px, None);
     let sent = async {
         edge.start().await?;
-        dial(&cx, p, later, &mut edge).await
+        dial(p, later, &mut edge).await
     };
     // A panic ends this call as internal before unwinding, so the drop
     // during unwinding does not end it abandoned.
     match AssertUnwindSafe(sent).catch_unwind().await {
-        Ok(Ok((metadata, events))) => Ok(Response::of_call(&p.format, metadata, events, edge)),
+        Ok(Ok((metadata, events))) => Ok(Response::of_call(metadata, events, edge)),
         Ok(Err(fault)) => {
             edge.finish(Err(fault.clone()));
             Err(fault)
@@ -202,29 +207,26 @@ async fn send(
     }
 }
 
-/// The live inputs owned by the client edge and their registered kind.
-type LiveInputs = Option<(Arc<Later>, Arc<dyn AnyFormat>)>;
-
 /// Open receiving and close the sending sink concurrently. A call counts
-/// as sent only after the sink has accepted its input sequence.
+/// as sent only after the sink has accepted its input sequence. `later` are
+/// the client edge's live inputs, if the call carries them.
 async fn dial(
-    cx: &ClientContext,
     p: &Provider,
-    later: LiveInputs,
+    later: Option<Arc<Later>>,
     edge: &mut CallEdge,
 ) -> Result<(Metadata, AnyEvents)> {
     let px = edge.cx();
-    let relay = !px.input.own && cx.format.name() == p.format.name();
+    let relay = !px.input.own && px.client.format.name() == p.format.name();
     let (fail, mut failed) = oneshot::channel();
     let mut outgoing = match later {
-        Some((later, format)) => {
+        Some(later) => {
             let call = Some((px.inputs.clone(), fail));
-            EventStream::stream(inputs(later, format, call, &px.cut))
+            EventStream::stream(inputs(later, call, &px.ended))
         }
         None => px.input.events(relay)?,
     };
     if relay {
-        outgoing.set_metadata(cx.input.metadata_copy());
+        outgoing.set_metadata(px.client.input.metadata_copy());
     }
     let (opening, mut sink) = guarded(|| {
         let io = (p.factory)(px.client.extensions.clone());
@@ -256,12 +258,7 @@ async fn dial(
         incoming.clear_metadata();
     }
     let metadata = incoming.metadata_copy();
-    let format = p.format.clone();
-    let events = incoming
-        .boxed()
-        .map(move |event| event.map(|event| format.output_values(vec![event])))
-        .boxed();
-    let events = drive_writer(events, writing);
+    let events = drive_writer(incoming.boxed(), writing);
     let failed = async {
         match failed.await {
             Ok(fault) => fault,
@@ -324,10 +321,12 @@ trait Open: Send + Sync {
 }
 
 /// Dropped, its end hooks run abandoned; whoever awaits it wakes.
-impl Open for Sending {
+impl Open for Mutex<CallSlot> {
     fn abandon(&self) {
-        let (sent, waker) = std::mem::take(&mut *locked(self));
-        drop(sent);
+        let mut slot = locked(self);
+        let (sending, waker) = (slot.sending.take(), slot.waker.take());
+        drop(slot);
+        drop(sending);
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -341,7 +340,7 @@ impl Open for Mutex<CallEdge> {
 }
 
 /// A request's calls being sent or with a response open; `None` once it ended.
-/// Its `abandon` is the synchronous handle [`Sending`] explains.
+/// Its `abandon` is the synchronous handle [`CallSlot`] explains.
 pub(crate) struct OpenCalls(Mutex<Option<Vec<Weak<dyn Open>>>>);
 
 impl Default for OpenCalls {
@@ -395,8 +394,7 @@ impl CallEdge {
     pub(crate) async fn start(&mut self) -> Result<()> {
         let gateway = self.cx().client.gateway.clone();
         for Registered { plugin, .. } in &gateway.plugins {
-            self.ran += 1;
-            plugin.on_provider(self.cx()).await?;
+            plugin.on_provider(self.begin()).await?;
         }
         Ok(())
     }

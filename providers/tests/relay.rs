@@ -5622,7 +5622,7 @@ impl Filter<Reply> for Restore {
     fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
         // Nothing follows a finish, and text kept back goes before other
         // content: hold nothing past them.
-        let other = |p: &Piece| matches!(p, Piece::Other { .. });
+        let other = |p: &Piece| !matches!(p, Piece::Text { .. });
         let last = reply.finish.is_some() || reply.content.iter().any(other);
         for piece in &mut reply.content {
             let Piece::Text { block, text, .. } = piece else {

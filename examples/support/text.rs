@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_sdk::conversation::{Content, Conversation, Piece, Reply};
+use respan_gateway_sdk::conversation::{Content, Conversation, Piece, Reply, ToolChoice};
 use respan_gateway_sdk::{Fault, Filter};
 use serde_json::{self, Map, Value, json};
 
@@ -274,7 +274,8 @@ fn text_result(value: &Value) -> bool {
 
 fn readable_part(part: &Content) -> bool {
     match part {
-        Content::Text { .. } => true,
+        Content::Text { .. } | Content::ToolCall { .. } => true,
+        Content::ToolResult { content, .. } => content.iter().all(readable_part),
         Content::Other { format, raw, .. } if format.as_ref() == "anthropic-messages" => {
             matches!(raw["type"].as_str(), Some("tool_use" | "tool_result"))
                 && readable_anthropic(raw)
@@ -286,6 +287,15 @@ fn readable_part(part: &Content) -> bool {
 fn edit_content(part: &mut Content, edit: &mut Edit) -> Result<(), Fault> {
     match part {
         Content::Text { text, .. } => edit(text),
+        Content::ToolCall {
+            name, arguments, ..
+        } => {
+            edit(name)?;
+            edit_arguments(arguments, edit)
+        }
+        Content::ToolResult { content, .. } => content
+            .iter_mut()
+            .try_for_each(|part| edit_content(part, edit)),
         Content::Other { raw, .. } => {
             let raw = Arc::make_mut(raw);
             if raw["type"] == "tool_use" {
@@ -333,6 +343,17 @@ impl Readable for Conversation {
         }
         for text in self.stop.iter_mut().chain(&mut self.user) {
             edit(text)?;
+        }
+        for tool in &mut self.tools {
+            edit(&mut tool.name)?;
+            if let Some(text) = &mut tool.description {
+                edit(text)?;
+            }
+            edit_json(&mut tool.parameters, false, &mut edit)?;
+            edit_fields(&mut tool.unsupported, &mut edit)?;
+        }
+        if let Some(ToolChoice::Tool(name)) = &mut self.tool_choice {
+            edit(name)?;
         }
         edit_fields(&mut self.unsupported, &mut edit)
     }
@@ -463,7 +484,7 @@ fn readable_anthropic(raw: &Value) -> bool {
 
 fn readable_piece(piece: &Piece) -> bool {
     match piece {
-        Piece::Text { .. } => true,
+        Piece::Text { .. } | Piece::ToolCall { .. } => true,
         Piece::Other { format, raw, .. } if matches!(format.as_ref(), "openai-chat" | "openai") => {
             raw.as_array()
                 .is_some_and(|choices| !choices.is_empty() && choices.iter().all(openai_choice))
@@ -498,9 +519,27 @@ fn is_delta(raw: &Value) -> bool {
     event.is_some_and(|t| t.ends_with("_delta"))
 }
 
+/// Runs `edit` on a tool call's arguments, JSON text: whole arguments that
+/// parse as an object or array as [`edit_json`] reads them, numbers
+/// included; a streamed part, or arguments cut off, as [`edit_json_text`].
+fn edit_arguments(arguments: &mut String, edit: &mut Edit) -> Result<(), Fault> {
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(Value::Object(_) | Value::Array(_)) => edit_string(arguments, edit),
+        _ => edit_json_text(arguments, edit),
+    }
+}
+
 fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
     match piece {
         Piece::Text { text, .. } => edit(text),
+        Piece::ToolCall {
+            name, arguments, ..
+        } => {
+            if let Some(name) = name {
+                edit(name)?;
+            }
+            edit_arguments(arguments, edit)
+        }
         Piece::Other { raw, .. } => {
             let delta = is_delta(raw);
             edit_raw(Arc::make_mut(raw), "", delta, edit)
@@ -567,7 +606,9 @@ pub struct Holdback<R> {
     rewrite: R,
     /// The block whose trailing text is held, and that text.
     held: Option<(u32, String)>,
-    /// The tails of tool-call arguments held, by call.
+    /// The tails of typed tool calls' arguments held, by call.
+    calls: BTreeMap<u32, String>,
+    /// The tails of tool-call arguments held in other content, by place.
     arguments: Vec<Tail>,
     /// Text tails of OpenAI choices other than choice zero (the typed text).
     choices: BTreeMap<u64, (Arc<str>, String)>,
@@ -581,6 +622,7 @@ impl<R: Rewrite> Holdback<R> {
         Self {
             rewrite,
             held: None,
+            calls: BTreeMap::new(),
             arguments: Vec::new(),
             choices: BTreeMap::new(),
             waiting: Vec::new(),
@@ -688,6 +730,39 @@ impl<R: Rewrite> Holdback<R> {
             }
             *arguments = text;
         });
+    }
+
+    /// Hold back the tail of tool call `call`'s `arguments` that may start a
+    /// match or is a cut-off escape, with what was held of the call before
+    /// in front, unless `open` is false; rewrite the rest.
+    fn hold_call(&mut self, call: u32, arguments: &mut String, open: bool) -> Result<(), Fault> {
+        let mut text = self.calls.remove(&call).unwrap_or_default() + arguments.as_str();
+        if open {
+            let cut = held_from(&text, |t| self.rewrite.pending(t));
+            let tail = text.split_off(cut);
+            if !tail.is_empty() {
+                self.calls.insert(call, tail);
+            }
+        }
+        edit_arguments(&mut text, &mut |t| {
+            *t = self.rewritten(t)?;
+            Ok(())
+        })?;
+        *arguments = text;
+        Ok(())
+    }
+
+    /// Release the typed calls' arguments held, rewritten.
+    fn release_calls(&mut self) -> Result<Vec<Piece>, Fault> {
+        let mut pieces = Vec::new();
+        for (call, mut text) in std::mem::take(&mut self.calls) {
+            edit_json_text(&mut text, &mut |t| {
+                *t = self.rewritten(t)?;
+                Ok(())
+            })?;
+            pieces.push(Piece::tool_arguments(call, text));
+        }
+        Ok(pieces)
     }
 
     /// Release the arguments held, rewritten, as one piece for each call.
@@ -851,6 +926,25 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         for (i, piece) in pieces.into_iter().enumerate() {
             let (block, text) = match piece {
                 Piece::Text { block, text, .. } => (block, text),
+                Piece::ToolCall {
+                    call,
+                    id,
+                    mut name,
+                    mut arguments,
+                    ..
+                } => {
+                    self.release_into(&mut reply)?;
+                    if let Some(name) = &mut name {
+                        *name = self.rewritten(name)?;
+                    }
+                    self.hold_call(call, &mut arguments, open)?;
+                    let mut piece = Piece::tool_arguments(call, arguments);
+                    if let Piece::ToolCall { id: i, name: n, .. } = &mut piece {
+                        (*i, *n) = (id, name);
+                    }
+                    reply.content.push(piece);
+                    continue;
+                }
                 mut other => {
                     let choices = matches!(&other, Piece::Other { raw, .. } if raw.is_array());
                     if !choices {
@@ -907,6 +1001,7 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         }
         if !open {
             self.release_into(&mut reply)?;
+            reply.content.extend(self.release_calls()?);
             reply.content.extend(self.release_arguments(Some(0))?);
         }
         // No content, such as a keep-alive or usage alone, is not delayed
@@ -926,7 +1021,8 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
             out.push(Reply::text(block, text));
         }
         let mut arguments = Reply::default();
-        arguments.content = self.release_arguments(None)?;
+        arguments.content = self.release_calls()?;
+        arguments.content.extend(self.release_arguments(None)?);
         if !arguments.content.is_empty() {
             out.push(arguments);
         }

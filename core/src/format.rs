@@ -2,10 +2,12 @@ use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
-use futures::stream::{self, BoxStream};
-use futures::{FutureExt, SinkExt, StreamExt};
+use crate::events::Single;
 
+use futures::future::{BoxFuture, ready};
+use futures::{FutureExt, SinkExt};
+
+use crate::values::{Values, clone_values, one, take_one};
 use crate::{EventSink, EventStream, Fault, Result};
 
 /// A receive future and a standard outgoing sink. Synchronous preparation
@@ -35,54 +37,19 @@ pub trait Format<T, R, W>: Send + Sync + 'static {
     fn bind(&self, io: T) -> Result<Connection<R, W>>;
 }
 
-/// An event whose concrete kind is retained by its registered format.
-pub(crate) type AnyValue = Arc<dyn Any + Send + Sync>;
-/// A batch of values of one concrete type.
-pub(crate) type Values = Box<dyn Any + Send>;
-pub(crate) type AnyEvents = BoxStream<'static, Result<Values>>;
-pub(crate) type ValueStream = BoxStream<'static, Result<AnyValue>>;
-
 pub(crate) trait AnyFormat: Send + Sync + 'static {
     fn name(&self) -> &str;
+    /// The gateway's input and output types, whichever edge it is on.
     fn kind(&self) -> (TypeId, TypeId);
+    /// Snapshot an explicitly supplied input using its registered type.
+    fn input(&self, value: &dyn Any) -> Result<Arc<Single<Values>>>;
     fn matches(&self, io: &dyn Any) -> bool;
-    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<AnyValue, AnyValue>>;
-    fn values(&self, inputs: Vec<AnyValue>) -> Values;
-    fn inputs(&self, values: Values) -> Vec<AnyValue>;
-    fn output_values(&self, outputs: Vec<AnyValue>) -> Values;
-    fn outputs(&self, values: Values) -> Vec<AnyValue>;
-    fn append(&self, values: &mut Values, more: Values);
+    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<Values, Values>>;
 }
 
-/// Typed events erased, one value per item.
-pub(crate) fn erase<T: Send + 'static>(events: BoxStream<'static, Result<T>>) -> AnyEvents {
-    events
-        .map(|e| e.map(|v| Box::new(vec![v]) as Values))
-        .boxed()
-}
-
-/// Erased events typed, each item's values in turn.
-pub(crate) fn typed<T: Send + 'static>(events: AnyEvents) -> BoxStream<'static, Result<T>> {
-    let each = |item: Result<Values>| {
-        let values =
-            item.and_then(|v| v.downcast::<Vec<T>>().map_err(|_| Fault::wrong_kind::<T>()));
-        stream::iter(match values {
-            Ok(values) => values.into_iter().map(Ok).collect::<Vec<_>>(),
-            Err(fault) => vec![Err(fault)],
-        })
-    };
-    events.flat_map(each).boxed()
-}
-
-/// `input` as `T`, moved if not shared.
-fn owned<T: Clone + Send + Sync + 'static>(input: AnyValue) -> Result<T> {
-    let input = input
-        .downcast::<T>()
-        .map_err(|_| Fault::wrong_kind::<T>())?;
-    Ok(Arc::try_unwrap(input).unwrap_or_else(|shared| (*shared).clone()))
-}
-
-fn erase_connection<R, W>((opening, send): Connection<R, W>) -> Connection<AnyValue, AnyValue>
+/// The connection with each value erased alone; its sink takes one value per
+/// item, as the kernel writes them.
+fn erase_connection<R, W>((opening, send): Connection<R, W>) -> Connection<Values, Values>
 where
     R: Clone + Send + Sync + 'static,
     W: Clone + Send + Sync + 'static,
@@ -90,19 +57,18 @@ where
     let opening = async move {
         opening
             .await
-            .map(|events| events.map_values(|value| Ok(Arc::new(value) as AnyValue)))
-    }
-    .boxed();
-    let send = EventSink::preparing(move |events: &mut EventStream<AnyValue>| {
+            .map(|events| events.map_values(|v| Ok(one(v)), clone_values::<R>))
+    };
+    let send = EventSink::preparing(move |events: &mut EventStream<Values>| {
         let mut send = send;
-        let mut typed = std::mem::replace(events, EventStream::empty()).map_values(owned::<W>);
+        let mut typed =
+            std::mem::replace(events, EventStream::empty()).map_values(take_one::<W>, W::clone);
         let prepared = send.prepare(&mut typed);
-        *events = typed.map_values(|value| Ok(Arc::new(value) as AnyValue));
+        *events = typed.map_values(|value| Ok(one(value)), clone_values::<W>);
         prepared?;
-        Ok(send
-            .with(|event: Result<AnyValue>| futures::future::ready(Ok(event.and_then(owned::<W>)))))
+        Ok(send.with(|event: Result<Values>| ready(Ok(event.and_then(take_one::<W>)))))
     });
-    (opening, send)
+    (opening.boxed(), send)
 }
 
 /// Pins the message types and transport at registration. Only the core
@@ -138,75 +104,30 @@ where
             (TypeId::of::<R>(), TypeId::of::<W>())
         }
     }
+    fn input(&self, value: &dyn Any) -> Result<Arc<Single<Values>>> {
+        fn snapshot<T: Clone + Send + Sync + 'static>(
+            value: &dyn Any,
+        ) -> Result<Arc<Single<Values>>> {
+            let value = value
+                .downcast_ref::<T>()
+                .ok_or_else(Fault::wrong_kind::<T>)?;
+            Ok(Single::ready(Ok(one(value.clone())), clone_values::<T>))
+        }
+        if PROVIDER {
+            snapshot::<W>(value)
+        } else {
+            snapshot::<R>(value)
+        }
+    }
     fn matches(&self, io: &dyn Any) -> bool {
         io.downcast_ref::<T>()
             .is_some_and(|io| self.format.matches(io))
     }
-    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<AnyValue, AnyValue>> {
+    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<Values, Values>> {
         let io = io
             .downcast::<T>()
             .map_err(|_| Fault::internal("a transport of another type than its format's"))?;
         self.format.bind(*io).map(erase_connection)
-    }
-    fn values(&self, inputs: Vec<AnyValue>) -> Values {
-        if PROVIDER {
-            values::<W>(inputs)
-        } else {
-            values::<R>(inputs)
-        }
-    }
-    fn inputs(&self, values: Values) -> Vec<AnyValue> {
-        if PROVIDER {
-            items::<W>(values)
-        } else {
-            items::<R>(values)
-        }
-    }
-    fn output_values(&self, outputs: Vec<AnyValue>) -> Values {
-        if PROVIDER {
-            values::<R>(outputs)
-        } else {
-            values::<W>(outputs)
-        }
-    }
-    fn outputs(&self, values: Values) -> Vec<AnyValue> {
-        if PROVIDER {
-            items::<R>(values)
-        } else {
-            items::<W>(values)
-        }
-    }
-    fn append(&self, values: &mut Values, more: Values) {
-        if PROVIDER {
-            append::<R>(values, more)
-        } else {
-            append::<W>(values, more)
-        }
-    }
-}
-
-fn values<T: Clone + Send + Sync + 'static>(items: Vec<AnyValue>) -> Values {
-    Box::new(
-        items
-            .into_iter()
-            .filter_map(|v| owned::<T>(v).ok())
-            .collect::<Vec<_>>(),
-    )
-}
-
-fn items<T: Send + Sync + 'static>(values: Values) -> Vec<AnyValue> {
-    values
-        .downcast::<Vec<T>>()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|v| Arc::new(v) as AnyValue)
-        .collect()
-}
-
-fn append<T: Send + 'static>(values: &mut Values, more: Values) {
-    let more = more.downcast::<Vec<T>>().map(|v| *v);
-    if let (Some(values), Ok(mut more)) = (values.downcast_mut::<Vec<T>>(), more) {
-        values.append(&mut more);
     }
 }
 
@@ -222,16 +143,19 @@ pub(crate) fn is_input<T: Any>(format: &dyn AnyFormat) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[tokio::test]
     async fn erased_preparation_preserves_lazy_metadata_and_stopped_source() {
         let held = Arc::new(());
         let captured = held.clone();
-        let mut source = EventStream::lazy(move || -> Result<AnyValue> {
+        let mut source = EventStream::lazy(move || -> Result<u8> {
             let _keep_alive = &captured;
             panic!("raw relay decoded during erasure");
         })
+        .map_values(|v| Ok(one(v)), clone_values::<u8>)
         .with_metadata("toy", 23_u16);
         let sink = EventSink::preparing(|source: &mut EventStream<u8>| {
             assert!(source.is_single() && source.is_lazy());

@@ -4,12 +4,16 @@
 //! `cx.filter(|r: &mut Reply| ..)` for the output, one [`Reply`] per
 //! provider message.
 //!
+//! Tools are the kind's too: the tools a request offers ([`Tool`],
+//! [`ToolChoice`]), the calls an assistant made and their results
+//! ([`Content::ToolCall`], [`Content::ToolResult`]), and the calls a
+//! response makes, whole or streamed ([`Piece::ToolCall`]).
+//!
 //! What the kind has no form for stays as the client's format has it
 //! ([`Conversation::unsupported`], [`Message::unsupported`],
-//! [`Content::Other`]); it is sent only in the format it is in, and
-//! translating it is refused if it can change the answer. The exception is
-//! tools between OpenAI chat and Anthropic messages, which the formats
-//! rewrite: `tools`, `tool_choice`, calls and results, whole or streamed.
+//! [`Tool::unsupported`], [`Content::Other`]); it is sent only in the
+//! format it is in, and translating it is refused if it can change the
+//! answer.
 
 use bytes::Bytes;
 use respan_gateway_core::Fault;
@@ -55,12 +59,20 @@ pub struct Conversation {
     pub stop: Vec<String>,
     /// The end user's id, as the client names them to the provider.
     pub user: Option<String>,
-    /// The request's fields the kind has no place for, such as its tools.
+    /// The tools the model may call.
+    pub tools: Vec<Tool>,
+    /// Whether, or which, tool the model must call, if the request says.
+    pub tool_choice: Option<ToolChoice>,
+    /// Whether the model may call several tools at once, if the request
+    /// says.
+    pub parallel_tool_calls: Option<bool>,
+    /// The request's fields the kind has no place for, such as tools a
+    /// provider runs itself.
     pub unsupported: Map<String, Value>,
-    /// The name of the format that `unsupported`, the messages' own
-    /// `unsupported` and their `Role::Other` roles are in, set when a format
-    /// decodes the request. Only a call in that format can send them: a
-    /// plugin that translates them for another sets its name here.
+    /// The name of the format that `unsupported`, the messages' and tools'
+    /// own `unsupported` and their `Role::Other` roles are in, set when a
+    /// format decodes the request. Only a call in that format can send
+    /// them: a plugin that translates them for another sets its name here.
     pub unsupported_in: Option<Arc<str>>,
     /// The client's body it was decoded from.
     pub(crate) origin: Relayed<Conversation>,
@@ -113,14 +125,16 @@ pub fn set_model(
 
 /// One message of a conversation: its author and what it says.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Message {
     /// Its author.
     pub role: Role,
     /// What it says, part by part.
     pub content: Vec<Content>,
-    /// The message's fields the kind has no place for, such as a tool call.
+    /// The message's fields the kind has no place for, such as a name.
     pub unsupported: Map<String, Value>,
-    /// The client's message it was decoded from; shared, as it may be large.
+    /// The client's message it was decoded from, shared by its copies: what
+    /// tells which client message an edited one still is.
     source: Option<Arc<Value>>,
 }
 
@@ -143,10 +157,11 @@ impl Message {
         }
     }
 
-    /// For formats: the client's message this was decoded from, sent as it
-    /// is while unchanged, and in its shape once changed.
-    pub fn with_source(mut self, source: Value) -> Self {
-        self.source = Some(Arc::new(source));
+    /// For formats: decoded from the client's message `json`, which is
+    /// written as it is while unchanged, and edited in its shape once
+    /// changed, even after other messages were inserted or removed.
+    pub fn with_source(mut self, json: Value) -> Self {
+        self.source = Some(Arc::new(json));
         self
     }
 
@@ -155,18 +170,20 @@ impl Message {
         self.source.as_deref()
     }
 
-    /// Whether both were decoded from the same client message.
+    /// Whether both were decoded from the same client message, however
+    /// either was edited since.
     pub fn same_source(&self, other: &Message) -> bool {
         matches!((&self.source, &other.source), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
     }
 
-    /// The message's text parts, joined; other content is skipped.
+    /// The message's text parts, joined; tool calls, results and other
+    /// content are skipped.
     pub fn text(&self) -> String {
         self.content
             .iter()
             .map(|c| match c {
                 Content::Text { text } => text.as_str(),
-                Content::Other { .. } => "",
+                _ => "",
             })
             .collect()
     }
@@ -205,6 +222,26 @@ pub enum Content {
         /// The text.
         text: String,
     },
+    /// A tool call an assistant made.
+    #[non_exhaustive]
+    ToolCall {
+        /// The call's id, which its result names.
+        id: String,
+        /// The tool's name.
+        name: String,
+        /// Its arguments, as JSON text.
+        arguments: String,
+    },
+    /// What a tool answered a call.
+    #[non_exhaustive]
+    ToolResult {
+        /// The id of the call it answers.
+        id: String,
+        /// What the tool said.
+        content: Vec<Content>,
+        /// Whether the call failed.
+        is_error: bool,
+    },
     /// A part the kind has no form for, such as an image or a file, as
     /// `format` has it; only a call in that format can send it.
     #[non_exhaustive]
@@ -217,6 +254,28 @@ pub enum Content {
 }
 
 impl Content {
+    /// A call of tool `name`, with its `id` and its `arguments` as JSON text.
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Content::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
+
+    /// The answer to call `id`: what the tool said, and whether it failed.
+    pub fn tool_result(id: impl Into<String>, content: Vec<Content>, is_error: bool) -> Self {
+        Content::ToolResult {
+            id: id.into(),
+            content,
+            is_error,
+        }
+    }
+
     /// A part of `format` the kind has no form for.
     pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
         Content::Other {
@@ -224,6 +283,47 @@ impl Content {
             raw: Arc::new(raw.into()),
         }
     }
+}
+
+/// A tool a request offers the model.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct Tool {
+    /// Its name, which a call names.
+    pub name: String,
+    /// What it does, for the model.
+    pub description: Option<String>,
+    /// The JSON schema of its arguments.
+    pub parameters: Value,
+    /// Its fields the kind has no place for, such as a cache marker, in
+    /// the conversation's `unsupported_in` format.
+    pub unsupported: Map<String, Value>,
+}
+
+impl Tool {
+    /// A tool `name` whose arguments `parameters`, a JSON schema, describes.
+    pub fn new(name: impl Into<String>, parameters: Value) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            parameters,
+            unsupported: Map::new(),
+        }
+    }
+}
+
+/// Whether, or which, tool the model must call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolChoice {
+    /// The model decides.
+    Auto,
+    /// No tool.
+    None,
+    /// Some tool.
+    Required,
+    /// The tool of this name.
+    Tool(String),
 }
 
 impl From<&str> for Content {
@@ -281,8 +381,22 @@ pub enum Piece {
         /// The text, or a delta of it in a stream.
         text: String,
     },
-    /// Content the kind has no form for, such as a tool call, as `format`
-    /// has it; translating it is refused, but for a tool call.
+    /// A tool call the model makes, or the next part of one in a stream.
+    /// The piece that starts call `call` names it with `id` and `name`;
+    /// each piece's `arguments` are JSON text, added to the call's.
+    #[non_exhaustive]
+    ToolCall {
+        /// The call, numbered in the response.
+        call: u32,
+        /// Its id, on the piece that starts it.
+        id: Option<String>,
+        /// The tool's name, on the piece that starts it.
+        name: Option<String>,
+        /// Its arguments, as JSON text, or the next part of them.
+        arguments: String,
+    },
+    /// Content the kind has no form for, as `format` has it; translating it
+    /// is refused.
     #[non_exhaustive]
     Other {
         /// The name of the format `raw` is in.
@@ -298,6 +412,32 @@ impl Piece {
         Piece::Text {
             block,
             text: text.into(),
+        }
+    }
+
+    /// The start of tool call `call`: its id, the tool's name, and its
+    /// arguments so far, as JSON text.
+    pub fn tool_call(
+        call: u32,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: impl Into<String>,
+    ) -> Self {
+        Piece::ToolCall {
+            call,
+            id: Some(id.into()),
+            name: Some(name.into()),
+            arguments: arguments.into(),
+        }
+    }
+
+    /// The next part of tool call `call`'s arguments, as JSON text.
+    pub fn tool_arguments(call: u32, arguments: impl Into<String>) -> Self {
+        Piece::ToolCall {
+            call,
+            id: None,
+            name: None,
+            arguments: arguments.into(),
         }
     }
 
@@ -346,24 +486,25 @@ impl Reply {
         }
     }
 
-    /// Its texts, to change in place.
+    /// Its texts, to change in place; tool calls and other content are
+    /// skipped.
     pub fn texts_mut(&mut self) -> impl Iterator<Item = &mut String> {
         self.content.iter_mut().filter_map(|piece| match piece {
             Piece::Text { text, .. } => Some(text),
-            Piece::Other { .. } => None,
+            _ => None,
         })
     }
 
-    /// Its texts, in order; other content is skipped.
+    /// Its texts, in order; tool calls and other content are skipped.
     pub fn texts(&self) -> impl Iterator<Item = &str> {
         self.content.iter().filter_map(|piece| match piece {
             Piece::Text { text, .. } => Some(text.as_str()),
-            Piece::Other { .. } => None,
+            _ => None,
         })
     }
 
-    /// Whether it is content, what `until_content` commits on: a start, content or
-    /// a finish. A keep-alive or usage alone is not.
+    /// Whether it is content: a start, content or a finish. A keep-alive or usage alone
+    /// is not.
     pub fn is_content(&self) -> bool {
         self.start.is_some() || !self.content.is_empty() || self.finish.is_some()
     }
@@ -426,11 +567,11 @@ mod tests {
     }
 
     #[test]
-    fn message_sources_and_reply_bytes_survive_cloning() {
-        let source = json!({"role": "user", "content": "hello"});
-        let message = Message::new(Role::User, "hello").with_source(source.clone());
+    fn message_origins_and_reply_bytes_survive_cloning() {
+        let origin = json!({"role": "user", "content": "hello"});
+        let message = Message::new(Role::User, "hello").with_source(origin.clone());
         let mut clone = message.clone();
-        assert_eq!(clone.source(), Some(&source));
+        assert_eq!(clone.source(), Some(&origin));
         assert!(message.same_source(&clone));
         clone.content = vec!["changed".into()];
         assert!(!message.eq(&clone));

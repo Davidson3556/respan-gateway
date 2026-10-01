@@ -16,7 +16,7 @@ pub mod relayed;
 mod usage;
 
 pub use conversation::{
-    Content, Conversation, Finish, Message, Piece, Reply, Role, Start, set_model,
+    Content, Conversation, Finish, Message, Piece, Reply, Role, Start, Tool, ToolChoice, set_model,
 };
 pub use usage::Usage;
 

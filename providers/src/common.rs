@@ -14,10 +14,11 @@ use respan_gateway_sdk::Fault;
 use serde_json::{self, Map, Value, json};
 
 use crate::Usage;
+use crate::anthropic::ANTHROPIC;
 use crate::conversation::{Content, Conversation, Finish, Message, Piece, Reply, Role};
 use crate::formats::errors::{provider_error, says_error};
 use crate::formats::sse::{content_type, event_data};
-use crate::tools::{Calls, fragments};
+use crate::tools::{Calls, anthropic_block, anthropic_part, start, update_anthropic_block};
 use respan_gateway_http::{Body, Encoder};
 use respan_gateway_sdk::{EventSink, EventStream};
 
@@ -185,9 +186,13 @@ fn refuse_foreign<W: Wire>(chat: &Conversation) -> Result<(), Fault> {
 
 /// Refuses what only the client's format can send. What a plugin removed
 /// from `unsupported`, it chose to lose.
-pub(crate) fn refuse_leftovers(chat: &Conversation) -> Result<(), Fault> {
+fn refuse_leftovers(chat: &Conversation) -> Result<(), Fault> {
     if let Some(key) = chat.unsupported.keys().next() {
         return Err(untranslatable(&format!("'{key}' in the request")));
+    }
+    let tools = chat.tools.iter().flat_map(|t| t.unsupported.keys());
+    if let Some(key) = tools.into_iter().next() {
+        return Err(untranslatable(&format!("a tool's '{key}'")));
     }
     let plain = |m: &Message| !matches!(m.role, Role::Other(_)) && m.unsupported.is_empty();
     match chat.messages.iter().all(plain) {
@@ -200,9 +205,9 @@ pub(crate) fn refuse_leftovers(chat: &Conversation) -> Result<(), Fault> {
 
 /// A conversation as a new request, if nothing is lost.
 pub(crate) fn write_request<W: Wire>(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
-    // Fields in another format are rewritten or refused; parts are checked
-    // as they are written.
-    let chat = &*crate::tools::adopt(chat, W::NAME)?;
+    // Fields in another format are refused; parts are checked as they are
+    // written.
+    refuse_foreign::<W>(chat)?;
     let mut v = match W::write(chat)? {
         Value::Object(v) => v,
         _ => Map::new(),
@@ -481,39 +486,74 @@ pub(crate) fn reads_back<W: Wire>(reply: &Reply, again: &Reply) -> Result<(), Fa
     Err(unpatchable("the provider's message has no place for it"))
 }
 
-/// `content` with its texts' blocks numbered by position.
+/// `content` with its texts' blocks and its tool calls numbered by position.
 fn by_position(content: &[Piece]) -> Vec<Piece> {
-    let mut blocks: Vec<u32> = Vec::new();
+    let (mut blocks, mut calls) = (Vec::new(), Vec::new());
+    let place = |seen: &mut Vec<u32>, n: &mut u32| {
+        let at = seen.iter().position(|b| b == n).unwrap_or_else(|| {
+            seen.push(*n);
+            seen.len() - 1
+        });
+        *n = u32::try_from(at).unwrap_or(u32::MAX);
+    };
     let mut numbered = content.to_vec();
     for p in &mut numbered {
-        if let Piece::Text { block, .. } = p {
-            let at = blocks.iter().position(|b| b == block).unwrap_or_else(|| {
-                blocks.push(*block);
-                blocks.len() - 1
-            });
-            *block = u32::try_from(at).unwrap_or(u32::MAX);
+        match p {
+            Piece::Text { block, .. } => place(&mut blocks, block),
+            Piece::ToolCall { call, .. } => place(&mut calls, call),
+            _ => {}
         }
     }
     numbered
 }
 
-/// `content` with texts of one block joined across whatever came between.
+/// `content` with texts of one block, and pieces of one tool call, joined
+/// across whatever came between.
 pub(crate) fn join(content: Vec<Piece>) -> Vec<Piece> {
     let mut joined: Vec<Piece> = Vec::with_capacity(content.len());
     for piece in content {
-        if let Piece::Text { block, text, .. } = &piece {
-            let same = joined.iter_mut().rev().find_map(|had| match had {
-                Piece::Text { block: b, text, .. } if b == block => Some(text),
-                _ => None,
-            });
-            if let Some(had) = same {
-                had.push_str(text);
-                continue;
+        let same = joined.iter_mut().rev().find(|had| match (&**had, &piece) {
+            (Piece::Text { block: a, .. }, Piece::Text { block: b, .. }) => a == b,
+            (Piece::ToolCall { call: a, .. }, Piece::ToolCall { call: b, .. }) => a == b,
+            _ => false,
+        });
+        match (same, piece) {
+            (Some(Piece::Text { text: had, .. }), Piece::Text { text, .. }) => had.push_str(&text),
+            (
+                Some(Piece::ToolCall {
+                    id: had_id,
+                    name: had_name,
+                    arguments: had,
+                    ..
+                }),
+                Piece::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                },
+            ) => {
+                had.push_str(&arguments);
+                if had_id.is_none() {
+                    *had_id = id;
+                }
+                if had_name.is_none() {
+                    *had_name = name;
+                }
             }
+            (_, piece) => joined.push(piece),
         }
-        joined.push(piece);
     }
     joined
+}
+
+/// Whether `object` says nothing but in the fields `these`.
+pub(crate) fn only(object: &Value, these: &[&str]) -> bool {
+    let fields = object.as_object();
+    fields.is_some_and(|o| {
+        o.iter()
+            .all(|(k, v)| these.contains(&k.as_str()) || !says(v))
+    })
 }
 
 /// The first encounter of a text block or tool call in an accumulated reply.
@@ -565,18 +605,19 @@ impl SoFar {
                     }
                     self.text.entry(*block).or_default().push_str(text);
                 }
-                Piece::Other { format, raw, .. } => match fragments(format, raw) {
-                    Some(all) => {
-                        for fragment in all {
-                            let before = self.calls.len();
-                            self.calls.add(fragment)?;
-                            if self.calls.len() > before {
-                                self.encounters.push(Encounter::Call(before));
-                            }
-                        }
+                Piece::ToolCall {
+                    call,
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    let before = self.calls.len();
+                    self.calls.add(*call, start(id, name), arguments)?;
+                    if self.calls.len() > before {
+                        self.encounters.push(Encounter::Call(before));
                     }
-                    None => return Err(unwritable_content()),
-                },
+                }
                 _ => return Err(unwritable_content()),
             }
         }
@@ -723,34 +764,58 @@ impl<W: Wire> Reading<W> {
 }
 
 /// A conversation's messages in the client's format: a client message (by
-/// shared source) as it was, or edited in its form; any other anew.
+/// shared origin) as it was, or `update`d in its form; any other `write`n
+/// anew. Either may make several messages of one.
 pub(crate) fn patch_messages(
-    format: &str,
     old: &[Message],
     new: &[Message],
-    roles: &Names<Role>,
+    write: impl Fn(&Message) -> Result<Vec<Value>, Fault>,
+    update: impl Fn(&Value, &Message, &Message) -> Result<Vec<Value>, Fault>,
 ) -> Result<Vec<Value>, Fault> {
-    let update = |value: &Value, was: &Message, now: &Message| {
-        let mut value = value.clone();
-        let fields = value
-            .as_object_mut()
-            .ok_or_else(|| unpatchable("a message that is not a JSON object was changed"))?;
-        if was.role != now.role {
-            fields.insert("role".into(), role_of(now, roles)?);
-        }
-        patch_fields(fields, &was.unsupported, &now.unsupported);
-        if was.content != now.content {
-            let content = patch_content(format, fields.get("content"), &was.content, &now.content)?;
-            fields.insert("content".into(), content);
-        }
-        Ok(value)
-    };
-    let one = |m: &Message| match (m.source(), old.iter().find(|o| o.same_source(m))) {
-        (Some(source), Some(was)) if was == m => Ok(source.clone()),
-        (Some(source), Some(was)) => update(source, was, m),
-        _ => write_message(format, m, roles),
-    };
-    new.iter().map(one).collect()
+    let mut all = Vec::with_capacity(new.len());
+    for m in new {
+        all.extend(match (m.source(), old.iter().find(|o| o.same_source(m))) {
+            (Some(origin), Some(was)) if was == m => vec![origin.clone()],
+            (Some(origin), Some(was)) => update(origin, was, m)?,
+            _ => write(m)?,
+        });
+    }
+    Ok(all)
+}
+
+/// The client's message `value`, which read `was`, edited in its form to
+/// read `now`: its role, fields and content.
+pub(crate) fn update_message(
+    format: &str,
+    value: &Value,
+    was: &Message,
+    now: &Message,
+    roles: &Names<Role>,
+) -> Result<Value, Fault> {
+    let mut value = value.clone();
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| unpatchable("a message that is not a JSON object was changed"))?;
+    if was.role != now.role {
+        fields.insert("role".into(), role_of(now, roles)?);
+    }
+    patch_fields(fields, &was.unsupported, &now.unsupported);
+    if was.content != now.content {
+        let content = patch_content(format, fields.get("content"), &was.content, &now.content)?;
+        fields.insert("content".into(), content);
+    }
+    Ok(value)
+}
+
+/// What a conversation says of its tools, to tell whether an edit changed it.
+pub(crate) fn tools_of(
+    chat: &Conversation,
+) -> (
+    &[crate::conversation::Tool],
+    &Option<crate::conversation::ToolChoice>,
+    Option<bool>,
+) {
+    (&chat.tools, &chat.tool_choice, chat.parallel_tool_calls)
 }
 
 /// Apply a change of unsupported fields from `was` to `now` to `v`.
@@ -898,10 +963,14 @@ pub(crate) fn read_content(format: &str, v: &Value) -> Vec<Content> {
     }
 }
 
-/// A part as `format` has it: text, or a part in that format only.
+/// A part as `format` has it: text, an Anthropic tool block, or a part in
+/// that format only.
 fn write_part(format: &str, c: &Content) -> Result<Value, Fault> {
     match c {
         Content::Text { text, .. } => Ok(json!({ "type": "text", "text": text })),
+        Content::ToolCall { .. } | Content::ToolResult { .. } if format == ANTHROPIC => {
+            anthropic_block(c)
+        }
         Content::Other { format: f, raw, .. } if **f == *format => Ok(Value::clone(raw)),
         Content::Other { format: f, .. } => Err(untranslatable(&format!("a part in {f}'s shape"))),
         _ => Err(untranslatable("an unsupported kind of part")),
@@ -915,6 +984,12 @@ fn part_update(format: &str, value: &Value, was: &Content, now: &Content) -> Res
             let mut value = value.clone();
             value["text"] = text.as_str().into();
             Ok(value)
+        }
+        (Content::ToolCall { .. }, Content::ToolCall { .. })
+        | (Content::ToolResult { .. }, Content::ToolResult { .. })
+            if format == ANTHROPIC =>
+        {
+            update_anthropic_block(value, was, now)
         }
         _ => write_part(format, now),
     }
@@ -982,14 +1057,16 @@ pub(crate) fn read_message(format: &str, m: &Value, roles: &Names<Role>) -> Mess
     message
 }
 
-/// A text part, even with a cache marker, or other content.
+/// A text part, even with a cache marker, an Anthropic tool block, or other
+/// content.
 fn read_part(format: &str, p: &Value) -> Content {
     let known = |k: &str| k == "type" || k == "text" || k == "cache_control";
     let fields = p.as_object().into_iter().flatten();
     let more = fields.filter(|(k, _)| !known(k)).any(|(_, v)| says(v));
+    let tool = || anthropic_part(p).filter(|_| format == ANTHROPIC);
     match (p["type"].as_str(), p["text"].as_str()) {
         (Some("text"), Some(text)) if !more => Content::from(text),
-        _ => Content::other(format, p.clone()),
+        _ => tool().unwrap_or_else(|| Content::other(format, p.clone())),
     }
 }
 
@@ -1050,18 +1127,6 @@ impl Names<Finish> {
         }
         Ok(())
     }
-}
-
-/// The text of `content`, if it is all text.
-pub(crate) fn text_of(content: &[Content]) -> Option<String> {
-    content
-        .iter()
-        .map(|c| match c {
-            Content::Text { text, .. } => Some(text.as_str()),
-            Content::Other { .. } => None,
-            _ => None,
-        })
-        .collect()
 }
 
 /// A plugin's change that cannot be made in the client's format.
@@ -1563,15 +1628,20 @@ mod tests {
 
     #[test]
     fn interleaved_calls_and_repeated_starts_remain_writable() {
-        let fragments = [
-            json!([{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"alpha","arguments":"{\"a\":"}}]}}]),
-            json!([{"index":0,"delta":{"tool_calls":[{"index":1,"id":"b","type":"function","function":{"name":"beta","arguments":"{\"b\":"}}]}}]),
-            json!([{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]),
-            json!([{"index":0,"delta":{"tool_calls":[{"index":1,"id":"b","type":"function","function":{"name":"beta","arguments":"2}"}}]}}]),
+        // As OpenAI streams parallel calls: interleaved, a start repeated.
+        let pieces = [
+            Piece::tool_call(0, "a", "alpha", "{\"a\":"),
+            Piece::tool_call(1, "b", "beta", "{\"b\":"),
+            Piece::tool_arguments(0, "1}"),
+            Piece::tool_call(1, "b", "beta", "2}"),
         ];
-        let replies: Vec<_> = fragments
+        let replies: Vec<_> = pieces
             .into_iter()
-            .map(|raw| Reply::other("openai-chat", raw))
+            .map(|piece| {
+                let mut reply = Reply::default();
+                reply.content.push(piece);
+                reply
+            })
             .collect();
         let mut all = SoFar::default();
         for reply in &replies {

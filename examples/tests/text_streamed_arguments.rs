@@ -1,4 +1,5 @@
-//! Holdback over Anthropic `partial_json` fragments: escapes and split matches.
+//! Holdback over a streamed tool call's arguments, as Anthropic's
+//! `partial_json` fragments decode: escapes and split matches.
 
 #[path = "../support/text.rs"]
 mod text;
@@ -8,24 +9,23 @@ use respan_gateway_sdk::conversation::{Piece, Reply};
 #[path = "text_support/mod.rs"]
 mod support;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use support::run_filter as run;
 use text::{Holdback, Placeholders, Rewrite, partial_match};
 
 /// One Anthropic `input_json_delta` of a streamed tool call, as the format
-/// decodes it.
+/// decodes it: the next part of the arguments of the call in block 1.
 fn partial(json_text: &str) -> Reply {
-    Reply::other(
-        "anthropic-messages",
-        json!({ "type": "input_json_delta", "partial_json": json_text }),
-    )
+    let mut reply = Reply::default();
+    reply.content.push(Piece::tool_arguments(1, json_text));
+    reply
 }
 
 fn joined_partial(out: &[Reply]) -> String {
     out.iter()
         .flat_map(|r| &r.content)
         .filter_map(|p| match p {
-            Piece::Other { raw, .. } => raw["partial_json"].as_str().map(str::to_owned),
+            Piece::ToolCall { arguments, .. } => Some(arguments.as_str()),
             _ => None,
         })
         .collect()
@@ -65,12 +65,11 @@ impl Rewrite for MaskDigits {
     }
 }
 
-/// Anthropic's streamed arguments: a backslash split from its pair makes the
-/// next fragment's `\b` read as an escape, so `bomb` (whole in the second
-/// fragment's bytes after the `\`) is read as `\u{8}omb`. The loop-2 fix
-/// covers OpenAI's arguments only.
+/// Streamed arguments: a backslash split from its pair makes the next
+/// fragment's `\b` read as an escape, so `bomb` (whole in the second
+/// fragment's bytes after the `\`) is read as `\u{8}omb`.
 #[test]
-fn a_split_backslash_hides_a_term_in_anthropic_partial_json() {
+fn a_split_backslash_does_not_hide_a_term_in_streamed_arguments() {
     let unsplit = run(
         &mut Holdback::new(Refuse),
         vec![partial("{\"s\":\"a\\\\bomb\"}")],
@@ -87,9 +86,9 @@ fn a_split_backslash_hides_a_term_in_anthropic_partial_json() {
     );
 }
 
-/// A term split across two Anthropic fragments is still refused.
+/// A term split across two fragments is still refused.
 #[test]
-fn a_term_split_across_anthropic_partial_json_is_refused() {
+fn a_term_split_across_streamed_arguments_is_refused() {
     let split = run(
         &mut Holdback::new(Refuse),
         vec![partial("{\"s\":\"bo"), partial("mb\"}")],
@@ -101,9 +100,9 @@ fn a_term_split_across_anthropic_partial_json_is_refused() {
     );
 }
 
-/// A placeholder split across Anthropic fragments is restored.
+/// A placeholder split across fragments is restored.
 #[test]
-fn a_placeholder_split_across_anthropic_partial_json_is_restored() {
+fn a_placeholder_split_across_streamed_arguments_is_restored() {
     let vault = Placeholders::default();
     let ph = vault.hide("EMAIL", "a@x.io");
     let (a, b) = ph.split_at(4);
@@ -124,7 +123,7 @@ fn a_placeholder_split_across_anthropic_partial_json_is_restored() {
 /// fragment's trailing `\`, so the next fragment's `"` ends the string and
 /// the arguments are no longer JSON.
 #[test]
-fn an_edit_before_a_split_escape_keeps_anthropic_partial_json_valid() {
+fn an_edit_before_a_split_escape_keeps_streamed_arguments_valid() {
     let out = run(
         &mut Holdback::new(MaskDigits),
         vec![

@@ -58,10 +58,12 @@ dependencies can use concrete implementations to verify these contracts.
 
 The SDK's basic accessors (`Message::text`, `Message::is_plain`,
 `Reply::texts` and `Reply::texts_mut`) operate on typed content; accessors that
-skip other content document that limitation. They do not claim to inspect
-opaque tool arguments. Specialized `Readable`, holdback, JSON-fragment rewriting
-and placeholders live together in private `examples/support/text.rs`, shared by
-guardrail, PII and realtime examples. Their provider-aware parsers and 422 error
+skip other content document that limitation. Tools are typed: a request's
+tools and choice, an assistant's calls and their results, and a response's
+calls, streamed as JSON-text arguments numbered by call. Specialized
+`Readable`, holdback, JSON-text rewriting and placeholders live together in
+private `examples/support/text.rs`, shared by guardrail, PII and realtime
+examples. Its parsers of content a format keeps as its own and its 422 error
 hints are not SDK APIs. All four dedicated text regression suites remain
 explicit example-package test targets.
 
@@ -77,8 +79,9 @@ helpers remain HTTP-aware. HTTP and format helpers share one package, with
 HTTP APIs at the crate root and framing helpers in the public `formats` module,
 rather than compatibility facade packages. The initial
 providers also share one package; layering does not require one package per
-vendor. Text, tool calls and tool results translate between the implemented chat
-formats; images and files remain format-specific rather than natively translated.
+vendor. Text, tools, tool calls and tool results translate between the
+implemented chat formats through the SDK's typed values; images, files and
+provider-run tools remain format-specific rather than natively translated.
 
 `respan_gateway_http::HttpClient` is behind the default-off `reqwest` feature.
 Axum's default-off `ws` feature hosts WebSockets; the WebSocket integration
@@ -338,7 +341,7 @@ policy: register a meter after filters whose rejection or dropping must not
 hide values from it, since output filters run in reverse order.
 
 Provider events are coalesced into batches of at most 128 ready stream
-items. A full batch without an end yields before delivery so hot streams
+items (see below). A full batch without an end yields before delivery so hot streams
 cannot monopolize the task. Provider filters see the entire batch before
 client filters see its first event; a large decoded frame can span several
 batches. A provider meter can observe usage in the same batch as output
@@ -370,12 +373,21 @@ inspection loses no outputs. Calling policy must bound buffering and waiting
 where needed. Both operations leave live-input calls unread to avoid duplex
 deadlock.
 
-Internally, each terminal response batch owns one completion containing its
+Internally, each terminal response batch owns one ending containing its
 result and, for a provider response, the obligation to settle the call.
 Inspection finalizes provider filters and retains that obligation. Reading or
-dropping the completion settles it once; request cancellation can settle the
+dropping the ending settles it once; request cancellation can settle the
 call first. Keeping the result and its ownership together avoids duplicate
-terminal results in separate drop guards. Unread batches discarded during
+terminal results in separate drop guards.
+
+The kernel erases every event to one representation: a batch of values of
+one registered type. Filters, buffering and coalescing work on batches;
+sinks receive one value per item. Typed access downcasts, and a value of
+another type is an `internal` fault, never silently dropped. Live batches
+move their values; only replayable snapshots copy values using the registered
+message type's `Clone` implementation. `Response::stream` and
+`Call::with_input` do not require `Clone`. Batches coalesce at most 128
+ready events before yielding. Unread batches discarded during
 client delivery remain deferred until the writer's outcome is known, so a
 preparation or delivery failure takes precedence over their buffered result.
 

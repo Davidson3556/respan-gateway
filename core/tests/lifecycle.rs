@@ -284,3 +284,27 @@ async fn idle_waits_for_a_job_started_in_an_end_hook() {
         "idle resolved before the job ended in {early}/{rounds}"
     );
 }
+
+#[tokio::test]
+async fn an_unregistered_input_is_rejected_before_sending() {
+    struct WrongInput;
+    struct TryWrongInput;
+    #[async_trait]
+    impl Plugin for TryWrongInput {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
+            let call = cx.call("a").with_input(WrongInput);
+            assert_eq!(call.clone().await.unwrap_err().code(), "internal");
+            assert_eq!(call.await.unwrap_err().code(), "internal");
+            Ok(Some(Response::stream(
+                futures::stream::empty::<Result<Out>>(),
+            )))
+        }
+    }
+    let rec = Rec::default();
+    let gw = gateway_of(&rec).plugin("wrong", TryWrongInput).unwrap();
+    let (response, end) = handle(&gw, req(vec!["q"])).await;
+    assert!(read(response).await.is_ok());
+    assert_eq!(end.await, Ok(()));
+    gw.idle().await;
+    assert_eq!(rec.log().prov_start, 0);
+}
