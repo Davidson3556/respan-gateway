@@ -12,7 +12,7 @@ use crate::call::{CallEdge, SharedCall};
 use crate::events::Metadata;
 use crate::fault::PANICKED;
 use crate::format::{AnyEvents, AnyFormat, Values, erase};
-use crate::leg::{cut, idle, locked, yield_ready};
+use crate::leg::{cut, idle, locked, run, yield_ready};
 
 /// Bound ready-event coalescing, including reads attempted during drop.
 const MAX_BATCH_EVENTS: usize = 128;
@@ -45,42 +45,93 @@ impl std::fmt::Debug for Response {
     }
 }
 
-/// Outputs read or made, and the end if it came.
+/// Outputs read or made, optionally carrying their terminal result.
 #[derive(Default)]
 pub(crate) struct Batch {
     pub(crate) values: Option<Values>,
-    pub(crate) end: Option<Result<()>>,
-    /// The call whose end this holds, ended once it is read.
-    pub(crate) unread: Unread,
+    pub(crate) end: Option<Completion>,
 }
 
-/// A call's end read from its provider and not yet by its reader; dropped
-/// unread, the call ends so.
-#[derive(Default)]
-pub(crate) struct Unread(Option<(SharedCall, Result<()>)>);
+/// A terminal result and the obligation to finish its provider call.
+/// Buffering finalizes filters but keeps this obligation. Reading or dropping
+/// the completion settles it; request cancellation may settle the call first.
+pub(crate) struct Completion {
+    outcome: Result<()>,
+    call: Option<SharedCall>,
+}
 
-impl Drop for Unread {
-    fn drop(&mut self) {
-        if let Some((call, end)) = self.0.take() {
-            let _ = settle(&call, &mut Batch::end(end));
+impl Completion {
+    pub(crate) fn new(outcome: Result<()>) -> Self {
+        Self {
+            outcome,
+            call: None,
+        }
+    }
+
+    pub(crate) fn outcome(&self) -> &Result<()> {
+        &self.outcome
+    }
+
+    /// Finalize provider filters without running end hooks. Their final
+    /// values and outcome must be visible to response inspection.
+    fn prepare(&mut self, values: &mut Option<Values>) {
+        let Some(call) = self.call.take() else {
+            return;
+        };
+        let prepared = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            self.finish_outputs(&mut locked(&call), values);
+        }));
+        if let Err(panic) = prepared {
+            locked(&call).finish(Err(Fault::internal(PANICKED)));
+            std::panic::resume_unwind(panic);
+        }
+        self.call = Some(call);
+    }
+
+    /// Consume the obligation before running user filters or hooks, so a
+    /// panic or subsequent drop cannot attempt completion again.
+    fn settle(&mut self, values: &mut Option<Values>) -> std::thread::Result<()> {
+        let Some(call) = self.call.take() else {
+            return Ok(());
+        };
+        let settled = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut edge = locked(&call);
+            self.finish_outputs(&mut edge, values);
+            edge.finish(self.outcome.clone());
+        }));
+        if settled.is_err() {
+            locked(&call).finish(Err(Fault::internal(PANICKED)));
+        }
+        settled
+    }
+
+    fn finish_outputs(&mut self, edge: &mut CallEdge, values: &mut Option<Values>) {
+        if edge.is_finished() {
+            *values = None;
+            self.outcome = Err(Fault::abandoned());
+            return;
+        }
+        let mut outputs = locked(&edge.cx().outputs);
+        // Buffering may already have finalized these filters. Preserve the
+        // stored outcome and never emit their final values a second time.
+        if !outputs.ended() {
+            self.outcome = outputs.end(self.outcome.clone(), values);
         }
     }
 }
 
-/// Settle `call` at the end `batch` holds; a panic ends it internal.
-fn settle(call: &SharedCall, batch: &mut Batch) -> std::thread::Result<()> {
-    let settled = std::panic::catch_unwind(AssertUnwindSafe(|| locked(call).settle(batch)));
-    if settled.is_err() {
-        locked(call).finish(Err(Fault::internal(PANICKED)));
+impl Drop for Completion {
+    fn drop(&mut self) {
+        // Discard final filter values, but still settle the provider call.
+        // Drop must not propagate a user filter's panic.
+        let _ = self.settle(&mut None);
     }
-    settled
 }
 
 impl Batch {
-    /// Just an end.
     pub(crate) fn end(end: Result<()>) -> Self {
         Self {
-            end: Some(end),
+            end: Some(Completion::new(end)),
             ..Self::default()
         }
     }
@@ -89,42 +140,34 @@ impl Batch {
         self.values.is_none() && self.end.is_none()
     }
 
-    /// Include final filter output and failure in a buffered end, while
-    /// leaving the call's end hooks deferred until replay or abandonment.
     fn prepare(&mut self) {
-        let Some((call, _)) = self.unread.0.take() else {
-            return;
-        };
-        let prepared = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            locked(&call).finish_outputs(self);
-        }));
-        if let Err(panic) = prepared {
-            locked(&call).finish(Err(Fault::internal(PANICKED)));
-            std::panic::resume_unwind(panic);
-        }
-        if let Some(end) = &self.end {
-            self.unread = Unread(Some((call, end.clone())));
+        if let Some(end) = &mut self.end {
+            end.prepare(&mut self.values);
         }
     }
 
-    /// Read by whoever reads or sends the response: the end of its call, if
-    /// it holds it, goes through the call's filters and ends the call. A
-    /// panic ends the call internal.
+    /// Reading a terminal batch settles its call before exposing its values.
     pub(crate) fn read(&mut self) {
-        if let Some((call, _)) = self.unread.0.take()
-            && let Err(panic) = settle(&call, self)
+        if let Some(end) = &mut self.end
+            && let Err(panic) = end.settle(&mut self.values)
         {
             std::panic::resume_unwind(panic);
         }
     }
 
-    /// Read from `call`'s provider: filtered; its end, if any, waits to be
-    /// read.
-    fn of(mut self, call: &SharedCall) -> Self {
-        if locked(call).events(&mut self)
-            && let Some(end) = &self.end
+    /// Apply provider filters and attach call ownership to the terminal result.
+    fn filter_provider_outputs(mut self, call: &SharedCall) -> Self {
+        let mut edge = locked(call);
+        if edge.is_finished() {
+            return Self::end(Err(Fault::abandoned()));
+        }
+        if let Some(values) = &mut self.values
+            && let Err(fault) = run(&[&edge.cx().outputs], values)
         {
-            self.unread = Unread(Some((call.clone(), end.clone())));
+            self.end = Some(Completion::new(Err(fault)));
+        }
+        if let Some(end) = &mut self.end {
+            end.call = Some(call.clone());
         }
         self
     }
@@ -206,7 +249,7 @@ impl Response {
                 }
             }
             if let Some(end) = &batch.end {
-                end.clone()?;
+                end.outcome().clone()?;
                 return Ok(());
             }
             index += 1;
@@ -254,7 +297,10 @@ impl Response {
     /// An inspection error without a buffered end (for example a wrong
     /// predicate type) is not a provider failure that can be replayed.
     pub fn buffered_end(&self) -> Option<&Result<()>> {
-        self.ahead.back().and_then(|batch| batch.end.as_ref())
+        self.ahead
+            .back()
+            .and_then(|batch| batch.end.as_ref())
+            .map(Completion::outcome)
     }
 
     /// Read it rather than send it, such as a judge's verdict: every output
@@ -289,8 +335,8 @@ impl Response {
                         outputs.extend(read.unwrap_or_default().into_iter().map(Ok));
                     }
                     if let Some(end) = batch.end {
-                        resp.body.end(end.clone());
-                        outputs.extend(end.err().map(Err));
+                        resp.body.end(end.outcome().clone());
+                        outputs.extend(end.outcome().clone().err().map(Err));
                         ended = true;
                     }
                     batches += 1;
@@ -324,7 +370,7 @@ impl Response {
         let body = Source::EventStream {
             events,
             format: format.clone(),
-            call: Some(call.share()),
+            call: call.share(),
         };
         Self {
             streams,
@@ -339,7 +385,7 @@ pub(crate) enum Source {
     EventStream {
         events: AnyEvents,
         format: Arc<dyn AnyFormat>,
-        call: Option<SharedCall>,
+        call: SharedCall,
     },
     /// Outputs a plugin made.
     Made(BoxStream<'static, Batch>),
@@ -362,7 +408,7 @@ impl Source {
     /// Its call, if any.
     pub(crate) fn call(&self) -> Option<&SharedCall> {
         match self {
-            Source::EventStream { call, .. } => call.as_ref(),
+            Source::EventStream { call, .. } => Some(call),
             Source::Made(..) => None,
         }
     }
@@ -409,22 +455,18 @@ impl Source {
                             format.append(values, more);
                             count += 1;
                         }
-                        Some(Some(Err(fault))) => batch.end = Some(Err(fault)),
-                        Some(None) => batch.end = Some(Ok(())),
+                        Some(Some(Err(fault))) => batch.end = Some(Completion::new(Err(fault))),
+                        Some(None) => batch.end = Some(Completion::new(Ok(()))),
                     }
                 }
-                if let Some(call) = call {
-                    batch = std::mem::take(&mut batch).of(call);
-                }
+                batch = std::mem::take(&mut batch).filter_provider_outputs(call);
             });
             std::panic::catch_unwind(of).map(|()| batch)
         });
         match read {
             Ok(Ok(batch)) => batch,
             Ok(Err(panic)) | Err(panic) => {
-                if let Some(call) = call {
-                    locked(call).finish(Err(Fault::internal(PANICKED)));
-                }
+                locked(call).finish(Err(Fault::internal(PANICKED)));
                 std::panic::resume_unwind(panic)
             }
         }

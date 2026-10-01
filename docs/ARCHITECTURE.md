@@ -365,6 +365,15 @@ inspection loses no outputs. Calling policy must bound buffering and waiting
 where needed. Both operations leave live-input calls unread to avoid duplex
 deadlock.
 
+Internally, each terminal response batch owns one completion containing its
+result and, for a provider response, the obligation to settle the call.
+Inspection finalizes provider filters and retains that obligation. Reading or
+dropping the completion settles it once; request cancellation can settle the
+call first. Keeping the result and its ownership together avoids duplicate
+terminal results in separate drop guards. Unread batches discarded during
+client delivery remain deferred until the writer's outcome is known, so a
+preparation or delivery failure takes precedence over their buffered result.
+
 The routing module offers `Until::Head`, `Until::content(predicate)` and
 `Until::End`. There is no universal content predicate: the plugin supplies
 the event type and criterion. Provider-filtered-out events cannot commit a

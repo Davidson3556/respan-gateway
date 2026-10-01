@@ -357,7 +357,7 @@ impl Outgoing {
             None => self.source.next().await,
         };
         batch.read();
-        let mut end = batch.end.take();
+        let mut end = batch.end.take().map(|end| end.outcome().clone());
         if let Some(mut values) = batch.values.take() {
             if let Err(fault) = run(&[&self.layer], &mut values) {
                 end = Some(Err(fault));

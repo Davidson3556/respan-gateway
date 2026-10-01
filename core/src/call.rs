@@ -14,10 +14,9 @@ use crate::fault::{PANICKED, guarded};
 use crate::format::{AnyEvents, AnyFormat, AnyValue};
 use crate::gateway::Registered;
 use crate::input::Input;
-use crate::leg::{self, Later, cut, inputs, locked};
+use crate::leg::{Later, cut, inputs, locked};
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::provider::Provider;
-use crate::response::Batch;
 use crate::{ClientContext, EventStream, Extensions, Fault, ProviderContext, Response, Result};
 
 /// A call from [`ClientContext::call`], sent when first awaited; it may
@@ -181,7 +180,7 @@ async fn send(
         inputs: Arc::default(),
         running: InFlight::enter(&cut),
         cut,
-        sent: Arc::default(),
+        sent: false,
         refused: false,
     };
     let mut edge = EndHooks::new(&cx.gateway.in_flight, px);
@@ -235,7 +234,7 @@ async fn dial(
     // Preparation is synchronous: a failure here has not sent the call.
     // The pump progresses alongside opening and response reads.
     guarded(|| sink.prepare(&mut outgoing))?;
-    px.sent.store(true, std::sync::atomic::Ordering::Release);
+    px.sent = true;
     let writing = crate::events::deliver(outgoing, sink);
     let opened = match futures::future::select(writing, opening).await {
         futures::future::Either::Left((written, opening)) => match written {
@@ -401,49 +400,6 @@ impl CallEdge {
             plugin.on_provider(self.cx()).await?;
         }
         Ok(())
-    }
-
-    /// Turn `batch` of this call's response into what its reader gets, as
-    /// the provider edge gave it: its outputs filtered. Whether it holds an end, a failed
-    /// filter's too, for [`CallEdge::settle`] once read. Once the call
-    /// ended, just an abandoned end.
-    pub(crate) fn events(&mut self, batch: &mut Batch) -> bool {
-        if self.is_finished() {
-            *batch = Batch::end(Err(Fault::abandoned()));
-            return false;
-        }
-        if let Some(values) = &mut batch.values
-            && let Err(f) = leg::run(&[&self.cx().outputs], values)
-        {
-            batch.end = Some(Err(f));
-        }
-        batch.end.is_some()
-    }
-
-    /// Finalize output filters without settling the call's lifecycle hooks.
-    /// A buffered end already contains their outcome and released values.
-    pub(crate) fn finish_outputs(&mut self, batch: &mut Batch) {
-        if self.is_finished() {
-            *batch = Batch::end(Err(Fault::abandoned()));
-            return;
-        }
-        let Some(end) = batch.end.take() else { return };
-        let mut outputs = locked(&self.cx().outputs);
-        // A later delivery failure must not be replaced by the cached result
-        // of filters finalized while buffering.
-        batch.end = Some(if outputs.ended() {
-            end
-        } else {
-            outputs.end(end, &mut batch.values)
-        });
-    }
-
-    /// Settle the call when its buffered end is read or discarded.
-    pub(crate) fn settle(&mut self, batch: &mut Batch) {
-        self.finish_outputs(batch);
-        if let Some(end) = &batch.end {
-            self.finish(end.clone());
-        }
     }
 }
 

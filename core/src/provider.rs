@@ -39,7 +39,7 @@ pub struct ProviderContext {
     /// end hooks finish, as its request's end hooks wait for them.
     pub(crate) running: InFlightGuard,
     /// Set once its format took it to send.
-    pub(crate) sent: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) sent: bool,
     /// Set if the provider answered and refused it at its head.
     pub(crate) refused: bool,
 }
@@ -123,7 +123,7 @@ impl ProviderContext {
     /// the provider. `false` in `on_provider`, and for a call that failed
     /// before that: by a hook or an input it could not write.
     pub fn is_sent(&self) -> bool {
-        self.sent.load(std::sync::atomic::Ordering::Acquire)
+        self.sent
     }
 
     /// Whether the provider answered and refused the call at its head: its

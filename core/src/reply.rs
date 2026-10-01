@@ -46,7 +46,7 @@ pub(crate) async fn reply(
                 None => resp.body.next().await,
             };
             batch.read();
-            batch.end
+            batch.end.map(|end| end.outcome().clone())
         });
         let fault = match read.catch_unwind().await {
             Ok(Some(Err(fault))) => fault,
