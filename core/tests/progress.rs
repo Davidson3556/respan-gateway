@@ -67,7 +67,7 @@ struct Protocol(Arc<AtomicUsize>, bool);
 struct Io;
 impl Format<Io, Input, Output> for Protocol {
     fn name(&self) -> &str {
-        "audit"
+        "messages"
     }
     fn matches(&self, _: &Io) -> bool {
         true
@@ -81,7 +81,7 @@ impl Format<Io, Input, Output> for Protocol {
 }
 impl Format<Io, Output, Input> for Protocol {
     fn name(&self) -> &str {
-        "audit"
+        "messages"
     }
     fn bind(&self, _: Io) -> Result<Connection<Output, Input>> {
         let count = self.0.clone();
@@ -133,7 +133,7 @@ async fn first_content_does_not_drain_every_ready_event() {
     gateway.idle().await;
     assert!(
         at_first_content.load(Ordering::SeqCst) < 10_000,
-        "until_content consumed all 10,000 ready events before returning the first content"
+        "buffer_until consumed all 10,000 ready events before returning the first content"
     );
 }
 
@@ -187,7 +187,7 @@ async fn caller_opening_uses_state_established_during_bind() {
 struct RejectDelivery;
 impl Format<Io, Input, Output> for RejectDelivery {
     fn name(&self) -> &str {
-        "audit"
+        "messages"
     }
     fn matches(&self, _: &Io) -> bool {
         true

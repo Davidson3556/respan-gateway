@@ -2,7 +2,7 @@
 //! reach: a plugin, a filter, a `Format` method and an edge's stream, on
 //! one-shot and streaming requests: the request finishes, every end hook
 //! runs once and `idle` resolves. The codec's points are HTTP's driver's
-//! (`sdks/http/tests/driver_toy.rs`).
+//! (`http/tests/driver_toy.rs`).
 #![allow(clippy::unwrap_used)]
 
 mod edge;
@@ -15,8 +15,8 @@ use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::*;
 
 /// Points: 1 the client edge's input stream; 5 the provider edge's event
-/// stream; 12 `dial`; 14 lazy decoding; 17 `accepts`; 18
-/// `accept`, 19 incoming opening; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
+/// stream; 12 provider binding; 14 lazy decoding; 17 format matching; 18
+/// client binding, 19 incoming opening; 20, 21 plugin hooks; 22, 23 end hooks; 24-27, 32 filters; 28 a
 /// dial future; 29 a provider stream's first poll.
 const POINTS: [usize; 19] = [
     1, 5, 12, 14, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32, 0,

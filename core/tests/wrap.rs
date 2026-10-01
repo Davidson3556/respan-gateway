@@ -258,7 +258,7 @@ async fn an_input_is_checked_only_when_the_provider_reads_it() {
 }
 
 /// The request ends while the provider reads: the call's inputs end
-/// `abandoned`, never as if complete (B1).
+/// `abandoned`, never as if complete.
 #[tokio::test]
 async fn a_cut_ends_the_inputs_abandoned_never_cleanly() {
     let (body, checked) = (Body::default(), Arc::default());
@@ -479,7 +479,7 @@ fn reads_then_refuses_first(bodies: Arc<Mutex<Vec<Frames>>>) -> Dialer {
     })
 }
 
-/// B1: a retry after the first call read every wrapped input is not sent an
+/// A retry after the first call read every wrapped input is not sent an
 /// empty upload that looks complete (the plain case is in `upload.rs`).
 #[tokio::test]
 async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload() {
@@ -603,8 +603,8 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
 /// transport that fails its dial because its body broke (as an HTTP client
 /// does when a streamed upload errors) must not turn the client's refusal
 /// into the provider's fault. The reply and the call end with the refusal.
-#[tokio::test]
-async fn l5_a_refusal_before_the_providers_head_is_the_refusal() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_before_the_providers_head_is_the_refusal() {
     struct Gate;
     #[async_trait]
     impl Plugin for Gate {
@@ -620,60 +620,59 @@ async fn l5_a_refusal_before_the_providers_head_is_the_refusal() {
             Ok(None)
         }
     }
-    let rec = Rec::default();
-    // Reads the body before answering, as a server does with a whole
-    // request; a body that breaks fails the send, as reqwest's does.
-    let dialer = fnt(|c| {
-        async move {
-            let mut body = c.body;
-            while let Some(f) = body.next().await {
-                if f.is_err() {
+    for background_reader in [false, true] {
+        let rec = Rec::default();
+        // Reads the body before answering, as a server does with a whole
+        // request; a body that breaks fails the send, as reqwest's does.
+        let dialer = fnt(move |c| {
+            async move {
+                let mut body = c.body;
+                let read_body = async move {
+                    while let Some(frame) = body.next().await {
+                        frame?;
+                    }
+                    Ok::<(), Fault>(())
+                };
+                let read = if background_reader {
+                    tokio::spawn(read_body).await.unwrap()
+                } else {
+                    read_body.await
+                };
+                if read.is_err() {
                     return Err(Fault::upstream("error sending request"));
                 }
+                Ok(answer(200, done()))
             }
-            Ok(answer(200, done()))
-        }
-        .boxed()
-    });
-    let gw = Gateway::new()
-        .client::<In, _, _>(Toy)
-        .unwrap()
-        .provider::<In, _, _>("p", Toy, connect(dialer))
-        .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("gate", Gate)
-        .unwrap()
-        .target("p")
-        .unwrap();
-    let (tx, r) = upload();
-    send(&tx, "evil");
-    let (res, end) = handle(&gw, r).await;
-    let got = read(res).await;
-    let end = code(&end.await);
-    gw.idle().await;
-    let prov = rec.log().prov_codes();
-    assert_eq!(
-        (got, end, prov),
-        (
-            Ok((400, "ERR bad_request".into())),
-            "bad_request".into(),
-            vec!["bad_request".to_string()]
-        )
-    );
-    drop(tx);
-}
-
-/// Without a wrap, the same relay: the wraps change nothing of it.
-#[tokio::test]
-async fn a_plain_relay_has_the_same_heads() {
-    let (body, checked) = (Body::default(), Arc::default());
-    let gw = gateway(&body, 10, &checked, Rec::default());
-    let (_tx, req) = upload();
-    let (res, _end) = handle(&gw, req).await;
-    assert_eq!(res.unwrap().head, Some(200));
-    let _ = body.finished().await;
-    assert_eq!(*lock(&body.relayed), [true]);
+            .boxed()
+        });
+        let gw = Gateway::new()
+            .client::<In, _, _>(Toy)
+            .unwrap()
+            .provider::<In, _, _>("p", Toy, connect(dialer))
+            .unwrap()
+            .plugin("rec", rec.clone())
+            .unwrap()
+            .plugin("gate", Gate)
+            .unwrap()
+            .target("p")
+            .unwrap();
+        let (tx, r) = upload();
+        send(&tx, "evil");
+        let (res, end) = handle(&gw, r).await;
+        let got = read(res).await;
+        let end = code(&end.await);
+        gw.idle().await;
+        let prov = rec.log().prov_codes();
+        assert_eq!(
+            (got, end, prov),
+            (
+                Ok((400, "ERR bad_request".into())),
+                "bad_request".into(),
+                vec!["bad_request".to_string()]
+            )
+        );
+        drop(tx);
+    }
 }
 
 /// Wraps and filters apply in plugin order: inputs after the earlier

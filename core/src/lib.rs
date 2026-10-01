@@ -37,29 +37,3 @@ pub type Result<T> = std::result::Result<T, Fault>;
 
 /// The crates the kernel's contracts use, at the kernel's versions.
 pub use {async_trait::async_trait, futures};
-
-/// Calling and reading inputs take `&mut ClientContext`, which `on_client`
-/// alone gets: end hooks and a call's hooks see the request by `&`.
-///
-/// ```
-/// # use respan_gateway_core::ClientContext;
-/// fn on_client(cx: &mut ClientContext) {
-///     let _ = (cx.call("p"), cx.take_inputs::<String>());
-/// }
-/// ```
-///
-/// ```compile_fail
-/// # use respan_gateway_core::ClientContext;
-/// fn on_client_end(cx: &ClientContext) {
-///     let _ = cx.call("p");
-/// }
-/// ```
-///
-/// ```compile_fail
-/// # use respan_gateway_core::ProviderContext;
-/// fn on_provider(px: &mut ProviderContext) {
-///     let _ = px.client().take_inputs::<String>();
-/// }
-/// ```
-#[cfg(doctest)]
-struct OnlyOnClientCalls;

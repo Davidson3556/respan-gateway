@@ -108,3 +108,22 @@ async fn hot_synthetic_buffers_yield_and_release_the_source_on_cancellation() {
         assert_eq!(Arc::strong_count(&reads), 1, "cancelled source is released");
     }
 }
+
+#[tokio::test]
+async fn buffering_checks_each_new_value_once() {
+    let mut response = Response::stream(stream::iter((0..1024_u32).map(Ok)));
+    let mut checked = 0;
+    response
+        .buffer_until(|_: &u32| {
+            checked += 1;
+            false
+        })
+        .await
+        .unwrap();
+    assert_eq!(checked, 1024, "buffering must not rescan earlier values");
+    assert_eq!(response.buffered_end(), Some(&Ok(())));
+    assert_eq!(
+        response.outputs::<u32>().collect::<Vec<_>>().await,
+        (0..1024).map(Ok).collect::<Vec<_>>()
+    );
+}

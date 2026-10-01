@@ -16,6 +16,30 @@ use crate::plugin::Filters;
 use crate::{Call, EventStream, Extensions, Fault, Filter, Gateway, Plugin, Result};
 
 /// One client request, as the client edge's hooks see it.
+///
+/// Calling and reading inputs take `&mut ClientContext`, which `on_client`
+/// alone gets: end hooks and a call's hooks see the request by `&`.
+///
+/// ```
+/// # use respan_gateway_core::ClientContext;
+/// fn on_client(cx: &mut ClientContext) {
+///     let _ = (cx.call("p"), cx.take_inputs::<String>());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use respan_gateway_core::ClientContext;
+/// fn on_client_end(cx: &ClientContext) {
+///     let _ = cx.call("p");
+/// }
+/// ```
+///
+/// ```compile_fail
+/// # use respan_gateway_core::ProviderContext;
+/// fn on_provider(px: &mut ProviderContext) {
+///     let _ = px.client().take_inputs::<String>();
+/// }
+/// ```
 pub struct ClientContext {
     /// The first client format that accepted the request.
     pub(crate) format: Arc<dyn AnyFormat>,

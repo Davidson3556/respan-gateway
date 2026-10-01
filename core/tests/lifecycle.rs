@@ -28,17 +28,15 @@ fn gateway_of(rec: &Rec) -> Gateway {
         .unwrap()
 }
 
-/// B4: a request whose one-shot edge is still reading its body is in
-/// flight (the core enters `InFlight` before `accept`).
+/// A request counts as in flight while its one-shot edge reads its body.
 #[tokio::test(flavor = "current_thread")]
 async fn idle_waits_for_a_request_still_reading_its_body() {
     let gw = gateway_of(&Rec::default());
     let (_tx, req) = whole_upload();
     let mut handling = Box::pin(handle(&gw, req));
     assert!(futures::poll!(handling.as_mut()).is_pending());
-    let idle = tokio::time::timeout(Duration::from_millis(100), gw.idle()).await;
     assert!(
-        idle.is_err(),
+        gw.idle().now_or_never().is_none(),
         "idle resolved while a request was reading its body"
     );
     // once the request is given up, so is its count
@@ -85,9 +83,8 @@ async fn a_rebuilt_gateway_counts_only_its_own_requests() {
     let old = gw.clone();
     let rebuilt = gw.plugin("more", Rec::default()).unwrap();
     rebuilt.idle().await;
-    let waiting = tokio::time::timeout(Duration::from_millis(100), old.idle()).await;
     assert!(
-        waiting.is_err(),
+        old.idle().now_or_never().is_none(),
         "the gateway that took the request stopped waiting for it"
     );
     drop(running);
@@ -129,12 +126,13 @@ async fn a_response_of_another_request_is_refused() {
     assert_eq!((l.client_start, l.client_end.len()), (2, 2));
 }
 
-/// Calls two ways: with an input of its own, then relaying the client's.
+/// Sends the same value as an explicit input, then as the original request.
 struct TwoCalls;
 #[async_trait]
 impl Plugin for TwoCalls {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        let own = cx.call("a").with_input(In("own".into()));
+        let copy = cx.input::<In>()?.clone();
+        let own = cx.call("a").with_input(copy);
         own.await?.until_end().await?;
         Ok(Some(cx.call("a").await?))
     }
@@ -151,7 +149,7 @@ fn noting(seen: &Arc<Mutex<Vec<bool>>>) -> Dialer {
 
 /// The kernel alone says a call relays the client's message.
 #[tokio::test(flavor = "current_thread")]
-async fn only_a_call_that_relays_the_clients_message_is_relayed() {
+async fn only_original_input_carries_relay_metadata() {
     let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
@@ -163,34 +161,6 @@ async fn only_a_call_that_relays_the_clients_message_is_relayed() {
     let (res, _) = handle(&gw, req(vec!["q"])).await;
     let _ = read(res).await;
     assert_eq!(*lock(&seen), [false, true]);
-}
-
-/// Sends the client's own value, cloned, as a call's own input.
-struct Cloned;
-#[async_trait]
-impl Plugin for Cloned {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-        let copy = cx.input::<In>()?.clone();
-        let own = cx.call("a").with_input(copy);
-        Ok(Some(own.await?))
-    }
-}
-
-/// Provenance, not value, decides a relay: a call whose own input is the
-/// client's value cloned gets no client origin (no head, no key).
-#[tokio::test(flavor = "current_thread")]
-async fn a_call_of_the_clients_value_cloned_gets_no_client_origin() {
-    let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
-    let gw = Gateway::new()
-        .client::<In, _, _>(Toy)
-        .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(noting(&seen)))
-        .unwrap()
-        .plugin("cloned", Cloned)
-        .unwrap();
-    let (res, _) = handle(&gw, req(vec!["q"])).await;
-    assert_eq!(read(res).await, Ok((200, "a;!".into())));
-    assert_eq!(*lock(&seen), [false]);
 }
 
 /// A job that outlives its request reaches the gateway through the
@@ -239,7 +209,7 @@ async fn a_job_hands_its_gateway_a_request_of_its_own() {
 }
 
 /// A request counts for `idle` from the moment `handle` is called, before
-/// its future is polled (loop 3, bug 3).
+/// its future is polled.
 #[tokio::test(flavor = "current_thread")]
 async fn a_request_counts_from_the_moment_handle_is_called() {
     let gw = gateway_of(&Rec::default());
@@ -258,7 +228,7 @@ async fn a_request_counts_from_the_moment_handle_is_called() {
 
 /// A job handed to the gateway from an end hook, whose task may run only
 /// after the hook's own count is gone: `idle` must not resolve before the
-/// job's request ends (loop 3, bug 3). Many rounds on several threads, as
+/// job's request ends. Many rounds on several threads, as
 /// the race is timing's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_waits_for_a_job_started_in_an_end_hook() {

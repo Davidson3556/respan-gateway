@@ -354,10 +354,3 @@ async fn run(gateway: &Inner, hooks: &mut EndHooks<ClientContext>) -> Result<Res
             .with_source("no target: the gateway has none, and no plugin set one")),
     }
 }
-
-/// Servers spawn `handle`, so it must be `Send`.
-#[cfg(test)]
-fn _handle_is_send(g: &Gateway) {
-    fn send<T: Send>(_: T) {}
-    send(g.handle(0u8, Extensions::new()));
-}

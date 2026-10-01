@@ -1,8 +1,8 @@
-//! What a provider is sent of a session's later inputs, at the event level
-//! (B1): an abandoned or broken upload never looks complete, and what the
+//! What a provider is sent of a session's later inputs, at the event level:
+//! an abandoned or broken upload never looks complete, and what the
 //! client edge produced before it failed is not lost. The byte-level cases
 //! (an encoder's failure, opening bytes) are HTTP's driver's
-//! (`sdks/http/tests/driver_toy.rs`). The toy dialer writes each input as
+//! (`http/tests/driver_toy.rs`). The toy dialer writes each input as
 //! its text and a clean end as `<END>`.
 #![allow(clippy::unwrap_used)]
 
@@ -30,7 +30,7 @@ fn frames(of: &[std::result::Result<&str, &str>]) -> Frames {
         .collect()
 }
 
-/// B1: the client leaves in the middle of its upload, which is still open.
+/// The client leaves in the middle of its upload, which is still open.
 /// The provider's inputs end with an `Err`, never as complete.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_abandoned_upload_ends_the_providers_body_with_an_err() {
@@ -48,7 +48,7 @@ async fn an_abandoned_upload_ends_the_providers_body_with_an_err() {
     assert_eq!(got, frames(&[Ok("hello"), Err("abandoned")]));
 }
 
-/// B1: the client's inputs break. The provider's inputs end with that
+/// The client's inputs break. The provider's inputs end with that
 /// `Err`, and no end follows it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broken_upload_ends_the_providers_body_with_the_err() {
@@ -100,7 +100,7 @@ impl Plugin for Tap {
     }
 }
 
-/// B1: inputs cut by the request's end, with the upload still open, end
+/// Inputs cut by the request's end, with the upload still open, end
 /// with an `Err`.
 #[tokio::test(flavor = "multi_thread")]
 async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {
@@ -204,7 +204,7 @@ fn reads_then_refuses_first(bodies: Arc<Mutex<Vec<Frames>>>) -> Dialer {
     })
 }
 
-/// B1: a retry after the first call read every input is not sent an empty
+/// A retry after the first call read every input is not sent an empty
 /// upload that looks complete: the inputs are gone, which is an `Err`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {

@@ -384,7 +384,7 @@ impl Outgoing {
 
 /// Dropped before its end, unread: its call ends as its end says, if it is
 /// ready; else as its source goes, abandoned, or with its request if the
-/// reply holds it (rule 4).
+/// reply holds it.
 impl Drop for Outgoing {
     fn drop(&mut self) {
         if self.done {
@@ -426,7 +426,7 @@ mod tests {
         }
     }
 
-    /// B1: inputs cut by the request's end end `Err(abandoned)`, however
+    /// Inputs cut by the request's end end `Err(abandoned)`, however
     /// the end and the first poll are ordered: here the request has ended
     /// but its cut is not yet idle, as when the end lands in the middle of
     /// a poll that already saw the cut open.

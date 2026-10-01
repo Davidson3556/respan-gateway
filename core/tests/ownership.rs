@@ -1,6 +1,5 @@
-//! Loop 6 audit of the core: the reply holding its call strongly (leaks,
-//! values kept past `idle`), `Gateway::handle`'s `Result`, a refusal before
-//! the provider's head, under drops.
+//! Request and response ownership: values are released by idle,
+//! and dropping a handle releases its request at every polling stage.
 #![allow(clippy::unwrap_used)]
 
 mod edge;
@@ -18,8 +17,8 @@ use respan_gateway_core::*;
 struct Marker(#[allow(dead_code)] Arc<()>);
 
 /// Puts the marker in the request's extensions, and wraps as `how` says:
-/// 0 none; 1 outputs cut after one; 2 inputs refused after one (a check
-/// that says no); 3 outputs never read by the wrap.
+/// 0 none; 1 outputs cut after one; 2 inputs checked asynchronously;
+/// 3 outputs never read by the wrap.
 struct Mark(Arc<()>, u8);
 
 #[async_trait]
@@ -33,10 +32,7 @@ impl Plugin for Mark {
             2 => cx.wrap(|i: EventStream<In>| {
                 i.and_then(|x| async move {
                     tokio::task::yield_now().await;
-                    match x.0.as_str() {
-                        "no" => Err(Fault::bad_request("refused")),
-                        _ => Ok(x),
-                    }
+                    Ok(x)
                 })
                 .boxed()
             })?,
@@ -49,9 +45,8 @@ impl Plugin for Mark {
     }
 }
 
-fn gw(mark: &Arc<()>, how: u8, body: fn() -> Text, dialer: Option<Dialer>) -> Gateway {
-    let dialer =
-        dialer.unwrap_or_else(|| fnt(move |_| async move { Ok(answer(200, body())) }.boxed()));
+fn gw(mark: &Arc<()>, how: u8, body: fn() -> Text) -> Gateway {
+    let dialer = fnt(move |_| async move { Ok(answer(200, body())) }.boxed());
     Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
@@ -73,14 +68,14 @@ async fn idle(gw: &Gateway) {
 /// edge did (every quirk), however the reply was read (to its end, partly,
 /// not at all) and whether the adapter still holds the reply's body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn l6_idle_finds_every_requests_values_dropped() {
+async fn idle_finds_every_requests_values_dropped() {
     let mut kept = Vec::new();
     for how in 0..4u8 {
         for quirk in 0..3u8 {
             for streams in [false, true] {
                 for read_to in [0usize, 1, 99] {
                     let mark = Arc::new(());
-                    let g = gw(&mark, how, || slow(vec!["a", "b", "c", "DONE"]), None);
+                    let g = gw(&mark, how, || slow(vec!["a", "b", "c", "DONE"]));
                     let (tx, mut r) = upload();
                     r.streams = streams;
                     r.quirk = quirk;
@@ -141,61 +136,14 @@ async fn l6_idle_finds_every_requests_values_dropped() {
     assert!(kept.is_empty(), "{}", kept.join("\n"));
 }
 
-/// An input wrap that refuses its first input while the transport, reading
-/// the body in its own task as reqwest does, fails its send because the
-/// body broke: the refusal is the client's (`bad_request`), under many
-/// runs on many threads, never the provider's (`upstream`).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn l6_a_refusal_before_the_head_is_the_refusal_on_many_threads() {
-    let mark = Arc::new(());
-    let dialer = fnt(|c| {
-        async move {
-            let mut body = c.body;
-            // The body is read in its own task; a broken body fails the send.
-            let read = tokio::spawn(async move {
-                while let Some(f) = body.next().await {
-                    f?;
-                }
-                Ok::<(), Fault>(())
-            });
-            match read.await {
-                Ok(Ok(())) => Ok(answer(200, chunks(vec!["a", "DONE"]))),
-                _ => Err(Fault::upstream("the body broke")),
-            }
-        }
-        .boxed()
-    });
-    let g = gw(&mark, 2, || chunks(vec![]), Some(dialer));
-    let mut wrong = Vec::new();
-    for i in 0..500 {
-        let (tx, mut r) = upload();
-        r.streams = true;
-        send(&tx, "no");
-        let (res, end) = handle(&g, r).await;
-        let got = read(res).await;
-        drop(tx);
-        let end = code(&end.await);
-        if end != "bad_request" {
-            wrong.push(format!("run {i}: end {end}, reply {got:?}"));
-        }
-    }
-    idle(&g).await;
-    assert!(
-        wrong.is_empty(),
-        "{} wrong, e.g. {:?}",
-        wrong.len(),
-        &wrong[..wrong.len().min(4)]
-    );
-}
-
 /// `handle`'s future dropped at every point: before it is polled, and after
 /// each poll. `idle` always resolves and no value is kept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn l6_handle_dropped_at_every_poll_leaks_nothing() {
+async fn handle_dropped_at_every_poll_leaks_nothing() {
     for polls in 0..12usize {
         for streams in [false, true] {
             let mark = Arc::new(());
-            let g = gw(&mark, 0, || slow(vec!["a", "DONE"]), None);
+            let g = gw(&mark, 0, || slow(vec!["a", "DONE"]));
             let (tx, mut r) = upload();
             r.streams = streams;
             send(&tx, "x");

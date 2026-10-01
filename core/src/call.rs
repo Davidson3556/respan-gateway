@@ -118,9 +118,8 @@ impl Future for Call {
 /// a call polled once and then parked, never polled again, must still end
 /// abandoned when its request ends. Only the request's end runs then, so it
 /// needs a synchronous handle to drop the future ([`Open::abandon`]); wrapping
-/// `Call::poll` in `take_until` cannot, as that runs only when polled. It was
-/// tried and reverted; cancellation tests exercise a parked call abandoned
-/// by the request's end without another poll.
+/// `Call::poll` in `take_until` cannot do this, because it only runs when
+/// the call is polled again.
 type Sending = Mutex<(Option<BoxFuture<'static, Result<Response>>>, Option<Waker>)>;
 
 async fn send(

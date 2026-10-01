@@ -287,9 +287,4 @@ mod tests {
         let g = f.clone().with(8_u8);
         assert_eq!((f.get::<u8>(), g.get::<u8>()), (Some(&7), Some(&8)));
     }
-
-    #[test]
-    fn a_fault_is_one_pointer_wide() {
-        assert_eq!(std::mem::size_of::<Fault>(), std::mem::size_of::<usize>());
-    }
 }

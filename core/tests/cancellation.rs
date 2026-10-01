@@ -36,7 +36,7 @@ const POINTS: std::ops::Range<usize> = 0..24;
 const QUIRKS: std::ops::Range<u8> = 0..3;
 
 #[tokio::test(flavor = "current_thread")]
-async fn hooks_end_once_when_dropped_at_every_await() {
+async fn cancellation_finishes_hooks_filters_and_delivery_once() {
     let mut failures = vec![];
     for quirk in QUIRKS {
         for scenario in SCENARIOS {
@@ -44,7 +44,10 @@ async fn hooks_end_once_when_dropped_at_every_await() {
                 for h in POINTS {
                     for b in POINTS {
                         let rec = Rec::default();
-                        let gw = gateway(scenario, &rec);
+                        let ends = Ends::default();
+                        let gw = gateway(scenario, &rec)
+                            .plugin("ends", ends.clone())
+                            .unwrap();
                         let end = drive(&gw, streams, quirk, h, b).await;
                         let idle = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
                         let (cs, ce, ps, pe) = {
@@ -65,46 +68,16 @@ async fn hooks_end_once_when_dropped_at_every_await() {
                                 idle.is_ok()
                             ));
                         }
+                        let counts = ends.counts();
+                        if counts.iter().any(|count| *count != 1) {
+                            failures.push(format!("{at}: filter completions {counts:?}"));
+                        }
                         if let Some(end) = end
                             && tokio::time::timeout(Duration::from_secs(1), end)
                                 .await
                                 .is_err()
                         {
                             failures.push(format!("{at}: the end future never resolved"));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "{} failures: {:#?}",
-        failures.len(),
-        &failures[..failures.len().min(10)]
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn filters_end_once_when_dropped_at_every_await() {
-    let mut failures = vec![];
-    for quirk in QUIRKS {
-        for scenario in SCENARIOS {
-            for streams in [false, true] {
-                for h in POINTS {
-                    for b in POINTS {
-                        let rec = Rec::default();
-                        let ends = Ends::default();
-                        let gw = gateway(scenario, &rec)
-                            .plugin("ends", ends.clone())
-                            .unwrap();
-                        drive(&gw, streams, quirk, h, b).await;
-                        let _ = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
-                        let counts = ends.counts();
-                        if counts.iter().any(|c| *c != 1) {
-                            failures.push(format!(
-                                "quirk {quirk} scenario {scenario} streams {streams} h {h} b {b}: {counts:?}"
-                            ));
                         }
                     }
                 }

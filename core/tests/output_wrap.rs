@@ -1,4 +1,4 @@
-//! Loop 5's audit of `ClientContext::wrap`: output wraps that end early,
+//! Output wrapping: early termination,
 //! never read, panic or outlive their source; backpressure; a retry and a
 //! fallback of wrapped inputs.
 #![allow(clippy::unwrap_used)]
@@ -91,7 +91,7 @@ fn abc() -> Text {
 /// An output wrap that ends early: the reply ends cleanly, the call once,
 /// the meter's end once.
 #[tokio::test]
-async fn l5_an_output_wrap_that_ends_early_ends_the_call_once() {
+async fn an_output_wrap_that_ends_early_ends_the_call_once() {
     let (meter, rec) = (Meter::default(), Rec::default());
     let gw = gw(abc, OutWrap(|o| o.take(1).boxed()), &meter, &rec);
     let (res, end) = handle(&gw, req(vec!["q"])).await;
@@ -110,7 +110,7 @@ async fn l5_an_output_wrap_that_ends_early_ends_the_call_once() {
 
 /// An output wrap that never polls its source.
 #[tokio::test]
-async fn l5_an_output_wrap_that_never_polls_its_source_ends_the_call_once() {
+async fn an_output_wrap_that_never_polls_its_source_ends_the_call_once() {
     let (meter, rec) = (Meter::default(), Rec::default());
     let gw = gw(
         abc,
@@ -129,7 +129,7 @@ async fn l5_an_output_wrap_that_never_polls_its_source_ends_the_call_once() {
 
 /// An output wrap whose stream panics after its first item.
 #[tokio::test]
-async fn l5_an_output_wrap_that_panics_mid_stream_ends_everything_once() {
+async fn an_output_wrap_that_panics_mid_stream_ends_everything_once() {
     let (meter, rec) = (Meter::default(), Rec::default());
     let gw = gw(
         abc,
@@ -151,7 +151,7 @@ async fn l5_an_output_wrap_that_panics_mid_stream_ends_everything_once() {
     assert_eq!(code(&end.await), "internal");
     settle(&gw).await;
     assert_eq!(ends(&rec), (1, 1, 1, 1));
-    // The reply's failure ends its call (rule 4).
+    // The reply's failure ends its call.
     assert_eq!(rec.log().prov_codes(), ["internal"]);
     assert_eq!(*lock(&meter.0), ["saw a", "saw b", "end internal"]);
 }
@@ -159,7 +159,7 @@ async fn l5_an_output_wrap_that_panics_mid_stream_ends_everything_once() {
 /// An output wrap that swallows the provider's failure and then yields
 /// items after its source ended.
 #[tokio::test]
-async fn l5_an_output_wrap_that_yields_after_its_source_ended() {
+async fn an_output_wrap_that_yields_after_its_source_ended() {
     let (meter, rec) = (Meter::default(), Rec::default());
     fn failing() -> Text {
         slow(vec!["a", "ERR"])
@@ -186,7 +186,7 @@ async fn l5_an_output_wrap_that_yields_after_its_source_ended() {
 /// Output wraps holding their source while the client reads slowly: the
 /// wrap is pulled as the client reads (backpressure), never ahead.
 #[tokio::test]
-async fn l5_an_output_wrap_is_pulled_only_as_the_client_reads() {
+async fn an_output_wrap_is_pulled_only_as_the_client_reads() {
     static PULLED: AtomicUsize = AtomicUsize::new(0);
     let (meter, rec) = (Meter::default(), Rec::default());
     fn many() -> Text {
@@ -223,7 +223,7 @@ async fn l5_an_output_wrap_is_pulled_only_as_the_client_reads() {
 /// an `Err`, never a clean empty upload; and the fault it gets says whose
 /// fault it is.
 #[tokio::test]
-async fn l5_a_retry_after_part_of_a_wrapped_session_was_read() {
+async fn a_retry_after_part_of_a_wrapped_session_was_read() {
     struct Retry;
     #[async_trait]
     impl Plugin for Retry {
@@ -287,94 +287,86 @@ async fn l5_a_retry_after_part_of_a_wrapped_session_was_read() {
     drop(tx);
 }
 
-/// A classifier wrap whose check call is still in flight when the reader
-/// is dropped for a fallback: the fallback gets the input once, checked
-/// once (the stream is given back, with its pending check).
+/// A call that consumes no wrapped input returns its pending check to the
+/// next attempt. The input reaches the fallback once and is checked once.
 #[tokio::test]
-async fn l5_a_fallback_mid_check_gets_each_input_once() {
-    static CHECKS: AtomicUsize = AtomicUsize::new(0);
-    struct Gate;
+async fn fallback_resumes_a_pending_input_check_once() {
+    struct Gate {
+        checks: Arc<AtomicUsize>,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
     #[async_trait]
     impl Plugin for Gate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
-            cx.wrap(|i: EventStream<In>| {
-                i.and_then(|x| async move {
-                    CHECKS.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(30)).await;
-                    Ok(x)
+            let checks = self.checks.clone();
+            let started = self.started.clone();
+            let resume = self.resume.clone();
+            cx.wrap(move |inputs: EventStream<In>| {
+                inputs.and_then(move |input| {
+                    let checks = checks.clone();
+                    let started = started.clone();
+                    let resume = resume.clone();
+                    async move {
+                        checks.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        resume.notified().await;
+                        Ok(In(input.0.to_uppercase()))
+                    }
                 })
             })?;
-            // The first call is given 10ms, then dropped for a second.
-            let first = cx.call("p");
-            let raced = tokio::time::timeout(Duration::from_millis(10), async {
-                let mut resp = first.await?;
-                resp.buffer_until(|out: &Out| !out.0.starts_with("keepalive"))
-                    .await?;
-                Ok::<_, Fault>(resp)
-            })
-            .await;
-            match raced {
-                Ok(Ok(resp)) => Ok(Some(resp)),
-                _ => Ok(Some(cx.call("p").await?)),
-            }
+            let failed = cx.call("p").await.unwrap_err();
+            assert_eq!(failed.code(), "upstream");
+            Ok(Some(cx.call("p").await?))
         }
     }
-    let seen = Seen::default();
-    let gw = Gateway::new()
+    let checks = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let calls = attempts.clone();
+    let checked = checks.clone();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let gate = Gate {
+        checks: checks.clone(),
+        started: started.clone(),
+        resume: resume.clone(),
+    };
+    let dialer = fnt(move |call| {
+        let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let checked = checked.clone();
+        let started = started.clone();
+        let resume = resume.clone();
+        async move {
+            let mut body = call.body;
+            if first {
+                tokio::select! {
+                    _ = started.notified() => {},
+                    item = body.next() => panic!("input escaped its pending check: {item:?}"),
+                }
+                assert_eq!(checked.load(Ordering::SeqCst), 1);
+                resume.notify_one();
+                return Err(Fault::upstream("try the next attempt"));
+            }
+            let frames = body.try_collect::<Vec<_>>().await?;
+            assert_eq!(frames, ["X", "<END>"]);
+            Ok(ok_resp(vec!["answer", "DONE"]))
+        }
+        .boxed()
+    });
+    let gateway = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .provider::<In, _, _>(
-            "p",
-            Toy,
-            connect({
-                // The first dial waits on its body before answering (so it
-                // times out); the second answers at once.
-                let n = Arc::new(AtomicUsize::new(0));
-                let seen = seen.clone();
-                fnt(move |c| {
-                    let first = n.fetch_add(1, Ordering::SeqCst) == 0;
-                    let seen = seen.clone();
-                    async move {
-                        let mut body = c.body;
-                        if first {
-                            let _ = body.next().await;
-                            std::future::pending::<()>().await;
-                        }
-                        let s = seen.clone();
-                        tokio::spawn(async move {
-                            let _ = s;
-                            let mut got = vec![];
-                            while let Some(f) = body.next().await {
-                                got.push(f.map_err(|e| e.code().to_string()));
-                                if got.len() >= 2 {
-                                    break;
-                                }
-                            }
-                            drop(got);
-                        });
-                        Ok(answer(200, never()))
-                    }
-                    .boxed()
-                })
-            }),
-        )
+        .provider::<In, _, _>("p", Toy, connect(dialer))
         .unwrap()
-        .plugin("gate", Gate)
+        .plugin("gate", gate)
         .unwrap();
-    let (tx, r) = upload();
+    let (tx, request) = upload();
     send(&tx, "x");
-    let (res, _end) = handle(&gw, r).await;
-    let _ = tokio::time::timeout(Duration::from_millis(300), async {
-        let mut b = res.unwrap().body;
-        let _ = b.next().await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    })
-    .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(
-        CHECKS.load(Ordering::SeqCst),
-        1,
-        "the input was checked more than once"
-    );
     drop(tx);
+    let (response, end) = handle(&gateway, request).await;
+    assert_eq!(read(response).await, Ok((200, "answer;!".into())));
+    assert_eq!(end.await, Ok(()));
+    gateway.idle().await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(checks.load(Ordering::SeqCst), 1);
 }

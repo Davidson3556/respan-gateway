@@ -114,8 +114,7 @@ async fn a_big_body_relays_whole() {
 /// Wrapped sessions on many threads, each dropped at a different point: an
 /// input wrap that swallows the cut and an output wrap, both yielding on
 /// every item. Every hook ends once, the end and `idle` resolve, and the
-/// provider never sees a clean end of an upload that was never finished
-/// (B1).
+/// provider never sees a clean end of an upload that was never finished.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn wrapped_sessions_dropped_at_random_end_once() {
     struct Both;

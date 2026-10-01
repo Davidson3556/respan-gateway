@@ -140,6 +140,11 @@ boundary's opening future resolves before the first event must be read.
 Its failure differs from a returned refused stream and from a fault after
 a stream opened. Reading stops at the first fault.
 
+Single-value storage distinguishes a ready result from deferred work. Only
+deferred work carries a decoder and memoization cell. Internal mapping stays
+deferred even for ready inputs, while preserving whether the input originally
+came from a lazy decoder; that provenance controls unchanged raw-byte relay.
+
 A single value is replayable. A lazy value is decoded at most once, when
 read or transformed, and snapshots share that result; inspection failure
 alone does not prevent an unchanged original request from relaying its raw
@@ -610,12 +615,12 @@ boundaries. Build public documentation with
 |---|---|
 | Concurrent read/write progress and delivery completion | Core stream/write unit tests, `symmetric`, and `edge_runtime`. |
 | Each started hook ends once, including panic and cancellation | Core `cancellation`, `panic_matrix`, `stress`. |
-| `idle` counts from handle invocation and includes jobs | Core `lifecycle`, `l6_core`. |
+| `idle` counts from handle invocation and includes jobs | Core `lifecycle`, `ownership`. |
 | Lazy decoding, replay provenance, unchanged large-body relay | Core `stress`, `lifecycle`; provider `relay`, `translate`. |
 | Refusal distinct from failed opening and failed first event | Core stream unit tests, `contract`, and `edge_runtime`; HTTP driver and WS tests. |
-| Live inputs read once, unused inputs returned for retry | Core `upload`, `wrap`, `l5_wrap`. |
+| Live inputs read once, unused inputs returned for retry | Core `upload`, `wrap`, `output_wrap`. |
 | No clean EOF after interrupted upload | Core `upload`, `wrap`; HTTP `driver_toy`. |
-| Batch accounting and response holding | Core `contract`, `until`; wallet's private accounting, wire, tally and ledger tests; cost-cap and routing suites. |
+| Batch accounting and response holding | Core `contract`, `buffering`, `until`; wallet's private accounting, wire, tally and ledger tests; cost-cap and routing suites. |
 | Byte-exact relay and credential isolation | Provider `relay`, `translate`; HTTP rules; WS credentials tests. |
 | Synchronous raw/value/live preparation, explicit response opening and offline encoding | HTTP binding and framing tests; formats and custom-format examples. |
 | Edited usage totals, SSE envelopes and bounded content provenance | Provider unit tests and `translate`; text filtering suites. |

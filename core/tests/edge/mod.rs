@@ -342,7 +342,7 @@ pub fn accept_toy(io: Io, decodes: Option<Arc<AtomicUsize>>) -> Result<Connectio
     Ok((incoming.boxed(), outgoing))
 }
 
-/// A call's extension that makes the toy's `dial` fail at once, unsent.
+/// A call's extension that makes provider binding fail before sending.
 #[derive(Clone)]
 pub struct Unsendable;
 
@@ -613,7 +613,7 @@ impl Sink<Result<Out>> for ReplySink {
             return Ok(());
         }
         if self.quirk == 2 && !self.opened && item.is_err() {
-            // The old edge sends a first fault even in head-only mode.
+            // A first fault produces an error response even in head-only mode.
             self.quirk = 0;
         }
         if !self.opened {
@@ -1127,7 +1127,7 @@ impl Plugin for Racer {
 }
 
 /// Answers with call `a`, read as far as its mode says: 0 not at all,
-/// 1 `until_content`, 2 `until_end`.
+/// 1 `buffer_until`, 2 `until_end`.
 pub struct Mode(pub u8);
 #[async_trait]
 impl Plugin for Mode {

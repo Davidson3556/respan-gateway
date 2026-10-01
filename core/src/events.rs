@@ -33,39 +33,67 @@ enum Source<T> {
 
 /// A replayable, memoized value, independent of the live-stream variant.
 pub(crate) struct Single<T> {
-    decoded: OnceLock<Result<T>>,
-    decode: Box<dyn Fn() -> Result<T> + Send + Sync>,
-    lazy: bool,
+    value: SingleValue<T>,
     clone: fn(&T) -> T,
+}
+
+enum SingleValue<T> {
+    Ready(Result<T>),
+    Deferred {
+        decoded: OnceLock<Result<T>>,
+        decode: Box<dyn Fn() -> Result<T> + Send + Sync>,
+        /// Original lazy-input provenance, preserved through mapping.
+        /// Mapping a ready value defers work too, but keeps this false.
+        lazy: bool,
+    },
 }
 
 impl<T> Single<T> {
     pub(crate) fn ready(value: Result<T>, clone: fn(&T) -> T) -> Arc<Self> {
-        let decoded = OnceLock::new();
-        let _ = decoded.set(value);
         Arc::new(Self {
-            decoded,
-            decode: Box::new(|| Err(Fault::internal("single value missing"))),
-            lazy: false,
+            value: SingleValue::Ready(value),
             clone,
         })
     }
 
+    fn deferred(
+        decode: impl Fn() -> Result<T> + Send + Sync + 'static,
+        lazy: bool,
+        clone: fn(&T) -> T,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            value: SingleValue::Deferred {
+                decoded: OnceLock::new(),
+                decode: Box::new(decode),
+                lazy,
+            },
+            clone,
+        })
+    }
+
+    fn is_lazy(&self) -> bool {
+        matches!(self.value, SingleValue::Deferred { lazy: true, .. })
+    }
+
     pub(crate) fn known_error(&self) -> Option<Fault> {
-        // Inspection may memoize an original lazy decode failure without
-        // editing its raw input. Only an edited snapshot's failure prevents
-        // sending; an unchanged lazy input can still relay its original bytes.
-        (!self.lazy)
-            .then(|| self.decoded.get())
-            .flatten()
-            .and_then(|value| value.as_ref().err().cloned())
+        // An original lazy decode failure does not prevent raw-byte relay.
+        // Edited or mapped ready values must report their known failures.
+        let result = match &self.value {
+            SingleValue::Ready(value) => value,
+            SingleValue::Deferred { lazy: true, .. } => return None,
+            SingleValue::Deferred { decoded, .. } => decoded.get()?,
+        };
+        result.as_ref().err().cloned()
     }
 
     pub(crate) fn value(&self) -> Result<&T> {
-        self.decoded
-            .get_or_init(|| guarded(|| (self.decode)()))
-            .as_ref()
-            .map_err(Clone::clone)
+        let result = match &self.value {
+            SingleValue::Ready(value) => value,
+            SingleValue::Deferred {
+                decoded, decode, ..
+            } => decoded.get_or_init(|| guarded(decode)),
+        };
+        result.as_ref().map_err(Clone::clone)
     }
 
     fn cloned(&self) -> Result<T> {
@@ -130,7 +158,7 @@ impl<T> EventStream<T> {
     /// Whether this single value came from a lazy decoder.
     /// Inspecting it keeps this property; replacing it with `single` does not.
     pub fn is_lazy(&self) -> bool {
-        matches!(&self.source, Source::Single(value) if value.lazy)
+        matches!(&self.source, Source::Single(value) if value.is_lazy())
     }
 
     /// The refusal, before the stream has been read.
@@ -198,13 +226,7 @@ impl<T: Clone + Send + Sync + 'static> EventStream<T> {
     /// A replayable value decoded only when a reader needs it.
     /// Internal snapshots share its result, including decoding failures.
     pub fn lazy(decode: impl Fn() -> Result<T> + Send + Sync + 'static) -> Self {
-        Arc::new(Single {
-            decoded: OnceLock::new(),
-            decode: Box::new(decode),
-            lazy: true,
-            clone: T::clone,
-        })
-        .into_events()
+        Single::deferred(decode, true, T::clone).into_events()
     }
 }
 
@@ -227,13 +249,12 @@ impl<T: Send + Sync + 'static> EventStream<T> {
     ) -> EventStream<U> {
         let source = match self.source {
             Source::Single(value) => {
-                let lazy = value.lazy;
-                Source::Single(Arc::new(Single {
-                    decoded: OnceLock::new(),
-                    decode: Box::new(move || value.cloned().and_then(&map)),
+                let lazy = value.is_lazy();
+                Source::Single(Single::deferred(
+                    move || value.cloned().and_then(&map),
                     lazy,
-                    clone: U::clone,
-                }))
+                    U::clone,
+                ))
             }
             Source::Stream(events) => {
                 Source::Stream(events.map(move |event| event.and_then(&map)).boxed())
@@ -490,6 +511,37 @@ mod tests {
         assert_eq!(mapped.value(), Some(Ok(&17_u16)));
         assert_eq!(mapped.value(), Some(Ok(&17_u16)));
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mapping_defers_and_memoizes_failures_without_changing_relay_provenance() {
+        for lazy in [false, true] {
+            let events = if lazy {
+                EventStream::lazy(|| Ok(7_u8))
+            } else {
+                EventStream::single(7_u8)
+            };
+            let maps = Arc::new(AtomicUsize::new(0));
+            let seen = maps.clone();
+            let fault = Fault::bad_request("mapping failed");
+            let failure = fault.clone();
+            let mut mapped = events.map_values(move |_| -> Result<u16> {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Err(failure.clone())
+            });
+            assert_eq!(mapped.is_lazy(), lazy);
+            assert_eq!(maps.load(Ordering::SeqCst), 0);
+            let Some(single) = mapped.take_single() else {
+                panic!("single expected")
+            };
+            assert_eq!(single.known_error(), None);
+            let replay = single.clone().into_events();
+            assert_eq!(single.value(), Err(fault.clone()));
+            assert_eq!(replay.value(), Some(Err(fault.clone())));
+            assert_eq!(maps.load(Ordering::SeqCst), 1);
+            assert_eq!(replay.is_lazy(), lazy);
+            assert_eq!(single.known_error(), (!lazy).then_some(fault));
+        }
     }
 
     #[test]

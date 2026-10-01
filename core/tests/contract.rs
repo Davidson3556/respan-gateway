@@ -35,7 +35,7 @@ fn refusing() -> Dialer {
     })
 }
 
-/// W1: a streaming client (an upgrade: its head goes when the reply
+/// A streaming client (an upgrade: its head goes when the reply
 /// resolves) relayed to a provider that refuses at its head gets a
 /// complete refusal, not a head and then a failing body.
 #[tokio::test(flavor = "multi_thread")]
@@ -56,7 +56,7 @@ async fn a_refused_upgrade_is_a_complete_answer() {
 }
 
 /// The same for a one-shot client, and a plugin that holds the answer:
-/// `until_content` fails at once, and the plugin's refusal is as clean.
+/// `buffer_until` fails at once, and the plugin's refusal is as clean.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refusal_at_the_head_is_clean_whoever_holds_it() {
     for mode in [0u8, 1, 2] {
@@ -171,7 +171,7 @@ async fn a_call_is_sent_only_once_handed_to_its_transport() {
 }
 
 /// A panic in the provider edge's stream while `until_end` or
-/// `until_content` reads unwinds through the plugin that awaits it, so the
+/// `buffer_until` reads unwinds through the plugin that awaits it, so the
 /// request is refused `internal`, and the call ends `internal`, as a
 /// decoder's panic does in HTTP's driver.
 #[tokio::test(flavor = "current_thread")]

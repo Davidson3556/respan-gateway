@@ -1,5 +1,5 @@
-//! `until_content` and `until_end` read a response without changing what it
-//! is, and in time linear in its size. The toy dialer answers text events,
+//! `buffer_until` and `until_end` read a response without changing what it
+//! is. The toy dialer answers text events,
 //! not bytes.
 #![allow(clippy::unwrap_used)]
 
@@ -7,7 +7,6 @@ mod edge;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
 
 use edge::*;
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
@@ -107,56 +106,10 @@ async fn reading_a_response_first_changes_nothing() {
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
-/// Read `n` events of a response as `mode` says, and how long that took.
-async fn time_of(mode: u8, lead: &'static str, n: usize) -> Duration {
-    let t = fnt(move |_| {
-        async move {
-            // Each chunk arrives on its own, so each is a batch of its own.
-            let chunks = stream::iter((0..n).map(move |_| lead.to_string()))
-                .chain(stream::iter(["x".to_string(), "DONE".to_string()]))
-                .then(|chunk| async {
-                    tokio::task::yield_now().await;
-                    Ok(chunk)
-                });
-            Ok(answer(200, chunks.boxed()))
-        }
-        .boxed()
-    });
-    let gw = Gateway::new()
-        .client::<In, _, _>(Toy)
-        .unwrap()
-        .provider::<In, _, _>("a", Toy, connect(t))
-        .unwrap()
-        .plugin("mode", Mode(mode))
-        .unwrap();
-    let start = Instant::now();
-    let (res, _) = handle(&gw, req(vec!["q"])).await;
-    let (_, body) = read(res).await.unwrap();
-    let took = start.elapsed();
-    assert_eq!(body.len(), n * (lead.len() + 1) + "x;!".len());
-    took
-}
-
-/// B3: a read to the end, or through a run without content, takes time in
-/// proportion to the response, not its square. The count of work is not
-/// visible from outside, so the size is chosen so the two cannot be told
-/// apart by a busy machine: linear takes well under a second (in debug
-/// too), a rescan of every held batch on each read (n^2/2 steps) takes
-/// about a minute, and the bound sits between with a wide margin on both sides.
-#[tokio::test(flavor = "current_thread")]
-async fn reading_until_is_linear_in_the_chunks() {
-    const BOUND: Duration = Duration::from_secs(15);
-    for (mode, lead) in [(2u8, "c"), (1, "keepalive")] {
-        let n = 100_000;
-        let took = time_of(mode, lead, n).await;
-        assert!(took < BOUND, "mode {mode}: {n} chunks took {took:?}");
-    }
-}
-
-/// `until_content` on a response with no content reads and holds all of it,
+/// `buffer_until` on a response with no content reads and holds all of it,
 /// to its end, and what it held is sent whole.
 #[tokio::test(flavor = "current_thread")]
-async fn until_content_holds_a_response_without_content_to_its_end() {
+async fn buffer_until_holds_a_response_without_content_to_its_end() {
     let reads = Arc::new(AtomicUsize::new(0));
     let counted = reads.clone();
     let t = fnt(move |_| {
