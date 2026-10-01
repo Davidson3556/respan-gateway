@@ -2,11 +2,11 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use respan_gateway_sdk::{Fault, Result};
 pub use rusqlite;
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
 
 /// A connection shared within a process; SQLite coordinates other processes.
 #[derive(Clone, Debug)]
@@ -49,11 +49,34 @@ impl Database {
     }
 
     fn configure(connection: Connection) -> Result<Self> {
+        // Competing first opens can return BUSY immediately while one connection
+        // switches the file to WAL, without using SQLite's busy timeout. Retry
+        // only that startup operation, for no longer than the transaction wait.
+        let until = Instant::now() + Duration::from_millis(250);
+        loop {
+            let remaining = until.saturating_duration_since(Instant::now());
+            connection
+                .busy_timeout(remaining.min(Duration::from_millis(25)))
+                .map_err(sql)?;
+            match connection.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if matches!(
+                        error.code,
+                        ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+                    ) && Instant::now() < until =>
+                {
+                    std::thread::sleep(
+                        until
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_millis(5)),
+                    );
+                }
+                Err(error) => return Err(sql(error)),
+            }
+        }
         connection
             .busy_timeout(Duration::from_millis(250))
-            .map_err(sql)?;
-        connection
-            .pragma_update(None, "journal_mode", "WAL")
             .map_err(sql)?;
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -85,11 +108,122 @@ impl Database {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+    fn startup_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "respan-startup-store-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    fn assert_configured(database: &Database) -> Result<()> {
+        let connection = database
+            .0
+            .lock()
+            .map_err(|_| Fault::internal("store lock poisoned"))?;
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .map_err(sql)?;
+        let wait: u64 = connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .map_err(sql)?;
+        assert_eq!(mode, "wal");
+        assert_eq!(wait, 250);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_first_opens_all_initialize_wal() -> Result<()> {
+        for _ in 0..60 {
+            let path = startup_path();
+            let barrier = std::sync::Barrier::new(8);
+            let databases = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            Database::open(&path)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .map_err(|_| Fault::internal("startup opener panicked"))?
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            for database in &databases {
+                assert_configured(database)?;
+            }
+            drop(databases);
+            std::fs::remove_file(path)
+                .map_err(|error| Fault::internal("startup cleanup failed").with_source(error))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn first_open_retries_a_transient_lock() -> Result<()> {
+        let path = startup_path();
+        let blocker = Connection::open(&path).map_err(sql)?;
+        blocker
+            .execute_batch("BEGIN EXCLUSIVE; CREATE TABLE startup(value INTEGER)")
+            .map_err(sql)?;
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(70));
+            blocker.execute_batch("COMMIT")
+        });
+        let database = Database::open(&path)?;
+        release
+            .join()
+            .map_err(|_| Fault::internal("startup blocker panicked"))?
+            .map_err(sql)?;
+        assert_configured(&database)?;
+        drop(database);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn first_open_fails_within_one_startup_budget_under_a_held_lock() -> Result<()> {
+        let path = startup_path();
+        let blocker = Connection::open(&path).map_err(sql)?;
+        blocker
+            .execute_batch("BEGIN EXCLUSIVE; CREATE TABLE startup(value INTEGER)")
+            .map_err(sql)?;
+        let start = Instant::now();
+        let error = Database::open(&path).expect_err("the exclusive lock must block WAL startup");
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<rusqlite::Error>());
+        assert!(matches!(
+            source,
+            Some(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+        ));
+        assert!(
+            start.elapsed() >= Duration::from_millis(200)
+                && start.elapsed() < Duration::from_millis(750),
+            "startup retries exceeded the shared 250 ms budget: {error}"
+        );
+        blocker.execute_batch("ROLLBACK").map_err(sql)?;
+        drop(blocker);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_databases_are_private_and_existing_permissions_are_preserved() -> Result<()> {
         let path = std::env::temp_dir().join(format!(
