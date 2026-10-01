@@ -946,6 +946,251 @@ async fn a_whole_tool_call_crosses_formats_both_ways() {
 }
 
 #[tokio::test]
+async fn generated_tool_calls_cross_both_ways_whole_and_streamed() {
+    let args = json!({ "path": "src/lib.rs", "line": 17 });
+    for stream in [false, true] {
+        let h = Harness::new(Vec::new()).await;
+        h.anthropic.answer(Answer::tool_call("read", args.clone()));
+        let request = json!({
+            "model": "claude-sonnet-4-5", "stream": stream,
+            "stream_options": { "include_usage": stream },
+            "messages": [{ "role": "user", "content": "read src/lib.rs" }],
+            "tools": [{ "type": "function", "function": {
+                "name": "read", "parameters": { "type": "object" }
+            }}],
+        });
+        let (status, out) = h.text(call(CHAT, request.to_string())).await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        h.assert_requests(0, 1);
+        assert_eq!(h.anthropic.requests()[0].body["model"], "claude-sonnet-4-5");
+        if stream {
+            let chunks = events(&out);
+            let calls: Vec<&Value> = chunks
+                .iter()
+                .flat_map(|(_, c)| {
+                    c.pointer("/choices/0/delta/tool_calls")
+                        .and_then(Value::as_array)
+                })
+                .flatten()
+                .collect();
+            assert_eq!(calls[0]["function"]["name"], "read", "{out}");
+            let arguments: String = calls
+                .iter()
+                .filter_map(|c| c["function"]["arguments"].as_str())
+                .collect();
+            assert_eq!(
+                serde_json::from_str::<Value>(&arguments).expect("valid tool JSON"),
+                args
+            );
+            assert!(
+                chunks
+                    .iter()
+                    .any(|(_, c)| c["choices"][0]["finish_reason"] == "tool_calls")
+            );
+            assert!(chunks.iter().any(|(_, c)| {
+                c["usage"]["completion_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            }));
+            assert!(out.ends_with("data: [DONE]\n\n"), "{out}");
+        } else {
+            let response: Value = serde_json::from_str(&out).expect("valid response JSON");
+            let call = &response["choices"][0]["message"]["tool_calls"][0];
+            assert_eq!(call["function"]["name"], "read");
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    call["function"]["arguments"]
+                        .as_str()
+                        .expect("tool arguments")
+                )
+                .expect("valid tool JSON"),
+                args
+            );
+            assert_eq!(response["choices"][0]["finish_reason"], "tool_calls");
+            assert!(
+                response["usage"]["completion_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            );
+        }
+
+        let h = Harness::new(Vec::new()).await;
+        h.openai.answer(Answer::tool_call("read", args.clone()));
+        let request = json!({
+            "model": "gpt-4o", "max_tokens": 100, "stream": stream,
+            "messages": [{ "role": "user", "content": "read src/lib.rs" }],
+            "tools": [{ "name": "read", "input_schema": { "type": "object" } }],
+        });
+        let (status, out) = h.text(call(MESSAGES, request.to_string())).await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        h.assert_requests(1, 0);
+        assert_eq!(h.openai.requests()[0].body["model"], "gpt-4o");
+        if stream {
+            let frames = events(&out);
+            let starts: Vec<&Value> = frames
+                .iter()
+                .filter(|(name, _)| name.as_deref() == Some("content_block_start"))
+                .map(|(_, body)| &body["content_block"])
+                .collect();
+            assert_eq!(starts.len(), 1, "{out}");
+            assert_eq!(starts[0]["name"], "read");
+            let arguments: String = frames
+                .iter()
+                .filter_map(|(_, body)| body["delta"]["partial_json"].as_str())
+                .collect();
+            assert_eq!(
+                serde_json::from_str::<Value>(&arguments).expect("valid tool JSON"),
+                args
+            );
+            assert!(
+                frames
+                    .iter()
+                    .any(|(_, body)| body["delta"]["stop_reason"] == "tool_use")
+            );
+            assert!(frames.iter().any(|(_, body)| {
+                body["usage"]["output_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            }));
+        } else {
+            let response: Value = serde_json::from_str(&out).expect("valid response JSON");
+            assert_eq!(response["content"][0]["type"], "tool_use");
+            assert_eq!(response["content"][0]["name"], "read");
+            assert_eq!(response["content"][0]["input"], args);
+            assert_eq!(response["stop_reason"], "tool_use");
+            assert!(
+                response["usage"]["output_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn generated_named_model_text_and_usage_relay_in_native_formats() {
+    let router = ModelRouter::new(|c: &Conversation| c.model.as_deref()).route("gpt", "openai");
+    let h = Harness::with(vec![Arc::new(router)]).await;
+    for stream in [false, true] {
+        h.openai.answer(Answer::text("Hello from OpenAI"));
+        let mut req = json!({ "model": "gpt-4o", "stream": stream,
+            "messages": [{ "role": "user", "content": "hi" }] });
+        if stream {
+            req["stream_options"] = json!({ "include_usage": true });
+        }
+        let (status, out) = h.text(call(CHAT, req.to_string())).await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        if stream {
+            let frames = events(&out);
+            let text: String = frames
+                .iter()
+                .filter_map(|(_, c)| {
+                    c.pointer("/choices/0/delta/content")
+                        .and_then(Value::as_str)
+                })
+                .collect();
+            assert_eq!(text, "Hello from OpenAI");
+            assert!(
+                frames
+                    .iter()
+                    .any(|(_, c)| c["usage"]["prompt_tokens"].as_u64().is_some_and(|n| n > 0))
+            );
+            assert!(out.ends_with("data: [DONE]\n\n"), "{out}");
+        } else {
+            let response: Value = serde_json::from_str(&out).expect("valid response JSON");
+            assert_eq!(
+                response["choices"][0]["message"]["content"],
+                "Hello from OpenAI"
+            );
+            assert!(
+                response["usage"]["prompt_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            );
+        }
+
+        h.anthropic.answer(Answer::text("Hello from Anthropic"));
+        let req = json!({ "model": "claude-sonnet-4-5", "max_tokens": 100,
+            "stream": stream, "messages": [{ "role": "user", "content": "hi" }] });
+        let (status, out) = h.text(call(MESSAGES, req.to_string())).await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        if stream {
+            assert_eq!(anthropic_texts(&out), "Hello from Anthropic");
+            assert!(
+                events(&out)
+                    .iter()
+                    .any(|(_, c)| c["usage"]["output_tokens"].as_u64().is_some_and(|n| n > 0))
+            );
+        } else {
+            let response: Value = serde_json::from_str(&out).expect("valid response JSON");
+            assert_eq!(response["content"][0]["text"], "Hello from Anthropic");
+            assert!(
+                response["usage"]["output_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            );
+        }
+    }
+    h.assert_requests(2, 2);
+    assert!(
+        h.openai
+            .requests()
+            .iter()
+            .all(|r| r.body["model"] == "gpt-4o")
+    );
+    assert!(
+        h.anthropic
+            .requests()
+            .iter()
+            .all(|r| r.body["model"] == "claude-sonnet-4-5")
+    );
+}
+
+#[tokio::test]
+async fn generated_anthropic_reasoning_relays_without_reinterpreting_thinking() {
+    let h = Harness::with(Vec::new()).await;
+    for stream in [false, true] {
+        h.anthropic
+            .answer(Answer::text("Answer").reasoning("First consider the question"));
+        let req = json!({
+            "model": "claude-sonnet-4-5", "max_tokens": 2048, "stream": stream,
+            "thinking": { "type": "enabled", "budget_tokens": 1024, "display": "summarized" },
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let (status, out) = h.text(call(MESSAGES, req.to_string())).await;
+        assert_eq!(status, StatusCode::OK, "{out}");
+        if stream {
+            let frames = events(&out);
+            let thinking: String = frames
+                .iter()
+                .filter_map(|(_, c)| c["delta"]["thinking"].as_str())
+                .collect();
+            assert_eq!(thinking, "First consider the question");
+            assert_eq!(anthropic_texts(&out), "Answer");
+            assert!(frames.iter().any(|(_, c)| {
+                c["usage"]["output_tokens_details"]["thinking_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            }));
+        } else {
+            let response: Value = serde_json::from_str(&out).expect("valid response JSON");
+            assert_eq!(response["content"][0]["type"], "thinking");
+            assert_eq!(
+                response["content"][0]["thinking"],
+                "First consider the question"
+            );
+            assert_eq!(response["content"][1]["text"], "Answer");
+            assert!(
+                response["usage"]["output_tokens_details"]["thinking_tokens"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0)
+            );
+        }
+    }
+    h.assert_requests(0, 2);
+}
+
+#[tokio::test]
 async fn a_tool_that_anthropic_runs_cannot_be_sent_to_openai() {
     let h = Harness::new(Vec::new()).await;
     let body = json!({ "model": "gpt-x", "max_tokens": 9, "messages": [{ "role": "user", "content": "hi" }],

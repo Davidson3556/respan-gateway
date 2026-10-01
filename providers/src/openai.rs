@@ -34,13 +34,16 @@ pub(crate) const OPENAI: &str = "openai-chat";
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenAiChat;
 
-const FINISH: Names<Finish> = Names(&[
-    ("stop", Finish::Stop),
-    ("length", Finish::Length),
-    ("tool_calls", Finish::ToolUse),
-    ("function_call", Finish::ToolUse),
-    ("content_filter", Finish::Filtered),
-]);
+const FINISH: Names<Finish> = Names(
+    &[
+        ("stop", Finish::Stop),
+        ("length", Finish::Length),
+        ("tool_calls", Finish::ToolUse),
+        ("function_call", Finish::ToolUse),
+        ("content_filter", Finish::Filtered),
+    ],
+    &[],
+);
 
 impl OpenAiChat {
     /// This wire format's name.
@@ -230,12 +233,15 @@ const INERT: &[(&str, f64)] = &[
     ("logprobs", 0.0),
 ];
 
-const ROLES: Names<Role> = Names(&[
-    ("system", Role::System),
-    ("developer", Role::System),
-    ("user", Role::User),
-    ("assistant", Role::Assistant),
-]);
+const ROLES: Names<Role> = Names(
+    &[
+        ("system", Role::System),
+        ("developer", Role::System),
+        ("user", Role::User),
+        ("assistant", Role::Assistant),
+    ],
+    &[],
+);
 
 impl Wire for OpenAiChat {
     const NAME: &'static str = OPENAI;
@@ -457,7 +463,7 @@ impl Wire for OpenAiChat {
             "choices": [{
                 "index": 0,
                 "message": message,
-                "finish_reason": FINISH.reason(finish),
+                "finish_reason": FINISH.reason(finish)?,
             }],
             "usage": Self::usage_body(&so_far.usage),
         }))
@@ -614,7 +620,7 @@ fn put_choice(v: &mut Value, reply: &Reply, key: &str) -> Result<(), Fault> {
         // The provider's spelling while unchanged; null if taken.
         let reason = match (&reply.finish, old_finish) {
             (Some(f), Some(Value::String(old))) if FINISH.finish(&old) == *f => Some(old.into()),
-            (Some(f), _) => Some(FINISH.reason(f).into()),
+            (Some(f), _) => Some(FINISH.reason(f)?.into()),
             (None, old) => old.map(|_| Value::Null),
         };
         if let Some(reason) = reason {
@@ -945,7 +951,7 @@ impl Chunks {
         if let Some(f) = &reply.finish {
             self.begin(&mut all);
             let mut finish = BytesMut::new();
-            let choices = json!([{ "index": 0, "delta": {}, "finish_reason": FINISH.reason(f) }]);
+            let choices = json!([{ "index": 0, "delta": {}, "finish_reason": FINISH.reason(f)? }]);
             self.chunk(&mut finish, choices, None);
             self.finish = Some(finish);
         }

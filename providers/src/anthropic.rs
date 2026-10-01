@@ -17,10 +17,10 @@ use serde_json::{Map, Value, json};
 use crate::Usage;
 use crate::common::ReplyParser;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, patch_content, patch_messages,
-    patch_sampling, post_json, read_content, read_message, reads_back, refusal, replace, says, set,
-    split_around, stop_json, supported_usage, unpatchable, unreadable_event, unsupported_fields,
-    unwritable_content, usage_step, write_content, write_message,
+    Encounter, Names, Reading, SoFar, UnaryEncoder, Wire, error_event, patch_content,
+    patch_messages, patch_sampling, post_json, read_content, read_message, reads_back, refusal,
+    replace, says, set, split_around, stop_json, supported_usage, unpatchable, unreadable_event,
+    unsupported_fields, unwritable_content, usage_step, write_content, write_message,
 };
 use crate::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
@@ -37,13 +37,16 @@ const VERSION_HEADER: &str = "anthropic-version";
 /// The `max_tokens` of a translated request without one, as it is required.
 const DEFAULT_MAX_TOKENS: u64 = 4096;
 
-const FINISH: Names<Finish> = Names(&[
-    ("end_turn", Finish::Stop),
-    ("stop_sequence", Finish::Stop),
-    ("max_tokens", Finish::Length),
-    ("tool_use", Finish::ToolUse),
-    ("refusal", Finish::Filtered),
-]);
+const FINISH: Names<Finish> = Names(
+    &[
+        ("end_turn", Finish::Stop),
+        ("stop_sequence", Finish::Stop),
+        ("max_tokens", Finish::Length),
+        ("tool_use", Finish::ToolUse),
+        ("refusal", Finish::Filtered),
+    ],
+    &["model_context_window_exceeded"],
+);
 
 pub(crate) const ANTHROPIC: &str = "anthropic-messages";
 
@@ -239,7 +242,7 @@ const KNOWN: &[&str] = &[
 ];
 
 /// Roles a message can have; system prompts have their own field.
-const ROLES: Names<Role> = Names(&[("user", Role::User), ("assistant", Role::Assistant)]);
+const ROLES: Names<Role> = Names(&[("user", Role::User), ("assistant", Role::Assistant)], &[]);
 
 /// The parts of the leading system messages, as the system prompt, and
 /// the rest; a later system message is refused.
@@ -519,12 +522,15 @@ impl Wire for AnthropicMessages {
 
     fn render(so_far: &SoFar) -> Result<Value, Fault> {
         check_usage(&so_far.usage)?;
-        let mut content: Vec<Value> = so_far
-            .text
-            .values()
-            .map(|t| json!({ "type": "text", "text": t }))
+        let calls = so_far.calls.anthropic()?;
+        let content: Vec<Value> = so_far
+            .encounters
+            .iter()
+            .map(|entry| match entry {
+                Encounter::Text(block) => json!({"type": "text", "text": so_far.text[block]}),
+                Encounter::Call(index) => calls[*index].clone(),
+            })
             .collect();
-        content.extend(so_far.calls.anthropic()?);
         let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
         let (id, model) = so_far.start.clone().unwrap_or_default();
         Ok(json!({
@@ -533,7 +539,7 @@ impl Wire for AnthropicMessages {
             "role": "assistant",
             "model": model,
             "content": content,
-            "stop_reason": FINISH.reason(finish),
+            "stop_reason": FINISH.reason(finish)?,
             "stop_sequence": null,
             "usage": Self::usage_body(&so_far.usage),
         }))
@@ -548,7 +554,7 @@ impl Wire for AnthropicMessages {
             replace(v, "/model", model.as_str());
         }
         if let Some(f) = &reply.finish {
-            FINISH.rewrite(v, "/stop_reason", f);
+            FINISH.rewrite(v, "/stop_reason", f)?;
         }
         let old = v["content"].take();
         let mut content = Vec::new();
@@ -620,7 +626,7 @@ fn put_event(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
         replace(v, "/message/model", model.as_str());
     }
     if let Some(f) = &reply.finish {
-        FINISH.rewrite(v, "/delta/stop_reason", f);
+        FINISH.rewrite(v, "/delta/stop_reason", f)?;
     }
     for piece in &reply.content {
         if let Piece::Text { text, .. } = piece {
@@ -1162,7 +1168,7 @@ impl Encoder<Reply> for EventStream {
             Some(held) if !held.is_empty() => out.extend_from_slice(&held),
             _ => {
                 let finish = self.so_far.finish.as_ref().unwrap_or(&Finish::Stop);
-                let reason = FINISH.reason(finish);
+                let reason = FINISH.reason(finish)?;
                 let delta = json!({ "stop_reason": reason, "stop_sequence": null });
                 let usage = AnthropicMessages::usage_body(&self.so_far.usage);
                 let v = json!({ "type": "message_delta", "delta": delta, "usage": usage });

@@ -571,7 +571,9 @@ send its next message.
 Examples are workspace members using only public APIs. Every runnable example
 has tests under `examples/tests/` that run with `cargo test --workspace`.
 Provider scenarios use the pinned `mockllm` fakes over real HTTP, with explicit
-request counts. Exact byte splits, malformed input, pending streams, injected
+request counts. Generated tool-call, text, usage and native reasoning responses
+supplement hand-authored wire events; named-model cases exercise the fake's
+request validation. Exact byte splits, malformed input, pending streams, injected
 faults and lifetime probes use small private in-process fixtures where a network
 would obscure the contract. Source-only helpers under `tests/support/` build
 requests and record hooks; they are not a public transport-mocking framework.
@@ -601,4 +603,5 @@ boundaries. Build public documentation with
 | Byte-exact relay and credential isolation | Provider `relay`, `translate`; HTTP rules; WS credentials tests. |
 | Synchronous raw/value/live preparation, explicit response opening and offline encoding | HTTP binding and framing tests; formats and custom-format examples. |
 | Edited usage totals, SSE envelopes and bounded content provenance | Provider unit tests and `translate`; text filtering suites. |
+| Supported text/tool block order and explicit failure for unrepresentable finish reasons | Provider unit tests and generated-mock `translate` cases. |
 | WS backpressure, closure and handshake behavior | WebSocket integration, Axum adapter and HTTP driver tests. |

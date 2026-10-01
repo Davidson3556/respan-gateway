@@ -436,6 +436,10 @@ impl Calls {
         self.0.is_empty()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
     /// As OpenAI's `tool_calls`.
     pub(crate) fn openai(&self) -> Vec<Value> {
         let call = |c: &Pending| {

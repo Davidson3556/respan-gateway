@@ -404,8 +404,16 @@ impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         end.clone()?;
         let replies = std::mem::take(&mut self.replies);
-        let own = replies.iter().find_map(|r| r.came_in(W::NAME));
-        let body = match own.filter(|_| self.relayed) {
+        // An SSE event is not a whole JSON message, even when both ends use
+        // the same format. Reframing those events must render their values.
+        let own = replies
+            .iter()
+            .find_map(|r| r.came_in(W::NAME))
+            .filter(|_| self.relayed)
+            .filter(|o| {
+                serde_json::from_slice::<Value>(&o.bytes).is_ok_and(|v| W::is_response(&v))
+            });
+        let body = match own {
             Some(o) if replies.len() == 1 && o.said == replies[0] => o.bytes.clone(),
             Some(o) => rebuild_whole::<W>(&o.bytes, &o.said, &merged(&replies))?,
             None => {
@@ -508,6 +516,13 @@ pub(crate) fn join(content: Vec<Piece>) -> Vec<Piece> {
     joined
 }
 
+/// The first encounter of a text block or tool call in an accumulated reply.
+#[derive(Debug)]
+pub(crate) enum Encounter {
+    Text(u32),
+    Call(usize),
+}
+
 /// What a response written from replies has written so far.
 #[derive(Debug, Default)]
 pub(crate) struct SoFar {
@@ -519,6 +534,8 @@ pub(crate) struct SoFar {
     pub(crate) text: BTreeMap<u32, String>,
     /// Tool calls, in the order they were made.
     pub(crate) calls: Calls,
+    /// Content order for formats with ordered text and tool blocks.
+    pub(crate) encounters: Vec<Encounter>,
     pub(crate) finish: Option<Finish>,
     pub(crate) usage: Usage,
 }
@@ -544,12 +561,19 @@ impl SoFar {
                 // Some providers refuse an empty text block.
                 Piece::Text { text, .. } if text.is_empty() => {}
                 Piece::Text { block, text, .. } => {
-                    self.text.entry(*block).or_default().push_str(text)
+                    if !self.text.contains_key(block) {
+                        self.encounters.push(Encounter::Text(*block));
+                    }
+                    self.text.entry(*block).or_default().push_str(text);
                 }
                 Piece::Other { format, raw, .. } => match fragments(format, raw) {
                     Some(all) => {
                         for fragment in all {
+                            let before = self.calls.len();
                             self.calls.add(fragment)?;
+                            if self.calls.len() > before {
+                                self.encounters.push(Encounter::Call(before));
+                            }
                         }
                     }
                     None => return Err(unwritable_content()),
@@ -977,7 +1001,11 @@ pub(crate) fn stop_json(stop: &[String]) -> Option<Value> {
 
 /// A format's names for a conversation type's values; the first of several
 /// is written.
-pub(crate) struct Names<T: 'static>(pub &'static [(&'static str, T)]);
+pub(crate) struct Names<T: 'static>(
+    pub &'static [(&'static str, T)],
+    /// Native reasons that are not equivalent to another format's finish.
+    pub &'static [&'static str],
+);
 
 impl<T: PartialEq + Clone> Names<T> {
     /// The value `name` means, if it is one of these.
@@ -1001,18 +1029,28 @@ impl Names<Finish> {
             .unwrap_or_else(|| Finish::Other(reason.to_owned()))
     }
 
-    /// A [`Finish`] as the provider's reason, else a plain stop.
-    pub(crate) fn reason(&self, finish: &Finish) -> &'static str {
-        let stop = || self.name(&Finish::Stop);
-        self.name(finish).or_else(stop).unwrap_or("stop")
+    /// A [`Finish`] as a known destination reason. An unrecognized native
+    /// reason has no translation to a normal stop.
+    pub(crate) fn reason<'a>(&self, finish: &'a Finish) -> Result<&'a str, Fault> {
+        match finish {
+            Finish::Other(reason) if self.1.contains(&reason.as_str()) => Ok(reason),
+            Finish::Other(_) => Err(unwritable_content()),
+            _ => self.name(finish).ok_or_else(unwritable_content),
+        }
     }
 
     /// Write `finish` at `pointer` if it is there and means otherwise.
-    pub(crate) fn rewrite(&self, v: &mut Value, pointer: &str, finish: &Finish) {
+    pub(crate) fn rewrite(
+        &self,
+        v: &mut Value,
+        pointer: &str,
+        finish: &Finish,
+    ) -> Result<(), Fault> {
         let now = v.pointer(pointer).and_then(Value::as_str);
         if now.is_some_and(|r| self.finish(r) != *finish) {
-            replace(v, pointer, self.reason(finish));
+            replace(v, pointer, self.reason(finish)?);
         }
+        Ok(())
     }
 }
 
@@ -1264,6 +1302,224 @@ mod tests {
                         }
                         (finite, live) => panic!("finite/live mismatch: {finite:?} / {live:?}"),
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_context_window_finish_survives_reframing_but_not_translation() {
+        let request =
+            |stream| http::Request::new(Bytes::from(json!({"stream": stream}).to_string()));
+        let call = http::Request::new(()).into_parts().0;
+        let native = "model_context_window_exceeded";
+        let unary = json!({
+            "id": "m", "type": "message", "role": "assistant", "model": "claude-x",
+            "content": [{"type": "text", "text": "partial"}],
+            "stop_reason": native,
+            "usage": {"input_tokens": 4, "output_tokens": 2}
+        });
+        let as_unary = http::Response::new(Bytes::from(unary.to_string()));
+        let replies = AnthropicMessages
+            .decode_response(as_unary, &call)
+            .expect("decode unary");
+        let framed = AnthropicMessages
+            .encode_response(&request(true), &replies)
+            .expect("SSE");
+        let body = String::from_utf8_lossy(framed.body());
+        assert!(
+            body.contains(&format!("\"stop_reason\":\"{native}\"")),
+            "{body}"
+        );
+        assert!(
+            OpenAiChat
+                .encode_response(&request(false), &replies)
+                .is_err()
+        );
+
+        let sse = format!(
+            "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"model\":\"claude-x\",\"usage\":{{\"input_tokens\":4,\"output_tokens\":0}}}}}}\n\n\
+             event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+             event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"partial\"}}}}\n\n\
+             event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+             event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{native}\"}},\"usage\":{{\"output_tokens\":2}}}}\n\n\
+             event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+        );
+        let mut head = http::Response::new(()).into_parts().0;
+        head.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        let replies = AnthropicMessages
+            .decode_response(http::Response::from_parts(head, sse.into()), &call)
+            .expect("decode SSE");
+        let framed = AnthropicMessages
+            .encode_response(&request(false), &replies)
+            .expect("unary");
+        let body: Value = serde_json::from_slice(framed.body()).expect("reframed unary JSON");
+        assert_eq!(body["stop_reason"], native);
+        assert!(
+            OpenAiChat
+                .encode_response(&request(false), &replies)
+                .is_err()
+        );
+
+        let unknown = Reply::finished(Finish::Other("unrecognized_native_finish".into()));
+        assert!(
+            AnthropicMessages
+                .encode_response(&request(false), &[unknown])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn anthrope_sse_to_unary_keeps_text_tool_text_and_tool_text_order() {
+        let request = http::Request::new(Bytes::from_static(b"{\"stream\":false}"));
+        let call = http::Request::new(()).into_parts().0;
+        for (parts, expected) in [
+            (
+                vec![
+                    json!({"type":"text","text":"before"}),
+                    json!({"type":"tool_use","id":"t","name":"lookup","input":{"q":"a"}}),
+                    json!({"type":"text","text":"after"}),
+                ],
+                vec!["text", "tool_use", "text"],
+            ),
+            (
+                vec![
+                    json!({"type":"tool_use","id":"t","name":"lookup","input":{"q":"a"}}),
+                    json!({"type":"text","text":"after"}),
+                ],
+                vec!["tool_use", "text"],
+            ),
+        ] {
+            let mut events = vec![
+                json!({"type":"message_start","message":{"id":"m","model":"claude-x","usage":{"input_tokens":3,"output_tokens":0}}}),
+            ];
+            for (index, part) in parts.iter().enumerate() {
+                events.push(json!({"type":"content_block_start","index":index,"content_block": match part["type"].as_str() {
+                    Some("text") => json!({"type":"text","text":""}),
+                    _ => json!({"type":"tool_use","id":part["id"],"name":part["name"],"input":{}}),
+                }}));
+                let delta = match part["type"].as_str() {
+                    Some("text") => json!({"type":"text_delta","text":part["text"]}),
+                    _ => {
+                        json!({"type":"input_json_delta","partial_json":part["input"].to_string()})
+                    }
+                };
+                events.push(json!({"type":"content_block_delta","index":index,"delta":delta}));
+                events.push(json!({"type":"content_block_stop","index":index}));
+            }
+            events.extend([
+                json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}),
+                json!({"type":"message_stop"}),
+            ]);
+            let body: String = events
+                .iter()
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect();
+            let mut head = http::Response::new(()).into_parts().0;
+            head.headers
+                .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+            let replies = AnthropicMessages
+                .decode_response(http::Response::from_parts(head, body.into()), &call)
+                .expect("decode SSE");
+            let rendered = AnthropicMessages
+                .encode_response(&request, &replies)
+                .expect("render unary");
+            let rendered: Value = serde_json::from_slice(rendered.body()).expect("JSON answer");
+            let content = rendered["content"].as_array().expect("blocks");
+            let types: Vec<_> = content.iter().filter_map(|b| b["type"].as_str()).collect();
+            assert_eq!(types, expected);
+            assert_eq!(
+                rendered["usage"],
+                json!({"input_tokens":3,"output_tokens":2})
+            );
+            assert_eq!(rendered["stop_reason"], "tool_use");
+            let texts: Vec<_> = content.iter().filter_map(|b| b["text"].as_str()).collect();
+            assert_eq!(
+                texts,
+                if parts.len() == 3 {
+                    vec!["before", "after"]
+                } else {
+                    vec!["after"]
+                }
+            );
+            let tool = content
+                .iter()
+                .find(|b| b["type"] == "tool_use")
+                .expect("tool");
+            assert_eq!(tool["input"], json!({"q":"a"}));
+        }
+    }
+
+    #[tokio::test]
+    async fn non_success_sse_is_a_whole_refusal_in_finite_and_live_reads() {
+        use respan_gateway_sdk::futures::{TryStreamExt, stream};
+        let cases = [
+            (
+                false,
+                "openai-chat",
+                "{\"error\":{\"type\":\"requests\",\"message\":\"slow down\"}}",
+            ),
+            (
+                true,
+                "anthropic-messages",
+                "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}",
+            ),
+        ];
+        let call = http::Request::new(Bytes::new());
+        for (anthropic, name, body) in cases {
+            let successful_sse = if anthropic {
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            } else {
+                "data: {\"id\":\"c\",\"model\":\"gpt-x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+            };
+            for body in [
+                body,
+                successful_sse,
+                "event: error\ndata: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}\n\n",
+            ] {
+                let mut response = http::Response::new(Bytes::from(body.to_owned()));
+                *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+                response
+                    .headers_mut()
+                    .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+                response
+                    .headers_mut()
+                    .insert("retry-after", HeaderValue::from_static("7"));
+                let finite = if anthropic {
+                    AnthropicMessages
+                        .decode_response(response.clone(), &call.clone().into_parts().0)
+                } else {
+                    OpenAiChat.decode_response(response.clone(), &call.clone().into_parts().0)
+                }
+                .expect_err("non-success must not decode as successful SSE");
+                let (head, bytes) = response.into_parts();
+                let live = http::Response::from_parts(
+                    head,
+                    Body::stream(stream::iter([Ok(bytes.clone())])),
+                );
+                let live = if anthropic {
+                    AnthropicMessages.read_response(live, call.clone())
+                } else {
+                    OpenAiChat.read_response(live, call.clone())
+                }
+                .try_collect::<Vec<_>>()
+                .await
+                .expect_err("non-success must refuse");
+                for fault in [finite, live] {
+                    assert_eq!(fault.get::<Status>().map(|s| s.0), Some(429));
+                    assert_eq!(fault.retry_after(), Some(std::time::Duration::from_secs(7)));
+                    assert_eq!(
+                        fault
+                            .answer::<http::Response<Bytes>>(name)
+                            .map(|a| a.body().clone()),
+                        Some(bytes.clone())
+                    );
                 }
             }
         }
