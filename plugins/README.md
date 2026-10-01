@@ -25,8 +25,8 @@ HTTP's `watchdog(transport, head, idle)` lives in the HTTP protocol module; it b
 transport's head wait and polled per-frame body gaps. Other transports can
 choose a different classifier without importing HTTP.
 
-Used by: [fallback](../examples/fallback.rs),
-[attachments](../examples/attachments.rs).
+Used by: [fallback](../examples/routing/fallback.rs),
+[attachments](../examples/integrations/attachments.rs).
 
 Billing is application policy, not a supported plugin export or SDK. See
 [the billing examples](../examples/README.md#billing-policies) for pricing,

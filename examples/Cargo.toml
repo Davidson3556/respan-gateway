@@ -48,117 +48,117 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 [[example]]
 name = "billing"
-path = "billing.rs"
+path = "billing/billing.rs"
 test = true
 
 [[example]]
 name = "logging"
-path = "logging.rs"
+path = "policies/logging.rs"
 test = true
 
 [[example]]
 name = "guardrail"
-path = "guardrail.rs"
+path = "policies/guardrail.rs"
 test = true
 
 [[example]]
 name = "pii"
-path = "pii.rs"
+path = "policies/pii.rs"
 test = true
 
 [[example]]
 name = "fallback"
-path = "fallback.rs"
+path = "routing/fallback.rs"
 test = true
 
 [[example]]
 name = "cost_cap"
-path = "cost_cap.rs"
+path = "billing/cost_cap.rs"
 test = true
 
 [[example]]
 name = "wallet"
-path = "wallet.rs"
+path = "billing/wallet.rs"
 test = true
 
 [[example]]
 name = "mcp_proxy"
-path = "mcp_proxy.rs"
+path = "integrations/mcp_proxy.rs"
 test = true
 
 [[example]]
 name = "custom_format"
-path = "custom_format.rs"
+path = "integrations/custom_format.rs"
 test = true
 
 [[example]]
 name = "custom_transport"
-path = "custom_transport.rs"
+path = "integrations/custom_transport.rs"
 test = true
 
 [[example]]
 name = "judge"
-path = "judge.rs"
+path = "routing/judge.rs"
 test = true
 
 [[example]]
 name = "attachments"
-path = "attachments.rs"
+path = "integrations/attachments.rs"
 test = true
 
 [[example]]
 name = "admission"
-path = "admission.rs"
+path = "policies/admission.rs"
 test = true
 
 [[example]]
 name = "tenants"
-path = "tenants.rs"
+path = "policies/tenants.rs"
 test = true
 
 [[example]]
 name = "embedded"
-path = "embedded.rs"
+path = "hosting/embedded.rs"
 test = true
 
 [[example]]
 name = "local_proxy"
-path = "local_proxy.rs"
+path = "hosting/local_proxy.rs"
 test = true
 
 [[example]]
 name = "jobs"
-path = "jobs.rs"
+path = "jobs/jobs.rs"
 test = true
 
 [[example]]
 name = "realtime"
-path = "realtime.rs"
+path = "realtime/realtime.rs"
 test = true
 
 [[example]]
 name = "gemini_live"
-path = "gemini_live.rs"
+path = "realtime/gemini_live.rs"
 test = true
 
 [[example]]
 name = "responses_ws"
-path = "responses_ws.rs"
+path = "realtime/responses_ws.rs"
 test = true
 
 [[example]]
 name = "batch_split"
-path = "batch_split.rs"
+path = "routing/batch_split.rs"
 test = true
 
 [[example]]
 name = "models_merge"
-path = "models_merge.rs"
+path = "routing/models_merge.rs"
 test = true
 
 [[example]]
 name = "jobs_background"
-path = "jobs_background.rs"
+path = "jobs/jobs_background.rs"
 test = true
 
 [[test]]

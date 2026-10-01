@@ -1046,7 +1046,7 @@ fn a_bodiless_answer_whose_body_never_settles_does_not_hold_the_adapter() {
 }
 
 /// A job handed to the gateway through the HTTP adapter (as
-/// `examples/jobs_background.rs` does) from an end hook: `serve` is called
+/// `examples/jobs/jobs_background.rs` does) from an end hook: `serve` is called
 /// in the hook and its future awaited in the job's task. `idle` waits for
 /// the job's request, however the task is scheduled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

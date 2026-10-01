@@ -100,4 +100,4 @@ body alone does not turn a finite request into a session. Where that shows:
   clean, then the response is read to its end and dropped unsent, because a
   connection that is closing cannot send.
 
-Used by: [realtime](../examples/realtime.rs).
+Used by: [realtime](../examples/realtime/realtime.rs).

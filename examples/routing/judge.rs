@@ -24,10 +24,10 @@ use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 #[allow(dead_code)]
-#[path = "tests/support.rs"]
+#[path = "../tests/support.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
 
@@ -155,5 +155,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/judge.rs"]
+#[path = "../tests/judge.rs"]
 mod tests;

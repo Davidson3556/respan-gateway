@@ -27,20 +27,20 @@ use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_http::Status;
 use respan_gateway_sdk::{Fault, Filter, Gateway, Plugin, ProviderContext, async_trait};
-#[path = "billing/ledger.rs"]
+#[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::conversation::{Conversation, Piece, Reply, units};
-#[path = "billing/accounting.rs"]
+#[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
 use respan_gateway_providers::OpenAiChat;
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 #[allow(dead_code)]
-#[path = "tests/support.rs"]
+#[path = "../tests/support.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
 
@@ -230,5 +230,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/cost_cap.rs"]
+#[path = "../tests/cost_cap.rs"]
 mod tests;

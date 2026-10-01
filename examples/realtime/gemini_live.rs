@@ -5,16 +5,16 @@
 //! Configure MODEL and MODEL_INPUT_LIMIT for the model's complete input bound.
 //! Sessions end after 30 minutes, before the one-hour hold expires.
 //! Protocol: https://ai.google.dev/api/live
-#[path = "live/budget.rs"]
+#[path = "../support/live/budget.rs"]
 mod budget;
-#[path = "live/serve.rs"]
+#[path = "../support/live/serve.rs"]
 mod serve;
 use budget::{Budget, OUTPUT};
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
 use respan_gateway_sdk::{
     ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
 };
-#[path = "billing/ledger.rs"]
+#[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
@@ -163,5 +163,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #[cfg(test)]
-#[path = "tests/gemini_live.rs"]
+#[path = "../tests/gemini_live.rs"]
 mod tests;

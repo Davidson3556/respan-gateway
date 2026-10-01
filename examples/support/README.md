@@ -1,8 +1,14 @@
-# Private text support
+# Private example support
 
-`text.rs` is a private source module shared by the guardrail, PII and realtime
-examples, not a library or SDK API. Its four regression suites are explicit
-`respan-gateway-examples` test targets (`text_*`).
+These are source modules included by the runnable examples, not library or SDK
+APIs: `billing/` holds accounting and ledger policies, `jobs/` holds worker and
+store implementations, `live/` holds WebSocket serving, budget and test
+helpers, and `realtime/` holds audio handling. See the
+[example index](../README.md) for their runnable entrypoints.
+
+`text.rs` is shared by the guardrail, PII and realtime examples. Its four
+regression suites are explicit `respan-gateway-examples` test targets
+(`text_*`).
 
 Read and rewrite the chat kind's text safely across stream deltas, and
 refuse what cannot be read.
@@ -33,4 +39,4 @@ make many); an edit of a bare number in a streamed tool-argument fragment, which
 unquoted. Anthropic tool inputs and text tool results are readable in
 requests; a tool result containing an image or another opaque payload is refused.
 
-Used by: [guardrail](../../examples/guardrail.rs), [pii](../../examples/pii.rs), [realtime](../../examples/realtime.rs).
+Used by: [guardrail](../policies/guardrail.rs), [pii](../policies/pii.rs), [realtime](../realtime/realtime.rs).

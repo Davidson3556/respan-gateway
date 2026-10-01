@@ -52,12 +52,12 @@ use respan_gateway_sdk::{
     ClientContext, EventStream, Extensions, Fault, Gateway, Plugin, Response, async_trait,
 };
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{read_whole, serve};
 use serde_json::{Value, json};
 
-#[path = "background_worker.rs"]
+#[path = "../support/jobs/background_worker.rs"]
 mod worker;
 
 /// The Responses API as a format: its input is the request as it came, so
@@ -742,9 +742,9 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/jobs_background.rs"]
+#[path = "../tests/jobs_background.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "tests/background_durable.rs"]
+#[path = "../tests/background_durable.rs"]
 mod durable_tests;

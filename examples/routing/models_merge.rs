@@ -31,7 +31,7 @@ use respan_gateway_sdk::{
     ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{read_whole, serve};
 use serde_json::{Value, json};
@@ -271,5 +271,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/models_merge.rs"]
+#[path = "../tests/models_merge.rs"]
 mod tests;

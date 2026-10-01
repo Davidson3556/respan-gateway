@@ -19,4 +19,4 @@ that keep their bytes, so an unedited message relays byte for byte.
   `NO_SESSION` (404), `BUSY` (409), `TOO_MANY_SESSIONS` (503).
 - `error(id, code, message)`: a JSON-RPC error.
 
-Used by: [mcp_proxy](../examples/mcp_proxy.rs).
+Used by: [mcp_proxy](../examples/integrations/mcp_proxy.rs).

@@ -15,19 +15,19 @@ use respan_gateway_http::Credential;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_sdk::{Fault, Gateway, ProviderContext, futures};
-#[path = "billing/ledger.rs"]
+#[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
 use respan_gateway_sdk::conversation::{Conversation, Reply};
-#[path = "billing/accounting.rs"]
+#[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
 use respan_gateway_providers::OpenAiChat;
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 #[allow(dead_code)]
-#[path = "tests/support.rs"]
+#[path = "../tests/support.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
 
@@ -160,17 +160,17 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/wallet.rs"]
+#[path = "../tests/wallet.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "tests/ledger.rs"]
+#[path = "../tests/ledger.rs"]
 mod ledger_tests;
 
 #[cfg(test)]
-#[path = "tests/accounting.rs"]
+#[path = "../tests/accounting.rs"]
 mod accounting_tests;
 
 #[cfg(test)]
-#[path = "tests/accounting_wire.rs"]
+#[path = "../tests/accounting_wire.rs"]
 mod accounting_wire_tests;

@@ -90,9 +90,9 @@ integration dependencies, not plugin SDK crates.
 The SDK supplies contracts and message types, not production `Plugin`
 implementations. Those live in `plugins/` or application/example code. Billing
 is application policy, not a supported SDK or first-party plugin API.
-`examples/billing/accounting.rs` owns `Accounting`, `Quote`, priced `Tally` and
+`examples/support/billing/accounting.rs` owns `Accounting`, `Quote`, priced `Tally` and
 conservative charging for refusals, failures and cancellation.
-`examples/billing/ledger.rs` supplies only private example-local reservations and
+`examples/support/billing/ledger.rs` supplies only private example-local reservations and
 settlement, shared by wallet, cost-cap and realtime examples through source
 modules, not exported by the examples library. Applications own prices,
 accounts, durable persistence and settlement recovery; expiry releases a
@@ -247,7 +247,7 @@ accepts a native `http::Request<Body>` and returns a native
 `http::Response<Body>` plus optional write completion. Backends can share their
 connection pools without sharing an attempt's binding state. An in-process
 model uses a cloned shared model handle as its per-call I/O
-([example](../examples/custom_transport.rs)). Constructing and binding I/O
+([example](../examples/integrations/custom_transport.rs)). Constructing and binding I/O
 performs no network work; synchronous preparation sets up the sink, and polling
 the stream-to-sink pump drives delivery.
 

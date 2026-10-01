@@ -16,7 +16,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example guardrail`
 
-#[path = "support/text.rs"]
+#[path = "../support/text.rs"]
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
@@ -30,10 +30,10 @@ use respan_gateway_sdk::futures::stream;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
 use respan_gateway_sdk::{Response, async_trait};
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 #[allow(dead_code)]
-#[path = "tests/support.rs"]
+#[path = "../tests/support.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
 use serde_json::{Value, json};
@@ -216,5 +216,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/guardrail.rs"]
+#[path = "../tests/guardrail.rs"]
 mod tests;

@@ -21,7 +21,7 @@ use respan_gateway_mcp::{
     self as mcp, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer,
 };
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 
@@ -225,5 +225,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/mcp_proxy.rs"]
+#[path = "../tests/mcp_proxy.rs"]
 mod tests;

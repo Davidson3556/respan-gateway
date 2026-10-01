@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
-#[path = "../live/test.rs"]
+#[path = "../support/live/test.rs"]
 mod support;
 use support::*;
 fn configured(balance: i64) -> Sessions {

@@ -5,16 +5,16 @@
 //! Sessions end after 30 minutes, before the one-hour hold expires.
 //! Unknown fields and previous_response_id pass through. A socket failure never replays a turn.
 //! Protocol: https://developers.openai.com/api/docs/guides/websocket-mode
-#[path = "live/budget.rs"]
+#[path = "../support/live/budget.rs"]
 mod budget;
-#[path = "live/serve.rs"]
+#[path = "../support/live/serve.rs"]
 mod serve;
 use budget::{Budget, OUTPUT};
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
 use respan_gateway_sdk::{
     ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
 };
-#[path = "billing/ledger.rs"]
+#[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
 use respan_gateway_ws::{ClientEvent, JsonEvents, ProviderEvent, WsTransport};
@@ -137,5 +137,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #[cfg(test)]
-#[path = "tests/responses_ws.rs"]
+#[path = "../tests/responses_ws.rs"]
 mod tests;

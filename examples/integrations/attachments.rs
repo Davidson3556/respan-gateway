@@ -64,11 +64,11 @@ use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
-#[path = "tests/support.rs"]
+#[path = "../tests/support.rs"]
 mod provider_support;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -737,7 +737,7 @@ async fn main() -> Result<(), Fault> {
         };
         let request = REQUEST.replace(
             "JVBERi0xLjcKJcfsj6IKMSAwIG9iago=",
-            include_str!("fixtures/report.pdf.b64"),
+            include_str!("../fixtures/report.pdf.b64"),
         );
         let status = send(&gw, "acme", &request).await;
         for sent in fixture
@@ -757,5 +757,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/attachments.rs"]
+#[path = "../tests/attachments.rs"]
 mod tests;

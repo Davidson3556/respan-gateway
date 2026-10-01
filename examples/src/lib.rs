@@ -1,5 +1,5 @@
-//! Helpers the examples share. The runnable examples live next to this crate
-//! as `examples/<name>.rs`; run one with
+//! Shared helpers for the topic-grouped examples in `examples/README.md`.
+//! Run one with
 //! `cargo run -p respan-gateway-examples --example <name>`. Each has tests that
 //! `cargo test` runs; see `examples/README.md` for the list.
 

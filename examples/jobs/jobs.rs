@@ -43,16 +43,16 @@ use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
-#[path = "tests/support.rs"]
+#[path = "../tests/support.rs"]
 mod provider_support;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-#[path = "jobs_store.rs"]
+#[path = "../support/jobs/jobs_store.rs"]
 mod persistent;
 use persistent::Sqlite;
 
@@ -418,5 +418,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/jobs.rs"]
+#[path = "../tests/jobs.rs"]
 mod tests;

@@ -100,5 +100,5 @@ async fn main() -> Result<(), Fault> {
 const ANSWER: &str = r#"{"id":"c1","object":"chat.completion","model":"gpt-4o-mini","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;
 
 #[cfg(test)]
-#[path = "tests/embedded.rs"]
+#[path = "../tests/embedded.rs"]
 mod tests;

@@ -37,11 +37,11 @@ use respan_gateway_http::http::{self, HeaderValue, header::RETRY_AFTER};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
-#[path = "tests/support.rs"]
+#[path = "../tests/support.rs"]
 mod provider_support;
 use tokio::time::Instant;
 
@@ -233,5 +233,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/admission.rs"]
+#[path = "../tests/admission.rs"]
 mod tests;

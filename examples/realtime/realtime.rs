@@ -63,10 +63,10 @@
 //!
 //! `cargo run -p respan-gateway-examples --example realtime`
 
-#[path = "realtime/audio.rs"]
+#[path = "../support/realtime/audio.rs"]
 mod audio;
 
-#[path = "support/text.rs"]
+#[path = "../support/text.rs"]
 mod text;
 
 use std::collections::{HashMap, VecDeque};
@@ -80,7 +80,7 @@ use respan_gateway_sdk::{
     ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
     async_trait,
 };
-#[path = "billing/ledger.rs"]
+#[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
@@ -1020,5 +1020,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "tests/realtime.rs"]
+#[path = "../tests/realtime.rs"]
 mod tests;

@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 use serde_json::Value;
-#[path = "../live/test.rs"]
+#[path = "../support/live/test.rs"]
 mod support;
 use support::*;
 #[tokio::test]

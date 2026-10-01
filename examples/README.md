@@ -1,104 +1,85 @@
 # Examples
 
-Each example is one file that reads top to bottom as the code to copy. Most
-`main` functions run offline against a mock provider; `gemini_live` and
-`responses_ws` serve real providers using environment credentials. Their tests, in
-`tests/<name>.rs`, check the promise it makes. `src/lib.rs` holds the helpers
-the examples share.
+Runnable examples are grouped by topic below. Each is an explicit Cargo target
+with tests in [`tests/`](tests/); private source modules live in
+[`support/`](support/) and shared library helpers remain in [`src/`](src/).
+Use case numbers refer to [the use-case guide](../docs/use-cases.md).
+
+Run from the repository root (replace `wallet` with any target name below):
 
 ```bash
 cargo run -p respan-gateway-examples --example wallet
-cargo test -p respan-gateway-examples
+cargo test -p respan-gateway-examples --all-targets
+cargo test -p respan-gateway-examples --example wallet
 ```
 
-Use case numbers refer to [docs/use-cases.md](../docs/use-cases.md).
+Most examples run offline with scripted/local providers. **`gemini_live` and
+`responses_ws` are live-provider servers:** running them needs credentials and
+can incur provider charges; their automated tests use local scripted sockets
+and do not need credentials or make paid requests.
 
-| Example | Use cases | What it shows |
+| Topic | Example | Demonstrates |
 | --- | --- | --- |
-| [attachments](attachments.rs) | 1 | Killable, bounded PDF extraction; tenant/SHA-256 SQLite cache with deletion fencing; metadata-checked stored files fetched under the tenant's key; per-attempt conversion facts and native PDF fallback. The HTTP adapter supports per-route body limits. |
-| [pii](pii.rs) | 2 | E-mail addresses hidden in every call's input and restored across stream deltas, tool-call arguments included. |
-| [guardrail](guardrail.rs) | 3 | A term list no request skips: every response the client gets and every call's input. |
-| [batch_split](batch_split.rs) | 4 | Bounded concurrent embedding chunks, individual transient retries, index-checked merge and summed usage. |
-| [models_merge](models_merge.rs) | 4 | `GET /v1/models` answered by merging every provider's list, each asked under its own key. |
-| [fallback](fallback.rs) | 4, 6 | Retry with `Retry-After`, fallback to another format, a hedged race, a stall watchdog. |
-| [judge](judge.rs) | 5 | A plugin that asks a small model to pick the target, as a subrequest. |
-| [mcp_proxy](mcp_proxy.rs) | 7 (MCP part) | MCP over streamable HTTP with a tool allow-list; optionally a stdio server. |
-| [realtime](realtime.rs) | 7 | OpenAI Realtime text and explicitly permitted audio: per-turn usage, duration-based audio reservations, output caps, cancellation settlement, text PII filtering that refuses opaque audio, and session deadlines. Separately billed transcription is refused in capped mode. |
-| [gemini_live](gemini_live.rs) | 7 | Gemini setup, text/audio turns with explicit activity boundaries, tool and resumption events, per-turn usage, reservations, interruptions, and graceful shutdown. |
-| [responses_ws](responses_ws.rs) | 7 | Responses over WebSocket: independent named lanes, continuation IDs, warmup, output caps, per-turn usage and cancellation settlement, and graceful shutdown. |
-| [jobs](jobs.rs) | 8 | Durable idempotency through SQLite, crash leases, stable provider idempotency keys, tenant-isolated replay and lease-loss cancellation. |
-| [jobs_background](jobs_background.rs) | 8 | Durable background Responses jobs, signed deployment IDs, restart recovery, cancellation, budget holds and a retryable completion-webhook outbox. Streaming remains unsupported. |
-| [wallet](wallet.rs) | 9 (and 4) | Nested prepaid wallets; fifty parallel requests never overspend $1; the loser of a hedge pays at least its hold. |
-| [cost_cap](cost_cap.rs) | 9 | A per-call cost cap: bound `max_tokens`, hold it, cut a runaway stream, settle. |
-| [admission](admission.rs) | 10 | Weighted fair turns within priority, shared across processes through SQLite; deadlines, cancellation and renewable crash leases; 429 with `Retry-After` when admission expires. |
-| [logging](logging.rs) | 11 | Request logs to a sink you choose; a zero-retention tenant stores no content. |
-| [local_proxy](local_proxy.rs) | 12 | A pass-through Anthropic proxy for Claude Code, byte for byte (the binary's `proxy` command is the no-config version). |
-| [tenants](tenants.rs) | 13 | Versioned tenant config edited while requests run; per-tenant provider keys. |
-| [embedded](embedded.rs) | 14 | The gateway as a library in another Rust service. |
-| [billing](billing.rs) | - | Price each call's usage from your table into your store. |
-| [custom_format](custom_format.rs) | - | Add a protocol (OpenAI embeddings) as a kind and direct `Format` implementations over owned HTTP messages. |
-| [custom_transport](custom_transport.rs) | - | A model in this process as a dial-only provider `Format`, no bytes. |
+| Policies | [admission](policies/admission.rs) | Weighted fair admission, deadlines and crash leases (use case 10). |
+| | [guardrail](policies/guardrail.rs) | Check every request and response against a term list (3). |
+| | [logging](policies/logging.rs) | Request logs and zero-retention tenants (11). |
+| | [pii](policies/pii.rs) | Redaction and restoration across streaming text and tool calls (2). |
+| | [tenants](policies/tenants.rs) | Hot-reloaded tenant config and per-tenant keys (13). |
+| Routing | [batch_split](routing/batch_split.rs) | Bounded concurrent embedding chunks, retries and usage merge (4). |
+| | [fallback](routing/fallback.rs) | Retry, fallback, hedging and stall watchdogs (4, 6). |
+| | [judge](routing/judge.rs) | A model-selecting subrequest (5). |
+| | [models_merge](routing/models_merge.rs) | Merge provider model lists using their respective keys (4). |
+| Billing | [billing](billing/billing.rs) | Price each call's usage into an application-owned store. |
+| | [cost_cap](billing/cost_cap.rs) | Reserve and settle a per-call cost cap (9). |
+| | [wallet](billing/wallet.rs) | Nested prepaid wallets and concurrent holds (9). |
+| Integrations | [attachments](integrations/attachments.rs) | Bounded PDF extraction, tenant-scoped cache and native fallback (1). |
+| | [custom_format](integrations/custom_format.rs) | Implement an embeddings protocol with `Format`. |
+| | [custom_transport](integrations/custom_transport.rs) | Bind an in-process model without HTTP bytes. |
+| | [mcp_proxy](integrations/mcp_proxy.rs) | MCP over streamable HTTP with a tool allow-list (7). |
+| Hosting | [embedded](hosting/embedded.rs) | Embed the gateway in another Rust service (14). |
+| | [local_proxy](hosting/local_proxy.rs) | Byte-exact pass-through proxy for Claude Code (12). |
+| Jobs | [jobs](jobs/jobs.rs) | SQLite-backed durable idempotency and crash leases (8). |
+| | [jobs_background](jobs/jobs_background.rs) | Durable background Responses, recovery, cancellation and webhook outbox (8). |
+| Realtime | [realtime](realtime/realtime.rs) | Metered Realtime text/audio, cancellation and output caps (7). |
+| | [gemini_live](realtime/gemini_live.rs) | Gemini Live text/audio turns, tools and shutdown (7). **Live credentials to run.** |
+| | [responses_ws](realtime/responses_ws.rs) | Responses WebSocket lanes, continuation and shutdown (7). **Live credentials to run.** |
 
 ## Billing policies
 
 Billing is application code, not a supported SDK or first-party plugin API.
-[billing](billing.rs) records priced usage without reservations;
-[wallet](wallet.rs) and [cost cap](cost_cap.rs) share private source modules in
-`billing/`, also used for reservations by the realtime examples. These modules
-are not exported by `src/lib.rs`:
+The private [accounting](support/billing/accounting.rs) module quotes each
+attempt before sending, prices generic `Usage`, and settles once; the
+[ledger](support/billing/ledger.rs) demonstrates atomic nested-account holds
+and idempotent settlement in memory, **not** durable charging or recovery.
+Register accounting last so it observes provider outputs before earlier filters
+can reject them. Unsent calls and uncut provider refusals cost nothing; sent
+calls cut off or lacking complete usage cost at least their reserve. The wallet
+target also runs ledger, accounting, wire and atomic tally tests.
 
-- [accounting.rs](billing/accounting.rs) holds each provider attempt's `Quote`
-  before sending and invokes settlement once at its end. A filter prices generic
-  message `Usage` into a shared `Tally`. Register `Accounting` last so its filter
-  sees provider outputs before earlier filters can reject them. Unsent calls and
-  uncut provider refusals cost nothing; sent calls cut off or lacking complete
-  usage cost at least their reserve. An empty account quote is refused with 401.
-- [ledger.rs](billing/ledger.rs) demonstrates atomic nested-account reservations,
-  idempotent settlement and bounded hold retention in memory. It is not a durable
-  billing store. Settlement errors do not change the response or trigger policy
-  retries; applications must provide durable charging and recovery. Hold expiry
-  releases reserved funds but cannot recover a lost charge.
+## Live provider runs
 
-The wallet target also runs the migrated ledger, accounting, non-HTTP wire and
-atomic tally tests under `tests/`, preserving concurrency, cancellation, refusal,
-TTL, late settlement and failure-recovery coverage. Run them with
-`cargo test -p respan-gateway-examples --example wallet`.
+```bash
+OPENAI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p respan-gateway-examples --example responses_ws
+GEMINI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p respan-gateway-examples --example gemini_live
+```
+
+These bind localhost ports 8081 and 8082 respectively. Choose the actual
+model's full input-context bound for `MODEL_INPUT_LIMIT`; other models are
+refused. Gemini audio clients must send `realtimeInput.activityStart` before
+audio input; automatic activity detection is disabled. Ctrl-C closes active
+sessions and awaits billing hooks. The realtime audio policy does not redact
+speech; its text-PII mode refuses opaque audio.
+Live-provider interoperability is not established by the local protocol tests.
+
+Private [text support](support/text.rs) is shared by guardrail, PII and
+realtime; the four explicit `text_*` test targets cover its reader, tool JSON
+and split-escape behavior.
 
 ## Remaining gaps
 
-- Streaming background Responses, chaining before a native ID exists, and mapping
-  arbitrary body IDs or list endpoints.
-- Tenant-wide job-content deletion and retention expiration.
-- Periodic job recovery/webhook supervision must be scheduled by the caller;
-  crash-safe external execution also depends on provider idempotency support.
-- Background multimodal or external-reference inputs need a provider-specific
-  cost quote; the example's byte/token estimate is insufficient for those inputs.
-- Signed file-upload ownership across deployments and video-specific job adapters.
-- Provider-hosted tools with no equivalent in the other chat format are refused.
-
-## Live provider examples
-
-`OPENAI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p respan-gateway-examples --example responses_ws`
-serves `/v1/responses` on localhost:8081. `GEMINI_API_KEY=... MODEL=... MODEL_INPUT_LIMIT=... cargo run -p
-respan-gateway-examples --example gemini_live` serves the Gemini Live path on
-localhost:8082. Ctrl-C closes existing sessions and waits for billing hooks.
-Each policy binds its configured model to `MODEL_INPUT_LIMIT`, the model's full
-input-context bound; client requests for other models are refused. Sessions end
-after 30 minutes, before reservation expiry. Their shared budget quote includes
-that full input bound plus the enforced output cap;
-amounts are token units, not a hard-coded currency price. Choose per-model prices
-and bounds when embedding these policies. Gemini disables automatic/proactive
-generation and requires activity boundaries for audio so the hold precedes generation.
-
-The realtime audio policy preserves waveforms; it does not redact speech. Its
-text-PII mode refuses opaque input audio. A deployment requiring speech redaction
-must transcribe, redact, and synthesize before permitting that audio path.
-Protocol tests use real local sockets and scripted providers; they do not claim
-credentialed interoperability with a live external model.
-
-## Private text support
-
-Guardrail, PII and realtime share `support/text.rs` as a private source module.
-It owns provider-aware readable-text checks, streaming holdback and placeholders;
-these are application examples, not part of the plugin SDK. The four `text_*`
-regression targets preserve the reader, tool-JSON and split-escape coverage.
+Streaming background Responses, arbitrary body-ID mapping, tenant-wide job
+content deletion/expiry and signed file-upload ownership need application
+work. Background multimodal inputs need provider-specific quotes; caller-owned
+scheduling and provider idempotency are required for crash-safe job recovery.
+Provider-hosted tools without an equivalent in the other chat format are
+refused.

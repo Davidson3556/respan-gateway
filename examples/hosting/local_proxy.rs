@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use respan_gateway_axum::router;
 use respan_gateway_http::HttpClient;
 #[allow(dead_code)]
-#[path = "../tests/support/http.rs"]
+#[path = "../../tests/support/http.rs"]
 mod http_support;
 use http_support::{post, read_whole, serve};
 
@@ -164,5 +164,5 @@ const STREAM: &[&str] = &[
 ];
 
 #[cfg(test)]
-#[path = "tests/local_proxy.rs"]
+#[path = "../tests/local_proxy.rs"]
 mod tests;
