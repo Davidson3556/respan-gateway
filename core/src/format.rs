@@ -41,8 +41,6 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
     fn name(&self) -> &str;
     /// The gateway's input and output types, whichever edge it is on.
     fn kind(&self) -> (TypeId, TypeId);
-    /// Snapshot an explicitly supplied input using its registered type.
-    fn input(&self, value: &dyn Any) -> Result<Arc<Single<Values>>>;
     fn matches(&self, io: &dyn Any) -> bool;
     fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<Values, Values>>;
 }
@@ -71,23 +69,35 @@ where
     (opening.boxed(), send)
 }
 
-/// Pins the message types and transport at registration. Only the core
-/// assigns a role; provider bindings receive outputs and send inputs.
-pub(crate) struct Erased<F, T, R, W, const PROVIDER: bool> {
+/// Pins the message types and transport at registration, which assigns the
+/// role: a client binding receives inputs and sends outputs, a provider
+/// binding receives outputs and sends inputs.
+pub(crate) struct Erased<F, T, R, W> {
     format: F,
+    /// The gateway's input and output types.
+    kind: (TypeId, TypeId),
     types: PhantomData<fn(T, R, W)>,
 }
 
-impl<F, T, R, W, const PROVIDER: bool> Erased<F, T, R, W, PROVIDER> {
-    pub(crate) fn new(format: F) -> Self {
+impl<F, T, R: 'static, W: 'static> Erased<F, T, R, W> {
+    pub(crate) fn client(format: F) -> Self {
+        Self::new(format, (TypeId::of::<R>(), TypeId::of::<W>()))
+    }
+
+    pub(crate) fn provider(format: F) -> Self {
+        Self::new(format, (TypeId::of::<W>(), TypeId::of::<R>()))
+    }
+
+    fn new(format: F, kind: (TypeId, TypeId)) -> Self {
         Self {
             format,
+            kind,
             types: PhantomData,
         }
     }
 }
 
-impl<F, T, R, W, const PROVIDER: bool> AnyFormat for Erased<F, T, R, W, PROVIDER>
+impl<F, T, R, W> AnyFormat for Erased<F, T, R, W>
 where
     F: Format<T, R, W>,
     T: Send + 'static,
@@ -98,26 +108,7 @@ where
         self.format.name()
     }
     fn kind(&self) -> (TypeId, TypeId) {
-        if PROVIDER {
-            (TypeId::of::<W>(), TypeId::of::<R>())
-        } else {
-            (TypeId::of::<R>(), TypeId::of::<W>())
-        }
-    }
-    fn input(&self, value: &dyn Any) -> Result<Arc<Single<Values>>> {
-        fn snapshot<T: Clone + Send + Sync + 'static>(
-            value: &dyn Any,
-        ) -> Result<Arc<Single<Values>>> {
-            let value = value
-                .downcast_ref::<T>()
-                .ok_or_else(Fault::wrong_kind::<T>)?;
-            Ok(Single::ready(Ok(one(value.clone())), clone_values::<T>))
-        }
-        if PROVIDER {
-            snapshot::<W>(value)
-        } else {
-            snapshot::<R>(value)
-        }
+        self.kind
     }
     fn matches(&self, io: &dyn Any) -> bool {
         io.downcast_ref::<T>()
@@ -129,6 +120,16 @@ where
             .map_err(|_| Fault::internal("a transport of another type than its format's"))?;
         self.format.bind(*io).map(erase_connection)
     }
+}
+
+/// Snapshot an explicitly supplied input of registered type `T`.
+pub(crate) fn snapshot<T: Clone + Send + Sync + 'static>(
+    value: &dyn Any,
+) -> Result<Arc<Single<Values>>> {
+    let value = value
+        .downcast_ref::<T>()
+        .ok_or_else(Fault::wrong_kind::<T>)?;
+    Ok(Single::ready(Ok(one(value.clone())), clone_values::<T>))
 }
 
 /// Whether `T` is `format`'s input type (`true`) or output type (`false`);

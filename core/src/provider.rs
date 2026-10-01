@@ -3,17 +3,21 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
+use crate::events::Single;
 use crate::format::{AnyFormat, is_input};
 use crate::input::Input;
 use crate::leg::{Layer, locked};
 use crate::lifecycle::{Edge, InFlight, InFlightGuard, Latch};
 use crate::plugin::Filters;
+use crate::values::Values;
 use crate::{ClientContext, Extensions, Filter, Plugin, Result};
 
 /// A provider the gateway can call: a format and a fresh-transport factory.
 #[derive(Clone)]
 pub(crate) struct Provider {
     pub(crate) format: Arc<dyn AnyFormat>,
+    /// Snapshots a call's own input with the registered input type's `Clone`.
+    pub(crate) snapshot: fn(&dyn Any) -> Result<Arc<Single<Values>>>,
     pub(crate) factory: Arc<dyn Fn(Extensions) -> Box<dyn Any + Send> + Send + Sync>,
 }
 

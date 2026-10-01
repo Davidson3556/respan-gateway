@@ -156,7 +156,7 @@ mod tests {
             text: "before".into(),
             copies: copies.clone(),
         };
-        let format = Arc::new(Erased::<_, (), Counted, (), false>::new(Protocol));
+        let format = Arc::new(Erased::<_, (), Counted, ()>::client(Protocol));
         let single = Single::ready(Ok(one(value)), clone_values::<Counted>);
         let mut input = Input::new(format, Some(single), None);
         let previous = input.clone();

@@ -167,7 +167,7 @@ async fn send(
                     "a call's own input is not the input type of provider '{provider}'"
                 )));
             }
-            (Input::own(p.format.clone(), p.format.input(&*input)?), None)
+            (Input::own(p.format.clone(), (p.snapshot)(&*input)?), None)
         }
     };
     // The call keeps its snapshot for its unsent clones; its hooks get their

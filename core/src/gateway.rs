@@ -8,7 +8,7 @@ use futures::FutureExt;
 
 use crate::call::SharedCall;
 use crate::fault::PANICKED;
-use crate::format::{AnyFormat, Erased};
+use crate::format::{AnyFormat, Erased, snapshot};
 use crate::leg::locked;
 use crate::lifecycle::{EndHooks, InFlight};
 use crate::outflow::outflow;
@@ -81,11 +81,12 @@ impl Gateway {
     {
         let factory =
             Arc::new(move |extensions| Box::new(factory(extensions)) as Box<dyn Any + Send>);
-        self.add_provider(
-            name.into(),
-            Arc::new(Erased::<_, T, O, I, true>::new(format)),
+        let provider = Provider {
+            format: Arc::new(Erased::<_, T, O, I>::provider(format)),
+            snapshot: snapshot::<I>,
             factory,
-        )
+        };
+        self.add_provider(name.into(), provider)
     }
 
     /// Register a client format receiving inputs `I` and sending outputs `O`
@@ -100,7 +101,7 @@ impl Gateway {
         I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
     {
-        self.add_client(Arc::new(Erased::<_, T, I, O, false>::new(format)))
+        self.add_client(Arc::new(Erased::<_, T, I, O>::client(format)))
     }
 
     /// Register `plugin` as `name`; its hooks run on every request and call,
@@ -237,17 +238,11 @@ impl Gateway {
         Arc::make_mut(&mut self.inner)
     }
 
-    fn add_provider(
-        mut self,
-        name: String,
-        format: Arc<dyn AnyFormat>,
-        factory: Arc<dyn Fn(Extensions) -> Box<dyn Any + Send> + Send + Sync>,
-    ) -> Result<Gateway> {
-        self.check(&*format)?;
+    fn add_provider(mut self, name: String, provider: Provider) -> Result<Gateway> {
+        self.check(&*provider.format)?;
         if self.inner.providers.contains_key(&name) {
             return Err(Fault::config(format!("provider '{name}' is defined twice")));
         }
-        let provider = Provider { format, factory };
         self.inner_mut().providers.insert(name, provider);
         Ok(self)
     }
