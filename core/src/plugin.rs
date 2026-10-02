@@ -112,8 +112,8 @@ pub trait Filter<T>: Send + 'static {
     fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<()>;
 
     /// Runs once at every end, a failure, drop or panic included: push what
-    /// it kept back to `out`, dropped once it failed. `Err` fails the end,
-    /// keeping a provider's answer.
+    /// it kept back to `out`, dropped once it failed. `Err` fails the end
+    /// with that fault in place of how it ended.
     fn end(&mut self, _end: &Result<()>, _out: &mut Vec<T>) -> Result<()> {
         Ok(())
     }

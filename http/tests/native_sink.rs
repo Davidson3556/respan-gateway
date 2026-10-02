@@ -14,7 +14,6 @@ async fn a_custom_body_and_sink_keep_feeding_a_retained_reader_without_completio
         Ok((Response::new(request.into_body()), None))
     });
     let (read, mut sink) = connect(Extensions::default()).bind(
-        "native",
         |_: &mut EventStream<u8>| {
             let (sender, receiver) = mpsc::channel::<Result<Bytes, Fault>>(0);
             let sink =

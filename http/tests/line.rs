@@ -62,7 +62,6 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Incoming, LIn, LOut> for Li
         io: respan_gateway_http::Incoming,
     ) -> Result<respan_gateway_sdk::Connection<LIn, LOut>, Fault> {
         Ok(io.bind(
-            LINE,
             |request| {
                 respan_gateway_http::messages(request, |_, raw| {
                     let text = String::from_utf8_lossy(&raw).into_owned();
@@ -99,7 +98,6 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Li
         io: respan_gateway_http::Outgoing,
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(
-            LINE,
             |source| {
                 let head = line_head(None);
                 let (request, sink) = respan_gateway_http::request(LINE, source, Box::new(Lines))?;
@@ -1316,7 +1314,6 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Pa
         io: respan_gateway_http::Outgoing,
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(
-            "pathed",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
                 let mut head = http::Request::new(()).into_parts().0;
                 let model = if source.is_single() {
@@ -1595,7 +1592,6 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Po
         io: respan_gateway_http::Outgoing,
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(
-            "posted",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
                 let mut head = line_head(None);
                 head.method = http::Method::POST;
@@ -1657,7 +1653,6 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Se
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
-            "line",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
                 let raw = false;
                 lock(&seen).push(source.is_single() && !raw);
@@ -1799,7 +1794,6 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for In
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
-            "line",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
                 let raw = false;
                 let (value, raw) = if source.is_single() && !raw {
@@ -1904,5 +1898,4 @@ async fn r11_a_filter_that_panics_fails_the_call_internal() {
     assert_eq!((t(&log.metered()[0]), internal), (None, true));
 }
 
-#[path = "../../tests/support/relay.rs"]
-mod explicit;
+use respan_gateway_http::relay as explicit;

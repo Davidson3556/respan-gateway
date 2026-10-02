@@ -21,8 +21,8 @@ struct FromHook;
 #[derive(Default)]
 struct Trace {
     factories: Mutex<Vec<(usize, bool)>>,
-    sent: Mutex<Vec<(usize, bool, u8)>>,
-    received: Mutex<Vec<(bool, u8)>>,
+    sent: Mutex<Vec<(usize, u8)>>,
+    received: Mutex<Vec<u8>>,
     ended: Mutex<Vec<bool>>,
 }
 
@@ -46,11 +46,10 @@ fn client(io: Io) -> Result<Connection<Input, Output>, Fault> {
     };
     let incoming = EventStream::lazy(|| Ok(Input(7)));
     let outgoing = EventSink::preparing(move |_outputs: &mut EventStream<Output>| {
-        let relayed = false;
         Ok(futures::sink::unfold(
             trace,
             move |trace, output: Result<Output, Fault>| async move {
-                trace.received.lock().unwrap().push((relayed, output?.0));
+                trace.received.lock().unwrap().push(output?.0);
                 Ok::<_, Fault>(trace)
             },
         ))
@@ -70,13 +69,12 @@ fn provider(io: Io) -> Result<Connection<Output, Input>, Fault> {
     let (answer, answered) = oneshot::channel();
     let incoming = async move { answered.await.map_err(|_| Fault::abandoned()) }.boxed();
     let outgoing = EventSink::preparing(move |inputs: &mut EventStream<Input>| {
-        let relayed = false;
         let value = inputs
             .value()
             .transpose()?
             .ok_or_else(|| Fault::bad_request("one input"))?
             .0;
-        trace.sent.lock().unwrap().push((attempt, relayed, value));
+        trace.sent.lock().unwrap().push((attempt, value));
         Ok(futures::sink::unfold(
             Some(answer),
             move |mut answer, input: Result<Input, Fault>| async move {
@@ -229,8 +227,8 @@ async fn same_format_sends_plain_typed_input_across_different_transports() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(false, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [7]);
     assert_eq!(*trace.factories.lock().unwrap(), [(1, true)]);
 
     // The first registered transport does not consume an incompatible
@@ -240,8 +238,8 @@ async fn same_format_sends_plain_typed_input_across_different_transports() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7), (2, false, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(false, 7), (false, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, 7), (2, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [7, 7]);
 }
 
 #[tokio::test]
@@ -268,12 +266,12 @@ async fn same_transport_sends_filtered_typed_input() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 8)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(false, 8)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, 8)]);
+    assert_eq!(*trace.received.lock().unwrap(), [8]);
 }
 
 #[tokio::test]
-async fn own_input_does_not_relay_metadata_on_the_same_transport() {
+async fn own_input_reaches_a_provider_on_the_same_transport() {
     let trace = Arc::new(Trace::default());
     let factories = trace.clone();
     let mut plugin = hooks(&trace);
@@ -296,8 +294,8 @@ async fn own_input_does_not_relay_metadata_on_the_same_transport() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 9)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(false, 9)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, 9)]);
+    assert_eq!(*trace.received.lock().unwrap(), [9]);
 }
 
 #[tokio::test]
@@ -325,8 +323,8 @@ async fn retries_create_distinct_transports_after_each_attempts_hooks() {
         .unwrap();
     gateway.idle().await;
     assert_eq!(*trace.factories.lock().unwrap(), [(1, true), (2, true)]);
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7), (2, false, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(false, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, 7), (2, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [7]);
 }
 
 #[tokio::test]

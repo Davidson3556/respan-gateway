@@ -45,7 +45,6 @@ impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Raw>, Got<Raw>>, Fault> {
         Ok(io.bind(
-            "raw",
             opaque::read_request,
             |reply, source| Ok(opaque::write_response("raw", reply, source)),
             respan_gateway_http::plain_refusal,
@@ -58,7 +57,6 @@ impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Raw>, Sent<Raw>>, Fault> {
         Ok(io.bind(
-            "raw",
             |source| opaque::write_request("raw", source),
             |response, request| opaque::read_response("raw", response, &request.into_parts().0),
             respan_gateway_http::success,
@@ -323,7 +321,6 @@ impl Format<Incoming, Conversation, Reply> for Counted {
     fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
         let count = self.0.clone();
         Ok(io.bind(
-            OpenAiChat.name(),
             move |request| {
                 respan_gateway_http::messages(request, move |_, raw| {
                     count.fetch_add(1, Ordering::Relaxed);

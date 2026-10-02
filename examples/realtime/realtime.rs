@@ -990,7 +990,7 @@ async fn main() -> Result<(), Fault> {
         &wallets,
         HOUR,
     )?;
-    let gw = gw.plugin(respan_gateway_examples::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
     let addr = listen(&gw).await;
 
     let mut ws = client(addr).await;

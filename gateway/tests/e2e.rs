@@ -313,7 +313,7 @@ async fn anthropic_stream_relay_is_byte_exact_and_passes_the_clients_key() {
 }
 
 #[tokio::test]
-async fn anthropic_whole_relay_is_byte_exact_and_sends_a_default_version() {
+async fn anthropic_whole_relay_is_byte_exact_with_the_clients_own_version() {
     let anthropic = FakeAnthropic::start().await;
     let gw = Gateway::run(&[
         "proxy",
@@ -328,10 +328,13 @@ async fn anthropic_whole_relay_is_byte_exact_and_sends_a_default_version() {
 
     let answer = r#"{"id":"msg_1", "type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
     anthropic.answer(Answer::raw(answer));
-    // The client names no version; Anthropic refuses a call without one.
+    // A raw relay sends the client's headers as they came, its version too.
     let resp = post(
         gw.url(MESSAGES),
-        &[("x-api-key", "sk-ant-client")],
+        &[
+            ("x-api-key", "sk-ant-client"),
+            ("anthropic-version", "2023-06-01"),
+        ],
         request.clone(),
     )
     .await;

@@ -153,7 +153,7 @@ mod tests {
         let captured = held.clone();
         let mut source = EventStream::lazy(move || -> Result<u8> {
             let _keep_alive = &captured;
-            panic!("raw relay decoded during erasure");
+            panic!("stopped source decoded during erasure");
         })
         .map_values(|v| Ok(Box::new(v) as Value), clone_value::<u8>);
         let sink = EventSink::preparing(|source: &mut EventStream<u8>| {

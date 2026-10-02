@@ -140,7 +140,6 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
         let reader_name = name.clone();
         let writer_name = name.clone();
         Ok(io.bind(
-            &name,
             move |request| {
                 h::messages(request, move |_, raw| {
                     let json = serde_json::from_slice(&raw)
@@ -181,7 +180,6 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
         let reader_name = name.clone();
         let path = self.path.clone();
         Ok(io.bind(
-            &name,
             move |source| {
                 if source.is_single() {
                     return Err(Fault::config(

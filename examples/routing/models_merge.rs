@@ -53,7 +53,6 @@ impl Format<Incoming, Sent<Models>, Got<Models>> for Models {
 
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Models>, Got<Models>>, Fault> {
         Ok(io.bind(
-            "models",
             opaque::read_request,
             |reply, _source| {
                 // A merged list has no provider's head to borrow a content type from.
@@ -84,7 +83,6 @@ impl Format<Outgoing, Got<Models>, Sent<Models>> for Models {
 
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Models>, Sent<Models>>, Fault> {
         Ok(io.bind(
-            "models",
             |source| opaque::write_request("models", source),
             |response, request| opaque::read_response("models", response, &request.into_parts().0),
             |head, _| head.status.is_success(),

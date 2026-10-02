@@ -137,18 +137,12 @@ async fn send(
     // match; provider details go to logs.
     let p = match cx.gateway.providers.get(&provider) {
         None => Err(format!("unknown provider '{provider}'")),
-        // Relayed within one name, else translated within one kind.
-        Some(p)
-            if own.is_none()
-                && cx.format.name() != p.format.name()
-                && cx.format.kind() != p.format.kind() =>
-        {
-            Err(format!(
-                "the client speaks {}, provider '{provider}' speaks {}, and they share no kind",
-                cx.format.name(),
-                p.format.name()
-            ))
-        }
+        // The client's input goes only to a provider of its kind.
+        Some(p) if own.is_none() && cx.format.kind() != p.format.kind() => Err(format!(
+            "the client speaks {}, provider '{provider}' speaks {}, and they share no kind",
+            cx.format.name(),
+            p.format.name()
+        )),
         Some(p) => Ok(p),
     };
     let p = p.map_err(|e| {
@@ -165,7 +159,10 @@ async fn send(
                     "a call's own input is not the input type of provider '{provider}'"
                 )));
             }
-            (Input::own(p.format.clone(), (p.snapshot)(&*input)?), None)
+            (
+                Input::new(p.format.clone(), Some((p.snapshot)(&*input)?)),
+                None,
+            )
         }
     };
     // The call keeps its snapshot for its unsent clones; its hooks get their

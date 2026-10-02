@@ -3,7 +3,7 @@
 //! text, each one input; a provider's dialer answers a status and text
 //! frames, each one event: `DONE` completes it, `ERR` fails it, `PANIC`
 //! panics its stream, and one that ends without `DONE` is truncated. The
-//! edges retain their own metadata and report actual writer completion.
+//! edges report actual writer completion.
 #![allow(dead_code, clippy::unwrap_used)]
 use std::future::Future;
 use std::pin::Pin;
@@ -53,12 +53,6 @@ pub fn boom(n: usize) {
 }
 
 pub type Text = BoxStream<'static, Result<String>>;
-
-/// Private protocol metadata: the client's head and optional whole body.
-pub struct ToyOrigin {
-    pub head: String,
-    pub body: Option<String>,
-}
 
 /// How a toy client edge treats its reply, for the drop sweep: 0 as it
 /// should; 1 drops its completion sender at once and writes on; 2 writes

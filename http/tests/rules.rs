@@ -26,8 +26,7 @@ use hooks::{Calls, Outcomes};
 use http_support::{post, read_whole, serve};
 use scripted::{Scripted, json, sse};
 
-#[path = "../../tests/support/relay.rs"]
-mod relay;
+use respan_gateway_http::relay;
 
 const OPENAI: &str = "http://openai.test/v1";
 const BACKUP: &str = "http://backup.test/v1";

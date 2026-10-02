@@ -643,8 +643,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
     }
 }
 
-#[path = "../../tests/support/relay.rs"]
-mod explicit;
+use respan_gateway_http::relay as explicit;
 struct RelaySame;
 #[async_trait]
 impl Plugin for RelaySame {

@@ -20,8 +20,7 @@ use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plug
 use respan_gateway_sdk::{async_trait, codes};
 use serde_json::{Value, json};
 
-#[path = "../../tests/support/relay.rs"]
-mod relay;
+use respan_gateway_http::relay;
 
 const AT: &str = "http://mcp.test";
 

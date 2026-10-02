@@ -244,7 +244,6 @@ impl Format<Incoming, Sent<Self>, Got<Self>> for Passthrough {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Self>, Got<Self>>, Fault> {
         Ok(io.bind(
-            "passthrough",
             read_request,
             |reply, source| Ok(write_response("passthrough", reply, source)),
             crate::plain_refusal,
@@ -257,7 +256,6 @@ impl Format<Outgoing, Got<Self>, Sent<Self>> for Passthrough {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Self>, Sent<Self>>, Fault> {
         Ok(io.bind(
-            "passthrough",
             |source| write_request("passthrough", source),
             |response, request| read_response("passthrough", response, &request.into_parts().0),
             |head, call| {

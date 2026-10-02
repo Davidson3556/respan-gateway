@@ -36,18 +36,19 @@ fn formats() -> [KnownFormat; 3] {
 }
 
 /// The config of `proxy`: one vendor, no keys of its own, its chat format
-/// and every other request relayed to `url`. For OpenAI the chat provider's
-/// URL holds the version (`/v1`), the passthrough's is the origin.
+/// and every other request relayed raw to the origin of `url`.
 fn proxy_config(anthropic: bool, url: Option<&str>) -> config::Config {
     let (format, default) = match anthropic {
         true => ("anthropic-messages", "https://api.anthropic.com"),
         false => ("openai-chat", "https://api.openai.com/v1"),
     };
     let url = url.unwrap_or(default).trim_end_matches('/');
+    // Every call is a raw relay of the client's own path, so both providers
+    // sit at the vendor's origin.
     let origin = url.strip_suffix("/v1").unwrap_or(url);
     config::Config {
         listen: None,
-        providers: [("vendor", format, url), ("any", "passthrough", origin)]
+        providers: [("vendor", format, origin), ("any", "passthrough", origin)]
             .into_iter()
             .map(|(name, format, base)| {
                 (
@@ -147,7 +148,7 @@ async fn main() -> ExitCode {
         Err(e) => return fail(&format!("{config_path}: {}", e.message())),
     };
     let gateway = if proxy {
-        gateway.plugin(respan_gateway_plugins::relay::Relay::RAW)
+        gateway.plugin(respan_gateway_http::relay::Relay::RAW)
     } else {
         gateway
     };

@@ -165,7 +165,6 @@ impl Format<Incoming, Say, Heard> for Talk {
     }
     fn bind(&self, io: Incoming) -> Result<respan_gateway_sdk::Connection<Say, Heard>, Fault> {
         Ok(io.bind(
-            "talk",
             |request| read_talk(request, false),
             talk_reply,
             |fault, _, _| json!({"error": fault.message()}).to_string().into(),
@@ -179,7 +178,6 @@ impl Format<Outgoing, Heard, Say> for Talk {
     }
     fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Heard, Say>, Fault> {
         Ok(io.bind(
-            "talk",
             |source| {
                 let live = !source.is_single();
                 let (request, sink) =
@@ -1194,7 +1192,6 @@ impl Format<Outgoing, Heard, Say> for TalkHttp {
     }
     fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Heard, Say>, Fault> {
         Ok(io.bind(
-            "talk-http",
             |source| {
                 if !source.is_single() {
                     return Err(Fault::config("talk-http cannot stream a request"));
@@ -1249,7 +1246,6 @@ impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
         io: Incoming,
     ) -> Result<respan_gateway_sdk::Connection<Sent<Raw>, Got<Raw>>, Fault> {
         Ok(io.bind(
-            "raw",
             opaque::read_request,
             |reply, source| Ok(opaque::write_response("raw", reply, source)),
             respan_gateway_http::plain_refusal,
@@ -1265,7 +1261,6 @@ impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
         io: Outgoing,
     ) -> Result<respan_gateway_sdk::Connection<Got<Raw>, Sent<Raw>>, Fault> {
         Ok(io.bind(
-            "raw",
             |source| {
                 let (request, sink) = opaque::write_request("raw", source)?;
                 let (mut head, body) = request.into_parts();
@@ -1799,7 +1794,6 @@ impl Format<Incoming, Say, Heard> for Strict {
     }
     fn bind(&self, io: Incoming) -> Result<respan_gateway_sdk::Connection<Say, Heard>, Fault> {
         Ok(io.bind(
-            "talk",
             |request| read_talk(request, true),
             talk_reply,
             |fault, _, _| json!({"error": fault.message()}).to_string().into(),
@@ -1979,5 +1973,4 @@ async fn r11_plugin_ws_to_sse_bridge() {
     assert_eq!(ended.await, Ok(()));
 }
 
-#[path = "../../tests/support/relay.rs"]
-mod explicit;
+use respan_gateway_http::relay as explicit;

@@ -192,7 +192,6 @@ impl Format<Incoming, Conversation, Reply> for OpenAiChat {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
         Ok(io.bind(
-            OPENAI,
             |request| Self.read_request(request),
             |reply, source| Self.write_response(reply, source),
             |fault, request, head| Self.refusal(fault, request, head),
@@ -206,7 +205,6 @@ impl Format<Outgoing, Reply, Conversation> for OpenAiChat {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Reply, Conversation>, Fault> {
         Ok(io.bind(
-            OPENAI,
             |source| Self.write_request(source),
             |response, call| Self.read_response(response, call),
             respan_gateway_http::success,

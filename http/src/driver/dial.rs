@@ -28,13 +28,7 @@ pub struct Outgoing {
 }
 impl Outgoing {
     /// Bind synchronous request preparation and a standard response stream.
-    pub fn bind<I, O, P, R, S>(
-        self,
-        _name: &str,
-        prepare: P,
-        read: R,
-        success: S,
-    ) -> Connection<O, I>
+    pub fn bind<I, O, P, R, S>(self, prepare: P, read: R, success: S) -> Connection<O, I>
     where
         I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,

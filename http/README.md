@@ -39,7 +39,6 @@ impl Format<h::Incoming, String, Vec<u8>> for Echo {
 
     fn bind(&self, io: h::Incoming) -> Result<Connection<String, Vec<u8>>> {
         Ok(io.bind(
-            "echo",
             |request| h::messages(request, |_, bytes| {
                 String::from_utf8(bytes.to_vec())
                     .map_err(|_| Fault::bad_request("expected UTF-8"))
@@ -63,7 +62,6 @@ impl Format<h::Outgoing, Vec<u8>, String> for Echo {
 
     fn bind(&self, io: h::Outgoing) -> Result<Connection<Vec<u8>, String>> {
         Ok(io.bind(
-            "echo",
             |source| {
                 if !source.is_single() {
                     return Err(Fault::config("echo expects one question"));

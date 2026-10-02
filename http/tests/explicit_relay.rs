@@ -20,7 +20,6 @@ impl Format<h::Incoming, String, Bytes> for Text {
     fn bind(&self, io: h::Incoming) -> Result<Connection<String, Bytes>, Fault> {
         let decodes = self.0.clone();
         Ok(io.bind(
-            "text",
             move |request| {
                 h::messages(request, move |_, bytes| {
                     decodes.fetch_add(1, Ordering::SeqCst);
@@ -41,7 +40,6 @@ impl Format<h::Outgoing, Bytes, String> for Text {
     }
     fn bind(&self, io: h::Outgoing) -> Result<Connection<Bytes, String>, Fault> {
         Ok(io.bind(
-            "text",
             |source| {
                 h::request(
                     "text",

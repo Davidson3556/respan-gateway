@@ -35,9 +35,9 @@ pub mod codes {
     pub const INTERNAL: &str = "internal";
 }
 
-/// The one error type: a code and message for the client, a retry delay, a source for logs, typed hints a transport reads (an HTTP status is
-/// one, [`Fault::with`]), and a provider's answer, which the client's format
-/// writes and the kernel never reads. Implement
+/// The one error type: a code and message for the client, a retry delay, a
+/// source for logs, and typed hints the edges read and the kernel never
+/// does, such as an HTTP status ([`Fault::with`]). Implement
 /// `From<YourError> for Fault` so `?` works in hooks.
 #[derive(Clone)]
 pub struct Fault(Box<Fields>);
@@ -184,8 +184,7 @@ impl Error for Fault {
     }
 }
 
-/// Equal when the client would read them alike: source, hints and answer
-/// ignored.
+/// Equal when the client would read them alike: source and hints ignored.
 impl PartialEq for Fault {
     fn eq(&self, other: &Self) -> bool {
         let (a, b) = (&self.0, &other.0);

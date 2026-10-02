@@ -168,4 +168,4 @@ const STREAM: &[&str] = &[
 #[path = "../tests/local_proxy.rs"]
 mod tests;
 
-use respan_gateway_examples::relay::Relay;
+use respan_gateway_http::relay::Relay;

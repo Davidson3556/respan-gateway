@@ -13,8 +13,7 @@ use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
 use tokio::net::TcpListener;
 
-#[path = "../../../tests/support/relay.rs"]
-mod relay;
+use respan_gateway_http::relay;
 
 const SSE: &str =
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
@@ -37,7 +36,8 @@ where
         .unwrap_or_else(|e| panic!("gateway: {e}"))
 }
 
-/// A gateway serving OpenAI clients, sent to the provider at `base`.
+/// A gateway relaying OpenAI clients raw, with their own paths, to the
+/// provider's origin `base`.
 fn openai_gateway(base: impl Into<String>) -> Gateway {
     gateway_to(OpenAiChat, http(base).connect()).plugin(relay::Relay::RAW)
 }
@@ -60,7 +60,7 @@ async fn relays_a_stream_over_real_http() {
         post(|| async { ([("content-type", "text/event-stream")], SSE).into_response() }),
     ))
     .await;
-    let gateway = openai_gateway(format!("{provider}/v1"));
+    let gateway = openai_gateway(provider.clone());
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::new()
@@ -128,7 +128,7 @@ async fn a_providers_redirect_is_passed_on_not_followed() {
         }),
     ))
     .await;
-    let gateway = openai_gateway(format!("{provider}/v1"));
+    let gateway = openai_gateway(provider.clone());
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::builder()
@@ -538,7 +538,7 @@ async fn it_strips_the_provider_origins_own_headers() {
         }),
     ))
     .await;
-    let gateway = openai_gateway(format!("{provider}/v1"));
+    let gateway = openai_gateway(provider.clone());
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::new()
@@ -574,7 +574,7 @@ async fn it_strips_the_clients_cookies_and_forwarding_headers() {
         }),
     ))
     .await;
-    let gateway = openai_gateway(format!("{provider}/v1"));
+    let gateway = openai_gateway(provider.clone());
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::new()

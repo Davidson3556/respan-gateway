@@ -53,7 +53,6 @@ fn writer(fail_encode: bool, fail_end: bool) -> Writes {
 async fn default_request_decodes_encodes_and_finalizes_one_initial_body() {
     let (incoming, _answer) = h::Incoming::accept(Request::new(Body::full("raw")), false);
     let (read, _sink) = incoming.bind(
-        "test",
         |request| h::messages(request, |_, _| -> Result<u8, Fault> { Ok(b'r') }),
         |reply, source: &mut EventStream<u8>| {
             Ok(reply.empty(
@@ -138,7 +137,6 @@ async fn empty_does_not_encode_and_open_keeps_prefix_through_decorator() {
         let calls = encode.calls.clone();
         let ends = encode.ends.clone();
         let (read, mut sink) = incoming.bind(
-            "test",
             |request| h::messages(request, |_, _| Ok(0_u8)),
             move |reply, source| {
                 let sink = if empty {
@@ -248,7 +246,6 @@ async fn custom_and_decorated_sink_faults_are_not_hidden_by_transport_completion
                     Ok((Response::new(Body::default()), Some(completion)))
                 });
                 let (_read, mut sink) = send(Extensions::new()).bind(
-                    "test",
                     move |source| {
                         let (request, inner) = if wrapped {
                             let (request, sink) = h::request(
@@ -290,7 +287,6 @@ async fn custom_and_decorated_sink_faults_are_not_hidden_by_transport_completion
 async fn transport_failure_does_not_wait_for_a_pending_custom_sink_close() {
     let send = h::connect(|_| async { Err(Fault::upstream("transport failed")) });
     let (_read, mut sink) = send(Extensions::new()).bind(
-        "test",
         |_| {
             Ok((
                 Request::new(Body::default()),
@@ -326,7 +322,6 @@ async fn custom_request_body_failure_survives_a_successful_transport() {
         Ok((Response::new(Body::default()), None))
     });
     let (_read, mut sink) = send(Extensions::new()).bind(
-        "test",
         |_| {
             let body = Body::stream(stream::once(future::ready(Err(Fault::config(
                 "custom body",
@@ -373,7 +368,6 @@ async fn authoritative_completion_releases_an_unconsumed_encoded_frame() {
         }
     });
     let (_read, mut sink) = send(Extensions::new()).bind(
-        "test",
         |source| {
             h::request(
                 "test",
@@ -418,7 +412,6 @@ async fn refusal_peeking_yields_without_losing_a_late_refusal() {
         }
     });
     let (read, mut sink) = send(Extensions::new()).bind(
-        "test",
         |source| h::request("test", source, h::formats::each(|_: &u8| Ok(Bytes::new()))),
         |response, _| {
             h::formats::read::<u8, _, _, _>(
@@ -468,7 +461,6 @@ async fn empty_error_frames_yield_even_though_the_byte_cap_is_not_reached() {
         }
     });
     let (_read, mut sink) = send(Extensions::new()).bind(
-        "test",
         |source| h::request("test", source, h::formats::each(|_: &u8| Ok(Bytes::new()))),
         |response, _| h::formats::whole::read::<u8>("test", response, |_, _| Ok(())),
         h::success,

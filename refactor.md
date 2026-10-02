@@ -214,7 +214,7 @@ hide missing feature gates).
 - Removed kernel metadata, automatic relay selection, raw fault answers and lazy provenance.
 - Added `Wire`, `SendRaw`, `ProviderHead`, `ClientHead`, `ProviderError` and `RawReply`.
 - Kept SDK per-value provenance; opaque events now own HTTP messages.
-- Proxy mode, examples and fixtures share the optional `plugins::relay` policy.
+- Proxy mode, examples and fixtures share the `respan_gateway_http::relay` policy.
 - Verified default typed encoding, separate credential opt-in, raw error opt-in,
   WebSocket relay, WS-to-SSE, MCP reframing and bodyless response lifecycles.
 - Formatting, Clippy (all targets/features, warnings denied), documentation

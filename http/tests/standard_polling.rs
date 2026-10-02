@@ -148,7 +148,6 @@ fn opening(
 ) -> impl Future<Output = Result<EventStream<Bytes>, Fault>> {
     let (incoming, _answer) = h::Incoming::accept(Request::new(body), false);
     let (opening, _sink) = incoming.bind(
-        "standard-polling",
         move |request| {
             h::messages(request, move |_, bytes| {
                 decoded.fetch_add(1, Ordering::SeqCst);

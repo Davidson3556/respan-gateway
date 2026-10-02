@@ -78,7 +78,6 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
 
     fn bind(&self, io: Incoming) -> Result<Connection<ToServer, ToClient>, Fault> {
         Ok(io.bind(
-            NAME,
             |request| {
                 h::messages(request, |head, raw| {
                     let mut input = ToServer::new(head.method.clone(), Vec::new());
@@ -112,7 +111,6 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
     fn bind(&self, io: Outgoing) -> Result<Connection<ToClient, ToServer>, Fault> {
         let path = self.path;
         Ok(io.bind(
-            NAME,
             move |source: &mut EventStream<ToServer>| {
                 if !source.is_single() {
                     return Err(Fault::config(

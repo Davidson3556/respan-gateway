@@ -105,7 +105,6 @@ impl Format<Incoming, Ask, Got<Rest>> for Rest {
     fn bind(&self, io: Incoming) -> Result<Connection<Ask, Got<Rest>>, Fault> {
         let name = self.name;
         Ok(io.bind(
-            name,
             |request| {
                 h::messages(request, |head, body| {
                     Ok(Ask {
@@ -130,7 +129,6 @@ impl Format<Outgoing, Got<Rest>, Ask> for Rest {
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Rest>, Ask>, Fault> {
         let (format, name) = (self.clone(), self.name);
         Ok(io.bind(
-            name,
             move |source| format.request(source),
             move |response, request| opaque::read_response(name, response, &request.into_parts().0),
             |head, _| head.status.is_success(),

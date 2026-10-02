@@ -74,7 +74,6 @@ impl Format<Incoming, In, Out> for Msg {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<In, Out>, Fault> {
         Ok(io.bind(
-            "msg",
             |request| {
                 let body = request.into_body();
                 if let Some(raw) = body.full_bytes().cloned() {
@@ -121,7 +120,6 @@ impl Format<Outgoing, Out, In> for Msg {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Out, In>, Fault> {
         Ok(io.bind(
-            "msg",
             |source: &mut EventStream<In>| {
                 let mut head = http::Request::new(()).into_parts().0;
                 respan_gateway_http::formats::set_path(&mut head, "/msg");
@@ -657,7 +655,6 @@ impl Format<Incoming, Conversation, Reply> for Noted {
     fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
-            AnthropicMessages.name(),
             |request| AnthropicMessages.read_request(request),
             move |reply, source| {
                 let mut head = reply.head();

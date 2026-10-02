@@ -11,11 +11,7 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-http-relay = ["dep:respan-gateway-http"]
-
 [dependencies]
-respan-gateway-http = { workspace = true, optional = true }
 respan-gateway-sdk.workspace = true
 tokio = { workspace = true, features = ["time", "macros"] }
 

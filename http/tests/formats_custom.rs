@@ -272,7 +272,6 @@ impl Format<Incoming, Jev, Answer> for JevFormat {
     fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
         let jev = *self;
         Ok(io.bind(
-            self.name,
             move |request| jev.inputs(request),
             move |reply, source| jev.outputs(reply, source),
             move |fault, _, head| jev.refusal(fault, head),
@@ -287,7 +286,6 @@ impl Format<Outgoing, Answer, Jev> for JevFormat {
     fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
         let jev = *self;
         Ok(io.bind(
-            self.name,
             move |source| jev.prepare(source),
             move |response, _| jev.replies(response),
             respan_gateway_http::success,
@@ -855,7 +853,6 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
         }
         fn bind(&self, io: Incoming) -> Result<Connection<Sent<Opaque>, Got<Opaque>>, Fault> {
             Ok(io.bind(
-                "opaque",
                 opaque::read_request,
                 |reply, source| Ok(opaque::write_response("opaque", reply, source)),
                 respan_gateway_http::plain_refusal,
@@ -868,7 +865,6 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Got<Opaque>, Sent<Opaque>>, Fault> {
             Ok(io.bind(
-                "opaque",
                 |source| {
                     let (mut request, sink) = opaque::write_request("opaque", source)?;
                     *request.method_mut() = http::Method::POST;
@@ -1019,7 +1015,6 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
         }
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             Ok(io.bind(
-                V2.name,
                 move |request| V2.inputs(request),
                 move |reply, source| V2.outputs(reply, source),
                 |fault, _, head| {
@@ -1036,7 +1031,6 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
             Ok(io.bind(
-                V2.name,
                 |source| V2.prepare(source),
                 |response, _| V2.replies(response),
                 respan_gateway_http::success,
@@ -1073,7 +1067,6 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
         }
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             Ok(io.bind(
-                V2.name,
                 move |request| V2.inputs(request),
                 |_, _| panic!("a buggy format"),
                 |_, _, _| panic!("a buggy format"),
@@ -1086,7 +1079,6 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
             Ok(io.bind(
-                V2.name,
                 |source| V2.prepare(source),
                 |response, _| V2.replies(response),
                 respan_gateway_http::success,
@@ -1373,7 +1365,6 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         }
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             Ok(io.bind(
-                "jev-headed",
                 |request| {
                     respan_gateway_http::messages(request, |head, raw| {
                         let prompt = head
@@ -1408,7 +1399,6 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
             Ok(io.bind(
-                "jev-headed",
                 |source| V2.prepare(source),
                 |response, _| V2.replies(response),
                 respan_gateway_http::success,
@@ -1465,7 +1455,6 @@ impl Format<Incoming, Sent<Anywhere>, Got<Anywhere>> for Anywhere {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Anywhere>, Got<Anywhere>>, Fault> {
         Ok(io.bind(
-            "anywhere",
             opaque::read_request,
             |reply, source| Ok(opaque::write_response("anywhere", reply, source)),
             respan_gateway_http::plain_refusal,
@@ -1478,7 +1467,6 @@ impl Format<Outgoing, Got<Anywhere>, Sent<Anywhere>> for Anywhere {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Anywhere>, Sent<Anywhere>>, Fault> {
         Ok(io.bind(
-            "anywhere",
             |source| {
                 let (mut request, sink) = opaque::write_request("anywhere", source)?;
                 *request.method_mut() = http::Method::POST;
@@ -1882,7 +1870,6 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             let seen = self.0.clone();
             Ok(io.bind(
-                V1.name,
                 move |request| V1.inputs(request),
                 move |reply, source| {
                     seen.lock()
@@ -1900,7 +1887,6 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
             Ok(io.bind(
-                V1.name,
                 |source| V1.prepare(source),
                 |response, _| V1.replies(response),
                 respan_gateway_http::success,
@@ -1979,8 +1965,7 @@ async fn a_keep_alive_reaches_filters_and_goes_where_it_came() {
     assert_eq!(counts.0.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
-#[path = "../../tests/support/relay.rs"]
-mod explicit;
+use respan_gateway_http::relay as explicit;
 
 struct ChosenHeads;
 #[async_trait]
@@ -1989,7 +1974,8 @@ impl Plugin for ChosenHeads {
         explicit::Relay::HEADS.on_client(cx).await
     }
     async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
-        px.filter::<Answer>(explicit::RawErrors)?;
+        let client = px.client().format().to_owned();
+        px.filter::<Answer>(explicit::RawErrors { client })?;
         Ok(())
     }
 }

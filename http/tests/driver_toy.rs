@@ -60,7 +60,6 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
         let toy = self.clone();
         let unwritable = self.unwritable;
         Ok(io.bind(
-            "toy",
             |request| {
                 if request.body().full_bytes().is_some() {
                     respan_gateway_http::messages(request, |_, bytes| {
@@ -104,7 +103,6 @@ impl respan_gateway_sdk::Format<Outgoing, Out, In> for Toy {
     fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Out, In>, Fault> {
         let toy = self.clone();
         Ok(io.bind(
-            "toy",
             move |source| {
                 let (mut request, sink) = if toy.open.is_some_and(|(_, done)| done) {
                     source.stop();

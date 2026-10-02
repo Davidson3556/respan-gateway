@@ -78,7 +78,7 @@ fn gateway(
         .client::<ToServer, _, _>(StreamableHttp::default())?
         .plugin(ToolAllowList(Arc::from(["echo"])))
         .target("tools")
-        .map(|g| g.plugin(respan_gateway_examples::relay::Relay::RAW))
+        .map(|g| g.plugin(respan_gateway_http::relay::Relay::RAW))
 }
 
 /// A small real MCP HTTP server for this example's three methods. Unlike a

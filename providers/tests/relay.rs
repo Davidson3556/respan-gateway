@@ -1,7 +1,6 @@
 //! The kernel's promises, driven through the OpenAI format.
 
-#[path = "../../tests/support/relay.rs"]
-mod explicit;
+use respan_gateway_http::relay as explicit;
 #[allow(dead_code)]
 #[path = "../../tests/support/hooks.rs"]
 mod hooks;
@@ -4182,7 +4181,6 @@ impl Format<Incoming, Conversation, Reply> for Fragile {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
         Ok(io.bind(
-            OpenAiChat.name(),
             |request| OpenAiChat.read_request(request),
             move |reply, source| {
                 let mut head = reply.head();
@@ -4406,6 +4404,95 @@ async fn a_translated_304_is_a_bad_gateway() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
+}
+
+/// An OpenAI client's gateway whose target is an Anthropic provider, with
+/// `relay` registered.
+fn translating(sites: &Sites, relay: explicit::Relay) -> Gateway {
+    let p = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
+    let gw = providers([p]).and_then(|g| {
+        g.client::<Conversation, _, _>(OpenAiChat)?
+            .plugin(relay)
+            .target("anthropic")
+    });
+    gw.unwrap_or_else(|e| panic!("gateway: {e}"))
+}
+
+// A raw relay sends the client's bytes and key; to another vendor it
+// would send both, so it is refused before anything is sent.
+#[tokio::test]
+async fn a_raw_relay_never_reaches_a_provider_of_another_format() {
+    let sites = Sites::default();
+    let gw = translating(&sites, explicit::Relay::RAW);
+    let mut req = call(
+        CHAT,
+        r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#,
+    );
+    req.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer client-key"),
+    );
+
+    let (status, _, _) = read_whole(serve(&gw, req).await.0).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(sites.sent.sent().is_empty(), "nothing reached the provider");
+}
+
+// Another vendor's head and error body are not the client's protocol: the
+// client gets its own format's error.
+#[tokio::test]
+async fn relayed_heads_and_errors_stay_within_one_format() {
+    let sites = Sites::default();
+    let gw = translating(&sites, explicit::Relay::HEADS);
+    let raw = r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}"#;
+    let mut refused = fixture::json(StatusCode::BAD_REQUEST, raw);
+    refused
+        .headers_mut()
+        .insert("anthropic-organization-id", HeaderValue::from_static("org"));
+    sites.claude.reply(refused);
+    let req = call(
+        CHAT,
+        r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#,
+    );
+
+    let (_, headers, body) = read_whole(serve(&gw, req).await.0).await;
+
+    let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+    assert_ne!(body, raw, "the provider's body was relayed raw");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    assert!(error.get("type").is_none(), "{body}");
+    assert!(error["error"]["message"].is_string(), "{body}");
+    assert!(!headers.contains_key("anthropic-organization-id"));
+}
+
+// A raw relay sends the client's body; an earlier plugin's edit would be
+// lost, so the relay refuses instead of dropping it.
+#[tokio::test]
+async fn a_raw_relay_refuses_a_request_a_plugin_edited() {
+    let h = Harness::new(
+        vec![Arc::new(Cool), Arc::new(explicit::Relay::RAW)],
+        Some("openai"),
+    );
+
+    let (status, _, _) = h.send(unary_chat()).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        h.sites.sent.sent().is_empty(),
+        "nothing reached the provider"
+    );
+}
+
+#[tokio::test]
+async fn a_raw_relay_sends_an_unedited_request_as_it_came() {
+    let h = Harness::new(vec![Arc::new(explicit::Relay::RAW)], Some("openai"));
+    h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
+
+    let (status, _, _) = h.send(unary_chat()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&h.sites.sent.sent()[0].body()[..], UNARY_REQ.as_bytes());
 }
 
 #[tokio::test]
@@ -5446,7 +5533,6 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
         fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
             let tally = self.0.clone();
             Ok(io.bind(
-                OpenAiChat.name(),
                 |request| OpenAiChat.read_request(request),
                 move |reply, source| {
                     let mut head = reply.head();

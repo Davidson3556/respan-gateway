@@ -15,7 +15,6 @@ async fn open(
 ) -> Result<EventStream<Bytes>, Fault> {
     let (incoming, _answer) = h::Incoming::accept(request, false);
     let (opening, _sink) = incoming.bind(
-        "standard-body",
         move |request| {
             h::messages(request, move |_, bytes| {
                 decoded.fetch_add(1, Ordering::SeqCst);

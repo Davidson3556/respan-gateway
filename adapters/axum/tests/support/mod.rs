@@ -41,7 +41,6 @@ impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Raw>, Got<Raw>>, Fault> {
         Ok(io.bind(
-            "raw",
             opaque::read_request::<Raw>,
             |reply, source| Ok(opaque::write_response::<Raw>("raw", reply, source)),
             h::plain_refusal,
@@ -55,7 +54,6 @@ impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Raw>, Sent<Raw>>, Fault> {
         Ok(io.bind(
-            "raw",
             |source| opaque::write_request::<Raw>("raw", source),
             |answer, sent| opaque::read_response::<Raw>("raw", answer, &sent.into_parts().0),
             |answer, call| {
@@ -79,11 +77,10 @@ impl Drop for Server {
     }
 }
 
-/// Serve `gateway` on a free local port with the SDK's router.
-#[path = "../../../../tests/support/relay.rs"]
-mod relay;
 #[allow(unused_imports)]
 pub use relay::Relay;
+/// Serve `gateway` on a free local port with the SDK's router.
+use respan_gateway_http::relay;
 
 pub async fn serve(gateway: Gateway) -> Server {
     serve_typed(gateway.plugin(relay::Relay::RAW)).await

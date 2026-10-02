@@ -78,9 +78,7 @@ impl<T> Single<T> {
     pub(crate) fn value(&self) -> Result<&T> {
         let result = match &self.value {
             SingleValue::Ready(value) => value,
-            SingleValue::Deferred {
-                decoded, decode, ..
-            } => decoded.get_or_init(|| guarded(decode)),
+            SingleValue::Deferred { decoded, decode } => decoded.get_or_init(|| guarded(decode)),
         };
         result.as_ref().map_err(Clone::clone)
     }
@@ -763,8 +761,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preparation_can_relay_lazy_source_without_decoding() {
-        let mut source = EventStream::lazy(|| -> Result<u8> { panic!("raw relay decoded") });
+    async fn preparation_can_stop_a_lazy_source_without_decoding() {
+        let mut source = EventStream::lazy(|| -> Result<u8> { panic!("stopped source decoded") });
         let mut sink = EventSink::preparing(|source: &mut EventStream<u8>| {
             source.stop();
             Ok(Probe::default())

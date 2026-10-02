@@ -18,7 +18,6 @@ async fn preparation_failure(opening: Opening, panic: bool) {
     let request = Request::new(h::Body::full(Bytes::new()));
     let (io, answer) = h::Incoming::accept(request, false);
     let (read, mut sink) = io.bind(
-        "preparation",
         |_| Ok(EventStream::single(String::new())),
         move |reply, source: &mut EventStream<u8>| {
             let head = respan_gateway_http::http::Response::new(()).into_parts().0;
@@ -104,7 +103,6 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
     for explicit_empty in [false, true] {
         let (io, answer) = h::Incoming::accept(Request::new(h::Body::full(Bytes::new())), false);
         let (read, mut sink) = io.bind(
-            "preparation",
             |_| Ok(EventStream::single(String::new())),
             move |reply, source: &mut EventStream<u8>| {
                 drop(answer);

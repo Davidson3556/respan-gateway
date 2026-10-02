@@ -67,7 +67,6 @@ impl Format<Incoming, EmbedRequest, Embeddings> for OpenAiEmbeddings {
 
     fn bind(&self, io: Incoming) -> Result<Connection<EmbedRequest, Embeddings>, Fault> {
         Ok(io.bind(
-            NAME,
             |request| h::messages(request, |_, raw| read_request(raw)),
             |reply, _source| {
                 let mut head = reply.head();
@@ -89,7 +88,6 @@ impl Format<Outgoing, Embeddings, EmbedRequest> for OpenAiEmbeddings {
 
     fn bind(&self, io: Outgoing) -> Result<Connection<Embeddings, EmbedRequest>, Fault> {
         Ok(io.bind(
-            NAME,
             |source| {
                 if !source.is_single() {
                     return Err(Fault::config(format!(

@@ -31,6 +31,8 @@ extern crate self as respan_gateway_http;
 
 /// Shared framing, faults and opaque relay helpers for format authors.
 pub mod formats;
+/// Explicit raw relay of a client's request, head and errors, as a plugin.
+pub mod relay;
 
 mod body;
 mod codec;
@@ -480,7 +482,7 @@ pub fn error_head(head: &mut http::response::Parts, fault: &Fault) {
 /// Use an explicitly supplied [`RawReply`], replacing `head` and returning
 /// its body. Otherwise apply [`error_head`] and return `None` so the client
 /// format writes its own error. Format names do not authorize forwarding.
-pub fn answered(_name: &str, fault: &Fault, head: &mut http::response::Parts) -> Option<Bytes> {
+pub fn answered(fault: &Fault, head: &mut http::response::Parts) -> Option<Bytes> {
     match fault.get::<RawReply>().map(|raw| &raw.0) {
         Some(answer) => {
             let (parts, body) = answer.clone().into_parts();
@@ -631,12 +633,12 @@ mod tests {
             .with_retry_after(Duration::from_secs(3));
         let (mut head, ()) = http::Response::new(()).into_parts();
         assert_eq!(
-            answered("f", &fault.clone().with(RawReply(answer)), &mut head).as_deref(),
+            answered(&fault.clone().with(RawReply(answer)), &mut head).as_deref(),
             Some(&b"busy"[..])
         );
         assert!(head.headers.get(RETRY_AFTER).is_none(), "as it came");
         let (mut head, ()) = http::Response::new(()).into_parts();
-        assert_eq!(answered("g", &fault, &mut head), None);
+        assert_eq!(answered(&fault, &mut head), None);
         assert_eq!(
             (head.status, &head.headers[RETRY_AFTER]),
             (StatusCode::TOO_MANY_REQUESTS, &HeaderValue::from(3))

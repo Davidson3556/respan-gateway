@@ -103,7 +103,7 @@ impl Incoming {
     }
 
     /// Bind ordinary reading and response preparation functions to core events.
-    pub fn bind<I, O, R, W, F>(self, name: &str, read: R, write: W, refuse: F) -> Connection<I, O>
+    pub fn bind<I, O, R, W, F>(self, read: R, write: W, refuse: F) -> Connection<I, O>
     where
         I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
@@ -123,7 +123,6 @@ impl Incoming {
         let original = Arc::new(OnceLock::new());
         let saved = original.clone();
         let ask = head.clone();
-        let format = name.to_owned();
         let incoming = {
             async move {
                 let (raw, body) = if live {
@@ -155,7 +154,6 @@ impl Incoming {
                 return Err(Fault::abandoned());
             }
             let reply = Reply {
-                name: format,
                 head: client_head,
                 request: Arc::new(http::Request::from_parts((*ask).clone(), raw)),
                 slot: Arc::new(Mutex::new(Handoff {
@@ -197,7 +195,6 @@ impl Incoming {
 /// real event sinks; there is no intermediate response plan.
 pub struct Reply {
     head: crate::ClientHead,
-    name: String,
     request: Arc<http::Request<Bytes>>,
     slot: Slot,
     refuse: Arc<Refuse>,
@@ -206,7 +203,6 @@ pub struct Reply {
 impl Reply {
     fn fallback(&self) -> Self {
         Self {
-            name: self.name.clone(),
             head: self.head.clone(),
             request: self.request.clone(),
             slot: self.slot.clone(),
@@ -347,7 +343,7 @@ impl<T: 'static> Client<T> {
     }
     fn refuse(&mut self, fault: Fault) {
         let mut head = http::Response::new(()).into_parts().0;
-        let answer = answered(&self.reply.name, &fault, &mut head);
+        let answer = answered(&fault, &mut head);
         let bytes = std::panic::catch_unwind(AssertUnwindSafe(|| {
             answer.unwrap_or_else(|| (self.reply.refuse)(&fault, &self.reply.request, &mut head))
         }));
@@ -488,7 +484,6 @@ impl std::fmt::Debug for Incoming {
 impl std::fmt::Debug for Reply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Reply")
-            .field("name", &self.name)
             .field("request", &self.request)
             .finish_non_exhaustive()
     }

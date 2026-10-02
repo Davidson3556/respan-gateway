@@ -28,8 +28,13 @@ impl Wire {
         self.live
     }
 }
-/// Send this request explicitly, bypassing encoding for a whole body.
-/// For live input, use this head and encode subsequent typed events normally.
+/// Send this request as given. For a whole body, its bytes go out instead of
+/// the call's input, so no edit to that input, by any plugin's filter, is
+/// applied: to send edits, build the body from the edited input yourself.
+/// For live input, its head goes out and later typed events are encoded as
+/// usual, edits included. Its path is joined to the transport's base URL as
+/// any call's is, so a provider that takes raw relays sits at the vendor's
+/// origin.
 #[derive(Clone, Debug)]
 pub struct SendRaw(pub Wire);
 

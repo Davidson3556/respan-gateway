@@ -21,13 +21,6 @@ impl Input {
         Self { format, single }
     }
 
-    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: Arc<Single<Value>>) -> Self {
-        Self {
-            single: Some(input),
-            ..Self::new(format, None)
-        }
-    }
-
     pub(crate) fn is_live(&self) -> bool {
         self.single.is_none()
     }
