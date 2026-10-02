@@ -4604,6 +4604,63 @@ fn translating(sites: &Sites, relay: explicit::Relay) -> Gateway {
     gw.unwrap_or_else(|e| panic!("gateway: {e}"))
 }
 
+/// Notes whether each call carried the relay's permission for raw errors.
+#[derive(Clone, Default)]
+struct RawPermission(Arc<Mutex<Vec<bool>>>);
+
+#[async_trait]
+impl Plugin for RawPermission {
+    async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
+        let granted = px
+            .extensions()
+            .get::<respan_gateway_http::RawErrors>()
+            .is_some();
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(granted);
+    }
+}
+
+// Raw errors (bodies and close codes) are a permission the relay grants
+// only on a call to a provider of the client's own format.
+#[tokio::test]
+async fn the_relay_grants_raw_errors_only_within_one_format() {
+    let sites = Sites::default();
+    let seen = RawPermission::default();
+    let same = providers([provider(&sites.openai, "openai", None)]).and_then(|g| {
+        g.client::<Conversation, _, _>(OpenAiChat)?
+            .plugin(explicit::Relay::HEADS)
+            .plugin(seen.clone())
+            .target("openai")
+    });
+    let same = same.unwrap_or_else(|e| panic!("gateway: {e}"));
+    sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
+    let _ = read_whole(serve(&same, unary_chat()).await.0).await;
+    same.idle().await;
+
+    let other = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
+    let other = providers([other]).and_then(|g| {
+        g.client::<Conversation, _, _>(OpenAiChat)?
+            .plugin(explicit::Relay::HEADS)
+            .plugin(seen.clone())
+            .target("anthropic")
+    });
+    let other = other.unwrap_or_else(|e| panic!("gateway: {e}"));
+    sites
+        .claude
+        .reply(fixture::json(StatusCode::BAD_REQUEST, "{}"));
+    let _ = read_whole(serve(&other, unary_chat()).await.0).await;
+    other.idle().await;
+
+    let seen = seen
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(seen, [true, false]);
+}
+
 // A raw relay sends the client's bytes and key; to another vendor it
 // would send both, so it is refused before anything is sent.
 #[tokio::test]

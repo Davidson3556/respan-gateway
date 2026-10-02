@@ -5,7 +5,8 @@ The Model Context Protocol on the gateway. Messages stay JSON-RPC values
 framing the client's request asks for. What MCP carries in HTTP headers is
 part of the kind, so a call carries it with no relay and plugins' filters
 see and edit it: a `ToServer` holds the client's `session`,
-`protocol_version` and `last_event_id`, and a `ToClient` the `session` the
+`protocol_version`, `last_event_id` and `query` (the request's query, less
+the credential parameters the adapter lifted, sent on to the server), and a `ToClient` the `session` the
 server named (as on its answer to `initialize`) and its SSE `event_id` and
 `event` name (for `Last-Event-ID` resumption), written only in an event
 stream; SSE comments are dropped.
@@ -35,6 +36,9 @@ stream; SSE comments are dropped.
   (503), `too_many_sessions`, -32005; not answered in time (504),
   `timed_out`, -32001.
 - `RpcCode`: the JSON-RPC error code a fault is written with, as a fact.
+  A server's non-success answer whose body is a JSON-RPC error is read back
+  into one: its code, message and `data` (as `Details`) reach the client's
+  error, with the HTTP status kept; any other body gives -32603.
 - `error(id, code, message)`: a JSON-RPC error.
 
 Used by: [mcp_proxy](../examples/integrations/mcp_proxy.rs).

@@ -3,9 +3,10 @@ use crate::{self as h, ClientHead, Credential, ProviderHead, RawErrors, SendRaw,
 use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response, async_trait};
 
 /// Opt into raw request, credentials, response head and error body forwarding.
-/// Its [`RawErrors`] are the permission a transport reads too: on a
-/// WebSocket one (`respan_gateway_ws::WsTransport`), the provider's close
-/// code goes to the client as a `CloseCode`.
+/// Its [`RawErrors`], granted only on a call to a provider of the client's
+/// own format, are the permission a transport reads too: on a WebSocket one
+/// (`respan_gateway_ws::WsTransport`), the provider's close code goes to the
+/// client as a `CloseCode`.
 ///
 /// It sends the target call itself: it is the routing for the requests it
 /// handles, answering each with its call to the target, so register no
@@ -28,8 +29,9 @@ impl Relay {
 #[async_trait]
 impl Plugin for Relay {
     async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
-        // A raw request, the client's key, and the provider's head go only
-        // to and from a provider of the client's own format.
+        // A raw request, the client's key, the provider's head and its raw
+        // errors (bodies and close codes alike) go only to and from a
+        // provider of the client's own format.
         if px.format() != px.client().format() {
             if px.extensions().get::<SendRaw>().is_some() {
                 return Err(Fault::config(format!(
@@ -40,6 +42,7 @@ impl Plugin for Relay {
                 )));
             }
             px.extensions_mut().remove::<ProviderHead>();
+            return Ok(());
         }
         let client = px.client().format().to_owned();
         px.extensions_mut().insert(RawErrors { client });

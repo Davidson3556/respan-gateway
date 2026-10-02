@@ -6,7 +6,7 @@
 //! Messages are JSON-RPC 2.0, kept as JSON so every field MCP adds
 //! survives. What MCP carries in HTTP headers (the session, the protocol
 //! version, a resumed stream's last event) is part of the kind too, so a
-//! call carries it with no relay. Output is always written from the parsed
+//! call carries it with no relay, and so is the request's query. Output is always written from the parsed
 //! messages, in the framing the client's request asks for.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -41,6 +41,10 @@ pub struct ToServer {
     /// The SSE `id:` of the last event the client got (`Last-Event-ID`),
     /// on a `GET` that resumes a stream.
     pub last_event_id: Option<String>,
+    /// The request's query as the client sent it, without the credential
+    /// parameters the HTTP adapter lifted out, sent to the server as it
+    /// stands.
+    pub query: Option<String>,
 }
 
 impl ToServer {
@@ -98,7 +102,8 @@ impl ToClient {
 /// The JSON-RPC error code a format writes for a fault, as a fact
 /// ([`Fault::with`](respan_gateway_sdk::Fault::with)). A fault without one
 /// is written as an invalid request (-32600) if it is a `BadRequest`, else
-/// as an internal error (-32603).
+/// as an internal error (-32603). A server's JSON-RPC error that refused a
+/// call is read back into one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RpcCode(pub i64);
 

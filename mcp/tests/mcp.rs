@@ -78,7 +78,16 @@ impl Plugin for Touch {
 }
 
 fn request(method: Method, body: &str, headers: &[(&str, &str)]) -> http::Request<Body> {
-    let mut req = http::Request::builder().method(method).uri("/mcp?x=1");
+    request_at("/mcp?x=1", method, body, headers)
+}
+
+fn request_at(
+    uri: &str,
+    method: Method,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> http::Request<Body> {
+    let mut req = http::Request::builder().method(method).uri(uri);
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
@@ -257,9 +266,8 @@ async fn an_answer_is_written_from_its_messages_typed_or_relayed() {
             assert_eq!(parse(whole.as_bytes()), Some(result.clone()));
             let sent = &mock.sent()[0];
             // A relay sends the client's path and query; a typed call, the
-            // format's path.
-            let path = if raw { "/mcp?x=1" } else { "/mcp" };
-            assert_eq!(sent.uri().to_string(), format!("{AT}{path}"));
+            // format's path and the kind's query.
+            assert_eq!(sent.uri().to_string(), format!("{AT}/mcp?x=1"));
             assert_eq!(parse(sent.body()), parse(body.as_bytes()));
             assert_eq!(sent.headers()[SESSION], "s1");
         }
@@ -592,7 +600,7 @@ async fn an_mcp_servers_error_is_written_as_a_json_rpc_error() {
         );
     }
     // A server's own error body goes as it came if relayed; else its
-    // status goes with the client format's error.
+    // status goes with the client format's error, and its code.
     let own = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"boom"}}"#;
     let mock = ScriptedMcp::new();
     mock.reply(json_reply(StatusCode::INTERNAL_SERVER_ERROR, own));
@@ -614,7 +622,7 @@ async fn an_mcp_servers_error_is_written_as_a_json_rpc_error() {
     let error: Value = serde_json::from_str(&body).unwrap_or_default();
     assert_eq!(
         (status, &error["id"], &error["error"]["code"]),
-        (StatusCode::INTERNAL_SERVER_ERROR, &json!(1), &json!(-32603))
+        (StatusCode::INTERNAL_SERVER_ERROR, &json!(1), &json!(-32000))
     );
 }
 
@@ -1389,4 +1397,95 @@ exec sleep 100"#;
     })
     .await;
     assert!(seen.contains("\"saw\":\"cancelled\""), "{seen}");
+}
+
+/// Sets the query of every call.
+struct Requery(Option<&'static str>);
+
+#[async_trait]
+impl Plugin for Requery {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let query = self.0;
+        cx.filter(move |input: &mut ToServer| {
+            input.query = query.map(str::to_owned);
+            Ok(())
+        })?;
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn the_query_travels_in_the_kind_without_the_keys_the_adapter_lifted() {
+    let result = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+    let queries = |mock: &ScriptedMcp| -> Vec<Option<String>> {
+        let uris = mock
+            .sent()
+            .into_iter()
+            .map(|r| r.uri().query().map(str::to_owned));
+        uris.collect()
+    };
+    let sends = |plugin: Option<Requery>, uri: &'static str| async move {
+        let mock = ScriptedMcp::new();
+        mock.reply(json_reply(StatusCode::OK, result));
+        let gw = gateway(mock.clone().connect(), None);
+        let gw = match plugin {
+            Some(p) => gw.plugin(p),
+            None => gw,
+        };
+        let (status, ..) = send(&gw, request_at(uri, Method::POST, INIT, &[])).await;
+        assert_eq!(status, StatusCode::OK);
+        (mock.sent()[0].uri().path().to_owned(), queries(&mock))
+    };
+    // Forwarded as it came, to the format's path.
+    let (path, query) = sends(None, "/mcp?x=1&y=a%20b").await;
+    assert_eq!(
+        (&path[..], query),
+        ("/mcp", vec![Some("x=1&y=a%20b".into())])
+    );
+    let (_, query) = sends(None, "/mcp").await;
+    assert_eq!(query, [None]);
+    // A plugin changes or removes it.
+    let (_, query) = sends(Some(Requery(Some("z=2"))), "/mcp?x=1").await;
+    assert_eq!(query, [Some("z=2".to_owned())]);
+    let (_, query) = sends(Some(Requery(None)), "/mcp?x=1").await;
+    assert_eq!(query, [None]);
+    // A key parameter is lifted by the adapter, and not put back.
+    let (_, query) = sends(None, "/mcp?x=1&api_key=sekret&token=t").await;
+    assert_eq!(query, [Some("x=1".to_owned())]);
+}
+
+#[tokio::test]
+async fn a_servers_json_rpc_refusal_keeps_its_code_message_and_status() {
+    let refusals = [
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad params","data":{"field":"a"}}}"#,
+        r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad params","data":{"field":"a"}}}]"#,
+    ];
+    for body in refusals {
+        let mock = ScriptedMcp::new();
+        mock.reply(json_reply(StatusCode::BAD_REQUEST, body));
+        let gw = gateway(mock.connect(), None);
+        let (status, _, text, _) = send(&gw, request(Method::POST, INIT, &[])).await;
+        let error: Value = serde_json::from_str(&text).unwrap_or_default();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert_eq!(error["id"], 1);
+        assert_eq!(error["error"]["code"], -32602, "{text}");
+        assert_eq!(error["error"]["message"], "bad params");
+        assert_eq!(error["error"]["data"]["data"], json!({ "field": "a" }));
+        assert_eq!(error["error"]["data"]["code"], "upstream");
+    }
+    // A body that says no JSON-RPC error is an internal error, as ever.
+    for body in [
+        "upstream down",
+        r#"{"error":"nope"}"#,
+        r#"{"error":{"code":"x","message":"m"}}"#,
+    ] {
+        let mock = ScriptedMcp::new();
+        mock.reply(typed(StatusCode::BAD_GATEWAY, Some("text/plain"), &[body]));
+        let gw = gateway(mock.connect(), None);
+        let (status, _, text, _) = send(&gw, request(Method::POST, INIT, &[])).await;
+        let error: Value = serde_json::from_str(&text).unwrap_or_default();
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{text}");
+        assert_eq!(error["error"]["code"], -32603, "{text}");
+        assert_eq!(error["error"]["message"], "the provider returned 502");
+    }
 }

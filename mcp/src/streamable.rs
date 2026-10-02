@@ -31,11 +31,14 @@ use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
-use respan_gateway_http::{self as h, Body, Incoming, Outgoing, bodiless, error_code};
+use respan_gateway_http::{
+    self as h, Body, Incoming, Outgoing, ProviderError, Status, bodiless, error_code,
+};
 use respan_gateway_sdk::futures::stream::BoxStream;
 use respan_gateway_sdk::futures::{Sink, SinkExt, StreamExt, stream};
 use respan_gateway_sdk::{
-    BadRequest, Connection, EventSink, EventStream, Fault, Format, Truncated,
+    BadRequest, Connection, Details, EventSink, EventStream, Fault, Format, RetryAfter, Truncated,
+    Upstream,
 };
 use serde_json::{Value, json};
 
@@ -120,6 +123,7 @@ fn decode(head: &RequestHead, raw: Bytes) -> Result<ToServer, Fault> {
     input.session = header(head, SESSION)?;
     input.protocol_version = header(head, PROTOCOL_VERSION)?;
     input.last_event_id = header(head, LAST_EVENT_ID)?;
+    input.query = head.uri.query().map(str::to_owned);
     Ok(input)
 }
 
@@ -174,7 +178,10 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
 fn call_head(input: &ToServer, path: &str) -> Result<RequestHead, Fault> {
     let mut head = Request::new(()).into_parts().0;
     head.method = input.method.clone();
-    formats::set_path(&mut head, path)?;
+    match &input.query {
+        Some(query) => formats::set_path(&mut head, &format!("{path}?{query}"))?,
+        None => formats::set_path(&mut head, path)?,
+    }
     // MCP: a client lists both in its `Accept`.
     let both = HeaderValue::from_static("application/json, text/event-stream");
     head.headers.insert(ACCEPT, both);
@@ -226,7 +233,8 @@ fn response_events(
             }
             Ok(())
         };
-        whole::read(NAME, Response::from_parts(head, body), on_body)
+        let read = whole::read(NAME, Response::from_parts(head, body), on_body);
+        read.map(|read| read.map_err(rpc_refusal)).boxed()
     };
     let posted = read(sent.body()).unwrap_or_default().0;
     let pending: Vec<Value> = request_ids(&posted).cloned().collect();
@@ -250,6 +258,37 @@ fn response_events(
         },
     )
     .boxed()
+}
+
+/// `fault`, a refusal whose body says a JSON-RPC error (a single one or the
+/// first of a batch), as that error: its [`RpcCode`] and message, its `data`
+/// as [`Details`]`{"data": ..}`; the status, `Retry-After` and the answer
+/// stay. Any other fault, or a body that says none, as it is. The body is
+/// the one [`whole::read`] collected, so it is within the body's limit.
+fn rpc_refusal(fault: Fault) -> Fault {
+    let Some(error) = fault.get::<ProviderError>().cloned() else {
+        return fault;
+    };
+    let said = read(error.response.body()).and_then(|(all, _)| {
+        all.into_iter()
+            .find_map(|mut m| Some(m.get_mut("error")?.take()))
+    });
+    let (Some(said), Some(Status(status))) = (said, fault.get::<Status>().copied()) else {
+        return fault;
+    };
+    let (Some(code), Some(message)) = (said["code"].as_i64(), said["message"].as_str()) else {
+        return fault;
+    };
+    let mut read = Upstream::fault(message)
+        .with(Status(status))
+        .with(RpcCode(code));
+    if let Some(data) = said.get("data") {
+        read = read.with(Details(json!({ "data": data })));
+    }
+    if let Some(&wait) = fault.get::<RetryAfter>() {
+        read = read.with(wait);
+    }
+    read.with(error)
 }
 
 /// Drops from `pending` the requests `output` answers.
@@ -530,7 +569,7 @@ fn event(output: &ToClient) -> Result<Bytes, Fault> {
 
 /// A fault as a JSON-RPC error to `id`: its [`RpcCode`], else -32600 for
 /// a `BadRequest` and -32603 for any other (JSON-RPC 2.0, 5.1), its
-/// [`error_code`] as `data.code`.
+/// [`error_code`] as `data.code`, with the fields of its [`Details`] beside it.
 fn failure(id: &Value, fault: &Fault) -> Value {
     let code = match fault.get::<RpcCode>() {
         Some(RpcCode(code)) => *code,
@@ -538,6 +577,12 @@ fn failure(id: &Value, fault: &Fault) -> Value {
         None => -32603,
     };
     let mut e = error(id.clone(), code, fault.message());
-    e["error"]["data"] = json!({ "code": error_code(fault) });
+    let mut data = json!({ "code": error_code(fault) });
+    if let Some(Details(Value::Object(details))) = fault.get() {
+        data.as_object_mut()
+            .into_iter()
+            .for_each(|d| d.extend(details.clone()));
+    }
+    e["error"]["data"] = data;
     e
 }
