@@ -29,8 +29,8 @@ async fn handle_returns_the_response_and_its_outcome_with_no_server() -> Result<
     assert_eq!(status, http::StatusCode::OK);
     gw.idle().await;
     let usage = tally.usage();
-    assert_eq!(usage.get(units::INPUT_TOKENS), Some(3.0));
-    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(1.0));
+    assert_eq!(usage.get(units::INPUT_TOKENS), Some(3));
+    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(1));
     assert_eq!(openai.requests().len(), 1);
     Ok(())
 }

@@ -165,7 +165,7 @@ impl LineDecoder {
                 Some(("i", x)) => out(x),
                 Some(("u", n)) => {
                     let mut u = Usage::default();
-                    u.add("t", n.parse().unwrap_or(0.0));
+                    u.add("t", n.parse().unwrap_or(0));
                     LOut(String::new(), u)
                 }
                 Some(("x", m)) => return Err(Upstream::fault(m)),
@@ -197,7 +197,7 @@ struct LineEncoder(Option<Usage>);
 impl LineEncoder {
     fn release(&mut self, out: &mut BytesMut) {
         if let Some(u) = self.0.take() {
-            let n = u.get("t").unwrap_or(0.0);
+            let n = u.get("t").unwrap_or(0);
             out.extend_from_slice(format!("u:{n}\n").as_bytes());
         }
     }
@@ -388,7 +388,7 @@ async fn run(gw: &Gateway, r: http::Request<Body>) -> (StatusCode, Result<Bytes,
 }
 
 /// The `t` a call's lines reported, as [`Meter`] saw them.
-fn t(usage: &Usage) -> Option<f64> {
+fn t(usage: &Usage) -> Option<u64> {
     usage.get("t")
 }
 
@@ -419,7 +419,7 @@ async fn f1_usage_read_until_content_is_metered_even_if_the_response_is_dropped(
     assert_eq!(status, StatusCode::OK);
     // The provider billed 5, which its edge's meter saw.
     assert_eq!(log.calls().len(), 1);
-    assert_eq!(log.metered().iter().map(t).collect::<Vec<_>>(), [Some(5.0)]);
+    assert_eq!(log.metered().iter().map(t).collect::<Vec<_>>(), [Some(5)]);
 }
 
 // A client-edge filter failing on a value that shares a frame with usage
@@ -445,7 +445,7 @@ async fn f2_usage_is_metered_on_the_call_though_the_client_edge_failed_first() {
     let gw = gateway(script, &log, Guard);
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(t(&log.metered()[0]), Some(7.0));
+    assert_eq!(t(&log.metered()[0]), Some(7));
 }
 
 // A `HEAD` whose provider sends no body passes its head.
@@ -1041,7 +1041,7 @@ async fn r9_3_usage_before_the_value_a_filter_fails_on_is_metered_once() {
     let script = Script::default().then(StatusCode::OK, vec!["u:5\ni:hi\n", "e\n"]);
     let gw = gateway(script, &log, P);
     let _ = run(&gw, req(http::Method::POST)).await;
-    assert_eq!(log.metered().iter().map(t).collect::<Vec<_>>(), [Some(5.0)]);
+    assert_eq!(log.metered().iter().map(t).collect::<Vec<_>>(), [Some(5)]);
     assert!(log.calls()[0].is_err());
 }
 
@@ -1297,7 +1297,7 @@ async fn k9_7_a_client_filter_fails_a_plugins_own_outputs_which_count_nothing() 
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(over_budget)?;
             let mut usage = out("");
-            usage.1.add("t", 5.0);
+            usage.1.add("t", 5);
             let own = [out("ok"), out("hi"), usage].map(Ok::<_, Fault>);
             Ok(Some(Response::stream(futures::stream::iter(own))))
         }

@@ -5,6 +5,8 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
+use serde_json::Value;
+
 use crate::Fault;
 
 /// The client's input is not one its format or kind can take.
@@ -47,3 +49,9 @@ pub struct RetryAfter(pub Duration);
 /// A client-facing code a format writes in its error body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ErrorCode(pub Cow<'static, str>);
+
+/// A fault's extra fields for a client's JSON error body, as a hint
+/// ([`Fault::with`](crate::Fault::with)). Formats write these into their
+/// error bodies; the kernel never reads them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Details(pub Value);

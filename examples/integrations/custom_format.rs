@@ -163,7 +163,7 @@ fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
         .collect::<Option<_>>()
         .ok_or_else(malformed)?;
     let usage = v.remove("usage");
-    if let Some(tokens) = usage.and_then(|u| u["prompt_tokens"].as_f64()) {
+    if let Some(tokens) = usage.and_then(|u| u["prompt_tokens"].as_u64()) {
         said.usage.add(INPUT_TOKENS, tokens);
     }
     said.rest = v;

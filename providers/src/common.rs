@@ -542,6 +542,22 @@ pub(crate) fn merge_fields(target: &mut Value, extra: &Map<String, Value>) {
 /// The fields of the usage object `u` the kind has no unit for: not the
 /// `known` counters, and of the `details` objects (by name, with the known
 /// counters of each) only what else they hold.
+/// A provider's usage count at `v`: `None` if it says none (absent or
+/// null); a whole number even when written as a float (`12.0`); else a
+/// failure, so a count that cannot be one is never metered as zero.
+pub(crate) fn count(v: Option<&Value>) -> Result<Option<u64>, Fault> {
+    let Some(v) = v.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let whole = v.as_u64().or_else(|| {
+        let f = v.as_f64()?;
+        (f >= 0.0 && f.fract() == 0.0 && f <= u64::MAX as f64).then_some(f as u64)
+    });
+    whole
+        .map(Some)
+        .ok_or_else(|| Upstream::fault(format!("a usage count is not a whole number: {v}")))
+}
+
 pub(crate) fn usage_extra(
     u: &Value,
     known: &[&str],
@@ -816,15 +832,10 @@ fn role_of(format: &str, m: &Message, roles: &Names<Role>) -> Result<Value, Faul
 #[derive(Debug, Default)]
 pub(crate) struct Totals(Usage);
 
-/// A provider can only express its known token counters as integral counts.
+/// A provider can only express its known token counters.
 pub(crate) fn supported_usage(usage: &Usage, units: &[&str]) -> Result<(), Fault> {
     for (unit, amount) in usage.iter() {
-        if (!units.contains(&unit.as_ref()) && amount != 0.0)
-            || !amount.is_finite()
-            || amount < 0.0
-            || amount.fract() != 0.0
-            || amount >= u64::MAX as f64
-        {
+        if !units.contains(&unit.as_ref()) && amount != 0 {
             return Err(unwritable_usage());
         }
     }
@@ -837,9 +848,10 @@ impl Totals {
         let mut step = Usage::default();
         for (unit, n) in total.iter() {
             let seen = self.0.get(&unit).unwrap_or_default();
-            if n > seen {
-                step.add(unit.clone(), n - seen);
-                self.0.add(unit, n - seen);
+            let more = n.saturating_sub(seen);
+            if more > 0 {
+                step.add(unit.clone(), more);
+                self.0.add(unit, more);
             }
         }
         step
@@ -966,7 +978,7 @@ mod tests {
     use respan_gateway_sdk::Details;
     use serde_json::json;
 
-    fn usage_of(reply: &Reply) -> Option<f64> {
+    fn usage_of(reply: &Reply) -> Option<u64> {
         match reply {
             Reply::Usage(u) => u.get(crate::conversation::units::INPUT_TOKENS),
             _ => None,
@@ -1026,7 +1038,7 @@ mod tests {
                     );
                     let usage = values[0].as_ref().expect("salvaged usage");
                     assert!(!usage.is_content());
-                    assert_eq!(usage_of(usage), Some(2.0));
+                    assert_eq!(usage_of(usage), Some(2));
                 }
             }
         }
@@ -1564,10 +1576,10 @@ mod tests {
             u.add("out", n);
             u
         };
-        assert_eq!(totals.increment(&total(1.0)).get("out"), Some(1.0));
-        assert_eq!(totals.increment(&total(3.0)).get("out"), Some(2.0));
-        assert!(totals.increment(&total(3.0)).is_empty());
-        assert!(totals.increment(&total(2.0)).is_empty(), "never negative");
+        assert_eq!(totals.increment(&total(1)).get("out"), Some(1));
+        assert_eq!(totals.increment(&total(3)).get("out"), Some(2));
+        assert!(totals.increment(&total(3)).is_empty());
+        assert!(totals.increment(&total(2)).is_empty(), "never negative");
     }
 
     #[test]

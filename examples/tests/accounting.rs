@@ -73,8 +73,8 @@ fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
         .ok_or_else(|| BadRequest::fault("no cost bound: set max_tokens"))?;
     px.filter(move |reply: &mut Reply| {
         if let Reply::Usage(usage) = reply {
-            let output = usage.get(units::OUTPUT_TOKENS).unwrap_or(0.0);
-            tally.add(output.ceil() as Amount * 10);
+            let output = usage.get(units::OUTPUT_TOKENS).unwrap_or(0);
+            tally.add(output as Amount * 10);
         }
         Ok(())
     })?;

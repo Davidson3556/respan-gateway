@@ -53,9 +53,9 @@ impl Format<Model, Reply, Conversation> for Local {
             let answer = model(chat)?;
 
             // One reply per word, then the finish with usage (a word is a token here).
-            let words = |s: &str| s.split_whitespace().count() as f64;
+            let words = |s: &str| s.split_whitespace().count() as u64;
             let mut usage = Usage::default();
-            let prompt = chat.messages.iter().map(|m| words(&m.text())).sum();
+            let prompt: u64 = chat.messages.iter().map(|m| words(&m.text())).sum();
             usage.add(units::INPUT_TOKENS, prompt);
             usage.add(units::OUTPUT_TOKENS, words(&answer));
             let model = chat.model.clone().unwrap_or_else(|| "local".into());

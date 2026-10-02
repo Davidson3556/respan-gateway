@@ -139,7 +139,7 @@ fn a_keep_alive_or_usage_alone_passes_at_once_unless_events_wait() {
     let mut holdback = Holdback::new(Terms);
     let mut out = Vec::new();
     let mut counts = Usage::default();
-    counts.add("output_tokens", 3.0);
+    counts.add("output_tokens", 3);
     let usage = Reply::usage(counts);
     assert!(holdback.edit(keep_alive(), &mut out).is_ok());
     assert_eq!(out, [keep_alive()]);

@@ -41,7 +41,7 @@ async fn a_batch_over_the_cap_is_split_and_merged_in_order_with_usage_summed() -
     assert_eq!(firsts, want, "the client's order, indexed anew");
     assert_eq!(
         answered["usage"]["prompt_tokens"],
-        json!(5.0),
+        json!(5),
         "every call's usage"
     );
     // Three calls of at most two inputs, each keeping the client's other fields.

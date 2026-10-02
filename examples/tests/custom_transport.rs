@@ -70,8 +70,8 @@ async fn the_provider_edge_sees_and_bills_its_calls() -> Result<(), Fault> {
     ask(&gw, STREAM).await?;
     gw.idle().await;
     let usage = meter.usage();
-    assert_eq!(usage.get(units::INPUT_TOKENS), Some(2.0));
-    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(4.0));
+    assert_eq!(usage.get(units::INPUT_TOKENS), Some(2));
+    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(4));
 
     let gw = gateway()?.plugin(Closed);
     let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", UNARY)).await.0).await;

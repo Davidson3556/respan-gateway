@@ -114,7 +114,7 @@ impl Price {
 
     /// What `usage`'s input and output tokens cost; a missing count is 0.
     pub fn of(&self, usage: &Usage) -> i64 {
-        let n = |unit| usage.get(unit).unwrap_or(0.0).max(0.0).ceil() as u64;
+        let n = |unit| usage.get(unit).unwrap_or(0);
         self.cost(n(units::INPUT_TOKENS), n(units::OUTPUT_TOKENS))
     }
 }

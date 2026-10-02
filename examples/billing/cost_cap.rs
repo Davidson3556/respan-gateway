@@ -138,7 +138,7 @@ impl Filter<Reply> for Settle {
         if self.usage.is_empty() && !cut {
             return Ok(());
         }
-        let n = |unit| self.usage.get(unit).map(|n| n.max(0.0).ceil() as u64);
+        let n = |unit| self.usage.get(unit);
         let reported = n(units::OUTPUT_TOKENS);
         let mut output = reported.unwrap_or(0);
         if reported.is_none() || cut {

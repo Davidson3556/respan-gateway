@@ -459,7 +459,7 @@ impl Wire for OpenAiChat {
 
 /// A response's usage, as the kind counts it. Groq reports it beside the
 /// response, under its own name.
-fn usage_of(v: &Value) -> Usage {
+fn usage_of(v: &Value) -> Result<Usage, Fault> {
     let mut usage = Usage::default();
     let u = usage_object(v);
     for (unit, ptr) in [
@@ -474,11 +474,11 @@ fn usage_of(v: &Value) -> Usage {
             "/completion_tokens_details/reasoning_tokens",
         ),
     ] {
-        if let Some(n) = u.pointer(ptr).and_then(Value::as_f64) {
+        if let Some(n) = crate::common::count(u.pointer(ptr))? {
             usage.add(unit, n);
         }
     }
-    usage
+    Ok(usage)
 }
 
 /// The usage object of a chunk or body: Groq reports it beside the response.
@@ -505,17 +505,17 @@ fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
     let get = |unit| u.get(unit).unwrap_or_default();
     let (input, output) = (get(units::INPUT_TOKENS), get(units::OUTPUT_TOKENS));
     let mut body = json!({
-        "prompt_tokens": input as u64,
-        "completion_tokens": output as u64,
-        "total_tokens": (input + output) as u64,
+        "prompt_tokens": input,
+        "completion_tokens": output,
+        "total_tokens": input.saturating_add(output),
     });
     let cached = get(units::CACHED_INPUT_TOKENS);
-    if cached > 0.0 {
-        body["prompt_tokens_details"] = json!({ "cached_tokens": cached as u64 });
+    if cached > 0 {
+        body["prompt_tokens_details"] = json!({ "cached_tokens": cached });
     }
     let reasoning = get(units::REASONING_TOKENS);
-    if reasoning > 0.0 {
-        body["completion_tokens_details"] = json!({ "reasoning_tokens": reasoning as u64 });
+    if reasoning > 0 {
+        body["completion_tokens_details"] = json!({ "reasoning_tokens": reasoning });
     }
     merge_fields(&mut body, extra);
     body
@@ -541,7 +541,7 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
     let output = usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
     if usage.get(units::CACHED_INPUT_TOKENS).unwrap_or_default() > input
         || usage.get(units::REASONING_TOKENS).unwrap_or_default() > output
-        || input + output >= u64::MAX as f64
+        || input.checked_add(output).is_none()
     {
         return Err(unwritable_usage());
     }
@@ -780,7 +780,7 @@ impl OpenAiReader {
             start.extra = extra_of(OPENAI, std::mem::take(&mut self.early));
             out.push(Reply::Start(start));
         }
-        let usage = self.totals.increment(&usage_of(v));
+        let usage = self.totals.increment(&usage_of(v)?);
         if !usage.is_empty() {
             out.push(Reply::Usage(usage));
         }
@@ -1343,7 +1343,7 @@ mod tests {
         }
     }
 
-    fn usage(unit: &'static str, n: f64) -> Reply {
+    fn usage(unit: &'static str, n: u64) -> Reply {
         let mut u = Usage::default();
         u.add(unit, n);
         Reply::usage(u)
@@ -1379,7 +1379,7 @@ mod tests {
         assert_eq!(failed[1].0.len(), 1);
         let held = &failed[1].0[0];
         assert!(
-            matches!(held, Reply::Usage(u) if u.get(units::INPUT_TOKENS) == Some(2.0)),
+            matches!(held, Reply::Usage(u) if u.get(units::INPUT_TOKENS) == Some(2)),
             "{held:?}"
         );
     }
@@ -1393,9 +1393,9 @@ mod tests {
             "data: [DONE]\n\n",
         ]);
         assert!(end.is_ok());
-        let mut first = usage(units::INPUT_TOKENS, 3.0);
+        let mut first = usage(units::INPUT_TOKENS, 3);
         if let Reply::Usage(u) = &mut first {
-            u.add(units::OUTPUT_TOKENS, 1.0);
+            u.add(units::OUTPUT_TOKENS, 1);
         }
         assert_eq!(
             out,
@@ -1407,7 +1407,7 @@ mod tests {
                 first,
                 Reply::block_end(0),
                 Reply::finished(Finish::Stop),
-                usage(units::OUTPUT_TOKENS, 1.0),
+                usage(units::OUTPUT_TOKENS, 1),
             ]
         );
     }
@@ -1528,7 +1528,7 @@ mod tests {
             out,
             [
                 Reply::start("x", ""),
-                usage(units::OUTPUT_TOKENS, 1.0),
+                usage(units::OUTPUT_TOKENS, 1),
                 Reply::block_start(0, Block::Text),
                 Reply::text(0, "hi"),
                 Reply::block_end(0),
@@ -1663,9 +1663,9 @@ mod tests {
             let fields = json!({ "created": 7 });
             s.extra = Extra::new(OPENAI, fields.as_object().cloned().unwrap_or_default());
         }
-        let mut totals = usage(units::INPUT_TOKENS, 2.0);
+        let mut totals = usage(units::INPUT_TOKENS, 2);
         if let Reply::Usage(u) = &mut totals {
-            u.add(units::OUTPUT_TOKENS, 1.0);
+            u.add(units::OUTPUT_TOKENS, 1);
         }
         assert_eq!(
             decode_body(&v),
@@ -1708,11 +1708,11 @@ mod tests {
     fn unsupported_usage_edits_fail_instead_of_disappearing() {
         let mut synthetic = vec![Reply::start("x", "m")];
         synthetic.extend(text_events(0, "ok"));
-        synthetic.push(usage("credits", 3.0));
+        synthetic.push(usage("credits", 3));
         assert!(stream_of(&synthetic, true).is_err());
         assert!(body_of(&synthetic).is_err());
         // Cached tokens are part of the input: more than it is no usage.
-        let more = [usage(units::CACHED_INPUT_TOKENS, 3.0)];
+        let more = [usage(units::CACHED_INPUT_TOKENS, 3)];
         assert!(body_of(&more).is_err());
     }
 
@@ -1731,7 +1731,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(sums, [1.0, 6.0]);
+        assert_eq!(sums, [1, 6]);
         let Some(Reply::Start(start)) = out.first() else {
             panic!("{out:?}");
         };
@@ -1764,10 +1764,10 @@ mod tests {
                 all
             });
             for (unit, n) in [
-                (units::INPUT_TOKENS, 4.0),
-                (units::OUTPUT_TOKENS, 7.0),
-                (units::CACHED_INPUT_TOKENS, 2.0),
-                (units::REASONING_TOKENS, 3.0),
+                (units::INPUT_TOKENS, 4),
+                (units::OUTPUT_TOKENS, 7),
+                (units::CACHED_INPUT_TOKENS, 2),
+                (units::REASONING_TOKENS, 3),
             ] {
                 assert_eq!(total.get(unit), Some(n), "groq {groq}");
             }
@@ -1805,7 +1805,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(counted, [3.0]);
+        assert_eq!(counted, [3]);
         // It counts, but neither it nor the usage on a chunk with choices is
         // written.
         let out = stream_of(&replies, false).expect("a stream");
@@ -1848,10 +1848,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(outputs, [1.0, 6.0]);
+        assert_eq!(outputs, [1, 6]);
         replies.retain(|r| matches!(r, Reply::Usage(_)));
         // A plugin lowers the second increment: the total follows it.
-        replies[1] = usage(units::OUTPUT_TOKENS, 2.0);
+        replies[1] = usage(units::OUTPUT_TOKENS, 2);
         let stream = stream_of(&replies, true).expect("a stream");
         let last = chunks_of(&stream).pop().unwrap_or_default();
         assert_eq!(last["usage"]["completion_tokens"], 3, "{stream}");
@@ -1875,24 +1875,24 @@ mod tests {
                 decode_all(&[&events[0], &events[1], &events[2], "data: [DONE]\n\n"]);
             // The second report, which adds 6, is dropped.
             replies.retain(
-                |r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6.0)),
+                |r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6)),
             );
             let stream = stream_of(&replies, true).expect("a stream");
             let again = decode_all(&[&stream]).0;
-            let total: f64 = again
+            let total: u64 = again
                 .iter()
                 .filter_map(|r| match r {
                     Reply::Usage(u) => u.get(units::OUTPUT_TOKENS),
                     _ => None,
                 })
                 .sum();
-            assert_eq!(total, 1.0, "groq={groq}: {stream}");
+            assert_eq!(total, 1, "groq={groq}: {stream}");
         }
     }
 
     #[test]
     fn usage_never_decreases_and_edits_upward_are_summed() {
-        for (totals, edited, expected) in [([7, 1, 0], None, 7.0), ([1, 7, 7], Some(3.0), 9.0)] {
+        for (totals, edited, expected) in [([7, 1, 0], None, 7), ([1, 7, 7], Some(3), 9)] {
             let events = totals.map(|n| {
                 format!("data: {{\"choices\":[],\"usage\":{{\"completion_tokens\":{n}}}}}\n\n")
             });

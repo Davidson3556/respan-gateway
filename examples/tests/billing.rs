@@ -24,7 +24,7 @@ async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
         billed,
         [("acme", Some(450)), ("acme", Some(7_500)), ("globex", None)]
     );
-    assert_eq!(rows[0].usage.get(units::OUTPUT_TOKENS), Some(500.0));
+    assert_eq!(rows[0].usage.get(units::OUTPUT_TOKENS), Some(500));
     Ok(())
 }
 

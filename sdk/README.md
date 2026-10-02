@@ -1,14 +1,23 @@
 # Plugin SDK
 
 `respan-gateway-sdk` is the single plugin-author entry point. It reexports
-core contracts (`Plugin`, `ClientContext`, `ProviderContext`, `Filter`, `Fault`,
-`EventStream`, `EventSink`, and the gateway/call/response APIs) and owns shared
-LLM vocabulary: `conversation::{Conversation, Reply, Message, …}`, `Usage` and
-`Details`. The reexports are the original core types, not wrappers.
+the core contracts (`Plugin`, `ClientContext`, `ProviderContext`, `Filter`,
+`Fault`, `EventStream`, `EventSink`, and the gateway/call/response APIs) as the
+original types, not wrappers, and provides:
+
+- the conversation kind: a `Conversation` in, `Reply` events out (one event of
+  a reply each), `Assembled` folding them, and `Extra` for what a format has
+  that the kind does not;
+- `Usage`: integer amounts of named units, kind-neutral (the conversation
+  kind's units are in `conversation::units`);
+- fault facts: `BadRequest`, `Upstream`, `Truncated`, `RetryAfter`,
+  `ErrorCode` and `Details`.
+
+HTTP bindings live in `respan_gateway_http`.
 
 A `Fault` carries typed facts that each edge renders as it knows: `BadRequest`,
-`Upstream` and `Truncated` (each with a `fault` constructor), `RetryAfter` and
-`ErrorCode`. Core adds only its own markers (`Abandoned`, `Internal`, `Config`,
+`Upstream` and `Truncated` (each with a `fault` constructor), `RetryAfter`,
+`ErrorCode` and `Details`. Core adds only its own markers (`Abandoned`, `Internal`, `Config`,
 `NotFound`).
 
 A reply is a sequence of events, the same for a stream and a whole body, and

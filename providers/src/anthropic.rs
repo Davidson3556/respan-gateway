@@ -576,18 +576,18 @@ fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
     let cached = get(units::CACHED_INPUT_TOKENS);
     let written = get(units::CACHE_WRITE_INPUT_TOKENS);
     let mut body = json!({
-        "input_tokens": (get(units::INPUT_TOKENS) - cached - written) as u64,
-        "output_tokens": get(units::OUTPUT_TOKENS) as u64,
+        "input_tokens": get(units::INPUT_TOKENS).saturating_sub(cached).saturating_sub(written),
+        "output_tokens": get(units::OUTPUT_TOKENS),
     });
-    if cached > 0.0 {
-        body["cache_read_input_tokens"] = json!(cached as u64);
+    if cached > 0 {
+        body["cache_read_input_tokens"] = json!(cached);
     }
-    if written > 0.0 {
-        body["cache_creation_input_tokens"] = json!(written as u64);
+    if written > 0 {
+        body["cache_creation_input_tokens"] = json!(written);
     }
     let reasoning = get(units::REASONING_TOKENS);
-    if reasoning > 0.0 {
-        body["output_tokens_details"] = json!({ "thinking_tokens": reasoning as u64 });
+    if reasoning > 0 {
+        body["output_tokens_details"] = json!({ "thinking_tokens": reasoning });
     }
     merge_fields(&mut body, extra);
     body
@@ -622,7 +622,7 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
     let written = usage
         .get(units::CACHE_WRITE_INPUT_TOKENS)
         .unwrap_or_default();
-    if cached + written > input || cached + written >= u64::MAX as f64 {
+    if cached.checked_add(written).is_none_or(|both| both > input) {
         return Err(unwritable_usage());
     }
     Ok(())
@@ -630,27 +630,30 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
 
 /// Usage totals; [`units::INPUT_TOKENS`] includes the cache reads and
 /// writes Anthropic counts apart.
-fn usage_of(u: &Value) -> Usage {
-    let n = |key: &str| u[key].as_f64();
+fn usage_of(u: &Value) -> Result<Usage, Fault> {
+    let n = |key: &str| crate::common::count(u.get(key));
     let mut usage = Usage::default();
-    if let Some(input) = n("input_tokens") {
-        let cached = n("cache_read_input_tokens").unwrap_or(0.0);
-        let written = n("cache_creation_input_tokens").unwrap_or(0.0);
-        usage.add(units::INPUT_TOKENS, input + cached + written);
-        if cached > 0.0 {
+    if let Some(input) = n("input_tokens")? {
+        let cached = n("cache_read_input_tokens")?.unwrap_or(0);
+        let written = n("cache_creation_input_tokens")?.unwrap_or(0);
+        usage.add(units::INPUT_TOKENS, input);
+        usage.add(units::INPUT_TOKENS, cached);
+        usage.add(units::INPUT_TOKENS, written);
+        if cached > 0 {
             usage.add(units::CACHED_INPUT_TOKENS, cached);
         }
-        if written > 0.0 {
+        if written > 0 {
             usage.add(units::CACHE_WRITE_INPUT_TOKENS, written);
         }
     }
-    if let Some(output) = n("output_tokens") {
+    if let Some(output) = n("output_tokens")? {
         usage.add(units::OUTPUT_TOKENS, output);
     }
-    if let Some(thinking) = u["output_tokens_details"]["thinking_tokens"].as_f64() {
+    let thinking = u.pointer("/output_tokens_details/thinking_tokens");
+    if let Some(thinking) = crate::common::count(thinking)? {
         usage.add(units::REASONING_TOKENS, thinking);
     }
-    usage
+    Ok(usage)
 }
 
 /// Decodes events and whole bodies of Anthropic Messages into events, as
@@ -705,7 +708,7 @@ impl AnthropicReader {
     }
 
     /// The events of a message: its start and usage so far.
-    fn message(&mut self, m: &Value, out: &mut Vec<Reply>) {
+    fn message(&mut self, m: &Value, out: &mut Vec<Reply>) -> Result<(), Fault> {
         let known = [
             "id",
             "model",
@@ -722,11 +725,12 @@ impl AnthropicReader {
         );
         start.extra = extra_of(ANTHROPIC, unsupported_fields(m, &known, &[]));
         out.push(Reply::Start(start));
-        let usage = self.totals.increment(&usage_of(&m["usage"]));
+        let usage = self.totals.increment(&usage_of(&m["usage"])?);
         if !usage.is_empty() {
             out.push(Reply::Usage(usage));
         }
         self.usage_other(&m["usage"], out);
+        Ok(())
     }
 
     /// The fields of the usage object `u` that have no unit, as one `Other`
@@ -851,7 +855,7 @@ impl Reader for AnthropicReader {
             .unwrap_or(0);
         let opaque = self.others.contains(&block);
         match v["type"].as_str() {
-            Some("message_start") => self.message(&v["message"], out),
+            Some("message_start") => self.message(&v["message"], out)?,
             Some("content_block_start") => self.open(block, &v["content_block"], v.clone(), out),
             Some("content_block_delta") if !opaque => {
                 let delta = &v["delta"];
@@ -867,7 +871,7 @@ impl Reader for AnthropicReader {
             }
             Some("content_block_stop") if !opaque => out.push(Reply::block_end(block)),
             Some("message_delta") => {
-                let usage = self.totals.increment(&usage_of(&v["usage"]));
+                let usage = self.totals.increment(&usage_of(&v["usage"])?);
                 if !usage.is_empty() {
                     out.push(Reply::Usage(usage));
                 }
@@ -886,7 +890,7 @@ impl Reader for AnthropicReader {
     }
 
     fn body(&mut self, v: &Value, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        self.message(v, out);
+        self.message(v, out)?;
         for (at, b) in v["content"].as_array().into_iter().flatten().enumerate() {
             let block = u32::try_from(at).unwrap_or(u32::MAX);
             let start = event_of("content_block_start", block, json!({ "content_block": b }));
@@ -1255,7 +1259,7 @@ mod tests {
         }
     }
 
-    fn usage(unit: &'static str, n: f64) -> Reply {
+    fn usage(unit: &'static str, n: u64) -> Reply {
         let mut u = Usage::default();
         u.add(unit, n);
         Reply::usage(u)
@@ -1365,16 +1369,34 @@ mod tests {
     }
 
     #[test]
+    fn a_count_written_as_a_whole_float_counts_and_any_other_is_refused() {
+        let floats = usage_of(&json!({ "input_tokens": 12.0, "output_tokens": 3 }));
+        let floats = floats.expect("a whole float is a count");
+        assert_eq!(floats.get(units::INPUT_TOKENS), Some(12));
+        assert_eq!(floats.get(units::OUTPUT_TOKENS), Some(3));
+        for bad in [json!(1.5), json!(-1), json!("7")] {
+            let refused = usage_of(&json!({ "input_tokens": 1, "output_tokens": bad }));
+            assert!(
+                refused.is_err_and(|f| f.is::<respan_gateway_sdk::Upstream>()),
+                "{bad}"
+            );
+        }
+        let none = usage_of(&json!({ "input_tokens": null })).expect("null says none");
+        assert!(none.is_empty());
+    }
+
+    #[test]
     fn input_usage_counts_cache_reads_and_writes() {
         let u = usage_of(&json!({
             "input_tokens": 3,
             "cache_read_input_tokens": 10,
             "cache_creation_input_tokens": 2,
             "output_tokens": 1,
-        }));
-        assert_eq!(u.get(units::INPUT_TOKENS), Some(15.0));
-        assert_eq!(u.get(units::CACHED_INPUT_TOKENS), Some(10.0));
-        assert_eq!(u.get(units::OUTPUT_TOKENS), Some(1.0));
+        }))
+        .expect("whole counts");
+        assert_eq!(u.get(units::INPUT_TOKENS), Some(15));
+        assert_eq!(u.get(units::CACHED_INPUT_TOKENS), Some(10));
+        assert_eq!(u.get(units::OUTPUT_TOKENS), Some(1));
     }
 
     #[test]
@@ -1390,8 +1412,8 @@ mod tests {
                 total += u;
             }
         }
-        assert_eq!(total.get(units::INPUT_TOKENS), Some(5.0));
-        assert_eq!(total.get(units::OUTPUT_TOKENS), Some(7.0));
+        assert_eq!(total.get(units::INPUT_TOKENS), Some(5));
+        assert_eq!(total.get(units::OUTPUT_TOKENS), Some(7));
         assert!(out.contains(&Reply::reasoning(0, "hm")));
     }
 
@@ -1558,9 +1580,9 @@ mod tests {
             "delta": { "type": "signature_delta", "signature": "sig" } });
         let cited = json!({ "type": "content_block_fields", "index": 3,
             "fields": { "citations": [{ "type": "char_location" }] } });
-        let mut totals = usage(units::INPUT_TOKENS, 2.0);
+        let mut totals = usage(units::INPUT_TOKENS, 2);
         if let Reply::Usage(u) = &mut totals {
-            u.add(units::OUTPUT_TOKENS, 1.0);
+            u.add(units::OUTPUT_TOKENS, 1);
         }
         assert_eq!(
             events,
@@ -1617,9 +1639,9 @@ mod tests {
 
     #[test]
     fn usage_so_far_is_in_message_start_and_the_totals_in_message_delta() {
-        let mut replies = vec![Reply::start("m", "c"), usage(units::INPUT_TOKENS, 4.0)];
+        let mut replies = vec![Reply::start("m", "c"), usage(units::INPUT_TOKENS, 4)];
         replies.extend(text_events(0, "hi"));
-        replies.push(usage(units::OUTPUT_TOKENS, 2.0));
+        replies.push(usage(units::OUTPUT_TOKENS, 2));
         replies.push(Reply::finished(Finish::Stop));
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
@@ -1638,8 +1660,8 @@ mod tests {
     fn a_finish_released_after_usage_keeps_the_final_totals() {
         let mut replies = vec![Reply::start("m", "c")];
         replies.extend(text_events(0, "hi"));
-        replies.push(usage(units::OUTPUT_TOKENS, 2.0));
-        replies.push(usage(units::OUTPUT_TOKENS, 3.0));
+        replies.push(usage(units::OUTPUT_TOKENS, 2));
+        replies.push(usage(units::OUTPUT_TOKENS, 3));
         replies.push(Reply::finished(Finish::Length));
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
@@ -1658,8 +1680,7 @@ mod tests {
         ];
         let mut replies = decode(&events);
         // The second report, which adds 6, is dropped.
-        replies
-            .retain(|r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6.0)));
+        replies.retain(|r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6)));
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
         let delta = events.iter().find(|e| e["type"] == "message_delta");
@@ -1671,7 +1692,7 @@ mod tests {
 
     #[test]
     fn usage_never_decreases_and_edits_upward_are_summed() {
-        for (totals, edited, expected) in [([7, 1, 0], None, 7), ([1, 7, 7], Some(3.0), 9)] {
+        for (totals, edited, expected) in [([7, 1, 0], None, 7), ([1, 7, 7], Some(3), 9)] {
             let events = totals.map(|n| {
                 format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{}},\"usage\":{{\"output_tokens\":{n}}}}}\n\n")
             });
@@ -1694,13 +1715,13 @@ mod tests {
     fn unsupported_usage_edits_fail_instead_of_disappearing() {
         let mut replies = vec![Reply::start("m", "c")];
         replies.extend(text_events(0, "ok"));
-        replies.push(usage("credits", 3.0));
+        replies.push(usage("credits", 3));
         assert!(stream_of(&replies).is_err());
         assert!(body_of(&replies).is_err());
         // Cache reads are part of the input: more than it is no usage.
-        let mut more = usage(units::CACHED_INPUT_TOKENS, 3.0);
+        let mut more = usage(units::CACHED_INPUT_TOKENS, 3);
         if let Reply::Usage(u) = &mut more {
-            u.add(units::INPUT_TOKENS, 1.0);
+            u.add(units::INPUT_TOKENS, 1);
         }
         assert!(body_of(&[more]).is_err());
     }
@@ -1709,10 +1730,10 @@ mod tests {
     fn cache_usage_is_written_as_the_units_say() {
         let mut u = Usage::default();
         for (unit, n) in [
-            (units::INPUT_TOKENS, 15.0),
-            (units::CACHED_INPUT_TOKENS, 10.0),
-            (units::CACHE_WRITE_INPUT_TOKENS, 2.0),
-            (units::OUTPUT_TOKENS, 1.0),
+            (units::INPUT_TOKENS, 15),
+            (units::CACHED_INPUT_TOKENS, 10),
+            (units::CACHE_WRITE_INPUT_TOKENS, 2),
+            (units::OUTPUT_TOKENS, 1),
         ] {
             u.add(unit, n);
         }
@@ -1723,8 +1744,8 @@ mod tests {
         );
         // A cache that was emptied is no field at all.
         let mut none = Usage::default();
-        none.add(units::INPUT_TOKENS, 15.0);
-        none.add(units::OUTPUT_TOKENS, 1.0);
+        none.add(units::INPUT_TOKENS, 15);
+        none.add(units::OUTPUT_TOKENS, 1);
         assert_eq!(
             usage_body(&none, &Map::new()),
             json!({ "input_tokens": 15, "output_tokens": 1 })
@@ -1740,7 +1761,10 @@ mod tests {
             json!({ "input_tokens": 3, "output_tokens": 4,
                 "output_tokens_details": { "thinking_tokens": 2 } }),
         ] {
-            assert_eq!(usage_body(&usage_of(&u), &Map::new()), u);
+            assert_eq!(
+                usage_body(&usage_of(&u).expect("whole counts"), &Map::new()),
+                u
+            );
         }
     }
 

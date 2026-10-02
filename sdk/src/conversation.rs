@@ -33,7 +33,8 @@ use serde_json::{Map, Value};
 
 use crate::{Upstream, Usage};
 
-/// Usage units every conversation format reports alike.
+/// The conversation kind's [`Usage`] unit names, which every conversation
+/// format reports alike.
 pub mod units {
     /// Every input token, cached or not.
     pub const INPUT_TOKENS: &str = "input_tokens";
@@ -784,7 +785,7 @@ mod tests {
     #[test]
     fn events_fold_into_the_whole_answer() {
         let mut usage = Usage::default();
-        usage.add(units::INPUT_TOKENS, 3.0);
+        usage.add(units::INPUT_TOKENS, 3);
         let all = fold(&[
             Reply::start("r1", "m"),
             Reply::block_start(0, Block::Reasoning),
@@ -821,7 +822,7 @@ mod tests {
         );
         assert_eq!(all.message.role, Role::Assistant);
         assert_eq!(all.finish, Some(Finish::ToolUse));
-        assert_eq!(all.usage.get(units::INPUT_TOKENS), Some(6.0));
+        assert_eq!(all.usage.get(units::INPUT_TOKENS), Some(6));
         assert_eq!(all.other, [Reply::other("chat", json!({"type": "ping"}))]);
     }
 

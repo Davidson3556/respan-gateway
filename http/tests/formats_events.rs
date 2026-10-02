@@ -404,12 +404,12 @@ async fn a_request_no_plugin_reads_is_decoded_for_encoding() {
 
 /// Cuts every call off once its replies report more than `.0` output
 /// tokens: a provider-edge filter, as a mid-stream cut is.
-struct Cap(f64);
+struct Cap(u64);
 
 #[async_trait]
 impl Plugin for Cap {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        let (cap, mut spent) = (self.0, 0.0);
+        let (cap, mut spent) = (self.0, 0);
         px.filter(move |reply: &mut Reply| {
             if let Reply::Usage(usage) = reply {
                 spent += usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
@@ -436,14 +436,14 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
     };
     let stream = [chunk("a", 10), chunk("b", 20), chunk("c", 30)];
     let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
-    for (after, metered) in [(true, 20.0), (false, 10.0)] {
+    for (after, metered) in [(true, 20), (false, 10)] {
         let fake = FakeOpenAi::start().await;
         fake.answer(events(&chunks));
         let meter = Metered::default();
         let mut plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(meter.clone())];
         match after {
-            true => plugins.insert(0, Arc::new(Cap(15.0))),
-            false => plugins.push(Arc::new(Cap(15.0))),
+            true => plugins.insert(0, Arc::new(Cap(15))),
+            false => plugins.push(Arc::new(Cap(15))),
         }
         let (gw, _, calls) = gateway(OpenAiChat, openai(&fake), plugins);
         let chat =
@@ -479,8 +479,8 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     impl Plugin for Answers {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let (mut shown, mut cached) = (Usage::default(), Usage::default());
-            shown.add(units::INPUT_TOKENS, 7.0);
-            cached.add(units::INPUT_TOKENS, 3.0);
+            shown.add(units::INPUT_TOKENS, 7);
+            cached.add(units::INPUT_TOKENS, 3);
             cx.extensions_mut().insert(CachedUsage(cached));
             let hi = [
                 Reply::start("own", "m"),
@@ -523,7 +523,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     assert_eq!(body["usage"]["prompt_tokens"], 7);
     assert!(meter.total().is_empty());
     let billed = bills.0.lock().map(|u| u.get(units::INPUT_TOKENS)).ok();
-    assert_eq!(billed, Some(Some(3.0)));
+    assert_eq!(billed, Some(Some(3)));
 }
 
 /// Fails on the usage it sees.
@@ -566,5 +566,5 @@ async fn a_meter_after_a_guard_sees_the_usage_in_the_reply_it_refuses() {
     gw.idle().await;
 
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(meter.total().get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(meter.total().get(units::INPUT_TOKENS), Some(4));
 }

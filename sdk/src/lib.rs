@@ -1,7 +1,15 @@
 #![warn(missing_docs)]
-//! The plugin-author facade: original core contracts and shared LLM vocabulary.
-//! Basic text accessors operate on typed conversation content, not opaque wire JSON.
-//! HTTP bindings and wire helpers live in `respan_gateway_http` and its `formats` module.
+//! The plugin-author facade: the core contracts and the shared LLM vocabulary.
+//!
+//! - The core contracts are re-exported as they are, not wrapped.
+//! - The conversation kind: a [`Conversation`] in, [`Reply`] events out (one
+//!   event of a reply each), [`Assembled`] folding them, and [`Extra`] for what
+//!   a format has that the kind does not.
+//! - [`Usage`]: integer amounts of named units, kind-neutral.
+//! - Fault facts: [`BadRequest`], [`Upstream`], [`Truncated`], [`RetryAfter`],
+//!   [`ErrorCode`] and [`Details`].
+//!
+//! HTTP bindings live in `respan_gateway_http`.
 //!
 //! ```
 //! use respan_gateway_sdk::{
@@ -19,13 +27,5 @@ pub use conversation::{
     Assembled, Block, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role, Start,
     Tool, ToolChoice, set_model,
 };
-pub use fault::{BadRequest, ErrorCode, RetryAfter, Truncated, Upstream};
+pub use fault::{BadRequest, Details, ErrorCode, RetryAfter, Truncated, Upstream};
 pub use usage::Usage;
-
-use serde_json::Value;
-
-/// A fault's extra fields for a client's JSON error body, as a hint
-/// ([`Fault::with`](respan_gateway_core::Fault::with)). Formats write these
-/// into their error bodies; the kernel never reads them.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Details(pub Value);

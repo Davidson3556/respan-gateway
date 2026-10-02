@@ -2,20 +2,23 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 /// An open map of usage units to additive amounts, as a provider reports
-/// them: the conversation kind names its units in
-/// [`conversation::units`](crate::conversation::units). `f64` is exact for
-/// counts such as tokens; money belongs in a decimal type.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Usage(BTreeMap<Cow<'static, str>, f64>);
+/// them. `Usage` is kind-neutral: each kind names its own units (the
+/// conversation kind's are in [`conversation::units`](crate::conversation::units)).
+/// Amounts are integer counts of the unit's smallest measure (tokens,
+/// characters, milliseconds); money belongs in the application's own decimal
+/// type. Addition saturates, so it never overflows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Usage(BTreeMap<Cow<'static, str>, u64>);
 
 impl Usage {
-    /// Add `amount` of `unit`.
-    pub fn add(&mut self, unit: impl Into<Cow<'static, str>>, amount: f64) {
-        *self.0.entry(unit.into()).or_insert(0.0) += amount;
+    /// Add `amount` of `unit`, saturating at `u64::MAX`.
+    pub fn add(&mut self, unit: impl Into<Cow<'static, str>>, amount: u64) {
+        let total = self.0.entry(unit.into()).or_insert(0);
+        *total = total.saturating_add(amount);
     }
 
     /// The amount of `unit`; `None` if none was reported.
-    pub fn get(&self, unit: &str) -> Option<f64> {
+    pub fn get(&self, unit: &str) -> Option<u64> {
         self.0.get(unit).copied()
     }
 
@@ -25,7 +28,7 @@ impl Usage {
     }
 
     /// Every unit and its amount.
-    pub fn iter(&self) -> impl Iterator<Item = (Cow<'static, str>, f64)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (Cow<'static, str>, u64)> + '_ {
         self.0.iter().map(|(k, v)| (k.clone(), *v))
     }
 }

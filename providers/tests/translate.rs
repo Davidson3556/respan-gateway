@@ -478,8 +478,8 @@ async fn an_openai_client_streams_from_anthropic() {
 
     assert_eq!(says(h.log.only()), Ok(()));
     let usage = h.usage.total();
-    assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
-    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(usage.get(units::INPUT_TOKENS), Some(5));
+    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2));
 }
 
 #[tokio::test]
@@ -1682,7 +1682,7 @@ async fn usage_counts_even_when_its_chunk_cannot_be_translated() {
 
     let _ = h.text(anthropic_request(true)).await;
 
-    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(9.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(9));
     assert!(h.log.only().is_err());
 }
 

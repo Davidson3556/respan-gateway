@@ -484,7 +484,7 @@ struct Cached;
 impl Plugin for Cached {
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let mut cost = Usage::default();
-        cost.add(units::OUTPUT_TOKENS, 1.0);
+        cost.add(units::OUTPUT_TOKENS, 1);
         // Shown in its reply; no provider edge, so no meter, sees it.
         let mut answer = vec![Reply::start("cached", "gpt-x")];
         answer.extend(text(0, "hi"));
@@ -506,8 +506,8 @@ async fn a_stream_is_relayed_with_usage() {
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     assert_eq!(says(h.log.only()), Ok(()));
     let usage = h.usage.total();
-    assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
-    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(usage.get(units::INPUT_TOKENS), Some(5));
+    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2));
 }
 
 #[tokio::test]
@@ -523,7 +523,7 @@ async fn a_unary_response_is_relayed_with_usage() {
     assert_eq!(said["usage"]["prompt_tokens"], 4);
     assert_eq!(said["usage"]["completion_tokens"], 1);
     assert_eq!(says(h.log.only()), Ok(()));
-    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4));
 }
 
 #[tokio::test]
@@ -615,7 +615,7 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
                 usage.get(units::INPUT_TOKENS),
                 usage.get(units::OUTPUT_TOKENS),
             );
-            assert_eq!(billed, (Some(54.0), Some(51.0)));
+            assert_eq!(billed, (Some(54), Some(51)));
         }
         let sent = h.sites.sent.sent();
         let judge: serde_json::Value = serde_json::from_slice(sent[0].body()).unwrap_or_default();
@@ -659,10 +659,10 @@ async fn a_filter_re_encodes_only_what_changed() {
 
     let said = gist(&h.body(chat()).await);
     assert_eq!(said.message.text(), "HELLO WORLD");
-    assert_eq!(said.usage.get(units::OUTPUT_TOKENS), Some(2.0));
-    assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(5.0));
+    assert_eq!(said.usage.get(units::OUTPUT_TOKENS), Some(2));
+    assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(5));
     assert_eq!(said.start.map(|s| s.id), Some("c1".to_owned()));
-    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2));
 }
 
 #[tokio::test]
@@ -1080,7 +1080,7 @@ async fn a_client_that_did_not_ask_for_usage_does_not_get_the_usage_chunk() {
     assert!(!body.contains("usage"), "{body}");
     assert_eq!(gist(&body).message.text(), "Hello world");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
-    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2));
     let sent: serde_json::Value =
         serde_json::from_slice(h.sites.sent.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent["stream_options"]["include_usage"], true);
@@ -1294,7 +1294,7 @@ async fn an_edited_streaming_request_keeps_the_clients_usage_chunk() {
 
     let said = gist(&h.body(chat()).await);
     assert_eq!(said.usage, gist(&STREAM.concat()).usage);
-    assert_eq!(said.usage.get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(said.usage.get(units::OUTPUT_TOKENS), Some(2));
 }
 
 #[tokio::test]
@@ -1768,11 +1768,11 @@ async fn what_the_provider_sent_after_its_finish_is_kept_when_it_breaks_off() {
 
 #[tokio::test]
 async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
-    type Entry = Arc<Mutex<Option<(String, f64)>>>;
+    type Entry = Arc<Mutex<Option<(String, u64)>>>;
 
     /// Keeps a finished answer and what it cost, to replay later: the
     /// filter sees every reply, the usage alone at the stream's end too.
-    struct Fill(String, f64, Entry);
+    struct Fill(String, u64, Entry);
 
     impl Filter<Reply> for Fill {
         fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
@@ -1799,7 +1799,7 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
     #[async_trait]
     impl Plugin for Cache {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(Fill(String::new(), 0.0, self.0.clone()))?;
+            cx.filter(Fill(String::new(), 0, self.0.clone()))?;
             Ok(None)
         }
     }
@@ -1811,7 +1811,7 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
     let _ = h.send(chat()).await;
 
     let kept = entry.lock().ok().and_then(|e| e.clone());
-    assert_eq!(kept, Some(("Hello world".to_owned(), 2.0)));
+    assert_eq!(kept, Some(("Hello world".to_owned(), 2)));
 }
 
 #[tokio::test]
@@ -2080,7 +2080,7 @@ async fn a_whole_message_a_filter_took_the_start_of_is_sent() {
     assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert_eq!(gist(&body).message.text(), "hi");
-    assert_eq!(gist(&body).usage.get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(gist(&body).usage.get(units::INPUT_TOKENS), Some(4));
 }
 
 #[tokio::test]
@@ -2380,7 +2380,7 @@ async fn groqs_usage_beside_the_response_is_counted() {
             usage.get(units::INPUT_TOKENS),
             usage.get(units::OUTPUT_TOKENS)
         ),
-        (Some(7.0), Some(3.0))
+        (Some(7), Some(3))
     );
 }
 
@@ -2673,7 +2673,7 @@ async fn a_reframed_stream_gets_usage_only_if_it_asked() {
 
     assert!(!body.contains("usage"), "{body}");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
-    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(1.0));
+    assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(1));
 }
 
 #[tokio::test]
@@ -3283,12 +3283,12 @@ impl Plugin for Bill {
     }
 }
 
-fn input_tokens(usage: &Usage) -> f64 {
+fn input_tokens(usage: &Usage) -> u64 {
     usage.get(units::INPUT_TOKENS).unwrap_or_default()
 }
 
 /// Each metered call's input tokens, by call.
-fn metered(h: &Harness) -> Vec<(String, f64)> {
+fn metered(h: &Harness) -> Vec<(String, u64)> {
     let mut calls: Vec<_> = h.usage.by_call();
     calls.sort_by(|a, b| a.0.cmp(&b.0));
     calls
@@ -3338,11 +3338,11 @@ async fn every_call_a_smart_router_makes_is_billed_once_on_the_provider_edge() {
     let ended: Vec<_> = ended.iter().map(|(c, o)| (c.as_str(), o.is_ok())).collect();
     assert_eq!(ended, [("backup/gpt-x", true), ("openai/judge-1", true)]);
     let billed = [
-        ("backup/gpt-x".to_owned(), 4.0),
-        ("openai/judge-1".to_owned(), 50.0),
+        ("backup/gpt-x".to_owned(), 4),
+        ("openai/judge-1".to_owned(), 50),
     ];
     assert_eq!(metered(&h), billed);
-    assert_eq!(input_tokens(&h.usage.total()), 54.0);
+    assert_eq!(input_tokens(&h.usage.total()), 54);
 }
 
 #[tokio::test]
@@ -3512,7 +3512,7 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
     let backup = metered(&h)
         .into_iter()
         .find(|(c, _)| c.starts_with("backup"));
-    assert_eq!(backup.map(|(_, n)| n), Some(5.0));
+    assert_eq!(backup.map(|(_, n)| n), Some(5));
 }
 
 fn ended_with(bill: &Bill, code: &str) -> bool {
@@ -3883,9 +3883,9 @@ async fn each_call_a_request_makes_is_metered_once() {
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
     assert_eq!(bill.ended().len(), 2);
-    let calls: Vec<f64> = metered(&h).into_iter().map(|(_, n)| n).collect();
-    assert_eq!(calls, [4.0, 4.0]);
-    assert_eq!(input_tokens(&h.usage.total()), 8.0);
+    let calls: Vec<u64> = metered(&h).into_iter().map(|(_, n)| n).collect();
+    assert_eq!(calls, [4, 4]);
+    assert_eq!(input_tokens(&h.usage.total()), 8);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4112,7 +4112,7 @@ async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
         end.as_ref().err().map(fault_code).as_deref(),
         Some("blocked")
     );
-    assert_eq!(input_tokens(&h.usage.all()[0]), 5.0);
+    assert_eq!(input_tokens(&h.usage.all()[0]), 5);
 }
 
 /// Sets its flag when dropped.
@@ -4741,7 +4741,7 @@ async fn a_call_read_in_on_client_is_metered_like_the_targets() {
     assert!(fault.is_none());
     let calls = metered(&h);
     let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
-    assert_eq!(calls, [("backup/gpt-x", 4.0), ("openai/gpt-x", 4.0)]);
+    assert_eq!(calls, [("backup/gpt-x", 4), ("openai/gpt-x", 4)]);
 }
 
 #[tokio::test]
@@ -4981,7 +4981,7 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
     assert_eq!(status, StatusCode::OK);
     let said = gist(&body);
     assert_eq!(said.message.text(), "hi");
-    assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(4));
     let order = returns.0.lock().map(|v| v.clone()).unwrap_or_default();
     assert_eq!(order, ["filter ended", "returned", "call ended"]);
     assert_eq!(ends.all(), ["openai ok", "client"]);
@@ -5242,7 +5242,7 @@ async fn a_calls_usage_is_metered_on_its_provider_edge() {
 
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
 
-    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4));
 }
 
 #[tokio::test]
@@ -5470,7 +5470,7 @@ async fn a_meter_sees_usage_though_a_filter_keeps_all_back_and_another_fails_at_
     h.sites.openai.reply(fixture::sse(STREAM));
     let _ = h.send(chat()).await;
     assert_eq!(code(&h.calls.all()[0]), "internal");
-    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(5.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(5));
 }
 
 #[tokio::test]
@@ -5496,7 +5496,7 @@ async fn a_calls_response_read_to_its_end_then_dropped_ends_ok() {
     let all = h.calls.all();
     assert_eq!(all.len(), 1);
     assert_eq!(says(all[0].clone()), Ok(()));
-    assert_eq!(h.usage.all()[0].get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(h.usage.all()[0].get(units::INPUT_TOKENS), Some(4));
 }
 
 // A meter registered last sees the usage in the message a filter fails on.
@@ -5507,7 +5507,7 @@ async fn a_meter_sees_usage_a_filter_fails_on() {
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
     let _ = h.send(unary_chat()).await;
     assert_eq!(code(&h.calls.all()[0]), "cap");
-    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4));
 }
 
 fn over_the_cap(reply: &mut Reply) -> Result<(), Fault> {
@@ -5577,7 +5577,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
     let (first, second) = seen.split_at(seen.len() / 2);
     assert!(!first.is_empty() && first == second, "{seen:?}");
     assert_eq!(first[0], 1);
-    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(10.0));
+    assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(10));
 }
 
 #[tokio::test]
@@ -5683,7 +5683,7 @@ async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
     // refused; each meter saw what was decoded, joined the usage that came
     // with the bytes refused, as provider-edge filters run first.
     assert_eq!(end(&split), (Some("blocked".to_owned()), None));
-    assert_eq!(end(&joined), (Some("blocked".to_owned()), Some(2.0)));
+    assert_eq!(end(&joined), (Some("blocked".to_owned()), Some(2)));
 }
 
 /// A guard refuses a plugin's own answer that fails before its first byte,
@@ -5789,7 +5789,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
     gw.idle().await;
 
     assert_eq!(code(&calls.all()[0]), "cap");
-    assert_eq!(input_tokens(&meter.total()), 4.0);
+    assert_eq!(input_tokens(&meter.total()), 4);
     assert!(tally.0.lock().map(|t| t.is_empty()).unwrap_or_default());
 }
 
@@ -6073,7 +6073,7 @@ impl Plugin for Markup {
             {
                 let mut marked = Usage::default();
                 for (unit, n) in usage.iter() {
-                    let n = if unit == units::INPUT_TOKENS { 99.0 } else { n };
+                    let n = if unit == units::INPUT_TOKENS { 99 } else { n };
                     marked.add(unit, n);
                 }
                 *usage = marked;
@@ -6131,7 +6131,7 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_hidden_from_a_later_meter
         .iter()
         .map(|u| u.get(units::INPUT_TOKENS))
         .collect();
-    assert_eq!(counted, [Some(4.0), Some(4.0)]);
+    assert_eq!(counted, [Some(4), Some(4)]);
     assert_eq!((&relayed, &translated), (&json!(99), &json!(99)));
 }
 
@@ -6144,7 +6144,7 @@ async fn synthetic_outputs_use_the_callers_predicate() {
     impl Plugin for FallsBack {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut one = Usage::default();
-            one.add(units::INPUT_TOKENS, 1.0);
+            one.add(units::INPUT_TOKENS, 1);
             let quiet = Reply::usage(one);
             // A policy accepting any event commits to the quiet reply.
             let made = [Ok(quiet.clone()), Err(Upstream::fault("gone"))];
@@ -6185,7 +6185,7 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     struct Reads(Arc<Mutex<Vec<Noted>>>);
 
     /// Whether an output is content, and its input tokens.
-    type Noted = (bool, Option<f64>);
+    type Noted = (bool, Option<u64>);
 
     #[async_trait]
     impl Plugin for Reads {
@@ -6212,7 +6212,7 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     let noted = reads.0.lock().map(|n| n.clone()).unwrap_or_default();
     assert_eq!(noted.first(), Some(&(false, None)), "{noted:?}");
     // Usage is shown, though it is no content.
-    assert!(noted.contains(&(false, Some(5.0))), "{noted:?}");
+    assert!(noted.contains(&(false, Some(5))), "{noted:?}");
 }
 
 // Filters see every value, yet `buffer_until(Reply::is_content)` matches neither
@@ -6251,7 +6251,7 @@ async fn until_content_commits_on_neither_a_keep_alive_nor_usage_alone() {
     );
     let calls = metered(&h);
     let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
-    assert_eq!(calls, [("backup/gpt-x", 5.0), ("openai/gpt-x", 7.0)]);
+    assert_eq!(calls, [("backup/gpt-x", 5), ("openai/gpt-x", 7)]);
 }
 
 // --- until_end ---------------------------------------------------------------
