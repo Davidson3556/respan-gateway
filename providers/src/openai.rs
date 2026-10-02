@@ -47,12 +47,12 @@ use std::sync::Arc;
 use crate::Usage;
 use crate::common::{
     Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
-    extra_of, fits, is_inert, merge_fields, post_json, probe, read_message, refusal, says, set,
+    extra_of, fits, is_inert, merge_fields, post_json, probe, read_message, refusal, set,
     stop_json, supported_usage, tag, unix_now, unreadable_event, unsupported_fields,
     unwritable_content, unwritable_usage, usage_extra,
 };
 use crate::conversation::{Block, Conversation, Delta, Finish, Reply, Role, Start, units};
-use crate::formats::errors::{merge_details, says_error};
+use crate::errors::{merge_details, says, says_error};
 use crate::formats::sse::{event, event_data, is_stream};
 use crate::tools::{
     read_openai_message, read_openai_tools, write_openai_message, write_openai_tools,
@@ -95,7 +95,9 @@ impl OpenAiChat {
         &self,
         request: http::Request<Body>,
     ) -> Result<TypedStream<Conversation>, Fault> {
-        respan_gateway_http::messages(request, |_, raw| Self.decode_request(raw))
+        Ok(respan_gateway_http::messages(request, |_, raw| {
+            Self.decode_request(raw)
+        }))
     }
 
     /// Decode a finite request synchronously.
@@ -111,8 +113,8 @@ impl OpenAiChat {
         post_json::<Self>(source, "/chat/completions")
     }
 
-    fn parser(&self, hold_start: bool) -> ReplyParser<OpenAiReader> {
-        ReplyParser::new(hold_start)
+    fn parser(&self, hold_start: bool, limit: Option<usize>) -> ReplyParser<OpenAiReader> {
+        ReplyParser::new(hold_start, limit)
     }
 
     /// Read provider response events with fresh per-body parser state.
@@ -121,8 +123,8 @@ impl OpenAiChat {
         response: http::Response<Body>,
         call: http::Request<Bytes>,
     ) -> BoxStream<'static, Result<Reply, Fault>> {
-        let parser = self.parser(true);
         crate::common::read_response::<Self>(response, &call.into_parts().0, |body| {
+            let parser = Self.parser(true, body.limit());
             crate::formats::read(
                 body,
                 parser,
@@ -192,7 +194,7 @@ impl OpenAiChat {
             return Ok(Vec::new());
         }
         if is_stream(&head) {
-            let mut parser = self.parser(true);
+            let mut parser = self.parser(true, None);
             let mut out = Vec::new();
             parser.push(bytes, &mut out)?;
             parser.finish(&mut out)?;
@@ -200,7 +202,7 @@ impl OpenAiChat {
         }
         crate::formats::default_content_type(&mut head, "application/json");
         if !head.status.is_success() {
-            return Err(crate::formats::whole::answer(OPENAI, &head, bytes));
+            return Err(crate::errors::answer::<Self>(&head, bytes));
         }
         crate::common::unary_reply::<Self>(head.status, bytes)
     }
@@ -1281,7 +1283,7 @@ mod tests {
 
     /// The events of `chunks`, and how the stream ended.
     fn decode_all(chunks: &[&str]) -> (Vec<Reply>, Result<(), Fault>) {
-        let mut d = OpenAiChat.parser(false);
+        let mut d = OpenAiChat.parser(false, None);
         let mut out = Vec::new();
         for c in chunks {
             if let Err(f) = d.push(Bytes::from(c.to_string()), &mut out) {
@@ -1356,7 +1358,7 @@ mod tests {
             "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";
         let error = "data: {\"error\":{\"message\":\"Overloaded\"}}\n\n";
         let batches = |events: &[&str]| {
-            let mut d = OpenAiChat.parser(true);
+            let mut d = OpenAiChat.parser(true, None);
             let batches: Vec<(Vec<Reply>, bool)> = events
                 .iter()
                 .map(|e| {
@@ -1547,7 +1549,7 @@ mod tests {
         let (_, end) = decode_all(&["data: {\"choices\":[]}\n\n"]);
         assert_eq!(
             end.err()
-                .map(|f| respan_gateway_http::error_code(&f).into_owned())
+                .map(|f| respan_gateway_http::error_code(&f).to_owned())
                 .as_deref(),
             Some("truncated")
         );

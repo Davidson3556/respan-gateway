@@ -1,6 +1,7 @@
 //! `Accounting` in a gateway: never overspend, settle exactly once, refuse
 //! what has no bound, and release what a cancelled hook held.
 
+use respan_gateway_examples::LIMIT;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -276,8 +277,10 @@ async fn every_call_settles_exactly_once() {
             // Keep the server alive through the exchange below.
             (gw, Some(fake))
         } else {
-            let transport =
-                respan_gateway_http::connect(|_call| async { Err(Upstream::fault("lost head")) });
+            let transport = respan_gateway_http::connect(
+                |_call| async { Err(Upstream::fault("lost head")) },
+                LIMIT,
+            );
             (gateway(transport, Nothing, ledger.clone()), None)
         };
         let (gw, _fake) = gw;
@@ -421,10 +424,13 @@ async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     let accounting = Accounting::new(ledger.clone(), quote);
     let gw = Gateway::new().client::<Conversation, _, _>(OpenAiChat);
     // The call is handed to the transport, but its head never arrives.
-    let no_head = respan_gateway_http::connect(|_call| async {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        Err(Upstream::fault("no head within 1s"))
-    });
+    let no_head = respan_gateway_http::connect(
+        |_call| async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Err(Upstream::fault("no head within 1s"))
+        },
+        LIMIT,
+    );
     let gw = gw.and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, no_head));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.map(|g| g.plugin(accounting));

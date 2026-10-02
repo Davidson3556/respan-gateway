@@ -25,7 +25,7 @@ mod http_support;
 #[path = "support/scripted.rs"]
 mod scripted;
 use hooks::Outcomes;
-use http_support::{post, read_whole};
+use http_support::{LIMIT, post, read_whole, serve};
 use scripted::{Scripted, json, sse};
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -136,13 +136,13 @@ impl Harness {
             .provider::<Conversation, _, _>(
                 "openai",
                 OpenAiChat,
-                respan_gateway_http::connect(openai),
+                respan_gateway_http::connect(openai, LIMIT),
             )
             .and_then(|g| {
                 g.provider::<Conversation, _, _>(
                     "anthropic",
                     AnthropicMessages,
-                    respan_gateway_http::connect(anthropic),
+                    respan_gateway_http::connect(anthropic, LIMIT),
                 )
             })
             .and_then(|g| {
@@ -165,7 +165,7 @@ impl Harness {
 
     /// Hand `req` to the gateway through the HTTP adapter.
     async fn serve(&self, req: http::Request<Body>) -> http::Response<Body> {
-        respan_gateway_http::serve(&self.gw, req).await.0
+        serve(&self.gw, req).await.0
     }
 
     /// Send `req`, read the whole answer, and wait for the end hooks.
@@ -178,7 +178,7 @@ impl Harness {
             .collect();
         let body = body
             .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
+            .map_err(|f| respan_gateway_http::error_code(&f).to_owned());
         Got {
             status: status.as_u16(),
             headers,
@@ -190,7 +190,7 @@ impl Harness {
     fn ends(&self) -> Vec<String> {
         let code = |e: &Result<(), Fault>| {
             e.as_ref().map_or_else(
-                |f| respan_gateway_http::error_code(f).into_owned(),
+                |f| respan_gateway_http::error_code(f).to_owned(),
                 |()| "ok".into(),
             )
         };
@@ -572,8 +572,8 @@ impl SlowRefusal {
     }
 }
 
-/// Rule 2 over a real network: a refusal whose body comes slowly is read
-/// whole before the call resolves, so `is_refused` says it was refused at
+/// Over a real network: a refusal whose body comes slowly is read whole
+/// before the call resolves, so `is_refused` says it was refused at
 /// its head, and the client gets it whole.
 #[tokio::test]
 async fn a_slow_refusal_is_refused() {
@@ -582,13 +582,16 @@ async fn a_slow_refusal_is_refused() {
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(|request| async move { SlowRefusal.send(request).await }),
+            respan_gateway_http::connect(
+                |request| async move { SlowRefusal.send(request).await },
+                LIMIT,
+            ),
         )
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .map(|g| g.plugin(head_only.clone()).plugin(explicit::Relay::RAW))
         .and_then(|g| g.target("openai"))
         .unwrap();
-    let resp = respan_gateway_http::serve(&gw, post_keyed(CHAT, UNARY_REQ)).await;
+    let resp = serve(&gw, post_keyed(CHAT, UNARY_REQ)).await;
     let (status, headers, body) = read_whole(resp.0).await;
     gw.idle().await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
@@ -633,6 +636,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
                 OpenAiChat,
                 respan_gateway_http::connect(
                     |request| async move { HugeRefusal.send(request).await },
+                    LIMIT,
                 ),
             )
             .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
@@ -640,14 +644,14 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
             .map(|g| g.plugin(head_only.clone()))
             .and_then(|g| g.target("openai"))
             .unwrap();
-        let resp = respan_gateway_http::serve(&gw, req).await;
+        let resp = serve(&gw, req).await;
         let (status, _, body) = read_whole(resp.0).await;
         gw.idle().await;
         let body = body.map(|b| String::from_utf8_lossy(&b[..b.len().min(120)]).into_owned());
         let ends: Vec<_> = outcomes
             .all()
             .into_iter()
-            .map(|e| e.map_err(|f| respan_gateway_http::error_code(&f).into_owned()))
+            .map(|e| e.map_err(|f| respan_gateway_http::error_code(&f).to_owned()))
             .collect();
         assert_eq!(
             (status.as_u16(), lock(&head_only.0).clone()),

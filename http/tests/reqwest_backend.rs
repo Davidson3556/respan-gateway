@@ -13,7 +13,7 @@ fn a_base_url_needs_http_or_https_and_a_host() {
         assert!(HttpClient::new(url).is_ok(), "{url}");
     }
     // A base URL may contain a key, so the error does not echo it.
-    let expected = "bad base URL: an http or https one with a host, and no query, fragment or credentials (those go in its headers)";
+    let expected = "bad base URL: http or https with a host, and no query, fragment or credentials (those go in its headers)";
     for url in [
         "api.openai.com",
         "https://h.test?api-version=1",

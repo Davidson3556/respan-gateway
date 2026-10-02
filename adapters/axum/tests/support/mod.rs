@@ -41,8 +41,8 @@ impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Raw>, Got<Raw>>, Fault> {
         Ok(io.bind(
-            opaque::read_request::<Raw>,
-            |reply, source| Ok(opaque::write_response::<Raw>("raw", reply, source)),
+            |request| Ok(opaque::read_request::<Raw>(request)),
+            |reply, _| Ok(opaque::write_response::<Raw>(reply)),
             h::plain_refusal,
         ))
     }
@@ -54,7 +54,7 @@ impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Raw>, Sent<Raw>>, Fault> {
         Ok(io.bind(
-            |source| opaque::write_request::<Raw>("raw", source),
+            opaque::write_request::<Raw>,
             |answer, sent| opaque::read_response::<Raw>("raw", answer, &sent.into_parts().0),
             |answer, call| {
                 answer.status.is_success()
@@ -601,6 +601,6 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
 pub fn code(end: &Result<(), Fault>) -> String {
     match end {
         Ok(()) => "ok".to_owned(),
-        Err(fault) => respan_gateway_http::error_code(fault).into_owned(),
+        Err(fault) => respan_gateway_http::error_code(fault).to_owned(),
     }
 }

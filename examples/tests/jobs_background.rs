@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_examples::LIMIT;
 use std::time::Duration;
 
 use respan_gateway_http::http::StatusCode;
@@ -27,13 +28,16 @@ fn slow_west(
 ) -> Result<Gateway, Fault> {
     let jobs = Jobs::default();
     let backend = west.transport()?;
-    let slow = respan_gateway_http::connect(move |request| {
-        let backend = backend.clone();
-        async move {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            backend.send(request).await
-        }
-    });
+    let slow = respan_gateway_http::connect(
+        move |request| {
+            let backend = backend.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                backend.send(request).await
+            }
+        },
+        LIMIT,
+    );
     Ok(gateway(east.transport()?.connect(), slow, &jobs)?.plugin(seen.clone()))
 }
 
@@ -179,28 +183,31 @@ async fn response_json_split_across_frames_is_mapped_whole() -> Result<(), Fault
     let (east, west) = deployments().await?;
     west.answer(StatusCode::OK, r#"{"id":"native-1","status":"completed"}"#);
     let west_http = west.transport()?;
-    let split = respan_gateway_http::connect(move |call| {
-        let west = west_http.clone();
-        async move {
-            let (response, completion) = west.send(call).await?;
-            let response = response.map(|body| {
-                respan_gateway_http::Body::stream(
-                    body.flat_map(|frame| {
-                        let pieces = match frame {
-                            Ok(bytes) => bytes
-                                .iter()
-                                .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
-                                .collect(),
-                            Err(fault) => vec![Err(fault)],
-                        };
-                        stream::iter(pieces)
-                    })
-                    .boxed(),
-                )
-            });
-            Ok((response, completion))
-        }
-    });
+    let split = respan_gateway_http::connect(
+        move |call| {
+            let west = west_http.clone();
+            async move {
+                let (response, completion) = west.send(call).await?;
+                let response = response.map(|body| {
+                    respan_gateway_http::Body::stream(
+                        body.flat_map(|frame| {
+                            let pieces = match frame {
+                                Ok(bytes) => bytes
+                                    .iter()
+                                    .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
+                                    .collect(),
+                                Err(fault) => vec![Err(fault)],
+                            };
+                            stream::iter(pieces)
+                        })
+                        .boxed(),
+                    )
+                });
+                Ok((response, completion))
+            }
+        },
+        LIMIT,
+    );
     let jobs = Jobs::default();
     let gateway = gateway(east.transport()?.connect(), split, &jobs)?;
     let body = send(&gateway, request("POST", "/v1/responses", "{}")).await?;

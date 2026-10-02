@@ -68,9 +68,7 @@ bytes_type!(Sent, Request, method, uri, version);
 bytes_type!(Got, Response, status, version);
 
 /// One message per finite body or explicitly live frame.
-pub fn read_request<F: 'static>(
-    request: http::Request<Body>,
-) -> Result<EventStream<Sent<F>>, Fault> {
+pub fn read_request<F: 'static>(request: http::Request<Body>) -> EventStream<Sent<F>> {
     crate::messages(request, |head, raw| {
         Ok(Sent::from_http(http::Request::from_parts(
             head.clone(),
@@ -81,7 +79,6 @@ pub fn read_request<F: 'static>(
 
 /// Encode the typed request head and body with its safe forwarded path.
 pub fn write_request<F: 'static>(
-    name: &str,
     source: &mut EventStream<Sent<F>>,
 ) -> Result<(http::Request<Body>, EventSink<Sent<F>>), Fault> {
     let head = source
@@ -89,10 +86,10 @@ pub fn write_request<F: 'static>(
         .transpose()?
         .map(|sent| sent.0.clone().into_parts().0)
         .unwrap_or_else(|| http::Request::new(()).into_parts().0);
-    let (request, sink) = crate::request(name, source, Box::new(Writes))?;
+    let (request, sink) = crate::request(source, Box::new(Writes))?;
     let path = crate::formats::forwarded_path(head.uri.path());
     let mut head = head;
-    crate::formats::set_path(&mut head, &path);
+    crate::formats::set_path(&mut head, &path)?;
     Ok((http::Request::from_parts(head, request.into_body()), sink))
 }
 
@@ -142,13 +139,8 @@ pub fn read_response<F: 'static>(
     }
 }
 
-/// Write opaque response bytes, retaining an unread bodyless source.
-pub fn write_response<F: 'static>(
-    _name: &str,
-    reply: Reply,
-    source: &mut EventStream<Got<F>>,
-) -> EventSink<Got<F>> {
-    let _ = source;
+/// Write opaque response bytes as they come, the head with the first.
+pub fn write_response<F: 'static>(reply: Reply) -> EventSink<Got<F>> {
     EventSink::new(OpaqueSink {
         reply: Some(reply),
         sink: None,
@@ -244,8 +236,8 @@ impl Format<Incoming, Sent<Self>, Got<Self>> for Passthrough {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Self>, Got<Self>>, Fault> {
         Ok(io.bind(
-            read_request,
-            |reply, source| Ok(write_response("passthrough", reply, source)),
+            |request| Ok(read_request(request)),
+            |reply, _| Ok(write_response(reply)),
             crate::plain_refusal,
         ))
     }
@@ -256,7 +248,7 @@ impl Format<Outgoing, Got<Self>, Sent<Self>> for Passthrough {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Self>, Sent<Self>>, Fault> {
         Ok(io.bind(
-            |source| write_request("passthrough", source),
+            write_request,
             |response, request| read_response("passthrough", response, &request.into_parts().0),
             |head, call| {
                 crate::success(head, call)

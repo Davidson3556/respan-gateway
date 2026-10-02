@@ -1,4 +1,8 @@
 //! The HTTP relay contract is an application choice, independent of format names.
+#[allow(dead_code)]
+#[path = "../../tests/support/http.rs"]
+mod http_support;
+use http_support::{LIMIT, serve};
 use respan_gateway_http::{self as h, bytes::Bytes, http};
 use respan_gateway_sdk::{
     ClientContext, Connection, EventStream, Fault, Format, Gateway, Plugin, Response, async_trait,
@@ -21,10 +25,10 @@ impl Format<h::Incoming, String, Bytes> for Text {
         let decodes = self.0.clone();
         Ok(io.bind(
             move |request| {
-                h::messages(request, move |_, bytes| {
+                Ok(h::messages(request, move |_, bytes| {
                     decodes.fetch_add(1, Ordering::SeqCst);
                     Ok(format!("encoded:{}", String::from_utf8_lossy(&bytes)))
-                })
+                }))
             },
             |reply, _: &mut EventStream<Bytes>| {
                 let head = reply.head();
@@ -42,7 +46,6 @@ impl Format<h::Outgoing, Bytes, String> for Text {
         Ok(io.bind(
             |source| {
                 h::request(
-                    "text",
                     source,
                     h::formats::each(|value: &String| Ok(Bytes::from(value.clone()))),
                 )
@@ -123,27 +126,30 @@ async fn exercise(
         .provider::<String, Bytes, _>(
             "p",
             format,
-            h::connect(move |mut request| {
-                let seen = seen.clone();
-                async move {
-                    h::credentials(&mut request, &http::HeaderMap::new());
-                    let (head, body) = request.into_parts();
-                    *seen.lock().expect("record") = Some(http::Request::from_parts(
-                        head,
-                        BodyExt::collect(body).await?.to_bytes(),
-                    ));
-                    let response = http::Response::builder()
-                        .status(if failure { 503 } else { 201 })
-                        .header("x-provider", "private")
-                        .body(h::Body::full(if failure {
-                            "secret upstream bytes"
-                        } else {
-                            "ok"
-                        }))
-                        .expect("response");
-                    Ok((response, None))
-                }
-            }),
+            h::connect(
+                move |mut request| {
+                    let seen = seen.clone();
+                    async move {
+                        h::credentials(&mut request, &http::HeaderMap::new());
+                        let (head, body) = request.into_parts();
+                        *seen.lock().expect("record") = Some(http::Request::from_parts(
+                            head,
+                            BodyExt::collect(body).await?.to_bytes(),
+                        ));
+                        let response = http::Response::builder()
+                            .status(if failure { 503 } else { 201 })
+                            .header("x-provider", "private")
+                            .body(h::Body::full(if failure {
+                                "secret upstream bytes"
+                            } else {
+                                "ok"
+                            }))
+                            .expect("response");
+                        Ok((response, None))
+                    }
+                },
+                LIMIT,
+            ),
         )
         .expect("provider")
         .target("p")
@@ -160,7 +166,7 @@ async fn exercise(
         .header("x-hop", "strip")
         .body(h::Body::full("raw unknown bytes"))
         .expect("request");
-    let (response, end) = h::serve(&gateway, request).await;
+    let (response, end) = serve(&gateway, request).await;
     let (head, body) = response.into_parts();
     let bytes = BodyExt::collect(body).await.expect("body").to_bytes();
     let _ = end.await;

@@ -4,9 +4,9 @@ use crate::http;
 use http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use http::{HeaderMap, HeaderName, HeaderValue};
 
-/// The credential headers and query parameters a client sent, which the
-/// adapter lifts out of its head ([`handle`](crate::handle)) into the
-/// request's extensions, so nothing passes them on by accident. A name is
+/// The credential headers and query parameters a client sent, which an
+/// [`Incoming`](crate::Incoming) lifts out of its head into the request's
+/// extensions, so nothing passes them on by accident. A name is
 /// one if its last `-` or `_` segment is `authorization`, `auth`, `key`,
 /// `token`, `secret`, `password`, `credential` or `credentials`, but not an
 /// idempotency key; names are read percent-decoded. A key offered as a
@@ -16,9 +16,11 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 /// the other entries stay; so is the entry after a bare such name
 /// (`token, <key>`), whose name stays.
 ///
-/// A transport without keys passes it through on a relay alone
-/// ([`credentials`](crate::credentials)); a plugin that authenticates the
-/// client with the gateway's own key removes it.
+/// No transport copies it ([`credentials`](crate::credentials)): a plugin
+/// that relays the client's key restores it on the call's head
+/// ([`restore`](Self::restore)), as [`Relay::RAW`](crate::relay::Relay::RAW)
+/// does; a plugin that authenticates the client with the gateway's own key
+/// removes it.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Credential {
     headers: HeaderMap,

@@ -27,18 +27,30 @@ pub struct Parser {
     buf: BytesMut,
     /// Where to resume searching `buf` for the end of an event.
     scanned: usize,
+    /// The most bytes of one event it holds.
+    limit: Option<usize>,
 }
 
 impl Parser {
-    /// Create an incremental synchronous event splitter.
-    pub fn new() -> Self {
-        let (buf, scanned) = (BytesMut::new(), 0);
-        Self { buf, scanned }
+    /// Create an incremental synchronous event splitter that holds up to
+    /// `limit` bytes of an event not yet ended, such as its body's
+    /// ([`Body::limit`]), or any number for `None`.
+    pub fn new(limit: Option<usize>) -> Self {
+        Self {
+            buf: BytesMut::new(),
+            scanned: 0,
+            limit,
+        }
     }
 
-    /// Split complete events from one wire frame.
-    pub fn push(&mut self, bytes: Bytes) -> Vec<Bytes> {
-        self.split(&bytes, false)
+    /// Split complete events from one wire frame. `Err` with `upstream` if
+    /// an event not yet ended is over the limit.
+    pub fn push(&mut self, bytes: Bytes) -> Result<Vec<Bytes>, Fault> {
+        let events = self.split(&bytes, false);
+        match self.limit.filter(|&limit| self.buf.len() > limit) {
+            Some(limit) => Err(crate::formats::whole::over(limit)),
+            None => Ok(events),
+        }
     }
     /// Finish the body, retaining a trailing event of whole lines only.
     pub fn finish(&mut self) -> Vec<Bytes> {
@@ -98,6 +110,7 @@ fn line_end(b: &[u8], at_end: bool) -> Option<usize> {
 
 /// Parse SSE through ordinary stateful functions. Wire failure does not flush
 /// an incomplete event; the terminal function receives the original fault.
+/// An event over the body's [`limit`](Body::limit) fails `upstream`.
 pub fn read<T, S, P, E>(
     body: Body,
     state: S,
@@ -110,11 +123,12 @@ where
     P: FnMut(&mut S, Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
     E: FnOnce(&mut S, Result<(), Fault>, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
+    let parser = Parser::new(body.limit());
     crate::formats::read(
         body,
-        (Parser::new(), state, event),
+        (parser, state, event),
         |(parser, state, event), bytes, out| {
-            for raw in parser.push(bytes) {
+            for raw in parser.push(bytes)? {
                 event(state, raw, out)?;
             }
             Ok(())
@@ -178,23 +192,6 @@ pub fn event_json(raw: &[u8]) -> Option<Value> {
     serde_json::from_str(&event_data(raw)?).ok()
 }
 
-/// A failed body as JSON: a JSON body, a one-element array unwrapped
-/// (Gemini), or the first event that says an error.
-pub fn failure_json(raw: &Bytes) -> Option<Value> {
-    if let Ok(v) = serde_json::from_slice::<Value>(raw) {
-        return Some(match v {
-            Value::Array(mut one) if one.len() == 1 => one.remove(0),
-            v => v,
-        });
-    }
-    // The body is whole: its last event ends with it.
-    let mut split = Parser::new();
-    let mut events = split.split(raw, false);
-    events.extend(split.split(b"\n\n", false));
-    let json = events.iter().filter_map(|event| event_json(event));
-    json.into_iter().find(crate::formats::errors::says_error)
-}
-
 /// The `data:` of an event, lines joined, if it has any.
 pub fn event_data(raw: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(raw);
@@ -213,7 +210,7 @@ mod tests {
     type Splitter = Parser;
 
     fn frames() -> Splitter {
-        Parser::new()
+        Parser::new(None)
     }
 
     fn splitter(stream: &[u8]) -> Splitter {
@@ -238,9 +235,12 @@ mod tests {
 
     #[test]
     fn a_last_bare_cr_ends_its_event_when_the_body_ends() {
-        let mut d = Parser::new();
+        let mut d = Parser::new(None);
         let mut out = Vec::new();
-        out.extend(d.push(Bytes::from_static(b"data: a\r\rdata: b\r\r")));
+        out.extend(
+            d.push(Bytes::from_static(b"data: a\r\rdata: b\r\r"))
+                .unwrap_or_default(),
+        );
         assert_eq!(out.len(), 1);
         out.extend(d.finish());
         assert_eq!(&out[1][..], b"data: b\r\r");
@@ -252,9 +252,9 @@ mod tests {
             (&b"data: [DONE]\n"[..], Some(&b"data: [DONE]\n"[..])),
             (b"data: [DO", None),
         ] {
-            let mut d = Parser::new();
+            let mut d = Parser::new(None);
             let mut out = Vec::new();
-            out.extend(d.push(Bytes::from_static(body)));
+            out.extend(d.push(Bytes::from_static(body)).unwrap_or_default());
             out.extend(d.finish());
             assert_eq!(out.first().map(|b| &b[..]), kept);
         }
@@ -302,41 +302,6 @@ mod tests {
             let out: Vec<_> = d.try_collect().await.expect("expected value");
             assert_eq!(out.len(), values, "{content_type}");
         }
-    }
-
-    #[test]
-    fn a_failure_is_read_by_its_error_event_whatever_its_line_endings() {
-        for body in [
-            &b"data: {\"type\":\"ping\"}\r\rdata: {\"error\":{\"message\":\"busy\"}}\r\r"[..],
-            b"data: {\"type\":\"ping\"}\n\r\ndata: {\"error\":{\"message\":\"busy\"}}\n\r\n",
-        ] {
-            let v = failure_json(&Bytes::from_static(body));
-            assert_eq!(
-                v.map(|v| v["error"]["message"].clone()),
-                Some("busy".into())
-            );
-        }
-    }
-
-    #[test]
-    fn a_failure_is_read_by_its_error_event_however_it_ends() {
-        let busy = |body: &'static [u8]| {
-            failure_json(&Bytes::from_static(body)).map(|v| v["error"]["message"].clone())
-        };
-        let said = Some(Value::from("busy"));
-        // No blank line after the last event, or no line end at all.
-        assert_eq!(
-            busy(b"data: {\"type\":\"ping\"}\n\ndata: {\"error\":{\"message\":\"busy\"}}\n"),
-            said
-        );
-        assert_eq!(busy(b"data: {\"error\":{\"message\":\"busy\"}}"), said);
-        // A null error is none.
-        assert_eq!(
-            busy(b"data: {\"error\":null}\n\ndata: {\"error\":{\"message\":\"busy\"}}\n\n"),
-            said
-        );
-        // Pings alone say nothing.
-        assert_eq!(busy(b"data: {\"type\":\"ping\"}\n\n"), None);
     }
 
     #[test]
@@ -409,12 +374,27 @@ mod tests {
     fn a_stream_split_at_any_byte_decodes_every_event_once() {
         let stream = b"data: {\"a\":1}\n\nevent: x\r\ndata: {\"b\":2}\r\n\r\ndata: [DONE]\n\n";
         for cut in 0..=stream.len() {
-            let mut d = Parser::new();
+            let mut d = Parser::new(None);
             let mut out = Vec::new();
-            out.extend(d.push(Bytes::copy_from_slice(&stream[..cut])));
-            out.extend(d.push(Bytes::copy_from_slice(&stream[cut..])));
+            for part in [&stream[..cut], &stream[cut..]] {
+                out.extend(d.push(Bytes::copy_from_slice(part)).unwrap_or_default());
+            }
             let decoded: Vec<u8> = out.iter().flat_map(|b| b.to_vec()).collect();
             assert_eq!((out.len(), &decoded[..]), (3, &stream[..]), "cut at {cut}");
         }
+    }
+
+    #[test]
+    fn an_event_is_held_up_to_the_limit() {
+        let mut d = Parser::new(Some(8));
+        assert_eq!(
+            d.push(Bytes::from_static(b"data: a\n\n"))
+                .map(|e| e.len())
+                .ok(),
+            Some(1)
+        );
+        assert!(d.push(Bytes::from_static(b"data: 1")).is_ok());
+        let over = d.push(Bytes::from_static(b"23")).err();
+        assert!(over.is_some_and(|f| f.is::<respan_gateway_sdk::Upstream>()));
     }
 }

@@ -8,15 +8,18 @@ use axum::Router;
 use axum::extract::Request;
 use axum::response::Response;
 use http::header;
-use http::{HeaderMap, HeaderValue, StatusCode};
-use http_body_util::{BodyExt, Limited};
-use respan_gateway_http::{Status, http::request::Parts as RequestHead};
-use respan_gateway_sdk::{BadRequest, ErrorCode, Fault, Gateway};
+use http::{HeaderMap, HeaderValue};
+use http_body_util::BodyExt;
+use respan_gateway_http::http::request::Parts as RequestHead;
+use respan_gateway_sdk::{BadRequest, Gateway};
 
 #[cfg(feature = "ws")]
 pub mod ws;
 
-const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// The most bytes of a request [`router`] reads: 32 MiB, the largest request
+/// the vendors' JSON APIs take (Anthropic's Messages API), so no request a
+/// provider would take is refused here.
+const MAX_BODY_BYTES: usize = 32 << 20;
 
 /// A router sending every request through the HTTP adapter
 /// ([`respan_gateway_http::handle`]). It switches no protocols, so it
@@ -26,9 +29,10 @@ pub fn router(gateway: Gateway) -> Router {
     router_with_limit(gateway, |_| MAX_BODY_BYTES)
 }
 
-/// An HTTP router with a per-request body limit in bytes. The callback sees
-/// the HTTP head before the body is read, so paths or authenticated adapter
-/// extensions can select a limit. Oversized bodies receive a 413 fault.
+/// An HTTP router with a per-request body limit in bytes, the adapter's
+/// ([`respan_gateway_http::handle`]). The callback sees the HTTP head before
+/// the body is read, so paths or authenticated adapter extensions can
+/// select a limit. Oversized bodies receive a 413 fault.
 /// Decoding and protocol recognition still belong to the gateway's formats.
 pub fn router_with_limit(
     gateway: Gateway,
@@ -48,8 +52,9 @@ pub fn router_with_limit(
 
 async fn handle(gateway: Gateway, mut req: Request, max: usize) -> Response {
     ignore_upgrade(req.headers_mut());
-    let req = req.map(|body| Limited::new(body, max).map_err(body_fault).boxed_unsync());
-    let (resp, _ended) = respan_gateway_http::handle(&gateway, req, false).await;
+    let broke = |_| BadRequest::fault("the request body broke off");
+    let req = req.map(|body| body.map_err(broke).boxed_unsync());
+    let (resp, _ended) = respan_gateway_http::handle(&gateway, req, false, max).await;
     let (parts, body) = resp.into_parts();
     Response::from_parts(parts, axum::body::Body::new(body))
 }
@@ -79,15 +84,5 @@ fn ignore_upgrade(headers: &mut HeaderMap) {
     headers.remove(header::CONNECTION);
     for value in kept {
         headers.append(header::CONNECTION, value);
-    }
-}
-
-/// Why a client's body did not arrive whole.
-fn body_fault(e: axum::BoxError) -> Fault {
-    match e.is::<http_body_util::LengthLimitError>() {
-        true => Fault::new("request body too large")
-            .with(ErrorCode("too_large".into()))
-            .with(Status(StatusCode::PAYLOAD_TOO_LARGE.as_u16())),
-        false => BadRequest::fault("the request body broke off"),
     }
 }

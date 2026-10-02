@@ -56,7 +56,7 @@ use respan_gateway_http::HttpClient;
 use respan_gateway_http::Status;
 use respan_gateway_http::formats::opaque::Got;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_http::{Asked, CallHeaders, Credential, retryable};
+use respan_gateway_http::{CallHeaders, Credential, Wire, retryable};
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::conversation::{Content, Conversation, Reply};
@@ -179,14 +179,14 @@ fn stored(chat: &Conversation) -> Vec<String> {
 fn too_large() -> Fault {
     Fault::new("PDF too large")
         .with(ErrorCode("too_large".into()))
-        .with(Status(413))
+        .with(Status(StatusCode::PAYLOAD_TOO_LARGE))
 }
 
 fn too_slow() -> Fault {
     let slow = "the PDF took too long to read";
     Fault::new(slow)
         .with(ErrorCode("conversion_timeout".into()))
-        .with(Status(504))
+        .with(Status(StatusCode::GATEWAY_TIMEOUT))
 }
 
 /// The files endpoint: a provider named `files`, whose paths the plugin sets.
@@ -416,13 +416,13 @@ impl PdfToText {
             if !pdf {
                 return Err(Fault::new("only PDF attachments are supported")
                     .with(ErrorCode("unsupported_file".into()))
-                    .with(Status(415)));
+                    .with(Status(StatusCode::UNSUPPORTED_MEDIA_TYPE)));
             }
             let bytes = read(format!("/v1/files/{id}/content"), self.max / 4 * 3).await?;
             if !bytes.starts_with(b"%PDF-") {
                 return Err(Fault::new("the stored file is not a PDF")
                     .with(ErrorCode("unsupported_file".into()))
-                    .with(Status(415)));
+                    .with(Status(StatusCode::UNSUPPORTED_MEDIA_TYPE)));
             }
             Ok(bytes)
         };
@@ -443,8 +443,9 @@ impl Plugin for PdfToText {
         if cx.extensions().get::<NoContent>().is_some() {
             let tenant = cx
                 .extensions()
-                .get::<Asked>()
-                .and_then(|asked| asked.headers.get("x-tenant")?.to_str().ok())
+                .get::<Wire>()
+                .and_then(Wire::get)
+                .and_then(|asked| asked.headers().get("x-tenant")?.to_str().ok())
                 .unwrap_or_default();
             tokio::time::timeout_at(deadline, self.forget(tenant))
                 .await
@@ -486,8 +487,8 @@ impl Plugin for PdfToText {
         let ext = px.extensions();
         let until = ext.get::<Deadline>().map(|d| d.0);
         let until = until.unwrap_or_else(|| Instant::now() + self.budget);
-        let asked = ext.get::<Asked>();
-        let tenant = asked.and_then(|a| a.headers.get("x-tenant")?.to_str().ok());
+        let asked = ext.get::<Wire>().and_then(Wire::get);
+        let tenant = asked.and_then(|a| a.headers().get("x-tenant")?.to_str().ok());
         let tenant = tenant.unwrap_or_default().to_owned();
         let keep = ext.get::<NoContent>().is_none();
         let chat = px.input::<Conversation>()?;

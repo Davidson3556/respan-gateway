@@ -1,8 +1,12 @@
 use std::time::Duration;
 
+#[allow(dead_code)]
+#[path = "../../tests/support/http.rs"]
+mod http_support;
 use h::bytes::Bytes;
 use h::http::{Request, StatusCode};
 use h::http_body_util::BodyExt;
+use http_support::LIMIT;
 use respan_gateway_http as h;
 use respan_gateway_sdk::BadRequest;
 use respan_gateway_sdk::futures::{SinkExt, future};
@@ -17,7 +21,7 @@ enum Opening {
 
 async fn preparation_failure(opening: Opening, panic: bool) {
     let request = Request::new(h::Body::full(Bytes::new()));
-    let (io, answer) = h::Incoming::accept(request, false);
+    let (io, answer) = h::Incoming::accept(request, false, LIMIT);
     let (read, mut sink) = io.bind(
         |_| Ok(EventStream::single(String::new())),
         move |reply, source: &mut EventStream<u8>| {
@@ -98,7 +102,8 @@ async fn preparation_panic_wins_after_constructing_each_response_sink() {
 #[tokio::test]
 async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
     for explicit_empty in [false, true] {
-        let (io, answer) = h::Incoming::accept(Request::new(h::Body::full(Bytes::new())), false);
+        let (io, answer) =
+            h::Incoming::accept(Request::new(h::Body::full(Bytes::new())), false, LIMIT);
         let (read, mut sink) = io.bind(
             |_| Ok(EventStream::single(String::new())),
             move |reply, source: &mut EventStream<u8>| {

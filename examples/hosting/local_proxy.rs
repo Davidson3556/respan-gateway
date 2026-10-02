@@ -14,6 +14,7 @@
 //! `RESPAN_ANTHROPIC_UPSTREAM=http://127.0.0.1:PORT` to use a local provider
 //! instead of the default Anthropic upstream.
 
+use respan_gateway_examples::LIMIT;
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
@@ -42,34 +43,37 @@ fn fixture(
 ) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
 {
     let body = body.into();
-    respan_gateway_http::connect(move |mut call| {
-        let (body, sent) = (body.clone(), Arc::clone(&sent));
-        async move {
-            respan_gateway_http::credentials(&mut call, &HeaderMap::new());
-            let (head, body_in) = call.into_parts();
-            let chunks: Vec<Bytes> = body_in.try_collect().await?;
-            let mut bytes = Vec::new();
-            for chunk in chunks {
-                bytes.extend_from_slice(&chunk);
+    respan_gateway_http::connect(
+        move |mut call| {
+            let (body, sent) = (body.clone(), Arc::clone(&sent));
+            async move {
+                respan_gateway_http::credentials(&mut call, &HeaderMap::new());
+                let (head, body_in) = call.into_parts();
+                let chunks: Vec<Bytes> = body_in.try_collect().await?;
+                let mut bytes = Vec::new();
+                for chunk in chunks {
+                    bytes.extend_from_slice(&chunk);
+                }
+                sent.lock().unwrap_or_else(PoisonError::into_inner).push((
+                    head.uri,
+                    head.headers,
+                    Bytes::from(bytes),
+                ));
+                let content_type = if status.is_success() {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                let response = http::Response::builder()
+                    .status(status)
+                    .header("content-type", content_type)
+                    .body(Body::full(body))
+                    .map_err(|e| Fault::internal(e.to_string()))?;
+                Ok((response, None))
             }
-            sent.lock().unwrap_or_else(PoisonError::into_inner).push((
-                head.uri,
-                head.headers,
-                Bytes::from(bytes),
-            ));
-            let content_type = if status.is_success() {
-                "text/event-stream"
-            } else {
-                "application/json"
-            };
-            let response = http::Response::builder()
-                .status(status)
-                .header("content-type", content_type)
-                .body(Body::full(body))
-                .map_err(|e| Fault::internal(e.to_string()))?;
-            Ok((response, None))
-        }
-    })
+        },
+        LIMIT,
+    )
 }
 
 /// The whole setup, in code: serve Anthropic Messages, relay to Anthropic.

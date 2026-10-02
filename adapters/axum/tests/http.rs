@@ -1,3 +1,8 @@
+#[allow(dead_code)]
+#[path = "../../../tests/support/http.rs"]
+mod http_support;
+use http_support::LIMIT;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -212,10 +217,13 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
     }
     impl Note {
         fn connect(self) -> impl Fn(Extensions) -> Outgoing + Send + Sync {
-            respan_gateway_http::connect(move |call| {
-                let value = self.clone();
-                async move { value.send(call).await }
-            })
+            respan_gateway_http::connect(
+                move |call| {
+                    let value = self.clone();
+                    async move { value.send(call).await }
+                },
+                LIMIT,
+            )
         }
     }
 
@@ -405,27 +413,35 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
         .provider::<Sent<Passthrough>, _, _>(
             "relay",
             Passthrough,
-            respan_gateway_http::connect(move |mut call| {
-                let before = before.clone();
-                async move {
-                    assert!(
-                        call.extensions()
-                            .get::<respan_gateway_sdk::Extensions>()
-                            .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some())
-                    );
-                    credentials(&mut call, &http::HeaderMap::new());
-                    assert_eq!(call.headers(), &before);
-                    assert_eq!(call.uri(), "/v1/chat?beta=1&key=k");
-                    Ok((http::Response::new(Body::full("ok")), None))
-                }
-            }),
+            respan_gateway_http::connect(
+                move |mut call| {
+                    let before = before.clone();
+                    async move {
+                        assert!(
+                            call.extensions()
+                                .get::<respan_gateway_sdk::Extensions>()
+                                .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some())
+                        );
+                        credentials(&mut call, &http::HeaderMap::new());
+                        assert_eq!(call.headers(), &before);
+                        assert_eq!(call.uri(), "/v1/chat?beta=1&key=k");
+                        Ok((http::Response::new(Body::full("ok")), None))
+                    }
+                },
+                LIMIT,
+            ),
         )
         .expect("valid test setup")
         .target("relay")
         .expect("valid test setup")
         .plugin(relay::Relay::RAW);
-    let (answer, ended) =
-        respan_gateway_http::serve(&gateway, http::Request::from_parts(head, Body::full(""))).await;
+    let (answer, ended) = respan_gateway_http::handle(
+        &gateway,
+        http::Request::from_parts(head, Body::full("")),
+        false,
+        LIMIT,
+    )
+    .await;
     BodyExt::collect(answer.into_body())
         .await
         .expect("valid test setup");
@@ -679,8 +695,8 @@ impl Plugin for L6Ends {
         let code = end
             .as_ref()
             .err()
-            .map_or("ok".into(), respan_gateway_http::error_code)
-            .into_owned();
+            .map_or("ok", respan_gateway_http::error_code)
+            .to_owned();
         self.0
             .lock()
             .map(|mut l| l.push(format!("request {code}")))
@@ -694,8 +710,8 @@ impl Plugin for L6Ends {
         let code = end
             .as_ref()
             .err()
-            .map_or("ok".into(), respan_gateway_http::error_code)
-            .into_owned();
+            .map_or("ok", respan_gateway_http::error_code)
+            .to_owned();
         self.0
             .lock()
             .map(|mut l| l.push(format!("call {code}")))

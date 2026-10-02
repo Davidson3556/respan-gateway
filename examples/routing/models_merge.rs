@@ -22,7 +22,7 @@
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::formats;
 use respan_gateway_http::formats::opaque::{self, Got, Sent};
-use respan_gateway_http::formats::whole::Relay;
+use respan_gateway_http::formats::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
 use respan_gateway_sdk::Upstream;
@@ -54,7 +54,7 @@ impl Format<Incoming, Sent<Models>, Got<Models>> for Models {
 
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Models>, Got<Models>>, Fault> {
         Ok(io.bind(
-            opaque::read_request,
+            |request| Ok(opaque::read_request(request)),
             |reply, _source| {
                 // A merged list has no provider's head to borrow a content type from.
                 let mut head = reply.head();
@@ -70,7 +70,7 @@ impl Format<Incoming, Sent<Models>, Got<Models>> for Models {
                         .to_string()
                         .into_bytes()
                 };
-                Ok(reply.write(head, Box::new(Relay::new(write, fail, false))))
+                Ok(reply.write(head, whole::collect(write, fail)))
             },
             h::plain_refusal,
         ))
@@ -84,7 +84,7 @@ impl Format<Outgoing, Got<Models>, Sent<Models>> for Models {
 
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Models>, Sent<Models>>, Fault> {
         Ok(io.bind(
-            |source| opaque::write_request("models", source),
+            opaque::write_request,
             |response, request| opaque::read_response("models", response, &request.into_parts().0),
             |head, _| head.status.is_success(),
         ))

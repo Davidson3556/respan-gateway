@@ -1,5 +1,9 @@
 //! External HTTP bodies must stay pull-driven through the standard adapter.
 
+#[allow(dead_code)]
+#[path = "../../tests/support/http.rs"]
+mod http_support;
+use http_support::LIMIT;
 use std::collections::VecDeque;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
@@ -147,13 +151,13 @@ fn opening(
     body: h::Body,
     decoded: Arc<AtomicUsize>,
 ) -> impl Future<Output = Result<EventStream<Bytes>, Fault>> {
-    let (incoming, _answer) = h::Incoming::accept(Request::new(body), false);
+    let (incoming, _answer) = h::Incoming::accept(Request::new(body), false, LIMIT);
     let (opening, _sink) = incoming.bind(
         move |request| {
-            h::messages(request, move |_, bytes| {
+            Ok(h::messages(request, move |_, bytes| {
                 decoded.fetch_add(1, Ordering::SeqCst);
                 Ok(bytes)
-            })
+            }))
         },
         |reply, source: &mut EventStream<()>| {
             Ok(reply.empty(Response::new(()).into_parts().0, source))

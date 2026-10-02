@@ -7,7 +7,7 @@ use std::sync::Arc;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::{self, BodyExt};
-use respan_gateway_http::{Asked, Body, CallHeaders, Credential, Outgoing};
+use respan_gateway_http::{Body, CallHeaders, Credential, Outgoing, Wire};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::conversation::Conversation;
@@ -24,7 +24,7 @@ mod http_support;
 #[path = "support/scripted.rs"]
 mod scripted;
 use hooks::{Calls, Outcomes};
-use http_support::{post, read_whole, serve};
+use http_support::{LIMIT, post, read_whole, serve};
 use scripted::{Scripted, json, sse};
 
 use respan_gateway_http::relay;
@@ -62,7 +62,7 @@ where
         gw.provider(
             name,
             format,
-            respan_gateway_http::connect(transport.into_sender()),
+            respan_gateway_http::connect(transport.into_sender(), LIMIT),
         )
     })
 }
@@ -172,8 +172,8 @@ struct ByHeader;
 #[async_trait]
 impl Plugin for ByHeader {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Asked>();
-        let to = asked.and_then(|a| a.headers.get("x-to")?.to_str().ok());
+        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let to = asked.and_then(|a| a.headers().get("x-to")?.to_str().ok());
         let to = to.unwrap_or_default().to_owned();
         cx.set_target(to);
         Ok(None)
@@ -481,7 +481,7 @@ async fn a_plugin_removes_the_gateways_own_credential() {
                 Some(key) if key == "secret" => Ok(None),
                 _ => Err(Fault::new("no")
                     .with(ErrorCode("unauthorized".into()))
-                    .with(Status(401))),
+                    .with(Status(StatusCode::UNAUTHORIZED))),
             }
         }
     }
@@ -578,7 +578,10 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
         gw.provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(|request| async move { Cookie.send(request).await }),
+            respan_gateway_http::connect(
+                |request| async move { Cookie.send(request).await },
+                LIMIT,
+            ),
         )
     });
     let gw = gateway([provider], vec![], Some("openai")).unwrap_or_else(|e| panic!("{e}"));

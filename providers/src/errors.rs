@@ -1,13 +1,22 @@
-//! Generic provider-error recognition, decoding, and detail preservation.
+//! How a provider's error body reads: its code, message and fields. HTTP
+//! reads no body's meaning ([`whole::answer`]); these are the shapes the
+//! vendors' APIs and their compatible servers send, each named where it is
+//! read: OpenAI's and Anthropic's `{"error": {..}}`, Gemini's and
+//! Cloudflare's lists, Mistral's and FastAPI's `detail`, and a problem's
+//! `title` (RFC 9457).
 
-use respan_gateway_http::{Status, http::StatusCode};
-use respan_gateway_sdk::{ErrorCode, Fault, Upstream};
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::http::{self, StatusCode};
+use respan_gateway_http::{ProviderError, Status};
+use respan_gateway_sdk::{Details, ErrorCode, Fault, RetryAfter, Upstream};
 use serde_json::Value;
 
-use respan_gateway_sdk::Details;
+use crate::common::Wire;
+use crate::formats::sse::{Parser, event_json};
+use crate::formats::whole;
 
 /// Whether a JSON value says anything: not null or empty.
-pub fn says(v: &Value) -> bool {
+pub(crate) fn says(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Array(a) => !a.is_empty(),
@@ -23,14 +32,14 @@ fn said(v: &Value) -> Option<&str> {
 
 /// Whether a provider's JSON message says an error: an `error` that says
 /// something, object or string, as compatible servers send.
-pub fn says_error(v: &Value) -> bool {
+pub(crate) fn says_error(v: &Value) -> bool {
     let error = &v["error"];
     says(error) && *error != false && *error != "" && error.as_f64() != Some(0.0)
 }
 
 /// The fault for a provider's error body in a response of `status`: an
 /// error's status, else a 502, with the error's fields as details.
-pub fn provider_error(status: StatusCode, v: &Value) -> Fault {
+pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
     // `{"error": {..}}` (OpenAI, Anthropic), the first of a list under
     // `error` or `errors` (Gemini, Cloudflare), or fields at the top.
     let fields = [&v["error"], &v["error"][0], &v["errors"][0]]
@@ -55,7 +64,7 @@ pub fn provider_error(status: StatusCode, v: &Value) -> Fault {
         .or(said(&v["detail"][0]["msg"]))
         .or(said(&error["title"]))
         .or(said(v));
-    let answered = || crate::formats::whole::answered(status);
+    let answered = || whole::answered(status);
     let message = message.map_or_else(answered, str::to_owned);
     let to = match status.is_client_error() || status.is_server_error() {
         true => status,
@@ -65,7 +74,7 @@ pub fn provider_error(status: StatusCode, v: &Value) -> Fault {
         Some(code) => Fault::new(message).with(ErrorCode(code.to_owned().into())),
         None => Upstream::fault(message),
     };
-    let fault = fault.with(Status(to.as_u16()));
+    let fault = fault.with(Status(to));
     let Some(fields) = fields else { return fault };
     let mut details = fields.clone();
     // Fields at the top are the error's, not its null `error`.
@@ -78,7 +87,7 @@ pub fn provider_error(status: StatusCode, v: &Value) -> Fault {
 /// Merge the fault's details into the format's error fields: each is added
 /// if missing, and a string or null replaces the format's but for
 /// `message` and `type`.
-pub fn merge_details(mut error: Value, fault: &Fault) -> Value {
+pub(crate) fn merge_details(mut error: Value, fault: &Fault) -> Value {
     let (Some(merged), Some(Value::Object(details))) =
         (error.as_object_mut(), fault.get::<Details>().map(|d| &d.0))
     else {
@@ -93,11 +102,85 @@ pub fn merge_details(mut error: Value, fault: &Fault) -> Value {
     error
 }
 
+/// A failed body as JSON: a JSON body, a one-element array unwrapped
+/// (Gemini), or the first event that says an error.
+pub(crate) fn failure_json(raw: &Bytes) -> Option<Value> {
+    if let Ok(v) = serde_json::from_slice::<Value>(raw) {
+        return Some(match v {
+            Value::Array(mut one) if one.len() == 1 => one.remove(0),
+            v => v,
+        });
+    }
+    // The body is whole: its last event ends with it.
+    let mut split = Parser::new(None);
+    let mut events = split.push(raw.clone()).unwrap_or_default();
+    events.extend(split.push(Bytes::from_static(b"\n\n")).unwrap_or_default());
+    let json = events.iter().filter_map(|event| event_json(event));
+    json.into_iter().find(says_error)
+}
+
+/// The fault of a provider's answer in format `W` that is no success
+/// ([`whole::answer`]), with what its body says: its code, message and
+/// fields, under the status `W` reads it as ([`Wire::status`]). Its
+/// `Retry-After` and the answer as it came stay.
+pub(crate) fn answer<W: Wire>(head: &http::response::Parts, body: Bytes) -> Fault {
+    read_answer::<W>(whole::answer(W::NAME, head, body))
+}
+
+/// [`answer`] of a fault [`whole::answer`] made; another fault as it is.
+pub(crate) fn read_answer<W: Wire>(fault: Fault) -> Fault {
+    let Some(error) = fault.get::<ProviderError>().cloned() else {
+        return fault;
+    };
+    let v = failure_json(error.response.body()).unwrap_or_default();
+    let read = provider_error(W::status(error.response.status()), &v);
+    let read = match fault.get::<RetryAfter>() {
+        Some(&wait) => read.with(wait),
+        None => read,
+    };
+    read.with(error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use respan_gateway_http::error_code;
     use serde_json::json;
+
+    #[test]
+    fn a_failure_is_read_by_its_error_event_whatever_its_line_endings() {
+        for body in [
+            &b"data: {\"type\":\"ping\"}\r\rdata: {\"error\":{\"message\":\"busy\"}}\r\r"[..],
+            b"data: {\"type\":\"ping\"}\n\r\ndata: {\"error\":{\"message\":\"busy\"}}\n\r\n",
+        ] {
+            let v = failure_json(&Bytes::from_static(body));
+            assert_eq!(
+                v.map(|v| v["error"]["message"].clone()),
+                Some("busy".into())
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_is_read_by_its_error_event_however_it_ends() {
+        let busy = |body: &'static [u8]| {
+            failure_json(&Bytes::from_static(body)).map(|v| v["error"]["message"].clone())
+        };
+        let said = Some(Value::from("busy"));
+        // No blank line after the last event, or no line end at all.
+        assert_eq!(
+            busy(b"data: {\"type\":\"ping\"}\n\ndata: {\"error\":{\"message\":\"busy\"}}\n"),
+            said
+        );
+        assert_eq!(busy(b"data: {\"error\":{\"message\":\"busy\"}}"), said);
+        // A null error is none.
+        assert_eq!(
+            busy(b"data: {\"error\":null}\n\ndata: {\"error\":{\"message\":\"busy\"}}\n\n"),
+            said
+        );
+        // Pings alone say nothing.
+        assert_eq!(busy(b"data: {\"type\":\"ping\"}\n\n"), None);
+    }
 
     #[test]
     fn only_an_error_that_says_something_is_one() {
@@ -188,7 +271,7 @@ mod tests {
         ] {
             let fault = provider_error(StatusCode::BAD_REQUEST, &body);
             assert_eq!(
-                (error_code(&fault).as_ref(), fault.message()),
+                (error_code(&fault), fault.message()),
                 (code, message),
                 "{body}"
             );
@@ -197,7 +280,7 @@ mod tests {
 
     #[test]
     fn an_envelopes_tag_is_no_error_code() {
-        let code = |v: Value| error_code(&provider_error(StatusCode::OK, &v)).into_owned();
+        let code = |v: Value| error_code(&provider_error(StatusCode::OK, &v)).to_owned();
         assert_eq!(
             code(json!({"type": "error", "error": "Overloaded"})),
             "upstream"
@@ -214,7 +297,7 @@ mod tests {
             json!({"errors": [{"code": "rate_limited", "message": "slow"}], "success": false});
         let fault = provider_error(StatusCode::TOO_MANY_REQUESTS, &cloudflare);
         assert_eq!(
-            (error_code(&fault).as_ref(), fault.message()),
+            (error_code(&fault), fault.message()),
             ("rate_limited", "slow")
         );
         assert_eq!(fault.get(), Some(&Details(cloudflare["errors"][0].clone())));
@@ -222,7 +305,7 @@ mod tests {
             StatusCode::OK,
             &json!({"error": [{"type": "t", "message": "m"}]}),
         );
-        assert_eq!((error_code(&listed).as_ref(), listed.message()), ("t", "m"));
+        assert_eq!((error_code(&listed), listed.message()), ("t", "m"));
         let message = provider_error(StatusCode::OK, &json!({"error": {"message": ""}}));
         assert_eq!(message.message(), "the provider returned 200");
     }

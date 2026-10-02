@@ -23,7 +23,7 @@ use http::header::AUTHORIZATION;
 use http::header::{HOST, UPGRADE};
 use http::{HeaderValue, StatusCode};
 use http_body_util::BodyExt;
-use http_support::{post, read_whole, serve, streamed};
+use http_support::{LIMIT, post, read_whole, serve, serve_live, streamed};
 #[cfg(feature = "reqwest")]
 use mockllm::{Answer, FakeOpenAi};
 #[cfg(feature = "reqwest")]
@@ -121,12 +121,14 @@ impl Format<Outgoing, Out, In> for Msg {
         Ok(io.bind(
             |source: &mut EventStream<In>| {
                 let mut head = http::Request::new(()).into_parts().0;
-                respan_gateway_http::formats::set_path(&mut head, "/msg");
+                respan_gateway_http::formats::set_path(&mut head, "/msg")?;
                 if let Some(value) = source.value().transpose()? {
-                    respan_gateway_http::formats::set_path(&mut head, &format!("/msg/{}", value.1));
+                    respan_gateway_http::formats::set_path(
+                        &mut head,
+                        &format!("/msg/{}", value.1),
+                    )?;
                 }
-                let (request, sink) =
-                    respan_gateway_http::request("msg", source, Box::new(Numbered(0)))?;
+                let (request, sink) = respan_gateway_http::request(source, Box::new(Numbered(0)))?;
                 let body = request.into_body();
                 Ok((http::Request::from_parts(head, body), sink))
             },
@@ -267,7 +269,7 @@ fn msg(echo: &Echo, plugin: impl Plugin) -> Gateway {
         .provider::<In, _, _>(
             "msg",
             Msg,
-            respan_gateway_http::connect(echo.clone().into_sender()),
+            respan_gateway_http::connect(echo.clone().into_sender(), LIMIT),
         )
         .and_then(|g| Ok(g.client::<In, _, _>(Msg)?.target("msg")?.plugin(plugin)))
         .unwrap_or_else(|e| panic!("{e}"))
@@ -299,7 +301,7 @@ async fn talk(gw: &Gateway, frames: &[&'static str]) -> (StatusCode, Vec<Result<
     let (send, mut req) = streamed("/msg");
     let upgrade = HeaderValue::from_static("msg");
     req.headers_mut().insert(UPGRADE, upgrade);
-    let (resp, _) = serve(gw, req).await;
+    let (resp, _) = serve_live(gw, req).await;
     for frame in frames {
         let _ = send.unbounded_send(Bytes::from_static(frame.as_bytes()));
     }
@@ -365,7 +367,7 @@ async fn r8_content_that_cannot_be_written_is_a_bad_request_edited_or_not() {
         let (_, ended) = serve(&gw, post("/msg", body)).await;
         let end = ended
             .await
-            .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
+            .map_err(|f| respan_gateway_http::error_code(&f).to_owned());
         assert_eq!(end, Err(code.to_owned()), "{body} {edit:?}");
         assert!(echo.seen().is_empty(), "nothing is sent");
     }
@@ -493,7 +495,7 @@ fn chat(
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(transport),
+            respan_gateway_http::connect(transport, LIMIT),
         )
         .and_then(|g| {
             g.client::<Conversation, _, _>(OpenAiChat)?
@@ -570,7 +572,7 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(transport),
+            respan_gateway_http::connect(transport, LIMIT),
         )
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat)?.target("openai"))
         .unwrap_or_else(|e| panic!("{e}"));
@@ -723,13 +725,13 @@ async fn r2_an_encoder_writes_its_own_formats_events_as_they_are_and_no_others()
             .provider::<Conversation, _, _>(
                 "anthropic",
                 noting.clone(),
-                respan_gateway_http::connect(sse(&stream)),
+                respan_gateway_http::connect(sse(&stream), LIMIT),
             )
             .and_then(|g| {
                 g.provider::<Conversation, _, _>(
                     "openai",
                     OpenAiChat,
-                    respan_gateway_http::connect(sse(&[chunk, "data: [DONE]\n\n"])),
+                    respan_gateway_http::connect(sse(&[chunk, "data: [DONE]\n\n"]), LIMIT),
                 )
             })
             .and_then(|g| {
@@ -785,7 +787,7 @@ async fn r13_a_filter_added_once_frames_pass_sees_the_later_ones() {
         let _ = send.unbounded_send(Bytes::from_static(frame.as_bytes()));
     }
     drop(send);
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     let _ = read_whole(resp).await;
 
     assert_eq!(echo.seen(), ["/msg", "1|a", "2|B"]);

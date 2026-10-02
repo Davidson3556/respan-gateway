@@ -97,7 +97,9 @@ impl Format<Io, Reply, Question> for Pipe {
                             EventStream::refused(
                                 Fault::new("busy")
                                     .with(ErrorCode("busy".into()))
-                                    .with(Status(429)),
+                                    .with(Status(
+                                        respan_gateway_http::http::StatusCode::TOO_MANY_REQUESTS,
+                                    )),
                             )
                         } else {
                             let replies = frames.into_iter().map(|raw| {

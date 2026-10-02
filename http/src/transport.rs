@@ -21,8 +21,12 @@ pub type Completion = BoxFuture<'static, Result<(), Fault>>;
 /// Make a cloneable provider factory from an ordinary async sending function.
 /// `Some(completion)` remains authoritative even after response EOF; `None`
 /// means only the outgoing handoff is complete, not later socket writes.
+/// `limit` is the most bytes a reader holds of one answer at once
+/// ([`Body::limit`](crate::Body::limit)): a whole body, a refusal's, or one
+/// event; past it, the answer fails `upstream`.
 pub fn connect<F, Fut>(
     send: F,
+    limit: usize,
 ) -> impl Fn(Extensions) -> crate::Outgoing + Clone + Send + Sync + 'static
 where
     F: Fn(http::Request<crate::Body>) -> Fut + Send + Sync + 'static,
@@ -36,7 +40,74 @@ where
     move |extensions| crate::Outgoing {
         send: send.clone(),
         extensions,
+        limit,
     }
+}
+
+/// `url` as a transport's base URL, without a trailing `/`: one of
+/// `schemes`, a host (a name, an IPv4 address, or an IPv6 one in brackets)
+/// with an optional port other than 0, an optional path prefix such as
+/// `/v1`, and no query, fragment or credentials, else `Err` with `config`.
+/// The error does not echo the URL, which may hold a key.
+pub fn base_url(url: &str, schemes: &[&str]) -> Result<String, Fault> {
+    let host = |host: &str| match host.strip_prefix('[') {
+        Some(v6) => v6
+            .strip_suffix(']')
+            .is_some_and(|v6| v6.parse::<std::net::Ipv6Addr>().is_ok()),
+        None if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') => {
+            host.parse::<std::net::Ipv4Addr>().is_ok()
+        }
+        None => host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'),
+    };
+    let parsed = url.parse::<http::Uri>().ok().filter(|u| {
+        let authority = u.authority().map_or("", |a| a.as_str());
+        // A port follows the host, past an IPv6 address's brackets.
+        let after_host = authority
+            .rsplit_once(']')
+            .map_or(authority, |(_, rest)| rest);
+        let port = after_host
+            .split_once(':')
+            .map(|(_, port)| port.parse::<u16>());
+        u.scheme_str().is_some_and(|s| schemes.contains(&s))
+            && u.host().is_some_and(|h| !h.is_empty() && host(h))
+            && !authority.contains('@')
+            && port.is_none_or(|p| p.is_ok_and(|p| p != 0))
+            && u.query().is_none()
+            && !url.contains('#')
+    });
+    match parsed {
+        Some(url) => Ok(url.to_string().trim_end_matches('/').to_owned()),
+        None => Err(Fault::config(format!(
+            "bad base URL: {} with a host, and no query, fragment or credentials \
+             (those go in its headers)",
+            schemes.join(" or "),
+        ))),
+    }
+}
+
+/// Make `call` the request a transport sends to `base` ([`base_url`]): what
+/// a proxy does not pass on stripped ([`proxy_call`]) with the gateway
+/// origin's headers ([`strip_client_origin_headers`]), its keys decided
+/// ([`credentials`]) over the transport's `headers`, and its path and
+/// query joined to `base`. `Err` with `config` if they make no URL.
+pub fn prepare_call(
+    call: &mut http::Request<crate::Body>,
+    base: &str,
+    headers: &HeaderMap,
+) -> Result<(), Fault> {
+    let (mut head, body) = std::mem::take(call).into_parts();
+    proxy_call(&mut head);
+    strip_client_origin_headers(&mut head.headers);
+    let extensions = head.extensions.get::<Extensions>().cloned();
+    keys(&mut head, &extensions.unwrap_or_default(), headers);
+    let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
+    let uri = format!("{base}{path}").parse::<http::Uri>();
+    *call = http::Request::from_parts(head, body);
+    *call.uri_mut() =
+        uri.map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
+    Ok(())
 }
 
 /// Strip from a call, whose head may be the client's, what a proxy does not
@@ -80,7 +151,7 @@ pub fn is_connection_header(name: &HeaderName) -> bool {
 
 /// Remove from a call the headers of the gateway's origin: `Cookie`,
 /// `Forwarded`, `Via`, `X-Forwarded-*` and `X-Real-IP`. Plugins still see
-/// them ([`Asked`](crate::Asked)); a call's [`CallHeaders`] may set them.
+/// them ([`Wire`](crate::Wire)); a call's [`CallHeaders`] may set them.
 pub fn strip_client_origin_headers(headers: &mut HeaderMap) {
     remove_if(headers, |name| {
         let name = name.as_str();
@@ -194,11 +265,12 @@ mod tests {
         assert_eq!(parts.headers[CONNECTION], "upgrade");
     }
 
-    /// A call with `head` and the client's `credential`, if any.
+    /// A call with `head` and the client's `credential`, if any, put back
+    /// on its head if `restored`, as a plugin that relays it does.
     fn call(
         head: RequestHead,
         credential: Option<HeaderMap>,
-        relayed: bool,
+        restored: bool,
     ) -> http::Request<crate::Body> {
         let mut call = http::Request::from_parts(head, crate::Body::default());
         let mut extensions = Extensions::new();
@@ -206,7 +278,7 @@ mod tests {
             extensions.insert(Credential::of(client));
         }
         call.extensions_mut().insert(extensions);
-        if relayed {
+        if restored {
             let (mut head, body) = call.into_parts();
             if let Some(credential) = head
                 .extensions
@@ -222,40 +294,41 @@ mod tests {
     }
 
     #[test]
-    fn with_no_keys_of_its_own_the_clients_pass_through() {
+    fn with_no_keys_of_its_own_the_heads_pass_through() {
         let mut client = HeaderMap::new();
         client.insert("x-api-key", HeaderValue::from_static("k"));
-        let mut relay = call(head(&[]), Some(client.clone()), true);
-        credentials(&mut relay, &HeaderMap::new());
-        assert_eq!(relay.headers()["x-api-key"], "k");
+        let mut restored = call(head(&[]), Some(client.clone()), true);
+        credentials(&mut restored, &HeaderMap::new());
+        assert_eq!(restored.headers()["x-api-key"], "k");
         let mut own = HeaderMap::new();
         own.insert("authorization", HeaderValue::from_static("Bearer own"));
-        let mut relay = call(head(&[]), Some(client), true);
-        credentials(&mut relay, &own);
-        assert!(relay.headers().get("x-api-key").is_none());
-        assert_eq!(relay.headers()["authorization"], "Bearer own");
+        let mut restored = call(head(&[]), Some(client), true);
+        credentials(&mut restored, &own);
+        assert!(restored.headers().get("x-api-key").is_none());
+        assert_eq!(restored.headers()["authorization"], "Bearer own");
     }
 
     #[test]
-    fn the_clients_credentials_pass_only_through_a_relay() {
-        // A translated call, or any not marked a relay, carries none of
-        // the client's keys, even to a provider with none of its own.
+    fn the_clients_credentials_pass_only_where_a_plugin_restored_them() {
+        // A call whose head has none of the client's keys carries none,
+        // even to a provider with none of its own: the Credential
+        // extension is never copied.
         let mut client = HeaderMap::new();
         client.insert("authorization", HeaderValue::from_static("Bearer sk-c"));
         client.insert("x-api-key", HeaderValue::from_static("k"));
-        let mut unrelayed = call(head(&[]), Some(client.clone()), false);
-        credentials(&mut unrelayed, &HeaderMap::new());
-        assert!(unrelayed.headers().is_empty());
+        let mut kept = call(head(&[]), Some(client.clone()), false);
+        credentials(&mut kept, &HeaderMap::new());
+        assert!(kept.headers().is_empty());
 
-        // A relay whose Credential a plugin removed carries none either.
+        // A Credential a plugin removed is restored by none either.
         let mut removed = call(head(&[]), None, true);
         credentials(&mut removed, &HeaderMap::new());
         assert!(removed.headers().is_empty());
 
-        let mut relay = call(head(&[]), Some(client), true);
-        credentials(&mut relay, &HeaderMap::new());
-        assert_eq!(relay.headers()["authorization"], "Bearer sk-c");
-        assert_eq!(relay.headers()["x-api-key"], "k");
+        let mut restored = call(head(&[]), Some(client), true);
+        credentials(&mut restored, &HeaderMap::new());
+        assert_eq!(restored.headers()["authorization"], "Bearer sk-c");
+        assert_eq!(restored.headers()["x-api-key"], "k");
     }
 
     #[test]
@@ -267,20 +340,17 @@ mod tests {
         let mut keyed = call(marked(), None, true);
         credentials(&mut keyed, &own);
         assert_eq!(keyed.headers()["sec-websocket-protocol"], "realtime");
-        // No key at all, as on a call not a relay.
-        let mut unrelayed = call(marked(), None, false);
-        credentials(&mut unrelayed, &HeaderMap::new());
-        assert_eq!(
-            unrelayed.headers()["sec-websocket-protocol"],
-            "realtime, token"
-        );
+        // No key at all, as on a call whose head has none.
+        let mut kept = call(marked(), None, false);
+        credentials(&mut kept, &HeaderMap::new());
+        assert_eq!(kept.headers()["sec-websocket-protocol"], "realtime, token");
         // The client's own key comes back after its marker.
         let mut client = HeaderMap::new();
         client.insert("sec-websocket-protocol", HeaderValue::from_static("dg"));
-        let mut relay = call(marked(), Some(client), true);
-        credentials(&mut relay, &HeaderMap::new());
+        let mut restored = call(marked(), Some(client), true);
+        credentials(&mut restored, &HeaderMap::new());
         assert_eq!(
-            relay.headers()["sec-websocket-protocol"],
+            restored.headers()["sec-websocket-protocol"],
             "realtime, token, dg"
         );
     }

@@ -127,7 +127,8 @@ async fn a_gemini_live_session_is_byte_exact_both_ways() {
 }
 
 // The provider's refusal of the upgrade (mockllm answers 401 to a key-less
-// handshake) reaches the client under its status, in plain text. The gateway
+// handshake) reaches the client under its status, in plain text; the
+// passthrough reads no body's words, so the call's fault is `upstream`. The gateway
 // sends a streaming request's head at once, so the refusal as the provider's
 // format would write it arrives as a head followed by a failing body; the
 // adapter writes the failure whole instead (BUGS.md, W1).
@@ -144,7 +145,7 @@ async fn a_provider_that_refuses_the_upgrade_is_refused_under_its_status() {
     let body = String::from_utf8(resp.body().clone().unwrap()).unwrap();
     assert!(body.contains("You didn't provide an API key"), "{body}");
     idle(&server.gateway).await;
-    assert_eq!(code(&ends.only()), "invalid_request_error");
+    assert_eq!(code(&ends.only()), "upstream");
     assert_eq!(calls.all().len(), 1);
 }
 

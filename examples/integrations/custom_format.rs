@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{self as formats, whole::Relay};
+use respan_gateway_http::formats::{self as formats, whole};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
 use respan_gateway_sdk::{
@@ -71,11 +71,11 @@ impl Format<Incoming, EmbedRequest, Embeddings> for OpenAiEmbeddings {
 
     fn bind(&self, io: Incoming) -> Result<Connection<EmbedRequest, Embeddings>, Fault> {
         Ok(io.bind(
-            |request| h::messages(request, |_, raw| read_request(raw)),
+            |request| Ok(h::messages(request, |_, raw| read_request(raw))),
             |reply, _source| {
                 let mut head = reply.head();
                 formats::default_content_type(&mut head, "application/json");
-                Ok(reply.write(head, Box::new(Relay::new(write_embeddings, error, false))))
+                Ok(reply.write(head, whole::collect(write_embeddings, error)))
             },
             |fault, _, head| {
                 formats::default_content_type(head, "application/json");
@@ -98,20 +98,17 @@ impl Format<Outgoing, Embeddings, EmbedRequest> for OpenAiEmbeddings {
                         "a call in {NAME} carries one body, not streamed inputs"
                     )));
                 }
-                let (request, sink) = h::request(
-                    NAME,
-                    source,
-                    Box::new(Relay::new(write_request, |_: &Fault| Bytes::new(), false)),
-                )?;
+                let encoder = whole::collect(write_request, |_: &Fault| Bytes::new());
+                let (request, sink) = h::request(source, encoder)?;
                 let (mut head, body) = request.into_parts();
                 head.method = Method::POST;
-                formats::set_path(&mut head, "/embeddings");
+                formats::set_path(&mut head, "/embeddings")?;
                 head.headers
                     .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 Ok((h::http::Request::from_parts(head, body), sink))
             },
             |response, _| {
-                formats::whole::read(NAME, response, |raw, out| {
+                whole::read(NAME, response, |raw, out| {
                     out.push(read_embeddings(raw)?);
                     Ok(())
                 })

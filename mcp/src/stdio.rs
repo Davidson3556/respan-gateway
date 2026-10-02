@@ -132,7 +132,7 @@ impl StdioTransport {
             if owned >= self.max_sessions || sessions.len() >= self.max_total {
                 let full = "too many sessions";
                 let fault = Fault::new(full).with(ErrorCode(TOO_MANY_SESSIONS.into()));
-                return Err(fault.with(Status(503)));
+                return Err(fault.with(Status(StatusCode::SERVICE_UNAVAILABLE)));
             }
             sessions.insert(key.clone(), None);
         }
@@ -176,7 +176,7 @@ pub(crate) fn reply(status: StatusCode) -> Reply {
 fn no_session() -> Fault {
     Fault::new("no such session")
         .with(ErrorCode(NO_SESSION.into()))
-        .with(Status(404))
+        .with(Status(StatusCode::NOT_FOUND))
 }
 
 impl StdioTransport {
@@ -185,10 +185,15 @@ impl StdioTransport {
         self,
     ) -> impl Fn(Extensions) -> respan_gateway_http::Outgoing + Clone + Send + Sync {
         let backend = Arc::new(self);
-        respan_gateway_http::connect(move |request| {
-            let backend = backend.clone();
-            async move { backend.send(request).await }
-        })
+        // Its answers are made of the child's lines, read whole before
+        // they are: a binding's limit would bound nothing more.
+        respan_gateway_http::connect(
+            move |request| {
+                let backend = backend.clone();
+                async move { backend.send(request).await }
+            },
+            usize::MAX,
+        )
     }
 
     /// Send an encoded call and return its response.
@@ -234,7 +239,7 @@ impl StdioTransport {
                 let open = "the stream is already open";
                 Fault::new(open)
                     .with(ErrorCode(BUSY.into()))
-                    .with(Status(409))
+                    .with(Status(StatusCode::CONFLICT))
             }),
             Method::DELETE => {
                 lock(&self.sessions).remove(&key);

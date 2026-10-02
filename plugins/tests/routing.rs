@@ -31,7 +31,7 @@ fn ended(end: Result<(), Fault>) -> Result<(), String> {
 #[allow(dead_code)] // The shared helper also exposes streamed requests, unused here.
 #[path = "../../tests/support/http.rs"]
 mod http_support;
-use http_support::{post, read_whole, serve};
+use http_support::{LIMIT, post, read_whole, serve};
 use tokio::time::Instant;
 
 const A: &str = "http://a.test/v1";
@@ -149,8 +149,8 @@ impl Plugin for Record {
         let end = end
             .as_ref()
             .err()
-            .map_or("ok".into(), |f| error_code(f))
-            .into_owned();
+            .map_or("ok", |f| error_code(f))
+            .to_owned();
         let entry = (px.provider().to_owned(), a.index(), a.role(), end);
         self.0
             .lock()
@@ -328,63 +328,63 @@ async fn harness(plan: Plan) -> Harness {
             g.provider::<Conversation, _, _>(
                 "a",
                 OpenAiChat,
-                respan_gateway_http::connect(mock.at(A)),
+                respan_gateway_http::connect(mock.at(A), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "b",
                 OpenAiChat,
-                respan_gateway_http::connect(mock.at(B)),
+                respan_gateway_http::connect(mock.at(B), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "slow",
                 OpenAiChat,
-                respan_gateway_http::connect(slow(mock.at(A), secs(5))),
+                respan_gateway_http::connect(slow(mock.at(A), secs(5)), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "stalled",
                 OpenAiChat,
-                respan_gateway_http::connect(watchdog(stall)),
+                respan_gateway_http::connect(watchdog(stall), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "silent",
                 OpenAiChat,
-                respan_gateway_http::connect(watchdog(silent)),
+                respan_gateway_http::connect(watchdog(silent), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "refused",
                 OpenAiChat,
-                respan_gateway_http::connect(refused),
+                respan_gateway_http::connect(refused, LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "dribble",
                 OpenAiChat,
-                respan_gateway_http::connect(dribble),
+                respan_gateway_http::connect(dribble, LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "b-in-1s",
                 OpenAiChat,
-                respan_gateway_http::connect(slow(mock.at(B), secs(1))),
+                respan_gateway_http::connect(slow(mock.at(B), secs(1)), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "late",
                 OpenAiChat,
-                respan_gateway_http::connect(watchdog(slow(mock.at(A), secs(3)))),
+                respan_gateway_http::connect(watchdog(slow(mock.at(A), secs(3))), LIMIT),
             )
         })
         .map(|g| g.plugin(record.clone()))
@@ -430,9 +430,17 @@ fn model_gateway(mock: &Fakes, router: ModelRouter<Conversation>) -> Gateway {
     Gateway::new()
         .client::<Conversation, _, _>(OpenAiChat)
         .expect("chat client")
-        .provider::<Conversation, _, _>("a", OpenAiChat, respan_gateway_http::connect(mock.at(A)))
+        .provider::<Conversation, _, _>(
+            "a",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(A), LIMIT),
+        )
         .expect("a provider")
-        .provider::<Conversation, _, _>("b", OpenAiChat, respan_gateway_http::connect(mock.at(B)))
+        .provider::<Conversation, _, _>(
+            "b",
+            OpenAiChat,
+            respan_gateway_http::connect(mock.at(B), LIMIT),
+        )
         .expect("b provider")
         .plugin(router)
         .target("b")
@@ -509,9 +517,10 @@ async fn model_router_passes_other_kinds_without_changing_their_target() {
         .provider::<respan_gateway_http::formats::opaque::Sent<Passthrough>, _, _>(
             "raw",
             Passthrough,
-            respan_gateway_http::connect(|_| async {
-                Ok((http::Response::new(Body::full("opaque answer")), None))
-            }),
+            respan_gateway_http::connect(
+                |_| async { Ok((http::Response::new(Body::full("opaque answer")), None)) },
+                LIMIT,
+            ),
         )
         .expect("opaque provider")
         .plugin(ModelRouter::new(model).route("", "a"))
@@ -795,7 +804,7 @@ async fn a_false_classifier_suppresses_preopening_upstream_retries_but_allows_fa
         Arc::new(move |fault, opened| {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((error_code(fault).into_owned(), opened));
+                .push((error_code(fault).to_owned(), opened));
             false
         }),
     ))
@@ -830,7 +839,7 @@ async fn classifier_sees_opened_content_and_late_terminal_failures() {
             Arc::new(move |fault, opened| {
                 seen.lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push((error_code(fault).into_owned(), opened));
+                    .push((error_code(fault).to_owned(), opened));
                 false
             }),
         ))
@@ -903,7 +912,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
         Arc::new(move |fault, opened| {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((error_code(fault).into_owned(), opened));
+                .push((error_code(fault).to_owned(), opened));
             fault
                 .get::<ErrorCode>()
                 .is_some_and(|c| c.0 == "model_busy")

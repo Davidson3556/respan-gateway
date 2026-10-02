@@ -6,22 +6,22 @@
 //! [`Outgoing`]. Native HTTP messages meet standard event streams and sinks;
 //! [`Encoder`] supplies synchronous stateful framing where needed.
 //!
-//! Its rules live at the three places that own them:
+//! Its rules live at the four places that own them:
 //!
-//! - **The adapter** ([`serve`], [`handle`]) strips the connection's
-//!   headers from a request, lifts the client's credentials into a
-//!   [`Credential`] extension, publishes an [`Asked`] view of the head,
-//!   writes what no format can in plain text, and strips what a hop must
-//!   not carry from the response ([`outgoing`]).
+//! - **The adapter** ([`handle`], [`Incoming::accept`]) strips the
+//!   connection's headers from a request, lifts the client's credentials
+//!   into a [`Credential`], publishes the request as it came ([`Wire`]),
+//!   writes what no format can in plain text, and strips what a hop must not
+//!   carry from the response.
 //! - **An outbound transport** can bound its provider head and polled body
 //!   frame gaps with [`watchdog`]. HTTP retry classification is explicitly
 //!   selected by a routing caller through [`retryable`]; it is not built into
 //!   routing's timing-only backoff.
 //! - **A transport** strips what a proxy must not pass on from a call
 //!   ([`proxy_call`], [`strip_client_origin_headers`]), decides whose keys
-//!   reach the provider ([`credentials`], [`CallHeaders`]), and strips a
-//!   provider origin's own headers from its response
-//!   ([`strip_origin_headers`]).
+//!   reach the provider ([`credentials`], [`CallHeaders`]), joins its path
+//!   to its base URL ([`base_url`], [`prepare_call`]), and strips a provider
+//!   origin's own headers from its response ([`strip_origin_headers`]).
 //! - **An HTTP format** writes a fault's status and `Retry-After`
 //!   ([`error_head`], [`answered`]), reads a provider's
 //!   ([`retry_after`]), and writes no body where HTTP has none
@@ -42,8 +42,8 @@ mod driver;
 mod reqwest_backend;
 mod transport;
 mod watchdog;
+mod wire;
 
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -53,7 +53,7 @@ use futures::FutureExt;
 use futures::future::{BoxFuture, ready};
 use http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
-    RETRY_AFTER, SEC_WEBSOCKET_PROTOCOL, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+    RETRY_AFTER, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{
     HeaderMap, HeaderValue, Method, StatusCode, request::Parts as RequestHead,
@@ -73,9 +73,16 @@ pub use {bytes, http, http_body, http_body_util};
 
 pub use body::Body;
 pub use codec::{Encoder, encode_all, messages, request};
-mod wire;
 pub use credential::Credential;
-pub use wire::{ClientHead, ProviderError, ProviderHead, RawReply, SendRaw, Wire};
+pub use driver::{Incoming, Outgoing, Reply};
+#[cfg(feature = "reqwest")]
+pub use reqwest_backend::HttpClient;
+pub use transport::{
+    CallHeaders, Completion, Frames, base_url, connect, credentials, is_connection_header,
+    prepare_call, proxy_call, strip_client_origin_headers, strip_origin_headers,
+};
+pub use watchdog::watchdog;
+pub use wire::{ClientHead, ProviderError, ProviderHead, RawErrors, RawReply, SendRaw, Wire};
 
 /// `s` with its `%XX` escapes decoded, a bad UTF-8 sequence replaced: how a
 /// path or a parameter's name is compared, so a spelling cannot dodge a match.
@@ -94,14 +101,6 @@ pub fn percent_decode(s: &str) -> String {
     }
     String::from_utf8_lossy(&out).into_owned()
 }
-pub use driver::{Incoming, Outgoing, Reply, drive};
-#[cfg(feature = "reqwest")]
-pub use reqwest_backend::HttpClient;
-pub use transport::{
-    CallHeaders, Completion, Frames, connect, credentials, is_connection_header, proxy_call,
-    strip_client_origin_headers, strip_origin_headers,
-};
-pub use watchdog::watchdog;
 
 /// Default HTTP success: 2xx, or a requested protocol switch.
 pub fn success(answer: &ResponseHead, call: &RequestHead) -> bool {
@@ -130,24 +129,26 @@ pub fn built_wrong(e: http::Error) -> Fault {
 }
 
 /// The HTTP status a fault asks for, as a fact ([`Fault::with`]): a plugin's
-/// `Fault::new(msg).with(Status(429))`, a provider's answer's.
-/// The kernel names no numbers; this is where they get them.
+/// `Fault::new(msg).with(Status(StatusCode::TOO_MANY_REQUESTS))`, a
+/// provider's answer's. The kernel names no numbers; this is where they get
+/// them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Status(pub u16);
+pub struct Status(pub StatusCode);
 
 /// The status of `fault` as HTTP's: its [`Status`] fact, else its kind's
 /// default (a 400 for [`BadRequest`], a 404 for [`NotFound`], a 502 for
 /// [`Upstream`] and [`Truncated`], a 499 for [`Abandoned`], a 500 for
-/// [`Config`], [`Internal`] and a fault of none of these), a 500 for a
-/// number that is no status.
+/// [`Config`], [`Internal`] and a fault of none of these).
 pub fn status(fault: &Fault) -> StatusCode {
-    let number = match fault.get::<Status>() {
-        Some(Status(number)) => *number,
-        None if fault.is::<NotFound>() => 404,
-        None if fault.is::<BadRequest>() => 400,
-        None if fault.is::<Upstream>() || fault.is::<Truncated>() => 502,
-        None if fault.is::<Abandoned>() => 499,
-        None => 500,
+    if let Some(Status(status)) = fault.get() {
+        return *status;
+    }
+    let number = match () {
+        _ if fault.is::<NotFound>() => 404,
+        _ if fault.is::<BadRequest>() => 400,
+        _ if fault.is::<Upstream>() || fault.is::<Truncated>() => 502,
+        _ if fault.is::<Abandoned>() => 499,
+        _ => 500,
     };
     StatusCode::from_u16(number).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -155,11 +156,11 @@ pub fn status(fault: &Fault) -> StatusCode {
 /// The code a format writes in a JSON error body for `fault`: its
 /// [`ErrorCode`] fact, else a name for its kind (`not_found`, `bad_request`,
 /// `upstream`, `truncated`, `abandoned`, `config`, `internal`), else `error`.
-pub fn error_code(fault: &Fault) -> Cow<'_, str> {
+pub fn error_code(fault: &Fault) -> &str {
     if let Some(ErrorCode(code)) = fault.get() {
-        return Cow::Borrowed(code);
+        return code;
     }
-    let name = match () {
+    match () {
         _ if fault.is::<NotFound>() => "not_found",
         _ if fault.is::<BadRequest>() => "bad_request",
         _ if fault.is::<Upstream>() => "upstream",
@@ -168,16 +169,29 @@ pub fn error_code(fault: &Fault) -> Cow<'_, str> {
         _ if fault.is::<Config>() => "config",
         _ if fault.is::<Internal>() => "internal",
         _ => "error",
-    };
-    Cow::Borrowed(name)
+    }
 }
 
+/// The statuses RFC 9110 names as transient: a later attempt may succeed
+/// (408, 425, 429, 500, 502, 503, 504).
+const TRANSIENT: [StatusCode; 7] = [
+    StatusCode::REQUEST_TIMEOUT,
+    StatusCode::TOO_EARLY,
+    StatusCode::TOO_MANY_REQUESTS,
+    StatusCode::INTERNAL_SERVER_ERROR,
+    StatusCode::BAD_GATEWAY,
+    StatusCode::SERVICE_UNAVAILABLE,
+    StatusCode::GATEWAY_TIMEOUT,
+];
+
 /// HTTP retry eligibility for a failed `first_success` attempt. Before a
-/// response opened, only an [`Upstream`] fault is retryable, regardless of
-/// any status fact. After opening, [`Internal`], [`Config`] and [`Abandoned`]
-/// are never retryable, even with a retryable status fact; otherwise
-/// statuses 408, 425, 429, 500, 502, 503, 504 and 529 are retryable (using
-/// [`status`] for the fault's explicit fact or default).
+/// response opened, only an [`Upstream`] fault is retryable: the provider
+/// could not be reached. After opening, a fault whose status is transient
+/// is: its [`Status`] fact, or the 502 of an [`Upstream`] or [`Truncated`]
+/// fault, which say the provider failed. A fault with neither, such as a
+/// plugin's own, is not, nor is an [`Internal`], [`Config`] or
+/// [`Abandoned`] one, whatever its status: a bug, a setting and a client
+/// that left are the same on a second attempt.
 /// `response_opened` means the call returned `Ok(Response)` before the
 /// caller's response-selection criterion ran, not that bytes arrived.
 pub fn retryable(fault: &Fault, response_opened: bool) -> bool {
@@ -187,44 +201,22 @@ pub fn retryable(fault: &Fault, response_opened: bool) -> bool {
     if fault.is::<Internal>() || fault.is::<Config>() || fault.is::<Abandoned>() {
         return false;
     }
-    [408, 425, 429, 500, 502, 503, 504, 529].contains(&status(fault).as_u16())
-}
-
-/// The client's request head, without its [`Credential`] or extensions: a
-/// read-only view for plugins (`cx.extensions().get::<Asked>()`).
-#[derive(Debug, Clone)]
-pub struct Asked(pub Arc<http::request::Parts>);
-
-impl std::ops::Deref for Asked {
-    type Target = http::request::Parts;
-
-    fn deref(&self) -> &http::request::Parts {
-        &self.0
+    match fault.get::<Status>() {
+        Some(Status(status)) => TRANSIENT.contains(status),
+        None => fault.is::<Upstream>() || fault.is::<Truncated>(),
     }
 }
 
-/// [`handle`] `req`, streaming if it asks to switch protocols (`Upgrade`):
-/// the adapter for an embedder or test that performs every switch.
-pub fn serve<B>(
-    gateway: &Gateway,
-    req: http::Request<B>,
-) -> impl Future<Output = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)> + Send + 'static
-where
-    B: http_body::Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<Fault>,
-{
-    let streaming = req.headers().contains_key(UPGRADE);
-    handle(gateway, req, streaming)
-}
-
-/// Hand `req` to `gateway` as an HTTP adapter does, streaming if
-/// `streaming`: as an [`Incoming`] handle, to [`Gateway::handle`]. Before:
-/// the hop's headers go but `Upgrade` (RFC 9110 7.6.1), credentials into a
-/// [`Credential`], and an [`Asked`] view joins them. After: what no format
-/// can write, or a 101 to a request not `streaming`, goes as text/plain
-/// ([`plain`]); the response loses a hop's headers ([`outgoing`]); a
+/// Hand `req` to `gateway` as an HTTP adapter does, as an [`Incoming`]
+/// handle, to [`Gateway::handle`]: `live` if its body is one message per
+/// frame (a session's), else whole, with `limit` the most bytes of one
+/// message it takes ([`Incoming::accept`]). Before: the hop's headers go but
+/// `Upgrade` (RFC 9110 7.6.1), and the [`Incoming`]'s
+/// [extensions](Incoming::extensions) join those `req` carries. After: what
+/// no format can write, or a 101 to a request not `live`, goes as
+/// text/plain ([`plain`]); the response loses a hop's headers; a
 /// [`bodiless`] one goes with none, the gateway's body read apart. The
-/// caller bounds a whole body and removes an `Upgrade` it will not perform.
+/// caller removes an `Upgrade` it will not perform.
 ///
 /// Like [`Gateway::handle`], the request counts for [`Gateway::idle`] from
 /// this call, not from the future's first poll, and the future borrows
@@ -233,23 +225,28 @@ where
 pub fn handle<B>(
     gateway: &Gateway,
     req: http::Request<B>,
-    streaming: bool,
+    live: bool,
+    limit: usize,
 ) -> impl Future<Output = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)> + Send + 'static
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
-    let (Arrived { head, body, to }, mut extensions) = arrive(req);
-    let (wire, answer) = Incoming::accept(http::Request::from_parts(head, body), streaming);
-    extensions.insert(wire.wire());
-    extensions.insert(wire.client_head());
-    let handled = gateway.handle(wire, extensions);
+    let (mut head, body) = req.into_parts();
+    let mut extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
+    head.extensions = http::Extensions::new();
+    strip_hops(&mut head.headers, true);
+    let to = (head.method.clone(), head.uri.path().to_owned());
+    let body = Body::stream(body.map_err(Into::into).into_data_stream());
+    let (incoming, answer) = Incoming::accept(http::Request::from_parts(head, body), live, limit);
+    extensions.extend(incoming.extensions());
+    let handled = gateway.handle(incoming, extensions);
     async move {
         let (resp, ended) = match driver::drive(handled.boxed(), answer).await {
             Ok((resp, ended)) => (Ok(resp), ended),
             Err(fault) => (Err(fault.clone()), ready(Err(fault)).boxed()),
         };
-        (depart(&to, streaming, resp), ended)
+        (depart(&to, live, resp), ended)
     }
 }
 
@@ -258,68 +255,13 @@ where
 #[derive(Clone, Copy)]
 pub(crate) struct Unwritten;
 
-/// A request as the adapter hands it on, and what its answer needs of it.
-pub(crate) struct Arrived {
-    pub(crate) head: RequestHead,
-    pub(crate) body: Body,
-    pub(crate) to: Asking,
-}
-
-/// What of a request its answer's rules need.
-pub(crate) struct Asking {
-    pub(crate) method: Method,
-    pub(crate) path: String,
-    /// The subprotocol to answer a 101 with if the provider chose none.
-    pub(crate) protocol: Option<HeaderValue>,
-}
-
-/// A request as it arrives at the adapter ([`handle`]): the hop's headers
-/// go but `Upgrade`, credentials into a [`Credential`], and an [`Asked`]
-/// view joins them.
-pub(crate) fn arrive<B>(req: http::Request<B>) -> (Arrived, Extensions)
-where
-    B: http_body::Body<Data = Bytes> + Send + 'static,
-    B::Error: Into<Fault>,
-{
-    let (mut head, body) = req.into_parts();
-    let mut extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
-    head.extensions = http::Extensions::new();
-    let body = Body::stream(body.map_err(Into::into).into_data_stream());
-    let method = head.method.clone();
-    let path = head.uri.path().to_owned();
-    strip_hops(&mut head.headers, true);
-    let offered = head.headers.contains_key(SEC_WEBSOCKET_PROTOCOL);
-    let mut protocol = None;
-    if let Some(credential) = Credential::lift(&mut head) {
-        // A client that offered only keys still needs a subprotocol echoed
-        // (browsers fail a handshake that echoes none), so the first of them.
-        if offered && !head.headers.contains_key(SEC_WEBSOCKET_PROTOCOL) {
-            let keys = credential.headers().get(SEC_WEBSOCKET_PROTOCOL);
-            let first = keys.and_then(|v| v.to_str().ok()?.split(',').next());
-            protocol = first.and_then(|e| HeaderValue::from_str(e.trim()).ok());
-        }
-        extensions.insert(credential);
-    }
-    extensions.insert(Asked(Arc::new(head.clone())));
-    let arrived = Arrived {
-        head,
-        body,
-        to: Asking {
-            method,
-            path,
-            protocol,
-        },
-    };
-    (arrived, extensions)
-}
-
-/// The answer to request `to` as it departs the adapter ([`handle`]): what
-/// no format can write, or a 101 to a request not `streaming`, as
-/// text/plain; a hop's headers gone; a [`bodiless`] one with none, the
-/// gateway's body read apart.
-pub(crate) fn depart(
-    to: &Asking,
-    streaming: bool,
+/// The answer to a request of `method` to `path` as it departs the adapter
+/// ([`handle`]): what no format can write, or a 101 to a request not
+/// `live`, as text/plain; a hop's headers gone; a [`bodiless`] one with
+/// none, the gateway's body read apart.
+fn depart(
+    (method, path): &(Method, String),
+    live: bool,
     resp: Result<http::Response<Body>, Fault>,
 ) -> http::Response<Body> {
     // A refusal no codec could write goes as the client edge wrote it.
@@ -332,11 +274,11 @@ pub(crate) fn depart(
     };
     match resp {
         Err(fault) if fault.is::<NotFound>() => {
-            let text = format!("no format served accepts {} {}", to.method, to.path);
+            let text = format!("no format served accepts {method} {path}");
             plain(&Fault::not_found(text))
         }
         Err(fault) => plain(&fault),
-        Ok(resp) if resp.status() == StatusCode::SWITCHING_PROTOCOLS && !streaming => {
+        Ok(resp) if resp.status() == StatusCode::SWITCHING_PROTOCOLS && !live => {
             // RFC 9110 15.2.2: a 101 only to a request that asked.
             let asked = "a 101 to a request that did not ask to switch protocols";
             plain(&Fault::internal(asked))
@@ -345,25 +287,18 @@ pub(crate) fn depart(
             let (mut head, mut body) = resp.into_parts();
             let length = head.headers.get(CONTENT_LENGTH).cloned();
             outgoing(&mut head);
-            if head.status == StatusCode::SWITCHING_PROTOCOLS
-                && !head.headers.contains_key(SEC_WEBSOCKET_PROTOCOL)
-                && let Some(protocol) = &to.protocol
-            {
-                head.headers
-                    .insert(SEC_WEBSOCKET_PROTOCOL, protocol.clone());
-            }
-            if bodiless(&to.method, head.status) {
+            if bodiless(method, head.status) {
                 // A HEAD's or a 304's `Content-Length` is the provider's
                 // for the body it would send (RFC 9110 8.6); a 204 has none.
-                let kept = to.method == Method::HEAD || head.status == StatusCode::NOT_MODIFIED;
+                let kept = method == Method::HEAD || head.status == StatusCode::NOT_MODIFIED;
                 if let Some(length) = length.filter(|_| kept) {
                     head.headers.insert(CONTENT_LENGTH, length);
                 }
-                // A hop drops a bodiless answer's body once its head is out, so
-                // that is when the client leaves. Read what is ready now, so a
-                // refusal's end is told, then drop the rest: the session ends
-                // with its client (rule 4), never when a provider's stream
-                // does.
+                // A hop drops a bodiless answer's body once its head is out,
+                // so that is when the client leaves. Read what is ready now,
+                // so an end that is ready is told, then drop the rest: the
+                // request ends with its client, never when a provider's
+                // stream does.
                 drain_ready(&mut body);
                 body = Body::default();
             }
@@ -375,11 +310,11 @@ pub(crate) fn depart(
 /// Read what `body` has ready now: until it ends, waits on something, or
 /// the task's budget is spent. A bodiless answer's frames are content it
 /// cannot send, read only to reach its end, so a ready body is read through
-/// and its end told (rule 4: dropped outputs end their call as its end, if
-/// ready, says, else `abandoned`). An output says `Pending` between the
-/// frames it sends apart (rule 5) but wakes itself at once, as a yield
-/// does, so a `Pending` that was woken during its poll is ready and one
-/// that was not is waiting: the gateway's own body cannot tell a source
+/// and its end told: outputs dropped unread end their call as their end
+/// says if it is ready, else `abandoned`. The gateway's body says `Pending`
+/// between the frames a provider sent apart but wakes itself at once, as a
+/// yield does, so a `Pending` that was woken during its poll is ready and
+/// one that was not is waiting: the gateway's own body cannot tell a source
 /// that yields between frames from one that has them all, so neither can
 /// this. What a task may do in one poll is what tokio's cooperative budget
 /// allows, so every poll spends from it, and a spent budget is not ready
@@ -387,10 +322,10 @@ pub(crate) fn depart(
 /// the read has a bound of its own that does not depend on the runtime,
 /// `DRAIN_POLLS`: a bodiless answer's body has no frames to a few, so the
 /// bound is far past any real one and costs the thread milliseconds at
-/// most (a runtime's own budget is 128). A body ready
-/// without end, or waking itself and never giving a frame, cannot hold the
-/// thread. A bodiless answer of more frames than the budget or this bound
-/// ends `abandoned`, as one still waiting does.
+/// most (a runtime's own budget is 128). A body ready without end, or
+/// waking itself and never giving a frame, cannot hold the thread. A
+/// bodiless answer of more frames than the budget or this bound ends
+/// `abandoned`, as one still waiting does.
 fn drain_ready(body: &mut Body) {
     /// The most polls one drain makes.
     const DRAIN_POLLS: usize = 1 << 16;
@@ -452,7 +387,7 @@ pub(crate) fn remove_if(headers: &mut HeaderMap, is: impl Fn(&HeaderName) -> boo
 }
 
 /// Remove the headers `Connection` names, but `Upgrade` (RFC 9110 7.6.1).
-pub fn strip_named(headers: &mut HeaderMap) {
+pub(crate) fn strip_named(headers: &mut HeaderMap) {
     let named: Vec<HeaderName> = headers
         .get_all(CONNECTION)
         .iter()
@@ -469,7 +404,7 @@ pub fn strip_named(headers: &mut HeaderMap) {
 /// A response head as sent to the client: without a hop's headers, but a
 /// 101's `Upgrade` with its `Connection: upgrade` (RFC 9110 7.8), in the
 /// client's version.
-pub fn outgoing(head: &mut http::response::Parts) {
+fn outgoing(head: &mut http::response::Parts) {
     let upgrade = head.status == StatusCode::SWITCHING_PROTOCOLS;
     strip_hops(&mut head.headers, upgrade);
     if upgrade {
@@ -588,7 +523,7 @@ mod tests {
     fn a_fault_writes_its_status_and_retry_after() {
         let (mut head, ()) = http::Response::new(()).into_parts();
         let fault = Fault::new("slow down")
-            .with(Status(429))
+            .with(Status(StatusCode::TOO_MANY_REQUESTS))
             .with(RetryAfter(Duration::from_millis(1500)));
         error_head(&mut head, &fault);
         assert_eq!(head.status, StatusCode::TOO_MANY_REQUESTS);
@@ -609,9 +544,13 @@ mod tests {
             (Fault::internal("x"), 500),
             (Fault::new("x"), 500),
         ] {
-            let code = error_code(&fault).into_owned();
+            let code = error_code(&fault).to_owned();
             assert_eq!(of(fault.clone()), want, "{code}");
-            assert_eq!(of(fault.with(Status(429))), 429, "{code}");
+            assert_eq!(
+                of(fault.with(Status(StatusCode::TOO_MANY_REQUESTS))),
+                429,
+                "{code}"
+            );
         }
     }
 
@@ -636,34 +575,35 @@ mod tests {
     }
 
     #[test]
-    fn retryable_respects_opening_stage_code_precedence_and_http_status() {
-        let hinted = |fault: Fault, number| fault.with(Status(number));
+    fn retryable_respects_opening_stage_kind_and_transient_status() {
+        let hinted = |fault: Fault, number| {
+            fault.with(Status(StatusCode::from_u16(number).unwrap_or_default()))
+        };
         let custom = || Fault::new("x").with(ErrorCode("custom".into()));
         for (fault, before, after) in [
             (Upstream::fault("x"), true, true),
+            (Truncated::fault(), false, true),
             (hinted(Upstream::fault("x"), 400), true, false),
             (hinted(Fault::config("x"), 503), false, false),
             (hinted(Fault::internal("x"), 429), false, false),
             (hinted(Fault::abandoned(), 502), false, false),
             (hinted(BadRequest::fault("x"), 503), false, true),
             (hinted(custom(), 400), false, false),
-            (custom(), false, true),
+            // A plugin's own fault, with no status, is not retried.
+            (custom(), false, false),
+            (Fault::new("x"), false, false),
         ] {
             assert_eq!(retryable(&fault, false), before, "before: {fault:?}");
             assert_eq!(retryable(&fault, true), after, "after: {fault:?}");
         }
-        for number in [408, 425, 429, 500, 502, 503, 504, 529] {
+        for number in [408, 425, 429, 500, 502, 503, 504] {
             assert!(retryable(&hinted(custom(), number), true), "{number}");
         }
-        for number in [200, 400, 401, 403, 404, 409, 422, 499, 501, 505, 528, 530] {
+        for number in [
+            200, 400, 401, 403, 404, 409, 422, 499, 501, 505, 528, 529, 530,
+        ] {
             assert!(!retryable(&hinted(custom(), number), true), "{number}");
         }
-    }
-
-    #[test]
-    fn a_number_that_is_no_status_is_a_500() {
-        let fault = BadRequest::fault("x").with(Status(1000));
-        assert_eq!(status(&fault), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
@@ -671,7 +611,7 @@ mod tests {
         let mut answer = http::Response::new(Bytes::from_static(b"busy"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         let fault = Fault::new("busy")
-            .with(Status(429))
+            .with(Status(StatusCode::TOO_MANY_REQUESTS))
             .with(ProviderError::new("f", answer.clone()))
             .with(RetryAfter(Duration::from_secs(3)));
         let (mut head, ()) = http::Response::new(()).into_parts();

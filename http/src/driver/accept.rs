@@ -1,16 +1,20 @@
 //! Client input and its one response handoff.
 
 use super::writer::Writer;
-use super::{End, PANICKED, Written};
-use crate::{Body, Encoder, Frames, Unwritten, answered, bodiless, plain};
+use super::{PANICKED, Written};
+use crate::{
+    Body, ClientHead, Completion, Credential, Encoder, Frames, Status, Unwritten, Wire, answered,
+    bodiless, plain,
+};
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
-use futures::{FutureExt, Sink, TryStreamExt};
+use futures::{FutureExt, Sink, StreamExt, TryStreamExt};
+use http::StatusCode;
 use http::response::Parts as ResponseHead;
-use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault};
+use respan_gateway_sdk::{Connection, ErrorCode, EventSink, EventStream, Extensions, Fault};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
 type Refuse = dyn Fn(&Fault, &http::Request<Bytes>, &mut ResponseHead) -> Bytes + Send + Sync;
@@ -48,54 +52,70 @@ impl Handoff {
 /// An accepted request cannot be cloned:
 /// ```compile_fail
 /// use respan_gateway_http::{Body, Incoming, http::Request};
-/// let (incoming, _) = Incoming::accept(Request::new(Body::default()), false);
+/// let (incoming, _) = Incoming::accept(Request::new(Body::default()), false, 1024);
 /// let duplicate = incoming.clone();
 /// ```
 /// Binding consumes it, preventing a second binding:
 /// ```compile_fail
 /// use respan_gateway_http::{self as h, formats::opaque::Passthrough};
 /// use respan_gateway_sdk::Format;
-/// let (incoming, _) = h::Incoming::accept(h::http::Request::new(h::Body::default()), false);
+/// let request = h::http::Request::new(h::Body::default());
+/// let (incoming, _) = h::Incoming::accept(request, false, 1024);
 /// let first = Passthrough.bind(incoming);
 /// let second = Passthrough.bind(incoming);
 /// ```
 pub struct Incoming {
     request: http::Request<Body>,
     live: bool,
-    wire: crate::Wire,
-    head: crate::ClientHead,
+    limit: usize,
+    wire: Wire,
+    head: ClientHead,
+    credential: Option<Credential>,
     reply: oneshot::Sender<Written>,
 }
 impl Incoming {
-    /// Accept an HTTP request. `live` explicitly means one semantic message per
-    /// body frame; ordinary network chunks are collected before decoding.
-    /// Drive the returned answer together with `Gateway::handle`.
+    /// Accept an HTTP request, its credentials lifted out of its head into a
+    /// [`Credential`]. `live` explicitly means one semantic message per body
+    /// frame; ordinary network chunks are collected before decoding. `limit`
+    /// is the most bytes of one message it takes, a whole body or a live
+    /// frame: past it, the request fails 413 (`too_large`). Hand the
+    /// gateway its [`extensions`](Self::extensions), and drive the returned
+    /// answer together with `Gateway::handle`.
     pub fn accept(
         request: http::Request<Body>,
         live: bool,
+        limit: usize,
     ) -> (Self, futures::future::BoxFuture<'static, Option<Written>>) {
+        let (mut head, body) = request.into_parts();
+        let credential = Credential::lift(&mut head);
+        let wire = Wire::unread(live);
+        if live {
+            wire.fill(http::Request::from_parts(head.clone(), Bytes::new()));
+        }
         let (reply, answer) = oneshot::channel();
         (
             Self {
-                request,
+                request: http::Request::from_parts(head, body),
                 live,
-                wire: crate::Wire {
-                    live,
-                    ..Default::default()
-                },
-                head: crate::ClientHead::default(),
+                limit,
+                wire,
+                head: ClientHead::default(),
+                credential,
                 reply,
             },
             async move { answer.await.ok() }.boxed(),
         )
     }
-    /// Shared original request, filled before plugin hooks run.
-    pub fn wire(&self) -> crate::Wire {
-        self.wire.clone()
-    }
-    /// Shared response head selection for this exchange.
-    pub fn client_head(&self) -> crate::ClientHead {
-        self.head.clone()
+    /// What the gateway is handed with this request: its [`Wire`], its
+    /// [`ClientHead`] and the client's [`Credential`], if it sent one.
+    pub fn extensions(&self) -> Extensions {
+        let mut extensions = Extensions::new();
+        extensions.insert(self.wire.clone());
+        extensions.insert(self.head.clone());
+        if let Some(credential) = &self.credential {
+            extensions.insert(credential.clone());
+        }
+        extensions
     }
     /// The request, available before binding for protocol recognition.
     pub fn request(&self) -> &http::Request<Body> {
@@ -114,39 +134,30 @@ impl Incoming {
         let Self {
             request,
             live,
+            limit,
             reply,
             wire,
             head: client_head,
+            ..
         } = self;
         let (head, body) = request.into_parts();
-        let head = Arc::new(head);
-        let original = Arc::new(OnceLock::new());
-        let saved = original.clone();
-        let ask = head.clone();
-        let incoming = {
-            async move {
-                let (raw, body) = if live {
-                    (None, Body::stream(body))
-                } else {
-                    let result = read_whole(body).await;
-                    let raw = result.as_ref().cloned().unwrap_or_default();
-                    let _ = saved.set(raw.clone());
-                    result?;
-                    (Some(raw.clone()), Body::full(raw))
-                };
-                if live {
-                    let _ = saved.set(Bytes::new());
-                }
-                let _ = wire.request.set(http::Request::from_parts(
-                    (*head).clone(),
-                    raw.unwrap_or_default(),
-                ));
-                read(http::Request::from_parts((*head).clone(), body))
+        let filled = wire.clone();
+        let incoming = async move {
+            if live {
+                let frames = body.map(move |frame| match frame {
+                    Ok(bytes) if bytes.len() > limit => Err(too_large()),
+                    frame => frame,
+                });
+                return read(http::Request::from_parts(head, Body::stream(frames)));
             }
-            .boxed()
-        };
+            let whole = read_whole(body, limit).await;
+            let raw = whole.as_ref().cloned().unwrap_or_default();
+            filled.fill(http::Request::from_parts(head.clone(), raw));
+            read(http::Request::from_parts(head, Body::full(whole?)))
+        }
+        .boxed();
         let outgoing = EventSink::preparing(move |events: &mut EventStream<O>| {
-            let raw = original
+            let request = wire
                 .get()
                 .cloned()
                 .ok_or_else(|| Fault::internal(PANICKED))?;
@@ -155,7 +166,7 @@ impl Incoming {
             }
             let reply = Reply {
                 head: client_head,
-                request: Arc::new(http::Request::from_parts((*ask).clone(), raw)),
+                request: Arc::new(request),
                 slot: Arc::new(Mutex::new(Handoff {
                     sender: Some(reply),
                     staged: None,
@@ -194,7 +205,7 @@ impl Incoming {
 /// Owns a client's response handoff and original request. Its methods construct
 /// real event sinks; there is no intermediate response plan.
 pub struct Reply {
-    head: crate::ClientHead,
+    head: ClientHead,
     request: Arc<http::Request<Bytes>>,
     slot: Slot,
     refuse: Arc<Refuse>,
@@ -220,7 +231,8 @@ impl Reply {
     pub fn head_or(&self, head: ResponseHead) -> ResponseHead {
         self.head.get().unwrap_or(head)
     }
-    /// The original request, independently of any rewritten provider call.
+    /// The client's request as it came, its [`Wire`]'s, independently of
+    /// any rewritten provider call.
     pub fn request(&self) -> &http::Request<Bytes> {
         &self.request
     }
@@ -281,14 +293,28 @@ impl Reply {
     }
 }
 
-async fn read_whole(body: Body) -> Result<Bytes, Fault> {
+/// The fault of a client's message over its adapter's limit: a 413.
+fn too_large() -> Fault {
+    Fault::new("request body too large")
+        .with(ErrorCode("too_large".into()))
+        .with(Status(StatusCode::PAYLOAD_TOO_LARGE))
+}
+
+/// A whole body of up to `limit` bytes.
+async fn read_whole(body: Body, limit: usize) -> Result<Bytes, Fault> {
     if let Some(bytes) = body.full_bytes() {
-        return Ok(bytes.clone());
+        return match bytes.len() > limit {
+            true => Err(too_large()),
+            false => Ok(bytes.clone()),
+        };
     }
     // Release each frame before polling again: a producer may recycle its buffer.
     body.try_fold(BytesMut::new(), |mut all, frame| {
-        all.extend_from_slice(&frame);
-        futures::future::ready(Ok(all))
+        let kept = all.len() + frame.len() <= limit;
+        if kept {
+            all.extend_from_slice(&frame);
+        }
+        futures::future::ready(kept.then_some(all).ok_or_else(too_large))
     })
     .await
     .map(BytesMut::freeze)
@@ -298,7 +324,7 @@ struct Client<T> {
     reply: Reply,
     head: Option<ResponseHead>,
     frames: Option<Frames>,
-    completion: Option<End>,
+    completion: Option<Completion>,
     encoder: Option<Box<dyn Encoder<T>>>,
     writer: Writer,
     ended: bool,

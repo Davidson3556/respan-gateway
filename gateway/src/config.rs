@@ -20,6 +20,10 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: Option<std::net::SocketAddr>,
+    /// The most bytes of a client's request, and of a provider's answer
+    /// held at once, past which the request fails 413 or the answer 502;
+    /// 32 MiB if unset.
+    pub body_limit: Option<usize>,
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     /// The formats served to clients, by name, tried in order. Serve
@@ -296,7 +300,10 @@ mod tests {
     /// A gateway from `yaml` reaching its providers over HTTP.
     fn resolve(yaml: &str) -> Result<Gateway, String> {
         Config::parse(yaml)
-            .and_then(|c| c.build(crate::http, &crate::formats()))
+            .and_then(|c| {
+                let limit = c.body_limit.unwrap_or(crate::BODY_LIMIT);
+                c.build(|url, auth| crate::http(url, auth, limit), &crate::formats())
+            })
             .map_err(|e| e.message().to_owned())
     }
 

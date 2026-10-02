@@ -17,7 +17,7 @@ use respan_gateway_sdk::{async_trait, futures};
 #[allow(dead_code, unused_imports)]
 #[path = "../../tests/support/http.rs"]
 mod http_helpers;
-use http_helpers::{post, read_whole, serve};
+use http_helpers::{LIMIT, post, read_whole, serve};
 
 const CHAT: &str = "/v1/chat/completions";
 const WHOLE_REQ: &str = r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#;
@@ -170,17 +170,19 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(move |request| async move {
-                Scripted { whole }.send(request).await
-            }),
+            respan_gateway_http::connect(
+                move |request| async move { Scripted { whole }.send(request).await },
+                LIMIT,
+            ),
         )
         .and_then(|g| {
             g.provider::<Conversation, _, _>(
                 "backup",
                 OpenAiChat,
-                respan_gateway_http::connect(move |request| async move {
-                    Scripted { whole }.send(request).await
-                }),
+                respan_gateway_http::connect(
+                    move |request| async move { Scripted { whole }.send(request).await },
+                    LIMIT,
+                ),
             )
         })
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))

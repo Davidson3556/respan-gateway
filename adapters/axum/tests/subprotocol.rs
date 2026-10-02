@@ -11,6 +11,7 @@ use respan_gateway_sdk::Gateway;
 use respan_gateway_ws::WsTransport;
 use support::*;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::{Error, ProtocolError};
 
 /// A gateway whose transport has a key of its own.
 fn keyed(probe: &Probe) -> Gateway {
@@ -66,21 +67,23 @@ async fn an_empty_entry_leaves_the_provider_a_valid_list() {
     assert_eq!(sent.as_deref(), Some("realtime"));
 }
 
-/// A client that offered nothing but a key gets a subprotocol echoed all the
-/// same: a browser fails a handshake that echoes none.
+/// A client that offered nothing but a key gets none echoed: a key is never
+/// sent back, so a client that needs a subprotocol (as a browser does)
+/// refuses the handshake.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_client_that_offered_only_a_key_still_gets_one_echoed() {
+async fn a_key_offered_as_the_only_subprotocol_is_never_echoed() {
     let probe = Probe::start().await;
     let server = serve(keyed(&probe)).await;
     let mut req = format!("ws://{}/v1/realtime", server.addr)
         .into_client_request()
         .unwrap();
     let offered = HeaderValue::from_static("openai-insecure-api-key.k");
-    req.headers_mut()
-        .insert("sec-websocket-protocol", offered.clone());
-    let (_ws, resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+    req.headers_mut().insert("sec-websocket-protocol", offered);
+    let refused = tokio_tungstenite::connect_async(req).await;
+    let Err(Error::Protocol(ProtocolError::SecWebSocketSubProtocolError(_))) = refused else {
+        panic!("a subprotocol was echoed: {refused:?}")
+    };
     probe.connected(0).await;
     let upgrade = &probe.upgrades()[0];
     assert!(upgrade.headers.get("sec-websocket-protocol").is_none());
-    assert_eq!(resp.headers().get("sec-websocket-protocol"), Some(&offered));
 }

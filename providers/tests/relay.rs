@@ -23,8 +23,8 @@ use std::time::Duration;
 use hooks::{Calls, Outcomes};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_support::{post, read_whole, serve};
-use respan_gateway_http::Asked;
 use respan_gateway_http::Body;
+use respan_gateway_http::Wire;
 use respan_gateway_http::{Completion, Encoder, HttpClient, Incoming};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::async_trait;
@@ -387,7 +387,7 @@ impl Plugin for Guard {
             if catches(e) {
                 return Err(Fault::new("not allowed")
                     .with(ErrorCode("blocked".into()))
-                    .with(Status(403)));
+                    .with(Status(StatusCode::FORBIDDEN)));
             }
             Ok(())
         })?;
@@ -589,7 +589,7 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
             match verdict.iter().any(unsafe_) {
                 true => Err(Fault::new("the judge refused")
                     .with(ErrorCode("unsafe".into()))
-                    .with(Status(403))),
+                    .with(Status(StatusCode::FORBIDDEN))),
                 false => Ok(None),
             }
         }
@@ -716,7 +716,7 @@ async fn edits_apply_the_last_added_first() {
 async fn a_refusal_is_an_error_in_the_client_format() {
     let fault = Fault::new("balance too low")
         .with(ErrorCode("insufficient_credits".into()))
-        .with(Status(402))
+        .with(Status(StatusCode::PAYMENT_REQUIRED))
         .with(Details(json!({ "balance": 0.12 })));
     let h = Harness::new(vec![Arc::new(Refuse(fault.clone()))], Some("openai"));
 
@@ -736,7 +736,7 @@ async fn a_refusal_is_an_error_in_the_client_format() {
     let logged = h.log.only().expect_err("the refusal is logged");
     assert_eq!(logged.message(), fault.message());
     assert_eq!(fault_code(&logged), "insufficient_credits");
-    assert_eq!(logged.get::<Status>().map(|s| s.0), Some(402));
+    assert_eq!(logged.get::<Status>().map(|s| s.0.as_u16()), Some(402));
     assert_eq!(logged.get::<Details>(), fault.get::<Details>());
 }
 
@@ -1151,7 +1151,7 @@ async fn caller_values_reach_plugins_by_type() {
                 Some(Tenant("acme")) => Ok(None),
                 _ => Err(Fault::new("unknown tenant")
                     .with(ErrorCode("forbidden".into()))
-                    .with(Status(403))),
+                    .with(Status(StatusCode::FORBIDDEN))),
             }
         }
     }
@@ -1202,7 +1202,7 @@ async fn a_client_body_that_breaks_off_is_refused_in_the_clients_format() {
     let broken = futures::stream::iter([Err::<http_body::Frame<bytes::Bytes>, _>(
         Fault::new("request body too large")
             .with(ErrorCode("too_large".into()))
-            .with(Status(413)),
+            .with(Status(StatusCode::PAYLOAD_TOO_LARGE)),
     )]);
     let body = Body::stream(http_body_util::BodyExt::into_data_stream(
         http_body_util::StreamBody::new(broken),
@@ -1247,7 +1247,7 @@ async fn a_refusal_its_format_cannot_write_is_a_plain_500() {
     let refuse = Refuse(
         Fault::new("not an error")
             .with(ErrorCode("odd".into()))
-            .with(Status(200)),
+            .with(Status(StatusCode::OK)),
     );
     let h = Harness::new(vec![Arc::new(refuse)], Some("openai"));
 
@@ -1388,7 +1388,11 @@ async fn plugins_see_the_request_and_change_its_model() {
     #[async_trait]
     impl Plugin for Redirect {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let asked = cx.extensions().get::<Asked>().map(|a| a.method.clone());
+            let asked = cx
+                .extensions()
+                .get::<Wire>()
+                .and_then(Wire::get)
+                .map(|a| a.method().clone());
             assert_eq!(asked, Some(http::Method::POST));
             // The client's request, as it said it.
             let chat = cx.input::<Conversation>()?;
@@ -3078,7 +3082,7 @@ async fn a_guard_refuses_what_it_cannot_read() {
                 let why = "content the guard cannot read";
                 return Err(Fault::new(why)
                     .with(ErrorCode("unreadable".into()))
-                    .with(Status(403)));
+                    .with(Status(StatusCode::FORBIDDEN)));
             }
             Ok(None)
         }
@@ -3354,7 +3358,7 @@ async fn a_call_refused_on_the_provider_edge_refuses_the_request_before_sending(
         async fn on_provider(&self, _px: &mut ProviderContext) -> Result<(), Fault> {
             Err(Fault::new("no calls")
                 .with(ErrorCode("denied".into()))
-                .with(Status(403)))
+                .with(Status(StatusCode::FORBIDDEN)))
         }
     }
 
@@ -3590,7 +3594,7 @@ async fn a_refused_call_ends_for_the_refusing_plugin_and_those_before_it() {
             self.0.on_provider(px).await?;
             Err(Fault::new("no calls")
                 .with(ErrorCode("denied".into()))
-                .with(Status(403)))
+                .with(Status(StatusCode::FORBIDDEN)))
         }
 
         async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
@@ -4165,8 +4169,8 @@ async fn a_response_goes_only_to_the_request_whose_call_it_answers() {
     #[async_trait]
     impl Plugin for Swap {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let asked = cx.extensions().get::<Asked>();
-            match asked.is_some_and(|a| a.headers.contains_key("x-keep")) {
+            let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+            match asked.is_some_and(|a| a.headers().contains_key("x-keep")) {
                 true => {
                     let resp = cx.call("backup").await?;
                     *self.0.0.lock().map_err(|_| Fault::internal("poisoned"))? = Some(resp);
@@ -4372,7 +4376,7 @@ impl Encoder<Reply> for Garbling {
             out.extend_from_slice(b"GARBAGE");
             return Err(Fault::new("cannot write it")
                 .with(ErrorCode("unwritable".into()))
-                .with(Status(422)));
+                .with(Status(StatusCode::UNPROCESSABLE_ENTITY)));
         }
         self.0.encode(reply, out)
     }
@@ -4697,7 +4701,7 @@ async fn a_body_that_broke_off_is_refused_without_its_model_read() {
     let gw = fragile(&sites, Vec::new());
     let too_large = Fault::new("too large")
         .with(ErrorCode("too_large".into()))
-        .with(Status(413));
+        .with(Status(StatusCode::PAYLOAD_TOO_LARGE));
     let broken = futures::stream::iter([Err::<http_body::Frame<bytes::Bytes>, _>(too_large)]);
     let mut req = http::Request::new(http_body_util::StreamBody::new(broken));
     *req.method_mut() = http::Method::POST;
@@ -5154,7 +5158,7 @@ async fn a_provider_hook_that_fails_refuses_the_call() {
     let unsigned = OnProvider(|_| {
         Err(Fault::new("no key")
             .with(ErrorCode("unsigned".into()))
-            .with(Status(403)))
+            .with(Status(StatusCode::FORBIDDEN)))
     });
     let h = Harness::new(vec![Arc::new(unsigned)], Some("openai"));
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
@@ -5270,7 +5274,7 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
             let fails = [Err::<Reply, _>(
                 Fault::new("no")
                     .with(ErrorCode("no".into()))
-                    .with(Status(403)),
+                    .with(Status(StatusCode::FORBIDDEN)),
             )];
             Ok(Some(Response::stream(futures::stream::iter(fails))))
         }
@@ -5362,7 +5366,7 @@ async fn a_failed_input_filter_fails_the_input_for_every_later_reader() {
             let fails = |_: &mut Conversation| {
                 Err(Fault::new("no")
                     .with(ErrorCode("no".into()))
-                    .with(Status(403)))
+                    .with(Status(StatusCode::FORBIDDEN)))
             };
             let _ = cx.filter(fails);
             let read = cx.input::<Conversation>().err().map(|f| fault_code(&f));
@@ -5514,7 +5518,7 @@ fn over_the_cap(reply: &mut Reply) -> Result<(), Fault> {
     match reply {
         Reply::Usage(_) => Err(Fault::new("over the cap")
             .with(ErrorCode("cap".into()))
-            .with(Status(402))),
+            .with(Status(StatusCode::PAYMENT_REQUIRED))),
         _ => Ok(()),
     }
 }

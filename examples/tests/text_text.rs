@@ -7,7 +7,7 @@ mod support;
 #[path = "../support/text.rs"]
 mod text;
 
-use http_support::{post, read_whole, serve};
+use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
@@ -34,7 +34,7 @@ impl Rewrite for Terms {
         if text.contains("bomb") {
             return Err(Fault::new("blocked")
                 .with(ErrorCode("blocked".into()))
-                .with(Status(400)));
+                .with(Status(StatusCode::BAD_REQUEST)));
         }
         Ok(text.to_owned())
     }
@@ -173,7 +173,7 @@ fn a_match_across_deltas_is_seen_whole() {
     let out = run(&mut Holdback::new(Terms), said(0, &["a bo", "m", "b!"]));
     assert_eq!(
         out.err()
-            .map(|f| respan_gateway_http::error_code(&f).into_owned())
+            .map(|f| respan_gateway_http::error_code(&f).to_owned())
             .as_deref(),
         Some("blocked")
     );
@@ -225,7 +225,7 @@ fn content_that_cannot_be_read_is_refused() {
     assert_eq!(
         chat.read_all()
             .err()
-            .map(|f| respan_gateway_http::error_code(&f).into_owned())
+            .map(|f| respan_gateway_http::error_code(&f).to_owned())
             .as_deref(),
         Some(UNREADABLE)
     );
@@ -640,7 +640,7 @@ async fn a_violation_in_the_held_start_is_refused_before_any_byte() -> Result<()
             outcome
                 .await
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).into_owned())
+                .map(|f| respan_gateway_http::error_code(&f).to_owned())
                 .as_deref(),
             Some("blocked")
         );
@@ -682,24 +682,27 @@ fn local(
 ) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
 {
     use respan_gateway_sdk::futures::{StreamExt, TryStreamExt, stream};
-    respan_gateway_http::connect(move |call| {
-        let chunks = chunks.clone();
-        async move {
-            call.into_body().try_collect::<Vec<_>>().await?;
-            let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
-            head.headers.insert(
-                "content-type",
-                HeaderValue::from_static("text/event-stream"),
-            );
-            Ok((
-                http::Response::from_parts(
-                    head,
-                    respan_gateway_http::Body::stream(stream::iter(chunks).boxed()),
-                ),
-                None,
-            ))
-        }
-    })
+    respan_gateway_http::connect(
+        move |call| {
+            let chunks = chunks.clone();
+            async move {
+                call.into_body().try_collect::<Vec<_>>().await?;
+                let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
+                head.headers.insert(
+                    "content-type",
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                Ok((
+                    http::Response::from_parts(
+                        head,
+                        respan_gateway_http::Body::stream(stream::iter(chunks).boxed()),
+                    ),
+                    None,
+                ))
+            }
+        },
+        LIMIT,
+    )
 }
 
 /// A body of OpenAI chunks, cut into frames of `size` bytes.

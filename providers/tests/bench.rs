@@ -13,7 +13,7 @@ use respan_gateway_sdk::Gateway;
 #[allow(dead_code, unused_imports)]
 #[path = "../../tests/support/http.rs"]
 mod http_helpers;
-use http_helpers::{post, read_whole, serve};
+use http_helpers::{LIMIT, post, read_whole, serve};
 
 /// A chat request of about 16 KB, as an agent's history makes.
 fn request(stream: bool) -> Bytes {
@@ -40,7 +40,11 @@ async fn time(name: &str, stream: bool, reply: &str, content_type: &'static str)
         }
     };
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>("p", OpenAiChat, respan_gateway_http::connect(transport))
+        .provider::<Conversation, _, _>(
+            "p",
+            OpenAiChat,
+            respan_gateway_http::connect(transport, LIMIT),
+        )
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
         .and_then(|g| g.target("p"))
         .unwrap_or_else(|f| panic!("{f}"));

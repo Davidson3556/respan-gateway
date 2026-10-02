@@ -74,7 +74,7 @@ async fn a_refused_upgrade_is_the_providers_answer_as_it_came() {
     let ends = ends.all();
     assert_eq!(ends.len(), 1);
     let fault: Fault = ends[0].clone().unwrap_err();
-    assert_eq!(fault.get::<Status>(), Some(&Status(403)));
+    assert_eq!(fault.get::<Status>(), Some(&Status(StatusCode::FORBIDDEN)));
 }
 
 // The same refusal through the adapter of this crate is a whole answer

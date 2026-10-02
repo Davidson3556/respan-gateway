@@ -426,7 +426,7 @@ impl Plugin for Meter {
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
         if let Some(Metered(session, turns)) = px.extensions().get::<Metered>() {
             let code = end.as_ref().err().map_or("ok".into(), |f| {
-                respan_gateway_http::error_code(f).into_owned()
+                respan_gateway_http::error_code(f).to_owned()
             });
             let turns = turns.load(Ordering::SeqCst);
             lock(&self.ended).push(Ended {
@@ -737,7 +737,7 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
         let key = key.ok_or_else(|| {
             Fault::new("no key")
                 .with(ErrorCode("no_key".into()))
-                .with(Status(401))
+                .with(Status(respan_gateway_http::http::StatusCode::UNAUTHORIZED))
         })?;
         let wallet = Arc::new(Wallet {
             ledger: self.0.clone(),

@@ -1,9 +1,9 @@
 //! Per-item request encoding and independent transport completion.
 
+use super::PANICKED;
 use super::reader::Failure;
 use super::writer::Writer;
-use super::{End, PANICKED};
-use crate::{Body, Encoder};
+use crate::{Body, Completion, Encoder};
 use bytes::BytesMut;
 use futures::future::{BoxFuture, Shared};
 use futures::{Future, Sink};
@@ -17,8 +17,13 @@ use std::sync::{
 use std::task::{Context, Poll, ready};
 
 pub(crate) type Delivery = Shared<BoxFuture<'static, Result<(), Fault>>>;
+
+/// Marks the failure of an encoding sink whose transport dropped its body:
+/// the delivery, not the sink, says how the upload ended.
+#[derive(Clone, Copy, Debug)]
+struct Discarded;
 pub(crate) struct Handoff {
-    pub(crate) draining: End,
+    pub(crate) draining: Completion,
     pub(crate) failed: Failure,
     pub(crate) settled: Arc<AtomicBool>,
 }
@@ -54,6 +59,16 @@ struct Encoding<T> {
 }
 impl<T> Unpin for Encoding<T> {}
 impl<T: 'static> Encoding<T> {
+    /// The writer's readiness: its own failure, or, once its reader is gone,
+    /// that it was [`Discarded`].
+    fn ready(&self, cx: &mut Context<'_>, requested: bool) -> Poll<Result<(), Fault>> {
+        self.writer.poll_ready(cx, requested).map_err(|gone| {
+            self.failed
+                .get()
+                .cloned()
+                .unwrap_or_else(|| gone.with(Discarded))
+        })
+    }
     fn finish(&mut self, mut end: Result<(), Fault>) {
         if self.ended {
             return;
@@ -79,10 +94,7 @@ impl<T: 'static> Encoding<T> {
 impl<T: 'static> Sink<Result<T, Fault>> for Encoding<T> {
     type Error = Fault;
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        match self.writer.poll_ready(cx, true) {
-            Poll::Ready(Err(_)) => Poll::Pending,
-            ready => ready,
-        }
+        self.ready(cx, true)
     }
     fn start_send(mut self: Pin<&mut Self>, item: Result<T, Fault>) -> Result<(), Fault> {
         if self.ended {
@@ -97,16 +109,14 @@ impl<T: 'static> Sink<Result<T, Fault>> for Encoding<T> {
             Err(fault) => Err(fault),
         };
         match encoded {
-            Ok(()) => self.writer.send(out.freeze()),
+            Ok(()) if !out.is_empty() => self.writer.send(out.freeze()),
+            Ok(()) => {}
             Err(fault) => self.finish(Err(fault)),
         }
         Ok(())
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        match self.writer.poll_ready(cx, false) {
-            Poll::Ready(Err(_)) => Poll::Pending,
-            ready => ready,
-        }
+        self.ready(cx, false)
     }
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
         if self.settled.load(Ordering::Acquire) {
@@ -167,10 +177,11 @@ impl<T: 'static> Upload<T> {
         } else {
             Pin::new(&mut self.sink).poll_ready(cx)
         };
-        if matches!(ready, Poll::Ready(Err(_))) || delivery.is_pending() {
-            ready
-        } else {
-            delivery
+        match (ready, delivery) {
+            // The delivery, whose waker is set, says how a discarded upload ended.
+            (Poll::Ready(Err(f)), delivery) if f.get::<Discarded>().is_some() => delivery,
+            (ready @ Poll::Ready(Err(_)), _) | (ready, Poll::Pending) => ready,
+            (_, delivery) => delivery,
         }
     }
 }

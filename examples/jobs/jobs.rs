@@ -27,6 +27,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example jobs`
 
+use respan_gateway_examples::LIMIT;
 use respan_gateway_sdk::ErrorCode;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -38,7 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use mockllm::FakeOpenAi;
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
-use respan_gateway_http::{Asked, Credential};
+use respan_gateway_http::{Credential, Wire};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
@@ -287,8 +288,8 @@ struct Idempotent<S>(Arc<S>);
 #[async_trait]
 impl<S: Store> Plugin for Idempotent<S> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Asked>();
-        let header = asked.and_then(|a| a.headers.get("idempotency-key")?.to_str().ok());
+        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let header = asked.and_then(|a| a.headers().get("idempotency-key")?.to_str().ok());
         let stores = cx.is_kind::<Conversation>() && cx.extensions().get::<NoContent>().is_none();
         let Some(key) = header.filter(|_| stores) else {
             return Ok(None);
@@ -372,10 +373,13 @@ fn gateway<S: Store>(
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(supervised(move |request| {
-                let client = transport.clone();
-                async move { client.send(request).await }
-            })),
+            respan_gateway_http::connect(
+                supervised(move |request| {
+                    let client = transport.clone();
+                    async move { client.send(request).await }
+                }),
+                LIMIT,
+            ),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin(Idempotent(store.clone()))

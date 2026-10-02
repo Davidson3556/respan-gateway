@@ -11,8 +11,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{self as formats, sse, whole::Relay};
+use respan_gateway_http::bytes::{Bytes, BytesMut};
+use respan_gateway_http::formats::{self as formats, sse, whole};
 use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
@@ -77,7 +77,7 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
     fn bind(&self, io: Incoming) -> Result<Connection<ToServer, ToClient>, Fault> {
         Ok(io.bind(
             |request| {
-                h::messages(request, |head, raw| {
+                Ok(h::messages(request, |head, raw| {
                     let mut input = ToServer::new(head.method.clone(), Vec::new());
                     if head.method == Method::POST {
                         let bad = || BadRequest::fault("not a JSON-RPC message or batch");
@@ -85,7 +85,7 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
                         (input.messages, input.batch) = read.ok_or_else(bad)?;
                     }
                     Ok(input)
-                })
+                }))
             },
             |reply, source| {
                 let head = reply.head();
@@ -118,7 +118,7 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
                 if let Some(value) = source.value() {
                     head.method = value?.method.clone();
                 }
-                formats::set_path(&mut head, path);
+                formats::set_path(&mut head, path)?;
                 head.headers
                     .entry(ACCEPT)
                     .or_insert(HeaderValue::from_static(
@@ -135,11 +135,8 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
                         posts.map(|i| Bytes::from(body(&i.messages, i.batch).to_string()));
                     Ok::<_, Fault>(bytes.next_back().unwrap_or_default())
                 };
-                let (request, sink) = h::request(
-                    NAME,
-                    source,
-                    Box::new(Relay::new(write, |_: &Fault| Bytes::new(), false)),
-                )?;
+                let (request, sink) =
+                    h::request(source, whole::collect(write, |_: &Fault| Bytes::new()))?;
                 Ok((Request::from_parts(head, request.into_body()), sink))
             },
             response_events,
@@ -229,11 +226,39 @@ fn response_body(
         })
     };
     let fail = move |f: &Fault| -> Bytes { failure(f, &lock(&pending), stream, batch).into() };
-    let encoder = Box::new(Relay::new(write, fail, stream));
+    let encoder = match stream {
+        true => Box::new(Events { write, fail }),
+        false => whole::collect(write, fail),
+    };
     if stream && listen {
         reply.open(head, sse::comment("stream").into(), encoder)
     } else {
         reply.write(head, encoder)
+    }
+}
+
+/// Encodes a stream of outputs through `write` output by output, and a
+/// failure through `fail`.
+struct Events<W, F> {
+    write: W,
+    fail: F,
+}
+
+impl<W, F> h::Encoder<ToClient> for Events<W, F>
+where
+    W: FnMut(&[ToClient]) -> Result<Bytes, Fault> + Send + 'static,
+    F: FnMut(&Fault) -> Bytes + Send + 'static,
+{
+    fn encode(&mut self, output: &ToClient, out: &mut BytesMut) -> Result<(), Fault> {
+        out.extend_from_slice(&(self.write)(std::slice::from_ref(output))?);
+        Ok(())
+    }
+
+    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        if let Err(fault) = end {
+            out.extend_from_slice(&(self.fail)(fault));
+        }
+        Ok(())
     }
 }
 

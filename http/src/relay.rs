@@ -1,8 +1,12 @@
 //! Explicit HTTP forwarding policy for local proxies and live sessions.
-use crate::{self as h, ClientHead, Credential, ProviderError, ProviderHead, SendRaw, Wire};
+use crate::{self as h, ClientHead, Credential, ProviderHead, RawErrors, SendRaw, Wire};
 use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response, async_trait};
 
 /// Opt into raw request, credentials, response head and error body forwarding.
+///
+/// It sends the target call itself: it is the routing for the requests it
+/// handles, answering each with its call to the target, so register no
+/// other router after it.
 #[derive(Debug)]
 pub struct Relay {
     raw: bool,
@@ -34,10 +38,8 @@ impl Plugin for Relay {
             }
             px.extensions_mut().remove::<ProviderHead>();
         }
-        if px.is_kind::<respan_gateway_sdk::conversation::Conversation>() {
-            let client = px.client().format().to_owned();
-            px.filter::<respan_gateway_sdk::conversation::Reply>(RawErrors { client })?;
-        }
+        let client = px.client().format().to_owned();
+        px.extensions_mut().insert(RawErrors { client });
         Ok(())
     }
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
@@ -65,48 +67,15 @@ impl Plugin for Relay {
             call = call.with_extension(raw);
         }
         let slot = ProviderHead::default();
-        let client = cx.format().to_owned();
-        let raw = |fault| raw_fault(fault, &client);
-        let mut response = call.with_extension(slot.clone()).await.map_err(raw)?;
+        let mut response = call.with_extension(slot.clone()).await?;
         if let Some(client) = cx.extensions().get::<ClientHead>() {
             client.set(slot.get());
         }
         if slot.get().is_some_and(|h| {
             !h.status.is_success() && h.status != h::http::StatusCode::SWITCHING_PROTOCOLS
         }) {
-            response.until_end().await.map_err(raw)?;
+            response.until_end().await?;
         }
         Ok(Some(response))
-    }
-}
-/// `fault` with its provider's error body to write as it came, if that
-/// provider spoke the `client`'s format.
-fn raw_fault(fault: Fault, client: &str) -> Fault {
-    let Some(mut error) = fault.get::<ProviderError>().cloned() else {
-        return fault;
-    };
-    if error.format != client {
-        return fault;
-    }
-    if error.response.status().is_success() {
-        *error.response.status_mut() = h::status(&fault);
-    }
-    fault.with(h::RawReply(error.response))
-}
-
-/// Explicitly forward provider error bodies from a typed response filter,
-/// only from a provider of the `client`'s format.
-#[derive(Debug)]
-pub struct RawErrors {
-    /// The client's format name.
-    pub client: String,
-}
-impl<T: 'static> respan_gateway_sdk::Filter<T> for RawErrors {
-    fn edit(&mut self, value: T, out: &mut Vec<T>) -> Result<(), Fault> {
-        out.push(value);
-        Ok(())
-    }
-    fn end(&mut self, end: &Result<(), Fault>, _: &mut Vec<T>) -> Result<(), Fault> {
-        end.clone().map_err(|fault| raw_fault(fault, &self.client))
     }
 }

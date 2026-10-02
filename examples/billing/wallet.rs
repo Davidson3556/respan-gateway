@@ -54,7 +54,7 @@ fn quote(
     let key = key.ok_or_else(|| {
         Fault::new("no key")
             .with(ErrorCode("no_key".into()))
-            .with(Status(401))
+            .with(Status(StatusCode::UNAUTHORIZED))
     })?;
     let chat = px.input::<Conversation>()?;
     let model = chat.model.as_deref().unwrap_or_default();

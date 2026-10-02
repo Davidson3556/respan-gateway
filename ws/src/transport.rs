@@ -241,11 +241,16 @@ impl WsTransport {
         self,
     ) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Clone + Send + Sync
     {
+        // One message is what a reader holds of the provider's answer.
+        let limit = self.max_message;
         let backend = Arc::new(self);
-        respan_gateway_http::connect(move |request| {
-            let backend = backend.clone();
-            async move { backend.send(request).await }
-        })
+        respan_gateway_http::connect(
+            move |request| {
+                let backend = backend.clone();
+                async move { backend.send(request).await }
+            },
+            limit,
+        )
     }
 
     /// Send an encoded call and return its response.
@@ -624,7 +629,7 @@ mod tests {
                 .expect("request");
             let (response, completion) = tokio::time::timeout(
                 Duration::from_secs(3),
-                respan_gateway_http::handle(&gateway, request, true),
+                respan_gateway_http::handle(&gateway, request, true, MAX_MESSAGE),
             )
             .await
             .expect("refusal must not wait for an upload frame");

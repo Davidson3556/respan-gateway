@@ -72,7 +72,8 @@ impl Jobs {
         });
         req.extensions_mut().insert(extensions);
         // Register with gateway.idle before the spawning request can finish.
-        let served = respan_gateway_http::serve(gateway, req);
+        let served =
+            respan_gateway_http::handle(gateway, req, false, respan_gateway_examples::LIMIT);
         let (jobs, id) = (self.clone(), id.to_owned());
         let active_id = id.clone();
         let (start, started) = tokio::sync::oneshot::channel();

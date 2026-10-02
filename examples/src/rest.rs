@@ -34,7 +34,7 @@ impl Rest {
 pub struct Ask {
     /// The HTTP method.
     pub method: Method,
-    /// The path; the query stays as it came (`Asked` has it).
+    /// The path; the query stays as it came (`Wire` has it).
     pub path: String,
     /// Query parameters retained independently of path edits.
     pub query: Option<String>,
@@ -79,7 +79,7 @@ impl Rest {
             ));
         }
         let ask = source.value().transpose()?.cloned();
-        let (request, sink) = h::request(self.name, source, Box::new(WriteBody))?;
+        let (request, sink) = h::request(source, Box::new(WriteBody))?;
         let (mut head, body) = request.into_parts();
         if let Some(ask) = ask {
             head.method = ask.method;
@@ -87,7 +87,7 @@ impl Rest {
                 Some(query) => format!("{}?{query}", ask.path),
                 None => ask.path,
             };
-            set_path(&mut head, &path);
+            set_path(&mut head, &path)?;
         }
         Ok((h::http::Request::from_parts(head, body), sink))
     }
@@ -103,19 +103,18 @@ impl Format<Incoming, Ask, Got<Rest>> for Rest {
     }
 
     fn bind(&self, io: Incoming) -> Result<Connection<Ask, Got<Rest>>, Fault> {
-        let name = self.name;
         Ok(io.bind(
             |request| {
-                h::messages(request, |head, body| {
+                Ok(h::messages(request, |head, body| {
                     Ok(Ask {
                         method: head.method.clone(),
                         path: head.uri.path().to_owned(),
                         query: head.uri.query().map(str::to_owned),
                         body,
                     })
-                })
+                }))
             },
-            move |reply, source| Ok(opaque::write_response(name, reply, source)),
+            |reply, _| Ok(opaque::write_response(reply)),
             h::plain_refusal,
         ))
     }

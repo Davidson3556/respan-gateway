@@ -1,5 +1,10 @@
 //! The promises of the MCP kind, format and stdio transport.
 
+#[allow(dead_code)]
+#[path = "../../tests/support/http.rs"]
+mod http_support;
+use http_support::{LIMIT, serve};
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -9,7 +14,7 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, Completion, Credential, Incoming, Outgoing, credentials, error_code, proxy_call, serve,
+    Body, Completion, Credential, Incoming, Outgoing, credentials, error_code, proxy_call,
     strip_client_origin_headers, strip_origin_headers,
 };
 use respan_gateway_mcp::{
@@ -198,10 +203,13 @@ impl ScriptedMcp {
 
 impl ScriptedMcp {
     fn connect(self) -> impl Fn(Extensions) -> Outgoing + Send + Sync {
-        respan_gateway_http::connect(move |call| {
-            let value = self.clone();
-            async move { value.send(call).await }
-        })
+        respan_gateway_http::connect(
+            move |call| {
+                let value = self.clone();
+                async move { value.send(call).await }
+            },
+            LIMIT,
+        )
     }
 }
 
@@ -406,7 +414,7 @@ async fn a_batch_answer_is_complete_only_once_every_id_is_answered() {
         (&json!(1), &json!("truncated"))
     );
     assert_eq!(
-        outcome.map_err(|f| (error_code(&f).into_owned(), f.is::<Truncated>())),
+        outcome.map_err(|f| (error_code(&f).to_owned(), f.is::<Truncated>())),
         Err(("truncated".to_owned(), true))
     );
 
@@ -530,7 +538,7 @@ impl Plugin for RefusalProbe {
             px.is_refused(),
             end.as_ref()
                 .err()
-                .map_or("ok".into(), |f| error_code(f).into_owned()),
+                .map_or("ok".into(), |f| error_code(f).to_owned()),
             end.as_ref()
                 .err()
                 .and_then(|f| f.get::<RetryAfter>())
@@ -643,13 +651,16 @@ struct Quiet;
 
 impl Quiet {
     fn connect(self) -> impl Fn(Extensions) -> Outgoing + Send + Sync {
-        respan_gateway_http::connect(|_call| async {
-            let resp = http::Response::builder()
-                .header("content-type", "text/event-stream")
-                .body(Body::stream(stream::pending()))
-                .map_err(respan_gateway_http::built_wrong)?;
-            Ok((resp, None))
-        })
+        respan_gateway_http::connect(
+            |_call| async {
+                let resp = http::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::stream(stream::pending()))
+                    .map_err(respan_gateway_http::built_wrong)?;
+                Ok((resp, None))
+            },
+            LIMIT,
+        )
     }
 }
 
@@ -990,7 +1001,7 @@ async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
     );
     assert_eq!(error["error"]["data"]["code"], TIMED_OUT);
     assert_eq!(
-        outcome.err().map(|f| error_code(&f).into_owned()),
+        outcome.err().map(|f| error_code(&f).to_owned()),
         Some(TIMED_OUT.into())
     );
     // With nothing waiting, the session idles out and a new one fits.
@@ -1036,7 +1047,7 @@ fn mcp_is_matched_however_its_path_is_spelled() {
             .method(method)
             .uri(uri)
             .body(Body::full(""));
-        Incoming::accept(req.expect("valid request"), false).0
+        Incoming::accept(req.expect("valid request"), false, LIMIT).0
     };
     let same = [
         "/mcp",

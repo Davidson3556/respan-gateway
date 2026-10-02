@@ -43,14 +43,14 @@ use std::sync::Arc;
 use crate::Usage;
 use crate::common::{
     Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
-    extra_of, fits, is_inert, merge_fields, post_json, read_content, read_message, refusal, says,
-    set, stop_json, supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
+    extra_of, fits, is_inert, merge_fields, post_json, read_content, read_message, refusal, set,
+    stop_json, supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
     unwritable_usage, usage_extra, write_content, write_message,
 };
 use crate::conversation::{
     Block, Content, Conversation, Delta, Finish, Message, Reply, Role, Start, units,
 };
-use crate::formats::errors::{merge_details, says_error};
+use crate::errors::{merge_details, says, says_error};
 use crate::formats::sse::{event, event_json, is_stream};
 use crate::tools::{arguments_json, read_anthropic_tools, write_anthropic_tools};
 use respan_gateway_http::Encoder;
@@ -99,7 +99,9 @@ impl AnthropicMessages {
         &self,
         request: http::Request<Body>,
     ) -> Result<TypedStream<Conversation>, Fault> {
-        respan_gateway_http::messages(request, |_, raw| Self.decode_request(raw))
+        Ok(respan_gateway_http::messages(request, |_, raw| {
+            Self.decode_request(raw)
+        }))
     }
 
     /// Decode a finite request synchronously.
@@ -120,8 +122,8 @@ impl AnthropicMessages {
         Ok((request, sink))
     }
 
-    fn parser(&self, hold_start: bool) -> ReplyParser<AnthropicReader> {
-        ReplyParser::new(hold_start)
+    fn parser(&self, hold_start: bool, limit: Option<usize>) -> ReplyParser<AnthropicReader> {
+        ReplyParser::new(hold_start, limit)
     }
 
     /// Read provider response events with fresh per-body parser state.
@@ -130,8 +132,8 @@ impl AnthropicMessages {
         response: http::Response<Body>,
         call: http::Request<Bytes>,
     ) -> BoxStream<'static, Result<Reply, Fault>> {
-        let parser = self.parser(true);
         crate::common::read_response::<Self>(response, &call.into_parts().0, |body| {
+            let parser = Self.parser(true, body.limit());
             crate::formats::read(
                 body,
                 parser,
@@ -201,7 +203,7 @@ impl AnthropicMessages {
             return Ok(Vec::new());
         }
         if is_stream(&head) {
-            let mut parser = self.parser(true);
+            let mut parser = self.parser(true, None);
             let mut out = Vec::new();
             parser.push(bytes, &mut out)?;
             parser.finish(&mut out)?;
@@ -209,7 +211,7 @@ impl AnthropicMessages {
         }
         crate::formats::default_content_type(&mut head, "application/json");
         if !head.status.is_success() {
-            return Err(crate::formats::whole::answer(ANTHROPIC, &head, bytes));
+            return Err(crate::errors::answer::<Self>(&head, bytes));
         }
         crate::common::unary_reply::<Self>(head.status, bytes)
     }
@@ -313,6 +315,18 @@ impl Wire for AnthropicMessages {
     const NAME: &'static str = ANTHROPIC;
     const OWN: &'static [&'static str] = &["metadata"];
     type Reading = AnthropicReader;
+
+    /// Anthropic's 529 (`overloaded_error`) says what HTTP's 503 does: the
+    /// service is overloaded, try later. So it reads as a 503, which retry
+    /// ([`retryable`](respan_gateway_http::retryable)), routing and a client
+    /// of any format understand; the answer as it came, 529, stays for a
+    /// raw relay ([`ProviderError`](respan_gateway_http::ProviderError)).
+    fn status(status: http::StatusCode) -> http::StatusCode {
+        match status.as_u16() {
+            529 => http::StatusCode::SERVICE_UNAVAILABLE,
+            _ => status,
+        }
+    }
 
     /// The system prompt becomes a leading system message.
     fn read(v: &Value) -> Conversation {

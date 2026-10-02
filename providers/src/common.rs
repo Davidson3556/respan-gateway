@@ -15,6 +15,7 @@ use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_T
 use respan_gateway_http::{
     Status, bodiless, http::request::Parts as RequestHead, http::response::Parts as ResponseHead,
 };
+use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{BadRequest, ErrorCode, Fault, Truncated, Upstream};
 use serde_json::{self, Map, Value};
 
@@ -23,7 +24,7 @@ use crate::anthropic::ANTHROPIC;
 use crate::conversation::{
     Block, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role, Start,
 };
-use crate::formats::errors::{provider_error, says_error};
+use crate::errors::{failure_json, provider_error, says, says_error};
 use crate::formats::sse::{content_type, event_data};
 use crate::tools::{anthropic_block, anthropic_part};
 use respan_gateway_http::{Body, Encoder};
@@ -49,8 +50,13 @@ pub(crate) trait Wire: Send + Sync + 'static {
     fn render(whole: &Whole) -> Result<Value, Fault>;
     /// The error body for `fault`, its details merged by [`merge_details`].
     ///
-    /// [`merge_details`]: crate::formats::errors::merge_details
+    /// [`merge_details`]: crate::errors::merge_details
     fn error_body(fault: &Fault) -> Value;
+    /// The status HTTP names for what a provider's error answer of `status`
+    /// says: `status` itself, unless the vendor uses one of its own.
+    fn status(status: StatusCode) -> StatusCode {
+        status
+    }
     /// Whether the client's request `raw` needs [`Wire::finish`].
     fn unfinished(_raw: &[u8]) -> bool {
         false
@@ -99,10 +105,10 @@ pub(crate) fn post_json<W: Wire>(
         )));
     }
     let (request, sink) =
-        respan_gateway_http::request(W::NAME, source, Box::new(RequestEncoder::<W>(PhantomData)))?;
+        respan_gateway_http::request(source, Box::new(RequestEncoder::<W>(PhantomData)))?;
     let (mut head, mut body) = request.into_parts();
     head.method = http::Method::POST;
-    crate::formats::set_path(&mut head, path);
+    crate::formats::set_path(&mut head, path)?;
     head.headers
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     if let Some(raw) = body.full_bytes_mut() {
@@ -292,6 +298,11 @@ pub(crate) fn read_response<W: Wire>(
     }
     crate::formats::default_content_type(&mut head, "application/json");
     let status = head.status;
+    if !status.is_success() {
+        let response = http::Response::from_parts(head, body);
+        let refusal = crate::formats::whole::refusal(W::NAME, response);
+        return Box::pin(refusal.map_err(crate::errors::read_answer::<W>));
+    }
     crate::formats::whole::read(
         W::NAME,
         http::Response::from_parts(head, body),
@@ -362,15 +373,13 @@ pub(crate) fn unary_reply<W: Wire>(status: StatusCode, raw: Bytes) -> Result<Vec
         W::Reading::default().body(v, &mut out)?;
         return Ok(out);
     }
-    Err(
-        match crate::formats::sse::failure_json(&raw).filter(says_error) {
-            Some(v) => provider_error(status, &v).with(respan_gateway_http::ProviderError::new(
-                W::NAME,
-                http::Response::new(raw),
-            )),
-            None => Upstream::fault("the provider's success is not a response of its format"),
-        },
-    )
+    Err(match failure_json(&raw).filter(says_error) {
+        Some(v) => provider_error(status, &v).with(respan_gateway_http::ProviderError::new(
+            W::NAME,
+            http::Response::new(raw),
+        )),
+        None => Upstream::fault("the provider's success is not a response of its format"),
+    })
 }
 
 /// One part of a response collected whole: a block, or an event the kind has
@@ -625,10 +634,11 @@ pub(crate) struct ReplyParser<R> {
 impl<R: Reader> ReplyParser<R> {
     /// A parser that, if `hold_start`, keeps a response's start and what
     /// comes before its first content back until that content comes, so a
-    /// failure before it leaves nothing started.
-    pub(crate) fn new(hold_start: bool) -> Self {
+    /// failure before it leaves nothing started; it holds up to `limit`
+    /// bytes of an event ([`Parser::new`](crate::formats::sse::Parser::new)).
+    pub(crate) fn new(hold_start: bool, limit: Option<usize>) -> Self {
         Self {
-            frames: crate::formats::sse::Parser::new(),
+            frames: crate::formats::sse::Parser::new(limit),
             reading: R::default(),
             held: Vec::new(),
             through: !hold_start,
@@ -637,11 +647,11 @@ impl<R: Reader> ReplyParser<R> {
 
     pub(crate) fn push(&mut self, bytes: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
         let from = out.len();
-        let result = self
-            .frames
-            .push(bytes)
-            .into_iter()
-            .try_for_each(|raw| self.reading.event(raw, out));
+        let result = self.frames.push(bytes).and_then(|events| {
+            events
+                .into_iter()
+                .try_for_each(|raw| self.reading.event(raw, out))
+        });
         self.hold(out, from, result.is_err());
         result
     }
@@ -915,7 +925,7 @@ pub(crate) fn unwritable_content() -> Fault {
     let message = "the response holds content that cannot yet be written anew in this format";
     Fault::new(message)
         .with(ErrorCode("untranslatable".into()))
-        .with(Status(502))
+        .with(Status(StatusCode::BAD_GATEWAY))
 }
 
 /// A stream that ended before its end event.
@@ -923,16 +933,6 @@ pub(crate) fn ended(done: bool) -> Result<(), Fault> {
     match done {
         true => Ok(()),
         false => Err(Truncated::fault()),
-    }
-}
-
-/// Whether a JSON value says anything: not null or empty.
-pub(crate) fn says(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-        _ => true,
     }
 }
 
@@ -1327,7 +1327,7 @@ mod tests {
                 .await
                 .expect_err("non-success must refuse");
                 for fault in [finite, live] {
-                    assert_eq!(fault.get::<Status>().map(|s| s.0), Some(429));
+                    assert_eq!(fault.get::<Status>().map(|s| s.0.as_u16()), Some(429));
                     assert_eq!(
                         fault.get::<respan_gateway_sdk::RetryAfter>().map(|r| r.0),
                         Some(std::time::Duration::from_secs(7))
@@ -1552,7 +1552,7 @@ mod tests {
         let details = json!({"message": "x", "type": 5, "code": 7, "param": 3, "category": "pii"});
         let fault = Fault::new("pii")
             .with(ErrorCode("blocked".into()))
-            .with(Status(403))
+            .with(Status(StatusCode::FORBIDDEN))
             .with(Details(details));
         let body = OpenAiChat::error_body(&fault);
         // OpenAI's `code` and `param` are strings: a number is not kept.

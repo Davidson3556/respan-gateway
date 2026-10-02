@@ -372,7 +372,7 @@ async fn a_session_is_closed_at_its_maximum_length() -> Result<(), Fault> {
     assert_eq!(
         s.ends
             .only()
-            .map_err(|f| respan_gateway_http::error_code(&f).into_owned()),
+            .map_err(|f| respan_gateway_http::error_code(&f).to_owned()),
         Err("max_length".into())
     );
     Ok(())
@@ -529,7 +529,7 @@ async fn a_flagged_input_never_reaches_the_provider_and_closes_the_session() -> 
     assert_eq!(
         s.ends
             .only()
-            .map_err(|f| respan_gateway_http::error_code(&f).into_owned()),
+            .map_err(|f| respan_gateway_http::error_code(&f).to_owned()),
         Err("flagged".into())
     );
     Ok(())
@@ -907,7 +907,7 @@ struct EndAt(Arc<Mutex<Vec<(std::time::Instant, String)>>>);
 impl Plugin for EndAt {
     async fn on_client_end(&self, _: &ClientContext, end: &Result<(), Fault>) {
         let code = end.as_ref().err().map_or("ok".into(), |f| {
-            respan_gateway_http::error_code(f).into_owned()
+            respan_gateway_http::error_code(f).to_owned()
         });
         lock(&self.0).push((std::time::Instant::now(), code));
     }

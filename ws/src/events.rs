@@ -122,11 +122,11 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
     fn bind(&self, io: Incoming) -> Result<Connection<ClientEvent, ProviderEvent>, Fault> {
         Ok(io.bind(
             |request| {
-                h::messages(request, |_, raw| {
+                Ok(h::messages(request, |_, raw| {
                     let json = serde_json::from_slice(&raw)
                         .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
                     Ok(ClientEvent::new(json))
-                })
+                }))
             },
             move |reply, _source| {
                 let mut head = reply.head();
@@ -156,9 +156,7 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
     }
 
     fn bind(&self, io: Outgoing) -> Result<Connection<ProviderEvent, ClientEvent>, Fault> {
-        let name = self.name.clone();
-        let writer_name = name.clone();
-        let reader_name = name.clone();
+        let reader_name = self.name.clone();
         let path = self.path.clone();
         Ok(io.bind(
             move |source| {
@@ -169,13 +167,13 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
                 }
                 let mut head = Request::new(()).into_parts().0;
                 head.method = Method::GET;
-                formats::set_path(&mut head, &path);
+                formats::set_path(&mut head, &path)?;
                 head.headers
                     .insert(UPGRADE, HeaderValue::from_static("websocket"));
                 head.headers
                     .insert(CONNECTION, HeaderValue::from_static("upgrade"));
                 formats::body_changed(&mut head);
-                let (request, sink) = h::request(&writer_name, source, Box::new(Writes))?;
+                let (request, sink) = h::request(source, Box::new(Writes))?;
                 Ok((Request::from_parts(head, request.into_body()), sink))
             },
             move |answer, sent| response_events(reader_name, answer, sent),

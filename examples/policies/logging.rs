@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::FakeOpenAi;
 use respan_gateway_examples::{CallUsage, meter};
-use respan_gateway_http::Asked;
+use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::Extensions;
@@ -105,7 +105,7 @@ impl Record {
                 .err()
                 .map(|f| respan_gateway_http::status(f).as_u16()),
             end: end.as_ref().map_or_else(
-                |f| respan_gateway_http::error_code(f).into_owned(),
+                |f| respan_gateway_http::error_code(f).to_owned(),
                 |()| "ok".into(),
             ),
             usage: Usage::default(),
@@ -172,15 +172,15 @@ impl<S: Sink> Plugin for Log<S> {
 }
 
 /// Marks requests of zero-retention tenants, named by `x-tenant` here
-/// (the adapter's view of the head, [`Asked`]); in practice, by the tenant
+/// (the client's request as it came, [`Wire`]); in practice, by the tenant
 /// your auth plugin resolved.
 struct Tenancy(&'static [&'static str]);
 
 #[async_trait]
 impl Plugin for Tenancy {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Asked>();
-        let tenant = asked.and_then(|a| a.headers.get("x-tenant")?.to_str().ok());
+        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        let tenant = asked.and_then(|a| a.headers().get("x-tenant")?.to_str().ok());
         if tenant.is_some_and(|t| self.0.contains(&t)) {
             cx.extensions_mut().insert(NoContent);
         }

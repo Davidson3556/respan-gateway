@@ -14,8 +14,8 @@ use respan_gateway_sdk::ErrorCode;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
+use respan_gateway_http::Wire;
 #[cfg(test)]
 use respan_gateway_http::http;
 use respan_gateway_providers::OpenAiChat;
@@ -78,11 +78,11 @@ struct Egress(Arc<Mutex<Vec<String>>>);
 impl Plugin for Egress {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         self.seen().push(px.provider().to_owned());
-        let asked = px.extensions().get::<Asked>();
-        if asked.is_some_and(|a| a.headers.contains_key("x-blocked")) {
+        let asked = px.extensions().get::<Wire>().and_then(Wire::get);
+        if asked.is_some_and(|a| a.headers().contains_key("x-blocked")) {
             return Err(Fault::new("no calls for you")
                 .with(ErrorCode("egress".into()))
-                .with(Status(403)));
+                .with(Status(respan_gateway_http::http::StatusCode::FORBIDDEN)));
         }
         Ok(())
     }

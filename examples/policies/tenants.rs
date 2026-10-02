@@ -78,7 +78,7 @@ impl Plugin for Tenants {
         let unknown = || {
             Fault::new("unknown key")
                 .with(ErrorCode("unauthorized".into()))
-                .with(Status(401))
+                .with(Status(StatusCode::UNAUTHORIZED))
         };
         let tenant = self.get(key.unwrap_or_default()).ok_or_else(unknown)?;
         cx.set_target(tenant.target.clone());
@@ -96,7 +96,7 @@ impl Plugin for Tenants {
         let keys = keys.cloned().ok_or_else(|| {
             Fault::new("no key for this provider")
                 .with(ErrorCode("no_key".into()))
-                .with(Status(403))
+                .with(Status(StatusCode::FORBIDDEN))
         })?;
         px.extensions_mut().insert(CallHeaders(keys));
         Ok(())

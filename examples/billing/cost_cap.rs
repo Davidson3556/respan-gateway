@@ -106,7 +106,9 @@ impl Plugin for Cap {
             let msg = "the answer ran past its cap";
             Err(Fault::new(msg)
                 .with(ErrorCode("cost_cap".into()))
-                .with(Status(402)))
+                .with(Status(
+                    respan_gateway_http::http::StatusCode::PAYMENT_REQUIRED,
+                )))
         })
     }
 }

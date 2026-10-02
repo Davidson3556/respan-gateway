@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_examples::LIMIT;
 
 fn labels(openai: &FakeOpenAi) -> Vec<String> {
     openai
@@ -321,7 +322,7 @@ async fn losing_the_store_cancels_a_call_waiting_for_its_provider_head() -> Resu
         .provider::<Conversation, _, _>(
             "p",
             OpenAiChat,
-            respan_gateway_http::connect(supervised(transport)),
+            respan_gateway_http::connect(supervised(transport), LIMIT),
         )?
         .plugin(Admission {
             slots: slots.clone(),

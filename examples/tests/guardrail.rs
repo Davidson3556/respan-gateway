@@ -18,8 +18,8 @@ impl Format<Incoming, Sent<Responses>, Got<Responses>> for Responses {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Responses>, Got<Responses>>, Fault> {
         Ok(io.bind(
-            opaque::read_request,
-            |reply, source| Ok(opaque::write_response("responses", reply, source)),
+            |request| Ok(opaque::read_request(request)),
+            |reply, _| Ok(opaque::write_response(reply)),
             h::plain_refusal,
         ))
     }
@@ -31,7 +31,7 @@ impl Format<Outgoing, Got<Responses>, Sent<Responses>> for Responses {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Responses>, Sent<Responses>>, Fault> {
         Ok(io.bind(
-            |source| opaque::write_request("responses", source),
+            opaque::write_request,
             |response, request| {
                 opaque::read_response("responses", response, &request.into_parts().0)
             },

@@ -85,7 +85,7 @@ const UNCOVERED: &str = "pii_uncovered";
 fn uncovered() -> Fault {
     Fault::new("no redaction reads this kind")
         .with(ErrorCode(UNCOVERED.into()))
-        .with(Status(403))
+        .with(Status(StatusCode::FORBIDDEN))
 }
 
 #[async_trait]

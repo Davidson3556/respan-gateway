@@ -3,8 +3,10 @@
 //! [`Gateway`], hands [`Gateway::handle`] a request on the HTTP wire (an
 //! owned `Incoming` native HTTP request and its whole body), reads the answer
 //! and awaits how the request ended. With no HTTP hop, it needs none of the
-//! adapter's rules (`respan_gateway_http::serve` applies them); no answer
-//! means no format took the request, and the end says why.
+//! adapter's hop rules (`respan_gateway_http::handle` applies them), but
+//! hands the gateway what the `Incoming` publishes, as the adapter does
+//! (`Incoming::extensions`); no answer means no format took the request,
+//! and the end says why.
 //!
 //! The kernel counts no usage:
 //! the embedder tallies it with a plugin that sums what each call's
@@ -13,6 +15,7 @@
 //! `cargo run -p respan-gateway-examples --example embedded`
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::Meter;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::HeaderValue;
@@ -22,7 +25,7 @@ use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures::future::join;
 use respan_gateway_sdk::futures::{StreamExt, stream};
-use respan_gateway_sdk::{Extensions, Fault, Gateway};
+use respan_gateway_sdk::{Fault, Gateway};
 
 /// The gateway, with no server. For real use, the transport is
 /// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
@@ -63,8 +66,9 @@ async fn ask(
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
     let request = http::Request::from_parts(head, respan_gateway_http::Body::stream(body));
-    let (wire, answer) = respan_gateway_http::Incoming::accept(request, false);
-    let handled = gw.handle(wire, Extensions::new());
+    let (incoming, answer) = respan_gateway_http::Incoming::accept(request, false, LIMIT);
+    let extensions = incoming.extensions();
+    let handled = gw.handle(incoming, extensions);
     let consume = async {
         let Some((resp, end)) = answer.await else {
             return Ok::<_, Fault>(None);

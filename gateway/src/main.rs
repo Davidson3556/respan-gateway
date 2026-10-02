@@ -2,7 +2,7 @@ use std::future::IntoFuture;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use respan_gateway_axum::router;
+use respan_gateway_axum::router_with_limit;
 use respan_gateway_http::formats::opaque::{Got, Passthrough, Sent};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::{HttpClient, Outgoing};
@@ -24,6 +24,12 @@ const DEFAULT_LISTEN: std::net::SocketAddr =
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// How long open responses and end hooks get, together, after a signal.
 const SHUTDOWN: Duration = Duration::from_secs(30);
+/// The most bytes of a client's request, and of a provider's answer held at
+/// once, unless the config's `body_limit` says: 32 MiB, the largest request
+/// the vendors' JSON APIs take (Anthropic's Messages API), so the gateway
+/// refuses nothing a vendor would take, and an answer may be as large as a
+/// request.
+const BODY_LIMIT: usize = 32 << 20;
 
 /// Every format this binary speaks. A custom gateway builds its own
 /// `Gateway` in its own `main.rs`.
@@ -48,6 +54,7 @@ fn proxy_config(anthropic: bool, url: Option<&str>) -> config::Config {
     let origin = url.strip_suffix("/v1").unwrap_or(url);
     config::Config {
         listen: None,
+        body_limit: None,
         providers: [("vendor", format, origin), ("any", "passthrough", origin)]
             .into_iter()
             .map(|(name, format, base)| {
@@ -67,12 +74,15 @@ fn proxy_config(anthropic: bool, url: Option<&str>) -> config::Config {
     }
 }
 
-/// A provider's transport: HTTP to `base_url`, sending `auth`.
+/// A provider's transport: HTTP to `base_url`, sending `auth`, reading up
+/// to `limit` bytes of an answer at once.
 fn http(
     base_url: &str,
     auth: HeaderMap,
+    limit: usize,
 ) -> Result<impl Fn(Extensions) -> Outgoing + Send + Sync + use<>, Fault> {
-    Ok(HttpClient::new(base_url)?.with_headers(auth)?.connect())
+    let client = HttpClient::new(base_url)?.with_headers(auth)?;
+    Ok(client.with_limit(limit).connect())
 }
 
 #[tokio::main]
@@ -142,7 +152,8 @@ async fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(&format!("{config_path}: {e}")),
     };
-    let built = config.build(http, &formats());
+    let limit = config.body_limit.unwrap_or(BODY_LIMIT);
+    let built = config.build(|url, auth| http(url, auth, limit), &formats());
     let gateway = match built {
         Ok(built) => built,
         Err(e) => return fail(&format!("{config_path}: {}", e.message())),
@@ -167,7 +178,7 @@ async fn main() -> ExitCode {
     // On a signal, open responses and then end hooks share one deadline.
     // Responses open at it are cut and lose their end hooks.
     let (stopping, mut stopped) = tokio::sync::oneshot::channel();
-    let serve = axum::serve(listener, router(gateway.clone()))
+    let serve = axum::serve(listener, router_with_limit(gateway.clone(), move |_| limit))
         .with_graceful_shutdown(async {
             shutdown().await;
             let _ = stopping.send(tokio::time::Instant::now() + SHUTDOWN);

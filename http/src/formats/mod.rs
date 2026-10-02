@@ -1,10 +1,10 @@
 #![warn(missing_docs)]
-//! Reusable HTTP-aware wire-format helpers. Concrete provider codecs live
-//! in `respan-gateway-providers`; shared conversation, usage, provenance and
-//! fault-detail types live in `respan-gateway-sdk`. Traffic of no kind
-//! relays through [`opaque`](crate::formats::opaque).
+//! Reusable HTTP-aware wire-format helpers. Concrete provider codecs, and
+//! how they read a vendor's error body, live in `respan-gateway-providers`;
+//! shared conversation, usage and fault-detail types live in
+//! `respan-gateway-sdk`. Traffic of no kind relays through
+//! [`opaque`](crate::formats::opaque).
 
-pub mod errors;
 pub mod opaque;
 pub mod sse;
 pub mod whole;
@@ -126,14 +126,17 @@ pub fn path_ends_with(head: &RequestHead, suffix: &str) -> bool {
     path.ends_with(&suffix) || bare.ends_with(&suffix)
 }
 
-/// Set a call's path, relative to the transport, keeping its query.
-pub fn set_path(head: &mut RequestHead, path: &str) {
+/// Set a call's path, relative to the transport, keeping its query. `Err`
+/// with `internal` if `path` is no path.
+pub fn set_path(head: &mut RequestHead, path: &str) -> Result<(), Fault> {
     let uri = match head.uri.query() {
         Some(query) => format!("{path}?{query}"),
         None => path.to_owned(),
     };
-    // A path and a query that parsed parse.
-    head.uri = uri.parse().unwrap_or_default();
+    head.uri = uri.parse().map_err(|e| {
+        Fault::internal(format!("a call's path {path:?} is no path")).with_source(e)
+    })?;
+    Ok(())
 }
 
 /// Mark a call whose body is not the client's bytes as sent, as when a
@@ -167,10 +170,17 @@ where
     }
 }
 
+/// The most frames that decode to nothing one poll of [`read`] reads before
+/// it yields: what tokio's cooperative budget allows one poll of a task
+/// (128), so a body always ready, of comments alone say, cannot hold its
+/// thread.
+const FRAMES_PER_POLL: usize = 128;
+
 /// Parse wire frames with ordinary stateful functions. Values produced before
 /// an error precede it. `end` sees clean EOF or a wire fault, never a semantic
 /// `push` failure. The returned stream does not prefetch another frame while
-/// decoded values remain, and cooperatively yields through ignored frames.
+/// decoded values remain, and yields after 128 frames that decode to
+/// nothing, as tokio's cooperative budget does a task.
 pub fn read<T, S, P, E>(
     body: crate::Body,
     state: S,
@@ -225,7 +235,7 @@ where
             if this.ended {
                 return Poll::Ready(None);
             }
-            if frames == 128 {
+            if frames == FRAMES_PER_POLL {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }

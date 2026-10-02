@@ -126,7 +126,7 @@ impl<L: Ledger> Plugin for Accounting<L> {
             let msg = "no account to charge";
             return Err(Fault::new(msg)
                 .with(ErrorCode(NO_ACCOUNT.into()))
-                .with(Status(401)));
+                .with(Status(respan_gateway_http::http::StatusCode::UNAUTHORIZED)));
         }
         let hold = Arc::new(Hold {
             id: HoldId::new(),

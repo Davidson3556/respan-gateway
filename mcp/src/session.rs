@@ -205,7 +205,7 @@ fn late() -> Fault {
     let msg = "the MCP server did not answer in time";
     Fault::new(msg)
         .with(ErrorCode(TIMED_OUT.into()))
-        .with(Status(504))
+        .with(Status(StatusCode::GATEWAY_TIMEOUT))
 }
 
 /// An event stream of what `rx` receives, until it closes, or failing at

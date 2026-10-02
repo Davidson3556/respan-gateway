@@ -1,15 +1,20 @@
 //! Explicit HTTP data shared with plugins through extensions.
 use bytes::Bytes;
 use http::{Request, Response, response::Parts};
+use respan_gateway_sdk::Fault;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Raw HTTP request data. The adapter publishes the original request without
-/// credentials; plugins copy `Credential` deliberately when constructing a relay.
-/// Whole bodies are available before hooks run; live requests contain their head.
-#[derive(Clone, Debug, Default)]
+/// The client's request as it came, without its
+/// [`Credential`](crate::Credential): its head, with the bytes of a whole
+/// body, or none for live input, whose body is its messages. An
+/// [`Incoming`](crate::Incoming) fills it before plugin hooks run, a live one
+/// at once; a whole body that broke off or passed the limit leaves the head
+/// alone, as the request is refused. Plugins copy the `Credential`
+/// deliberately when constructing a relay.
+#[derive(Clone, Debug)]
 pub struct Wire {
-    pub(crate) request: Arc<OnceLock<Request<Bytes>>>,
-    pub(crate) live: bool,
+    request: Arc<OnceLock<Request<Bytes>>>,
+    live: bool,
 }
 impl Wire {
     /// Supply an owned request; `live` means its body is a handshake prefix.
@@ -18,6 +23,17 @@ impl Wire {
             request: Arc::new(OnceLock::from(request)),
             live,
         }
+    }
+    /// A wire its request fills later, once read.
+    pub(crate) fn unread(live: bool) -> Self {
+        Self {
+            request: Arc::default(),
+            live,
+        }
+    }
+    /// Fill it, once.
+    pub(crate) fn fill(&self, request: Request<Bytes>) {
+        let _ = self.request.set(request);
     }
     /// The original head and collected bytes (empty for live input).
     pub fn get(&self) -> Option<&Request<Bytes>> {
@@ -84,3 +100,30 @@ impl ProviderError {
 /// Explicit permission to write this error response to the client.
 #[derive(Clone, Debug)]
 pub struct RawReply(pub Response<Bytes>);
+
+/// A call's explicit permission to write its provider's error answer to the
+/// client as it came ([`RawReply`]), if that provider spoke the `client`'s
+/// format: the outgoing binding gives every fault of the call's answer,
+/// refusal or failure, the provider's [`ProviderError`] as a `RawReply`. An
+/// answer that failed under a success status goes with the fault's status.
+#[derive(Clone, Debug)]
+pub struct RawErrors {
+    /// The client's format name.
+    pub client: String,
+}
+impl RawErrors {
+    /// `fault` with its provider's error answer to write as it came, if that
+    /// provider spoke the client's format.
+    pub(crate) fn apply(&self, fault: Fault) -> Fault {
+        let Some(mut error) = fault.get::<ProviderError>().cloned() else {
+            return fault;
+        };
+        if error.format != self.client {
+            return fault;
+        }
+        if error.response.status().is_success() {
+            *error.response.status_mut() = crate::status(&fault);
+        }
+        fault.with(RawReply(error.response))
+    }
+}

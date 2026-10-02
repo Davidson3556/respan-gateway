@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_examples::LIMIT;
 use respan_gateway_http::http_body_util::BodyExt;
 
 #[tokio::test]
@@ -171,7 +172,7 @@ async fn a_run_cut_by_a_disconnect_stores_nothing_and_runs_again() -> Result<(),
     drop(body);
     let end = outcome
         .await
-        .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
+        .map_err(|f| respan_gateway_http::error_code(&f).to_owned());
     assert_eq!(end, Err("abandoned".into()), "core cut the call");
     gw.idle().await;
 
@@ -237,7 +238,7 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(supervised(transport)),
+            respan_gateway_http::connect(supervised(transport), LIMIT),
         )?
         .plugin(Idempotent(store))
         .target("openai")?;

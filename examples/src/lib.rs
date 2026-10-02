@@ -7,6 +7,11 @@ pub mod admission;
 pub mod rest;
 pub mod store;
 
+/// The most bytes of one message the examples' adapters and transports
+/// hold: 32 MiB, as the gateway binary's, the largest request the vendors'
+/// JSON APIs take (Anthropic's Messages API).
+pub const LIMIT: usize = 32 << 20;
+
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_sdk::Usage;

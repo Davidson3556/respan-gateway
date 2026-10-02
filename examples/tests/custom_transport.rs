@@ -57,7 +57,9 @@ impl Plugin for Closed {
         if px.provider() == "local" {
             return Err(Fault::new("closed")
                 .with(ErrorCode("limit".into()))
-                .with(Status(429)));
+                .with(Status(
+                    respan_gateway_http::http::StatusCode::TOO_MANY_REQUESTS,
+                )));
         }
         Ok(())
     }

@@ -55,7 +55,7 @@ impl Terms {
         if self.0.iter().any(|term| text.contains(term)) {
             return Err(Fault::new("blocked")
                 .with(ErrorCode(BLOCKED.into()))
-                .with(Status(400)));
+                .with(Status(StatusCode::BAD_REQUEST)));
         }
         Ok(())
     }
@@ -80,7 +80,7 @@ struct GuardInput(Terms);
 fn uncovered() -> Fault {
     Fault::new("no guard reads this kind")
         .with(ErrorCode(UNCOVERED.into()))
-        .with(Status(403))
+        .with(Status(StatusCode::FORBIDDEN))
 }
 
 #[async_trait]
@@ -106,7 +106,7 @@ impl Plugin for Guard {
                 let message = "the guard cannot read a tool call in the answer";
                 Err(Fault::new(message)
                     .with(ErrorCode(UNREADABLE.into()))
-                    .with(Status(422)))
+                    .with(Status(StatusCode::UNPROCESSABLE_ENTITY)))
             }
         })?;
         Ok(None)

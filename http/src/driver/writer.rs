@@ -10,8 +10,7 @@ use futures::channel::oneshot;
 use futures::{FutureExt, Stream, StreamExt};
 use respan_gateway_sdk::Fault;
 
-use super::End;
-use crate::Frames;
+use crate::{Completion, Frames};
 
 #[derive(Default)]
 struct State {
@@ -52,7 +51,7 @@ impl State {
 pub(crate) struct Writer(Arc<Mutex<State>>);
 
 impl Writer {
-    pub(crate) fn new() -> (Self, Frames, End) {
+    pub(crate) fn new() -> (Self, Frames, Completion) {
         let (completion, ended) = oneshot::channel();
         let state = Arc::new(Mutex::new(State {
             completion: Some(completion),

@@ -17,13 +17,11 @@ pub use accept::{Incoming, Reply};
 pub use dial::Outgoing;
 pub(crate) use dial::Sending;
 const PANICKED: &str = "a plugin or format panicked";
-pub(crate) type End = BoxFuture<'static, Result<(), Fault>>;
-pub(crate) type Written = (http::Response<Body>, End);
+pub(crate) type Written = (http::Response<Body>, crate::Completion);
 
 /// Drive the gateway alongside an HTTP reply, then let its body own the
 /// remaining work. Cancelling either stage cancels the gateway exchange.
-#[doc(hidden)]
-pub async fn drive(
+pub(crate) async fn drive(
     handled: BoxFuture<'static, Result<(), Fault>>,
     answer: BoxFuture<'static, Option<Written>>,
 ) -> Result<Written, Fault> {
@@ -105,5 +103,31 @@ impl http_body::Body for Pump {
 
     fn size_hint(&self) -> http_body::SizeHint {
         self.body.size_hint()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formats::opaque::Passthrough;
+    use respan_gateway_sdk::{EventStream, Format, Upstream};
+
+    /// A reply prepared before handling ends is kept, however it ended.
+    #[tokio::test]
+    async fn a_completed_handler_keeps_an_already_ready_reply() {
+        let request = http::Request::post("/x").body(Body::full("q"));
+        let request = request.unwrap_or_default();
+        let (incoming, answer) = Incoming::accept(request, false, 1024);
+        let Ok((opening, mut outgoing)) = Passthrough.bind(incoming) else {
+            panic!("bound")
+        };
+        assert!(opening.await.is_ok());
+        let mut refused = EventStream::refused(Upstream::fault("refused"));
+        assert!(outgoing.prepare(&mut refused).is_ok());
+        let handled = futures::future::ready(Err(Upstream::fault("handling failed"))).boxed();
+        let response = drive(handled, answer)
+            .await
+            .map(|(response, _)| response.status());
+        assert_eq!(response.ok(), Some(http::StatusCode::BAD_GATEWAY));
     }
 }

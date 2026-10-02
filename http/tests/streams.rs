@@ -8,7 +8,7 @@ mod hooks;
 #[path = "../../tests/support/http.rs"]
 mod http_support;
 use hooks::Calls;
-use http_support::{post, serve, streamed};
+use http_support::{LIMIT, post, serve, serve_live, streamed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ use respan_gateway_http::formats::opaque::{self, Got, Sent};
 
 use respan_gateway_http::Encoder;
 use respan_gateway_http::formats::set_path;
-use respan_gateway_http::{Asked, Completion, Incoming, Outgoing};
+use respan_gateway_http::{Completion, Incoming, Outgoing, Wire};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::conversation::{Conversation, Delta, Message, Reply, Role};
@@ -70,7 +70,7 @@ where
         gw.provider(
             name,
             format,
-            respan_gateway_http::connect(move |request| send(request)),
+            respan_gateway_http::connect(move |request| send(request), LIMIT),
         )
     })
 }
@@ -110,7 +110,7 @@ struct Heard(String);
 struct Talk;
 
 fn read_talk(request: http::Request<Body>, strict: bool) -> Result<EventStream<Say>, Fault> {
-    respan_gateway_http::messages(request, move |_, raw| {
+    Ok(respan_gateway_http::messages(request, move |_, raw| {
         let mut rest = match serde_json::from_slice::<Value>(&raw) {
             Ok(Value::Object(fields)) => fields,
             _ => serde_json::Map::new(),
@@ -123,7 +123,7 @@ fn read_talk(request: http::Request<Body>, strict: bool) -> Result<EventStream<S
             None => return Err(BadRequest::fault("not talk")),
         };
         Ok(Say(text, rest))
-    })
+    }))
 }
 
 fn talk_reply(
@@ -183,9 +183,9 @@ impl Format<Outgoing, Heard, Say> for Talk {
         Ok(io.bind(
             |source| {
                 let live = !source.is_single();
-                let (request, sink) = respan_gateway_http::request("talk", source, Box::new(Says))?;
+                let (request, sink) = respan_gateway_http::request(source, Box::new(Says))?;
                 let (mut head, body) = request.into_parts();
-                set_path(&mut head, "/talk");
+                set_path(&mut head, "/talk")?;
                 if live {
                     head.headers
                         .insert(UPGRADE, HeaderValue::from_static("websocket"));
@@ -485,7 +485,7 @@ async fn a_101_head_goes_out_at_once() {
     let (send, req) = upgrade();
 
     // Nothing is sent either way until the client hears the 101.
-    let handled = tokio::time::timeout(Duration::from_secs(5), serve(&gw, req)).await;
+    let handled = tokio::time::timeout(Duration::from_secs(5), serve_live(&gw, req)).await;
     let (resp, _) = handled.unwrap_or_else(|_| panic!("the head waited for a first byte"));
 
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
@@ -501,7 +501,7 @@ async fn a_framed_requests_inputs_are_relayed_as_one_call_each_with_what_they_sa
     let (gw, calls) = talk(&echo, Vec::new());
     let (send, req) = upgrade();
 
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     say(&send, r#"{ "say": "b" }"#);
     drop(send);
@@ -536,7 +536,7 @@ async fn a_provider_edge_input_filter_redacts_streamed_inputs() {
     let (gw, _) = talk(&echo, vec![Arc::new(Redact)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"my secret","id":7}"#);
     say(&send, r#"{ "say": "fine" }"#);
     drop(send);
@@ -571,7 +571,7 @@ async fn client_edge_input_filters_apply_the_first_added_first() {
     let (gw, _) = talk(&echo, vec![Arc::new(Append("1")), Arc::new(Append("2"))]);
     let (send, req) = upgrade();
 
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"x"}"#);
     drop(send);
     let _ = frames(resp).await;
@@ -634,8 +634,8 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
                 Ok(say) => format!("{say:?}"),
                 Err(f) => format!("{}: {}", respan_gateway_http::error_code(&f), f.message()),
             };
-            let asked = cx.extensions().get::<Asked>();
-            let count = match asked.is_some_and(|a| a.headers.contains_key(UPGRADE)) {
+            let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+            let count = match asked.is_some_and(|a| a.headers().contains_key(UPGRADE)) {
                 // A framed request's inputs are left for the call.
                 true => 0,
                 false => cx.take_inputs::<Say>().count().await,
@@ -652,7 +652,7 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
     let (whole, whole_ended) = serve(&gw, post("/v1/talk", "")).await;
     let (send, req) = upgrade();
     drop(send);
-    let (framed, framed_ended) = serve(&gw, req).await;
+    let (framed, framed_ended) = serve_live(&gw, req).await;
 
     assert_eq!(whole.status(), StatusCode::OK);
     assert_eq!(framed.status(), StatusCode::SWITCHING_PROTOCOLS);
@@ -699,7 +699,7 @@ async fn each_output_of_a_framed_response_is_its_own_frame() {
     let (gw, _) = talk(&echo, vec![Arc::new(Echoes)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     drop(send);
 
@@ -742,7 +742,7 @@ async fn a_bridge_calls_a_provider_of_another_kind_once_per_input_and_streams_ba
     );
     let (send, req) = upgrade();
 
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     say(&send, r#"{"say":"x"}"#);
     say(&send, r#"{"say":"y"}"#);
@@ -870,7 +870,7 @@ async fn inputs_are_cut_at_the_requests_end_and_a_calls_input_filters_end_with_i
     let gw = gw.target("early").unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
 
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     assert!(frames(resp).await.is_empty());
     let _ = ended.await;
     gw.idle().await;
@@ -901,7 +901,7 @@ async fn an_input_filters_failure_ends_every_input_filter_with_it() {
             let code = end
                 .as_ref()
                 .err()
-                .map_or("ok".into(), respan_gateway_http::error_code);
+                .map_or("ok", respan_gateway_http::error_code);
             self.0.note(format!("{} {code}", self.1));
             Ok(())
         }
@@ -928,7 +928,7 @@ async fn an_input_filters_failure_ends_every_input_filter_with_it() {
     let (gw, _) = talk(&echo, vec![Arc::new(guard.clone())]);
     let (send, req) = upgrade();
 
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"bad"}"#);
     let _ = BodyExt::collect(resp.into_body()).await;
     let _ = ended.await;
@@ -971,8 +971,8 @@ async fn a_panic_ending_a_call_keeps_its_end() {
             let code = o
                 .as_ref()
                 .err()
-                .map_or("ok".into(), respan_gateway_http::error_code);
-            self.0.note(code.into_owned());
+                .map_or("ok", respan_gateway_http::error_code);
+            self.0.note(code.to_owned());
         }
     }
 
@@ -982,7 +982,7 @@ async fn a_panic_ending_a_call_keeps_its_end() {
     let gw = gw.target("early").unwrap_or_else(|e| panic!("{e}"));
     let (_send, req) = upgrade();
 
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
@@ -1010,7 +1010,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
                 let end = call
                     .await
                     .err()
-                    .map(|f| respan_gateway_http::error_code(&f).into_owned());
+                    .map(|f| respan_gateway_http::error_code(&f).to_owned());
                 notes.note(format!("call {}", end.unwrap_or_default()));
             });
             let _ = pending.await;
@@ -1036,7 +1036,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
             let end = o
                 .as_ref()
                 .err()
-                .map(|f| respan_gateway_http::error_code(f).into_owned());
+                .map(|f| respan_gateway_http::error_code(f).to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1099,7 +1099,7 @@ async fn a_retry_after_a_call_that_failed_unread_gets_every_input() {
     let (gw, _) = talk_to(list, vec![Arc::new(Retry)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     say(&send, r#"{"say":"b"}"#);
     drop(send);
@@ -1125,7 +1125,7 @@ async fn inputs_are_taken_only_by_a_reader_that_is_polled() {
     let (gw, _) = talk(&echo, vec![Arc::new(Peek)]);
     let (send, req) = upgrade();
 
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"a"}"#);
     drop(send);
 
@@ -1151,7 +1151,7 @@ async fn a_101_is_read_until_content_at_once() {
     let (send, req) = upgrade();
 
     // The echo says nothing until the client does, which waits for the 101.
-    let handled = tokio::time::timeout(Duration::from_secs(5), serve(&gw, req)).await;
+    let handled = tokio::time::timeout(Duration::from_secs(5), serve_live(&gw, req)).await;
     let (resp, _) = handled.unwrap_or_else(|_| panic!("until_content waited for a 101's content"));
     say(&send, r#"{"say":"a"}"#);
     drop(send);
@@ -1166,7 +1166,7 @@ async fn a_101_and_an_upgrading_call_carry_connection_upgrade() {
     let (gw, _) = talk(&echo, Vec::new());
     let (send, req) = upgrade();
 
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     drop(send);
 
     assert_eq!(resp.headers()[CONNECTION], "upgrade");
@@ -1185,7 +1185,7 @@ async fn a_streamed_call_goes_without_the_clients_content_encoding() {
     let gzip = HeaderValue::from_static("gzip");
     req.headers_mut().insert(CONTENT_ENCODING, gzip.clone());
 
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     drop(send);
     let _ = frames(resp).await;
     // A whole body relayed as it came keeps it.
@@ -1213,10 +1213,9 @@ impl Format<Outgoing, Heard, Say> for TalkHttp {
                 if !source.is_single() {
                     return Err(Fault::config("talk-http cannot stream a request"));
                 }
-                let (request, sink) =
-                    respan_gateway_http::request("talk-http", source, Box::new(Says))?;
+                let (request, sink) = respan_gateway_http::request(source, Box::new(Says))?;
                 let (mut head, body) = request.into_parts();
-                set_path(&mut head, "/talk");
+                set_path(&mut head, "/talk")?;
                 Ok((http::Request::from_parts(head, body), sink))
             },
             read_heard,
@@ -1233,7 +1232,7 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
     let gw = gw.target("http").unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
 
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     drop(send);
 
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -1241,7 +1240,7 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
     assert_eq!(
         ended
             .await
-            .map_err(|f| respan_gateway_http::error_code(&f).into_owned()),
+            .map_err(|f| respan_gateway_http::error_code(&f).to_owned()),
         Err("config".into())
     );
     gw.idle().await;
@@ -1265,8 +1264,8 @@ impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
         io: Incoming,
     ) -> Result<respan_gateway_sdk::Connection<Sent<Raw>, Got<Raw>>, Fault> {
         Ok(io.bind(
-            opaque::read_request,
-            |reply, source| Ok(opaque::write_response("raw", reply, source)),
+            |request| Ok(opaque::read_request(request)),
+            |reply, _| Ok(opaque::write_response(reply)),
             respan_gateway_http::plain_refusal,
         ))
     }
@@ -1281,9 +1280,9 @@ impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
     ) -> Result<respan_gateway_sdk::Connection<Got<Raw>, Sent<Raw>>, Fault> {
         Ok(io.bind(
             |source| {
-                let (request, sink) = opaque::write_request("raw", source)?;
+                let (request, sink) = opaque::write_request(source)?;
                 let (mut head, body) = request.into_parts();
-                set_path(&mut head, "/");
+                set_path(&mut head, "/")?;
                 Ok((http::Request::from_parts(head, body), sink))
             },
             |response, request| opaque::read_response("raw", response, &request.into_parts().0),
@@ -1302,7 +1301,7 @@ async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
     let (send, req) = upgrade();
 
     // Raw says nothing of framing: the request's `Upgrade` does.
-    let handled = tokio::time::timeout(Duration::from_secs(5), serve(&gw, req)).await;
+    let handled = tokio::time::timeout(Duration::from_secs(5), serve_live(&gw, req)).await;
     let (resp, _) = handled.unwrap_or_else(|_| panic!("the body was read whole"));
     say(&send, r#"{"say":"a"}"#);
     say(&send, "");
@@ -1310,9 +1309,10 @@ async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
 
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     let frames = frames(resp).await;
-    // Every data frame is an input, an empty one too.
-    assert_eq!(echo.frames(), [r#"{"say":"a"}"#, ""]);
-    assert_eq!(frames, [r#"{"heard":"a"}"#, r#"{"heard":null}"#]);
+    // Every data frame is an input, an empty one too, but one of no bytes
+    // writes no frame.
+    assert_eq!(echo.frames(), [r#"{"say":"a"}"#]);
+    assert_eq!(frames, [r#"{"heard":"a"}"#]);
 }
 
 #[tokio::test]
@@ -1354,7 +1354,7 @@ async fn a_101_goes_only_to_a_request_that_asked() {
     assert_eq!(
         ended
             .await
-            .map_err(|f| respan_gateway_http::error_code(&f).into_owned()),
+            .map_err(|f| respan_gateway_http::error_code(&f).to_owned()),
         Err("upstream".into())
     );
 }
@@ -1421,7 +1421,7 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
             let end = o
                 .as_ref()
                 .err()
-                .map(|f| respan_gateway_http::error_code(f).into_owned());
+                .map(|f| respan_gateway_http::error_code(f).to_owned());
             self.0
                 .note(format!("on_provider_end {}", end.unwrap_or_default()));
         }
@@ -1488,7 +1488,7 @@ async fn a_call_kept_past_its_request_does_not_keep_the_clients_body() {
     req.headers_mut()
         .insert(UPGRADE, HeaderValue::from_static("websocket"));
 
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
@@ -1543,7 +1543,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
     let (send, req) = upgrade();
     // The client says nothing and closes.
     drop(send);
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     let mut body = resp.into_body();
     let mut got = Vec::new();
     while let Some(frame) = body.frame().await {
@@ -1559,7 +1559,7 @@ async fn a_retry_after_a_call_that_read_the_end_gets_a_clean_end() {
     let end = ended
         .await
         .err()
-        .map(|f| respan_gateway_http::error_code(&f).into_owned());
+        .map(|f| respan_gateway_http::error_code(&f).to_owned());
     assert_eq!((got, end), (Vec::<String>::new(), None));
 }
 
@@ -1599,7 +1599,7 @@ async fn without_a_kept_call_the_clients_body_is_dropped() {
     *req.uri_mut() = http::Uri::from_static("/v1/talk");
     req.headers_mut()
         .insert(UPGRADE, HeaderValue::from_static("websocket"));
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     let _ = frames(resp).await;
     let _ = ended.await;
     gw.idle().await;
@@ -1867,20 +1867,23 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
         .provider::<Say, _, _>(
             "echo",
             Strict,
-            respan_gateway_http::connect({
-                let echo = echo.clone();
-                move |request| {
+            respan_gateway_http::connect(
+                {
                     let echo = echo.clone();
-                    async move { echo.send(request).await }
-                }
-            }),
+                    move |request| {
+                        let echo = echo.clone();
+                        async move { echo.send(request).await }
+                    }
+                },
+                LIMIT,
+            ),
         )
         .and_then(|g| g.client::<Say, _, _>(Strict))
         .map(|g| g.plugin(P))
         .and_then(|g| g.target("echo"))
         .unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     say(&send, r#"{"say":"hi"}"#);
     drop(send);
     let frames = frames(resp).await;
@@ -1919,7 +1922,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
             let added = cx.filter(Ends(self.0.clone()));
             let code = added
                 .err()
-                .map(|f| respan_gateway_http::error_code(&f).into_owned());
+                .map(|f| respan_gateway_http::error_code(&f).to_owned());
             self.0
                 .lock()
                 .map(|mut n| n.push(format!("{read} {code:?}")))
@@ -1936,7 +1939,7 @@ async fn r8_an_input_filter_added_after_the_inputs_ended_ends_at_once() {
     let (send, req) = upgrade();
     say(&send, r#"{"say":"hi"}"#);
     drop(send);
-    let (resp, _) = serve(&gw, req).await;
+    let (resp, _) = serve_live(&gw, req).await;
     drop(frames(resp).await);
     gw.idle().await;
     let noted = noted.lock().map(|n| n.clone()).unwrap_or_default();
@@ -1952,8 +1955,8 @@ struct WsToSse(&'static str);
 #[async_trait]
 impl Plugin for WsToSse {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Asked>();
-        if !cx.is_kind::<Say>() || !asked.is_some_and(|a| a.headers.contains_key(UPGRADE)) {
+        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        if !cx.is_kind::<Say>() || !asked.is_some_and(|a| a.headers().contains_key(UPGRADE)) {
             return Ok(None);
         }
         let call = cx.call(self.0);
@@ -1982,7 +1985,7 @@ async fn r11_plugin_ws_to_sse_bridge() {
         vec![Arc::new(WsToSse("openai"))],
     );
     let (send, req) = upgrade();
-    let (resp, ended) = serve(&gw, req).await;
+    let (resp, ended) = serve_live(&gw, req).await;
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     say(&send, r#"{"say":"x"}"#);
     say(&send, r#"{"say":"y"}"#);

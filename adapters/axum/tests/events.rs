@@ -5,11 +5,15 @@
 //! mockllm's OpenAI Realtime; the SDK knows none of their names.
 #![allow(clippy::unwrap_used)]
 
+#[allow(dead_code)]
+#[path = "../../../tests/support/http.rs"]
+mod http_support;
 mod support;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use http_support::LIMIT;
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_sdk::{
@@ -335,18 +339,21 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
     use respan_gateway_http::{Body, Outgoing};
     use respan_gateway_sdk::{EventStream, Extensions, Format};
     let format = events();
-    let factory = respan_gateway_http::connect(|call| async move {
-        assert_eq!(call.method(), "GET");
-        assert_eq!(call.uri().path(), "/v1/realtime");
-        assert_eq!(call.headers()["upgrade"], "websocket");
-        let frames: Vec<Bytes> = call.into_body().try_collect().await?;
-        assert_eq!(frames, [Bytes::from_static(br#"{"type":"x","n":1}"#)]);
-        let answer = http::Response::builder()
-            .status(101)
-            .body(Body::stream(stream::empty()))
-            .unwrap();
-        Ok((answer, None))
-    });
+    let factory = respan_gateway_http::connect(
+        |call| async move {
+            assert_eq!(call.method(), "GET");
+            assert_eq!(call.uri().path(), "/v1/realtime");
+            assert_eq!(call.headers()["upgrade"], "websocket");
+            let frames: Vec<Bytes> = call.into_body().try_collect().await?;
+            assert_eq!(frames, [Bytes::from_static(br#"{"type":"x","n":1}"#)]);
+            let answer = http::Response::builder()
+                .status(101)
+                .body(Body::stream(stream::empty()))
+                .unwrap();
+            Ok((answer, None))
+        },
+        LIMIT,
+    );
     let (_, mut refusal) = <JsonEvents as Format<Outgoing, ProviderEvent, ClientEvent>>::bind(
         &format,
         factory(Extensions::new()),
@@ -380,7 +387,9 @@ async fn a_plugin_can_refuse_a_session_before_the_upgrade() {
     let refuse = OnClient(|_: &mut ClientContext| {
         Err(Fault::new("too many sessions")
             .with(ErrorCode("over_limit".into()))
-            .with(Status(429)))
+            .with(Status(
+                respan_gateway_http::http::StatusCode::TOO_MANY_REQUESTS,
+            )))
     });
     let (gateway, ends, calls) = gateway_of(&probe.base(), vec![Arc::new(refuse)]);
     let server = serve(gateway).await;

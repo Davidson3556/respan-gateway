@@ -8,12 +8,13 @@
 //!
 //! `cargo run -p respan-gateway-examples --example fallback`
 
+use respan_gateway_examples::LIMIT;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
 use respan_gateway_http::http::{self, HeaderValue};
-use respan_gateway_http::{Asked, Body, retryable, watchdog};
+use respan_gateway_http::{Body, Wire, retryable, watchdog};
 use respan_gateway_plugins::routing::{Attempt, Backoff, Until, first_success, race};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::conversation::{Conversation, Reply, set_model};
@@ -40,8 +41,8 @@ impl Plugin for Resilient {
         };
         // Each answer is judged at its first content; `Until::End` would
         // hold each whole and race for the first to finish.
-        let asked = cx.extensions().get::<Asked>();
-        if asked.is_some_and(|a| a.headers.contains_key("x-hedge")) {
+        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
+        if asked.is_some_and(|a| a.headers().contains_key("x-hedge")) {
             let calls = [cx.call(target), cx.call("openai-eu")];
             let stagger = Duration::from_millis(200);
             return race(calls, stagger, Until::content(Reply::is_content))
@@ -86,7 +87,7 @@ impl Plugin for Log {
         let end = end
             .as_ref()
             .err()
-            .map_or("ok".into(), |f| respan_gateway_http::error_code(f));
+            .map_or("ok", respan_gateway_http::error_code);
         let chat = px.input::<Conversation>().ok();
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());
@@ -150,7 +151,7 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(primary),
+            respan_gateway_http::connect(primary, LIMIT),
         )?
         .provider::<Conversation, _, _>(
             "openai-eu",

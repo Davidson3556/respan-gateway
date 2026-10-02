@@ -3,6 +3,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_http::{Body, Completion, Outgoing, connect, http};
+
+use crate::http_support::LIMIT;
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 
@@ -19,7 +21,7 @@ where
         + 'static,
 {
     let name = name.to_owned();
-    Box::new(move |gateway| gateway.provider(name, format, connect(sender)))
+    Box::new(move |gateway| gateway.provider(name, format, connect(sender, LIMIT)))
 }
 
 pub fn providers(list: impl IntoIterator<Item = AddProvider>) -> Result<Gateway, Fault> {

@@ -2,6 +2,11 @@
 # keys. Keep it local.
 listen: 127.0.0.1:8080
 
+# The most bytes of a client's request, and of a provider's answer held at
+# once: past it, the request fails 413, the answer 502. 32 MiB if unset, the
+# largest request the vendors' JSON APIs take.
+# body_limit: 33554432
+
 # A base URL is what the provider's own SDK takes: OpenAI's holds the
 # version (https://api.groq.com/openai/v1 for Groq), Anthropic's does not.
 # A provider with `auth` (any header) sends only its own credentials;

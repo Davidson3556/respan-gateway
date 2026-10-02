@@ -21,6 +21,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example admission`
 
+use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::admission::{Slot, Slots};
 use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream};
@@ -30,11 +31,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_http::Asked;
 use respan_gateway_http::Status;
-#[cfg(test)]
-use respan_gateway_http::http::StatusCode;
-use respan_gateway_http::http::{self, HeaderValue, header::RETRY_AFTER};
+use respan_gateway_http::Wire;
+use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
@@ -67,7 +66,7 @@ async fn guarded<T>(
 ) -> Result<T, Fault> {
     tokio::select! {
         biased;
-        _ = held.lost() => Err(Fault::new("admission lease expired").with(ErrorCode("busy".into())).with(Status(429))),
+        _ = held.lost() => Err(Fault::new("admission lease expired").with(ErrorCode("busy".into())).with(Status(StatusCode::TOO_MANY_REQUESTS))),
         result = work => result,
     }
 }
@@ -146,19 +145,19 @@ struct Admission {
 #[async_trait]
 impl Plugin for Admission {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let asked = cx.extensions().get::<Asked>();
+        let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
         let paid = asked
-            .and_then(|a| a.headers.get("x-tier"))
+            .and_then(|a| a.headers().get("x-tier"))
             .is_some_and(|t| t == "paid");
         let (priority, wait) = if paid { (1, self.paid) } else { (0, self.free) };
-        let user = asked.and_then(|a| a.headers.get("x-user")?.to_str().ok());
+        let user = asked.and_then(|a| a.headers().get("x-user")?.to_str().ok());
         let user = user.unwrap_or_default().to_owned();
         let until = Instant::now() + wait;
         let Some(slot) = self.slots.acquire(priority, &user, until).await? else {
             let busy = "every slot is busy; retry later";
             let fault = Fault::new(busy)
                 .with(ErrorCode("busy".into()))
-                .with(Status(429));
+                .with(Status(StatusCode::TOO_MANY_REQUESTS));
             return Err(fault.with(RetryAfter(Duration::from_secs(1))));
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));
@@ -170,8 +169,9 @@ impl Plugin for Admission {
         // Explicitly forward the demonstration's tracing label.
         if let Some(label) = cx
             .extensions()
-            .get::<Asked>()
-            .and_then(|a| a.headers.get("x-case-label"))
+            .get::<Wire>()
+            .and_then(Wire::get)
+            .and_then(|a| a.headers().get("x-case-label"))
             .cloned()
         {
             let mut headers = http::HeaderMap::new();
@@ -209,10 +209,13 @@ fn gateway(
         .provider::<Conversation, _, _>(
             "openai",
             OpenAiChat,
-            respan_gateway_http::connect(supervised(move |request| {
-                let client = provider.clone();
-                async move { client.send(request).await }
-            })),
+            respan_gateway_http::connect(
+                supervised(move |request| {
+                    let client = provider.clone();
+                    async move { client.send(request).await }
+                }),
+                LIMIT,
+            ),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
         .plugin(admission)

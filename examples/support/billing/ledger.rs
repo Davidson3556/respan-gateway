@@ -170,7 +170,7 @@ impl Books {
                     let msg = format!("unknown account '{name}'");
                     Fault::new(msg)
                         .with(ErrorCode(UNKNOWN_ACCOUNT.into()))
-                        .with(Status(401))
+                        .with(Status(respan_gateway_http::http::StatusCode::UNAUTHORIZED))
                 })?;
                 chain.push(name.clone());
                 at = a.parent.as_ref();
@@ -216,7 +216,9 @@ impl Ledger for MemoryLedger {
                 let details = json!({ "account": name, "available": available });
                 let fault = Fault::new(msg)
                     .with(ErrorCode(INSUFFICIENT_FUNDS.into()))
-                    .with(Status(402));
+                    .with(Status(
+                        respan_gateway_http::http::StatusCode::PAYMENT_REQUIRED,
+                    ));
                 return Err(fault.with(Details(details)));
             }
         }

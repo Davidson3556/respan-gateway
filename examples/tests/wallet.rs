@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_examples::LIMIT;
 use respan_gateway_sdk::conversation::Conversation;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -184,7 +185,11 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
         }
     };
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, respan_gateway_http::connect(slow))?
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            respan_gateway_http::connect(slow, LIMIT),
+        )?
         .provider::<Conversation, _, _>(
             "openai-eu",
             OpenAiChat,

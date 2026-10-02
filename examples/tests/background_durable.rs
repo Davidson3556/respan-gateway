@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_examples::LIMIT;
 use respan_gateway_http::http::StatusCode;
 
 fn database() -> std::path::PathBuf {
@@ -77,7 +78,8 @@ fn crash_child() -> Result<(), Fault> {
     runtime.block_on(async {
         let jobs = Jobs::open(path)?;
         jobs.budget(account(), 10_000).await?;
-        let pending = || respan_gateway_http::connect(|_| async { std::future::pending().await });
+        let pending =
+            || respan_gateway_http::connect(|_| async { std::future::pending().await }, LIMIT);
         let gateway = gateway(pending(), pending(), &jobs)?;
         let queued = send(
             &gateway,

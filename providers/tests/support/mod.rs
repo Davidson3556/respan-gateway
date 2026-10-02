@@ -5,6 +5,8 @@
 
 use respan_gateway_http::http;
 
+use crate::http_support::LIMIT;
+
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_sdk::Usage;
@@ -32,7 +34,7 @@ where
     T: Into<SendRequest>,
 {
     let send = send.into();
-    let connect = respan_gateway_http::connect(move |request| send(request));
+    let connect = respan_gateway_http::connect(move |request| send(request), LIMIT);
     let name = name.to_owned();
     Box::new(move |g| g.provider(name, format, connect))
 }
@@ -425,7 +427,7 @@ impl Filter<Reply> for Footer {
 
 /// The code a client's error body would carry for `fault`.
 pub fn fault_code(fault: &Fault) -> String {
-    respan_gateway_http::error_code(fault).into_owned()
+    respan_gateway_http::error_code(fault).to_owned()
 }
 
 /// `r` with its fault as its message, which tests can compare.

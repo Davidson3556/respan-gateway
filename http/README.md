@@ -39,10 +39,10 @@ impl Format<h::Incoming, String, Vec<u8>> for Echo {
 
     fn bind(&self, io: h::Incoming) -> Result<Connection<String, Vec<u8>>> {
         Ok(io.bind(
-            |request| h::messages(request, |_, bytes| {
+            |request| Ok(h::messages(request, |_, bytes| {
                 String::from_utf8(bytes.to_vec())
                     .map_err(|_| BadRequest::fault("expected UTF-8"))
-            }),
+            })),
             |reply, source| {
                 let head = reply.head();
                 if h::bodiless(reply.request().method(), head.status) {
@@ -67,7 +67,7 @@ impl Format<h::Outgoing, Vec<u8>, String> for Echo {
                     return Err(Fault::config("echo expects one question"));
                 }
                 let (mut request, sink) = h::request(
-                    "echo", source,
+                    source,
                     formats::each(|question: &String| {
                         Ok(Bytes::from(question.clone()))
                     }),
@@ -105,8 +105,9 @@ SSE helpers for common framing.
 
 `Body` represents complete bytes or a live byte stream and implements both
 `Stream<Item = Result<Bytes, Fault>>` and `http_body::Body`. Network chunks are
-not semantic messages: accepted ordinary HTTP requests are collected before
-opening, while explicitly live/message ingress remains streaming.
+not semantic messages: accepted ordinary HTTP requests are collected, up to
+the adapter's limit, before opening, while explicitly live/message ingress
+remains streaming.
 
 Use the native `http::request::Parts` and `http::response::Parts` for heads;
 `http::Request::new(()).into_parts().0` and
@@ -122,9 +123,9 @@ without polling.
 
 Keep `Body::full` for finite, inspectable and editable bytes, and `Body::stream`
 for pull-driven frames. Unlike a generic full or stream adapter, `Body` also
-retains a prependable opening prefix, exposes its initial-byte snapshot during
-request preparation, and carries a private upload handoff for delivery and
-cancellation. Those gateway semantics are not replaced by standard body
+carries a private upload handoff for delivery and cancellation, and, for a
+provider's answer, its transport's `limit`: the most bytes a reader holds of
+it at once. Those gateway semantics are not replaced by standard body
 utilities; ordinary conversions and collection need no additional facade.
 
 `messages` decodes a complete body lazily or maps explicitly live message frames.
@@ -136,17 +137,19 @@ utilities; ordinary conversions and collection need no additional facade.
   byte-reader backpressure, not an unbounded event queue.
 
 The request can be modified before returning it from the preparation callback.
-The outgoing binding then snapshots the actual sent head and initial bytes for
+The outgoing binding then snapshots the actual sent head and whole bytes for
 the response reader. Client negotiation and refusal formatting instead receive
-the original request. A plugin can explicitly bypass whole-body encoding with
-`SendRaw(Wire)`. For live input, this supplies the handshake head while typed
-events continue through the encoder. The adapter publishes `Wire` separately
-from `Credential`; credentials must be copied deliberately.
+the client's request as it came, its `Wire`. A plugin can explicitly bypass
+whole-body encoding with `SendRaw(Wire)`. For live input, this supplies the
+handshake head while typed events continue through the encoder. An `Incoming`
+publishes its `Wire`, `ClientHead` and the client's `Credential` apart
+(`Incoming::extensions`); credentials must be copied deliberately.
 
 A plugin attaches a `ProviderHead` slot to a call and copies its result into the
 exchange's `ClientHead` to forward a response head. Otherwise `Reply::head()`
 returns a fresh success head. Provider failures carry `ProviderError` for
-inspection; only an explicit `RawReply` opts into writing their original body.
+inspection; only an explicit `RawReply` opts into writing their original body,
+which a call's `RawErrors` asks the binding for.
 
 The incoming response handle constructs real sinks:
 
@@ -163,10 +166,14 @@ finite response conversion helpers for applications such as durable jobs.
 
 ## Backends and completion
 
-`connect(send)` creates a provider factory from an async function accepting
-`http::Request<Body>` and returning `(http::Response<Body>, Option<Completion>)`.
-The optional Reqwest `HttpClient` also supplies a `.connect()` convenience.
-Backends can share connection pools; each factory invocation owns a fresh attempt.
+`connect(send, limit)` creates a provider factory from an async function
+accepting `http::Request<Body>` and returning
+`(http::Response<Body>, Option<Completion>)`; `limit` is the most bytes a
+reader holds of one answer at once, past which it fails `upstream`. The
+optional Reqwest `HttpClient` also supplies a `.connect()` convenience.
+Backends can share connection pools; each factory invocation owns a fresh
+attempt. A transport prepares a call with `prepare_call` against a base URL
+`base_url` checked.
 
 `Some(completion)` reports outgoing writing independently of the response:
 response headers and response EOF do not shorten that wait. `None` means the
@@ -180,6 +187,7 @@ an interrupted upload into successful EOF. Dropping a response cancels its work.
 
 A format supplies its success predicate. The ordinary `success` helper accepts
 2xx and a requested 101; strict WebSocket formats can require the handshake.
-Non-success responses undergo bounded refusal classification. Parsing helpers
-preserve semantic decoder failures separately from broken wire bodies and avoid
-unbounded prefetch across wire frames.
+An answer is refused, with its reader's first fault, if and only if it is no
+success; a success opens at its head, and a fault its body says later fails
+it. Parsing helpers preserve semantic decoder failures separately from broken
+wire bodies and avoid unbounded prefetch across wire frames.

@@ -49,9 +49,10 @@ pub fn router(gateway: Gateway) -> Router {
 }
 
 /// Hand a client's WebSocket upgrade to `gateway`, and pump its frames both
-/// ways: the HTTP adapter's [`handle`](respan_gateway_http::handle), asked
-/// to stream, with the client's text frames as the request's body, one frame
-/// per item, and the response's body as the frames sent back.
+/// ways: the HTTP adapter's [`handle`](respan_gateway_http::handle), live,
+/// with the client's text frames as the request's body, one message per
+/// frame of up to [`MAX_MESSAGE`], and the response's body as the frames
+/// sent back.
 ///
 /// The gateway answers before the client is upgraded, so a request it
 /// refuses (no format accepts it, a plugin refuses it, the provider cannot
@@ -111,7 +112,7 @@ pub async fn serve_ws_until(
         let frames = frames.map_ok(http_body::Frame::data);
         http_body_util::StreamBody::new(frames).boxed_unsync()
     });
-    let (resp, _ended) = respan_gateway_http::handle(gateway, req, true).await;
+    let (resp, _ended) = respan_gateway_http::handle(gateway, req, true, MAX_MESSAGE).await;
     let (head, body) = resp.into_parts();
     if head.status != StatusCode::SWITCHING_PROTOCOLS {
         return refusal(head, body).await;
@@ -358,7 +359,7 @@ async fn write(
 /// message.
 fn failure(fault: &Fault) -> (u16, String) {
     let code = fault.get::<CloseCode>().map_or(1011, |c| c.sendable());
-    (code, clipped(error_code(fault).into_owned()))
+    (code, clipped(error_code(fault).to_owned()))
 }
 
 /// `reason` cut to the 123 bytes a Close's reason takes.

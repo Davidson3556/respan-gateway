@@ -47,7 +47,7 @@ use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::formats::opaque::Got;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Asked, Body, Credential, HttpClient, built_wrong};
+use respan_gateway_http::{Body, Credential, HttpClient, Wire, built_wrong};
 use respan_gateway_sdk::futures::{TryStreamExt, future, stream};
 use respan_gateway_sdk::{
     ClientContext, EventStream, Extensions, Fault, Gateway, Plugin, Response, async_trait,
@@ -179,9 +179,9 @@ fn split(path: &str) -> Option<(&str, &str)> {
 
 /// Whether a request asks for a streamed answer, in its body or its query.
 fn streams(cx: &ClientContext, body: &Value) -> bool {
-    let asked = cx.extensions().get::<Asked>();
+    let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
     let query = asked
-        .and_then(|asked| asked.uri.query())
+        .and_then(|asked| asked.uri().query())
         .unwrap_or_default();
     body["stream"] == true || query.split('&').any(|pair| pair == "stream=true")
 }
@@ -499,8 +499,9 @@ impl Jobs {
         let reserve = (body.to_string().len() as i64).saturating_add(max as i64);
         let mut uri = cx
             .extensions()
-            .get::<Asked>()
-            .map_or_else(|| "/v1/responses".into(), |a| a.uri.to_string());
+            .get::<Wire>()
+            .and_then(Wire::get)
+            .map_or_else(|| "/v1/responses".into(), |a| a.uri().to_string());
         if let Some(credential) = cx.extensions().get::<Credential>() {
             let query = credential.query().collect::<Vec<_>>().join("&");
             if !query.is_empty() {
@@ -521,7 +522,7 @@ impl Jobs {
         self.db(move |tx| {
             tx.execute("INSERT OR IGNORE INTO job_accounts(tenant,balance) VALUES(?1,?2)", (&home, i64::MAX)).map_err(sql)?;
             let held = tx.execute("UPDATE job_accounts SET held=held+?1 WHERE tenant=?2 AND balance-spent-held>=?1", (reserve, &home)).map_err(sql)?;
-            if held == 0 { return Err(Fault::new("job exceeds available budget").with(ErrorCode("insufficient_funds".into())).with(respan_gateway_http::Status(402))); }
+            if held == 0 { return Err(Fault::new("job exceeds available budget").with(ErrorCode("insufficient_funds".into())).with(respan_gateway_http::Status(StatusCode::PAYMENT_REQUIRED))); }
             tx.execute("INSERT INTO background_jobs(id,request,uri,headers,tenant,reserve,webhook) VALUES(?1,?2,?3,?4,?5,?6,?7)", (saved_id, saved_body, uri, headers, home, reserve, webhook)).map_err(sql)?;
             Ok(())
         }).await?;
@@ -542,8 +543,9 @@ impl Plugin for Jobs {
             .unwrap_or_default();
         if let Some(key) = px
             .extensions()
-            .get::<Asked>()
-            .and_then(|a| a.headers.get("idempotency-key"))
+            .get::<Wire>()
+            .and_then(Wire::get)
+            .and_then(|a| a.headers().get("idempotency-key"))
         {
             headers.insert("idempotency-key", key.clone());
         }

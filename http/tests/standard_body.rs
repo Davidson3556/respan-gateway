@@ -1,4 +1,8 @@
 use std::sync::Arc;
+#[allow(dead_code)]
+#[path = "../../tests/support/http.rs"]
+mod http_support;
+use http_support::LIMIT;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use h::bytes::Bytes;
@@ -14,13 +18,13 @@ async fn open(
     request: Request<h::Body>,
     decoded: Arc<AtomicUsize>,
 ) -> Result<EventStream<Bytes>, Fault> {
-    let (incoming, _answer) = h::Incoming::accept(request, false);
+    let (incoming, _answer) = h::Incoming::accept(request, false, LIMIT);
     let (opening, _sink) = incoming.bind(
         move |request| {
-            h::messages(request, move |_, bytes| {
+            Ok(h::messages(request, move |_, bytes| {
                 decoded.fetch_add(1, Ordering::SeqCst);
                 Ok(bytes)
-            })
+            }))
         },
         |reply, _: &mut EventStream<()>| {
             Ok(reply.write(

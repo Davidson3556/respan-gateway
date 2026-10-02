@@ -4,6 +4,10 @@
 //! a status other than 200 fails its decoder.
 #![allow(clippy::unwrap_used)]
 
+#[allow(dead_code)]
+#[path = "../../tests/support/http.rs"]
+mod http_support;
+use http_support::{LIMIT, serve, serve_live};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
@@ -31,21 +35,21 @@ struct In(String);
 #[derive(Clone, PartialEq, Debug)]
 struct Out(String);
 
-/// The toy codec; its request encoder opens with `open`'s bytes, saying
-/// whether the body is done, its calls ask to switch if `upgrade`, and it
-/// cannot write a refusal if `unwritable`.
+/// The toy codec; its request is `open`'s bytes alone if any, its calls
+/// ask to switch if `upgrade`, and it cannot write a refusal if
+/// `unwritable`.
 #[derive(Clone, Default)]
 struct Toy {
-    open: Option<(&'static str, bool)>,
+    open: Option<&'static str>,
     upgrade: bool,
     unwritable: bool,
     /// The status its answers say, if not 200.
     answers: Option<u16>,
 }
 
-fn opening(bytes: &'static str, done: bool) -> Toy {
+fn opening(bytes: &'static str) -> Toy {
     Toy {
-        open: Some((bytes, done)),
+        open: Some(bytes),
         ..Toy::default()
     }
 }
@@ -63,14 +67,14 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
         Ok(io.bind(
             |request| {
                 if request.body().full_bytes().is_some() {
-                    respan_gateway_http::messages(request, |_, bytes| {
+                    Ok(respan_gateway_http::messages(request, |_, bytes| {
                         let mut values = Vec::new();
                         ReqDec.decode(bytes, &mut values)?;
                         values
                             .into_iter()
                             .next()
                             .ok_or_else(|| BadRequest::fault("empty input"))
-                    })
+                    }))
                 } else {
                     Ok(EventStream::stream(respan_gateway_http::formats::read(
                         request.into_body(),
@@ -105,23 +109,16 @@ impl respan_gateway_sdk::Format<Outgoing, Out, In> for Toy {
         let toy = self.clone();
         Ok(io.bind(
             move |source| {
-                let (mut request, sink) = if toy.open.is_some_and(|(_, done)| done) {
+                let (mut request, sink) = if let Some(open) = toy.open {
                     source.stop();
                     (
-                        http::Request::new(Body::full(toy.open.unwrap().0)),
+                        http::Request::new(Body::full(open)),
                         EventSink::new(
                             respan_gateway_sdk::futures::sink::drain().sink_map_err(Fault::from),
                         ),
                     )
                 } else {
-                    let (mut request, sink) =
-                        respan_gateway_http::request("toy", source, Box::new(ReqEnc))?;
-                    if let Some((prefix, _)) = toy.open {
-                        let body = std::mem::replace(request.body_mut(), Body::full(Bytes::new()));
-                        *request.body_mut() =
-                            body.with_prefix(Bytes::from_static(prefix.as_bytes()));
-                    }
-                    (request, sink)
+                    respan_gateway_http::request(source, Box::new(ReqEnc))?
                 };
                 *request.uri_mut() = http::Uri::from_static("/x");
                 if toy.upgrade {
@@ -205,7 +202,9 @@ impl RespDec {
         if self.status != 200 {
             return Err(Fault::new("refused")
                 .with(ErrorCode("refused".into()))
-                .with(respan_gateway_http::Status(self.status))
+                .with(respan_gateway_http::Status(
+                    StatusCode::from_u16(self.status).unwrap_or_default(),
+                ))
                 .with(()));
         }
         let s = String::from_utf8_lossy(&bytes).to_string();
@@ -353,7 +352,7 @@ fn gateway_of(
     let gw = Gateway::new()
         .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider::<In, _, _>("a", codec, respan_gateway_http::connect(transport))
+        .provider::<In, _, _>("a", codec, respan_gateway_http::connect(transport, LIMIT))
         .unwrap()
         .target("a")
         .unwrap()
@@ -380,8 +379,8 @@ fn ask() -> RequestHead {
     head
 }
 
-/// `frames` as a request, streaming if `streams`, through `Incoming` and
-/// `Gateway::open`: the answer, and how the session ended.
+/// `frames` as a request, live if `streams`, through the adapter
+/// ([`respan_gateway_http::handle`]): the answer, and how the session ended.
 async fn open(
     gw: &Gateway,
     frames: Frames,
@@ -390,15 +389,9 @@ async fn open(
     Option<http::Response<Body>>,
     BoxFuture<'static, Result<(), Fault>>,
 ) {
-    let (wire, answer) = Incoming::accept(
-        http::Request::from_parts(ask(), Body::stream(frames)),
-        streams,
-    );
-    let handled = gw.handle(wire, Extensions::new()).boxed();
-    match respan_gateway_http::drive(handled, answer).await {
-        Ok((resp, end)) => (Some(resp), end),
-        Err(fault) => (None, future::ready(Err(fault)).boxed()),
-    }
+    let req = http::Request::from_parts(ask(), Body::stream(frames));
+    let (resp, end) = respan_gateway_http::handle(gw, req, streams, LIMIT).await;
+    (Some(resp), end)
 }
 
 /// What a client got: its status and body as text, or the failure it
@@ -432,7 +425,7 @@ fn code(end: &Result<(), Fault>) -> String {
 /// What a client reads of a result: a fault's code and message.
 fn said<T>(result: Result<T, Fault>) -> Result<(), (String, String)> {
     result.map(|_| ()).map_err(|f| {
-        let code = respan_gateway_http::error_code(&f).into_owned();
+        let code = respan_gateway_http::error_code(&f).to_owned();
         (code, f.message().to_owned())
     })
 }
@@ -476,40 +469,17 @@ async fn a_body_ends_at_its_first_failure() {
     assert_eq!(seen.frames(), frames(&[Ok("one"), Err("internal")]));
 }
 
-/// B5: a prepared request's prefix comes before raw or encoded body bytes.
-#[tokio::test(flavor = "current_thread")]
-async fn a_request_encoders_opening_bytes_come_first() {
-    let seen = Seen::default();
-    let (gw, _, _) = gateway_of(opening("<OPEN>", false), seen.transport(true, done));
-    let (resp, _) = open(&gw, chunks(vec!["q"]), false).await;
-    let _ = read(resp).await;
-    // a relay's first frame is the client's bytes, unread
-    assert_eq!(seen.frames(), frames(&[Ok("<OPEN>q<END>")]));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_streaming_requests_opening_bytes_are_its_first_frame() {
-    let seen = Seen::default();
-    let (gw, _, _) = gateway_of(opening("<OPEN>", false), seen.transport(true, done));
-    let (tx, body) = upload();
-    send(&tx, "x");
-    drop(tx);
-    let (resp, _) = open(&gw, body, true).await;
-    let _ = read(resp).await;
-    assert_eq!(seen.frames(), frames(&[Ok("<OPEN>"), Ok("x"), Ok("<END>")]));
-}
-
 /// B5: a prebuilt native request body consumes no input and writes only its bytes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     let seen = Seen::default();
-    let (gw, _, _) = gateway_of(opening("<OPEN>", true), seen.transport(true, done));
+    let (gw, _, _) = gateway_of(opening("<OPEN>"), seen.transport(true, done));
     let (resp, _) = open(&gw, chunks(vec!["q"]), false).await;
     assert_eq!(read(resp).await, Ok((200, "a;!".into())));
     assert_eq!(seen.frames(), frames(&[Ok("<OPEN>")]), "a whole request");
 
     let seen = Seen::default();
-    let (gw, _, _) = gateway_of(opening("<OPEN>", true), seen.transport(true, done));
+    let (gw, _, _) = gateway_of(opening("<OPEN>"), seen.transport(true, done));
     let (tx, body) = upload();
     send(&tx, "x");
     let (resp, _) = open(&gw, body, true).await;
@@ -522,9 +492,10 @@ async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     );
 }
 
-/// An empty data frame is an input, and reaches the provider as a frame.
+/// An empty data frame is an input, but an encoding of no bytes is no
+/// frame: the provider gets none for it.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_empty_frame_is_still_a_frame() {
+async fn an_empty_frame_is_an_input_that_writes_no_frame() {
     let seen = Seen::default();
     let (gw, _, _) = gateway_of(Toy::default(), seen.transport(true, done));
     let (tx, body) = upload();
@@ -533,7 +504,7 @@ async fn an_empty_frame_is_still_a_frame() {
     drop(tx);
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
-    assert_eq!(seen.frames(), frames(&[Ok("one"), Ok(""), Ok("<END>")]));
+    assert_eq!(seen.frames(), frames(&[Ok("one"), Ok("<END>")]));
 }
 
 /// B1: the client's body breaks; the provider's body ends with that `Err`,
@@ -559,8 +530,11 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
 async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     let (tx, body) = upload();
     drop(tx);
-    let (wire, _answer) =
-        Incoming::accept(http::Request::from_parts(ask(), Body::stream(body)), true);
+    let (wire, _answer) = Incoming::accept(
+        http::Request::from_parts(ask(), Body::stream(body)),
+        true,
+        LIMIT,
+    );
     let (incoming, _outgoing) = respan_gateway_sdk::Format::bind(&Toy::default(), wire).unwrap();
     let incoming = incoming.await.unwrap();
     assert!(!incoming.is_single());
@@ -569,6 +543,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     let (wire, _answer) = Incoming::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
         false,
+        LIMIT,
     );
     let (incoming, _outgoing) = respan_gateway_sdk::Format::bind(&Toy::default(), wire).unwrap();
     let incoming = incoming.await.unwrap();
@@ -601,7 +576,7 @@ fn dial(
     codec: &Toy,
     transport: impl Fn(http::Request<Body>) -> BoxFuture<'static, WireResult> + Send + Sync + 'static,
 ) -> BoxFuture<'static, Result<EventStream<Out>, Fault>> {
-    let factory = respan_gateway_http::connect(transport);
+    let factory = respan_gateway_http::connect(transport, LIMIT);
     let (incoming, outgoing) =
         respan_gateway_sdk::Format::bind(codec, factory(Extensions::new())).unwrap();
     async move {
@@ -613,8 +588,7 @@ fn dial(
     .boxed()
 }
 
-/// Rule 5: a provider's outputs say `Pending` between the frames it sent
-/// apart, so each frame is its own batch, even when all are ready.
+/// A provider's outputs say `Pending` between the frames it sent apart, so each frame is its own batch, even when all are ready.
 #[tokio::test]
 async fn a_providers_frames_are_read_apart() {
     let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "b", "DONE"])))).boxed());
@@ -642,24 +616,27 @@ fn late(text: &'static str) -> Frames {
     .boxed()
 }
 
-/// Rule 2: a non-2xx answer is read whole before the call resolves, so its
-/// refusal is known at its head however slowly its body comes; a 2xx one's
-/// is read as far as it is ready.
+/// An answer that is no success is read whole before the call resolves, so
+/// its refusal is known at its head however slowly its body comes; a 2xx
+/// one opens at its head, its body unread.
 #[tokio::test]
 async fn a_slow_refusal_is_known_at_its_head() {
     let transport = fnt(|_| future::ready(Ok(answer(429, late("busy")))).boxed());
     let outputs = dial(&Toy::default(), transport).await.unwrap();
     let fault = outputs.refusal().unwrap();
     assert_eq!(respan_gateway_http::error_code(fault), "refused");
-    assert_eq!(fault.get(), Some(&respan_gateway_http::Status(429)));
+    assert_eq!(
+        fault.get(),
+        Some(&respan_gateway_http::Status(StatusCode::TOO_MANY_REQUESTS))
+    );
 
     let transport = fnt(|_| future::ready(Ok(answer(200, late("DONE")))).boxed());
     let outputs = dial(&Toy::default(), transport).await.unwrap();
     assert!(outputs.refusal().is_none(), "open, its body still to come");
 }
 
-/// Rule 2's exception: a 101 to a call that asked to switch is open at
-/// once; to one that did not, it is read whole like any other non-2xx.
+/// A 101 to a call that asked to switch is a success, open at once; to one
+/// that did not, it is read whole like any other refusal.
 #[tokio::test]
 async fn a_101_is_open_only_to_a_call_that_asked_to_switch() {
     let switched = || fnt(|_| future::ready(Ok(answer(101, stream::pending().boxed()))).boxed());
@@ -678,45 +655,6 @@ async fn a_101_is_open_only_to_a_call_that_asked_to_switch() {
     assert!(dialed.await.is_err(), "still reading the body");
 }
 
-/// the native request relay marker is set on a call written from the client's origin
-/// alone: a relay of the client's own message, not a call of its own input.
-#[tokio::test]
-async fn only_a_call_written_from_the_clients_origin_is_relayed() {
-    let marks = Arc::new(Mutex::new(Vec::new()));
-    let marking = {
-        let marks = marks.clone();
-        fnt(move |c| {
-            lock(&marks).push(
-                c.extensions()
-                    .get::<respan_gateway_sdk::Extensions>()
-                    .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some()),
-            );
-            future::ready(Ok(answer(200, chunks(vec!["a", "DONE"])))).boxed()
-        })
-    };
-    let factory = respan_gateway_http::connect(marking);
-    let (wire, _answer) = Incoming::accept(
-        http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        false,
-    );
-    let (incoming, _outgoing) = respan_gateway_sdk::Format::bind(&Toy::default(), wire).unwrap();
-    let inputs = incoming.await.unwrap();
-    let toy = Toy::default();
-    let (incoming, outgoing) =
-        respan_gateway_sdk::Format::bind(&toy, factory(Extensions::new())).unwrap();
-    let written = deliver(outgoing, inputs).unwrap();
-    let (opened, written) = future::join(incoming, written).await;
-    opened.unwrap();
-    written.unwrap();
-    let (incoming, outgoing) =
-        respan_gateway_sdk::Format::bind(&toy, factory(Extensions::new())).unwrap();
-    let written = deliver(outgoing, EventStream::single(In("own".into()))).unwrap();
-    let (opened, written) = future::join(incoming, written).await;
-    opened.unwrap();
-    written.unwrap();
-    assert_eq!(*lock(&marks), [false, false]);
-}
-
 /// A refusal no codec can write goes as plain text, with its body, even to
 /// a `HEAD` request: the adapter's rule for a body does not apply to it.
 #[tokio::test]
@@ -730,22 +668,22 @@ async fn a_refusal_no_codec_can_write_keeps_its_body_even_to_a_head() {
     for method in [http::Method::POST, http::Method::HEAD] {
         let req = http::Request::builder().method(method.clone()).uri("/x");
         let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-        let (resp, _) = respan_gateway_http::serve(&gw, req).await;
+        let (resp, _) = serve(&gw, req).await;
         let got = read(Some(resp)).await.unwrap();
         assert_eq!(got.0, 500, "{method}");
         assert!(!got.1.is_empty(), "{method}: the refusal's text");
     }
 }
 
-/// An error answer is read whole to be relayed or translated, up to a cap
-/// (`ERROR_BODY_CAP`); past it, it is refused with what was read. Before
-/// the cap: a non-2xx body that never ends, pulled without bound.
+/// An error answer that never ends is read only as far as its format
+/// reads it, a whole one up to its transport's limit
+/// ([`respan_gateway_http::connect`]), and refused.
 ///
 /// (ADV-1: a non-2xx answer is read whole before `dial` resolves, with no
 /// bound: an error body that never ends is pulled forever, every frame
 /// held in memory, and the call never resolves.)
 #[tokio::test(flavor = "multi_thread")]
-async fn an_error_answer_that_never_ends_is_refused_at_a_cap() {
+async fn an_error_answer_that_never_ends_is_refused() {
     let pulled = Arc::new(AtomicUsize::new(0));
     let counter = pulled.clone();
     let transport = fnt(move |_| {
@@ -759,13 +697,17 @@ async fn an_error_answer_that_never_ends_is_refused_at_a_cap() {
         future::ready(Ok(answer(503, body))).boxed()
     });
     let dialed = tokio::time::timeout(Duration::from_secs(2), dial(&Toy::default(), transport));
-    let resolved = dialed.await.is_ok();
+    let resolved = dialed.await;
     let frames = pulled.load(Ordering::SeqCst);
     let mib = frames * 64 / 1024;
-    assert!(
-        resolved,
-        "dial still pending after 2s; it pulled {frames} frames ({mib} MiB) of a 503's body into memory"
-    );
+    let Ok(Ok(outputs)) = resolved else {
+        panic!(
+            "dial still pending after 2s; it pulled {frames} frames ({mib} MiB) of a 503's body into memory"
+        )
+    };
+    // The toy refuses at the first frame it reads.
+    let refusal = outputs.refusal().map(respan_gateway_http::error_code);
+    assert_eq!(refusal, Some("refused"));
 }
 
 /// ADV-2: the adapter drains the body of a bodiless answer (a HEAD) in a
@@ -785,7 +727,7 @@ async fn a_bodiless_answer_ends_with_its_client() {
         let (gw, calls, _) = gateway_of(Toy::default(), transport);
         let req = http::Request::builder().method(method.clone()).uri("/x");
         let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-        let (resp, _ended) = respan_gateway_http::serve(&gw, req).await;
+        let (resp, _ended) = serve(&gw, req).await;
         assert_eq!(resp.status(), 200);
         drop(resp); // the client leaves
         let idle = tokio::time::timeout(Duration::from_secs(1), gw.idle()).await;
@@ -812,7 +754,7 @@ async fn a_bodiless_answer_whose_end_is_not_ready_ends_abandoned() {
         .method(http::Method::HEAD)
         .uri("/x");
     let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     drop(resp);
     let end = ended.await;
@@ -839,7 +781,10 @@ fn panicking() -> Frames {
 async fn a_panic_while_accepting_ends_internal() {
     let (gw, _, _) = gateway_of(Toy::default(), fnt(|_| future::pending().boxed()));
     let (resp, end) = open(&gw, panicking(), false).await;
-    assert!(resp.is_none(), "no codec wrote it");
+    let resp = resp.unwrap();
+    // No codec wrote it: the adapter did, as plain text.
+    assert_eq!(resp.status(), 500);
+    assert_eq!(resp.headers()["content-type"], "text/plain; charset=utf-8");
     assert_eq!(code(&end.await), "internal");
 }
 /// Answers with the target's response read to its end first.
@@ -868,7 +813,11 @@ async fn a_client_that_leaves_ends_the_request_before_its_call() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider::<In, _, _>("a", Toy::default(), respan_gateway_http::connect(transport))
+        .provider::<In, _, _>(
+            "a",
+            Toy::default(),
+            respan_gateway_http::connect(transport, LIMIT),
+        )
         .unwrap()
         .plugin(calls.clone())
         .plugin(ReadToEnd);
@@ -912,25 +861,20 @@ impl respan_gateway_sdk::Plugin for Asks {
     }
 }
 
-/// What the provider got, as (`relayed`, body), of a client's `question`
-/// through `plugin`.
-async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<(bool, String)> {
+/// The bodies the provider got of a client's question through `plugin`.
+async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<String> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let noting = {
         let seen = seen.clone();
         fnt(move |c| {
             let seen = seen.clone();
             async move {
-                let relayed = c
-                    .extensions()
-                    .get::<respan_gateway_sdk::Extensions>()
-                    .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some());
                 let body: Vec<_> = c.into_body().into_data_stream().collect().await;
                 let body = body
                     .into_iter()
                     .map(|b| text(&b.unwrap()))
                     .collect::<String>();
-                lock(&seen).push((relayed, body));
+                lock(&seen).push(body);
                 Ok(answer(200, chunks(vec!["a", "DONE"])))
             }
             .boxed()
@@ -939,7 +883,11 @@ async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<(bool, Str
     let gw = Gateway::new()
         .client::<In, _, _>(Toy::default())
         .unwrap()
-        .provider::<In, _, _>("a", Toy::default(), respan_gateway_http::connect(noting))
+        .provider::<In, _, _>(
+            "a",
+            Toy::default(),
+            respan_gateway_http::connect(noting, LIMIT),
+        )
         .unwrap()
         .target("a")
         .unwrap()
@@ -949,19 +897,14 @@ async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<(bool, Str
     lock(&seen).clone()
 }
 
-/// the native request relay marker means the session's own inputs to a format of the
-/// same name, as the plugins' filters left them: a filter-edited input
-/// still relays (a redactor keeps a subscription passthrough working); a
-/// call with its own input (`Call::with_input`) does not.
+/// A call sends its inputs as the plugins' filters left them, and a call
+/// with its own input (`Call::with_input`) sends that.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_filter_edited_input_still_relays_but_a_calls_own_input_does_not() {
+async fn a_filter_edited_input_and_a_calls_own_input_are_sent_as_they_are() {
     let edited = provider_saw(Rewrites).await;
-    assert_eq!(
-        edited,
-        [(false, "the plugin's own prompt<END>".to_string())]
-    );
+    assert_eq!(edited, ["the plugin's own prompt<END>"]);
     let own = provider_saw(Asks).await;
-    assert_eq!(own, [(false, "own prompt<END>".to_string())]);
+    assert_eq!(own, ["own prompt<END>"]);
 }
 
 /// L2-1: a HEAD whose provider answer is complete and ready at once: the
@@ -974,7 +917,7 @@ async fn a_complete_bodiless_answer_ends_ok() {
         .method(http::Method::HEAD)
         .uri("/x");
     let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let got = read(Some(resp)).await;
     let end = ended.await;
@@ -1005,7 +948,7 @@ async fn a_complete_bodiless_answer_with_a_large_ready_body_ends_ok() {
         .method(http::Method::HEAD)
         .uri("/x");
     let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let _ = read(Some(resp)).await;
     let end = ended.await;
@@ -1053,7 +996,7 @@ fn a_bodiless_answer_whose_body_never_settles_does_not_hold_the_adapter() {
                     .uri("/x")
                     .header("upgrade", "websocket");
                 let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-                let (resp, _ended) = respan_gateway_http::serve(&gw, req).await;
+                let (resp, _ended) = serve_live(&gw, req).await;
                 resp.status()
             });
             let _ = tx.send(status);
@@ -1096,7 +1039,7 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
             marked.insert(Job);
             job.extensions_mut().insert(marked);
             // Called here, so the request counts from here.
-            let serving = respan_gateway_http::serve(&cx.gateway(), job);
+            let serving = serve(&cx.gateway(), job);
             tokio::spawn(async move {
                 let (resp, ended) = serving.await;
                 let _ = BodyExt::collect(resp.into_body()).await;
@@ -1112,7 +1055,7 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
         let req = http::Request::post("/x")
             .body(respan_gateway_http::Body::full("q"))
             .unwrap();
-        let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+        let (resp, ended) = serve(&gw, req).await;
         let _ = BodyExt::collect(resp.into_body()).await;
         let _ = ended.await;
         tokio::time::timeout(Duration::from_secs(2), gw.idle())
@@ -1137,7 +1080,7 @@ async fn a_complete_bodiless_answer_of_many_ready_frames_ends_ok() {
         .method(http::Method::HEAD)
         .uri("/x");
     let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let _ = read(Some(resp)).await;
     let end = ended.await;
@@ -1154,8 +1097,8 @@ async fn a_complete_bodiless_answer_of_many_ready_frames_ends_ok() {
 
 /// The same answer with its frames sent apart (each after a yield, as a
 /// source that says `Pending` between outputs does): its end is not ready
-/// when the head goes out (rule 4: outputs dropped unread end their call as
-/// its end, if ready, says, else `abandoned`), however soon the next frame
+/// when the head goes out (outputs dropped unread end their call as their
+/// end says if it is ready, else `abandoned`), however soon the next frame
 /// wakes itself, so it ends `abandoned`.
 #[tokio::test]
 async fn a_bodiless_answer_of_frames_sent_apart_ends_abandoned() {
@@ -1176,7 +1119,7 @@ async fn a_bodiless_answer_of_frames_sent_apart_ends_abandoned() {
         .method(http::Method::HEAD)
         .uri("/x");
     let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = respan_gateway_http::serve(&gw, req).await;
+    let (resp, ended) = serve(&gw, req).await;
     assert_eq!(resp.status(), 200);
     let _ = read(Some(resp)).await;
     let end = ended.await;
@@ -1218,8 +1161,7 @@ fn l6_an_endless_ready_bodiless_answer_never_holds_the_thread() {
                 .method(http::Method::HEAD)
                 .uri("/x");
             let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-            let (resp, _ended) =
-                tokio::task::unconstrained(respan_gateway_http::serve(&gw, req)).await;
+            let (resp, _ended) = tokio::task::unconstrained(serve(&gw, req)).await;
             let _ = tx.send(resp.status());
         });
     });
@@ -1308,6 +1250,7 @@ async fn accepted_incoming_moves_into_one_connection() {
     let (incoming, reply) = Incoming::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
         false,
+        LIMIT,
     );
     assert_eq!(incoming.request().method(), http::Method::POST);
     // Incoming is move-only: binding transfers exclusive ownership, rather
@@ -1334,7 +1277,7 @@ async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
             async { Ok(answer(200, chunks(vec!["a", "DONE"]))) }.boxed()
         }
     });
-    let factory = respan_gateway_http::connect(transport);
+    let factory = respan_gateway_http::connect(transport, LIMIT);
     let connection = |id| {
         let mut extensions = Extensions::new();
         extensions.insert(id);
@@ -1358,37 +1301,13 @@ async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
 #[tokio::test]
 async fn an_unmatched_owned_incoming_does_not_hold_a_rejection_open() {
     let gateway = Gateway::new();
-    let (transport, answer) = Incoming::accept(
-        http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        false,
-    );
-    let result = tokio::time::timeout(
+    let opened = tokio::time::timeout(
         Duration::from_secs(1),
-        respan_gateway_http::drive(gateway.handle(transport, Extensions::new()).boxed(), answer),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        respan_gateway_http::error_code(&result.err().unwrap()),
-        "not_found"
+        open(&gateway, chunks(vec!["q"]), false),
     );
-}
-
-#[tokio::test]
-async fn a_completed_handler_keeps_an_already_ready_reply() {
-    let (transport, answer) = Incoming::accept(
-        http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        false,
-    );
-    let (incoming, outgoing) =
-        respan_gateway_sdk::Format::bind(&Toy::default(), transport).unwrap();
-    incoming.await.unwrap();
-    let mut writing = deliver(outgoing, EventStream::refused(Upstream::fault("refused"))).unwrap();
-    // Queue the encoded refusal, leaving its delivery pending.
-    assert!(writing.as_mut().now_or_never().is_none());
-    let handled = future::ready(Err(Upstream::fault("handling failed"))).boxed();
-    let (response, _) = respan_gateway_http::drive(handled, answer).await.unwrap();
-    assert!(!response.status().is_success());
+    let (resp, end) = opened.await.unwrap();
+    assert_eq!(resp.map(|r| r.status()), Some(StatusCode::NOT_FOUND));
+    assert_eq!(code(&end.await), "not_found");
 }
 
 #[tokio::test]
@@ -1427,6 +1346,7 @@ async fn sink_send_fault_waits_for_its_refusal_bytes() {
     let (transport, answer) = Incoming::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
         false,
+        LIMIT,
     );
     let (incoming, mut outgoing) =
         respan_gateway_sdk::Format::bind(&Toy::default(), transport).unwrap();
@@ -1449,7 +1369,7 @@ async fn upload_sink_flush_waits_for_its_terminal_body_error() {
     let transport = fnt(|call| {
         future::ready(Ok(answer(200, call.into_body().into_data_stream().boxed()))).boxed()
     });
-    let factory = respan_gateway_http::connect(transport);
+    let factory = respan_gateway_http::connect(transport, LIMIT);
     let (incoming, mut outgoing) =
         respan_gateway_sdk::Format::bind(&Toy::default(), factory(Extensions::new())).unwrap();
     let mut source = EventStream::stream(stream::pending());
@@ -1461,9 +1381,8 @@ async fn upload_sink_flush_waits_for_its_terminal_body_error() {
         "terminal body error is still unread"
     );
     let mut response = incoming.await.unwrap();
-    assert_eq!(
-        said(response.next().await.unwrap()),
-        said(Err::<(), _>(fault.clone()))
-    );
-    assert_eq!(said(sending.await), said(Err::<(), _>(fault)));
+    // The transport reads the body as the sink sends it.
+    let (read, sent) = future::join(response.next(), sending).await;
+    assert_eq!(said(read.unwrap()), said(Err::<(), _>(fault.clone())));
+    assert_eq!(said(sent), said(Err::<(), _>(fault)));
 }

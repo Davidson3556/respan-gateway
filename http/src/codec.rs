@@ -2,7 +2,7 @@
 
 use crate::Body;
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use http::request::Parts as RequestHead;
 use respan_gateway_sdk::{EventSink, EventStream, Fault};
 
@@ -34,7 +34,6 @@ pub fn encode_all<T: 'static>(
 /// Prepare the actual request and per-item sink. Finite input is encoded now;
 /// live input stays caller-owned. Explicit raw requests bypass this helper.
 pub fn request<T: Clone + Send + Sync + 'static>(
-    _name: &str,
     source: &mut EventStream<T>,
     encoder: Box<dyn Encoder<T>>,
 ) -> Result<(http::Request<Body>, EventSink<T>), Fault> {
@@ -58,18 +57,14 @@ pub fn request<T: Clone + Send + Sync + 'static>(
 
 /// Decode one finite request lazily, or one message per explicitly live frame.
 /// Incoming binding has already collected ordinary HTTP bodies before this runs.
-pub fn messages<T, F>(request: http::Request<Body>, decode: F) -> Result<EventStream<T>, Fault>
+pub fn messages<T, F>(request: http::Request<Body>, decode: F) -> EventStream<T>
 where
     T: Clone + Send + Sync + 'static,
     F: Fn(&RequestHead, Bytes) -> Result<T, Fault> + Send + Sync + 'static,
 {
     let (head, body) = request.into_parts();
     match body.full_bytes().cloned() {
-        Some(bytes) => Ok(EventStream::lazy(move || decode(&head, bytes.clone()))),
-        None => Ok(EventStream::stream(
-            body.map(move |bytes| decode(&head, bytes?)),
-        )),
+        Some(bytes) => EventStream::lazy(move || decode(&head, bytes.clone())),
+        None => EventStream::stream(body.map(move |bytes| decode(&head, bytes?))),
     }
 }
-
-use futures::SinkExt;

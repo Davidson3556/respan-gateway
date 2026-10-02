@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hooks::{Calls, Outcomes};
-use http_support::{post, read_whole, serve};
+use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
@@ -46,8 +46,8 @@ impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Sent<Raw>, Got<Raw>>, Fault> {
         Ok(io.bind(
-            opaque::read_request,
-            |reply, source| Ok(opaque::write_response("raw", reply, source)),
+            |request| Ok(opaque::read_request(request)),
+            |reply, _| Ok(opaque::write_response(reply)),
             respan_gateway_http::plain_refusal,
         ))
     }
@@ -58,7 +58,7 @@ impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Got<Raw>, Sent<Raw>>, Fault> {
         Ok(io.bind(
-            |source| opaque::write_request("raw", source),
+            opaque::write_request,
             |response, request| opaque::read_response("raw", response, &request.into_parts().0),
             respan_gateway_http::success,
         ))
@@ -79,7 +79,7 @@ where
 {
     let (log, calls) = (Outcomes::default(), Calls::default());
     let gw = Gateway::new()
-        .provider::<I, O, _>("p", format.clone(), connect(transport))
+        .provider::<I, O, _>("p", format.clone(), connect(transport, LIMIT))
         .and_then(|g| {
             Ok(g.client::<I, O, _>(format)?
                 .plugin(log.clone())
@@ -337,10 +337,10 @@ impl Format<Incoming, Conversation, Reply> for Counted {
         let count = self.0.clone();
         Ok(io.bind(
             move |request| {
-                respan_gateway_http::messages(request, move |_, raw| {
+                Ok(respan_gateway_http::messages(request, move |_, raw| {
                     count.fetch_add(1, Ordering::Relaxed);
                     OpenAiChat.decode_request(raw)
-                })
+                }))
             },
             |reply, source| OpenAiChat.write_response(reply, source),
             |fault, request, head| OpenAiChat.refusal(fault, request, head),
@@ -417,7 +417,7 @@ impl Plugin for Cap {
             match spent > cap {
                 true => Err(Fault::new("over the cap")
                     .with(ErrorCode("cap".into()))
-                    .with(Status(402))),
+                    .with(Status(StatusCode::PAYMENT_REQUIRED))),
                 false => Ok(()),
             }
         })
@@ -534,7 +534,7 @@ impl Filter<Reply> for Refuses {
         if matches!(reply, Reply::Usage(_)) {
             return Err(Fault::new("no")
                 .with(ErrorCode("blocked".into()))
-                .with(Status(403)));
+                .with(Status(StatusCode::FORBIDDEN)));
         }
         out.push(reply);
         Ok(())

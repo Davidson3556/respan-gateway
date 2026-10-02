@@ -17,6 +17,7 @@
 
 mod anthropic;
 mod common;
+mod errors;
 mod openai;
 #[cfg(test)]
 mod round_trips;

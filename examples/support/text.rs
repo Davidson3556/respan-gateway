@@ -30,7 +30,7 @@ fn unreadable(what: &str) -> Fault {
     let message = format!("the gateway cannot read {what}, so it refuses it");
     Fault::new(message)
         .with(ErrorCode(UNREADABLE.into()))
-        .with(Status(StatusCode::UNPROCESSABLE_ENTITY.as_u16()))
+        .with(Status(StatusCode::UNPROCESSABLE_ENTITY))
 }
 
 /// An edit of one text.

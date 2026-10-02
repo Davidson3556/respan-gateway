@@ -5,7 +5,7 @@
 mod support;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use support::Gateway;
@@ -93,13 +93,21 @@ async fn l8_a_client_that_leaves_while_an_error_is_read_frees_the_vendor() {
     }
 }
 
-/// An error body that never ends but trickles fast: the cap ends it, and the
-/// client gets a refusal (at most ~1 MiB) rather than waiting forever.
+/// An error body that never ends but trickles fast: the limit ends it, and
+/// the client gets the gateway's 502 rather than waiting forever.
 #[tokio::test]
-async fn l8_an_endless_error_is_answered_at_the_cap() {
+async fn l8_an_endless_error_is_answered_at_the_limit() {
     let closed = Arc::new(AtomicBool::new(false));
-    let gw =
-        gateway(&trickler("500 Internal Server Error", Duration::ZERO, closed.clone()).await).await;
+    let base = trickler("500 Internal Server Error", Duration::ZERO, closed.clone()).await;
+    let gw = Gateway::start(&format!(
+        "body_limit: 1048576
+providers:
+  any: {{ format: passthrough, base_url: '{base}' }}
+serve: [passthrough]
+target: any
+"
+    ))
+    .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
     sock.write_all(b"GET /files/x HTTP/1.1\r\nhost: x\r\nauthorization: Bearer sk\r\nconnection: close\r\n\r\n").await.unwrap();
@@ -107,8 +115,7 @@ async fn l8_an_endless_error_is_answered_at_the_cap() {
     let r = tokio::time::timeout(Duration::from_secs(20), sock.read_to_end(&mut out)).await;
     assert!(r.is_ok(), "no end within 20 s ({} bytes)", out.len());
     let head = String::from_utf8_lossy(&out[..out.len().min(200)]).into_owned();
-    assert!(head.starts_with("HTTP/1.1 500"), "{head}");
+    assert!(head.starts_with("HTTP/1.1 502"), "{head}");
     let n = out.iter().filter(|b| **b == b'e').count();
-    assert!(n <= (1 << 20) + 70_000, "{n} bytes relayed");
-    let _ = AtomicUsize::new(0);
+    assert!(n < 1024, "{n} bytes relayed");
 }
