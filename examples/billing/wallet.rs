@@ -71,8 +71,8 @@ fn quote(
     let key = key.to_owned();
     // Accounting runs last, so this filter sees each reply first.
     px.filter(move |reply: &mut Reply| {
-        if !reply.usage.is_empty() {
-            tally.add(price.of(&reply.usage));
+        if let Reply::Usage(usage) = reply {
+            tally.add(price.of(usage));
         }
         Ok(())
     })?;

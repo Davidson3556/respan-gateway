@@ -1,7 +1,32 @@
 //! Anthropic Messages: `POST /v1/messages`, JSON or SSE, of the
 //! conversation kind.
+//!
+//! # Responses as events
+//!
+//! A stream and a whole body decode into the same events, by these rules:
+//!
+//! - [`Reply::Start`] comes from `message_start`, or the body's `id` and
+//!   `model`; its `extra` holds the message's other fields.
+//! - Blocks are numbered by their `index`. A `text`, `tool_use` or
+//!   `thinking` block opens a [`Block::Text`], [`Block::ToolCall`] or
+//!   [`Block::Reasoning`]; `text_delta`, `input_json_delta` and
+//!   `thinking_delta` are its deltas, and `content_block_stop` its end. A
+//!   whole body's blocks are the same events, one delta each.
+//! - `message_delta`'s `stop_reason` is the [`Reply::Finish`]; `usage` of
+//!   `message_start` and `message_delta` are [`Reply::Usage`] increments.
+//! - What the kind has no form for is a [`Reply::Other`] of this format, as
+//!   the stream event that carries it: `ping`, a `signature_delta`, a block
+//!   of another type (and its deltas and stop), citations, a `stop_sequence`
+//!   (as a `message_delta`), an event of an unknown type. In a whole body a
+//!   block of another type is a `content_block_start` of the whole block.
+//!   `message_stop` ends the stream.
+//!
+//! Encoders do the reverse. A stream's blocks are written one at a time, as
+//! Anthropic does: a block that opens while another is open waits, with its
+//! deltas, until that one ends. A whole body is written from the events
+//! collected, empty text blocks left out, as Anthropic refuses them.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use http::HeaderValue;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
@@ -13,23 +38,23 @@ use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
 use respan_gateway_sdk::{BadRequest, Connection, EventSink, Fault, Format};
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
 
 use crate::Usage;
-use crate::common::ReplyParser;
 use crate::common::{
-    Encounter, Names, Reading, SoFar, UnaryEncoder, Wire, error_event, only, patch_content,
-    patch_messages, patch_sampling, post_json, read_content, read_message, reads_back, refusal,
-    replace, says, set, split_around, stop_json, supported_usage, tools_of, unpatchable,
-    unreadable_event, unsupported_fields, unwritable_content, update_message, usage_step,
-    write_content, write_message,
+    Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
+    extra_of, is_inert, merge_fields, post_json, read_content, read_message, refusal, says, set,
+    stop_json, supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
+    unwritable_usage, usage_extra, write_content, write_message,
 };
 use crate::conversation::{
-    Content, Conversation, Finish, Message, Piece, Reply, Role, Start, units,
+    Block, Content, Conversation, Finish, Message, Reply, Role, Start, units,
 };
 use crate::formats::errors::{merge_details, says_error};
 use crate::formats::sse::{event, event_json, is_stream};
-use crate::tools::{arguments_json, read_anthropic_tools, start, write_anthropic_tools};
+use crate::tools::{arguments_json, read_anthropic_tools, write_anthropic_tools};
 use respan_gateway_http::Encoder;
+use respan_gateway_http::bytes::BytesMut;
 
 /// The API version sent when the client names none.
 const VERSION: &str = "2023-06-01";
@@ -46,7 +71,7 @@ const FINISH: Names<Finish> = Names(
         ("tool_use", Finish::ToolUse),
         ("refusal", Finish::Filtered),
     ],
-    &["model_context_window_exceeded"],
+    ANTHROPIC,
 );
 
 pub(crate) const ANTHROPIC: &str = "anthropic-messages";
@@ -69,7 +94,7 @@ impl AnthropicMessages {
         crate::formats::posts_to(head, "/v1/messages")
     }
 
-    /// Read a request lazily, retaining bytes for an unchanged relay.
+    /// Read a request lazily.
     pub fn read_request(
         &self,
         request: http::Request<Body>,
@@ -77,7 +102,7 @@ impl AnthropicMessages {
         respan_gateway_http::messages(request, |_, raw| Self.decode_request(raw))
     }
 
-    /// Decode a finite request synchronously, retaining relay provenance.
+    /// Decode a finite request synchronously.
     pub fn decode_request(&self, bytes: Bytes) -> Result<Conversation, Fault> {
         crate::common::read_request::<Self>(bytes)
     }
@@ -95,8 +120,8 @@ impl AnthropicMessages {
         Ok((request, sink))
     }
 
-    fn parser(&self, hold_start: bool) -> ReplyParser<Self> {
-        ReplyParser::new(Reading::<Self>::event, Reading::<Self>::end, hold_start)
+    fn parser(&self, hold_start: bool) -> ReplyParser<AnthropicReader> {
+        ReplyParser::new(hold_start)
     }
 
     /// Read provider response events with fresh per-body parser state.
@@ -125,11 +150,9 @@ impl AnthropicMessages {
         head: &mut ResponseHead,
         request: &http::Request<Bytes>,
     ) -> Option<Box<dyn Encoder<Reply>>> {
-        crate::common::response_encoder(head, request, |head, relayed, _asked| {
-            match is_stream(head) {
-                false => Box::new(UnaryEncoder::<Self>::new(relayed)),
-                true => Box::new(EventStream::new(relayed)),
-            }
+        crate::common::response_encoder(head, request, |head, _asked| match is_stream(head) {
+            false => Box::new(UnaryEncoder::<Self>::new()),
+            true => Box::new(EventStream::default()),
         })
     }
 
@@ -188,10 +211,7 @@ impl AnthropicMessages {
         if !head.status.is_success() {
             return Err(crate::formats::whole::answer(ANTHROPIC, &head, bytes));
         }
-        Ok(vec![crate::common::unary_reply::<Self>(
-            head.status,
-            bytes,
-        )?])
+        crate::common::unary_reply::<Self>(head.status, bytes)
     }
 }
 
@@ -241,7 +261,10 @@ const KNOWN: &[&str] = &[
 ];
 
 /// Roles a message can have; system prompts have their own field.
-const ROLES: Names<Role> = Names(&[("user", Role::User), ("assistant", Role::Assistant)], &[]);
+const ROLES: Names<Role> = Names(
+    &[("user", Role::User), ("assistant", Role::Assistant)],
+    ANTHROPIC,
+);
 
 /// The parts of the leading system messages, as the system prompt, and
 /// the rest; a later system message is refused.
@@ -257,45 +280,17 @@ fn split_system(chat: &Conversation) -> Result<(Vec<Content>, &[Message]), Fault
             "Anthropic has no place for a system message after the conversation starts",
         ));
     }
-    if system.iter().any(|m| !m.unsupported.is_empty()) {
+    // The spelling of a system role is for the format that decoded it.
+    if system
+        .iter()
+        .any(|m| m.extra.fields.keys().any(|k| k != "role"))
+    {
         return Err(BadRequest::fault(
             "Anthropic's system prompt has no place for a message's other fields",
         ));
     }
     let parts = system.iter().flat_map(|m| m.content.iter().cloned());
     Ok((parts.collect(), rest))
-}
-
-/// The system prompt of `after`'s leading system messages: the client's
-/// edited in its own form, others as new parts beside it.
-fn patch_system(
-    system: Option<&Value>,
-    before: &Conversation,
-    after: &Conversation,
-) -> Result<Value, Fault> {
-    let own = before.messages.first().filter(|m| m.role == Role::System);
-    let lead: Vec<&Message> = after
-        .messages
-        .iter()
-        .take_while(|m| m.role == Role::System)
-        .collect();
-    let patch = |m: &Message| match own.filter(|o| o.same_source(m)) {
-        Some(o) => patch_content(ANTHROPIC, system, &o.content, &m.content),
-        None => write_content(ANTHROPIC, &m.content),
-    };
-    // One message keeps the prompt's own form, a string or parts.
-    if let ([only], false) = (&lead[..], matches!(system, Some(Value::Array(_)))) {
-        return patch(only);
-    }
-    let mut parts = Vec::new();
-    for m in lead {
-        match patch(m)? {
-            Value::Array(more) => parts.extend(more),
-            Value::String(text) => parts.push(json!({ "type": "text", "text": text })),
-            other => parts.push(other),
-        }
-    }
-    Ok(Value::Array(parts))
 }
 
 /// `m` without its empty text parts, which Anthropic refuses, if it says
@@ -313,28 +308,13 @@ fn without_empty_text(m: &Message) -> std::borrow::Cow<'_, Message> {
 /// Whether a message says nothing: no content, or only empty text.
 fn is_empty(m: &Message) -> bool {
     let empty = |c: &Content| matches!(c, Content::Text { text, .. } if text.is_empty());
-    m.unsupported.is_empty() && m.content.iter().all(empty)
-}
-
-/// Set the metadata's user id, or remove it and the metadata if left empty.
-fn patch_user(v: &mut Map<String, Value>, user: Option<&str>) {
-    let metadata = v.entry("metadata").or_insert(Value::Null);
-    if !metadata.is_object() {
-        *metadata = json!({});
-    }
-    if let Some(fields) = metadata.as_object_mut() {
-        match user {
-            Some(user) => _ = fields.insert("user_id".into(), user.into()),
-            None => _ = fields.shift_remove("user_id"),
-        }
-        if fields.is_empty() {
-            v.shift_remove("metadata");
-        }
-    }
+    m.extra.is_empty() && m.content.iter().all(empty)
 }
 
 impl Wire for AnthropicMessages {
     const NAME: &'static str = ANTHROPIC;
+    const OWN: &'static [&'static str] = &["metadata"];
+    type Reading = AnthropicReader;
 
     /// The system prompt becomes a leading system message.
     fn read(v: &Value) -> Conversation {
@@ -350,21 +330,32 @@ impl Wire for AnthropicMessages {
             .filter_map(|s| s.as_str().map(Into::into))
             .collect();
         chat.user = v["metadata"]["user_id"].as_str().map(Into::into);
-        chat.unsupported = unsupported_fields(v, KNOWN, &[]);
-        chat.unsupported_in = Some(ANTHROPIC.into());
+        chat.extra.fields = unsupported_fields(v, KNOWN, &[]);
+        // Metadata beside the user id is kept for this format to write again.
+        let others = v["metadata"].as_object().into_iter().flatten();
+        let others: Map<String, Value> = others
+            .filter(|(k, x)| *k != "user_id" && says(x))
+            .map(|(k, x)| (k.clone(), x.clone()))
+            .collect();
+        if !others.is_empty() {
+            chat.extra.fields.insert("metadata".into(), others.into());
+        }
         if says(&v["system"]) {
-            let mut system = Message::new(Role::System, "").with_source(v["system"].clone());
+            let mut system = Message::new(Role::System, "");
             system.content = read_content(ANTHROPIC, &v["system"]);
             chat.messages.push(system);
         }
         for m in v["messages"].as_array().into_iter().flatten() {
-            chat.messages.push(read_message(ANTHROPIC, m, &ROLES));
+            let mut message = read_message(ANTHROPIC, m, &ROLES);
+            tag(&mut message, ANTHROPIC);
+            chat.messages.push(message);
         }
         read_anthropic_tools(v, &mut chat);
+        chat.extra = extra_of(ANTHROPIC, std::mem::take(&mut chat.extra.fields));
         chat
     }
 
-    fn write(chat: &Conversation) -> Result<Value, Fault> {
+    fn write(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
         let (system, rest) = split_system(chat)?;
         if rest.is_empty() {
             return Err(BadRequest::fault(
@@ -400,220 +391,134 @@ impl Wire for AnthropicMessages {
         set(&mut v, "temperature", chat.temperature.map(Into::into));
         set(&mut v, "top_p", chat.top_p.map(Into::into));
         set(&mut v, "stop_sequences", stop_json(&chat.stop));
-        let user = chat.user.as_ref().map(|u| json!({ "user_id": u }));
-        set(&mut v, "metadata", user);
+        let mut metadata = Value::Object(Map::new());
+        if let Some(user) = &chat.user {
+            metadata["user_id"] = user.as_str().into();
+        }
+        let own = chat.extra.format.as_deref() == Some(ANTHROPIC);
+        if let Some(more) = chat.extra.fields.get("metadata").and_then(Value::as_object) {
+            merge_fields(
+                &mut metadata,
+                &more
+                    .iter()
+                    .filter(|_| own)
+                    .map(|(k, x)| (k.clone(), x.clone()))
+                    .collect(),
+            );
+        }
+        let empty = metadata.as_object().is_none_or(Map::is_empty);
+        set(&mut v, "metadata", (!empty).then_some(metadata));
         write_anthropic_tools(chat, &mut v)?;
-        Ok(v.into())
-    }
-
-    /// Cache markers and anything else unchanged keep their place.
-    fn patch(
-        v: &mut Map<String, Value>,
-        before: &Conversation,
-        after: &Conversation,
-    ) -> Result<(), Fault> {
-        let (was, _) = split_system(before)?;
-        let (system, rest) = split_system(after).map_err(|f| unpatchable(f.message()))?;
-        if was != system {
-            let patched = patch_system(v.get("system"), before, after)?;
-            set(v, "system", (!system.is_empty()).then_some(patched));
-        }
-        if before.max_tokens != after.max_tokens {
-            let max_tokens = after.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-            v.insert("max_tokens".into(), max_tokens.into());
-        }
-        patch_sampling(v, before, after, "stop_sequences");
-        if before.user != after.user {
-            patch_user(v, after.user.as_deref());
-        }
-        if tools_of(before) != tools_of(after) {
-            write_anthropic_tools(after, v)?;
-        }
-        if before.messages != after.messages {
-            let write = |m: &Message| Ok(vec![write_message(ANTHROPIC, m, &ROLES)?]);
-            let update = |old: &Value, was: &Message, now: &Message| {
-                Ok(vec![update_message(ANTHROPIC, old, was, now, &ROLES)?])
-            };
-            let messages = patch_messages(&before.messages, rest, write, update)?;
-            v.insert("messages".into(), messages.into());
-        }
-        Ok(())
+        Ok(v)
     }
 
     fn is_response(v: &Value) -> bool {
         v["type"] == "message"
     }
 
-    /// One piece per content block.
-    fn reply(v: &Value) -> Reply {
-        let mut reply = Reply::start(
-            v["id"].as_str().unwrap_or_default(),
-            v["model"].as_str().unwrap_or_default(),
-        );
-        let blocks = v["content"].as_array().into_iter().flatten();
-        for (i, b) in blocks.enumerate() {
-            // A text block with more, such as citations, is other content.
-            let more = |(k, x): (&String, &Value)| k != "type" && k != "text" && says(x);
-            let plain = !b.as_object().into_iter().flatten().any(more);
-            let block = u32::try_from(i).unwrap_or(u32::MAX);
-            reply
-                .content
-                .push(match (b["type"].as_str(), b["text"].as_str()) {
-                    (Some("text"), Some(text)) if plain => Piece::text(block, text),
-                    _ => tool_use(block, b).unwrap_or_else(|| Piece::other(ANTHROPIC, b.clone())),
-                });
+    /// The blocks in the order they came, empty text left out.
+    fn render(whole: &Whole) -> Result<Value, Fault> {
+        check_usage(&whole.usage)?;
+        let mut content: Vec<Value> = Vec::new();
+        // Where each block, by number, is in `content`, and the JSON text of
+        // the input of an event-made block, which is parsed at the end.
+        let mut at: Vec<(u32, usize)> = Vec::new();
+        let mut input: Vec<(usize, String)> = Vec::new();
+        // The fields of blocks that come next.
+        let mut fields: Vec<(u32, Map<String, Value>)> = Vec::new();
+        let mut stop = StopFields::default();
+        for item in &whole.items {
+            match item {
+                Item::Block(part) => {
+                    let block = match &part.kind {
+                        Block::Text if part.text.is_empty() => continue,
+                        Block::Text => json!({ "type": "text", "text": part.text }),
+                        Block::Reasoning => json!({ "type": "thinking", "thinking": part.text }),
+                        Block::ToolCall { id, name } => {
+                            let input =
+                                arguments_json(&part.text).map_err(|_| unwritable_content())?;
+                            json!({ "type": "tool_use", "id": id, "name": name, "input": input })
+                        }
+                        _ => return Err(unwritable_content()),
+                    };
+                    let mut block = block;
+                    if let Some(i) = fields.iter().position(|(b, _)| *b == part.block) {
+                        merge_fields(&mut block, &fields.remove(i).1);
+                    }
+                    at.push((part.block, content.len()));
+                    content.push(block);
+                }
+                Item::Other(format, raw) if **format == *ANTHROPIC && fields_of(raw).is_some() => {
+                    fields.extend(fields_of(raw).map(|(b, f)| (b, f.clone())));
+                }
+                Item::Other(format, raw) if **format == *ANTHROPIC => {
+                    let place = raw["index"]
+                        .as_u64()
+                        .and_then(|i| u32::try_from(i).ok())
+                        .and_then(|i| at.iter().find(|(b, _)| *b == i))
+                        .map(|(_, place)| *place);
+                    match (raw["type"].as_str(), place) {
+                        (Some("content_block_start"), _) => {
+                            let index = raw["index"].as_u64().and_then(|i| u32::try_from(i).ok());
+                            at.extend(index.map(|i| (i, content.len())));
+                            content.push(raw["content_block"].clone());
+                        }
+                        (Some("content_block_stop" | "ping"), _) => {}
+                        (Some("message_delta"), _) => stop.add(raw),
+                        (Some("content_block_delta"), Some(place)) => {
+                            let delta = &raw["delta"];
+                            match delta["type"].as_str() {
+                                Some("signature_delta") => {
+                                    content[place]["signature"] = delta["signature"].clone();
+                                }
+                                Some("citations_delta") => {
+                                    let cites = &mut content[place]["citations"];
+                                    if !cites.is_array() {
+                                        *cites = json!([]);
+                                    }
+                                    if let Some(cites) = cites.as_array_mut() {
+                                        cites.push(delta["citation"].clone());
+                                    }
+                                }
+                                Some("input_json_delta") => {
+                                    let json = delta["partial_json"].as_str().unwrap_or_default();
+                                    match input.iter_mut().find(|(p, _)| *p == place) {
+                                        Some((_, text)) => text.push_str(json),
+                                        None => input.push((place, json.to_owned())),
+                                    }
+                                }
+                                _ => return Err(unwritable_content()),
+                            }
+                        }
+                        _ => return Err(unwritable_content()),
+                    }
+                }
+                Item::Other(format, raw) if is_inert(format, raw) => {}
+                Item::Other(..) => return Err(unwritable_content()),
+            }
         }
-        reply.finish = v["stop_reason"].as_str().map(|r| FINISH.finish(r));
-        reply
-    }
-
-    fn usage(v: &Value) -> Usage {
-        usage_of(&v["usage"])
-    }
-
-    /// The inverse of [`usage_of`].
-    fn usage_body(u: &Usage) -> Value {
-        let get = |unit| u.get(unit).unwrap_or_default();
-        let cached = get(units::CACHED_INPUT_TOKENS);
-        let written = get(units::CACHE_WRITE_INPUT_TOKENS);
-        let mut body = json!({
-            "input_tokens": (get(units::INPUT_TOKENS) - cached - written) as u64,
-            "output_tokens": get(units::OUTPUT_TOKENS) as u64,
-        });
-        if cached > 0.0 {
-            body["cache_read_input_tokens"] = json!(cached as u64);
+        for (place, text) in input {
+            content[place]["input"] = arguments_json(&text).map_err(|_| unwritable_content())?;
         }
-        if written > 0.0 {
-            body["cache_creation_input_tokens"] = json!(written as u64);
-        }
-        body
-    }
-
-    fn patch_usage(
-        v: &mut Value,
-        total: &Usage,
-        said: &Usage,
-        edited: &Usage,
-    ) -> Result<(), Fault> {
-        check_usage(total)?;
-        let path = match v["type"].as_str() {
-            Some("message_start") => "/message/usage",
-            _ => "/usage",
-        };
-        let u = v
-            .pointer_mut(path)
-            .filter(|u| u.is_object())
-            .ok_or_else(|| unpatchable("this response has no place for edited usage"))?;
-        let changed = |unit| said.get(unit) != edited.get(unit);
-        let cached = total.get(units::CACHED_INPUT_TOKENS).unwrap_or_default();
-        let written = total
-            .get(units::CACHE_WRITE_INPUT_TOKENS)
+        let finish = whole.finish.as_ref().unwrap_or(&Finish::Stop);
+        let (id, model) = whole
+            .start
+            .as_ref()
+            .map(|s| (s.id.as_str(), s.model.as_str()))
             .unwrap_or_default();
-        let input = total.get(units::INPUT_TOKENS).unwrap_or_default();
-        if u.get("input_tokens").is_some()
-            || changed(units::INPUT_TOKENS)
-            || changed(units::CACHED_INPUT_TOKENS)
-            || changed(units::CACHE_WRITE_INPUT_TOKENS)
-        {
-            u["input_tokens"] = json!((input - cached - written) as u64);
-        }
-        if u.get("output_tokens").is_some() || changed(units::OUTPUT_TOKENS) {
-            u["output_tokens"] = json!(total.get(units::OUTPUT_TOKENS).unwrap_or_default() as u64);
-        }
-        for (unit, field, amount) in [
-            (
-                units::CACHED_INPUT_TOKENS,
-                "cache_read_input_tokens",
-                cached,
-            ),
-            (
-                units::CACHE_WRITE_INPUT_TOKENS,
-                "cache_creation_input_tokens",
-                written,
-            ),
-        ] {
-            if u.get(field).is_some() || changed(unit) {
-                u[field] = json!(amount as u64);
-            }
-        }
-        Ok(())
-    }
-
-    fn render(so_far: &SoFar) -> Result<Value, Fault> {
-        check_usage(&so_far.usage)?;
-        let calls = so_far.calls.anthropic()?;
-        let content: Vec<Value> = so_far
-            .encounters
-            .iter()
-            .map(|entry| match entry {
-                Encounter::Text(block) => json!({"type": "text", "text": so_far.text[block]}),
-                Encounter::Call(index) => calls[*index].clone(),
-            })
-            .collect();
-        let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
-        let (id, model) = so_far.start.clone().unwrap_or_default();
-        Ok(json!({
-            "id": id,
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": content,
-            "stop_reason": FINISH.reason(finish)?,
-            "stop_sequence": null,
-            "usage": Self::usage_body(&so_far.usage),
-        }))
-    }
-
-    /// Rebuilds the content, one block per piece: the provider's text block
-    /// of that number with the text put in, else a new one; other content
-    /// as it came.
-    fn put(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
-        if let Some(Start { id, model, .. }) = &reply.start {
-            replace(v, "/id", id.as_str());
-            replace(v, "/model", model.as_str());
-        }
-        if let Some(f) = &reply.finish {
-            FINISH.rewrite(v, "/stop_reason", f)?;
-        }
-        let old = v["content"].take();
-        let mut content = Vec::new();
-        for piece in &reply.content {
-            match piece {
-                Piece::Text { block, text, .. } => {
-                    let mut b = old
-                        .get(*block as usize)
-                        .cloned()
-                        .filter(|b| b["type"] == "text");
-                    let b = b.get_or_insert_with(|| json!({ "type": "text" }));
-                    b["text"] = text.as_str().into();
-                    content.push(b.clone());
-                }
-                Piece::ToolCall {
-                    call,
-                    id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    let old = old.get(*call as usize).filter(|b| b["type"] == "tool_use");
-                    let mut b = old
-                        .cloned()
-                        .unwrap_or_else(|| json!({ "type": "tool_use" }));
-                    if let Some(id) = id {
-                        b["id"] = id.as_str().into();
-                    }
-                    if let Some(name) = name {
-                        b["name"] = name.as_str().into();
-                    }
-                    b["input"] = arguments_json(arguments).map_err(|_| unwritable_content())?;
-                    content.push(b);
-                }
-                Piece::Other { raw, .. } => content.push((**raw).clone()),
-                _ => return Err(unwritable_content()),
-            }
-        }
-        v["content"] = content.into();
-        Ok(())
+        let mut body = Map::new();
+        body.insert("id".into(), id.into());
+        body.insert("type".into(), "message".into());
+        body.insert("role".into(), "assistant".into());
+        body.insert("model".into(), model.into());
+        body.extend(own_fields(whole.start.as_ref()));
+        body.insert("content".into(), content.into());
+        body.insert("stop_reason".into(), stop.reason(finish)?.into());
+        let sequence = stop.delta.get("stop_sequence").cloned();
+        body.insert("stop_sequence".into(), sequence.unwrap_or(Value::Null));
+        body.insert("usage".into(), usage_body(&whole.usage, &stop.usage));
+        body.extend(stop.top);
+        Ok(body.into())
     }
 
     fn error_body(fault: &Fault) -> Value {
@@ -621,6 +526,86 @@ impl Wire for AnthropicMessages {
             json!({ "type": respan_gateway_http::error_code(fault), "message": fault.message() });
         json!({ "type": "error", "error": merge_details(error, fault) })
     }
+}
+
+/// The start's own fields, if they are in this format.
+fn own_fields(start: Option<&Start>) -> Map<String, Value> {
+    let start = start.filter(|s| s.extra.format.as_deref() == Some(ANTHROPIC));
+    start.map(|s| s.extra.fields.clone()).unwrap_or_default()
+}
+
+/// What a `message_delta` [`Reply::Other`] says beyond the finish and usage:
+/// fields of its `delta`, such as the stop sequence, and its own.
+#[derive(Debug, Default)]
+struct StopFields {
+    delta: Map<String, Value>,
+    top: Map<String, Value>,
+    /// The usage fields that have no unit, such as the cache breakdown.
+    usage: Map<String, Value>,
+}
+
+impl StopFields {
+    /// The reason to write for `finish`: a stop that hit a sequence says so.
+    fn reason<'a>(&self, finish: &'a Finish) -> Result<&'a str, Fault> {
+        match (finish, self.delta.get("stop_sequence")) {
+            (Finish::Stop, Some(Value::String(_))) => Ok("stop_sequence"),
+            _ => FINISH.reason(finish),
+        }
+    }
+
+    fn add(&mut self, raw: &Value) {
+        for (key, value) in raw.as_object().into_iter().flatten() {
+            match (key.as_str(), value.as_object()) {
+                ("type", _) => {}
+                ("usage", Some(usage)) => {
+                    let mut all = Value::Object(std::mem::take(&mut self.usage));
+                    merge_fields(&mut all, usage);
+                    if let Value::Object(all) = all {
+                        self.usage = all;
+                    }
+                }
+                ("delta", Some(delta)) => self.delta.extend(delta.clone()),
+                _ => _ = self.top.insert(key.clone(), value.clone()),
+            }
+        }
+    }
+}
+
+/// Usage as this format reports it: the cache reads and writes beside the
+/// input they are part of, and reasoning as `thinking_tokens`.
+fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
+    let get = |unit| u.get(unit).unwrap_or_default();
+    let cached = get(units::CACHED_INPUT_TOKENS);
+    let written = get(units::CACHE_WRITE_INPUT_TOKENS);
+    let mut body = json!({
+        "input_tokens": (get(units::INPUT_TOKENS) - cached - written) as u64,
+        "output_tokens": get(units::OUTPUT_TOKENS) as u64,
+    });
+    if cached > 0.0 {
+        body["cache_read_input_tokens"] = json!(cached as u64);
+    }
+    if written > 0.0 {
+        body["cache_creation_input_tokens"] = json!(written as u64);
+    }
+    let reasoning = get(units::REASONING_TOKENS);
+    if reasoning > 0.0 {
+        body["output_tokens_details"] = json!({ "thinking_tokens": reasoning as u64 });
+    }
+    merge_fields(&mut body, extra);
+    body
+}
+
+/// What a usage object says that has no unit: the cache breakdown, the
+/// service tier, and details beside the thinking count.
+fn extra_usage(u: &Value) -> Map<String, Value> {
+    let known = [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ];
+    let details: [(&str, &[&str]); 1] = [("output_tokens_details", &["thinking_tokens"])];
+    usage_extra(u, &known, &details)
 }
 
 fn check_usage(usage: &Usage) -> Result<(), Fault> {
@@ -631,6 +616,7 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
             units::OUTPUT_TOKENS,
             units::CACHED_INPUT_TOKENS,
             units::CACHE_WRITE_INPUT_TOKENS,
+            units::REASONING_TOKENS,
         ],
     )?;
     let input = usage.get(units::INPUT_TOKENS).unwrap_or_default();
@@ -639,120 +625,9 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
         .get(units::CACHE_WRITE_INPUT_TOKENS)
         .unwrap_or_default();
     if cached + written > input || cached + written >= u64::MAX as f64 {
-        return Err(unpatchable("this format cannot represent the edited usage"));
+        return Err(unwritable_usage());
     }
     Ok(())
-}
-
-/// A `tool_use` block numbered `block` as a tool call, if the kind can say
-/// all of it. A stream opens the block with an empty input.
-fn tool_use(block: u32, b: &Value) -> Option<Piece> {
-    if b["type"] != "tool_use" || !only(b, &["type", "id", "name", "input"]) {
-        return None;
-    }
-    let input = b["input"].as_object()?;
-    let arguments = match input.is_empty() {
-        true => String::new(),
-        false => b["input"].to_string(),
-    };
-    Some(Piece::tool_call(
-        block,
-        b["id"].as_str()?,
-        b["name"].as_str()?,
-        arguments,
-    ))
-}
-
-/// An `input_json_delta` of block `block` as the next part of its call's
-/// arguments.
-fn tool_arguments(block: u32, delta: &Value) -> Option<Piece> {
-    if delta["type"] != "input_json_delta" || !only(delta, &["type", "partial_json"]) {
-        return None;
-    }
-    Some(Piece::tool_arguments(
-        block,
-        delta["partial_json"].as_str()?,
-    ))
-}
-
-/// A reply of `piece` alone.
-fn reply_of(piece: Piece) -> Reply {
-    let mut reply = Reply::default();
-    reply.content.push(piece);
-    reply
-}
-
-/// Puts an edited reply back into a stream event.
-fn put_event(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
-    let known = |p: &Piece| {
-        matches!(
-            p,
-            Piece::Text { .. } | Piece::ToolCall { .. } | Piece::Other { .. }
-        )
-    };
-    if !reply.content.iter().all(known) {
-        return Err(unwritable_content());
-    }
-    // A block that opened with text a filter took opens empty.
-    let text = reply
-        .content
-        .iter()
-        .any(|p| matches!(p, Piece::Text { .. }));
-    if v["type"] == "content_block_start" && !text {
-        replace(v, "/content_block/text", "");
-    }
-    if let Some(Start { id, model, .. }) = &reply.start {
-        replace(v, "/message/id", id.as_str());
-        replace(v, "/message/model", model.as_str());
-    }
-    if let Some(f) = &reply.finish {
-        FINISH.rewrite(v, "/delta/stop_reason", f)?;
-    }
-    let starts = v["type"] == "content_block_start";
-    for piece in &reply.content {
-        match piece {
-            Piece::Text { text, .. } => {
-                let at = match starts {
-                    true => "/content_block/text",
-                    false => "/delta/text",
-                };
-                replace(v, at, text.as_str());
-            }
-            Piece::ToolCall {
-                id,
-                name,
-                arguments,
-                ..
-            } if starts => {
-                if let Some(id) = id {
-                    replace(v, "/content_block/id", id.as_str());
-                }
-                if let Some(name) = name {
-                    replace(v, "/content_block/name", name.as_str());
-                }
-                let input = match arguments.is_empty() {
-                    true => json!({}),
-                    false => arguments_json(arguments).map_err(|_| unwritable_content())?,
-                };
-                replace(v, "/content_block/input", input);
-            }
-            Piece::ToolCall { arguments, .. } => {
-                replace(v, "/delta/partial_json", arguments.as_str());
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// The usage snapshot in an Anthropic event, including message_start's
-/// nested message rather than only the top-level delta.
-fn event_usage(v: &Value) -> Usage {
-    match v["type"].as_str() {
-        Some("message_start") => usage_of(&v["message"]["usage"]),
-        Some("message_delta") => usage_of(&v["usage"]),
-        _ => Usage::default(),
-    }
 }
 
 /// Usage totals; [`units::INPUT_TOKENS`] includes the cache reads and
@@ -774,389 +649,459 @@ fn usage_of(u: &Value) -> Usage {
     if let Some(output) = n("output_tokens") {
         usage.add(units::OUTPUT_TOKENS, output);
     }
+    if let Some(thinking) = u["output_tokens_details"]["thinking_tokens"].as_f64() {
+        usage.add(units::REASONING_TOKENS, thinking);
+    }
     usage
 }
 
-impl Reading<AnthropicMessages> {
+/// Decodes events and whole bodies of Anthropic Messages into events, as
+/// the module says.
+#[derive(Debug)]
+pub(crate) struct AnthropicReader {
+    name: Arc<str>,
+    totals: Totals,
+    done: bool,
+    /// The usage fields with no unit that were last said, to say them once.
+    usage_extra: Map<String, Value>,
+    /// The indexes of blocks the kind has no form for: all their events are
+    /// [`Reply::Other`].
+    others: Vec<u32>,
+}
+
+impl Default for AnthropicReader {
+    fn default() -> Self {
+        Self {
+            name: Arc::from(ANTHROPIC),
+            totals: Totals::default(),
+            done: false,
+            usage_extra: Map::new(),
+            others: Vec::new(),
+        }
+    }
+}
+
+/// The type of an [`Reply::Other`] that carries the fields of a block's
+/// start: not an event of the wire, but of this format's words.
+pub(crate) const BLOCK_FIELDS: &str = "content_block_fields";
+
+/// The fields an `Other` of [`BLOCK_FIELDS`] carries for block `block`.
+fn fields_of(raw: &Value) -> Option<(u32, &Map<String, Value>)> {
+    let block = u32::try_from(raw["index"].as_u64()?).ok()?;
+    (raw["type"] == BLOCK_FIELDS).then_some(())?;
+    Some((block, raw["fields"].as_object()?))
+}
+
+/// A block's event, as the stream says it, for what the kind has no form for.
+fn event_of(kind: &str, index: u32, fields: Value) -> Value {
+    let mut v = json!({ "type": kind, "index": index });
+    if let (Some(v), Some(fields)) = (v.as_object_mut(), fields.as_object()) {
+        v.extend(fields.clone());
+    }
+    v
+}
+
+impl AnthropicReader {
+    fn other(&self, v: Value, out: &mut Vec<Reply>) {
+        out.push(Reply::other(self.name.clone(), v));
+    }
+
+    /// The events of a message: its start and usage so far.
+    fn message(&mut self, m: &Value, out: &mut Vec<Reply>) {
+        let known = [
+            "id",
+            "model",
+            "type",
+            "role",
+            "content",
+            "usage",
+            "stop_reason",
+            "stop_sequence",
+        ];
+        let mut start = Start::new(
+            m["id"].as_str().unwrap_or_default(),
+            m["model"].as_str().unwrap_or_default(),
+        );
+        start.extra = extra_of(ANTHROPIC, unsupported_fields(m, &known, &[]));
+        out.push(Reply::Start(start));
+        let usage = self.totals.increment(&usage_of(&m["usage"]));
+        if !usage.is_empty() {
+            out.push(Reply::Usage(usage));
+        }
+        self.usage_other(&m["usage"], out);
+    }
+
+    /// The fields of the usage object `u` that have no unit, as one `Other`
+    /// that carries them in a `message_delta`'s usage.
+    fn usage_other(&mut self, u: &Value, out: &mut Vec<Reply>) {
+        let extra = extra_usage(u);
+        if !extra.is_empty() && extra != self.usage_extra {
+            let event = json!({ "type": "message_delta", "delta": {}, "usage": extra });
+            self.other(event, out);
+            self.usage_extra = extra;
+        }
+    }
+
+    /// The events that open block `block`, `b`, with its first content; a
+    /// block of a kind the kind has no form for is one `Other` of `event`.
+    fn open(&mut self, block: u32, b: &Value, event: Value, out: &mut Vec<Reply>) {
+        let text = || b["text"].as_str().filter(|t| !t.is_empty());
+        match b["type"].as_str() {
+            Some("text") => {
+                self.fields(block, b, &["type", "text"], out);
+                out.push(Reply::block_start(block, Block::Text));
+                out.extend(text().map(|t| Reply::delta(block, t)));
+            }
+            Some("tool_use") => {
+                let call = b["id"].as_str().zip(b["name"].as_str());
+                let input = b["input"].as_object().filter(|_| call.is_some());
+                let (Some((id, name)), Some(input)) = (call, input) else {
+                    return self.opaque(block, event, out);
+                };
+                let kind = Block::ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                };
+                self.fields(block, b, &["type", "id", "name", "input"], out);
+                out.push(Reply::block_start(block, kind));
+                if !input.is_empty() {
+                    out.push(Reply::delta(block, b["input"].to_string()));
+                }
+            }
+            Some("thinking") => {
+                self.fields(block, b, &["type", "thinking", "signature"], out);
+                out.push(Reply::block_start(block, Block::Reasoning));
+                let thinking = b["thinking"].as_str().filter(|t| !t.is_empty());
+                out.extend(thinking.map(|t| Reply::delta(block, t)));
+                if says(&b["signature"]) {
+                    let delta = json!({ "type": "signature_delta", "signature": b["signature"] });
+                    self.other(
+                        event_of("content_block_delta", block, json!({ "delta": delta })),
+                        out,
+                    );
+                }
+            }
+            _ => self.opaque(block, event, out),
+        }
+    }
+
+    /// The fields of block `b` the kind has no place for, beyond its `known`
+    /// ones, as one `Other` before the block opens, which the encoder merges
+    /// into the block's start.
+    fn fields(&self, block: u32, b: &Value, known: &[&str], out: &mut Vec<Reply>) {
+        let rest = b.as_object().into_iter().flatten();
+        let rest: Map<String, Value> = rest
+            // Kept even when null or empty: an unknown field's presence is
+            // part of what its format said.
+            .filter(|(k, _)| !known.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !rest.is_empty() {
+            let event = json!({ "type": BLOCK_FIELDS, "index": block, "fields": rest });
+            self.other(event, out);
+        }
+    }
+
+    fn opaque(&mut self, block: u32, event: Value, out: &mut Vec<Reply>) {
+        self.others.push(block);
+        self.other(event, out);
+    }
+
+    /// What a `message_delta` says beyond the finish and usage, as one
+    /// `Other`, if it says anything: `delta` is its `delta` and `top` its own
+    /// fields.
+    fn stop_fields(&self, delta: &Value, top: &Value, out: &mut Vec<Reply>) {
+        let delta: Map<String, Value> = delta
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, v)| *k != "stop_reason" && says(v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let top = top.as_object().into_iter().flatten();
+        let top = top.filter(|(k, v)| !["type", "delta", "usage"].contains(&k.as_str()) && says(v));
+        let mut event = Map::new();
+        event.insert("type".into(), "message_delta".into());
+        event.insert("delta".into(), delta.clone().into());
+        event.extend(top.map(|(k, v)| (k.clone(), v.clone())));
+        if !delta.is_empty() || event.len() > 2 {
+            self.other(event.into(), out);
+        }
+    }
+
+    fn finish(&self, reason: &Value, out: &mut Vec<Reply>) {
+        let finish = reason.as_str().map(|r| FINISH.finish(r));
+        out.extend(finish.map(Reply::finished));
+    }
+}
+
+impl Reader for AnthropicReader {
     fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
         if self.done {
             return Ok(());
         }
         let Some(v) = event_json(&raw) else {
-            out.push(unreadable_event(&self.name, raw));
+            unreadable_event(&self.name, &raw, out);
             return Ok(());
         };
         if says_error(&v) || v["type"] == "error" {
             return Err(error_event(&self.name, &raw, &v));
         }
-        if v["type"] == "message_stop" {
-            self.done = true;
-            return Ok(());
+        let block = v["index"]
+            .as_u64()
+            .and_then(|i| u32::try_from(i).ok())
+            .unwrap_or(0);
+        let opaque = self.others.contains(&block);
+        match v["type"].as_str() {
+            Some("message_start") => self.message(&v["message"], out),
+            Some("content_block_start") => self.open(block, &v["content_block"], v.clone(), out),
+            Some("content_block_delta") if !opaque => {
+                let delta = &v["delta"];
+                let text = |key: &str| delta[key].as_str().unwrap_or_default();
+                match delta["type"].as_str() {
+                    Some("text_delta") => out.push(Reply::delta(block, text("text"))),
+                    Some("input_json_delta") => out.push(Reply::delta(block, text("partial_json"))),
+                    Some("thinking_delta") => out.push(Reply::delta(block, text("thinking"))),
+                    _ => self.other(v, out),
+                }
+            }
+            Some("content_block_stop") if !opaque => out.push(Reply::block_end(block)),
+            Some("message_delta") => {
+                let usage = self.totals.increment(&usage_of(&v["usage"]));
+                if !usage.is_empty() {
+                    out.push(Reply::Usage(usage));
+                }
+                self.usage_other(&v["usage"], out);
+                self.stop_fields(&v["delta"], &v, out);
+                self.finish(&v["delta"]["stop_reason"], out);
+            }
+            Some("message_stop") => self.done = true,
+            _ => self.other(v, out),
         }
-        let mut reply = event_reply(&v);
-        reply.usage = self.totals.increment(&event_usage(&v));
-        out.push(reply.came(&self.name, raw));
         Ok(())
     }
 
     fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-        self.ended()
+        ended(self.done)
     }
-}
 
-/// What a stream event says: nothing for a ping, a block's end or an empty
-/// text block's start.
-fn event_reply(v: &Value) -> Reply {
-    let block = v["index"]
-        .as_u64()
-        .and_then(|i| u32::try_from(i).ok())
-        .unwrap_or(0);
-    match v["type"].as_str() {
-        Some("message_start") => {
-            let message = &v["message"];
-            let id = message["id"].as_str().unwrap_or_default();
-            Reply::start(id, message["model"].as_str().unwrap_or_default())
-        }
-        Some("content_block_start") => {
-            let content = &v["content_block"];
-            match (content["type"].as_str(), content["text"].as_str()) {
-                (Some("text"), None | Some("")) => Reply::default(),
-                (Some("text"), Some(text)) => Reply::text(block, text),
-                _ => tool_use(block, content)
-                    .map_or_else(|| Reply::other(ANTHROPIC, content.clone()), reply_of),
-            }
-        }
-        Some("content_block_delta") => {
-            let delta = &v["delta"];
-            match delta["type"].as_str() {
-                Some("text_delta") => {
-                    Reply::text(block, delta["text"].as_str().unwrap_or_default())
+    fn body(&mut self, v: &Value, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.message(v, out);
+        for (at, b) in v["content"].as_array().into_iter().flatten().enumerate() {
+            let block = u32::try_from(at).unwrap_or(u32::MAX);
+            let start = event_of("content_block_start", block, json!({ "content_block": b }));
+            let before = out.len();
+            self.open(block, b, start, out);
+            let opaque = self.others.contains(&block);
+            let stop = match opaque {
+                true => event_of("content_block_stop", block, json!({})),
+                false => {
+                    out.push(Reply::block_end(block));
+                    continue;
                 }
-                _ => tool_arguments(block, delta)
-                    .map_or_else(|| Reply::other(ANTHROPIC, delta.clone()), reply_of),
-            }
+            };
+            debug_assert!(out.len() > before);
+            self.other(stop, out);
         }
-        Some("message_delta") => {
-            let finish = v.pointer("/delta/stop_reason").and_then(Value::as_str);
-            let finish = finish.map(|f| FINISH.finish(f));
-            finish.map_or_else(Reply::default, Reply::finished)
-        }
-        Some("ping" | "content_block_stop") | None => Reply::default(),
-        // An event type this format does not know may carry content.
-        Some(_) => Reply::other(ANTHROPIC, v.clone()),
+        self.stop_fields(
+            &json!({ "stop_sequence": v["stop_sequence"] }),
+            &json!({}),
+            out,
+        );
+        self.finish(&v["stop_reason"], out);
+        self.done = true;
+        Ok(())
     }
 }
 
-/// Writes Anthropic events: the provider's as they came, with edits
-/// written in, and others anew.
+/// Writes events as Anthropic's stream: `message_start` at the first need,
+/// each block's events, and at the end `message_delta` and `message_stop`.
+/// Blocks are written one at a time: one that opens while another is open
+/// waits, and goes out when the open one ends.
 #[derive(Debug, Default)]
 struct EventStream {
-    so_far: SoFar,
-    /// Earlier edits may make the provider's later cumulative snapshots stale.
-    usage_changed: bool,
-    /// Whether `message_start` is written, at the first content.
-    started: bool,
-    /// The open block and its index, numbered in the order blocks open: the
-    /// number of its text, none for a tool call.
-    open: Option<(Option<u32>, u32)>,
-    opened: u32,
-    /// The tool call blocks not yet stopped, by the number their maker
-    /// gave the call.
-    tools: Vec<(u32, u32)>,
-    /// Tool calls that started while a tool block was open, by number, with
-    /// their id, name and arguments so far.
-    queued: Vec<(u32, String, String, String)>,
-    /// The provider's open text block and its stop, kept back until the
-    /// next event so released text can still go in.
-    provider_open: Option<(u32, Option<Bytes>)>,
-    /// Text for a block the provider has not opened: it goes in when it
-    /// opens, or else into a new block at the end.
-    waiting: Vec<(u32, String)>,
-    /// The provider's events from its terminal `message_delta` on.
-    held: Option<BytesMut>,
-    /// The provider's events before its `message_start`, or that say
-    /// nothing after a stop kept back: relayed once that goes out.
-    later: Vec<Bytes>,
-    /// Stops of the provider's blocks not yet opened, waiting for them.
-    parked: Vec<(u32, Bytes)>,
+    start: Option<Start>,
+    began: bool,
+    usage: Usage,
+    finish: Option<Finish>,
+    stop: StopFields,
+    blocks: Vec<Slot>,
+    /// The block open on the wire.
+    current: Option<u32>,
+    /// The blocks waiting to open, in order.
+    waiting: Vec<u32>,
+    /// The index the next block takes.
+    next: u32,
+    /// The fields of blocks that have not opened, by block.
+    fields: Vec<(u32, Map<String, Value>)>,
+    gate: Gate,
+}
+
+/// A block, by number, as the stream has it so far.
+#[derive(Debug)]
+struct Slot {
+    block: u32,
+    kind: Block,
+    /// Its index once it is open on the wire.
+    index: Option<u32>,
+    /// What came for it while it waited.
+    held: String,
+    ended: bool,
 }
 
 impl EventStream {
-    fn new(relayed: bool) -> Self {
-        let so_far = SoFar {
-            relayed,
-            ..SoFar::default()
-        };
-        Self {
-            so_far,
-            ..Self::default()
-        }
-    }
-
     /// Writes `message_start` once.
-    fn open(&mut self, out: &mut BytesMut) {
-        if std::mem::replace(&mut self.started, true) {
+    fn begin(&mut self, out: &mut BytesMut) {
+        if std::mem::replace(&mut self.began, true) {
             return;
         }
-        let (id, model) = self.so_far.start.clone().unwrap_or_default();
-        let message = json!({
-            "id": id,
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [],
-            "stop_reason": null,
-            "stop_sequence": null,
-            // What is known so far.
-            "usage": AnthropicMessages::usage_body(&self.so_far.usage),
-        });
+        let (id, model) = self
+            .start
+            .as_ref()
+            .map(|s| (s.id.as_str(), s.model.as_str()))
+            .unwrap_or_default();
+        let mut message = Map::new();
+        message.insert("id".into(), id.into());
+        message.insert("type".into(), "message".into());
+        message.insert("role".into(), "assistant".into());
+        message.insert("model".into(), model.into());
+        message.extend(own_fields(self.start.as_ref()));
+        message.insert("content".into(), json!([]));
+        message.insert("stop_reason".into(), Value::Null);
+        message.insert("stop_sequence".into(), Value::Null);
+        // What is known so far.
+        message.insert("usage".into(), usage_body(&self.usage, &Map::new()));
         emit(out, json!({ "type": "message_start", "message": message }));
-        self.relay_later(out);
     }
 
-    fn relay_later(&mut self, out: &mut BytesMut) {
-        for raw in std::mem::take(&mut self.later) {
-            self.relay(&raw, out);
-        }
+    fn find(&mut self, block: u32) -> Result<&mut Slot, Fault> {
+        let found = self.blocks.iter_mut().find(|b| b.block == block);
+        found.ok_or_else(unwritable_content)
     }
 
-    /// Closes the provider's block, if its stop was kept back.
-    fn close_provider_block(&mut self, out: &mut BytesMut) {
-        if let Some((_, Some(stop))) = self.provider_open.take_if(|(_, stop)| stop.is_some()) {
-            out.extend_from_slice(&stop);
-            self.relay_later(out);
-        }
-    }
-
-    /// Stops the open text block or tool block, then writes each queued
-    /// tool call whole, one block after another.
-    fn close_block(&mut self, out: &mut BytesMut) {
-        let text = self.open.take().filter(|(block, _)| block.is_some());
-        let tools = std::mem::take(&mut self.tools);
-        let all = text
-            .into_iter()
-            .map(|(_, i)| i)
-            .chain(tools.iter().map(|t| t.1));
-        for index in all {
-            emit(out, json!({ "type": "content_block_stop", "index": index }));
-        }
-        for (_, id, name, arguments) in std::mem::take(&mut self.queued) {
-            let index = self.start_tool(&id, &name, out);
-            delta_json(index, &arguments, out);
-            emit(out, json!({ "type": "content_block_stop", "index": index }));
-        }
-    }
-
-    /// Opens a tool block at the next index.
-    fn start_tool(&mut self, id: &str, name: &str, out: &mut BytesMut) -> u32 {
-        let index = self.opened;
-        self.opened += 1;
-        let block = json!({ "type": "tool_use", "id": id, "name": name, "input": {} });
-        let start =
-            json!({ "type": "content_block_start", "index": index, "content_block": block });
-        emit(out, start);
-        index
-    }
-
-    /// Text of `block`, opening a new block at the next index if needed.
-    fn text(&mut self, block: u32, text: &str, out: &mut BytesMut) {
-        let index = match self.open {
-            Some((open, index)) if open == Some(block) => index,
-            _ => {
-                self.close_block(out);
-                let index = self.opened;
-                self.opened += 1;
-                self.open = Some((Some(block), index));
-                let start = json!({
-                    "type": "content_block_start",
-                    "index": index,
-                    "content_block": { "type": "text", "text": "" },
-                });
-                emit(out, start);
-                index
+    /// Opens a block on the wire, with what it held while it waited.
+    fn open_wire(&mut self, block: u32, out: &mut BytesMut) -> Result<(), Fault> {
+        let index = self.next;
+        self.next += 1;
+        let wb = self.find(block)?;
+        wb.index = Some(index);
+        let content = match &wb.kind {
+            Block::Text => json!({ "type": "text", "text": "" }),
+            Block::ToolCall { id, name } => {
+                json!({ "type": "tool_use", "id": id, "name": name, "input": {} })
             }
+            Block::Reasoning => json!({ "type": "thinking", "thinking": "" }),
+            _ => return Err(unwritable_content()),
         };
-        delta(index, text, out);
+        let (held, kind) = (std::mem::take(&mut wb.held), wb.kind.clone());
+        let mut content = content;
+        if let Some(at) = self.fields.iter().position(|(b, _)| *b == block) {
+            merge_fields(&mut content, &self.fields.remove(at).1);
+        }
+        let start =
+            json!({ "type": "content_block_start", "index": index, "content_block": content });
+        emit(out, start);
+        delta(index, &kind, &held, out);
+        Ok(())
     }
 
-    /// Write a piece of tool call `call`, made by a plugin or another
-    /// format. A block stops before the next starts, so a call that starts
-    /// while a tool block is open, which may still get arguments (OpenAI
-    /// streams parallel calls interleaved), waits with its arguments for
-    /// that block to stop; the open call's arguments go out as they come.
-    fn call(
-        &mut self,
-        call: u32,
-        start: Option<(&str, &str)>,
-        arguments: &str,
-        out: &mut BytesMut,
-    ) -> Result<(), Fault> {
-        let keys = (self.tools.iter().map(|t| t.0)).chain(self.queued.iter().map(|q| q.0));
-        let at = keys.collect::<Vec<_>>().iter().position(|k| *k == call);
-        match (start, at) {
-            (Some((id, name)), None) => {
-                if matches!(self.open, Some((None, _))) {
-                    let queued = (call, id.into(), name.into(), arguments.into());
-                    self.queued.push(queued);
-                    return Ok(());
+    /// Opens the waiting blocks, one after another, as far as each has ended.
+    fn pump(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+        while self.current.is_none() && !self.waiting.is_empty() {
+            let block = self.waiting.remove(0);
+            self.open_wire(block, out)?;
+            let wb = self.find(block)?;
+            match (wb.ended, wb.index) {
+                (true, Some(index)) => {
+                    emit(out, json!({ "type": "content_block_stop", "index": index }))
                 }
-                self.close_block(out);
-                let block = self.start_tool(id, name, out);
-                self.open = Some((None, block));
-                self.tools.push((call, block));
-                delta_json(block, arguments, out);
+                _ => self.current = Some(block),
             }
-            (_, Some(at)) if at < self.tools.len() => {
-                delta_json(self.tools[at].1, arguments, out);
-            }
-            (_, Some(at)) => self.queued[at - self.tools.len()].3.push_str(arguments),
-            (None, None) => return Err(unwritable_content()),
         }
         Ok(())
     }
 
-    /// Relay the provider's event `raw`.
-    fn relay(&mut self, raw: &Bytes, out: &mut BytesMut) {
-        let v = event_json(raw).unwrap_or_default();
-        let name = v["type"].as_str();
-        match name {
-            Some("message_start") => self.started = true,
-            Some("message_delta") if event_reply(&v).finish.is_some() => {
-                _ = self.held.get_or_insert_default();
-            }
-            _ => {}
+    fn open(&mut self, block: u32, kind: &Block, out: &mut BytesMut) -> Result<(), Fault> {
+        if let Some(had) = self.blocks.iter().find(|b| b.block == block) {
+            // A start repeated for a block that is open opens nothing more.
+            return match had.kind == *kind && !had.ended {
+                true => Ok(()),
+                false => Err(unwritable_content()),
+            };
         }
-        if let Some(held) = &mut self.held {
-            return held.extend_from_slice(raw);
-        }
-        // What is no content goes where it came.
-        let quiet = matches!(name, None | Some("ping"));
-        if !self.started && !quiet {
-            return self.later.push(raw.clone());
-        }
-        let index = v["index"].as_u64().and_then(|i| u32::try_from(i).ok());
-        // A released delta goes into its block, before the stop kept back.
-        if let (Some("content_block_delta"), Some((open, Some(_)))) = (name, &self.provider_open)
-            && index == Some(*open)
-        {
-            return out.extend_from_slice(raw);
-        }
-        let no_content = quiet
-            || (name == Some("content_block_start")
-                && v["content_block"]["type"] == "text"
-                && v["content_block"]["text"]
-                    .as_str()
-                    .is_none_or(str::is_empty));
-        if no_content && matches!(self.provider_open, Some((_, Some(_)))) {
-            return self.later.push(raw.clone());
-        }
-        self.close_provider_block(out);
-        match (name, index) {
-            // Its stop is kept back until its next event.
-            (Some("content_block_stop"), Some(i)) if self.provider_open == Some((i, None)) => {
-                self.provider_open = Some((i, Some(raw.clone())));
-            }
-            (Some("content_block_stop"), Some(i)) if i >= self.opened => {
-                self.parked.push((i, raw.clone()));
-            }
-            (Some("content_block_start"), Some(i)) => {
-                out.extend_from_slice(raw);
-                self.opened = self.opened.max(i.saturating_add(1));
-                let stop = self.parked.iter().position(|(block, _)| *block == i);
-                let stop = stop.map(|at| self.parked.remove(at).1);
-                // Written text waiting for this text block goes in first;
-                // a tool block's stop waits too, for released arguments.
-                if v["content_block"]["type"] == "tool_use" {
-                    self.provider_open = Some((i, stop));
-                } else if v["content_block"]["type"] == "text" {
-                    self.provider_open = Some((i, stop));
-                    let now = self
-                        .waiting
-                        .iter()
-                        .take_while(|(block, _)| *block == i)
-                        .count();
-                    for (_, text) in self.waiting.drain(..now) {
-                        delta(i, &text, out);
-                    }
-                } else if let Some(stop) = stop {
-                    out.extend_from_slice(&stop);
-                }
-            }
-            (Some("message_start"), _) => {
-                out.extend_from_slice(raw);
-                self.relay_later(out);
-            }
-            _ => out.extend_from_slice(raw),
-        }
+        self.begin(out);
+        self.blocks.push(Slot {
+            block,
+            kind: kind.clone(),
+            index: None,
+            held: String::new(),
+            ended: false,
+        });
+        self.waiting.push(block);
+        self.pump(out)
     }
 
-    /// Write text the provider did not send, in a new stream or among its
-    /// events; other content is an `Err`.
-    fn write(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
-        for piece in &reply.content {
-            match piece {
-                Piece::Text { text, .. } if text.is_empty() => {}
-                Piece::Text { block, text, .. } => match &self.provider_open {
-                    // Text waits behind waiting text, to keep order.
-                    Some((open, _)) if open == block && self.waiting.is_empty() => {
-                        delta(*block, text, out)
-                    }
-                    _ if self.so_far.relayed => self.waiting.push((*block, text.clone())),
-                    _ => {
-                        self.open(out);
-                        self.text(*block, text, out);
-                    }
-                },
-                // Released arguments go into the provider's tool block, if it
-                // has not stopped.
-                Piece::ToolCall {
-                    call,
-                    id: None,
-                    arguments,
-                    ..
-                } if self.so_far.relayed => match &self.provider_open {
-                    Some((open, _)) if open == call => delta_json(*call, arguments, out),
-                    _ => return Err(held_block()),
-                },
-                // A provider block released has lost its position.
-                _ if self.so_far.relayed => return Err(held_block()),
-                Piece::ToolCall {
-                    call,
-                    id,
-                    name,
-                    arguments,
-                    ..
-                } => {
-                    self.open(out);
-                    self.call(*call, start(id, name), arguments, out)?;
-                }
-                _ => return Err(unwritable_content()),
-            }
+    fn say(&mut self, block: u32, text: &str, out: &mut BytesMut) -> Result<(), Fault> {
+        let wb = self.find(block)?;
+        if wb.ended {
+            return Err(unwritable_content());
         }
+        match (wb.index, text.is_empty()) {
+            (_, true) => {}
+            (Some(index), false) => delta(index, &wb.kind, text, out),
+            (None, false) => wb.held.push_str(text),
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, block: u32, out: &mut BytesMut) -> Result<(), Fault> {
+        let wb = self.find(block)?;
+        if std::mem::replace(&mut wb.ended, true) {
+            return Ok(());
+        }
+        if let Some(index) = wb.index {
+            emit(out, json!({ "type": "content_block_stop", "index": index }));
+            self.current = None;
+            self.pump(out)?;
+        }
+        Ok(())
+    }
+
+    /// Ends every block, then writes the terminal `message_delta`.
+    fn finish(&mut self, out: &mut BytesMut) -> Result<(), Fault> {
+        self.begin(out);
+        let open: Vec<u32> = self.blocks.iter().map(|b| b.block).collect();
+        for block in open {
+            self.close(block, out)?;
+        }
+        let finish = self.finish.as_ref().unwrap_or(&Finish::Stop);
+        let mut delta = Map::new();
+        delta.insert("stop_reason".into(), self.stop.reason(finish)?.into());
+        delta.insert("stop_sequence".into(), Value::Null);
+        delta.extend(self.stop.delta.clone());
+        let mut v = Map::new();
+        v.insert("type".into(), "message_delta".into());
+        v.insert("delta".into(), delta.into());
+        v.insert("usage".into(), usage_body(&self.usage, &self.stop.usage));
+        v.extend(self.stop.top.clone());
+        emit(out, v.into());
         Ok(())
     }
 }
 
-fn held_block() -> Fault {
-    unpatchable("Anthropic's own blocks other than text cannot be held")
-}
-
-fn delta(index: u32, text: &str, out: &mut BytesMut) {
-    let delta = json!({ "type": "text_delta", "text": text });
-    let v = json!({ "type": "content_block_delta", "index": index, "delta": delta });
-    emit(out, v);
-}
-
-/// Write a piece of a tool call's arguments, if there is one.
-fn delta_json(index: u32, arguments: &str, out: &mut BytesMut) {
-    if arguments.is_empty() {
-        return;
+fn delta(index: u32, kind: &Block, text: &str, out: &mut BytesMut) {
+    let delta = match kind {
+        Block::Text => json!({ "type": "text_delta", "text": text }),
+        Block::ToolCall { .. } => json!({ "type": "input_json_delta", "partial_json": text }),
+        Block::Reasoning => json!({ "type": "thinking_delta", "thinking": text }),
+        _ => return,
+    };
+    if !text.is_empty() {
+        emit(
+            out,
+            json!({ "type": "content_block_delta", "index": index, "delta": delta }),
+        );
     }
-    let delta = json!({ "type": "input_json_delta", "partial_json": arguments });
-    emit(
-        out,
-        json!({ "type": "content_block_delta", "index": index, "delta": delta }),
-    );
 }
 
 /// Write the event `v`, named by its type.
@@ -1164,124 +1109,73 @@ fn emit(out: &mut BytesMut, v: Value) {
     out.extend_from_slice(event(v["type"].as_str(), &v).as_bytes());
 }
 
-/// Whether the event `v` carries `piece`: text in a text block's start or
-/// delta of its index, other content in another block's.
-fn holds(v: &Value, piece: &Piece) -> bool {
-    let block = matches!(
-        v["type"].as_str(),
-        Some("content_block_start" | "content_block_delta")
-    );
-    let text = v["content_block"]["type"] == "text" || v["delta"]["type"] == "text_delta";
-    let index = v["index"].as_u64();
-    match piece {
-        Piece::Text { block: b, .. } => block && text && index == Some(u64::from(*b)),
-        Piece::ToolCall { call, .. } => block && !text && index == Some(u64::from(*call)),
-        Piece::Other { .. } => block && !text,
-        _ => false,
-    }
-}
-
-/// An event `raw`, which said `said`, with its edited reply put back;
-/// `None` if nothing is left, unless it opens a message or a block.
-fn rebuild(
-    raw: &Bytes,
-    said: &Reply,
-    reply: &Reply,
-    before: &Usage,
-) -> Result<Option<Bytes>, Fault> {
-    let mut v = event_json(raw).unwrap_or_default();
-    let opens = matches!(
-        v["type"].as_str(),
-        Some("message_start" | "content_block_start")
-    );
-    let mut after = before.clone();
-    after += &reply.usage;
-    check_usage(&after)?;
-    let reported = event_usage(&v);
-    let different_total = reported.iter().any(|(unit, n)| after.get(&unit) != Some(n));
-    if different_total || usage_step(before, &reported) != reply.usage {
-        AnthropicMessages::patch_usage(&mut v, &after, &said.usage, &reply.usage)?;
-    }
-    // A filter may defer the finish until its end callback. Its usage has
-    // already been counted; retaining the original terminal event would
-    // finish the message before that callback can append content.
-    if !opens
-        && reply.content.is_empty()
-        && reply.finish.is_none()
-        && (said.finish.is_some() || !v["usage"].is_object())
-    {
-        return Ok(None);
-    }
-    put_event(&mut v, reply)?;
-    let mut again = event_reply(&v);
-    again.usage = usage_step(before, &event_usage(&v));
-    reads_back::<AnthropicMessages>(reply, &again)?;
-    Ok(Some(
-        crate::formats::sse::event_as(Some(raw), v["type"].as_str(), &v).into(),
-    ))
-}
-
 impl Encoder<Reply> for EventStream {
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
-        if reply
-            .came_in(ANTHROPIC)
-            .is_some_and(|o| serde_json::from_slice::<Value>(&o.bytes).is_err())
-        {
-            self.so_far.relayed = true;
-        }
-        let before = self.so_far.usage.clone();
-        self.so_far.note(reply);
-        check_usage(&self.so_far.usage)?;
-        let own = reply
-            .came_in(ANTHROPIC)
-            .filter(|o| serde_json::from_slice::<Value>(&o.bytes).is_err());
-        let Some(own) = own else {
-            self.usage_changed |= !reply.usage.is_empty();
-            return self.write(reply, out);
-        };
-        self.usage_changed |= own.said.usage != reply.usage;
-        if own.said == *reply {
-            let v = event_json(&own.bytes).unwrap_or_default();
-            let reported = event_usage(&v);
-            self.usage_changed |= usage_step(&before, &reported) != reply.usage;
-            if self.usage_changed {
-                let different = reported
-                    .iter()
-                    .any(|(unit, n)| self.so_far.usage.get(&unit) != Some(n))
-                    || usage_step(&before, &reported) != reply.usage;
-                if different {
-                    if let Some(bytes) = rebuild(&own.bytes, &own.said, reply, &before)? {
-                        self.relay(&bytes, out);
-                    }
-                    return Ok(());
-                }
-            }
-            self.relay(&own.bytes, out);
-            return Ok(());
-        }
-        // What the event has no place for is written anew around it; only
-        // `message_start` carries a start.
-        let v = event_json(&own.bytes).unwrap_or_default();
-        let (ahead, mut inside, after) =
-            split_around(reply, |p| holds(&v, p), v["type"] == "message_delta");
-        if v["type"] != "message_start" {
-            inside.start = None;
-        }
-        let mut all = BytesMut::new();
-        self.write(&ahead, &mut all)?;
-        if let Some(bytes) = rebuild(&own.bytes, &own.said, &inside, &before)? {
-            self.relay(&bytes, &mut all);
-        }
-        self.write(&after, &mut all)?;
-        out.extend_from_slice(&all);
+        let mut made = BytesMut::new();
+        self.write(reply, &mut made)?;
+        self.gate.pass(reply, &made, out);
         Ok(())
     }
 
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        self.close_provider_block(out);
-        let held = self.held.take();
+        if end.is_ok() {
+            self.gate.release(out);
+        }
+        self.write_end(end, out)
+    }
+}
+
+impl EventStream {
+    fn write(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+        match reply {
+            Reply::Start(start) => _ = self.start.get_or_insert_with(|| start.clone()),
+            Reply::BlockStart { block, kind } => self.open(*block, kind, out)?,
+            Reply::Delta { block, delta } => self.say(*block, delta, out)?,
+            Reply::BlockEnd { block } => self.close(*block, out)?,
+            Reply::Usage(usage) => {
+                self.usage += usage;
+                check_usage(&self.usage)?;
+            }
+            Reply::Finish(finish) => {
+                FINISH.reason(finish)?;
+                self.finish = Some(finish.clone());
+                self.begin(out);
+            }
+            Reply::Other { format, raw } if **format == *ANTHROPIC && fields_of(raw).is_some() => {
+                if let Some((block, fields)) = fields_of(raw) {
+                    self.fields.push((block, fields.clone()));
+                }
+            }
+            Reply::Other { format, raw } if **format == *ANTHROPIC => {
+                self.begin(out);
+                match raw["type"].as_str() {
+                    // Beside the terminal `message_delta`, which carries them.
+                    Some("message_delta") => self.stop.add(raw),
+                    kind => {
+                        // A block this format keeps takes its index.
+                        if kind == Some("content_block_start")
+                            && let Some(i) =
+                                raw["index"].as_u64().and_then(|i| u32::try_from(i).ok())
+                        {
+                            self.next = self.next.max(i.saturating_add(1));
+                        }
+                        emit(out, Value::clone(raw));
+                    }
+                }
+            }
+            Reply::Other { format, raw } if is_inert(format, raw) => {}
+            Reply::Other { .. } => return Err(unwritable_content()),
+            _ => return Err(unwritable_content()),
+        }
+        Ok(())
+    }
+
+    fn write_end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         if let Err(f) = end {
-            out.extend_from_slice(&held.unwrap_or_default());
+            // What the provider finished before it broke off is kept.
+            if self.finish.is_some() {
+                self.finish(out)?;
+            }
             let body = match f.get::<respan_gateway_http::RawReply>().map(|r| r.0.body()) {
                 Some(raw) => String::from_utf8_lossy(raw).into_owned(),
                 None => AnthropicMessages::error_body(f).to_string(),
@@ -1289,23 +1183,7 @@ impl Encoder<Reply> for EventStream {
             out.extend_from_slice(event(Some("error"), &body).as_bytes());
             return Ok(());
         }
-        self.open(out);
-        for (block, text) in std::mem::take(&mut self.waiting) {
-            self.text(block, &text, out);
-        }
-        self.close_block(out);
-        // The provider's message_delta, unless a filter took its finish.
-        match held {
-            Some(held) if !held.is_empty() => out.extend_from_slice(&held),
-            _ => {
-                let finish = self.so_far.finish.as_ref().unwrap_or(&Finish::Stop);
-                let reason = FINISH.reason(finish)?;
-                let delta = json!({ "stop_reason": reason, "stop_sequence": null });
-                let usage = AnthropicMessages::usage_body(&self.so_far.usage);
-                let v = json!({ "type": "message_delta", "delta": delta, "usage": usage });
-                emit(out, v);
-            }
-        }
+        self.finish(out)?;
         emit(out, json!({ "type": "message_stop" }));
         Ok(())
     }
@@ -1313,20 +1191,14 @@ impl Encoder<Reply> for EventStream {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
-    /// The rebuilt event, or empty bytes.
-    fn rebuilt(raw: &Bytes, reply: &Reply) -> Result<Bytes, Fault> {
-        let said = event_reply(&event_json(raw).unwrap_or_default());
-        rebuild(raw, &said, reply, &Usage::default()).map(Option::unwrap_or_default)
-    }
-    use crate::common::patch_request;
-    use crate::conversation::ToolChoice;
+    use crate::common::write_request;
+    use crate::conversation::{Extra, ToolChoice};
 
-    /// The replies of `events`, each decoded apart.
+    /// The events of `events`, each decoded in turn.
     fn decode(events: &[&str]) -> Vec<Reply> {
-        let mut reader = Reading::<AnthropicMessages>::new();
+        let mut reader = AnthropicReader::default();
         let mut out = Vec::new();
         for e in events {
             let _ = reader.event(Bytes::from(e.to_string()), &mut out);
@@ -1334,12 +1206,68 @@ mod tests {
         out
     }
 
-    fn patched(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
-        let before = AnthropicMessages::read(&body);
-        let mut chat = before.clone();
+    /// The events of a whole body.
+    fn decode_body(v: &Value) -> Vec<Reply> {
+        let mut out = Vec::new();
+        AnthropicReader::default()
+            .body(v, &mut out)
+            .expect("a whole response");
+        out
+    }
+
+    /// `replies` as a stream, whole.
+    fn stream_of(replies: &[Reply]) -> Result<String, Fault> {
+        let mut enc = EventStream::default();
+        let mut out = BytesMut::new();
+        for reply in replies {
+            enc.encode(reply, &mut out)?;
+        }
+        enc.end(&Ok(()), &mut out)?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// The JSON of each event of a stream.
+    fn stream_events(stream: &str) -> Vec<Value> {
+        let data = stream
+            .split("\n\n")
+            .filter_map(|e| e.lines().find_map(|l| l.strip_prefix("data: ")));
+        data.filter_map(|d| serde_json::from_str(d).ok()).collect()
+    }
+
+    /// `replies` as a whole body.
+    fn body_of(replies: &[Reply]) -> Result<Value, Fault> {
+        let mut whole = Whole::default();
+        replies.iter().try_for_each(|r| whole.add(r))?;
+        AnthropicMessages::render(&whole)
+    }
+
+    fn call(id: &str, name: &str) -> Block {
+        Block::ToolCall {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    fn usage(unit: &'static str, n: f64) -> Reply {
+        let mut u = Usage::default();
+        u.add(unit, n);
+        Reply::usage(u)
+    }
+
+    fn text_events(block: u32, text: &str) -> Vec<Reply> {
+        vec![
+            Reply::block_start(block, Block::Text),
+            Reply::delta(block, text),
+            Reply::block_end(block),
+        ]
+    }
+
+    /// The client's `body` as the conversation it says, with `edit` made,
+    /// written as a request.
+    fn written(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
+        let mut chat = AnthropicMessages.decode_request(Bytes::from(body.to_string()))?;
         edit(&mut chat);
-        let raw = Bytes::from(body.to_string());
-        Ok(patch_request::<AnthropicMessages>(&raw, &before, &chat)?.into())
+        Ok(write_request::<AnthropicMessages>(&chat)?.into())
     }
 
     #[test]
@@ -1359,9 +1287,10 @@ mod tests {
         ]});
         let chat = AnthropicMessages::read(&body);
         assert_eq!(
-            chat.tools[0].unsupported.get("cache_control"),
+            chat.tools[0].extra.fields.get("cache_control"),
             Some(&marker)
         );
+        assert_eq!(chat.tools[0].extra.format.as_deref(), Some(ANTHROPIC));
         assert_eq!(chat.tool_choice, Some(ToolChoice::Tool("lookup".into())));
         assert_eq!(chat.parallel_tool_calls, Some(false));
         assert_eq!(
@@ -1372,8 +1301,8 @@ mod tests {
                 false
             )]
         );
-        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
-        let edited = patched(body.clone(), |c| {
+        assert_eq!(written(body.clone(), |_| {}).ok(), Some(body.clone()));
+        let edited = written(body.clone(), |c| {
             for part in c.messages.iter_mut().flat_map(|m| &mut m.content) {
                 match part {
                     Content::ToolCall { arguments, .. } => {
@@ -1401,10 +1330,10 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }],
             "stop_sequences": ["x"],
         });
-        let chat = AnthropicMessages::read(&body);
         assert_eq!(
-            AnthropicMessages::write(&chat).ok(),
+            written(body, |_| {}).ok(),
             Some(json!({
+                "model": "claude",
                 "max_tokens": 10,
                 "system": "be brief",
                 "messages": [{ "role": "user", "content": "hi" }],
@@ -1420,11 +1349,11 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }] });
         let chat = AnthropicMessages::read(&body);
         assert_eq!(chat.user.as_deref(), Some("bob@x.io"));
-        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
-        let redacted = patched(body.clone(), |c| c.user = Some("[x]".into()));
+        assert_eq!(written(body.clone(), |_| {}).ok(), Some(body.clone()));
+        let redacted = written(body.clone(), |c| c.user = Some("[x]".into()));
         let metadata = redacted.ok().map(|v| v["metadata"].clone());
         assert_eq!(metadata, Some(json!({ "user_id": "[x]" })));
-        let removed = patched(body, |c| c.user = None);
+        let removed = written(body, |c| c.user = None);
         assert_eq!(removed.ok().map(|v| v.get("metadata").cloned()), Some(None));
     }
 
@@ -1442,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_usage_is_counted_once_and_thinking_is_other() {
+    fn stream_usage_is_counted_once_and_thinking_is_reasoning() {
         let out = decode(&[
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hm\"}}\n\n",
@@ -1450,11 +1379,13 @@ mod tests {
         ]);
         let mut total = Usage::default();
         for r in &out {
-            total += &r.usage;
+            if let Reply::Usage(u) = r {
+                total += u;
+            }
         }
         assert_eq!(total.get(units::INPUT_TOKENS), Some(5.0));
         assert_eq!(total.get(units::OUTPUT_TOKENS), Some(7.0));
-        assert!(matches!(&out[1].content[..], [Piece::Other { .. }]));
+        assert!(out.contains(&Reply::delta(0, "hm")));
     }
 
     #[test]
@@ -1465,23 +1396,33 @@ mod tests {
             "event: ping\ndata: {\"type\":\"ping\"}\n\n",
             ": a comment\n\n",
         ]);
-        let other = |r: &Reply| matches!(&r.content[..], [Piece::Other { .. }]);
-        assert!(other(&out[0]) && other(&out[1]));
-        // What is no content is still a reply, which keeps its bytes (N4).
-        assert!(
-            out[2..]
-                .iter()
-                .all(|r| !r.is_content() && r.came_in(ANTHROPIC).is_some())
+        // A comment says nothing; the others are events of this format.
+        assert_eq!(
+            out,
+            [
+                Reply::other(ANTHROPIC, json!({ "type": "future", "text": "secret" })),
+                Reply::other(ANTHROPIC, "not json"),
+                Reply::other(ANTHROPIC, json!({ "type": "ping" })),
+            ]
         );
+        assert!(out.iter().all(|r| !r.is_content()));
     }
 
     #[test]
     fn text_a_block_opens_with_is_text() {
-        let e = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"Hi \"}}\n\n";
-        assert_eq!(decode(&[e]), [Reply::text(0, "Hi ")]);
-        let raw = Bytes::from_static(e.as_bytes());
-        let edited = rebuilt(&raw, &Reply::text(0, "HI "));
-        assert!(edited.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"text\":\"HI \"")));
+        let out = decode(&[
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"Well, \"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        ]);
+        assert_eq!(
+            out,
+            [
+                Reply::block_start(2, Block::Text),
+                Reply::delta(2, "Well, "),
+                // An empty text opens a block that says nothing yet.
+                Reply::block_start(3, Block::Text),
+            ]
+        );
     }
 
     #[test]
@@ -1490,22 +1431,21 @@ mod tests {
             Message::new(Role::System, "be brief"),
             Message::new(Role::User, "hi"),
         ]);
-        let body = AnthropicMessages::write(&chat).ok();
-        assert_eq!(body.map(|v| v["system"].clone()), Some(json!("be brief")));
-        chat.messages
-            .push(Message::new(Role::System, "now be long"));
-        assert!(AnthropicMessages::write(&chat).is_err());
+        let v = write_request::<AnthropicMessages>(&chat).map(Value::from);
+        let v = v.unwrap_or_default();
+        assert_eq!(v["system"], "be brief");
+        assert_eq!(v["messages"], json!([{ "role": "user", "content": "hi" }]));
+        chat.messages.push(Message::new(Role::System, "later"));
+        assert!(write_request::<AnthropicMessages>(&chat).is_err());
     }
 
     #[test]
     fn a_temperature_above_1_is_refused() {
         let mut chat = Conversation::new([Message::new(Role::User, "hi")]);
         chat.temperature = Some(1.5);
-        let refused = AnthropicMessages::write(&chat);
-        assert!(refused.is_err_and(|f| respan_gateway_http::status(&f).as_u16() == 400));
+        assert!(write_request::<AnthropicMessages>(&chat).is_err());
         chat.temperature = Some(1.0);
-        let body = AnthropicMessages::write(&chat).ok();
-        assert_eq!(body.map(|v| v["temperature"].clone()), Some(json!(1.0)));
+        assert!(write_request::<AnthropicMessages>(&chat).is_ok());
     }
 
     #[test]
@@ -1513,13 +1453,12 @@ mod tests {
         let chat = Conversation::new([
             Message::new(Role::User, "hi"),
             Message::new(Role::Assistant, ""),
-            Message::new(Role::User, ""),
             Message::new(Role::User, "again"),
             Message::new(Role::Assistant, ""),
         ]);
-        let body = AnthropicMessages::write(&chat).ok();
+        let v = write_request::<AnthropicMessages>(&chat).map(Value::from);
         assert_eq!(
-            body.map(|v| v["messages"].clone()),
+            v.map(|v| v["messages"].clone()).ok(),
             Some(json!([
                 { "role": "user", "content": "hi" },
                 { "role": "user", "content": "again" },
@@ -1531,617 +1470,553 @@ mod tests {
     #[test]
     fn a_request_of_only_system_messages_is_refused() {
         let chat = Conversation::new([Message::new(Role::System, "be brief")]);
-        let refused = AnthropicMessages::write(&chat);
-        assert!(refused.is_err_and(|f| f.message().contains("at least one user or assistant")));
+        assert!(write_request::<AnthropicMessages>(&chat).is_err());
     }
 
     #[test]
-    fn an_edit_keeps_a_system_prompt_with_cache_markers() {
-        let system = json!([{ "type": "text", "text": "be brief", "cache_control": { "type": "ephemeral" } }]);
-        let body = json!({
-            "model": "c", "system": system.clone(),
-            "messages": [{ "role": "user", "content": "hi" }],
-        });
-        // Message 0 is the system prompt.
-        let edited = patched(body.clone(), |c| {
-            c.messages[1] = Message::new(Role::User, "HI")
-        });
-        let mut expected = body;
-        expected["messages"][0]["content"] = "HI".into();
-        // An edited body gains no `max_tokens`: only what was edited changes.
-        assert_eq!(edited.ok(), Some(expected));
+    fn a_system_prompt_with_cache_markers_is_written_as_it_is() {
+        let system = json!([
+            { "type": "text", "text": "the repo", "cache_control": { "type": "ephemeral" } },
+            { "type": "text", "text": "be brief" },
+        ]);
+        let body = json!({ "model": "m", "max_tokens": 5, "system": system,
+            "messages": [{ "role": "user", "content": "hi" }] });
+        // Edited elsewhere, it is as it was.
+        let edited = written(body.clone(), |c| c.messages[1].content = vec!["HI".into()]);
+        assert_eq!(edited.map(|v| v["system"].clone()).ok(), Some(system));
+        // A part with a marker is text, with the marker in its own extra.
+        let chat = AnthropicMessages::read(&body);
+        assert!(chat.messages[0].is_plain());
+        let Content::Text { text, extra, .. } = &chat.messages[0].content[0] else {
+            panic!("{:?}", chat.messages[0].content);
+        };
+        assert_eq!(text, "the repo");
+        assert_eq!(
+            extra.fields.get("cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
+        assert_eq!(chat.messages[0].content[1], Content::from("be brief"));
     }
 
     #[test]
     fn a_system_prompt_redacted_beside_an_inserted_one_keeps_its_cache_marker() {
-        let cached =
-            json!({ "type": "text", "text": "SECRET", "cache_control": { "type": "ephemeral" } });
-        let body = json!({
-            "model": "c",
-            "system": [{ "type": "text", "text": "You are Claude Code" }, cached],
-            "messages": [{ "role": "user", "content": "hi" }],
+        let marked =
+            json!({ "type": "text", "text": "key sk-1", "cache_control": { "type": "ephemeral" } });
+        let body = json!({ "model": "m", "max_tokens": 5, "system": [marked],
+            "messages": [{ "role": "user", "content": "hi" }] });
+        let edited = written(body, |c| {
+            c.messages.insert(0, Message::new(Role::System, "first"));
         });
-        let edited = patched(body, |c| {
-            if let Some(Content::Text { text, .. }) = c.messages[0].content.get_mut(1) {
-                *text = "[x]".into();
-            }
-            c.messages.insert(0, Message::new(Role::System, "gw"));
-        });
-        let system = edited.ok().map(|v| v["system"].clone());
         assert_eq!(
-            system,
-            Some(json!([
-                { "type": "text", "text": "gw" },
-                { "type": "text", "text": "You are Claude Code" },
-                { "type": "text", "text": "[x]", "cache_control": { "type": "ephemeral" } },
-            ]))
+            edited.map(|v| v["system"].clone()).ok(),
+            Some(json!([{ "type": "text", "text": "first" }, marked]))
         );
     }
 
     #[test]
     fn an_unchanged_part_keeps_its_marker_beside_an_edit_and_an_append() {
-        let marker = json!({ "type": "ephemeral" });
-        let body = json!({ "model": "c", "messages": [], "system": [
-            { "type": "text", "text": "SECRET a" },
-            { "type": "text", "text": "b", "cache_control": marker },
-        ]});
-        let edited = patched(body, |c| {
-            c.messages[0].content[0] = "[x] a".into();
-            c.messages[0].content.push("gateway note".into());
+        let marked =
+            json!({ "type": "text", "text": "A", "cache_control": { "type": "ephemeral" } });
+        let body = json!({ "model": "m", "max_tokens": 5, "messages": [
+            { "role": "user", "content": [marked, { "type": "text", "text": "B" }] }] });
+        let edited = written(body, |c| {
+            c.messages[0].content[1] = "B2".into();
+            c.messages[0].content.push("C".into());
         });
         assert_eq!(
-            edited.map(|v| v["system"].clone()).ok(),
+            edited.map(|v| v["messages"][0]["content"].clone()).ok(),
             Some(json!([
-                { "type": "text", "text": "[x] a" },
-                { "type": "text", "text": "b", "cache_control": marker },
-                { "type": "text", "text": "gateway note" },
+                marked,
+                { "type": "text", "text": "B2" },
+                { "type": "text", "text": "C" },
             ]))
         );
     }
 
     #[test]
-    fn a_whole_response_decodes_into_a_piece_per_block() {
+    fn a_whole_response_decodes_into_events_per_block() {
         let v = json!({
-            "id": "m", "model": "c", "stop_reason": "tool_use",
+            "id": "m", "type": "message", "role": "assistant", "model": "c",
             "content": [
+                { "type": "thinking", "thinking": "hm", "signature": "sig" },
                 { "type": "text", "text": "ok" },
-                { "type": "tool_use", "id": "t", "name": "f", "input": {} },
+                { "type": "tool_use", "id": "t", "name": "f", "input": { "a": 1 } },
+                { "type": "text", "text": "cited", "citations": [{ "type": "char_location" }] },
             ],
+            "stop_reason": "tool_use", "stop_sequence": null,
+            "usage": { "input_tokens": 2, "output_tokens": 1 },
         });
-        let mut whole = Reply::start("m", "c");
-        whole.content = vec![Piece::text(0, "ok"), Piece::tool_call(1, "t", "f", "")];
-        whole.finish = Some(Finish::ToolUse);
-        assert_eq!(AnthropicMessages::reply(&v), whole);
-        let mut patched = v.clone();
-        let mut edited = AnthropicMessages::reply(&v);
-        edited.content[0] = Piece::text(0, "OK");
-        assert!(AnthropicMessages::put(&mut patched, &edited).is_ok());
-        assert_eq!(patched["content"][0]["text"], "OK");
-        assert_eq!(patched["content"][1]["type"], "tool_use");
-        // Text of a block that is not there is a block of its own.
-        edited.content.push(Piece::text(9, "x"));
-        assert!(AnthropicMessages::put(&mut patched, &edited).is_ok());
+        let events = decode_body(&v);
+        let signature = json!({ "type": "content_block_delta", "index": 0,
+            "delta": { "type": "signature_delta", "signature": "sig" } });
+        let cited = json!({ "type": "content_block_fields", "index": 3,
+            "fields": { "citations": [{ "type": "char_location" }] } });
+        let mut totals = usage(units::INPUT_TOKENS, 2.0);
+        if let Reply::Usage(u) = &mut totals {
+            u.add(units::OUTPUT_TOKENS, 1.0);
+        }
         assert_eq!(
-            patched["content"][2],
-            json!({ "type": "text", "text": "x" })
+            events,
+            [
+                Reply::start("m", "c"),
+                totals,
+                Reply::block_start(0, Block::Reasoning),
+                Reply::delta(0, "hm"),
+                Reply::other(ANTHROPIC, signature),
+                Reply::block_end(0),
+                Reply::block_start(1, Block::Text),
+                Reply::delta(1, "ok"),
+                Reply::block_end(1),
+                Reply::block_start(2, call("t", "f")),
+                Reply::delta(2, "{\"a\":1}"),
+                Reply::block_end(2),
+                // What the kind has no place for comes before the block opens.
+                Reply::other(ANTHROPIC, cited),
+                Reply::block_start(3, Block::Text),
+                Reply::delta(3, "cited"),
+                Reply::block_end(3),
+                Reply::finished(Finish::ToolUse),
+            ]
+        );
+        // Written again, the whole body is what it was.
+        let again = body_of(&events).expect("a body");
+        assert_eq!(again["content"], v["content"]);
+        assert_eq!(again["stop_reason"], "tool_use");
+        assert_eq!(
+            again["usage"],
+            json!({ "input_tokens": 2, "output_tokens": 1 })
         );
     }
 
     #[test]
-    fn an_edited_message_keeps_its_cache_marker() {
-        let cached = json!([{ "type": "text", "text": "key sk-1", "cache_control": { "type": "ephemeral" } }]);
-        let body = json!({ "model": "c", "max_tokens": 5, "messages": [
-            { "role": "user", "content": cached },
-        ]});
-        let edited = patched(body, |c| c.messages[0].content = vec!["key [x]".into()]);
+    fn a_cache_marked_part_is_kept_as_the_format_has_it_beside_edited_text() {
+        let marked =
+            json!({ "type": "text", "text": "the repo", "cache_control": { "type": "ephemeral" } });
+        let body = json!({ "model": "m", "max_tokens": 5, "messages": [
+            { "role": "user", "content": [marked, { "type": "text", "text": "mine" }] }] });
+        let edited = written(body, |c| c.messages[0].content[1] = "MINE".into());
         assert_eq!(
             edited.map(|v| v["messages"][0]["content"].clone()).ok(),
-            Some(
-                json!([{ "type": "text", "text": "key [x]", "cache_control": { "type": "ephemeral" } }])
-            )
+            Some(json!([marked, { "type": "text", "text": "MINE" }]))
         );
     }
 
     #[test]
-    fn edited_text_keeps_the_sse_envelope_and_unedited_bytes() {
-        let raw = Bytes::from_static(b"id: 7\nevent: content_block_delta\nretry: 1500\n: preserve\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"secret\"}}\n\n");
-        let changed =
-            rebuilt(&raw, &Reply::text(0, "public")).expect("rebuild edited Anthropic event");
-        let text = String::from_utf8_lossy(&changed);
-        for line in [
-            "id: 7",
-            "event: content_block_delta",
-            "retry: 1500",
-            ": preserve",
-        ] {
-            assert!(text.contains(line), "{text}");
-        }
-        assert!(
-            text.contains("public") && !text.contains("secret"),
-            "{text}"
-        );
-        let mut encoder = EventStream::new(true);
-        let mut out = BytesMut::new();
-        let start = Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\n");
-        let name = std::sync::Arc::from(ANTHROPIC);
-        encoder
-            .encode(&Reply::start("m", "c").came(&name, start.clone()), &mut out)
-            .expect("relay Anthropic message start");
-        let said = event_reply(&event_json(&raw).expect("parse source Anthropic event"))
-            .came(&name, raw.clone());
-        encoder
-            .encode(&said, &mut out)
-            .expect("relay Anthropic text event");
-        assert_eq!(&out[..], &[&start[..], &raw[..]].concat());
+    fn an_sse_envelope_is_no_part_of_a_response() {
+        let plain = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"secret\"}}\n\n";
+        let wrapped = "id: 7\nevent: content_block_delta\nretry: 1500\n: kept\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"secret\"}}\n\n";
+        assert_eq!(decode(&[plain]), decode(&[wrapped]));
     }
 
     #[test]
-    fn edited_stream_usage_rewrites_nested_start_and_later_totals() {
-        let events = [
-            "id: start\n: keep\nevent: message_start\nretry: 500\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"vendor\":8}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":7,\"vendor\":9}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"input_tokens\":1,\"output_tokens\":7,\"vendor\":10}}\n\n",
-        ];
-        let mut replies = decode(&events);
-        assert_eq!(replies[1].usage.get(units::OUTPUT_TOKENS), Some(6.0));
-        replies[1].usage = Usage::default();
-        replies[1].usage.add(units::OUTPUT_TOKENS, 3.0);
-        let mut encoder = EventStream::new(true);
-        let mut out = BytesMut::new();
-        for reply in &replies {
-            encoder
-                .encode(reply, &mut out)
-                .expect("encode Anthropic event");
-        }
-        encoder
-            .end(&Ok(()), &mut out)
-            .expect("finish Anthropic stream");
-        let text = String::from_utf8_lossy(&out);
-        assert!(text.contains(events[0]), "{text}");
-        assert!(
-            text.contains("\"vendor\":9") && text.contains("\"vendor\":10"),
-            "{text}"
-        );
-        let mut reader = AnthropicMessages.parser(false);
-        let mut again = Vec::new();
-        reader
-            .push(out.freeze(), &mut again)
-            .expect("decode rebuilt Anthropic stream");
+    fn usage_so_far_is_in_message_start_and_the_totals_in_message_delta() {
+        let mut replies = vec![Reply::start("m", "c"), usage(units::INPUT_TOKENS, 4.0)];
+        replies.extend(text_events(0, "hi"));
+        replies.push(usage(units::OUTPUT_TOKENS, 2.0));
+        replies.push(Reply::finished(Finish::Stop));
+        let stream = stream_of(&replies).expect("a stream");
+        let events = stream_events(&stream);
         assert_eq!(
-            again
-                .iter()
-                .map(|r| r.usage.get(units::OUTPUT_TOKENS))
-                .collect::<Vec<_>>(),
-            [Some(1.0), Some(3.0), None]
+            events[0]["message"]["usage"],
+            json!({ "input_tokens": 4, "output_tokens": 0 })
+        );
+        let delta = events.iter().find(|e| e["type"] == "message_delta");
+        assert_eq!(
+            delta.map(|d| d["usage"].clone()),
+            Some(json!({ "input_tokens": 4, "output_tokens": 2 }))
         );
     }
 
     #[test]
-    fn deferred_finish_after_nonterminal_usage_keeps_final_totals() {
-        let events = [
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"output_tokens\":1}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":4,\"vendor\":9}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
-        ];
-        let mut replies = decode(&events);
-        let finish = replies[2].finish.take();
-        let mut encoder = EventStream::new(true);
-        let mut out = BytesMut::new();
-        for reply in &replies {
-            encoder
-                .encode(reply, &mut out)
-                .expect("encode Anthropic event");
-        }
-        let mut footer = Reply::text(0, "footer");
-        footer.finish = finish;
-        encoder
-            .encode(&footer, &mut out)
-            .expect("write deferred finish");
-        encoder
-            .end(&Ok(()), &mut out)
-            .expect("finish Anthropic stream");
-        let text = String::from_utf8_lossy(&out).into_owned();
-        let mut reader = AnthropicMessages.parser(false);
-        let mut again = Vec::new();
-        reader
-            .push(out.freeze(), &mut again)
-            .expect("decode rebuilt Anthropic stream");
-        let total: f64 = again
-            .iter()
-            .filter_map(|r| r.usage.get(units::OUTPUT_TOKENS))
-            .sum();
-        assert_eq!(total, 7.0, "{text}");
-        assert!(
-            again.iter().any(|r| r.finish == Some(Finish::Stop)),
-            "{text}"
-        );
-        assert!(
-            text.contains("footer") && text.contains("\"vendor\":9"),
-            "{text}"
-        );
+    fn a_finish_released_after_usage_keeps_the_final_totals() {
+        let mut replies = vec![Reply::start("m", "c")];
+        replies.extend(text_events(0, "hi"));
+        replies.push(usage(units::OUTPUT_TOKENS, 2.0));
+        replies.push(usage(units::OUTPUT_TOKENS, 3.0));
+        replies.push(Reply::finished(Finish::Length));
+        let stream = stream_of(&replies).expect("a stream");
+        let events = stream_events(&stream);
+        let delta = events.iter().find(|e| e["type"] == "message_delta");
+        let delta = delta.cloned().unwrap_or_default();
+        assert_eq!(delta["usage"]["output_tokens"], 5);
+        assert_eq!(delta["delta"]["stop_reason"], "max_tokens");
     }
 
     #[test]
     fn dropped_usage_does_not_reappear_in_later_totals() {
         let events = [
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"output_tokens\":1}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":1}}\n\n",
             "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":7}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7,\"vendor\":9}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{},\"usage\":{\"output_tokens\":7}}\n\n",
         ];
-        let replies = decode(&events);
-        let mut encoder = EventStream::new(true);
-        let mut out = BytesMut::new();
-        for (index, reply) in replies.iter().enumerate() {
-            if index != 1 {
-                encoder
-                    .encode(reply, &mut out)
-                    .expect("encode Anthropic event");
-            }
-        }
-        encoder
-            .end(&Ok(()), &mut out)
-            .expect("finish Anthropic stream");
-        let text = String::from_utf8_lossy(&out);
-        let mut reader = AnthropicMessages.parser(false);
-        let mut again = Vec::new();
-        reader
-            .push(out.clone().freeze(), &mut again)
-            .expect("decode corrected Anthropic totals");
-        let total: f64 = again
-            .iter()
-            .filter_map(|r| r.usage.get(units::OUTPUT_TOKENS))
-            .sum();
-        assert_eq!(total, 1.0, "{text}");
-        assert!(text.contains("\"vendor\":9"), "{text}");
+        let mut replies = decode(&events);
+        // The second report, which adds 6, is dropped.
+        replies
+            .retain(|r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6.0)));
+        let stream = stream_of(&replies).expect("a stream");
+        let events = stream_events(&stream);
+        let delta = events.iter().find(|e| e["type"] == "message_delta");
+        assert_eq!(
+            delta.map(|d| d["usage"]["output_tokens"].clone()),
+            Some(json!(1))
+        );
     }
 
     #[test]
-    fn usage_correction_preserves_unchanged_decreases_and_upward_edits() {
-        for (totals, edited, expected) in [
-            ([7, 1, 0], None, [7.0, 1.0, 0.0]),
-            ([1, 7, 7], Some(3.0), [3.0, 9.0, 9.0]),
-        ] {
-            let events = [
-                format!(
-                    "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"model\":\"c\",\"usage\":{{\"output_tokens\":{}}}}}}}\n\n",
-                    totals[0]
-                ),
-                format!(
-                    "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{}},\"usage\":{{\"output_tokens\":{}}}}}\n\n",
-                    totals[1]
-                ),
-                format!(
-                    "event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":{}}}}}\n\n",
-                    totals[2]
-                ),
-            ];
+    fn usage_never_decreases_and_edits_upward_are_summed() {
+        for (totals, edited, expected) in [([7, 1, 0], None, 7), ([1, 7, 7], Some(3.0), 9)] {
+            let events = totals.map(|n| {
+                format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{}},\"usage\":{{\"output_tokens\":{n}}}}}\n\n")
+            });
             let mut replies = decode(&[&events[0], &events[1], &events[2]]);
             if let Some(amount) = edited {
-                replies[0].usage = Usage::default();
-                replies[0].usage.add(units::OUTPUT_TOKENS, amount);
+                replies[0] = usage(units::OUTPUT_TOKENS, amount);
             }
-            let mut encoder = EventStream::new(true);
-            let mut out = BytesMut::new();
-            for reply in &replies {
-                encoder
-                    .encode(reply, &mut out)
-                    .expect("encode Anthropic event");
-            }
-            encoder
-                .end(&Ok(()), &mut out)
-                .expect("finish Anthropic stream");
-            let text = String::from_utf8_lossy(&out);
-            let reported: Vec<_> = text
-                .split("\n\n")
-                .filter_map(|e| event_json(&Bytes::copy_from_slice(e.as_bytes())))
-                .filter_map(|v| event_usage(&v).get(units::OUTPUT_TOKENS))
-                .collect();
-            assert_eq!(reported, expected, "{text}");
-            if edited.is_none() {
-                assert!(text.starts_with(&events.concat()), "{text}");
-            }
+            let stream = stream_of(&replies).expect("a stream");
+            let events = stream_events(&stream);
+            let delta = events.iter().find(|e| e["type"] == "message_delta");
+            assert_eq!(
+                delta.map(|d| d["usage"]["output_tokens"].clone()),
+                Some(json!(expected)),
+                "{stream}"
+            );
         }
     }
 
     #[test]
     fn unsupported_usage_edits_fail_instead_of_disappearing() {
-        let ping = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
-        let mut edited = Reply::default();
-        edited.usage.add(units::OUTPUT_TOKENS, 2.0);
-        assert!(rebuilt(&ping, &edited).is_err(), "no usage object to patch");
-        let start = Bytes::from_static(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":1}}}\n\n");
-        let mut unknown = event_reply(&event_json(&start).expect("parse source message start"));
-        unknown.usage.add("credits", 3.0);
-        assert!(rebuilt(&start, &unknown).is_err(), "unknown usage unit");
-        let mut synthetic = Reply::text(0, "ok");
-        synthetic.usage.add("credits", 3.0);
-        let mut out = BytesMut::new();
-        assert!(
-            EventStream::new(false)
-                .encode(&synthetic, &mut out)
-                .is_err()
-        );
+        let mut replies = vec![Reply::start("m", "c")];
+        replies.extend(text_events(0, "ok"));
+        replies.push(usage("credits", 3.0));
+        assert!(stream_of(&replies).is_err());
+        assert!(body_of(&replies).is_err());
+        // Cache reads are part of the input: more than it is no usage.
+        let mut more = usage(units::CACHED_INPUT_TOKENS, 3.0);
+        if let Reply::Usage(u) = &mut more {
+            u.add(units::INPUT_TOKENS, 1.0);
+        }
+        assert!(body_of(&[more]).is_err());
     }
 
     #[test]
-    fn cache_usage_edit_removes_old_cache_value_without_losing_vendor_fields() {
-        let events = [
-            "id: begin\nevent: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\",\"usage\":{\"input_tokens\":1,\"cache_read_input_tokens\":2,\"cache_creation_input_tokens\":1,\"output_tokens\":1,\"vendor\":7}}}\n\n",
-            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":1,\"cache_read_input_tokens\":2,\"cache_creation_input_tokens\":1,\"output_tokens\":7,\"vendor\":8}}\n\n",
-        ];
-        let mut replies = decode(&events);
-        assert_eq!(replies[0].usage.get(units::INPUT_TOKENS), Some(4.0));
-        replies[0].usage = Usage::default();
-        replies[0].usage.add(units::INPUT_TOKENS, 2.0);
-        replies[0].usage.add(units::CACHE_WRITE_INPUT_TOKENS, 1.0);
-        replies[0].usage.add(units::OUTPUT_TOKENS, 1.0);
-        let mut encoder = EventStream::new(true);
-        let mut out = BytesMut::new();
-        for reply in &replies {
-            encoder
-                .encode(reply, &mut out)
-                .expect("encode Anthropic event");
+    fn cache_usage_is_written_as_the_units_say() {
+        let mut u = Usage::default();
+        for (unit, n) in [
+            (units::INPUT_TOKENS, 15.0),
+            (units::CACHED_INPUT_TOKENS, 10.0),
+            (units::CACHE_WRITE_INPUT_TOKENS, 2.0),
+            (units::OUTPUT_TOKENS, 1.0),
+        ] {
+            u.add(unit, n);
         }
-        encoder
-            .end(&Ok(()), &mut out)
-            .expect("finish Anthropic stream");
-        let text = String::from_utf8_lossy(&out).into_owned();
-        assert!(
-            text.contains("id: begin")
-                && text.contains("\"vendor\":7")
-                && text.contains("\"vendor\":8"),
-            "{text}"
-        );
-        let mut reader = AnthropicMessages.parser(false);
-        let mut again = Vec::new();
-        reader
-            .push(out.freeze(), &mut again)
-            .expect("decode rebuilt Anthropic stream");
         assert_eq!(
-            again
-                .iter()
-                .map(|r| r.usage.get(units::INPUT_TOKENS))
-                .collect::<Vec<_>>(),
-            [Some(2.0), None]
+            usage_body(&u, &Map::new()),
+            json!({ "input_tokens": 3, "output_tokens": 1,
+                "cache_read_input_tokens": 10, "cache_creation_input_tokens": 2 })
         );
+        // A cache that was emptied is no field at all.
+        let mut none = Usage::default();
+        none.add(units::INPUT_TOKENS, 15.0);
+        none.add(units::OUTPUT_TOKENS, 1.0);
         assert_eq!(
-            again
-                .iter()
-                .map(|r| r.usage.get(units::CACHED_INPUT_TOKENS))
-                .collect::<Vec<_>>(),
-            [None, None]
-        );
-        for raw in text.split("\n\n").filter(|e| e.contains("\"usage\"")) {
-            let v = event_json(raw.as_bytes()).expect("parse corrected cache-usage event");
-            let u = if v["type"] == "message_start" {
-                &v["message"]["usage"]
-            } else {
-                &v["usage"]
-            };
-            assert_eq!(u["input_tokens"], 1);
-            assert_eq!(u["cache_read_input_tokens"], 0);
-            assert_eq!(u["cache_creation_input_tokens"], 1);
-        }
-    }
-
-    #[test]
-    fn whole_usage_edit_keeps_cache_arithmetic_and_vendor_keys() {
-        let v = json!({
-            "id":"m", "model":"c", "content":[], "stop_reason":"end_turn",
-            "usage":{"input_tokens":2,"cache_read_input_tokens":3,
-                "cache_creation_input_tokens":1,"output_tokens":7,
-                "server_tool_use":{"web_search_requests":4}}
-        });
-        let raw = Bytes::from(v.to_string());
-        let mut said = AnthropicMessages::reply(&v);
-        said.usage = AnthropicMessages::usage(&v);
-        let mut edited = said.clone();
-        edited.usage = Usage::default();
-        edited.usage.add(units::INPUT_TOKENS, 3.0);
-        edited.usage.add(units::CACHE_WRITE_INPUT_TOKENS, 1.0);
-        edited.usage.add(units::OUTPUT_TOKENS, 4.0);
-        let bytes = crate::common::rebuild_whole::<AnthropicMessages>(&raw, &said, &edited)
-            .expect("rebuild whole Anthropic usage");
-        let got: Value = serde_json::from_slice(&bytes).expect("parse rebuilt Anthropic response");
-        assert_eq!(got["usage"]["input_tokens"], 2);
-        assert_eq!(got["usage"]["cache_read_input_tokens"], 0);
-        assert_eq!(got["usage"]["cache_creation_input_tokens"], 1);
-        assert_eq!(got["usage"]["output_tokens"], 4);
-        assert_eq!(
-            got["usage"]["server_tool_use"],
-            json!({"web_search_requests":4})
+            usage_body(&none, &Map::new()),
+            json!({ "input_tokens": 15, "output_tokens": 1 })
         );
     }
 
     #[test]
     fn usage_is_written_as_it_was_read() {
-        let reported = json!({
-            "input_tokens": 3,
-            "cache_read_input_tokens": 10,
-            "cache_creation_input_tokens": 2,
-            "output_tokens": 1,
-        });
-        assert_eq!(
-            AnthropicMessages::usage_body(&usage_of(&reported)),
-            reported
-        );
+        for u in [
+            json!({ "input_tokens": 3, "output_tokens": 1 }),
+            json!({ "input_tokens": 3, "output_tokens": 1,
+                "cache_read_input_tokens": 10, "cache_creation_input_tokens": 2 }),
+            json!({ "input_tokens": 3, "output_tokens": 4,
+                "output_tokens_details": { "thinking_tokens": 2 } }),
+        ] {
+            assert_eq!(usage_body(&usage_of(&u), &Map::new()), u);
+        }
     }
 
     #[test]
-    fn an_unchanged_finish_keeps_the_providers_reason() {
-        let mut v = json!({ "stop_reason": "stop_sequence", "stop_sequence": "X" });
-        assert!(AnthropicMessages::put(&mut v, &Reply::finished(Finish::Stop)).is_ok());
-        assert_eq!(v["stop_reason"], "stop_sequence");
-        assert!(AnthropicMessages::put(&mut v, &Reply::finished(Finish::Length)).is_ok());
-        assert_eq!(v["stop_reason"], "max_tokens");
+    fn a_stop_reason_is_written_as_it_was_read() {
+        for (reason, sequence) in [
+            ("end_turn", Value::Null),
+            ("stop_sequence", json!("END")),
+            ("max_tokens", Value::Null),
+            ("model_context_window_exceeded", Value::Null),
+        ] {
+            let v = json!({ "id": "m", "type": "message", "role": "assistant", "model": "c",
+                "content": [], "stop_reason": reason, "stop_sequence": sequence,
+                "usage": { "input_tokens": 1, "output_tokens": 1 } });
+            let again = body_of(&decode_body(&v)).expect("a body");
+            assert_eq!(again["stop_reason"], v["stop_reason"]);
+            assert_eq!(again["stop_sequence"], v["stop_sequence"]);
+            let stream = stream_of(&decode_body(&v)).expect("a stream");
+            let delta = stream_events(&stream)
+                .into_iter()
+                .find(|e| e["type"] == "message_delta");
+            let delta = delta.unwrap_or_default();
+            assert_eq!(delta["delta"]["stop_reason"], v["stop_reason"]);
+            assert_eq!(delta["delta"]["stop_sequence"], v["stop_sequence"]);
+        }
     }
 
     #[test]
-    fn blocks_are_numbered_in_the_order_they_open() {
-        let mut enc = EventStream::new(false);
-        let mut out = BytesMut::new();
-        assert!(enc.encode(&Reply::text(5, "hi"), &mut out).is_ok());
-        assert!(enc.end(&Ok(()), &mut out).is_ok());
-        let text = String::from_utf8_lossy(&out);
-        assert!(text.contains("\"index\":0"), "{text}");
-        assert!(!text.contains("\"index\":5"), "{text}");
+    fn blocks_are_numbered_by_their_index() {
+        let v = json!({ "id": "m", "type": "message", "role": "assistant", "model": "c",
+            "content": [
+                { "type": "text", "text": "a" },
+                { "type": "tool_use", "id": "t", "name": "f", "input": {} },
+                { "type": "text", "text": "b" },
+            ], "stop_reason": "tool_use", "usage": { "input_tokens": 1, "output_tokens": 1 } });
+        let blocks: Vec<_> = decode_body(&v)
+            .into_iter()
+            .filter_map(|r| match r {
+                Reply::BlockStart { block, .. } => Some(block),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blocks, [0, 1, 2]);
     }
 
     #[test]
     fn a_tool_call_a_filter_turns_to_text_is_gone() {
-        let raw = Bytes::from(
-            json!({ "id": "m", "model": "c", "stop_reason": "tool_use", "content": [
-                { "type": "tool_use", "id": "a", "name": "rm_rf", "input": {} },
-            ]})
-            .to_string(),
-        );
-        let v: Value = serde_json::from_slice(&raw).unwrap_or_default();
-        let said = AnthropicMessages::reply(&v);
-        let mut edited = said.clone();
-        edited.content = vec![Piece::text(0, "[removed]")];
-        let rebuilt = crate::common::rebuild_whole::<AnthropicMessages>(&raw, &said, &edited);
-        let rebuilt: Value = rebuilt.map_or(Value::Null, |b| {
-            serde_json::from_slice(&b).unwrap_or_default()
-        });
-        assert_eq!(
-            rebuilt["content"],
-            json!([{ "type": "text", "text": "[removed]" }])
+        let mut replies = vec![Reply::start("m", "c")];
+        replies.extend(text_events(0, "[removed]"));
+        let stream = stream_of(&replies).expect("a stream");
+        assert!(
+            stream.contains("[removed]") && !stream.contains("tool_use"),
+            "{stream}"
         );
     }
 
     #[test]
-    fn a_text_block_with_citations_is_other() {
-        let cited = json!({ "type": "text", "text": "Paris", "citations": [{ "type": "web" }] });
-        let v = json!({ "id": "m", "model": "c", "content": [cited, { "type": "text", "text": "!", "citations": null }] });
-        assert_eq!(
-            AnthropicMessages::reply(&v).content,
-            [Piece::other(ANTHROPIC, cited), Piece::text(1, "!")]
-        );
+    fn a_text_block_with_citations_is_text_with_its_fields_and_events() {
+        let out = decode(&[
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"x\",\"citations\":[{\"type\":\"c\"}]}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":{}}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        ]);
+        assert_eq!(out.len(), 5);
+        assert!(matches!(&out[0], Reply::Other { .. }));
+        assert_eq!(out[1], Reply::block_start(0, Block::Text));
+        assert_eq!(out[2], Reply::delta(0, "x"));
+        // And written as it is, in this format.
+        let stream = stream_of(&out).expect("a stream");
+        assert!(stream.contains("citations_delta"), "{stream}");
     }
 
     #[test]
-    fn a_stream_event_edited_into_what_it_has_no_place_for_fails() {
-        let raw = Bytes::from_static(
-            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"rm_rf\",\"input\":{}}}\n\n",
+    fn an_event_the_format_cannot_write_fails() {
+        // An event of another format that carries content.
+        let foreign = Reply::other(
+            "openai-chat",
+            json!({ "choices": [{ "index": 1, "delta": { "content": "B" } }] }),
         );
-        assert!(rebuilt(&raw, &Reply::text(0, "[removed]")).is_err());
-        let text = Bytes::from_static(
-            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
-        );
-        let out = rebuilt(&text, &Reply::text(0, "HI")).unwrap_or_default();
-        assert!(String::from_utf8_lossy(&out).contains("\"text\":\"HI\""));
+        assert!(stream_of(std::slice::from_ref(&foreign)).is_err());
+        assert!(body_of(&[foreign]).is_err());
+        // Text for a block that never opened.
+        assert!(stream_of(&[Reply::delta(0, "x")]).is_err());
+        // A block that opens as another kind.
+        let events = [
+            Reply::block_start(0, Block::Text),
+            Reply::block_start(0, call("t", "f")),
+        ];
+        assert!(stream_of(&events).is_err());
     }
 
     #[test]
-    fn a_text_part_that_says_more_is_not_plain_text() {
-        let cached =
-            json!([{ "type": "text", "text": "hi", "cache_control": { "type": "ephemeral" } }]);
-        assert_eq!(read_content(ANTHROPIC, &cached), [Content::from("hi")]);
-        let cited = json!({ "type": "text", "text": "hi", "citations": [{ "type": "x" }] });
+    fn a_text_part_that_says_more_keeps_it_in_its_extra_and_is_still_plain() {
+        let part = json!({ "type": "text", "text": "hi", "citations": [{ "type": "c" }] });
+        let chat = AnthropicMessages::read(&json!({ "model": "m", "max_tokens": 1,
+            "messages": [{ "role": "user", "content": [part] }] }));
+        assert!(chat.messages[0].is_plain());
+        assert_eq!(chat.messages[0].text(), "hi");
+        let again = write_request::<AnthropicMessages>(&chat).map(Value::from);
         assert_eq!(
-            read_content(ANTHROPIC, &json!([cited.clone()])),
-            [Content::other(ANTHROPIC, cited)]
+            again.map(|v| v["messages"][0]["content"][0].clone()).ok(),
+            Some(part)
         );
     }
 
     #[test]
     fn a_system_prompt_of_several_blocks_is_edited_block_by_block() {
-        let marker = json!({ "type": "ephemeral" });
-        let body = json!({ "model": "c", "max_tokens": 5, "messages": [], "system": [
-            { "type": "text", "text": "You are Claude Code." },
-            { "type": "text", "text": "SECRET rules", "cache_control": marker },
-        ]});
-        let edited = patched(body, |c| {
-            c.messages[0].content[1] = "[redacted] rules".into();
-        });
+        let body = json!({ "model": "m", "max_tokens": 5, "system": [
+            { "type": "text", "text": "one" }, { "type": "text", "text": "two sk-1" }],
+            "messages": [{ "role": "user", "content": "hi" }] });
+        let edited = written(body, |c| c.messages[0].content[1] = "two [x]".into());
         assert_eq!(
             edited.map(|v| v["system"].clone()).ok(),
-            Some(json!([
-                { "type": "text", "text": "You are Claude Code." },
-                { "type": "text", "text": "[redacted] rules", "cache_control": marker },
-            ]))
-        );
-        // An empty prompt can be filled.
-        let empty = json!({ "model": "c", "max_tokens": 5, "messages": [], "system": [] });
-        let filled = patched(empty, |c| {
-            c.messages.insert(0, Message::new(Role::System, "be kind"))
-        });
-        assert_eq!(
-            filled.map(|v| v["system"].clone()).ok(),
-            Some(json!([{ "type": "text", "text": "be kind" }]))
+            Some(json!([{ "type": "text", "text": "one" }, { "type": "text", "text": "two [x]" }]))
         );
     }
 
     #[test]
     fn a_removed_message_takes_its_cache_marker_with_it() {
-        let marker = json!({ "type": "ephemeral" });
-        let body = json!({ "model": "c", "max_tokens": 5, "messages": [
-            { "role": "user", "content": "A" },
-            { "role": "assistant", "content": [{ "type": "text", "text": "B", "cache_control": marker }] },
-            { "role": "user", "content": "C" },
-        ]});
-        let edited = patched(body, |c| {
-            c.messages.remove(1);
-            c.messages[1].content = vec!["C-redacted".into()];
-        });
+        let marked = json!({ "role": "user", "content": [
+            { "type": "text", "text": "the repo", "cache_control": { "type": "ephemeral" } }] });
+        let body = json!({ "model": "m", "max_tokens": 5, "messages": [
+            marked, { "role": "assistant", "content": "ok" }] });
+        let edited = written(body, |c| drop(c.messages.remove(0)));
         assert_eq!(
             edited.map(|v| v["messages"].clone()).ok(),
-            Some(json!([
-                { "role": "user", "content": "A" },
-                { "role": "user", "content": "C-redacted" },
-            ]))
+            Some(json!([{ "role": "assistant", "content": "ok" }]))
         );
     }
 
     #[test]
     fn a_redacted_message_keeps_its_marker_beside_an_inserted_one() {
-        let marker = json!({ "type": "ephemeral" });
-        let body = json!({ "model": "c", "max_tokens": 5, "messages": [
-            { "role": "user", "content": [{ "type": "text", "text": "SECRET", "cache_control": marker }] },
-            { "role": "assistant", "content": "B" },
-        ]});
-        let edited = patched(body, |c| {
-            c.messages[0].content = vec!["[redacted]".into()];
-            c.messages.insert(1, Message::new(Role::User, "and"));
+        let marked =
+            json!({ "type": "text", "text": "the repo", "cache_control": { "type": "ephemeral" } });
+        let body = json!({ "model": "m", "max_tokens": 5, "messages": [
+            { "role": "user", "content": [marked] }] });
+        let edited = written(body, |c| {
+            c.messages.insert(0, Message::new(Role::User, "first"));
         });
         assert_eq!(
             edited.map(|v| v["messages"].clone()).ok(),
             Some(json!([
-                { "role": "user", "content": [{ "type": "text", "text": "[redacted]", "cache_control": marker }] },
-                { "role": "user", "content": "and" },
-                { "role": "assistant", "content": "B" },
+                { "role": "user", "content": "first" },
+                { "role": "user", "content": [marked] },
             ]))
         );
     }
 
     #[test]
     fn an_empty_answer_has_no_empty_text_block() {
-        let mut whole = crate::common::SoFar::default();
-        let mut empty = Reply::start("m", "c");
-        empty.content = vec![Piece::text(0, "")];
-        empty.finish = Some(Finish::Length);
-        assert!(whole.add(&empty).is_ok());
-        let v = AnthropicMessages::render(&whole).unwrap_or_default();
-        assert_eq!(v["content"], json!([]));
+        let replies = [
+            Reply::start("m", "c"),
+            Reply::block_start(0, Block::Text),
+            Reply::block_end(0),
+        ];
+        let body = body_of(&replies).expect("a body");
+        assert_eq!(body["content"], json!([]));
+        let stream = stream_of(&replies).expect("a stream");
+        assert!(stream.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
     }
 
-    // D4: a delta a filter held and released goes into its block, before
-    // the block's stop, which is kept back.
     #[test]
-    fn a_released_delta_goes_before_its_blocks_stop() {
-        let mut enc = EventStream::new(true);
-        let mut out = BytesMut::new();
-        let events = [
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\n",
-            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
-            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n",
+    fn text_released_late_goes_into_its_block_before_it_stops() {
+        // A filter held the end of block 0 and the next text, and released
+        // them at the end of the response, in order.
+        let replies = [
+            Reply::start("m", "c"),
+            Reply::block_start(0, Block::Text),
+            Reply::delta(0, "a"),
+            Reply::delta(0, "b"),
+            Reply::block_end(0),
         ];
-        for reply in decode(&events) {
-            assert!(enc.encode(&reply, &mut out).is_ok());
+        let stream = stream_of(&replies).expect("a stream");
+        let events = stream_events(&stream);
+        let kinds: Vec<_> = events.iter().filter_map(|e| e["type"].as_str()).collect();
+        assert_eq!(
+            kinds,
+            [
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop",
+            ]
+        );
+    }
+
+    #[test]
+    fn blocks_that_open_together_are_written_one_at_a_time() {
+        // OpenAI streams parallel calls interleaved.
+        let replies = [
+            Reply::block_start(0, call("a", "f")),
+            Reply::block_start(1, call("b", "g")),
+            Reply::delta(1, "{\"b\":"),
+            Reply::delta(0, "{}"),
+            Reply::delta(1, "1}"),
+            Reply::block_end(0),
+            Reply::block_end(1),
+        ];
+        let stream = stream_of(&replies).expect("a stream");
+        let events = stream_events(&stream);
+        let seen: Vec<String> = events
+            .iter()
+            .filter(|e| {
+                e["type"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("content_block"))
+            })
+            .map(|e| {
+                let at = &e["index"];
+                match e["type"].as_str().unwrap_or_default() {
+                    "content_block_delta" => format!("delta{at}:{}", e["delta"]["partial_json"]),
+                    kind => format!("{kind}{at}"),
+                }
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                "content_block_start0",
+                "delta0:\"{}\"",
+                "content_block_stop0",
+                "content_block_start1",
+                "delta1:\"{\\\"b\\\":1}\"",
+                "content_block_stop1",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stream_error_after_the_finish_keeps_the_finish_and_ends_last() {
+        let mut enc = EventStream::default();
+        let mut out = BytesMut::new();
+        let mut replies = vec![Reply::start("m", "c")];
+        replies.extend(text_events(0, "hi"));
+        replies.push(Reply::finished(Finish::Stop));
+        for reply in &replies {
+            assert!(enc.encode(reply, &mut out).is_ok());
         }
-        let out = String::from_utf8_lossy(&out).into_owned();
-        let (late, stop) = (out.find("late"), out.find("content_block_stop"));
-        assert!(late.is_some() && stop.is_none(), "{out}");
+        let _ = enc.end(&Err(respan_gateway_sdk::Upstream::fault("boom")), &mut out);
+        let text = String::from_utf8_lossy(&out);
+        let delta = text.find("message_delta").unwrap_or(usize::MAX);
+        let error = text.find("event: error").unwrap_or(0);
+        assert!(delta < error, "{text}");
+        assert!(!text.contains("message_stop"), "{text}");
+    }
+
+    #[test]
+    fn extra_fields_of_the_message_survive_in_the_same_format() {
+        let body = json!({ "id": "m", "type": "message", "role": "assistant", "model": "c",
+            "content": [{ "type": "text", "text": "hi" }], "stop_reason": "end_turn",
+            "stop_sequence": null, "container": { "id": "k" },
+            "usage": { "input_tokens": 1, "output_tokens": 1 } });
+        let events = decode_body(&body);
+        let Some(Reply::Start(start)) = events.first() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(
+            start.extra,
+            Extra::new(
+                ANTHROPIC,
+                json!({ "container": { "id": "k" } })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default()
+            )
+        );
+        assert_eq!(
+            body_of(&events).expect("a body")["container"],
+            json!({ "id": "k" })
+        );
+        let stream = stream_of(&events).expect("a stream");
+        assert_eq!(
+            stream_events(&stream)[0]["message"]["container"],
+            json!({ "id": "k" })
+        );
+        // Another format drops it: it cannot change the answer.
+        let openai = crate::OpenAiChat.encode_response(
+            &respan_gateway_http::http::Request::new(Bytes::from_static(b"{}")),
+            &events,
+        );
+        assert!(openai.is_ok());
     }
 }

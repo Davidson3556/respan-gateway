@@ -29,7 +29,7 @@ use respan_gateway_http::http::HeaderValue;
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::Extensions;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Conversation, Message, Reply};
+use respan_gateway_sdk::conversation::{Block, Conversation, Message, Reply};
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -125,10 +125,21 @@ impl<S: Sink> Plugin for Log<S> {
         }
         let captured = Captured::default();
         let into = captured.0.clone();
+        // The completion is the text of the text blocks, so reasoning and
+        // tool-call arguments stay out of it.
+        let mut text_blocks = Vec::new();
         cx.filter(move |reply: &mut Reply| {
-            into.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend(reply.texts());
+            match reply {
+                Reply::BlockStart {
+                    block,
+                    kind: Block::Text,
+                } => text_blocks.push(*block),
+                Reply::Delta { block, delta } if text_blocks.contains(block) => into
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push_str(delta),
+                _ => {}
+            }
             Ok(())
         })?;
         cx.extensions_mut().insert(captured);

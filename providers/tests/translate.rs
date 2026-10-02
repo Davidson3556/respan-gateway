@@ -10,7 +10,7 @@ use mockllm::{Answer, FakeAnthropic, FakeOpenAi, Request};
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::async_trait;
-use respan_gateway_sdk::conversation::{Conversation, Finish, Piece, Reply, units};
+use respan_gateway_sdk::conversation::{Block, Conversation, Extra, Finish, Reply, units};
 use respan_gateway_sdk::{ClientContext, Fault, Plugin, ProviderContext, Response, Upstream};
 #[allow(dead_code)] // Shared hooks also expose a call log not used by this suite.
 #[path = "../../tests/support/hooks.rs"]
@@ -27,7 +27,7 @@ use respan_gateway_sdk::Filter;
 use serde_json::{Value, json};
 use support::{
     Adds, CHAT, Call, Disclaimer, Flip, Footer, HoldAll, MESSAGES, Metered, Nameless, Shout,
-    Silence, Unmask, add_provider, fault_code, providers, says, with_plugins,
+    Silence, TextBlocks, Unmask, add_provider, fault_code, providers, says, text, with_plugins,
 };
 use support::{SendRequest, http_sender, sender};
 
@@ -269,6 +269,20 @@ fn events(body: &str) -> Vec<(Option<String>, Value)> {
             (field("event:"), data)
         })
         .collect()
+}
+
+/// The events of an Anthropic stream, each as `(name, data)`, as a client
+/// that reads them sees them: a `message_delta`'s usage is the cumulative
+/// output tokens, whatever else it counts.
+fn semantic(body: &str) -> Vec<(Option<String>, Value)> {
+    let mut all = events(body);
+    for (_, data) in &mut all {
+        if data["type"] == "message_delta" {
+            let output = data["usage"]["output_tokens"].clone();
+            data["usage"] = json!({ "output_tokens": output });
+        }
+    }
+    all
 }
 
 // Only a relay carries the client's headers: a translated call says
@@ -673,10 +687,10 @@ async fn an_edit_that_does_not_cause_the_failure_leaves_it_the_clients_fault() {
     assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "bad_request"));
 }
 
-// An edit that itself makes the request untranslatable is the plugin's
-// fault: the client's own request translates.
+// An edit that itself makes the request untranslatable is, without
+// provenance, refused like any request the format cannot write.
 #[tokio::test]
-async fn an_edit_that_causes_the_failure_is_the_gateways_fault() {
+async fn an_edit_that_causes_the_failure_is_refused_as_a_bad_request() {
     /// Adds a field Anthropic has no place for.
     struct Break;
 
@@ -684,8 +698,9 @@ async fn an_edit_that_causes_the_failure_is_the_gateways_fault() {
     impl Plugin for Break {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|chat: &mut Conversation| {
-                let format = json!({ "type": "json_object" });
-                chat.unsupported.insert("response_format".into(), format);
+                let format = json!({ "response_format": { "type": "json_object" } });
+                let fields = format.as_object().cloned().unwrap_or_default();
+                chat.extra = Extra::new("openai-chat", fields);
                 Ok(())
             })?;
             Ok(None)
@@ -697,8 +712,10 @@ async fn an_edit_that_causes_the_failure_is_the_gateways_fault() {
 
     let (status, _) = h.text(call(CHAT, body.to_string())).await;
 
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "config"));
+    // Without the bytes a request came as, the gateway cannot tell an edit
+    // from the client's own field: a request it cannot write is the client's.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "bad_request"));
 }
 
 /// An agent's turn in OpenAI's words: tools, a call made, its result, and
@@ -1226,31 +1243,37 @@ async fn a_cut_translated_stream_ends_with_an_error_in_the_client_format() {
 
 #[tokio::test]
 async fn a_filter_can_turn_content_of_another_format_into_text() {
-    /// Reports that the model thought, from Anthropic's thinking block.
+    /// Reports that the model thought, from Anthropic's redacted thinking
+    /// block, which the kind has no form for.
     struct Thought;
+
+    impl Filter<Reply> for Thought {
+        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            match &reply {
+                Reply::Other { format, raw }
+                    if &**format == "anthropic-messages"
+                        && raw["content_block"]["type"] == "redacted_thinking" =>
+                {
+                    out.extend(support::text(5, "[thought] "));
+                }
+                _ => out.push(reply),
+            }
+            Ok(())
+        }
+    }
 
     #[async_trait]
     impl Plugin for Thought {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|r: &mut Reply| {
-                for piece in &mut r.content {
-                    if let Piece::Other { format, raw, .. } = piece
-                        && &**format == "anthropic-messages"
-                        && raw["type"] == "thinking"
-                    {
-                        *piece = Piece::text(0, "[thought] ");
-                    }
-                }
-                Ok(())
-            })?;
+            cx.filter(Thought)?;
             Ok(None)
         }
     }
 
     let h = Harness::new(vec![Arc::new(Thought)]).await;
-    let thinking = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n";
+    let thought = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":5,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"x\"}}\n\n";
     let mut stream = ANTHROPIC_STREAM.to_vec();
-    stream.insert(1, thinking);
+    stream.insert(1, thought);
     h.anthropic.answer(sse(&stream));
 
     let (status, body) = h.text(openai_request("claude-x", true)).await;
@@ -1262,8 +1285,8 @@ async fn a_filter_can_turn_content_of_another_format_into_text() {
 #[tokio::test]
 async fn a_translated_stream_that_starts_with_what_cannot_be_translated_is_refused() {
     let h = Harness::new(Vec::new()).await;
-    let thinking = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n";
-    h.anthropic.answer(sse(&[ANTHROPIC_STREAM[0], thinking]));
+    let redacted = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"x\"}}\n\n";
+    h.anthropic.answer(sse(&[ANTHROPIC_STREAM[0], redacted]));
 
     let (status, body) = h.text(openai_request("claude-x", true)).await;
 
@@ -1336,12 +1359,10 @@ struct Canned;
 #[async_trait]
 impl Plugin for Canned {
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let events = [
-            Reply::start("cached_1", "claude-x"),
-            Reply::text(0, "Hi"),
-            Reply::finished(Finish::Stop),
-        ];
-        let events = futures::stream::iter(events.map(Ok));
+        let mut events = vec![Reply::start("cached_1", "claude-x")];
+        events.extend(text(0, "Hi"));
+        events.push(Reply::finished(Finish::Stop));
+        let events = futures::stream::iter(events.into_iter().map(Ok));
         Ok(Some(Response::stream(events)))
     }
 }
@@ -1370,7 +1391,7 @@ async fn a_plugin_can_stream_from_facts_in_the_client_format() {
 }
 
 #[tokio::test]
-async fn an_anthropic_stream_is_relayed_byte_for_byte() {
+async fn an_anthropic_stream_is_relayed_event_for_event() {
     let h = Harness::new(Vec::new()).await;
     h.anthropic.answer(sse(ANTHROPIC_STREAM));
     // Same format end to end: nothing is translated, so tools are fine.
@@ -1385,7 +1406,8 @@ async fn an_anthropic_stream_is_relayed_byte_for_byte() {
     let (status, out) = h.text(call(MESSAGES, body.to_string())).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(out, ANTHROPIC_STREAM.concat());
+    // Every event, the keep-alive too, as it said it.
+    assert_eq!(semantic(&out), semantic(&ANTHROPIC_STREAM.concat()));
 }
 
 #[tokio::test]
@@ -1525,7 +1547,7 @@ async fn a_filter_edits_an_anthropic_stream_in_its_own_shape() {
         .concat()
         .replace("\"text\":\"Hello\"", "\"text\":\"HELLO\"")
         .replace("\"text\":\" world\"", "\"text\":\" WORLD\"");
-    assert_eq!(out, expected);
+    assert_eq!(semantic(&out), semantic(&expected));
 }
 
 #[tokio::test]
@@ -1625,11 +1647,10 @@ async fn a_filter_edits_events_that_share_a_chunk_while_translating() {
     impl Plugin for Truncated {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|r: &mut Reply| {
-                if let Some(start) = &mut r.start {
-                    start.model = "alias".into();
-                }
-                if let Some(finish) = &mut r.finish {
-                    *finish = Finish::Length;
+                match r {
+                    Reply::Start(start) => start.model = "alias".into(),
+                    Reply::Finish(finish) => *finish = Finish::Length,
+                    _ => {}
                 }
                 Ok(())
             })?;
@@ -1855,7 +1876,7 @@ async fn anthropics_own_end_is_kept_when_it_breaks_off_after_it() {
 }
 
 #[tokio::test]
-async fn a_relayed_stream_cut_after_its_last_block_keeps_every_byte() {
+async fn a_relayed_stream_cut_after_its_last_block_keeps_every_event() {
     let h = Harness::new(Vec::new()).await;
     let cut = &ANTHROPIC_STREAM[..ANTHROPIC_STREAM.len() - 1];
     h.anthropic.answer(sse(cut));
@@ -1866,11 +1887,9 @@ async fn a_relayed_stream_cut_after_its_last_block_keeps_every_byte() {
 
     let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
 
-    assert!(out.starts_with(&cut.concat()), "{out}");
-    assert!(
-        out[cut.concat().len()..].starts_with("event: error"),
-        "{out}"
-    );
+    let (kept, error) = out.split_once("event: error").unwrap_or((&out, ""));
+    assert_eq!(semantic(kept), semantic(&cut.concat()), "{out}");
+    assert!(error.contains("truncated"), "{out}");
 }
 
 /// Fails the end of a response that failed, as an audit might.
@@ -2045,12 +2064,12 @@ fn a_filter_is_tested_on_its_own() {
     let mut footer = Footer(0, None);
     let mut out = Vec::new();
     let _ = footer.edit(Reply::finished(Finish::Stop), &mut out);
-    // The message is kept, saying nothing now, as its usage is still shown.
-    assert_eq!(out, [Reply::default()]);
+    // The finish is kept back to the end.
+    assert!(out.is_empty());
     let _ = footer.end(&Ok(()), &mut out);
-    let mut footed = Reply::text(0, " [footer]");
-    footed.finish = Some(Finish::Stop);
-    assert_eq!(out[1..], [footed]);
+    let mut footed = text(0, " [footer]");
+    footed.push(Reply::finished(Finish::Stop));
+    assert_eq!(out, footed);
 }
 
 #[tokio::test]
@@ -2093,10 +2112,14 @@ struct Note(bool);
 
 impl Filter<Reply> for Note {
     fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let first = event.start.is_some() && !std::mem::replace(&mut self.0, true);
+        let first = matches!(event, Reply::Start(_)) && !std::mem::replace(&mut self.0, true);
         out.push(event);
         if first {
-            out.push(Reply::text(0, "Note: "));
+            // Into the answer's first block, which opens as it comes.
+            out.extend([
+                Reply::block_start(0, Block::Text),
+                Reply::delta(0, "Note: "),
+            ]);
         }
         Ok(())
     }
@@ -2136,7 +2159,7 @@ async fn text_put_before_anthropics_first_block_goes_into_it() {
 
 #[tokio::test]
 async fn a_whole_message_a_filter_took_all_text_of_is_still_sent() {
-    let h = filtered(Silence).await;
+    let h = filtered(Silence::default()).await;
     let reply = json!({
         "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
         "content": [{ "type": "text", "text": "secret" }],
@@ -2159,7 +2182,22 @@ async fn a_whole_message_a_filter_took_all_text_of_is_still_sent() {
 
 #[tokio::test]
 async fn made_text_stays_out_of_a_thinking_block() {
-    let h = filtered(Note(false)).await;
+    /// Puts a note, a block of its own, as soon as the response starts.
+    #[derive(Clone)]
+    struct OwnNote(bool);
+
+    impl Filter<Reply> for OwnNote {
+        fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            let first = matches!(event, Reply::Start(_)) && !std::mem::replace(&mut self.0, true);
+            out.push(event);
+            if first {
+                out.extend(text(9, "Note: "));
+            }
+            Ok(())
+        }
+    }
+
+    let h = filtered(OwnNote(false)).await;
     let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     let stream = [
         ANTHROPIC_STREAM[0].to_owned(),
@@ -2204,9 +2242,16 @@ async fn made_text_stays_out_of_a_thinking_block() {
     let (status, out) = h.text(call(MESSAGES, body.to_string())).await;
 
     assert_eq!(status, StatusCode::OK, "{out}");
-    let in_thinking = events(&out)
-        .into_iter()
-        .any(|(_, v)| v["index"] == 0 && v.pointer("/delta/type") == Some(&json!("text_delta")));
+    let all = events(&out);
+    let thinking = all
+        .iter()
+        .find(|(_, v)| v.pointer("/content_block/type") == Some(&json!("thinking")))
+        .map(|(_, v)| v["index"].clone());
+    assert!(thinking.is_some(), "{out}");
+    let in_thinking = all.iter().any(|(_, v)| {
+        v["index"] == thinking.clone().unwrap_or_default()
+            && v.pointer("/delta/type") == Some(&json!("text_delta"))
+    });
     assert!(!in_thinking, "{out}");
     assert!(anthropic_texts(&out).contains("Note: "), "{out}");
 }
@@ -2254,7 +2299,14 @@ async fn text_before_the_start_of_an_anthropic_message_is_written() {
 
     assert_eq!(status, StatusCode::OK, "{out}");
     let out: Value = serde_json::from_str(&out).unwrap_or_default();
-    assert_eq!(out["content"][0]["text"], "NOTE: Hello");
+    // The note is a block of its own, before the answer's.
+    let texts: Vec<&str> = out["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b["text"].as_str())
+        .collect();
+    assert_eq!(texts, ["NOTE: ", "Hello"]);
 }
 
 #[tokio::test]
@@ -2279,14 +2331,9 @@ async fn a_block_that_opens_with_text_a_filter_holds_opens_once() {
         (1, 1),
         "{out}"
     );
-    // Released as it came, its opening text stays in its block's start, and
+    // Released as it came, its opening text is the block's first text, and
     // the stream keeps its order.
-    let opening = events(&out).into_iter().find_map(|(_, v)| {
-        let text = v.pointer("/content_block/text")?.as_str()?;
-        Some(text.to_owned())
-    });
-    assert_eq!(opening.as_deref(), Some("Well, "), "{out}");
-    assert_eq!(anthropic_texts(&out), "Hello world");
+    assert_eq!(anthropic_texts(&out), "Well, Hello world");
     assert_well_formed(&names, &out);
     let start = events(&out)
         .into_iter()
@@ -2335,14 +2382,15 @@ async fn an_anthropic_stream_of_data_lines_only_is_written_once() {
     );
 }
 
-/// Keeps text back to the end, letting everything else through.
-#[derive(Clone)]
-struct HoldText(Vec<Reply>);
+/// Keeps text back to the end, with the end of its block, letting everything
+/// else through.
+#[derive(Clone, Default)]
+struct HoldText(Vec<Reply>, TextBlocks);
 
 impl Filter<Reply> for HoldText {
     fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let text = event.texts().next().is_some();
-        match text {
+        self.1.note(&event);
+        match self.1.is_text(&event) && !matches!(event, Reply::BlockStart { .. }) {
             true => self.0.push(event),
             false => out.push(event),
         }
@@ -2357,7 +2405,7 @@ impl Filter<Reply> for HoldText {
 
 #[tokio::test]
 async fn text_released_at_the_end_of_a_translated_stream_goes_before_its_finish() {
-    let h = filtered(HoldText(Vec::new())).await;
+    let h = filtered(HoldText::default()).await;
     h.anthropic.answer(sse(ANTHROPIC_STREAM));
 
     let (status, body) = h.text(openai_request("claude-x", true)).await;
@@ -2394,8 +2442,10 @@ async fn a_whole_anthropic_message_a_filter_took_the_start_of_is_sent() {
     let (status, out) = h.text(call(MESSAGES, body.to_string())).await;
 
     assert_eq!(status, StatusCode::OK, "{out}");
+    // Without its start the message is sent, unnamed.
     let out: Value = serde_json::from_str(&out).unwrap_or_default();
-    assert_eq!(out["id"], "msg_1");
+    assert_eq!(out["content"][0]["text"], "Hello");
+    assert_eq!(out["id"], "");
 }
 
 #[tokio::test]
@@ -2454,29 +2504,35 @@ async fn azures_filter_annotation_after_the_finish_ends_a_translated_stream_clea
     );
 }
 
-/// Keeps each text back until the next one comes, releasing the last at the end.
-#[derive(Clone)]
-struct LagByOne(Option<Reply>);
+/// Keeps each text back, with the end of its block, until the next one
+/// comes, releasing the last at the end.
+#[derive(Clone, Default)]
+struct LagByOne(Vec<Reply>, TextBlocks);
 
 impl Filter<Reply> for LagByOne {
     fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let text = event.texts().next().is_some();
-        match text {
-            true => out.extend(self.0.replace(event)),
-            false => out.push(event),
+        let text = self.1.text(&event).is_some();
+        let ends = matches!(&event, Reply::BlockEnd { block } if self.1.contains(*block));
+        match (text, ends) {
+            (true, _) => {
+                out.append(&mut self.0);
+                self.0.push(event);
+            }
+            (_, true) => self.0.push(event),
+            _ => out.push(event),
         }
         Ok(())
     }
 
     fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        out.extend(self.0.take());
+        out.append(&mut self.0);
         Ok(())
     }
 }
 
 #[tokio::test]
 async fn text_held_across_two_anthropic_blocks_stays_in_its_block() {
-    let h = filtered(LagByOne(None)).await;
+    let h = filtered(LagByOne::default()).await;
     let event = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
     let block = |i: u32, text: &str| {
         [
@@ -2582,14 +2638,14 @@ async fn a_guardrail_ending_an_anthropic_stream_early_ends_it() {
     struct Cut;
 
     impl Filter<Reply> for Cut {
-        fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            if reply.texts().any(|t| t == " world") {
-                for text in reply.texts_mut().filter(|t| *t == " world") {
-                    *text = " [cut]".into();
+        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            match reply {
+                Reply::Delta { block, delta } if delta == " world" => {
+                    out.push(Reply::delta(block, " [cut]"));
+                    out.push(Reply::finished(Finish::Filtered));
                 }
-                reply.finish = Some(Finish::Filtered);
+                reply => out.push(reply),
             }
-            out.push(reply);
             Ok(())
         }
     }
@@ -3280,7 +3336,7 @@ async fn l4_sequential_anthropic_tool_blocks_written_anew_stop_before_the_next_s
 
 /// A text block after a tool call, then the tool call's arguments (index 0
 /// again): an Anthropic client must still get the arguments in the tool's
-/// block, or a refusal, never a mangled stream.
+/// block, never a mangled stream.
 #[tokio::test]
 async fn l4_openai_arguments_after_interleaved_text_reach_an_anthropic_client() {
     const MIXED: &[&str] = &[
@@ -3309,13 +3365,16 @@ async fn l4_openai_arguments_after_interleaved_text_reach_an_anthropic_client() 
         events.iter().any(|(_, d)| d["delta"]["text"] == "hm"),
         "{out}"
     );
-    assert!(
-        events
-            .iter()
-            .any(|(_, d)| d["error"]["type"] == "untranslatable"),
-        "{out}"
-    );
-    assert!(!out.contains("partial_json"), "{out}");
+    // The arguments are in the tool's own block, which stops before the
+    // text's opens: a stream that is never mangled.
+    let args: String = events
+        .iter()
+        .filter_map(|(_, d)| d["delta"]["partial_json"].as_str())
+        .collect();
+    assert_eq!(args, r#"{"path":"a"}"#, "{out}");
+    assert!(!out.contains("event: error"), "{out}");
+    let names: Vec<String> = events.iter().filter_map(|(n, _)| n.clone()).collect();
+    assert_well_formed(&names, &out);
 }
 
 /// A tool result's text block carries `cache_control`, which OpenAI has no
@@ -3401,15 +3460,20 @@ async fn parallel_openai_tool_calls_reach_an_anthropic_client_in_blocks_that_do_
 }
 
 /// Restores a hidden email in tool calls' arguments, as a PII plugin does.
-#[derive(Clone)]
-struct RestoreArguments;
+#[derive(Clone, Default)]
+struct RestoreArguments(Vec<u32>);
 
 impl Filter<Reply> for RestoreArguments {
     fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        for piece in &mut reply.content {
-            if let Piece::ToolCall { arguments, .. } = piece {
-                *arguments = arguments.replace("<EMAIL_1>", "bob@x.io");
+        match &mut reply {
+            Reply::BlockStart {
+                block,
+                kind: Block::ToolCall { .. },
+            } => self.0.push(*block),
+            Reply::Delta { block, delta } if self.0.contains(block) => {
+                *delta = delta.replace("<EMAIL_1>", "bob@x.io");
             }
+            _ => {}
         }
         out.push(reply);
         Ok(())
@@ -3437,7 +3501,7 @@ async fn an_edited_tool_call_is_written_into_anthropics_own_events() {
             event(json!({"type": "content_block_stop", "index": 1})),
         ],
     );
-    let h = Harness::new(vec![Arc::new(Adds(RestoreArguments))]).await;
+    let h = Harness::new(vec![Arc::new(Adds(RestoreArguments::default()))]).await;
     let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
     h.anthropic.answer(sse(&chunks));
     let body = json!({ "model": "claude-x", "max_tokens": 10, "stream": true,
@@ -3493,8 +3557,12 @@ async fn an_edited_tool_call_is_written_into_openais_own_chunks() {
         chunk(json!([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}])),
         "data: [DONE]\n\n".to_owned(),
     ];
-    let plugins =
-        || -> Vec<Arc<dyn Plugin>> { vec![Arc::new(ToOpenAi), Arc::new(Adds(RestoreArguments))] };
+    let plugins = || -> Vec<Arc<dyn Plugin>> {
+        vec![
+            Arc::new(ToOpenAi),
+            Arc::new(Adds(RestoreArguments::default())),
+        ]
+    };
     let h = Harness::with(plugins()).await;
     let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
     h.openai.answer(sse(&chunks));
@@ -3527,8 +3595,14 @@ async fn an_edited_tool_call_is_written_into_openais_own_chunks() {
     let (status, out) = h.text(call(CHAT, body.to_string())).await;
 
     assert_eq!(status, StatusCode::OK, "{out}");
-    let mut expected = whole;
-    expected["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
-        "{\"to\":\"bob@x.io\"}".into();
-    assert_eq!(serde_json::from_str::<Value>(&out).ok(), Some(expected));
+    let said: Value = serde_json::from_str(&out).unwrap_or_default();
+    let (choice, was) = (&said["choices"][0], &whole["choices"][0]);
+    let mut call = was["message"]["tool_calls"][0].clone();
+    call["function"]["arguments"] = "{\"to\":\"bob@x.io\"}".into();
+    assert_eq!(choice["message"]["tool_calls"], json!([call]));
+    assert_eq!(choice["finish_reason"], "tool_calls");
+    assert_eq!(
+        (&said["id"], &said["model"]),
+        (&whole["id"], &whole["model"])
+    );
 }

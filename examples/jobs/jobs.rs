@@ -2,7 +2,7 @@
 //! idempotent request. The client sends an `Idempotency-Key` header (an
 //! operation id in the body works the same). The first request with it
 //! runs, and what it sent the client is stored, keyed by tenant, key and a
-//! hash of the body: the same key with another body runs on its own. A
+//! hash of the conversation it asks: the same key with another one runs on its own. A
 //! retry, or a duplicate sent while the first runs, gets the stored result
 //! or waits for the run in flight: the provider is called once. The tenant
 //! is a hash of all its credentials, which the adapter lifted into a
@@ -61,7 +61,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Hashes of the tenant's credential and of the body, around the
+/// Hashes of the tenant's credential and of the conversation, around the
 /// idempotency key. SHA-256 is stable across process restarts.
 type Key = (String, String, String);
 
@@ -111,7 +111,7 @@ enum Claim {
 /// store is a table keyed by `Key` with a TTL: `claim` is an
 /// `INSERT .. ON CONFLICT DO NOTHING` (or Redis `SET NX EX`), waiting
 /// polls or subscribes until the row is done, and a result is each reply's
-/// bytes (`reply.came_in(format)`), decoded again to replay.
+/// events, which a format encodes and decodes again to replay.
 #[async_trait]
 trait Store: Send + Sync + 'static {
     /// `Run` for the first request with `key`; else its result, waiting
@@ -293,9 +293,12 @@ impl<S: Store> Plugin for Idempotent<S> {
         let Some(key) = header.filter(|_| stores) else {
             return Ok(None);
         };
-        // The body as it came: the bytes the client's conversation came in.
-        let chat = cx.input::<Conversation>()?;
-        let body = chat.came_in(cx.format()).map_or(&[][..], |o| &o.bytes);
+        // The body as the client sent it, which the HTTP adapter publishes:
+        // stable across restarts and versions, unlike any in-memory form.
+        let wire = cx.extensions().get::<respan_gateway_http::Wire>();
+        let body = wire
+            .and_then(|w| w.get())
+            .map_or(&[][..], |r| &r.body()[..]);
         let key = (tenant(cx), key.to_owned(), digest(body));
         let (owner, deadline) = match self.0.claim(&key).await? {
             Claim::Done(replies) => {

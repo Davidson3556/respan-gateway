@@ -1,5 +1,29 @@
 use super::*;
 
+/// Whether `got` says everything `sent` does: its fields are there, equal
+/// (objects field by field). A re-encoded response may say more.
+fn says_all(got: &serde_json::Value, sent: &serde_json::Value) -> bool {
+    match (got, sent) {
+        (serde_json::Value::Object(got), serde_json::Value::Object(sent)) => sent
+            .iter()
+            .all(|(key, value)| got.get(key).is_some_and(|g| says_all(g, value))),
+        _ => got == sent,
+    }
+}
+
+/// The JSON of each `data:` line of an event stream.
+fn data_events(sse: &[u8]) -> Vec<serde_json::Value> {
+    let text = String::from_utf8_lossy(sse).into_owned();
+    let lines: Vec<_> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .collect();
+    lines
+        .iter()
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect()
+}
+
 #[test]
 fn invalid_serve_arguments_fail_instead_of_running_the_offline_demo() {
     let args = |parts: &[&str]| {
@@ -55,7 +79,9 @@ async fn serve_mode_uses_local_upstream_and_relays_client_credentials()
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.text().await?, reply);
+    // The response is re-encoded: everything the provider said is there.
+    let got: serde_json::Value = serde_json::from_str(&response.text().await?)?;
+    assert!(says_all(&got, &serde_json::from_str(reply)?), "{got}");
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/v1/messages");
@@ -77,8 +103,15 @@ async fn credentials_beta_headers_and_unknown_fields_pass_untouched() -> Result<
     let gw = gateway(fixture(http::StatusCode::OK, STREAM.concat(), sent.clone()))?;
     let (status, _, body) = read_whole(serve(&gw, request()).await.0).await;
     assert_eq!(status, http::StatusCode::OK);
-    // The response, unknown event and field included, is the provider's bytes.
-    assert_eq!(body?, STREAM.concat());
+    // The response is re-encoded, not the provider's bytes: each event it
+    // sent comes back in order and says all it said, the unknown event and
+    // a block's unknown field included.
+    let (got, said) = (data_events(&body?), data_events(STREAM.concat().as_bytes()));
+    assert_eq!(got.len(), said.len(), "{got:?}");
+    for (got, sent) in got.iter().zip(&said) {
+        assert!(says_all(got, sent), "{got} vs {sent}");
+    }
+    assert!(got.contains(&serde_json::json!({ "type": "brand_new_event", "x": 1 })));
     let requests = sent.lock().unwrap_or_else(PoisonError::into_inner);
     assert_eq!(requests.len(), 1);
     let (uri, headers, body) = &requests[0];

@@ -19,7 +19,7 @@ use respan_gateway_http::Status;
 #[cfg(test)]
 use respan_gateway_http::http;
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Conversation, Message, Reply, Role};
+use respan_gateway_sdk::conversation::{Assembled, Conversation, Message, Reply, Role};
 use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -58,8 +58,9 @@ impl Plugin for Judge {
             .outputs()
             .try_collect()
             .await?;
-        let verdict: String = replies.iter().flat_map(Reply::texts).collect();
-        cx.set_target(if verdict.contains("HARD") {
+        let mut answer = Assembled::default();
+        replies.iter().try_for_each(|reply| answer.push(reply))?;
+        cx.set_target(if answer.message.text().contains("HARD") {
             "strong"
         } else {
             "cheap"

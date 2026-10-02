@@ -14,12 +14,12 @@ use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{HttpClient, Status};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::conversation::{
-    Content, Conversation, Finish, Message, Piece, Reply, Role,
+    Block, Content, Conversation, Finish, Message, Reply, Role, Tool,
 };
 use respan_gateway_sdk::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
-use respan_gateway_sdk::{ErrorCode, Upstream};
+use respan_gateway_sdk::{ErrorCode, Upstream, Usage};
 use serde_json::{self, json};
-use support::run_filter as run;
+use support::{opened, run_filter as run};
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
 
 /// Refuses text holding "bomb".
@@ -40,8 +40,26 @@ impl Rewrite for Terms {
     }
 }
 
+/// The text of every delta in `replies`.
 fn text(replies: &[Reply]) -> String {
-    replies.iter().flat_map(Reply::texts).collect()
+    replies
+        .iter()
+        .filter_map(|r| match r {
+            Reply::Delta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Text block `block` opens and says each of `deltas`.
+fn said(block: u32, deltas: &[&str]) -> Vec<Reply> {
+    let open = Reply::block_start(block, Block::Text);
+    let deltas = deltas.iter().map(|d| Reply::delta(block, *d));
+    std::iter::once(open).chain(deltas).collect()
+}
+
+fn keep_alive() -> Reply {
+    Reply::other("anthropic-messages", json!({ "type": "ping" }))
 }
 
 fn email() -> Placeholders {
@@ -53,8 +71,8 @@ fn email() -> Placeholders {
 
 #[test]
 fn a_placeholder_split_across_three_deltas_is_restored() {
-    let deltas = ["Mail <EMA", "IL_", "1> now"].map(|d| Reply::text(0, d));
-    let out = run(&mut Holdback::new(email()), deltas.into());
+    let deltas = said(0, &["Mail <EMA", "IL_", "1> now"]);
+    let out = run(&mut Holdback::new(email()), deltas);
     assert_eq!(text(&out.unwrap_or_default()), "Mail bob@x.io now");
 }
 
@@ -62,7 +80,9 @@ fn a_placeholder_split_across_three_deltas_is_restored() {
 fn nothing_is_held_past_the_finish() {
     let mut holdback = Holdback::new(email());
     let mut out = Vec::new();
-    assert!(holdback.edit(Reply::text(0, "Hi <EMA"), &mut out).is_ok());
+    for event in said(0, &["Hi <EMA"]) {
+        assert!(holdback.edit(event, &mut out).is_ok());
+    }
     assert_eq!(text(&out), "Hi ");
     assert!(
         holdback
@@ -70,10 +90,7 @@ fn nothing_is_held_past_the_finish() {
             .is_ok()
     );
     assert_eq!(text(&out), "Hi <EMA");
-    assert_eq!(
-        out.last().and_then(|r| r.finish.clone()),
-        Some(Finish::Stop)
-    );
+    assert_eq!(out.last(), Some(&Reply::finished(Finish::Stop)));
     let mut tail = Vec::new();
     assert!(holdback.end(&Ok(()), &mut tail).is_ok());
     assert!(tail.is_empty(), "{tail:?}");
@@ -82,80 +99,78 @@ fn nothing_is_held_past_the_finish() {
 #[test]
 fn held_text_goes_before_other_content_and_at_the_end() {
     let mut holdback = Holdback::new(email());
-    let replies = vec![
-        Reply::text(0, "a <EMAIL_"),
-        Reply::other(
-            "anthropic-messages",
-            json!({ "type": "tool_use", "name": "f", "input": {} }),
-        ),
-        Reply::text(1, "b <EM"),
-    ];
+    let tool_use = json!({ "type": "tool_use", "name": "f", "input": {} });
+    let mut replies = said(0, &["a <EMAIL_"]);
+    replies.push(Reply::other("anthropic-messages", tool_use.clone()));
+    replies.extend(said(1, &["b <EM"]));
     let out = run(&mut holdback, replies).unwrap_or_default();
-    let pieces: Vec<Piece> = out.into_iter().flat_map(|r| r.content).collect();
     assert_eq!(
-        pieces[..3],
+        out,
         [
-            Piece::text(0, "a "),
-            Piece::text(0, "<EMAIL_"),
-            Piece::other(
-                "anthropic-messages",
-                json!({ "type": "tool_use", "name": "f", "input": {} }),
-            ),
+            Reply::block_start(0, Block::Text),
+            Reply::delta(0, "a "),
+            Reply::delta(0, "<EMAIL_"),
+            Reply::other("anthropic-messages", tool_use),
+            Reply::block_start(1, Block::Text),
+            Reply::delta(1, "b "),
+            Reply::delta(1, "<EM"),
         ]
     );
-    assert_eq!(pieces[3..], [Piece::text(1, "b "), Piece::text(1, "<EM")]);
 }
 
 #[test]
-fn a_reply_left_showing_nothing_waits_for_one_that_does() {
+fn an_event_left_showing_nothing_waits_for_one_that_does() {
     let mut holdback = Holdback::new(Terms);
     let mut out = Vec::new();
-    let mut start = Reply::start("c1", "m");
-    start.content.push(Piece::text(0, "bo"));
-    assert!(holdback.edit(start, &mut out).is_ok());
-    assert!(out.is_empty());
-    assert!(holdback.edit(Reply::text(0, "at"), &mut out).is_ok());
+    for event in [Reply::start("c1", "m"), Reply::block_start(0, Block::Text)] {
+        assert!(holdback.edit(event, &mut out).is_ok());
+    }
+    assert!(holdback.edit(Reply::delta(0, "bo"), &mut out).is_ok());
+    assert!(out.is_empty(), "{out:?}");
+    assert!(holdback.edit(Reply::delta(0, "at"), &mut out).is_ok());
     assert_eq!(text(&out), "boat");
-    assert!(out[0].start.is_some());
+    assert_eq!(out[0], Reply::start("c1", "m"));
 }
 
 // Every value reaches a filter: a keep-alive or usage alone passes
 // at once when nothing waits, even while text is held, and is never refused.
 #[test]
-fn a_keep_alive_or_usage_alone_passes_at_once_unless_replies_wait() {
+fn a_keep_alive_or_usage_alone_passes_at_once_unless_events_wait() {
     let mut holdback = Holdback::new(Terms);
     let mut out = Vec::new();
-    let keep_alive = Reply::default();
-    let mut usage = Reply::default();
-    usage.usage.add("output_tokens", 3.0);
-    assert!(holdback.edit(keep_alive.clone(), &mut out).is_ok());
-    assert_eq!(out.len(), 1);
-    assert_eq!(out[0], keep_alive);
+    let mut counts = Usage::default();
+    counts.add("output_tokens", 3.0);
+    let usage = Reply::usage(counts);
+    assert!(holdback.edit(keep_alive(), &mut out).is_ok());
+    assert_eq!(out, [keep_alive()]);
     // "bo" may start a match, so it is held; usage alone still passes.
-    assert!(holdback.edit(Reply::text(0, "a bo"), &mut out).is_ok());
+    for event in said(0, &["a bo"]) {
+        assert!(holdback.edit(event, &mut out).is_ok());
+    }
     assert!(holdback.edit(usage.clone(), &mut out).is_ok());
     assert_eq!(out.last(), Some(&usage));
-    // Behind a reply that waits, it waits too, in order.
+    // Behind an event that waits, it waits too, in order.
     let (mut holdback, mut out) = (Holdback::new(Terms), Vec::new());
-    let mut start = Reply::start("c1", "m");
-    start.content.push(Piece::text(1, ""));
-    assert!(holdback.edit(start, &mut out).is_ok());
-    assert!(holdback.edit(keep_alive.clone(), &mut out).is_ok());
+    for event in [Reply::start("c1", "m"), Reply::block_start(1, Block::Text)] {
+        assert!(holdback.edit(event, &mut out).is_ok());
+    }
+    assert!(holdback.edit(keep_alive(), &mut out).is_ok());
     assert!(out.is_empty(), "{out:?}");
-    assert!(holdback.edit(Reply::text(1, "at"), &mut out).is_ok());
-    assert!(out[0].start.is_some() && out[1] == keep_alive, "{out:?}");
+    assert!(holdback.edit(Reply::delta(1, "at"), &mut out).is_ok());
+    assert_eq!(out[0], Reply::start("c1", "m"));
+    assert_eq!(out[2], keep_alive(), "{out:?}");
+    assert_eq!(out[3], Reply::delta(1, "at"), "{out:?}");
 }
 
 #[test]
 fn a_match_ending_in_its_own_start_is_seen_whole() {
-    let out = run(&mut Holdback::new(Terms), vec![Reply::text(0, "a bomb")]);
+    let out = run(&mut Holdback::new(Terms), said(0, &["a bomb"]));
     assert!(out.is_err(), "{out:?}");
 }
 
 #[test]
 fn a_match_across_deltas_is_seen_whole() {
-    let replies = ["a bo", "m", "b!"].map(|d| Reply::text(0, d));
-    let out = run(&mut Holdback::new(Terms), replies.into());
+    let out = run(&mut Holdback::new(Terms), said(0, &["a bo", "m", "b!"]));
     assert_eq!(
         out.err()
             .map(|f| respan_gateway_http::error_code(&f).into_owned())
@@ -173,7 +188,7 @@ fn a_label_matches_exactly_and_counts_its_own() {
     assert_eq!(vault.hide("EMAIL_WORK", "b@x.io"), "<EMAIL_WORK_2>");
     let out = run(
         &mut Holdback::new(vault),
-        vec![Reply::text(0, "<EMAIL_2> <EMAIL_WORK_1>")],
+        said(0, &["<EMAIL_2> <EMAIL_WORK_1>"]),
     );
     assert_eq!(text(&out.unwrap_or_default()), "b@x.io a@x.io");
 }
@@ -184,10 +199,7 @@ fn a_restored_value_is_not_restored_again() {
     // Someone literally wrote a placeholder's shape.
     assert_eq!(vault.hide("NAME", "<NAME_2>"), "<NAME_1>");
     assert_eq!(vault.hide("NAME", "Alice"), "<NAME_2>");
-    let out = run(
-        &mut Holdback::new(vault),
-        vec![Reply::text(0, "<NAME_1>. <")],
-    );
+    let out = run(&mut Holdback::new(vault), said(0, &["<NAME_1>. <"]));
     assert_eq!(text(&out.unwrap_or_default()), "<NAME_2>. <");
 }
 
@@ -237,7 +249,7 @@ fn content_that_cannot_be_read_is_refused() {
     );
     assert_eq!(plain.messages[0].text(), "HI");
     assert_eq!(
-        Reply::text(0, "hi").read_all().ok().as_deref(),
+        Reply::delta(0, "hi").read_all().ok().as_deref(),
         Some("hi\n")
     );
 }
@@ -245,19 +257,29 @@ fn content_that_cannot_be_read_is_refused() {
 /// An agent's request: tools, an assistant's tool call and the tool's
 /// answer.
 fn agent_chat() -> Conversation {
-    let mut call = Message::new(Role::Assistant, "");
     let arguments = json!({ "to": "bob@x.io", "cc": ["a@y.io"] }).to_string();
-    let calls = json!([{ "id": "c1", "function": { "name": "mail", "arguments": arguments } }]);
-    call.unsupported.insert("tool_calls".into(), calls);
-    let mut answer = Message::new(Role::Other("tool".into()), "sent to bob@x.io");
-    answer
-        .unsupported
-        .insert("tool_call_id".into(), "c1".into());
+    let mut call = Message::new(Role::Assistant, "");
+    call.content = vec![Content::tool_call("c1", "mail", arguments)];
+    let mut answer = Message::new(Role::User, "");
+    let said = vec![Content::from("sent to bob@x.io")];
+    answer.content = vec![Content::tool_result("c1", said, false)];
     let mut chat = Conversation::new([Message::new(Role::User, "mail bob"), call, answer]);
-    let tools = json!([{ "function": { "name": "mail", "description": "Mail; CEO is c@z.io",
-        "parameters": { "type": "object", "properties": { "to": { "type": "string" } } } } }]);
-    chat.unsupported.insert("tools".into(), tools);
+    let parameters = json!({ "type": "object", "properties": { "to": { "type": "string" } } });
+    let mut tool = Tool::new("mail", parameters);
+    tool.description = Some("Mail; CEO is c@z.io".into());
+    chat.tools.push(tool);
     chat
+}
+
+/// The text of the first part of the tool result in `message`.
+fn result_text(message: &Message) -> String {
+    match message.content.first() {
+        Some(Content::ToolResult { content, .. }) => match content.first() {
+            Some(Content::Text { text, .. }) => text.clone(),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
 }
 
 #[test]
@@ -281,85 +303,76 @@ fn tools_and_tool_calls_are_read_and_edited_as_text() -> Result<(), Fault> {
         }
         Ok(())
     })?;
-    let arguments = &chat.messages[1].unsupported["tool_calls"][0]["function"]["arguments"];
-    let arguments: serde_json::Value = serde_json::from_str(arguments.as_str().unwrap_or(""))
-        .map_err(|e| Fault::internal(e.to_string()))?;
+    let Some(Content::ToolCall { arguments, .. }) = chat.messages[1].content.first() else {
+        panic!("a tool call")
+    };
+    let arguments: serde_json::Value =
+        serde_json::from_str(arguments).map_err(|e| Fault::internal(e.to_string()))?;
     // Still JSON, the value hidden inside it.
     assert_eq!(arguments, json!({ "to": "<EMAIL_1>", "cc": ["a@y.io"] }));
-    assert_eq!(chat.messages[2].text(), "sent to <EMAIL_1>");
+    assert_eq!(result_text(&chat.messages[2]), "sent to <EMAIL_1>");
     Ok(())
 }
 
 #[test]
 fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault> {
     let arguments = json!({ "card": 4111111111111111u64, "ok": true }).to_string();
-    let calls = json!([{ "function": { "arguments": arguments } }]);
     let mut call = Message::new(Role::Assistant, "");
-    call.unsupported.insert("tool_calls".into(), calls);
+    call.content = vec![Content::tool_call("c1", "pay", arguments)];
     let mut chat = Conversation::new([call]);
-    chat.unsupported
+    chat.extra
+        .fields
         .insert("seed".into(), json!(4111111111111111u64));
     assert!(chat.read_all()?.contains("\n4111111111111111\n"));
     chat.edit_all(|text| {
         *text = text.replace("4111111111111111", "<CARD_1>");
         Ok(())
     })?;
-    let arguments = &chat.messages[0].unsupported["tool_calls"][0]["function"]["arguments"];
-    let arguments: serde_json::Value = serde_json::from_str(arguments.as_str().unwrap_or(""))
-        .map_err(|e| Fault::internal(e.to_string()))?;
+    let Some(Content::ToolCall { arguments, .. }) = chat.messages[0].content.first() else {
+        panic!("a tool call")
+    };
+    let arguments: serde_json::Value =
+        serde_json::from_str(arguments).map_err(|e| Fault::internal(e.to_string()))?;
     assert_eq!(arguments, json!({ "card": "<CARD_1>", "ok": true }));
     // The request's own numbers are not texts.
-    assert_eq!(chat.unsupported["seed"], json!(4111111111111111u64));
+    assert_eq!(chat.extra.fields["seed"], json!(4111111111111111u64));
     Ok(())
 }
 
-fn call_delta(index: u64, arguments: &str) -> Reply {
-    let call = json!({ "index": index, "function": { "arguments": arguments } });
-    Reply::other(
-        "openai-chat",
-        json!([{ "index": 0, "delta": { "tool_calls": [call] } }]),
-    )
+fn call_delta(block: u32, arguments: &str) -> Reply {
+    Reply::delta(block, arguments)
 }
 
 /// The arguments of each streamed call in `replies`, by call.
 fn arguments_by_call(replies: &[Reply]) -> Vec<String> {
     let mut calls: Vec<String> = Vec::new();
-    for piece in replies.iter().flat_map(|r| &r.content) {
-        let Piece::Other { raw, .. } = piece else {
+    for reply in replies {
+        let Reply::Delta { block, delta } = reply else {
             continue;
         };
-        for call in raw[0]["delta"]["tool_calls"]
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
-            let at = call["index"].as_u64().unwrap_or_default() as usize;
-            calls.resize(calls.len().max(at + 1), String::new());
-            calls[at].push_str(call["function"]["arguments"].as_str().unwrap_or_default());
-        }
+        let at = *block as usize;
+        calls.resize(calls.len().max(at + 1), String::new());
+        calls[at].push_str(delta);
     }
     calls
 }
 
 #[test]
 fn a_placeholder_split_across_three_argument_deltas_is_restored_by_call() {
-    let deltas = [
+    let deltas = opened(vec![
         call_delta(0, r#"{"to":"<EMA"#),
         call_delta(1, r#"{"cc":"<EMAIL_1>","n":"#),
         call_delta(0, "IL_"),
         call_delta(0, r#"1>"}"#),
         call_delta(1, "3}"),
         Reply::finished(Finish::ToolUse),
-    ];
-    let out = run(&mut Holdback::new(email()), deltas.into()).unwrap_or_default();
+    ]);
+    let out = run(&mut Holdback::new(email()), deltas).unwrap_or_default();
     assert_eq!(
         arguments_by_call(&out),
         [r#"{"to":"bob@x.io"}"#, r#"{"cc":"bob@x.io","n":3}"#]
     );
-    assert_eq!(
-        out.last().and_then(|r| r.finish.clone()),
-        Some(Finish::ToolUse)
-    );
+    assert_eq!(out.last(), Some(&Reply::finished(Finish::ToolUse)));
 }
 
 #[test]
@@ -367,7 +380,7 @@ fn a_tail_held_at_the_end_is_sent_then_and_never_lost() {
     // The stream ends (cut) inside a placeholder: what was held goes out.
     let out = run(
         &mut Holdback::new(email()),
-        vec![call_delta(0, r#"{"to":"<EMA"#)],
+        opened(vec![call_delta(0, r#"{"to":"<EMA"#)]),
     );
     assert_eq!(
         arguments_by_call(&out.unwrap_or_default()),
@@ -748,31 +761,20 @@ async fn a_stream_cut_while_text_is_held_sends_it_then_the_error() -> Result<(),
 fn a_value_restored_into_a_streamed_tool_fragment_is_escaped() {
     let vault = Placeholders::default();
     let ph = vault.hide("NAME", "Robert \"Bob\" Smith");
-    let call = |arguments: &str| {
-        let raw = json!([{ "index": 0, "delta": { "tool_calls": [{ "function": { "arguments": arguments } }] } }]);
-        Reply::other("openai", raw)
-    };
     let frags = [format!("{{\"to\":\"{ph}"), "\"}".to_owned()];
     let out = run(
         &mut Holdback::new(vault),
-        frags.iter().map(|f| call(f)).collect(),
+        opened(frags.iter().map(|f| call_delta(0, f)).collect()),
     )
     .unwrap_or_default();
-    let joined: String = out
-        .iter()
-        .filter_map(|r| match &r.content[..] {
-            [Piece::Other { raw, .. }] => raw[0]["delta"]["tool_calls"][0]["function"]["arguments"]
-                .as_str()
-                .map(str::to_owned),
-            _ => None,
-        })
-        .collect();
+    let joined = arguments_by_call(&out).concat();
     let parsed: serde_json::Value = serde_json::from_str(&joined).unwrap_or_default();
     assert_eq!(parsed["to"], "Robert \"Bob\" Smith", "{joined}");
 }
 
-// A keep-alive and the usage chunk pass a guard's Holdback in place, so a
-// client of the provider's format gets the provider's bytes.
+// A keep-alive and the usage chunk pass a guard's Holdback: the client still
+// gets the text, the finish, the usage it asked for and `[DONE]`. (The
+// keep-alive comment says nothing, so it is not an event and is not resent.)
 #[tokio::test]
 async fn a_keep_alive_and_usage_pass_a_holdback_in_place() -> Result<(), Fault> {
     let chunks = [
@@ -792,6 +794,22 @@ async fn a_keep_alive_and_usage_pass_a_holdback_in_place() -> Result<(), Fault> 
     let req = post("/v1/chat/completions", body.to_string());
     let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body?, Bytes::from(chunks.concat()));
+    let body = String::from_utf8_lossy(&body?).into_owned();
+    let events = body.lines().filter_map(|l| l.strip_prefix("data: "));
+    let events: Vec<serde_json::Value> = events
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect();
+    assert_eq!(streamed_text(&body), "hi", "{body}");
+    let finish = |e: &&serde_json::Value| e["choices"][0]["finish_reason"] == "stop";
+    assert!(events.iter().any(|e| finish(&e)), "{body}");
+    let usage = events.iter().find(|e| e["usage"].is_object());
+    let usage = usage.map(|e| {
+        (
+            e["usage"]["prompt_tokens"].clone(),
+            e["usage"]["completion_tokens"].clone(),
+        )
+    });
+    assert_eq!(usage, Some((json!(3), json!(1))), "{body}");
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     Ok(())
 }

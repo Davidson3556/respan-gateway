@@ -8,7 +8,7 @@ use respan_gateway_http::http;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Conversation, Finish, Piece, Reply};
+use respan_gateway_sdk::conversation::{Block, Conversation, Finish, Reply};
 use respan_gateway_sdk::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -136,7 +136,9 @@ impl Plugin for Metered {
         let usage = CallUsage::default();
         px.extensions_mut().insert(usage.clone());
         px.filter(move |reply: &mut Reply| {
-            *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &reply.usage;
+            if let Reply::Usage(more) = reply {
+                *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &*more;
+            }
             Ok(())
         })
     }
@@ -182,6 +184,65 @@ impl Plugin for Flip {
     }
 }
 
+/// The events of text `text` in block `block`: it opens, says it and ends.
+pub fn text(block: u32, text: &str) -> Vec<Reply> {
+    vec![
+        Reply::block_start(block, Block::Text),
+        Reply::delta(block, text),
+        Reply::block_end(block),
+    ]
+}
+
+/// The text blocks of a response, as its events open them.
+#[derive(Clone, Default)]
+pub struct TextBlocks(Vec<u32>);
+
+impl TextBlocks {
+    /// Note what `reply` opens.
+    pub fn note(&mut self, reply: &Reply) {
+        if let Reply::BlockStart { block, kind } = reply
+            && *kind == Block::Text
+            && !self.0.contains(block)
+        {
+            self.0.push(*block);
+        }
+    }
+
+    /// The text `reply` adds to a text block, noting the blocks it opens.
+    pub fn text<'a>(&mut self, reply: &'a Reply) -> Option<&'a str> {
+        self.note(reply);
+        match reply {
+            Reply::Delta { block, delta } if self.contains(*block) => Some(delta),
+            _ => None,
+        }
+    }
+
+    /// The text `reply` adds to a text block, to change, noting the blocks it
+    /// opens.
+    pub fn text_mut<'a>(&mut self, reply: &'a mut Reply) -> Option<&'a mut String> {
+        self.note(reply);
+        match reply {
+            Reply::Delta { block, delta } if self.contains(*block) => Some(delta),
+            _ => None,
+        }
+    }
+
+    /// Whether `block` is a text block.
+    pub fn contains(&self, block: u32) -> bool {
+        self.0.contains(&block)
+    }
+
+    /// Whether `reply` is an event of a text block's content.
+    pub fn is_text(&self, reply: &Reply) -> bool {
+        match reply {
+            Reply::BlockStart { block, .. }
+            | Reply::Delta { block, .. }
+            | Reply::BlockEnd { block } => self.0.contains(block),
+            _ => false,
+        }
+    }
+}
+
 /// Upper-cases a conversation response's text, streamed or whole, in any
 /// format.
 pub struct Shout;
@@ -189,16 +250,25 @@ pub struct Shout;
 #[async_trait]
 impl Plugin for Shout {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(shout)?;
+        cx.filter(Shouting::default())?;
         Ok(None)
     }
 }
 
-fn shout(reply: &mut Reply) -> Result<(), Fault> {
-    for text in reply.texts_mut() {
-        *text = text.to_uppercase();
+#[derive(Clone, Default)]
+struct Shouting(TextBlocks);
+
+impl Filter<Reply> for Shouting {
+    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.0.note(&reply);
+        if let Reply::Delta { block, delta } = &mut reply
+            && self.0.contains(*block)
+        {
+            *delta = delta.to_uppercase();
+        }
+        out.push(reply);
+        Ok(())
     }
-    Ok(())
 }
 
 /// Restores the name a redaction replaced with `<P1>`, even split across a
@@ -218,27 +288,26 @@ struct Restore {
     /// Text from a `<` that may begin a placeholder.
     held: String,
     block: u32,
+    texts: TextBlocks,
 }
 
 impl Filter<Reply> for Restore {
     fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.texts.note(&reply);
         // Nothing follows a finish, and text kept back goes before any
         // other content: hold nothing past them.
-        let other = |p: &Piece| !matches!(p, Piece::Text { .. });
-        let last = reply.finish.is_some() || reply.content.iter().any(other);
-        for piece in &mut reply.content {
-            let Piece::Text { block, text, .. } = piece else {
-                continue;
-            };
-            let mut t = std::mem::take(&mut self.held) + text.as_str();
-            if let Some(i) = t.rfind('<').filter(|&i| !last && !t[i..].contains('>')) {
+        let text = matches!(&reply, Reply::Delta { block, .. } if self.texts.contains(*block));
+        let last = !text && reply.is_content();
+        if let (Reply::Delta { block, delta }, true) = (&mut reply, text) {
+            let mut t = std::mem::take(&mut self.held) + delta.as_str();
+            if let Some(i) = t.rfind('<').filter(|&i| !t[i..].contains('>')) {
                 self.held = t.split_off(i);
             }
-            (self.block, *text) = (*block, t.replace("<P1>", "Alice"));
+            (self.block, *delta) = (*block, t.replace("<P1>", "Alice"));
+            if delta.is_empty() {
+                return Ok(());
+            }
         }
-        reply
-            .content
-            .retain(|p| !matches!(p, Piece::Text { text, .. } if text.is_empty()));
         if last {
             self.release(out);
         }
@@ -255,7 +324,7 @@ impl Filter<Reply> for Restore {
 impl Restore {
     fn release(&mut self, out: &mut Vec<Reply>) {
         if !self.held.is_empty() {
-            out.push(Reply::text(self.block, std::mem::take(&mut self.held)));
+            out.push(Reply::delta(self.block, std::mem::take(&mut self.held)));
         }
     }
 }
@@ -276,14 +345,14 @@ impl Filter<Reply> for HoldAll {
     }
 }
 
-/// Puts a note before everything, the start included.
+/// Puts a note, a block of its own, before everything, the start included.
 #[derive(Clone)]
 pub struct Disclaimer;
 
 impl Filter<Reply> for Disclaimer {
     fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if reply.start.is_some() {
-            out.push(Reply::text(0, "NOTE: "));
+        if matches!(reply, Reply::Start(_)) {
+            out.extend(text(u32::MAX, "NOTE: "));
         }
         out.push(reply);
         Ok(())
@@ -295,42 +364,51 @@ impl Filter<Reply> for Disclaimer {
 pub struct Nameless;
 
 impl Filter<Reply> for Nameless {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        reply.start = None;
-        out.push(reply);
+    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if !matches!(reply, Reply::Start(_)) {
+            out.push(reply);
+        }
         Ok(())
     }
 }
 
 /// Drops every text.
-#[derive(Clone)]
-pub struct Silence;
+#[derive(Clone, Default)]
+pub struct Silence(TextBlocks);
 
 impl Filter<Reply> for Silence {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        reply.content.retain(|p| !matches!(p, Piece::Text { .. }));
-        out.push(reply);
+    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.0.note(&reply);
+        if !self.0.is_text(&reply) {
+            out.push(reply);
+        }
         Ok(())
     }
 }
 
-/// Appends a footer to block `.0`, keeping the finish back until the end.
+/// Appends a footer to block `.0`, keeping its end and the finish back until
+/// the end of the response.
 #[derive(Clone)]
 pub struct Footer(pub u32, pub Option<Finish>);
 
 impl Filter<Reply> for Footer {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if let Some(finish) = reply.finish.take() {
-            self.1 = Some(finish);
+    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        match reply {
+            Reply::Finish(finish) => self.1 = Some(finish),
+            Reply::BlockEnd { block } if block == self.0 => {}
+            reply => out.push(reply),
         }
-        out.push(reply);
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let mut footer = Reply::text(self.0, " [footer]");
-        footer.finish = self.1.take();
-        out.push(footer);
+    fn end(&mut self, end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        out.push(Reply::block_start(self.0, Block::Text));
+        out.push(Reply::delta(self.0, " [footer]"));
+        out.push(Reply::block_end(self.0));
+        // A finish kept back past a failed end is not written, as it would
+        // claim the answer complete.
+        let finish = self.1.take().filter(|_| end.is_ok());
+        out.extend(finish.map(Reply::finished));
         Ok(())
     }
 }

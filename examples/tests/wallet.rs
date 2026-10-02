@@ -71,14 +71,44 @@ async fn an_image_cannot_overspend_the_wallet() -> Result<(), Fault> {
     Ok(())
 }
 
-/// Five answers of up to 10,000 tokens each: the hold covers all five.
+/// The conversation kind has no form for several choices, so a request for
+/// five is refused before it holds anything or reaches a provider.
 #[tokio::test]
-async fn n_answers_cannot_overspend_the_wallet() -> Result<(), Fault> {
+async fn several_answers_are_refused_unless_relayed_raw() -> Result<(), Fault> {
     let (fake, ledger) = (FakeOpenAi::start().await, wallets());
     let gw = gateway(
         provider_support::openai(&fake.base_url())?.connect(),
         ledger.clone(),
     )?;
+    let body =
+        r#"{"model":"gpt-x","n":5,"max_tokens":10000,"messages":[{"role":"user","content":"hi"}]}"#;
+    assert_eq!(send(&gw, "sk-b1", body).await?, StatusCode::BAD_REQUEST);
+    assert_eq!(ledger.spent("acme"), 0);
+    assert!(fake.requests().is_empty());
+    Ok(())
+}
+
+/// Five answers of up to 10,000 tokens each, through an explicit raw relay
+/// (the only way a request for several choices reaches a provider): the
+/// hold covers all five.
+#[tokio::test]
+async fn n_answers_cannot_overspend_the_wallet() -> Result<(), Fault> {
+    let (fake, ledger) = (FakeOpenAi::start().await, wallets());
+    let prices = prices();
+    let accounting = Accounting::new(ledger.clone(), move |px, tally| quote(px, tally, &prices));
+    // A raw relay keeps the client's path, so the provider sits at the origin.
+    let base = fake.base_url();
+    let origin = base.trim_end_matches("/v1");
+    let gw = Gateway::new()
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            provider_support::openai(origin)?.connect(),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
+        .plugin(accounting)
+        .plugin(respan_gateway_http::relay::Relay::RAW)
+        .target("openai")?;
     let five = r#"{"id":"c1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"..."}}],"usage":{"prompt_tokens":10,"completion_tokens":50000}}"#;
     let body =
         r#"{"model":"gpt-x","n":5,"max_tokens":10000,"messages":[{"role":"user","content":"hi"}]}"#;

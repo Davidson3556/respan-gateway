@@ -643,8 +643,8 @@ async fn r9_a_calls_own_input_is_written_from_its_value_alone() {
     assert_eq!(sent[1].raw, CHAT.as_bytes());
 }
 
-/// Anthropic Messages, noting where each reply its response encoder gets
-/// came from: `own` bytes, `openai` bytes, or `none`.
+/// Anthropic Messages, noting what each reply its response encoder gets is:
+/// an `own` event, in this format's words, or an ordinary `event`.
 #[derive(Clone, Default)]
 struct Noted(Arc<Mutex<Vec<&'static str>>>);
 
@@ -685,13 +685,10 @@ struct Noting(Arc<Mutex<Vec<&'static str>>>, Box<dyn Encoder<Reply>>);
 
 impl Encoder<Reply> for Noting {
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
-        let noted = match (
-            reply.came_in(AnthropicMessages.name()),
-            reply.came_in(OpenAiChat.name()),
-        ) {
-            (Some(_), _) => "own",
-            (_, Some(_)) => "openai",
-            _ => "none",
+        let noted = match reply {
+            Reply::Other { format, .. } if &**format == AnthropicMessages.name() => "own",
+            Reply::Other { .. } => "other",
+            _ => "event",
         };
         self.0.lock().map(|mut n| n.push(noted)).ok();
         self.1.encode(reply, out)
@@ -702,13 +699,15 @@ impl Encoder<Reply> for Noting {
     }
 }
 
-// An encoder gets another format's replies with their origin and writes the
-// bytes only if they are its own format's.
+// An encoder gets the events of another format as ordinary events, and of
+// its own format's as such: it writes the first anew and the second as they
+// are, never another format's words.
 #[tokio::test]
-async fn r2_an_encoder_gets_another_formats_replies_with_their_origin() {
+async fn r2_an_encoder_writes_its_own_formats_events_as_they_are_and_no_others() {
     let stream = [
-        ": ping\n\n",
+        "event: ping\ndata: {\"type\": \"ping\"}\n\n",
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"c\"}}\n\n",
+        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
         "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
     ];
@@ -739,7 +738,7 @@ async fn r2_an_encoder_gets_another_formats_replies_with_their_origin() {
                 g.provider::<Conversation, _, _>(
                     "openai",
                     OpenAiChat,
-                    respan_gateway_http::connect(sse(&[": ping\n\n", chunk, "data: [DONE]\n\n"])),
+                    respan_gateway_http::connect(sse(&[chunk, "data: [DONE]\n\n"])),
                 )
             })
             .and_then(|g| {
@@ -751,10 +750,15 @@ async fn r2_an_encoder_gets_another_formats_replies_with_their_origin() {
         bodies.push(String::from_utf8_lossy(&out.unwrap_or_default()).into_owned());
         noted.push(noting.0.lock().map(|n| n.clone()).unwrap_or_default());
     }
-    assert!(!noted[0].is_empty() && noted[0].iter().all(|n| *n == "own"));
-    assert!(bodies[0].contains(": ping\n\n"), "{}", bodies[0]);
-    // Another format's bytes come with their replies, and are not written.
-    assert!(!noted[1].is_empty() && noted[1].iter().all(|n| *n == "openai"));
+    // Its own format's keep-alive is an event of its own, written as it is.
+    assert!(noted[0].contains(&"own"), "{:?}", noted[0]);
+    assert!(
+        bodies[0].contains("event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+        "{}",
+        bodies[0]
+    );
+    // Another format's events are ordinary, and none of its words is written.
+    assert!(!noted[1].is_empty() && noted[1].iter().all(|n| *n == "event"));
     assert!(
         !bodies[1].contains("choices") && !bodies[1].contains("ping"),
         "{}",

@@ -4,7 +4,7 @@
 //! answers with is covered too; and every call's input on the provider
 //! edge, tools included, as the provider receives it, so a call any plugin
 //! makes, or text any plugin adds, is covered. What it cannot read (an
-//! image, a tool call in the answer) is refused, never passed; this gateway
+//! image, a tool call in the answer, a second choice) is refused, never passed; this gateway
 //! also serves Anthropic clients, which the guard reads. Traffic of another
 //! kind is refused (see tests).
 //!
@@ -26,7 +26,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::conversation::{Conversation, Piece, Reply};
+use respan_gateway_sdk::conversation::{Block, Conversation, Reply};
 use respan_gateway_sdk::futures::stream;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
 use respan_gateway_sdk::{Response, async_trait};
@@ -93,11 +93,14 @@ impl Plugin for Guard {
         // This example allows text-only answers. Holdback can inspect
         // tool arguments, but this policy refuses tool calls outright.
         cx.filter(|reply: &mut Reply| {
-            let text_only = reply
-                .content
-                .iter()
-                .all(|p| matches!(p, Piece::Text { .. }));
-            if text_only {
+            let calls_a_tool = matches!(
+                reply,
+                Reply::BlockStart {
+                    kind: Block::ToolCall { .. },
+                    ..
+                }
+            );
+            if !calls_a_tool {
                 Ok(())
             } else {
                 let message = "the guard cannot read a tool call in the answer";
@@ -132,7 +135,12 @@ impl Plugin for Cache {
         if cx.input::<Conversation>()?.model.as_deref() != Some("cached") {
             return Ok(None);
         }
-        let reply = [Reply::start("c0", "cached"), Reply::text(0, "a bomb")];
+        let reply = [
+            Reply::start("c0", "cached"),
+            Reply::block_start(0, Block::Text),
+            Reply::delta(0, "a bomb"),
+            Reply::block_end(0),
+        ];
         Ok(Some(Response::stream(stream::iter(reply.map(Ok)))))
     }
 }

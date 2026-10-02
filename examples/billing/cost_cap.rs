@@ -32,7 +32,7 @@ use respan_gateway_sdk::{Fault, Filter, Gateway, Plugin, ProviderContext, async_
 mod ledger;
 use ledger::MemoryLedger;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Conversation, Piece, Reply, units};
+use respan_gateway_sdk::conversation::{Block, Conversation, Reply, units};
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
@@ -86,17 +86,18 @@ impl Plugin for Cap {
             Ok(())
         })?;
         px.filter(move |reply: &mut Reply| {
-            // A tool call counts its name and arguments; other content its
-            // whole JSON, an overestimate, which errs toward cutting.
-            let chars = |piece: &Piece| match piece {
-                Piece::Text { text, .. } => text.len(),
-                Piece::ToolCall {
-                    name, arguments, ..
-                } => name.as_ref().map_or(0, String::len) + arguments.len(),
-                Piece::Other { raw, .. } => raw.to_string().len(),
+            // A delta counts its text or arguments, a tool call its name;
+            // other events their whole JSON, an overestimate, which errs
+            // toward cutting.
+            let chars = match reply {
+                Reply::Delta { delta, .. } => delta.len(),
+                Reply::BlockStart {
+                    kind: Block::ToolCall { name, .. },
+                    ..
+                } => name.len(),
+                Reply::Other { raw, .. } => raw.to_string().len(),
                 _ => 0,
             };
-            let chars: usize = reply.content.iter().map(chars).sum();
             seen.chars.fetch_add(chars, Ordering::Relaxed);
             if seen.tokens() <= seen.cap {
                 return Ok(());
@@ -125,7 +126,9 @@ struct Settle {
 
 impl Filter<Reply> for Settle {
     fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        self.usage += &reply.usage;
+        if let Reply::Usage(usage) = &reply {
+            self.usage += usage;
+        }
         out.push(reply);
         Ok(())
     }

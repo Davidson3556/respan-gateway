@@ -1,6 +1,6 @@
 //! The routing module's promises, against a mock provider.
 
-use respan_gateway_sdk::conversation::{Conversation, Reply};
+use respan_gateway_sdk::conversation::{Block, Conversation, Finish, Reply};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -44,6 +44,24 @@ const DONE: &str = "data: [DONE]\n\n";
 
 fn sse(chunks: &[&str]) -> Answer {
     Answer::events(chunks.iter().map(|frame| frame.trim_end().into()).collect())
+}
+
+/// What a client reads from a chat stream, ignoring how the gateway frames it:
+/// each data frame's id, model, delta and finish reason (a null one is none).
+/// The gateway re-encodes responses, so they are compared by meaning.
+fn meaning(body: &str) -> Vec<serde_json::Value> {
+    use serde_json::{Value, json};
+    body.split("\n\n")
+        .filter_map(|frame| frame.strip_prefix("data: "))
+        .map(|data| match serde_json::from_str::<Value>(data) {
+            Err(_) => json!(data),
+            Ok(chunk) => {
+                let choice = &chunk["choices"][0];
+                let finish = Some(&choice["finish_reason"]).filter(|f| !f.is_null());
+                json!([chunk["id"], chunk["model"], choice["delta"], finish])
+            }
+        })
+        .collect()
 }
 
 fn ok() -> Answer {
@@ -858,7 +876,13 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
                     |send, item: Result<Conversation, Fault>| async move {
                         item?;
                         if let Some(send) = send {
-                            let answer = stream::iter([Ok(Reply::text(0, "Local answer"))]);
+                            let answer = stream::iter([
+                                Ok(Reply::start("local-1", "local")),
+                                Ok(Reply::block_start(0, Block::Text)),
+                                Ok(Reply::delta(0, "Local answer")),
+                                Ok(Reply::block_end(0)),
+                                Ok(Reply::finished(Finish::Stop)),
+                            ]);
                             let _ = send.send(EventStream::stream(answer));
                         }
                         Ok::<_, Fault>(None)
@@ -1142,7 +1166,7 @@ async fn until_content_moves_on_from_a_success_failing_before_content() {
         let (status, _, body, outcome) = h.send().await;
 
         assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
-        assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
+        assert_eq!(meaning(&body), meaning(&[ROLE, HELLO, STOP, DONE].concat()));
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     }
 }
@@ -1160,7 +1184,7 @@ async fn until_end_sends_the_whole_answer_as_it_came_and_moves_on_before_content
         let (status, _, body, outcome) = h.send().await;
 
         assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
-        assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
+        assert_eq!(meaning(&body), meaning(&[ROLE, HELLO, STOP, DONE].concat()));
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
         let mut roles: Vec<_> = h
             .record
@@ -1204,7 +1228,11 @@ async fn a_race_until_end_picks_the_call_that_finishes_first() {
             (StatusCode::OK, Ok(())),
             "{until:?}"
         );
-        assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat(), "{until:?}");
+        assert_eq!(
+            meaning(&body),
+            meaning(&[ROLE, HELLO, STOP, DONE].concat()),
+            "{until:?}"
+        );
         let mut record = h.record.all();
         record.sort_by_key(|r| r.2 == Role::Loser);
         let got: Vec<_> = record
@@ -1241,7 +1269,7 @@ async fn until_end_a_stream_failing_after_content_is_not_a_winner() {
         let (status, _, body, outcome) = h.send().await;
 
         assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
-        assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
+        assert_eq!(meaning(&body), meaning(&[ROLE, HELLO, STOP, DONE].concat()));
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
         let mut roles: Vec<_> = h
             .record
@@ -1270,7 +1298,8 @@ async fn until_end_retries_a_stream_failing_after_content_and_returns_the_last()
     let (status, _, body, outcome) = h.send().await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(body.starts_with(&[ROLE, HELLO].concat()), "{body}");
+    let heard = meaning(&body);
+    assert_eq!(heard[..2], meaning(&[ROLE, HELLO].concat())[..], "{body}");
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
     assert!(matches!(outcome, Err(f) if f.is::<Upstream>()));
     assert_eq!(h.sent_to(), ["a.test", "a.test"]);

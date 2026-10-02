@@ -1,28 +1,36 @@
 //! The conversation kind: chats with a language model. Formats translate
 //! through these types, and plugins read any conversation through them:
 //! `cx.filter(|c: &mut Conversation| ..)` for the input and
-//! `cx.filter(|r: &mut Reply| ..)` for the output, one [`Reply`] per
-//! provider message.
+//! `cx.filter(|r: &mut Reply| ..)` for the output, one [`Reply`] per event of
+//! the response.
+//!
+//! A response is a sequence of events that follows the lifecycle of a
+//! stream: [`Reply::Start`], then for each content block a
+//! [`Reply::BlockStart`], its [`Reply::Delta`]s and a [`Reply::BlockEnd`],
+//! with [`Reply::Usage`], [`Reply::Finish`] and [`Reply::Other`] among them.
+//! A response that was not streamed decodes into the same sequence, and an
+//! encoder collects the events into one body or writes them as a stream, so a
+//! plugin handles one shape. [`Assembled`] folds the events into the whole
+//! answer for plugins that need it.
 //!
 //! Tools are the kind's too: the tools a request offers ([`Tool`],
 //! [`ToolChoice`]), the calls an assistant made and their results
 //! ([`Content::ToolCall`], [`Content::ToolResult`]), and the calls a
-//! response makes, whole or streamed ([`Piece::ToolCall`]).
+//! response makes ([`Block::ToolCall`]), whose arguments stream as JSON text.
 //!
-//! What the kind has no form for stays as the client's format has it
-//! ([`Conversation::unsupported`], [`Message::unsupported`],
-//! [`Tool::unsupported`], [`Content::Other`]); it is sent only in the
-//! format it is in, and translating it is refused if it can change the
-//! answer.
+//! What the kind has no form for stays as the format that decoded it has it
+//! ([`Extra`], [`Content::Other`], [`Reply::Other`]); it is sent only in that
+//! format, and translating it is refused if it can change the answer.
+//!
+//! Values are plain data: they say what they hold and compare by it. They
+//! keep nothing of the bytes they were decoded from.
 
-use bytes::Bytes;
 use respan_gateway_core::Fault;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::Usage;
-use crate::relayed::{Came, Relayed};
+use crate::{Upstream, Usage};
 
 /// Usage units every conversation format reports alike.
 pub mod units {
@@ -36,6 +44,40 @@ pub mod units {
     pub const CACHE_WRITE_INPUT_TOKENS: &str = "cache_write_input_tokens";
     /// The output tokens spent on reasoning.
     pub const REASONING_TOKENS: &str = "reasoning_tokens";
+}
+
+/// Fields a format keeps that the kind has no place for, in that format's
+/// terms. An encoder writes them only when `format` is its own name;
+/// translating to another format drops them unless doing so could change the
+/// answer, in which case it is refused. A format that decodes a value sets
+/// `format` whenever `fields` says something, or the value needs it, as a
+/// [`Role::Other`] does.
+///
+/// `fields` may also hold a field's own spelling, such as the `role` a
+/// message was written with (`developer`) or the key a limit was written
+/// under: the format that decoded it honours it when it writes the value
+/// again, and any other format writes its own spelling and drops it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Extra {
+    /// The name of the format `fields` are in.
+    pub format: Option<Arc<str>>,
+    /// The fields, as that format has them.
+    pub fields: Map<String, Value>,
+}
+
+impl Extra {
+    /// These `fields` of `format`.
+    pub fn new(format: impl Into<Arc<str>>, fields: Map<String, Value>) -> Self {
+        Self {
+            format: Some(format.into()),
+            fields,
+        }
+    }
+
+    /// Whether it holds no field.
+    pub fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
 }
 
 /// The kind's input: a conversation request.
@@ -68,14 +110,7 @@ pub struct Conversation {
     pub parallel_tool_calls: Option<bool>,
     /// The request's fields the kind has no place for, such as tools a
     /// provider runs itself.
-    pub unsupported: Map<String, Value>,
-    /// The name of the format that `unsupported`, the messages' and tools'
-    /// own `unsupported` and their `Role::Other` roles are in, set when a
-    /// format decodes the request. Only a call in that format can send
-    /// them: a plugin that translates them for another sets its name here.
-    pub unsupported_in: Option<Arc<str>>,
-    /// The client's body it was decoded from.
-    pub(crate) origin: Relayed<Conversation>,
+    pub extra: Extra,
 }
 
 impl Conversation {
@@ -85,30 +120,6 @@ impl Conversation {
             messages: messages.into_iter().collect(),
             ..Self::default()
         }
-    }
-
-    /// For formats: decoded by `format` from `bytes`.
-    pub fn came(mut self, format: &Arc<str>, bytes: Bytes) -> Self {
-        self.unsupported_in = Some(format.clone());
-        self.origin = Relayed::default();
-        self.origin = Relayed::came(format, bytes, self.clone());
-        self
-    }
-
-    /// The body it was decoded from, if `format` decoded it.
-    pub fn came_in(&self, format: &str) -> Option<&Came<Conversation>> {
-        self.origin.came_in(format)
-    }
-
-    /// The original request as decoded, if any, for classifying a format's
-    /// inability to write it as a client error rather than a plugin edit.
-    pub fn said(&self) -> Option<&Conversation> {
-        self.origin.said()
-    }
-
-    /// Attribute a writing failure to the original client request or an edit.
-    pub fn whose(&self, fault: Fault) -> Fault {
-        self.origin.whose(self, fault)
     }
 }
 
@@ -124,26 +135,16 @@ pub fn set_model(
 }
 
 /// One message of a conversation: its author and what it says.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Message {
     /// Its author.
     pub role: Role,
     /// What it says, part by part.
     pub content: Vec<Content>,
-    /// The message's fields the kind has no place for, such as a name.
-    pub unsupported: Map<String, Value>,
-    /// The client's message it was decoded from, shared by its copies: what
-    /// tells which client message an edited one still is.
-    source: Option<Arc<Value>>,
-}
-
-/// Compares what messages say, not their source.
-impl PartialEq for Message {
-    fn eq(&self, other: &Self) -> bool {
-        (&self.role, &self.content, &self.unsupported)
-            == (&other.role, &other.content, &other.unsupported)
-    }
+    /// The message's fields the kind has no place for, such as a name. A
+    /// [`Role::Other`] is in the format of `extra`.
+    pub extra: Extra,
 }
 
 impl Message {
@@ -152,28 +153,8 @@ impl Message {
         Self {
             role,
             content: vec![content.into()],
-            unsupported: Map::new(),
-            source: None,
+            extra: Extra::default(),
         }
-    }
-
-    /// For formats: decoded from the client's message `json`, which is
-    /// written as it is while unchanged, and edited in its shape once
-    /// changed, even after other messages were inserted or removed.
-    pub fn with_source(mut self, json: Value) -> Self {
-        self.source = Some(Arc::new(json));
-        self
-    }
-
-    /// The client's message this was decoded from, if any.
-    pub fn source(&self) -> Option<&Value> {
-        self.source.as_deref()
-    }
-
-    /// Whether both were decoded from the same client message, however
-    /// either was edited since.
-    pub fn same_source(&self, other: &Message) -> bool {
-        matches!((&self.source, &other.source), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
     }
 
     /// The message's text parts, joined; tool calls, results and other
@@ -182,17 +163,19 @@ impl Message {
         self.content
             .iter()
             .map(|c| match c {
-                Content::Text { text } => text.as_str(),
+                Content::Text { text, .. } => text.as_str(),
                 _ => "",
             })
             .collect()
     }
 
-    /// Whether the kind has a place for all of it: a known role and text.
+    /// Whether the kind has a place for all of it: a known role, no extra
+    /// fields on the message, and text parts (whose own extra fields, such as
+    /// a cache marker, do not change what they say).
     pub fn is_plain(&self) -> bool {
         let text = |c: &Content| matches!(c, Content::Text { .. });
-        !matches!(self.role, Role::Other(_))
-            && self.unsupported.is_empty()
+        !matches!(self.role, Role::Other { .. })
+            && self.extra.is_empty()
             && self.content.iter().all(text)
     }
 }
@@ -207,8 +190,25 @@ pub enum Role {
     User,
     /// The model.
     Assistant,
-    /// A role the kind has no form for, by the client format's name.
-    Other(String),
+    /// A role the kind has no form for, as `format` names it; only a call
+    /// in that format can send it.
+    #[non_exhaustive]
+    Other {
+        /// The name of the format `name` is in.
+        format: Arc<str>,
+        /// The role, as that format names it.
+        name: String,
+    },
+}
+
+impl Role {
+    /// The role `name` of `format`, which the kind has no form for.
+    pub fn other(format: impl Into<Arc<str>>, name: impl Into<String>) -> Self {
+        Role::Other {
+            format: format.into(),
+            name: name.into(),
+        }
+    }
 }
 
 /// A part of a message; a plugin that must see all of it refuses variants
@@ -221,6 +221,9 @@ pub enum Content {
     Text {
         /// The text.
         text: String,
+        /// The part's fields the kind has no place for, such as a cache
+        /// marker.
+        extra: Extra,
     },
     /// A tool call an assistant made.
     #[non_exhaustive]
@@ -231,6 +234,8 @@ pub enum Content {
         name: String,
         /// Its arguments, as JSON text.
         arguments: String,
+        /// The part's fields the kind has no place for.
+        extra: Extra,
     },
     /// What a tool answered a call.
     #[non_exhaustive]
@@ -241,6 +246,8 @@ pub enum Content {
         content: Vec<Content>,
         /// Whether the call failed.
         is_error: bool,
+        /// The part's fields the kind has no place for.
+        extra: Extra,
     },
     /// A part the kind has no form for, such as an image or a file, as
     /// `format` has it; only a call in that format can send it.
@@ -264,6 +271,7 @@ impl Content {
             id: id.into(),
             name: name.into(),
             arguments: arguments.into(),
+            extra: Extra::default(),
         }
     }
 
@@ -273,6 +281,7 @@ impl Content {
             id: id.into(),
             content,
             is_error,
+            extra: Extra::default(),
         }
     }
 
@@ -295,9 +304,8 @@ pub struct Tool {
     pub description: Option<String>,
     /// The JSON schema of its arguments.
     pub parameters: Value,
-    /// Its fields the kind has no place for, such as a cache marker, in
-    /// the conversation's `unsupported_in` format.
-    pub unsupported: Map<String, Value>,
+    /// Its fields the kind has no place for, such as a cache marker.
+    pub extra: Extra,
 }
 
 impl Tool {
@@ -307,7 +315,7 @@ impl Tool {
             name: name.into(),
             description: None,
             parameters,
-            unsupported: Map::new(),
+            extra: Extra::default(),
         }
     }
 }
@@ -328,38 +336,69 @@ pub enum ToolChoice {
 
 impl From<&str> for Content {
     fn from(text: &str) -> Self {
-        Content::Text { text: text.into() }
+        Content::Text {
+            text: text.into(),
+            extra: Extra::default(),
+        }
     }
 }
 
 impl From<String> for Content {
     fn from(text: String) -> Self {
-        Content::Text { text }
+        Content::Text {
+            text,
+            extra: Extra::default(),
+        }
     }
 }
 
-/// The kind's output: one message of a response, such as an OpenAI chunk,
-/// an Anthropic event or a whole body. Filters see every reply, those that
-/// are no content ([`Reply::is_content`]) included, such as a keep-alive or
-/// usage alone.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// The kind's output: one event of a response, streamed or not. Filters see
+/// every event, those that are no content ([`Reply::is_content`]) included,
+/// such as a usage report.
+///
+/// Blocks are numbered by the format that decodes them, and may be open
+/// together; an event names its block.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub struct Reply {
-    /// Which response this is, if the message names it.
-    pub start: Option<Start>,
-    /// What it says, in order.
-    pub content: Vec<Piece>,
-    /// Why the model stopped, if it says.
-    pub finish: Option<Finish>,
-    /// The usage the provider reports in it, as an increment. A plugin
-    /// that meters a call sums it in a provider-edge filter, which sees
-    /// every reply, usage alone included.
-    pub usage: Usage,
-    /// The provider's message it was decoded from.
-    pub(crate) origin: Relayed<Reply>,
+pub enum Reply {
+    /// The response begins: its id and model.
+    Start(Start),
+    /// Content block `block` opens.
+    BlockStart {
+        /// The block, numbered in the order blocks open.
+        block: u32,
+        /// What it holds.
+        kind: Block,
+    },
+    /// The next part of block `block`: text, tool-call argument JSON, or
+    /// reasoning.
+    Delta {
+        /// The block it belongs to.
+        block: u32,
+        /// The text, or the part of a tool call's arguments.
+        delta: String,
+    },
+    /// Block `block` is complete.
+    BlockEnd {
+        /// The block that is complete.
+        block: u32,
+    },
+    /// Usage the provider reports, as an increment. A plugin that meters a
+    /// call sums it in a provider-edge filter, which sees every event.
+    Usage(Usage),
+    /// Why the model stopped.
+    Finish(Finish),
+    /// An event the kind has no form for, as `format` has it (pings,
+    /// signatures, provider-specific events). Sent only in that format.
+    Other {
+        /// The name of the format `raw` is in.
+        format: Arc<str>,
+        /// The event as that format has it.
+        raw: Arc<Value>,
+    },
 }
 
-/// Which response a reply belongs to.
+/// Which response the events belong to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Start {
@@ -367,158 +406,86 @@ pub struct Start {
     pub id: String,
     /// The model that replied.
     pub model: String,
+    /// The response's fields the kind has no place for, such as a
+    /// fingerprint.
+    pub extra: Extra,
 }
 
-/// A part of what a reply says.
-#[derive(Debug, Clone, PartialEq)]
+/// What a content block holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Piece {
-    /// Text of content block `block`.
-    #[non_exhaustive]
-    Text {
-        /// The content block, numbered in the order blocks open.
-        block: u32,
-        /// The text, or a delta of it in a stream.
-        text: String,
-    },
-    /// A tool call the model makes, or the next part of one in a stream.
-    /// The piece that starts call `call` names it with `id` and `name`;
-    /// each piece's `arguments` are JSON text, added to the call's.
-    #[non_exhaustive]
+pub enum Block {
+    /// Text.
+    Text,
+    /// A tool call the model makes; its [`Reply::Delta`]s are its arguments,
+    /// as JSON text.
     ToolCall {
-        /// The call, numbered in the response.
-        call: u32,
-        /// Its id, on the piece that starts it.
-        id: Option<String>,
-        /// The tool's name, on the piece that starts it.
-        name: Option<String>,
-        /// Its arguments, as JSON text, or the next part of them.
-        arguments: String,
+        /// The call's id, which its result names.
+        id: String,
+        /// The tool's name.
+        name: String,
     },
-    /// Content the kind has no form for, as `format` has it; translating it
-    /// is refused.
-    #[non_exhaustive]
-    Other {
-        /// The name of the format `raw` is in.
-        format: Arc<str>,
-        /// The content as that format has it.
-        raw: Arc<Value>,
-    },
+    /// The model's reasoning.
+    Reasoning,
 }
 
-impl Piece {
-    /// Text of content block `block`.
-    pub fn text(block: u32, text: impl Into<String>) -> Self {
-        Piece::Text {
-            block,
-            text: text.into(),
-        }
-    }
-
-    /// The start of tool call `call`: its id, the tool's name, and its
-    /// arguments so far, as JSON text.
-    pub fn tool_call(
-        call: u32,
-        id: impl Into<String>,
-        name: impl Into<String>,
-        arguments: impl Into<String>,
-    ) -> Self {
-        Piece::ToolCall {
-            call,
-            id: Some(id.into()),
-            name: Some(name.into()),
-            arguments: arguments.into(),
-        }
-    }
-
-    /// The next part of tool call `call`'s arguments, as JSON text.
-    pub fn tool_arguments(call: u32, arguments: impl Into<String>) -> Self {
-        Piece::ToolCall {
-            call,
-            id: None,
-            name: None,
-            arguments: arguments.into(),
-        }
-    }
-
-    /// Content of `format` the kind has no form for.
-    pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
-        Piece::Other {
-            format: format.into(),
-            raw: Arc::new(raw.into()),
+impl Start {
+    /// The start of a response of this `id` and `model`.
+    pub fn new(id: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            model: model.into(),
+            extra: Extra::default(),
         }
     }
 }
 
 impl Reply {
-    /// A reply naming its response.
+    /// The start of a response of this `id` and `model`.
     pub fn start(id: impl Into<String>, model: impl Into<String>) -> Self {
-        Self {
-            start: Some(Start {
-                id: id.into(),
-                model: model.into(),
-            }),
-            ..Self::default()
+        Reply::Start(Start::new(id, model))
+    }
+
+    /// Block `block` opens as `kind`.
+    pub fn block_start(block: u32, kind: Block) -> Self {
+        Reply::BlockStart { block, kind }
+    }
+
+    /// The next part of block `block`.
+    pub fn delta(block: u32, delta: impl Into<String>) -> Self {
+        Reply::Delta {
+            block,
+            delta: delta.into(),
         }
     }
 
-    /// A reply of text of content block `block`.
-    pub fn text(block: u32, text: impl Into<String>) -> Self {
-        Self {
-            content: vec![Piece::text(block, text)],
-            ..Self::default()
-        }
+    /// Block `block` is complete.
+    pub fn block_end(block: u32) -> Self {
+        Reply::BlockEnd { block }
     }
 
-    /// A reply of content of `format` the kind has no form for.
-    pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
-        Self {
-            content: vec![Piece::other(format, raw)],
-            ..Self::default()
-        }
+    /// Usage the provider reports, as an increment.
+    pub fn usage(usage: Usage) -> Self {
+        Reply::Usage(usage)
     }
 
-    /// A reply saying why the model stopped.
+    /// The model stopped for this reason.
     pub fn finished(finish: Finish) -> Self {
-        Self {
-            finish: Some(finish),
-            ..Self::default()
+        Reply::Finish(finish)
+    }
+
+    /// An event of `format` the kind has no form for.
+    pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
+        Reply::Other {
+            format: format.into(),
+            raw: Arc::new(raw.into()),
         }
     }
 
-    /// Its texts, to change in place; tool calls and other content are
-    /// skipped.
-    pub fn texts_mut(&mut self) -> impl Iterator<Item = &mut String> {
-        self.content.iter_mut().filter_map(|piece| match piece {
-            Piece::Text { text, .. } => Some(text),
-            _ => None,
-        })
-    }
-
-    /// Its texts, in order; tool calls and other content are skipped.
-    pub fn texts(&self) -> impl Iterator<Item = &str> {
-        self.content.iter().filter_map(|piece| match piece {
-            Piece::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-    }
-
-    /// Whether it is content: a start, content or a finish. A keep-alive or usage alone
-    /// is not.
+    /// Whether it is content: a start, a block event or a finish. Usage and
+    /// [`Reply::Other`] are not.
     pub fn is_content(&self) -> bool {
-        self.start.is_some() || !self.content.is_empty() || self.finish.is_some()
-    }
-
-    /// For formats: decoded by `format` from `bytes`.
-    pub fn came(mut self, format: &Arc<str>, bytes: Bytes) -> Self {
-        self.origin = Relayed::default();
-        self.origin = Relayed::came(format, bytes, self.clone());
-        self
-    }
-
-    /// The message it was decoded from, if `format` decoded it.
-    pub fn came_in(&self, format: &str) -> Option<&Came<Reply>> {
-        self.origin.came_in(format)
+        !matches!(self, Reply::Usage(_) | Reply::Other { .. })
     }
 }
 
@@ -534,50 +501,290 @@ pub enum Finish {
     ToolUse,
     /// A safety filter.
     Filtered,
-    /// A reason the kind has no form for, by the format's name.
-    Other(String),
+    /// A reason the kind has no form for, as `format` names it; only a
+    /// response in that format can say it.
+    #[non_exhaustive]
+    Other {
+        /// The name of the format `reason` is in.
+        format: Arc<str>,
+        /// The reason, as that format names it.
+        reason: String,
+    },
+}
+
+impl Finish {
+    /// The reason `reason` of `format`, which the kind has no form for.
+    pub fn other(format: impl Into<Arc<str>>, reason: impl Into<String>) -> Self {
+        Finish::Other {
+            format: format.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+/// The events of a response folded into the whole answer, for plugins that
+/// need it (a judge, a cache, a job store). Unary and streamed responses
+/// fold alike.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Assembled {
+    /// The response's start, if one came.
+    pub start: Option<Start>,
+    /// The answer: the assistant's text and tool calls, one part per block,
+    /// in the order the blocks opened.
+    pub message: Message,
+    /// The reasoning of each reasoning block, in the order they opened.
+    pub reasoning: Vec<String>,
+    /// Why the model stopped, if it said.
+    pub finish: Option<Finish>,
+    /// All the usage reported.
+    pub usage: Usage,
+    /// The [`Reply::Other`] events, in order.
+    pub other: Vec<Reply>,
+    blocks: Vec<Folding>,
+}
+
+/// A block being folded: where its content goes.
+#[derive(Debug, Clone, PartialEq)]
+struct Folding {
+    block: u32,
+    place: Place,
+    ended: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Place {
+    /// An index in the message's content.
+    Content(usize),
+    /// An index in the reasoning.
+    Reasoning(usize),
+}
+
+/// An empty message of the assistant, which is what an answer starts as.
+impl Default for Message {
+    fn default() -> Self {
+        Self {
+            role: Role::Assistant,
+            content: Vec::new(),
+            extra: Extra::default(),
+        }
+    }
+}
+
+impl Assembled {
+    /// Fold the next event of the response in. A sequence that cannot be a
+    /// response is an `Err`: a start twice, a block that opens as another
+    /// kind, a delta or an end for a block that is not open.
+    pub fn push(&mut self, reply: &Reply) -> Result<(), Fault> {
+        match reply {
+            Reply::Start(start) => match self.start {
+                Some(_) => return Err(malformed("the response starts twice")),
+                None => self.start = Some(start.clone()),
+            },
+            Reply::BlockStart { block, kind } => self.open(*block, kind)?,
+            Reply::Delta { block, delta } => {
+                let place = self.open_place(*block)?;
+                match place {
+                    Place::Reasoning(at) => self.reasoning[at].push_str(delta),
+                    Place::Content(at) => match &mut self.message.content[at] {
+                        Content::Text { text, .. } => text.push_str(delta),
+                        Content::ToolCall { arguments, .. } => arguments.push_str(delta),
+                        _ => {}
+                    },
+                }
+            }
+            Reply::BlockEnd { block } => {
+                self.open_place(*block)?;
+                if let Some(folding) = self.blocks.iter_mut().find(|f| f.block == *block) {
+                    folding.ended = true;
+                }
+            }
+            Reply::Usage(usage) => self.usage += usage,
+            Reply::Finish(finish) => self.finish = Some(finish.clone()),
+            Reply::Other { .. } => self.other.push(reply.clone()),
+        }
+        Ok(())
+    }
+
+    fn open(&mut self, block: u32, kind: &Block) -> Result<(), Fault> {
+        if let Some(had) = self.blocks.iter().find(|f| f.block == block) {
+            // A start repeated for a block, as a filter that adds to it may
+            // write, opens nothing more.
+            let same = match (&had.place, kind) {
+                (Place::Reasoning(_), Block::Reasoning) => true,
+                (Place::Content(at), kind) => match (&self.message.content[*at], kind) {
+                    (Content::Text { .. }, Block::Text) => true,
+                    (Content::ToolCall { id, name, .. }, Block::ToolCall { id: i, name: n }) => {
+                        id == i && name == n
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            return match (same, had.ended) {
+                (true, false) => Ok(()),
+                _ => Err(malformed("a block opens twice")),
+            };
+        }
+        let place = match kind {
+            Block::Text => {
+                self.message.content.push(Content::from(String::new()));
+                Place::Content(self.message.content.len() - 1)
+            }
+            Block::ToolCall { id, name } => {
+                self.message.content.push(Content::tool_call(id, name, ""));
+                Place::Content(self.message.content.len() - 1)
+            }
+            Block::Reasoning => {
+                self.reasoning.push(String::new());
+                Place::Reasoning(self.reasoning.len() - 1)
+            }
+        };
+        self.blocks.push(Folding {
+            block,
+            place,
+            ended: false,
+        });
+        Ok(())
+    }
+
+    fn open_place(&self, block: u32) -> Result<Place, Fault> {
+        match self.blocks.iter().find(|f| f.block == block) {
+            Some(Folding {
+                place,
+                ended: false,
+                ..
+            }) => Ok(place.clone()),
+            Some(_) => Err(malformed("an event names a block that has ended")),
+            None => Err(malformed("an event names a block that never opened")),
+        }
+    }
+}
+
+/// A sequence of events that is no response.
+fn malformed(what: &str) -> Fault {
+    Upstream::fault(format!("the response is malformed: {what}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BadRequest, Config};
     use serde_json::json;
 
-    #[test]
-    fn decoded_conversation_keeps_its_bytes_and_attributes_edits() {
-        let format: Arc<str> = Arc::from("chat");
-        let raw = Bytes::from_static(br#"{"messages":[{"role":"user","content":"hello"}]}"#);
-        let original = Conversation::new([Message::new(Role::User, "hello")]);
-        let mut decoded = original.came(&format, raw.clone());
-        let snapshot = decoded.clone();
-        assert_eq!(decoded.came_in("chat").map(|came| &came.bytes), Some(&raw));
-        assert!(decoded.came_in("other").is_none());
-        assert_eq!(decoded.said(), Some(&snapshot));
-        assert!(decoded.whose(Fault::internal("invalid")).is::<BadRequest>());
-        decoded.messages[0].content = vec!["edited".into()];
-        assert_eq!(decoded.said(), Some(&snapshot));
-        assert!(decoded.whose(Fault::internal("invalid")).is::<Config>());
+    fn fold(events: &[Reply]) -> Result<Assembled, Fault> {
+        let mut all = Assembled::default();
+        events.iter().try_for_each(|e| all.push(e))?;
+        Ok(all)
     }
 
     #[test]
-    fn message_origins_and_reply_bytes_survive_cloning() {
-        let origin = json!({"role": "user", "content": "hello"});
-        let message = Message::new(Role::User, "hello").with_source(origin.clone());
-        let mut clone = message.clone();
-        assert_eq!(clone.source(), Some(&origin));
-        assert!(message.same_source(&clone));
-        clone.content = vec!["changed".into()];
-        assert!(!message.eq(&clone));
-        assert!(message.same_source(&clone));
-
-        let format: Arc<str> = Arc::from("chat");
-        let raw = Bytes::from_static(b"reply");
-        let reply = Reply::text(0, "hello").came(&format, raw.clone());
-        assert_eq!(
-            reply.clone().came_in("chat").map(|came| &came.bytes),
-            Some(&raw)
+    fn plain_values_compare_by_what_they_say() {
+        let a = Message::new(Role::User, "hi");
+        let mut b = a.clone();
+        assert_eq!(a, b);
+        b.extra = Extra::new(
+            "chat",
+            json!({"name": "x"})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
         );
-        assert!(reply.came_in("other").is_none());
+        assert_ne!(a, b);
+        assert!(a.is_plain() && !b.is_plain());
+        let tagged = Message::new(Role::other("chat", "tool"), "x");
+        assert!(!tagged.is_plain());
+    }
+
+    #[test]
+    fn parts_roles_and_finishes_carry_their_format_and_extra() {
+        let marker = Extra::new(
+            "chat",
+            json!({"cache_control": 1})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let mut cached = Message::new(Role::User, "hi");
+        if let Content::Text { extra, .. } = &mut cached.content[0] {
+            *extra = marker;
+        }
+        // A part's extra does not change what it says.
+        assert!(cached.is_plain());
+        assert_ne!(cached, Message::new(Role::User, "hi"));
+        assert_eq!(Role::other("chat", "critic"), Role::other("chat", "critic"));
+        assert_ne!(
+            Role::other("chat", "critic"),
+            Role::other("other", "critic")
+        );
+        assert_ne!(Finish::other("a", "x"), Finish::other("b", "x"));
+    }
+
+    #[test]
+    fn events_fold_into_the_whole_answer() {
+        let mut usage = Usage::default();
+        usage.add(units::INPUT_TOKENS, 3.0);
+        let all = fold(&[
+            Reply::start("r1", "m"),
+            Reply::block_start(0, Block::Reasoning),
+            Reply::delta(0, "hm"),
+            Reply::block_end(0),
+            Reply::block_start(1, Block::Text),
+            Reply::delta(1, "Hel"),
+            Reply::delta(1, "lo"),
+            Reply::block_end(1),
+            Reply::block_start(
+                2,
+                Block::ToolCall {
+                    id: "t".into(),
+                    name: "f".into(),
+                },
+            ),
+            Reply::delta(2, "{\"a\":"),
+            Reply::delta(2, "1}"),
+            Reply::block_end(2),
+            Reply::other("chat", json!({"type": "ping"})),
+            Reply::usage(usage.clone()),
+            Reply::usage(usage.clone()),
+            Reply::finished(Finish::ToolUse),
+        ])
+        .expect("a response");
+        assert_eq!(all.start.as_ref().map(|s| s.id.as_str()), Some("r1"));
+        assert_eq!(all.reasoning, ["hm"]);
+        assert_eq!(
+            all.message.content,
+            [
+                Content::from("Hello"),
+                Content::tool_call("t", "f", "{\"a\":1}")
+            ]
+        );
+        assert_eq!(all.message.role, Role::Assistant);
+        assert_eq!(all.finish, Some(Finish::ToolUse));
+        assert_eq!(all.usage.get(units::INPUT_TOKENS), Some(6.0));
+        assert_eq!(all.other, [Reply::other("chat", json!({"type": "ping"}))]);
+    }
+
+    #[test]
+    fn a_sequence_that_is_no_response_is_refused() {
+        let text = || Reply::block_start(0, Block::Text);
+        for events in [
+            vec![Reply::delta(0, "x")],
+            vec![Reply::block_end(0)],
+            vec![text(), Reply::block_end(0), Reply::delta(0, "x")],
+            vec![text(), Reply::block_start(0, Block::Reasoning)],
+            vec![Reply::start("a", "m"), Reply::start("b", "m")],
+        ] {
+            let end = fold(&events).err();
+            assert!(end.is_some_and(|f| f.is::<Upstream>()), "{events:?}");
+        }
+        // A start repeated for an open block, as a filter adding to it writes.
+        assert!(fold(&[text(), Reply::delta(0, "a"), text(), Reply::delta(0, "b")]).is_ok());
+    }
+
+    #[test]
+    fn only_usage_and_other_events_are_no_content() {
+        assert!(Reply::start("a", "m").is_content());
+        assert!(Reply::delta(0, "x").is_content());
+        assert!(Reply::finished(Finish::Stop).is_content());
+        assert!(!Reply::usage(Usage::default()).is_content());
+        assert!(!Reply::other("f", json!(1)).is_content());
     }
 }

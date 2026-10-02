@@ -1,8 +1,9 @@
 //! Use case 12, a local proxy in front of Claude Code: no config file, one
 //! Anthropic provider, and the client's own credentials (API key or
 //! subscription token) passed through, since the transport sets no headers
-//! of its own. Beta headers, unknown request fields and unknown response
-//! events relay byte for byte: formats of one name relay, never re-encode.
+//! of its own. Beta headers and the request body relay byte for byte (an
+//! explicit `Relay::RAW`); a response is decoded into events and written
+//! again, so an unknown response event survives, not its bytes.
 //! The binary does the same with no config file, and also relays the
 //! vendor's other endpoints (`count_tokens`): `respan-gateway proxy
 //! --anthropic`.

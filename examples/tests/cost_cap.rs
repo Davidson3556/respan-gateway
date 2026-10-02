@@ -100,10 +100,22 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
     for _ in 0..30 {
         fake.answer(Answer::raw(answer));
     }
-    let gw = gateway(
-        provider_support::openai(&fake.base_url())?.connect(),
-        ledger.clone(),
-    )?;
+    // A request for several choices reaches a provider only through an
+    // explicit raw relay, which sends the client's body as it is.
+    // A raw relay keeps the client's path, so the provider sits at the origin.
+    let base = fake.base_url();
+    let origin = base.trim_end_matches("/v1");
+    let gw = Gateway::new()
+        .provider::<Conversation, _, _>(
+            "openai",
+            OpenAiChat,
+            provider_support::openai(origin)?.connect(),
+        )?
+        .client::<Conversation, _, _>(OpenAiChat)?
+        .plugin(Cap)
+        .plugin(Accounting::new(ledger.clone(), quote))
+        .plugin(respan_gateway_http::relay::Relay::RAW)
+        .target("openai")?;
     let body =
         r#"{"model":"m","n":3,"max_tokens":5000,"messages":[{"role":"user","content":"hi"}]}"#;
     let all = (0..30).map(|_| {
@@ -119,6 +131,7 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
     let served = statuses.iter().flatten().filter(|s| s.is_success()).count();
     let spent = ledger.spent("team");
     assert!(spent <= 10_000, "overspent: {spent} of 10,000");
+    assert!(served > 0, "the raw relay serves some");
     assert_eq!(spent, served as i64 * PRICE.cost(3, 300));
     assert_eq!(fake.requests().len(), served);
     Ok(())

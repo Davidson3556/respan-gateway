@@ -11,8 +11,10 @@
 //! whole or streamed: `Holdback` also holds the tail of each streamed call's
 //! arguments (OpenAI's chunks, Anthropic's `partial_json` fragments), so a
 //! placeholder split across their fragments is restored, and the restored
-//! value is escaped as JSON text. Interleaved OpenAI choices retain separate
-//! text and tool-argument tails, so one choice finishing does not release another.
+//! value is escaped as JSON text. The tails are held per content block, from the
+//! block's start. The kind has one choice: an answer with several (a raw relay
+//! can send `n`) is refused as unreadable, not passed with its other choices
+//! unrestored.
 //!
 //! So it is two plugins, and order is registration order: `pii` registered
 //! first restores every response the client gets, whoever answers;

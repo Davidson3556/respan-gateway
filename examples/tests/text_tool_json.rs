@@ -3,31 +3,36 @@
 #[path = "../support/text.rs"]
 mod text;
 
-use respan_gateway_sdk::conversation::{Conversation, Message, Piece, Reply, Role};
+use respan_gateway_sdk::conversation::{Block, Content, Conversation, Message, Reply, Role, Tool};
 use respan_gateway_sdk::{Fault, Filter};
 #[path = "text_support/mod.rs"]
 mod support;
 
 use serde_json::{self, Value, json};
-use support::run_filter as run;
+use support::{arguments_of, opened, run_filter as run};
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE};
 
+/// The next part of the arguments of the tool call in block 0.
 fn call(arguments: &str) -> Reply {
-    Reply::other(
-        "openai",
-        json!([{ "index": 0, "delta": { "tool_calls": [{ "function": { "arguments": arguments } }] } }]),
-    )
+    Reply::delta(0, arguments)
 }
+
 fn args(out: &[Reply]) -> String {
-    out.iter()
-        .flat_map(|r| &r.content)
-        .filter_map(|p| match p {
-            Piece::Other { raw, .. } => raw[0]["delta"]["tool_calls"][0]["function"]["arguments"]
-                .as_str()
-                .map(str::to_owned),
-            _ => None,
-        })
-        .collect()
+    arguments_of(out, 0)
+}
+
+/// A tool call whose arguments come whole, as a body that was not streamed
+/// decodes.
+fn whole_call(arguments: &str) -> Vec<Reply> {
+    let kind = Block::ToolCall {
+        id: "t".into(),
+        name: "f".into(),
+    };
+    vec![
+        Reply::block_start(0, kind),
+        Reply::delta(0, arguments),
+        Reply::block_end(0),
+    ]
 }
 
 #[test]
@@ -35,7 +40,7 @@ fn a_value_restored_in_a_whole_tool_call_is_escaped_once() {
     let vault = Placeholders::default();
     let ph = vault.hide("NAME", "Robert \"Bob\" Smith");
     let whole = json!({ "note": format!("[vip] {ph}") }).to_string();
-    let out = run(&mut Holdback::new(vault), vec![call(&whole)]).unwrap_or_default();
+    let out = run(&mut Holdback::new(vault), whole_call(&whole)).unwrap_or_default();
     let parsed: Value = serde_json::from_str(&args(&out)).unwrap_or_default();
     assert_eq!(
         parsed["note"],
@@ -52,7 +57,7 @@ fn a_fragment_that_is_only_a_placeholder_is_escaped() {
     let frags = ["{\"to\":\"".to_owned(), ph, "\"}".to_owned()];
     let out = run(
         &mut Holdback::new(vault),
-        frags.iter().map(|f| call(f)).collect(),
+        opened(frags.iter().map(|f| call(f)).collect()),
     )
     .unwrap_or_default();
     let joined = args(&out);
@@ -64,11 +69,9 @@ fn a_fragment_that_is_only_a_placeholder_is_escaped() {
 fn a_tool_description_with_two_quoted_values_is_edited() {
     let vault = Placeholders::default();
     let mut chat = Conversation::new([Message::new(Role::User, "hi")]);
-    chat.unsupported.insert(
-        "tools".into(),
-        json!([{ "type": "function", "function": {
-        "name": "mail", "description": "Send to \"a@b.io\" or \"c@d.io\"" } }]),
-    );
+    let mut tool = Tool::new("mail", json!({ "type": "object" }));
+    tool.description = Some("Send to \"a@b.io\" or \"c@d.io\"".into());
+    chat.tools.push(tool);
     let r = chat.edit_all(|t| {
         for e in ["a@b.io", "c@d.io"] {
             if t.contains(e) {
@@ -78,6 +81,8 @@ fn a_tool_description_with_two_quoted_values_is_edited() {
         Ok(())
     });
     assert!(r.is_ok(), "{r:?}");
+    let description = chat.tools[0].description.clone().unwrap_or_default();
+    assert_eq!(description, "Send to \"<EMAIL_1>\" or \"<EMAIL_2>\"");
 }
 
 #[test]
@@ -86,51 +91,63 @@ fn a_whole_tool_call_with_two_quoted_placeholders_is_restored() {
     let a = vault.hide("EMAIL", "a@b.io");
     let b = vault.hide("EMAIL", "c@d.io");
     let whole = json!({ "body": format!("Write \"{a}\" and \"{b}\"") }).to_string();
-    let out = run(&mut Holdback::new(vault), vec![call(&whole)]);
+    let out = run(&mut Holdback::new(vault), whole_call(&whole));
     assert!(out.is_ok(), "{:?}", out.err());
 }
 
+/// The first event the kind has no form for in `out`, as `raw`.
+fn first_other(out: &[Reply]) -> Value {
+    out.iter()
+        .find_map(|r| match r {
+            Reply::Other { raw, .. } => Some((**raw).clone()),
+            _ => None,
+        })
+        .unwrap_or(Value::Null)
+}
+
 fn restored(raw_json: Value, vault: Placeholders) -> Value {
-    let format = if raw_json.get("type").is_some() {
-        "anthropic-messages"
-    } else {
-        "openai-chat"
-    };
     let out = run(
         &mut Holdback::new(vault),
-        vec![Reply::other(format, raw_json)],
+        vec![Reply::other("openai-chat", raw_json)],
     )
     .unwrap_or_default();
-    match out.iter().flat_map(|r| &r.content).next() {
-        Some(Piece::Other { raw, .. }) => (**raw).clone(),
-        _ => Value::Null,
-    }
+    first_other(&out)
+}
+
+/// The text a reasoning block says, restored.
+fn reasoning(text: &str, vault: Placeholders) -> String {
+    let events = vec![
+        Reply::block_start(0, Block::Reasoning),
+        Reply::delta(0, text),
+        Reply::block_end(0),
+    ];
+    let out = run(&mut Holdback::new(vault), events).unwrap_or_default();
+    arguments_of(&out, 0)
 }
 
 #[test]
 fn prose_in_other_content_is_restored_unescaped() {
     let vault = Placeholders::default();
     let name = vault.hide("NAME", "Robert \"Bob\" Smith");
-    let refusal =
-        json!([{ "index": 0, "message": { "refusal": format!("I won't write to {name}.") } }]);
+    let refusal = json!({ "choices": [{ "index": 0, "delta": { "refusal": format!("I won't write to {name}.") } }] });
     let v = restored(refusal, vault.clone());
     assert_eq!(
-        v[0]["message"]["refusal"],
+        v["choices"][0]["delta"]["refusal"],
         "I won't write to Robert \"Bob\" Smith."
     );
     let path = vault.hide("PATH", "C:\\Users\\bob");
-    let second = json!([{ "index": 1, "message": { "role": "assistant", "content": format!("See {path}") } }]);
+    let second = json!({ "choices": [{ "index": 0, "delta": { "role": "assistant", "content": format!("See {path}") } }] });
     let v = restored(second, vault);
-    assert_eq!(v[0]["message"]["content"], "See C:\\Users\\bob");
+    assert_eq!(v["choices"][0]["delta"]["content"], "See C:\\Users\\bob");
 }
 
+/// Anthropic's `partial_json` pieces decode as deltas of a tool call.
 #[test]
 fn an_anthropic_partial_json_piece_is_escaped() {
     let vault = Placeholders::default();
     let name = vault.hide("NAME", "Robert \"Bob\" Smith");
-    let delta = json!({ "type": "input_json_delta", "partial_json": name });
-    let v = restored(delta, vault);
-    assert_eq!(v["partial_json"], "Robert \\\"Bob\\\" Smith");
+    let out = run(&mut Holdback::new(vault), opened(vec![call(&name)])).unwrap_or_default();
+    assert_eq!(args(&out), "Robert \\\"Bob\\\" Smith");
 }
 
 /// A tool's own parameter named `arguments` is a decoded value, not JSON text.
@@ -138,33 +155,33 @@ fn an_anthropic_partial_json_piece_is_escaped() {
 fn a_parameter_named_arguments_is_restored_once() {
     let vault = Placeholders::default();
     let name = vault.hide("NAME", "Robert \"Bob\" Smith");
-    let args = json!({ "program": "greet", "arguments": name }).to_string();
-    let raw = json!([{ "index": 0, "message": { "tool_calls": [{ "id": "t", "type": "function",
-        "function": { "name": "run", "arguments": args } }] } }]);
-    let v = restored(raw, vault.clone());
-    let text = v[0]["message"]["tool_calls"][0]["function"]["arguments"].as_str();
-    let a: Value = serde_json::from_str(text.unwrap_or_default()).unwrap_or_default();
+    let given = json!({ "program": "greet", "arguments": name }).to_string();
+    let out = run(&mut Holdback::new(vault.clone()), whole_call(&given)).unwrap_or_default();
+    let a: Value = serde_json::from_str(&args(&out)).unwrap_or_default();
     assert_eq!(a["arguments"], "Robert \"Bob\" Smith");
+    // An Anthropic request's tool input is a value in its own format's JSON.
     let name = vault.hide("NAME", "Robert \"Bob\" Smith");
     let block =
         json!({ "type": "tool_use", "id": "t", "name": "run", "input": { "arguments": name } });
-    assert_eq!(
-        restored(block, vault)["input"]["arguments"],
-        "Robert \"Bob\" Smith"
-    );
+    let mut chat = Conversation::new([Message::new(Role::Assistant, "")]);
+    chat.messages[0].content = vec![Content::other("anthropic-messages", block)];
+    let edited = chat.edit_all(|t| {
+        *t = vault.clone().rewrite(t)?;
+        Ok(())
+    });
+    assert!(edited.is_ok());
+    let Content::Other { raw, .. } = &chat.messages[0].content[0] else {
+        panic!("tool input")
+    };
+    assert_eq!(raw["input"]["arguments"], "Robert \"Bob\" Smith");
 }
 
 /// A request's text after a backslash is read whole: nothing is skipped.
 #[test]
 fn text_after_a_backslash_in_a_tool_call_is_read() {
-    let mut call = Message::new(Role::Assistant, "");
-    call.content.clear();
     let args = json!({ "arguments": "C:\\dir\\bob@x.io" }).to_string();
-    call.unsupported.insert(
-        "tool_calls".into(),
-        json!([{ "id": "t", "type": "function",
-        "function": { "name": "run", "arguments": args } }]),
-    );
+    let mut call = Message::new(Role::Assistant, "");
+    call.content = vec![Content::tool_call("t", "run", args)];
     let mut chat = Conversation::new([Message::new(Role::User, "hi"), call]);
     let mut seen = Vec::new();
     let read = chat.edit_all(|t| {
@@ -175,32 +192,19 @@ fn text_after_a_backslash_in_a_tool_call_is_read() {
     assert!(seen.iter().any(|t| t.contains("bob@x.io")), "{seen:?}");
 }
 
-/// OpenAI's older `functions` stream: `delta.function_call.arguments`.
+/// OpenAI's older `functions` stream (`delta.function_call.arguments`)
+/// decodes as the deltas of a tool call, like any other.
 #[test]
 fn a_legacy_function_call_fragment_is_escaped() {
     let vault = Placeholders::default();
     let path = vault.hide("PATH", "C:\\Users\\bob");
     let frags = ["{\"dir\":\"".to_owned(), path, "\"}".to_owned()];
-    let delta =
-        |f: &String| json!([{ "index": 0, "delta": { "function_call": { "arguments": f } } }]);
     let out = run(
         &mut Holdback::new(vault),
-        frags
-            .iter()
-            .map(|f| Reply::other("openai", delta(f)))
-            .collect(),
+        opened(frags.iter().map(|f| call(f)).collect()),
     )
     .unwrap_or_default();
-    let joined: String = out
-        .iter()
-        .flat_map(|r| &r.content)
-        .filter_map(|p| match p {
-            Piece::Other { raw, .. } => raw[0]["delta"]["function_call"]["arguments"]
-                .as_str()
-                .map(str::to_owned),
-            _ => None,
-        })
-        .collect();
+    let joined = args(&out);
     let parsed: Value = serde_json::from_str(&joined).unwrap_or_default();
     assert_eq!(parsed["dir"], "C:\\Users\\bob", "{joined}");
 }
@@ -210,32 +214,51 @@ fn a_legacy_function_call_fragment_is_escaped() {
 fn a_streamed_piece_that_parses_is_edited_as_text() {
     let mut joined = String::new();
     for f in ["{\"note\":\"ids ", "[4111111111111111]", "\"}"] {
-        let raw = json!([{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": f } }] } }]);
-        let mut reply = Reply::other("openai", raw);
+        let mut reply = call(f);
         let edited = reply.edit_all(|t| {
             *t = t.replace("4111111111111111", "[card]");
             Ok(())
         });
         assert!(edited.is_ok());
-        if let Some(Piece::Other { raw, .. }) = reply.content.first() {
-            let piece = raw[0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str();
-            joined.push_str(piece.unwrap_or_default());
+        if let Reply::Delta { delta, .. } = &reply {
+            joined.push_str(delta);
         }
     }
     let parsed: Value = serde_json::from_str(&joined).unwrap_or_default();
     assert_eq!(parsed["note"], "ids [[card]]", "{joined}");
 }
 
-/// A reply's tool call is read alike in both formats, numbers included.
-#[test]
-fn a_tool_calls_numbers_are_read_in_both_formats() {
-    let anthropic = json!({ "type": "tool_use", "id": "t", "name": "pay", "input": { "card": 4111111111111111u64 } });
-    let openai = json!([{ "index": 0, "message": { "tool_calls": [{ "function": {
-        "name": "pay", "arguments": "{\"card\":4111111111111111}" } }] } }]);
-    for (format, raw) in [("anthropic-messages", anthropic), ("openai-chat", openai)] {
-        let all = Reply::other(format, raw).read_all().unwrap_or_default();
-        assert!(all.contains("4111111111111111"), "{format}: {all:?}");
+/// Remembers every text it is asked to rewrite.
+struct Record(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl Rewrite for Record {
+    fn pending(&self, _text: &str) -> usize {
+        0
     }
+
+    fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(text.to_owned());
+        Ok(text.to_owned())
+    }
+}
+
+/// A tool call's whole arguments are read as JSON, numbers included.
+#[test]
+fn a_tool_calls_numbers_are_read() {
+    let seen = std::sync::Arc::default();
+    let whole = whole_call("{\"card\":4111111111111111}");
+    let out = run(
+        &mut Holdback::new(Record(std::sync::Arc::clone(&seen))),
+        whole,
+    );
+    assert!(out.is_ok());
+    let seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(seen.iter().any(|t| t == "4111111111111111"), "{seen:?}");
 }
 
 /// Streamed reasoning that happens to be whole JSON keeps its own spelling.
@@ -244,15 +267,13 @@ fn streamed_reasoning_is_plain_text() {
     let vault = Placeholders::default();
     let name = vault.hide("NAME", "bob");
     let text = format!("{{\"a\": \"{name}\",  \"b\": 1.0}}");
-    let openai = json!([{ "index": 0, "delta": { "reasoning_content": text } }]);
-    let v = restored(openai, vault.clone());
     assert_eq!(
-        v[0]["delta"]["reasoning_content"],
+        reasoning(&text, vault.clone()),
         "{\"a\": \"bob\",  \"b\": 1.0}"
     );
     let name = vault.hide("NAME", "bob");
-    let thinking = json!({ "type": "thinking_delta", "thinking": format!("[\"{name}\", 1.0]") });
-    assert_eq!(restored(thinking, vault)["thinking"], "[\"bob\", 1.0]");
+    let thinking = format!("[\"{name}\", 1.0]");
+    assert_eq!(reasoning(&thinking, vault), "[\"bob\", 1.0]");
 }
 
 /// Masks every run of four or more digits, as a card or phone redactor would.
@@ -282,7 +303,7 @@ impl Rewrite for MaskDigits {
 #[test]
 fn a_unicode_escape_in_streamed_arguments_is_kept_whole() {
     let piece = "{\"note\":\"don\\u2019t call 5551234\"}";
-    let out = run(&mut Holdback::new(MaskDigits), vec![call(piece)]).unwrap_or_default();
+    let out = run(&mut Holdback::new(MaskDigits), opened(vec![call(piece)])).unwrap_or_default();
     let parsed: Value = serde_json::from_str(&args(&out)).unwrap_or_default();
     assert_eq!(parsed["note"], "don\u{2019}t call ****", "{}", args(&out));
 }
@@ -385,49 +406,51 @@ fn tool_indexes_do_not_delay_argument_tails_until_after_the_finish() -> Result<(
     use respan_gateway_sdk::Filter;
     use respan_gateway_sdk::conversation::Finish;
 
-    for (format, raw) in [
-        (
-            "anthropic-messages",
-            json!({"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"to\":\"<NA"}}),
-        ),
-        (
-            "openai",
-            json!([{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"to\":\"<NA"}}]}}]),
-        ),
-    ] {
-        let vault = Placeholders::default();
-        vault.hide("NAME", "alice");
-        let mut filter = Holdback::new(vault);
-        let mut out = Vec::new();
-        filter.edit(Reply::other(format, raw), &mut out)?;
-        filter.edit(Reply::finished(Finish::Length), &mut out)?;
-        let finished = out.last().expect("finish is forwarded");
-        assert!(finished.finish.is_some());
-        assert!(
-            finished.content.iter().any(|piece| match piece {
-                Piece::Other { raw, .. } => raw.to_string().contains("<NA"),
-                _ => false,
-            }),
-            "{format} must flush the tool argument tail with the finish"
-        );
-        let mut after = Vec::new();
-        filter.end(&Ok(()), &mut after)?;
-        assert!(
-            after.is_empty(),
-            "{format} emitted arguments after the finish"
-        );
-    }
+    let vault = Placeholders::default();
+    vault.hide("NAME", "alice");
+    let mut filter = Holdback::new(vault);
+    let mut out = Vec::new();
+    let kind = Block::ToolCall {
+        id: "t".into(),
+        name: "f".into(),
+    };
+    filter.edit(Reply::block_start(2, kind), &mut out)?;
+    filter.edit(Reply::delta(2, "{\"to\":\"<NA"), &mut out)?;
+    filter.edit(Reply::finished(Finish::Length), &mut out)?;
+    assert_eq!(out.last(), Some(&Reply::finished(Finish::Length)));
+    assert!(
+        arguments_of(&out, 2).contains("<NA"),
+        "the tool argument tail must flush before the finish: {out:?}"
+    );
+    let mut after = Vec::new();
+    filter.end(&Ok(()), &mut after)?;
+    assert!(after.is_empty(), "arguments emitted after the finish");
     Ok(())
+}
+
+/// Replaces the text `42` with `.0`.
+struct Replace42(String);
+
+impl Rewrite for Replace42 {
+    fn pending(&self, _text: &str) -> usize {
+        0
+    }
+
+    fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
+        Ok(if text == "42" {
+            self.0.clone()
+        } else {
+            text.to_owned()
+        })
+    }
 }
 
 #[test]
 fn edited_tool_argument_numbers_are_strings_even_when_replacement_looks_like_json() {
     for replacement in [r#"{"admin":true}"#, "null", "[1,2]", "123"] {
         let mut request = Conversation::new([Message::new(Role::Assistant, "")]);
-        request.messages[0].unsupported.insert(
-            "tool_calls".into(),
-            json!([{"function": {"arguments": r#"{"n":42,"unchanged":7}"#}}]),
-        );
+        request.messages[0].content =
+            vec![Content::tool_call("t", "f", r#"{"n":42,"unchanged":7}"#)];
         request
             .edit_all(|text| {
                 if text == "42" {
@@ -436,57 +459,20 @@ fn edited_tool_argument_numbers_are_strings_even_when_replacement_looks_like_jso
                 Ok(())
             })
             .expect("request edit");
-        let request_args =
-            request.messages[0].unsupported["tool_calls"][0]["function"]["arguments"]
-                .as_str()
-                .expect("arguments string");
-        let parsed: Value = serde_json::from_str(request_args).expect("valid request arguments");
+        let Content::ToolCall { arguments, .. } = &request.messages[0].content[0] else {
+            panic!("tool call")
+        };
+        let parsed: Value = serde_json::from_str(arguments).expect("valid request arguments");
         assert_eq!(parsed["n"], json!(replacement));
         assert_eq!(parsed["unchanged"], json!(7));
 
-        let mut reply = Reply::other(
-            "openai-chat",
-            json!([{"index": 0, "message": {
-                "tool_calls": [{"function": {"name": "f", "arguments": r#"{"n":42,"unchanged":7}"#}}]
-            }}]),
-        );
-        reply
-            .edit_all(|text| {
-                if text == "42" {
-                    *text = replacement.to_owned();
-                }
-                Ok(())
-            })
-            .expect("reply edit");
-        let Piece::Other { raw, .. } = &reply.content[0] else {
-            panic!("tool reply")
-        };
-        let reply_args = raw[0]["message"]["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .expect("arguments string");
-        let parsed: Value = serde_json::from_str(reply_args).expect("valid reply arguments");
+        // A response's tool call, in either format, is the same events.
+        let whole = whole_call(r#"{"n":42,"unchanged":7}"#);
+        let out =
+            run(&mut Holdback::new(Replace42(replacement.to_owned())), whole).expect("reply edit");
+        let parsed: Value = serde_json::from_str(&args(&out)).expect("valid reply arguments");
         assert_eq!(parsed["n"], json!(replacement));
         assert_eq!(parsed["unchanged"], json!(7));
-
-        let mut reply = Reply::other(
-            "anthropic-messages",
-            json!({
-                "type": "tool_use", "name": "f", "input": {"n": 42, "unchanged": 7}
-            }),
-        );
-        reply
-            .edit_all(|text| {
-                if text == "42" {
-                    *text = replacement.to_owned();
-                }
-                Ok(())
-            })
-            .expect("anthropic reply edit");
-        let Piece::Other { raw, .. } = &reply.content[0] else {
-            panic!("tool reply")
-        };
-        assert_eq!(raw["input"]["n"], json!(replacement));
-        assert_eq!(raw["input"]["unchanged"], json!(7));
     }
 }
 
@@ -495,7 +481,7 @@ fn unreadable_reply_content_refuses_before_editing_any_text() {
     for (format, opaque) in [
         (
             "openai-chat",
-            json!([{"index": 0, "delta": {"audio": {"data": "opaque"}}}]),
+            json!({"choices": [{"index": 0, "delta": {"audio": {"data": "opaque"}}}]}),
         ),
         (
             "anthropic-messages",
@@ -504,9 +490,9 @@ fn unreadable_reply_content_refuses_before_editing_any_text() {
         ("openai-chat", json!({"unknown": "opaque"})),
         (
             "openai-chat",
-            json!([{"index": 0, "delta": {"tool_calls": [
+            json!({"choices": [{"index": 0, "delta": {"tool_calls": [
                 {"function": {"name": "f", "arguments": "{}", "audio": {"data": "opaque"}}}
-            ]}}]),
+            ]}}]}),
         ),
         (
             "anthropic-messages",
@@ -515,8 +501,7 @@ fn unreadable_reply_content_refuses_before_editing_any_text() {
             ]}),
         ),
     ] {
-        let mut reply = Reply::text(0, "keep me");
-        reply.content.push(Piece::other(format, opaque));
+        let mut reply = Reply::other(format, opaque);
         let before = reply.clone();
         let mut calls = 0;
         let result = reply.edit_all(|text| {
@@ -556,7 +541,7 @@ fn holdback_refuses_unreadable_reply_before_rewriting_or_emitting_text() {
     for (format, opaque) in [
         (
             "openai-chat",
-            json!([{"index": 0, "message": {"content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}}]),
+            json!({"choices": [{"index": 0, "delta": {"content": [{"type": "image_url", "image_url": {"url": "data:,"}}]}}]}),
         ),
         (
             "anthropic-messages",
@@ -565,10 +550,8 @@ fn holdback_refuses_unreadable_reply_before_rewriting_or_emitting_text() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut filter = Holdback::new(Count(calls.clone()));
-        let mut reply = Reply::text(0, "do not send");
-        reply.content.push(Piece::other(format, opaque));
         let mut out = Vec::new();
-        let result = filter.edit(reply, &mut out);
+        let result = filter.edit(Reply::other(format, opaque), &mut out);
         assert_eq!(
             result
                 .err()
@@ -576,7 +559,7 @@ fn holdback_refuses_unreadable_reply_before_rewriting_or_emitting_text() {
                 .as_deref(),
             Some(UNREADABLE)
         );
-        assert!(out.is_empty(), "nothing from the rejected reply is emitted");
+        assert!(out.is_empty(), "nothing from the rejected event is emitted");
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 }

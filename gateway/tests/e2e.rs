@@ -6,8 +6,10 @@
 //! by the provider's own rules and answer in its exact framing, streams and
 //! breaks included. Clients speak real HTTP to the real axum server.
 //!
-//! A byte-exact relay is checked against exact scripted bytes
-//! (`Answer::raw`, or verbatim SSE events): the client gets them unchanged.
+//! A raw relay sends the client's request bytes unedited, which these tests
+//! check byte for byte. Responses are re-encoded, so they are checked by
+//! meaning: every event and field the provider sent is present, in the same
+//! format, and the gateway may add what the format requires.
 //!
 //! Run: `cargo test -p respan-gateway --test e2e`. Calls to real providers
 //! are in `tests/real_providers.rs`, ignored unless asked for.
@@ -136,10 +138,56 @@ fn openai_stream_text(body: &str) -> (String, bool) {
     (text, done)
 }
 
+/// Whether `actual` holds all of `expected`: the same values, with objects
+/// allowed more fields (a re-encoded response adds what its format requires).
+fn holds(actual: &Value, expected: &Value) -> bool {
+    match (actual, expected) {
+        (Value::Object(a), Value::Object(e)) => {
+            e.iter().all(|(k, v)| a.get(k).is_some_and(|x| holds(x, v)))
+        }
+        (Value::Array(a), Value::Array(e)) => {
+            a.len() == e.len() && a.iter().zip(e).all(|(x, v)| holds(x, v))
+        }
+        _ => actual == expected,
+    }
+}
+
+/// The data of each event of an SSE body: JSON, or the string `[DONE]`.
+fn frames(body: &str) -> Vec<Value> {
+    body.split("\n\n")
+        .filter(|frame| !frame.is_empty())
+        .map(|frame| {
+            let data = frame
+                .lines()
+                .find_map(|l| l.strip_prefix("data: "))
+                .unwrap_or_else(|| panic!("no data in {frame:?}"));
+            serde_json::from_str(data).unwrap_or_else(|_| json!(data))
+        })
+        .collect()
+}
+
+/// `body` starts with the events `sent` (the provider's), each as it means.
+/// Returns the events after them.
+fn assert_relays_events(body: &str, sent: &[&str]) -> Vec<Value> {
+    let got = frames(body);
+    let want = frames(&sse(sent));
+    assert!(got.len() >= want.len(), "too few events in {body}");
+    for (got, want) in got.iter().zip(&want) {
+        assert!(holds(got, want), "{got} does not hold {want}\n{body}");
+    }
+    got[want.len()..].to_vec()
+}
+
+/// `body` is exactly the events `sent`, each as it means.
+fn assert_relays_all(body: &str, sent: &[&str]) {
+    let rest = assert_relays_events(body, sent);
+    assert!(rest.is_empty(), "extra events {rest:?} in {body}");
+}
+
 // 1. OpenAI chat relay (use case 12).
 
 #[tokio::test]
-async fn openai_whole_relay_is_byte_exact_and_passes_the_clients_key() {
+async fn openai_whole_relay_sends_the_request_byte_exact_and_passes_the_clients_key() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::run(&[
         "proxy",
@@ -163,7 +211,8 @@ async fn openai_whole_relay_is_byte_exact_and_passes_the_clients_key() {
 
     assert_eq!(resp.status(), 200);
     assert_eq!(header(resp.headers(), "x-request-id"), Some("req_1"));
-    assert_eq!(resp.text().await.unwrap(), answer);
+    let text = resp.text().await.unwrap();
+    assert!(holds(&json(&text), &json(answer)), "{text}");
     let got = &openai.requests()[0];
     assert_eq!(got.path, CHAT);
     assert_eq!(
@@ -176,7 +225,7 @@ async fn openai_whole_relay_is_byte_exact_and_passes_the_clients_key() {
 }
 
 #[tokio::test]
-async fn openai_stream_relay_is_byte_exact_and_passes_the_clients_key() {
+async fn openai_stream_relay_sends_the_request_byte_exact_and_passes_the_clients_key() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::run(&[
         "proxy",
@@ -205,7 +254,7 @@ async fn openai_stream_relay_is_byte_exact_and_passes_the_clients_key() {
     assert_eq!(got.path, CHAT);
     assert_eq!(got.raw, request.as_bytes());
     assert_eq!(got.header("authorization"), Some("Bearer sk-client"));
-    assert_eq!(body, sse(&OPENAI_STREAM));
+    assert_relays_all(&body, &OPENAI_STREAM);
 }
 
 #[tokio::test]
@@ -243,7 +292,11 @@ async fn raw_proxy_preserves_the_clients_usage_request() {
     assert!(seen["stream_options"]["include_usage"].is_null());
     assert_eq!(seen["metadata"]["kept"], "yes");
     // What the provider sends a client that did not ask for usage.
-    assert_eq!(body, sse(&OPENAI_STREAM), "the usage is hidden");
+    assert_relays_all(&body, &OPENAI_STREAM);
+    assert!(
+        frames(&body).iter().all(|f| f.get("usage").is_none()),
+        "the usage is hidden: {body}"
+    );
 }
 
 fn body_of<P: Provider>(mock: &Mock<P>, i: usize) -> Value {
@@ -279,7 +332,7 @@ target: p
 // 2. Anthropic messages relay.
 
 #[tokio::test]
-async fn anthropic_stream_relay_is_byte_exact_and_passes_the_clients_key() {
+async fn anthropic_stream_relay_sends_the_request_byte_exact_and_passes_the_clients_key() {
     let anthropic = FakeAnthropic::start().await;
     let gw = Gateway::run(&[
         "proxy",
@@ -309,11 +362,11 @@ async fn anthropic_stream_relay_is_byte_exact_and_passes_the_clients_key() {
         got.header("anthropic-beta"),
         Some("some-future-beta-2099-01-01")
     );
-    assert_eq!(body, sse(&ANTHROPIC_STREAM));
+    assert_relays_all(&body, &ANTHROPIC_STREAM);
 }
 
 #[tokio::test]
-async fn anthropic_whole_relay_is_byte_exact_with_the_clients_own_version() {
+async fn anthropic_whole_relay_sends_the_request_byte_exact_with_the_clients_own_version() {
     let anthropic = FakeAnthropic::start().await;
     let gw = Gateway::run(&[
         "proxy",
@@ -340,7 +393,8 @@ async fn anthropic_whole_relay_is_byte_exact_with_the_clients_own_version() {
     .await;
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.text().await.unwrap(), answer);
+    let text = resp.text().await.unwrap();
+    assert!(holds(&json(&text), &json(answer)), "{text}");
     let got = &anthropic.requests()[0];
     assert_eq!(got.raw, request.as_bytes());
     assert_eq!(got.header("x-api-key"), Some("sk-ant-client"));
@@ -661,13 +715,11 @@ async fn a_relayed_stream_cut_mid_body_ends_truncated_without_a_hang() {
     let (body, ended) = read_all(resp).await;
     // The client's stream ends cleanly with an error event in its format.
     assert_eq!(ended, Ok(()));
-    let tail = body
-        .strip_prefix(&sse(&OPENAI_STREAM[..2]))
-        .unwrap_or_else(|| panic!("{body}"));
-    let data = tail.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
-    let error = &json(data)["error"];
-    assert_eq!(error["code"], "upstream", "{tail}");
-    assert_eq!(error["message"], "the provider's body broke off", "{tail}");
+    let tail = assert_relays_events(&body, &OPENAI_STREAM[..2]);
+    let error = &tail[0]["error"];
+    assert_eq!(tail.len(), 1, "{body}");
+    assert_eq!(error["code"], "upstream", "{body}");
+    assert_eq!(error["message"], "the provider's body broke off", "{body}");
 }
 
 #[tokio::test]
@@ -691,14 +743,11 @@ async fn an_anthropic_stream_cut_after_content_ends_with_an_anthropic_error_even
     assert_eq!(resp.status(), 200);
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
-    let tail = body
-        .strip_prefix(&sse(&ANTHROPIC_STREAM[..4]))
-        .unwrap_or_else(|| panic!("{body}"));
-    assert!(tail.starts_with("event: error\n"), "{tail}");
-    let data = tail.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
-    let v = json(data);
-    assert_eq!(v["type"], "error", "{tail}");
-    assert_eq!(v["error"]["type"], "upstream", "{tail}");
+    let tail = assert_relays_events(&body, &ANTHROPIC_STREAM[..4]);
+    assert_eq!(tail.len(), 1, "{body}");
+    assert!(body.contains("event: error\n"), "{body}");
+    assert_eq!(tail[0]["type"], "error", "{body}");
+    assert_eq!(tail[0]["error"]["type"], "upstream", "{body}");
 }
 
 #[tokio::test]
@@ -760,11 +809,11 @@ async fn a_stream_that_ends_before_done_ends_truncated() {
     assert_eq!(resp.status(), 200);
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
-    let tail = body
-        .strip_prefix(&format!("data: {chunk}\n\n"))
-        .unwrap_or_else(|| panic!("{body}"));
-    let data = tail.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
-    assert_eq!(json(data)["error"]["code"], "truncated", "{tail}");
+    // The chunk's role and text may come as two chunks; the stream is cut
+    // short of `[DONE]` and ends with the error.
+    assert_eq!(openai_stream_text(&body), ("hel".into(), false), "{body}");
+    let last = frames(&body).pop().unwrap();
+    assert_eq!(last["error"]["code"], "truncated", "{body}");
 }
 
 #[tokio::test]
@@ -811,7 +860,7 @@ async fn a_slow_first_byte_is_waited_for() {
     assert_eq!(resp.status(), 200);
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
-    assert_eq!(body, sse(&OPENAI_STREAM));
+    assert_relays_all(&body, &OPENAI_STREAM);
 }
 
 // 5. Model routing (the binary has no fallback; see README).
@@ -1226,7 +1275,7 @@ async fn the_chat_format_still_answers_its_own_path_before_the_catch_all() {
     )
     .await;
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.text().await.unwrap(), sse(&ANTHROPIC_STREAM));
+    assert_relays_all(&resp.text().await.unwrap(), &ANTHROPIC_STREAM);
     assert_eq!(anthropic.requests()[0].path, MESSAGES);
 }
 
@@ -1270,7 +1319,7 @@ async fn proxy_needs_no_config_and_relays_claude_code_with_its_own_credentials()
     let asked = r#"{ "model":"claude-sonnet-4-5","max_tokens":64, "stream":true,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"} }"#;
     let resp = post(gw.url(MESSAGES), &headers, asked).await;
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.text().await.unwrap(), sse(&ANTHROPIC_STREAM));
+    assert_relays_all(&resp.text().await.unwrap(), &ANTHROPIC_STREAM);
     let got = &anthropic.requests()[0];
     assert_eq!(got.raw, asked.as_bytes());
     assert_eq!(got.header("x-api-key"), Some("sk-ant-own"));

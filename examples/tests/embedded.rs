@@ -8,7 +8,22 @@ async fn handle_returns_the_response_and_its_outcome_with_no_server() -> Result<
     let tally = Meter::default();
     let gw = gateway(scripted_provider(&openai)?.connect(), tally.clone())?;
     let (status, body, outcome) = ask(&gw, "Say hi").await?;
-    assert_eq!(body, ANSWER, "a relay passes the provider's bytes");
+    // The answer is re-encoded: the provider's answer, not its bytes (the
+    // encoder adds fields of its own, such as `created`).
+    let got: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| Fault::internal(e.to_string()))?;
+    let sent: serde_json::Value =
+        serde_json::from_str(ANSWER).map_err(|e| Fault::internal(e.to_string()))?;
+    for pointer in [
+        "/id",
+        "/model",
+        "/choices/0/message",
+        "/choices/0/finish_reason",
+        "/usage/prompt_tokens",
+        "/usage/completion_tokens",
+    ] {
+        assert_eq!(got.pointer(pointer), sent.pointer(pointer), "{pointer}");
+    }
     assert!(outcome.is_ok());
     // The status is the response's.
     assert_eq!(status, http::StatusCode::OK);

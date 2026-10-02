@@ -18,6 +18,26 @@ use respan_gateway_http::relay;
 const SSE: &str =
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
 
+/// What a client heard of an OpenAI chat stream: the text its chunks carry and
+/// whether it ended with `[DONE]`. The gateway re-encodes the provider's
+/// stream, so its framing is not compared.
+fn heard(body: &str) -> (String, bool) {
+    let frames: Vec<&str> = body
+        .split("\n\n")
+        .filter_map(|frame| frame.strip_prefix("data: "))
+        .collect();
+    let text = frames
+        .iter()
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .filter_map(|chunk| {
+            chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    (text, frames.last() == Some(&"[DONE]"))
+}
+
 fn http(base: impl Into<String>) -> HttpClient {
     HttpClient::new(base).unwrap_or_else(|e| panic!("{e}"))
 }
@@ -74,7 +94,10 @@ async fn relays_a_stream_over_real_http() {
         resp.headers().get("content-type").map(|v| v.as_bytes()),
         Some(&b"text/event-stream"[..])
     );
-    assert_eq!(resp.text().await.unwrap_or_default(), SSE);
+    assert_eq!(
+        heard(&resp.text().await.unwrap_or_default()),
+        ("hi".to_owned(), true)
+    );
 }
 
 const ANTHROPIC_SSE: &str = concat!(
@@ -321,7 +344,10 @@ async fn it_joins_its_base_with_the_path_and_sends_its_headers() {
         .unwrap_or_else(|e| panic!("send: {e}"));
 
     assert_eq!(resp.status(), 200);
-    assert_eq!(resp.text().await.unwrap_or_default(), SSE);
+    assert_eq!(
+        heard(&resp.text().await.unwrap_or_default()),
+        ("hi".to_owned(), true)
+    );
 }
 
 /// A call's request head to `uri`, with the client's `headers`.
@@ -590,7 +616,10 @@ async fn it_strips_the_clients_cookies_and_forwarding_headers() {
         .await
         .unwrap_or_else(|e| panic!("send: {e}"));
 
-    assert_eq!(resp.text().await.unwrap_or_default(), SSE);
+    assert_eq!(
+        heard(&resp.text().await.unwrap_or_default()),
+        ("hi".to_owned(), true)
+    );
 }
 
 #[tokio::test]

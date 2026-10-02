@@ -57,7 +57,9 @@ impl Plugin for Metered {
         }
         let usage = self.0.clone();
         px.filter(move |reply: &mut Reply| {
-            *usage.lock().unwrap_or_else(PoisonError::into_inner) += &reply.usage;
+            if let Reply::Usage(more) = reply {
+                *usage.lock().unwrap_or_else(PoisonError::into_inner) += &*more;
+            }
             Ok(())
         })
     }

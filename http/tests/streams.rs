@@ -761,8 +761,10 @@ async fn a_bridge_calls_a_provider_of_another_kind_once_per_input_and_streams_ba
 
 /// The text of `reply`, if it has any, as heard.
 fn heard(reply: &Reply) -> Option<Heard> {
-    let text: String = reply.texts().collect();
-    (!text.is_empty()).then_some(Heard(text))
+    match reply {
+        Reply::Delta { delta, .. } if !delta.is_empty() => Some(Heard(delta.clone())),
+        _ => None,
+    }
 }
 
 /// A gateway serving talk with `plugins` and the talk providers `list`,

@@ -104,7 +104,7 @@ async fn what_it_cannot_read_is_refused() -> Result<(), Fault> {
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert!(fake.requests().is_empty());
     // A tool call in the answer, too.
-    let call = r#"data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#;
+    let call = r#"data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"t","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}"#;
     fake.answer(provider_support::sse(&[&format!("{call}\n\n")]));
     let (status, body) = send(&gw, chat("gpt", "hi".into())).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");

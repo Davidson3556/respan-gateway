@@ -6,30 +6,22 @@ mod text;
 
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Fault;
-use respan_gateway_sdk::conversation::{Piece, Reply};
+use respan_gateway_sdk::conversation::Reply;
 #[path = "text_support/mod.rs"]
 mod support;
 
 use serde_json::Value;
-use support::run_filter as run;
+use support::{arguments_of, opened, run_filter as run};
 use text::{Holdback, Placeholders, Rewrite, partial_match};
 
 /// One Anthropic `input_json_delta` of a streamed tool call, as the format
 /// decodes it: the next part of the arguments of the call in block 1.
 fn partial(json_text: &str) -> Reply {
-    let mut reply = Reply::default();
-    reply.content.push(Piece::tool_arguments(1, json_text));
-    reply
+    Reply::delta(1, json_text)
 }
 
 fn joined_partial(out: &[Reply]) -> String {
-    out.iter()
-        .flat_map(|r| &r.content)
-        .filter_map(|p| match p {
-            Piece::ToolCall { arguments, .. } => Some(arguments.as_str()),
-            _ => None,
-        })
-        .collect()
+    arguments_of(out, 1)
 }
 
 struct Refuse;
@@ -73,12 +65,12 @@ impl Rewrite for MaskDigits {
 fn a_split_backslash_does_not_hide_a_term_in_streamed_arguments() {
     let unsplit = run(
         &mut Holdback::new(Refuse),
-        vec![partial("{\"s\":\"a\\\\bomb\"}")],
+        opened(vec![partial("{\"s\":\"a\\\\bomb\"}")]),
     );
     assert!(unsplit.is_err(), "control");
     let split = run(
         &mut Holdback::new(Refuse),
-        vec![partial("{\"s\":\"a\\"), partial("\\bomb\"}")],
+        opened(vec![partial("{\"s\":\"a\\"), partial("\\bomb\"}")]),
     );
     assert!(
         split.is_err(),
@@ -92,7 +84,7 @@ fn a_split_backslash_does_not_hide_a_term_in_streamed_arguments() {
 fn a_term_split_across_streamed_arguments_is_refused() {
     let split = run(
         &mut Holdback::new(Refuse),
-        vec![partial("{\"s\":\"bo"), partial("mb\"}")],
+        opened(vec![partial("{\"s\":\"bo"), partial("mb\"}")]),
     );
     assert!(
         split.is_err(),
@@ -109,10 +101,10 @@ fn a_placeholder_split_across_streamed_arguments_is_restored() {
     let (a, b) = ph.split_at(4);
     let out = run(
         &mut Holdback::new(vault),
-        vec![
+        opened(vec![
             partial(&format!("{{\"to\":\"{a}")),
             partial(&format!("{b}\"}}")),
-        ],
+        ]),
     )
     .unwrap_or_default();
     let joined = joined_partial(&out);
@@ -127,10 +119,10 @@ fn a_placeholder_split_across_streamed_arguments_is_restored() {
 fn an_edit_before_a_split_escape_keeps_streamed_arguments_valid() {
     let out = run(
         &mut Holdback::new(MaskDigits),
-        vec![
+        opened(vec![
             partial("{\"n\":\"card 4111111111111111\\"),
             partial("\"x\"}"),
-        ],
+        ]),
     )
     .unwrap_or_default();
     let joined = joined_partial(&out);

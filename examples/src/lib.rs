@@ -52,8 +52,8 @@ pub fn meter(px: &mut ProviderContext) -> Result<(), Fault> {
     let usage = CallUsage::default();
     px.extensions_mut().insert(usage.clone());
     px.filter(move |reply: &mut Reply| {
-        if !reply.usage.is_empty() {
-            *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &reply.usage;
+        if let Reply::Usage(reported) = reply {
+            *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &*reported;
         }
         Ok(())
     })
@@ -128,24 +128,54 @@ pub mod chat_bound {
     use serde_json::{self, Map, Value};
 
     /// The most input tokens `chat` can be. A token is at least a byte, so
-    /// bytes bound them: its text, the JSON of what the kind has no place for
-    /// (tools, tool calls), and 8 a message for framing. Content with no byte
-    /// bound, such as an image, is refused.
+    /// bytes bound them: its text, tool calls and results, tools, the JSON
+    /// of what the kind has no place for (`extra`), and 8 a message for
+    /// framing. A format's own spelling of a field the kind has (the key a
+    /// token limit was written under, a role's name) is no input and is not
+    /// counted. Content with no byte bound, such as an image, is refused.
     pub fn input_bound(chat: &Conversation) -> Result<u64, Fault> {
-        let json = |m: &Map<_, _>| serde_json::to_string(m).map_or(0, |s| s.len());
-        let mut bytes = json(&chat.unsupported);
+        let json = |m: &Map<_, _>, spellings: &[&str]| {
+            let kept: Map<_, _> = m
+                .iter()
+                .filter(|(key, _)| !spellings.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            serde_json::to_string(&kept).map_or(0, |s| s.len())
+        };
+        let mut bytes = json(&chat.extra.fields, &["max_tokens", "max_completion_tokens"]);
+        for tool in &chat.tools {
+            let description = tool.description.as_deref().map_or(0, str::len);
+            let parameters = serde_json::to_string(&tool.parameters).map_or(0, |s| s.len());
+            bytes += tool.name.len() + description + parameters + json(&tool.extra.fields, &[]);
+        }
         for m in &chat.messages {
-            if !m.content.iter().all(|c| matches!(c, Content::Text { .. })) {
-                return Err(BadRequest::fault("no cost bound for non-text input"));
-            }
-            bytes += m.text().len() + json(&m.unsupported) + 8;
+            bytes += content_bytes(&m.content)? + json(&m.extra.fields, &["role"]) + 8;
         }
         Ok(bytes as u64)
     }
 
+    /// The bytes of `parts`: text, tool calls and results.
+    fn content_bytes(parts: &[Content]) -> Result<usize, Fault> {
+        let mut bytes = 0;
+        for part in parts {
+            bytes += match part {
+                Content::Text { text, .. } => text.len(),
+                Content::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => id.len() + name.len() + arguments.len(),
+                Content::ToolResult { id, content, .. } => id.len() + content_bytes(content)?,
+                _ => return Err(BadRequest::fault("no cost bound for non-text input")),
+            };
+        }
+        Ok(bytes)
+    }
+
     /// How many answers `chat` asks for: its `n`, 1 if unset.
     pub fn answers(chat: &Conversation) -> Result<u64, Fault> {
-        let n = chat.unsupported.get("n").map_or(Some(1), Value::as_u64);
+        let n = chat.extra.fields.get("n").map_or(Some(1), Value::as_u64);
         n.map(|n| n.max(1))
             .ok_or_else(|| BadRequest::fault("n must be a whole number"))
     }

@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Conversation, Finish, Reply, units};
+use respan_gateway_sdk::conversation::{Block, Conversation, Finish, Reply, units};
 use respan_gateway_sdk::futures::FutureExt;
 use respan_gateway_sdk::futures::channel::oneshot;
 use respan_gateway_sdk::futures::{sink, stream};
@@ -61,10 +61,11 @@ impl Format<Model, Reply, Conversation> for Local {
             let model = chat.model.clone().unwrap_or_else(|| "local".into());
             let mut replies = vec![Reply::start("local-1", model)];
             // Each word keeps the space before the next: "you ", "said: ", ...
-            replies.extend(answer.split_inclusive(' ').map(|w| Reply::text(0, w)));
-            let mut last = Reply::finished(Finish::Stop);
-            last.usage = usage;
-            replies.push(last);
+            replies.push(Reply::block_start(0, Block::Text));
+            replies.extend(answer.split_inclusive(' ').map(|w| Reply::delta(0, w)));
+            replies.push(Reply::block_end(0));
+            replies.push(Reply::usage(usage));
+            replies.push(Reply::finished(Finish::Stop));
             let outputs = EventStream::stream(stream::iter(replies.into_iter().map(Ok)));
             Ok(sink::unfold(
                 Some((send, outputs)),

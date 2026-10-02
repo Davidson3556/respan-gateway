@@ -127,15 +127,27 @@ async fn an_agent_request_is_redacted_and_its_tool_call_restored() -> Result<(),
     Ok(())
 }
 
+/// The kind has one choice: a request for several is refused, and an answer
+/// with several (a raw relay can send `n`) is refused unread, whole or
+/// streamed, rather than passed with its other choices unrestored.
 #[tokio::test]
-async fn several_choices_restore_independently_whole_or_streamed() -> Result<(), Fault> {
+async fn several_choices_are_refused_rather_than_passed_unread() -> Result<(), Fault> {
     let fake = FakeOpenAi::start().await;
+    let gw = gateway(provider_support::openai(&fake.base_url())?.connect())?;
+    let (status, _, body) =
+        read_whole(serve(&gw, chat(PROMPT.into(), json!({"n":2}))).await.0).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&body?)
+    );
+    assert!(fake.requests().is_empty());
+
     let events = [
         json!([{"index":0,"delta":{"content":"a <EMA"}},{"index":1,"delta":{"content":"b <EM"}}]),
         json!([{"index":1,"delta":{"content":"AIL_2>"}},{"index":0,"delta":{"content":"IL_"}}]),
         json!([{"index":0,"delta":{"content":"1>"},"finish_reason":"stop"}]),
-        json!([{"index":1,"delta":{"content":" and <EMA"}}]),
-        json!([{"index":1,"delta":{"content":"IL_1>"},"finish_reason":"stop"}]),
     ]
     .map(|choices| {
         format!(
@@ -146,55 +158,23 @@ async fn several_choices_restore_independently_whole_or_streamed() -> Result<(),
     let mut chunks: Vec<_> = events.iter().map(String::as_str).collect();
     chunks.push("data: [DONE]\n\n");
     fake.answer(provider_support::sse(&chunks));
-    let (status, _, body) = read_whole(
-        serve(
-            &gateway(provider_support::openai(&fake.base_url())?.connect())?,
-            chat(PROMPT.into(), json!({"n":2})),
-        )
-        .await
-        .0,
-    )
-    .await;
+    let (status, _, body) = read_whole(serve(&gw, chat(PROMPT.into(), json!({}))).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let mut texts = [String::new(), String::new()];
-    let mut finishes = [0, 0];
-    for data in body.lines().filter_map(|l| l.strip_prefix("data: ")) {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-            continue;
-        };
-        for choice in value["choices"].as_array().into_iter().flatten() {
-            let index = choice["index"].as_u64().unwrap_or(0) as usize;
-            texts[index].push_str(choice["delta"]["content"].as_str().unwrap_or_default());
-            finishes[index] += usize::from(choice["finish_reason"].is_string());
-        }
-    }
-    assert_eq!(
-        texts,
-        ["a bob@x.io", "b alice@y.org and bob@x.io"],
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body.contains("unreadable_content") && !body.contains("data:"),
         "{body}"
     );
-    assert_eq!(finishes, [1, 1], "{body}");
+
     let answer = json!({ "id": "c1", "model": "gpt", "choices": [
         { "index": 0, "message": { "role": "assistant", "content": "a <EMAIL_1>" } },
         { "index": 1, "message": { "role": "assistant", "content": "b <EMAIL_1>" } }] });
     fake.answer(Answer::raw(answer.to_string()));
-    let whole = chat(PROMPT.into(), json!({ "n": 2, "stream": false }));
-    let (status, _, body) = read_whole(
-        serve(
-            &gateway(provider_support::openai(&fake.base_url())?.connect())?,
-            whole,
-        )
-        .await
-        .0,
-    )
-    .await;
+    let whole = chat(PROMPT.into(), json!({ "stream": false }));
+    let (status, _, body) = read_whole(serve(&gw, whole).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        body.contains("a bob@x.io") && body.contains("b bob@x.io"),
-        "{body}"
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(!body.contains("bob@x.io"), "{body}");
     assert_eq!(fake.requests().len(), 2);
     Ok(())
 }
@@ -491,9 +471,10 @@ async fn anthropic_tool_history_is_redacted_and_its_reply_restored() -> Result<(
     Ok(())
 }
 
+/// A tool call's arguments in another choice are never sent unread, even
+/// held, as another choice finishes: the answer is refused whole.
 #[tokio::test]
-async fn finishing_one_choice_does_not_release_another_choices_tool_arguments() -> Result<(), Fault>
-{
+async fn another_choices_tool_arguments_are_refused_not_sent_unread() -> Result<(), Fault> {
     let chunks = [
         json!([{"index":1,"delta":{"tool_calls":[{"index":0,"id":"t","type":"function","function":{"name":"send","arguments":"{\"to\":\"<EMA"}}]}}]),
         json!([{"index":0,"delta":{},"finish_reason":"stop"}]),
@@ -503,35 +484,7 @@ async fn finishing_one_choice_does_not_release_another_choices_tool_arguments() 
     let mut chunks = chunks.to_vec();
     chunks.push("data: [DONE]\n\n".into());
     let (status, body) = stream_of(chunks).await?;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let mut arguments = String::new();
-    let mut finished = false;
-    for data in body.lines().filter_map(|line| line.strip_prefix("data: ")) {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
-            continue;
-        };
-        for choice in value["choices"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|c| c["index"] == 1)
-        {
-            for call in choice["delta"]["tool_calls"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                let text = call["function"]["arguments"].as_str().unwrap_or_default();
-                assert!(
-                    !finished || text.is_empty(),
-                    "arguments after finish: {body}"
-                );
-                arguments.push_str(text);
-            }
-            finished |= choice["finish_reason"].is_string();
-        }
-    }
-    assert!(finished, "{body}");
-    assert_eq!(arguments, "{\"to\":\"bob@x.io", "{body}");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(!body.contains("<EMA") && !body.contains("data:"), "{body}");
     Ok(())
 }

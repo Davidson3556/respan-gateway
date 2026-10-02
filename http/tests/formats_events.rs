@@ -24,7 +24,7 @@ use respan_gateway_http::{Body, HttpClient, Incoming, Outgoing, connect};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Conversation, Reply, units};
+use respan_gateway_sdk::conversation::{Block, Conversation, Reply, units};
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{
@@ -256,14 +256,14 @@ impl Plugin for Seen {
     }
 }
 
-// Keep-alives and other messages that are no content reach every filter,
-// and a client of the provider's format in place.
+// Keep-alives and other events that are no content reach every filter, and a
+// client of the provider's format.
 #[tokio::test]
 async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
     let openai_events = [
-        ": keep-alive\n\n",
+        "data: keep-alive\n\n",
         "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
-        ": keep-alive\n\n",
+        "data: keep-alive\n\n",
         "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         "data: [DONE]\n\n",
     ];
@@ -275,8 +275,13 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
 
     let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
 
-    assert_eq!(body.ok(), Some(Bytes::from(openai_events.concat())));
-    assert_eq!((seen.silent(), seen.all()), (2, 4));
+    let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+    // Each keep-alive, an event of the format, is written as it came.
+    assert_eq!(body.matches("data: keep-alive\n\n").count(), 2, "{body}");
+    assert!(body.contains("\"content\":\"Hi\""), "{body}");
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
+    // Two keep-alives, a start, a block's opening, its text and end, and a finish.
+    assert_eq!((seen.silent(), seen.all()), (2, 7));
 
     let anthropic_events = [
         "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"c\",\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n",
@@ -304,8 +309,17 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
 
     let (_, _, body) = read_whole(serve(&gw, request).await.0).await;
 
-    assert_eq!(body.ok(), Some(Bytes::from(anthropic_events.concat())));
-    assert_eq!((seen.silent(), seen.all()), (4, 7));
+    let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+    assert!(
+        body.contains("event: ping\ndata: {\"type\":\"ping\"}\n\n"),
+        "{body}"
+    );
+    assert!(body.contains("\"text\":\"Hi\""), "{body}");
+    assert!(body.ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+    // A comment says nothing. The ping and the two usage reports are no
+    // content; with the start, the block's three events and the finish
+    // they are all.
+    assert_eq!((seen.silent(), seen.all()), (3, 8));
 }
 
 /// OpenAI Chat, counting lazy request parsing.
@@ -353,8 +367,8 @@ impl Plugin for Reads {
     }
 }
 
-// Must hold: a whole request no plugin reads is relayed undecoded, as the
-// client's bytes; one read is decoded once, and still goes as it came.
+// Must hold: a whole request is decoded once, whether or not a plugin reads
+// it, and goes as the conversation it says.
 #[tokio::test]
 async fn a_request_no_plugin_reads_is_decoded_for_encoding() {
     const UNARY: &str = r#"{"id":"c","choices":[{"message":{"content":"hi"}}]}"#;
@@ -378,10 +392,13 @@ async fn a_request_no_plugin_reads_is_decoded_for_encoding() {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(format.0.load(Ordering::Relaxed), decoded);
-        assert_eq!(
-            sent.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
-            &[Bytes::from(chat)]
-        );
+        let sent = sent.lock().unwrap_or_else(|e| e.into_inner());
+        let [sent] = sent.as_slice() else {
+            panic!("{sent:?}");
+        };
+        let said: serde_json::Value = serde_json::from_slice(sent).unwrap_or_default();
+        let wanted: serde_json::Value = serde_json::from_str(chat).unwrap_or_default();
+        assert_eq!(said, wanted);
     }
 }
 
@@ -394,7 +411,9 @@ impl Plugin for Cap {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         let (cap, mut spent) = (self.0, 0.0);
         px.filter(move |reply: &mut Reply| {
-            spent += reply.usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
+            if let Reply::Usage(usage) = reply {
+                spent += usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
+            }
             match spent > cap {
                 true => Err(Fault::new("over the cap")
                     .with(ErrorCode("cap".into()))
@@ -463,9 +482,14 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
             shown.add(units::INPUT_TOKENS, 7.0);
             cached.add(units::INPUT_TOKENS, 3.0);
             cx.extensions_mut().insert(CachedUsage(cached));
-            let mut hi = Reply::text(0, "hi");
-            hi.usage = shown;
-            let answer = futures::stream::iter([Ok(Reply::start("own", "m")), Ok(hi)]);
+            let hi = [
+                Reply::start("own", "m"),
+                Reply::block_start(0, Block::Text),
+                Reply::delta(0, "hi"),
+                Reply::block_end(0),
+                Reply::usage(shown),
+            ];
+            let answer = futures::stream::iter(hi.map(Ok));
             Ok(Some(Response::stream(answer)))
         }
     }
@@ -502,18 +526,22 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
     assert_eq!(billed, Some(Some(3.0)));
 }
 
-/// Fails on every reply it sees.
+/// Fails on the usage it sees.
 struct Refuses;
 
 impl Filter<Reply> for Refuses {
-    fn edit(&mut self, _reply: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-        Err(Fault::new("no")
-            .with(ErrorCode("blocked".into()))
-            .with(Status(403)))
+    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if matches!(reply, Reply::Usage(_)) {
+            return Err(Fault::new("no")
+                .with(ErrorCode("blocked".into()))
+                .with(Status(403)));
+        }
+        out.push(reply);
+        Ok(())
     }
 }
 
-// A meter registered after a guard sees the usage in the reply the guard
+// A meter registered after a guard sees the usage in the event the guard
 // refuses: its filter runs first.
 #[tokio::test]
 async fn a_meter_after_a_guard_sees_the_usage_in_the_reply_it_refuses() {

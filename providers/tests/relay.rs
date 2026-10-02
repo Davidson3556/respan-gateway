@@ -29,7 +29,7 @@ use respan_gateway_http::{Completion, Encoder, HttpClient, Incoming};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::async_trait;
 use respan_gateway_sdk::conversation::{
-    Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
+    Assembled, Content, Conversation, Extra, Finish, Message, Reply, Role, set_model, units,
 };
 use respan_gateway_sdk::{
     BadRequest, ClientContext, Connection, ErrorCode, Fault, Filter, Format, Gateway, Plugin,
@@ -39,7 +39,8 @@ use respan_gateway_sdk::{Details, Usage};
 use serde_json::json;
 use support::{
     Adds, Call, Disclaimer, Flip, Footer, HoldAll, Metered, Nameless, SendRequest, Shout, Silence,
-    Unmask, add_provider, fault_code, http_sender, providers, says, sender, with_plugins,
+    TextBlocks, Unmask, add_provider, fault_code, http_sender, providers, says, sender, text,
+    with_plugins,
 };
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -59,6 +60,52 @@ const UNARY: &str = r#"{"id":"c2","choices":[{"message":{"content":"hi"}}],"usag
 
 fn call(path: &str, body: impl Into<bytes::Bytes>) -> Call {
     post(path, body)
+}
+
+/// The events of a complete OpenAI body, streamed or whole.
+fn events_of(body: &str) -> Vec<Reply> {
+    let kind = match body.starts_with("data:") {
+        true => "text/event-stream",
+        false => "application/json",
+    };
+    let mut head = http::Response::new(()).into_parts().0;
+    head.headers
+        .insert(http::header::CONTENT_TYPE, HeaderValue::from_static(kind));
+    let ask = http::Request::new(()).into_parts().0;
+    let answer = http::Response::from_parts(head, bytes::Bytes::from(body.to_owned()));
+    OpenAiChat
+        .decode_response(answer, &ask)
+        .unwrap_or_else(|f| panic!("{f}: {body}"))
+}
+
+/// What a complete OpenAI body says, folded into the whole answer: how the
+/// answer is framed, and what the provider's fields beside it were, do not
+/// matter.
+fn gist(body: &str) -> Assembled {
+    let mut all = Assembled::default();
+    for event in events_of(body) {
+        all.push(&event).unwrap_or_else(|f| panic!("{f}: {body}"));
+    }
+    if let Some(start) = &mut all.start {
+        start.extra = Extra::default();
+    }
+    all
+}
+
+/// The text the chunks of an OpenAI stream add.
+fn gist_text(chunks: &[serde_json::Value]) -> String {
+    let text = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str());
+    text.collect()
+}
+
+/// The JSON of each data line of an OpenAI stream, but its `[DONE]`.
+fn sent_chunks(body: &str) -> Vec<serde_json::Value> {
+    body.split("\n\n")
+        .filter_map(|e| e.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect()
 }
 fn chat() -> Call {
     call(CHAT, STREAM_REQ)
@@ -362,9 +409,10 @@ impl Transcript {
 impl Plugin for Transcript {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let text = self.0.clone();
+        let mut blocks = TextBlocks::default();
         cx.filter(move |e: &mut Reply| {
-            if let Ok(mut t) = text.lock() {
-                e.texts().for_each(|event| t.push_str(event));
+            if let (Ok(mut t), Some(event)) = (text.lock(), blocks.text(e)) {
+                t.push_str(event);
             }
             Ok(())
         })?;
@@ -439,20 +487,24 @@ impl Plugin for Cached {
         let mut cost = Usage::default();
         cost.add(units::OUTPUT_TOKENS, 1.0);
         // Shown in its reply; no provider edge, so no meter, sees it.
-        let mut hi = Reply::text(0, "hi");
-        hi.usage = cost;
-        let answer = [Reply::start("cached", "gpt-x"), hi];
-        let answer = futures::stream::iter(answer.map(Ok));
+        let mut answer = vec![Reply::start("cached", "gpt-x")];
+        answer.extend(text(0, "hi"));
+        answer.push(Reply::usage(cost));
+        let answer = futures::stream::iter(answer.into_iter().map(Ok));
         Ok(Some(Response::stream(answer)))
     }
 }
 
 #[tokio::test]
-async fn a_stream_is_relayed_byte_for_byte_with_usage() {
+async fn a_stream_is_relayed_with_usage() {
     let h = relay();
     h.sites.openai.reply(fixture::sse(STREAM));
 
-    assert_eq!(h.body(chat()).await, STREAM.concat());
+    let body = h.body(chat()).await;
+    let (said, sent) = (gist(&body), gist(&STREAM.concat()));
+    assert_eq!(said.message, sent.message);
+    assert_eq!((said.usage, said.start), (sent.usage, sent.start));
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     assert_eq!(says(h.log.only()), Ok(()));
     let usage = h.usage.total();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
@@ -460,12 +512,17 @@ async fn a_stream_is_relayed_byte_for_byte_with_usage() {
 }
 
 #[tokio::test]
-async fn a_unary_response_is_relayed_byte_for_byte_with_usage() {
+async fn a_unary_response_is_relayed_with_usage() {
     let fake = FakeOpenAi::start().await;
     let h = Harness::real(&fake, Vec::new(), Some("openai"));
     fake.answer(Answer::raw(UNARY));
 
-    assert_eq!(h.body(valid_unary_chat()).await, UNARY);
+    let body = h.body(valid_unary_chat()).await;
+    let said: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(said["id"], "c2");
+    assert_eq!(said["choices"][0]["message"]["content"], "hi");
+    assert_eq!(said["usage"]["prompt_tokens"], 4);
+    assert_eq!(said["usage"]["completion_tokens"], 1);
     assert_eq!(says(h.log.only()), Ok(()));
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
@@ -528,7 +585,7 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
                 .outputs::<Reply>()
                 .try_collect::<Vec<_>>()
                 .await?;
-            let unsafe_ = |e: &Reply| e.texts().any(|text| text == "UNSAFE");
+            let unsafe_ = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta == "UNSAFE");
             match verdict.iter().any(unsafe_) {
                 true => Err(Fault::new("the judge refused")
                     .with(ErrorCode("unsafe".into()))
@@ -566,17 +623,20 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
         assert_eq!(judge["messages"][0]["role"], "system");
         if status == StatusCode::OK {
             // The client's request is untouched by the judge's call.
-            assert_eq!(&sent[1].body()[..], UNARY_REQ.as_bytes());
+            let own: serde_json::Value = serde_json::from_slice(sent[1].body()).unwrap_or_default();
+            assert_eq!(own, json!({ "model": "gpt-x", "messages": [] }));
         }
     }
 }
 
 #[tokio::test]
-async fn an_unedited_request_reaches_the_provider_byte_for_byte() {
+async fn an_unedited_request_reaches_the_provider_as_it_said() {
     let h = relay();
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
     let _ = h.send(unary_chat()).await;
-    assert_eq!(&h.sites.sent.sent()[0].body()[..], UNARY_REQ.as_bytes());
+    let sent: serde_json::Value =
+        serde_json::from_slice(h.sites.sent.sent()[0].body()).unwrap_or_default();
+    assert_eq!(sent, json!({ "model": "gpt-x", "messages": [] }));
 }
 
 #[tokio::test]
@@ -597,13 +657,11 @@ async fn a_filter_re_encodes_only_what_changed() {
     let h = Harness::new(vec![Arc::new(Shout)], Some("openai"));
     h.sites.openai.reply(fixture::sse(STREAM));
 
-    let expected = [
-        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"HELLO\"}}]}\n\n",
-        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" WORLD\"}}]}\n\n",
-        STREAM[2],
-        STREAM[3],
-    ];
-    assert_eq!(h.body(chat()).await, expected.concat());
+    let said = gist(&h.body(chat()).await);
+    assert_eq!(said.message.text(), "HELLO WORLD");
+    assert_eq!(said.usage.get(units::OUTPUT_TOKENS), Some(2.0));
+    assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(5.0));
+    assert_eq!(said.start.map(|s| s.id), Some("c1".to_owned()));
     assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2.0));
 }
 
@@ -616,8 +674,9 @@ async fn a_filter_may_keep_state_that_is_not_sync() {
     impl Plugin for Count {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let seen = std::cell::Cell::new(0);
+            let mut blocks = TextBlocks::default();
             cx.filter(move |e: &mut Reply| {
-                for text in e.texts_mut() {
+                if let Some(text) = blocks.text_mut(e) {
                     seen.set(seen.get() + 1);
                     *text = format!("{}:{text}", seen.get());
                 }
@@ -706,7 +765,8 @@ async fn a_plugin_can_answer_by_calling_providers() {
         .reply(fixture::json(StatusCode::SERVICE_UNAVAILABLE, overloaded));
     h.sites.backup.reply(fixture::sse(STREAM));
 
-    assert_eq!(h.body(chat()).await, STREAM.concat());
+    let said = gist(&h.body(chat()).await);
+    assert_eq!(said.message, gist(&STREAM.concat()).message);
     assert_eq!(h.sites.sent.sent().len(), 2);
     assert_eq!(says(h.log.only()), Ok(()));
 }
@@ -754,7 +814,15 @@ async fn a_transport_error_mid_stream_ends_with_an_error_event() {
 
     let body = h.body(chat()).await;
 
-    assert!(body.starts_with(&STREAM[..2].concat()), "{body}");
+    let text: String = sent_chunks(&body)
+        .iter()
+        .filter_map(|c| {
+            c["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(text, "Hello world", "{body}");
     assert!(body.ends_with("\"type\":\"upstream\",\"param\":null,\"code\":\"upstream\"}}\n\n"));
     assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "upstream"));
 }
@@ -920,8 +988,9 @@ impl Plugin for Named {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         self.note("client");
         let name = self.0;
+        let mut blocks = TextBlocks::default();
         cx.filter(move |r: &mut Reply| {
-            for text in r.texts_mut() {
+            if let Some(text) = blocks.text_mut(r) {
                 *text = format!("{name}({text})");
             }
             Ok(())
@@ -977,12 +1046,29 @@ async fn plugins_run_in_registration_order_on_both_edges() {
 async fn a_filter_edits_a_unary_response_and_keeps_its_other_fields() {
     let fake = FakeOpenAi::start().await;
     let h = Harness::real(&fake, vec![Arc::new(Shout)], Some("openai"));
-    fake.answer(Answer::raw(UNARY));
+    let rich = json!({
+        "id": "c2", "object": "chat.completion", "created": 5, "model": "gpt-x",
+        "system_fingerprint": "fp", "service_tier": "default",
+        "choices": [{ "index": 0, "logprobs": { "content": [] },
+            "message": { "role": "assistant", "content": "hi", "refusal": null },
+            "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5 },
+    });
+    fake.answer(Answer::raw(rich.to_string()));
 
-    assert_eq!(
-        h.body(valid_unary_chat()).await,
-        UNARY.replace("\"content\":\"hi\"", "\"content\":\"HI\"")
-    );
+    let said: serde_json::Value =
+        serde_json::from_str(&h.body(valid_unary_chat()).await).unwrap_or_default();
+
+    // Unknown fields of the same format survive, the edit is made, and the
+    // rest of what it said is as it was.
+    assert_eq!(said["choices"][0]["message"]["content"], "HI");
+    for (field, value) in [("system_fingerprint", "fp"), ("service_tier", "default")] {
+        assert_eq!(said[field], value, "{said}");
+    }
+    assert_eq!(said["created"], 5);
+    assert_eq!(said["choices"][0]["logprobs"], json!({ "content": [] }));
+    assert_eq!(said["choices"][0]["finish_reason"], "stop");
+    assert_eq!(said["usage"], rich["usage"]);
 }
 
 #[tokio::test]
@@ -993,7 +1079,9 @@ async fn a_client_that_did_not_ask_for_usage_does_not_get_the_usage_chunk() {
 
     let body = h.body(call(CHAT, request)).await;
 
-    assert_eq!(body, [STREAM[0], STREAM[1], STREAM[3]].concat());
+    assert!(!body.contains("usage"), "{body}");
+    assert_eq!(gist(&body).message.text(), "Hello world");
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2.0));
     let sent: serde_json::Value =
         serde_json::from_slice(h.sites.sent.sent()[0].body()).unwrap_or_default();
@@ -1015,23 +1103,40 @@ async fn the_null_usage_the_gateway_asked_for_does_not_reach_the_client() {
 
     let body = h.body(call(CHAT, request)).await;
 
-    assert_eq!(body, chunk("") + "data: [DONE]\n\n");
+    assert!(!body.contains("usage"), "{body}");
+    assert_eq!(gist(&body).message.text(), "hi");
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
 }
 
 #[tokio::test]
 async fn a_chunk_that_says_more_than_null_usage_is_kept() {
     let h = relay();
     let filter = |usage: &str| {
-        format!("data: {{\"choices\":[],\"id\":\"\",\"prompt_filter_results\":[]{usage}}}\n\n")
+        format!(
+            "data: {{\"choices\":[],\"id\":\"\",\"prompt_filter_results\":[{{\"prompt_index\":0}}]{usage}}}\n\n"
+        )
     };
-    let stream = [filter(",\"usage\":null"), "data: [DONE]\n\n".into()];
+    let stream = [
+        filter(",\"usage\":null"),
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"
+            .into(),
+        "data: [DONE]\n\n".into(),
+    ];
     let stream: Vec<&str> = stream.iter().map(String::as_str).collect();
     h.sites.openai.reply(fixture::sse(&stream));
     let request = r#"{"model":"gpt-x","stream":true,"messages":[]}"#;
 
     let body = h.body(call(CHAT, request)).await;
 
-    assert_eq!(body, filter("") + "data: [DONE]\n\n");
+    // What the chunk said beside its null usage is kept, in the chunks the
+    // response is written in.
+    assert!(!body.contains("usage"), "{body}");
+    let first = &sent_chunks(&body)[0];
+    assert_eq!(
+        first["prompt_filter_results"],
+        json!([{ "prompt_index": 0 }])
+    );
+    assert_eq!(gist(&body).message.text(), "hi");
 }
 
 #[tokio::test]
@@ -1178,6 +1283,7 @@ async fn an_edit_in_the_same_format_keeps_what_a_conversation_cannot_hold() {
     assert_eq!(status, StatusCode::OK);
     let sent: serde_json::Value =
         serde_json::from_slice(h.sites.sent.sent()[0].body()).unwrap_or_default();
+    // Even the developer role is as the client spelled it.
     let mut expected = request;
     expected["temperature"] = json!(0.0);
     assert_eq!(sent, expected);
@@ -1188,7 +1294,9 @@ async fn an_edited_streaming_request_keeps_the_clients_usage_chunk() {
     let h = Harness::new(vec![Arc::new(Cool)], Some("openai"));
     h.sites.openai.reply(fixture::sse(STREAM));
 
-    assert_eq!(h.body(chat()).await, STREAM.concat());
+    let said = gist(&h.body(chat()).await);
+    assert_eq!(said.usage, gist(&STREAM.concat()).usage);
+    assert_eq!(said.usage.get(units::OUTPUT_TOKENS), Some(2.0));
 }
 
 #[tokio::test]
@@ -1199,7 +1307,7 @@ async fn an_edit_to_the_start_is_written_in_the_clients_format() {
     impl Plugin for Rename {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|e: &mut Reply| {
-                if let Some(start) = &mut e.start {
+                if let Reply::Start(start) = e {
                     start.id = "hidden".into();
                 }
                 Ok(())
@@ -1223,7 +1331,7 @@ async fn an_edit_to_the_start_is_written_in_the_clients_format() {
 }
 
 #[tokio::test]
-async fn a_filter_that_changes_nothing_keeps_the_bytes() {
+async fn a_filter_that_changes_nothing_keeps_what_was_said() {
     struct Idle;
 
     #[async_trait]
@@ -1240,7 +1348,7 @@ async fn a_filter_that_changes_nothing_keeps_the_bytes() {
         .openai
         .reply(fixture::sse(&[spaced, "data: [DONE]\n\n"]));
 
-    assert_eq!(h.body(chat()).await, [spaced, "data: [DONE]\n\n"].concat());
+    assert_eq!(gist(&h.body(chat()).await).message.text(), "café");
 }
 
 #[tokio::test]
@@ -1253,7 +1361,7 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
     let end = h.log.only();
     assert!(matches!(end, Err(f) if respan_gateway_http::status(&f) == StatusCode::FORBIDDEN));
 
-    let world = |e: &Reply| e.texts().any(|text| text.contains("world"));
+    let world = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.contains("world"));
     let h = Harness::new(vec![Arc::new(Guard(world))], Some("openai"));
     h.sites.openai.reply(fixture::sse(STREAM));
 
@@ -1283,10 +1391,9 @@ async fn plugins_see_the_request_and_change_its_model() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let asked = cx.extensions().get::<Asked>().map(|a| a.method.clone());
             assert_eq!(asked, Some(http::Method::POST));
-            // The client's bytes, as they came, are its input's origin.
+            // The client's request, as it said it.
             let chat = cx.input::<Conversation>()?;
-            let came = chat.came_in(cx.format()).map(|o| &o.bytes);
-            assert_eq!(came.map(|b| &b[..]), Some(STREAM_REQ.as_bytes()));
+            assert!(chat.stream);
             let said = chat.messages[0].text();
             cx.extensions_mut()
                 .insert(Seen(if said == "hi" { "hi" } else { "other" }));
@@ -1320,11 +1427,12 @@ async fn a_filter_edits_several_events_of_one_chunk_in_its_shape() {
     #[async_trait]
     impl Plugin for Truncate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|e: &mut Reply| {
-                for text in e.texts_mut() {
+            let mut blocks = TextBlocks::default();
+            cx.filter(move |e: &mut Reply| {
+                if let Some(text) = blocks.text_mut(e) {
                     *text = text.to_uppercase();
                 }
-                if let Some(finish) = &mut e.finish {
+                if let Reply::Finish(finish) = e {
                     *finish = Finish::Length;
                 }
                 Ok(())
@@ -1339,10 +1447,11 @@ async fn a_filter_edits_several_events_of_one_chunk_in_its_shape() {
         .openai
         .reply(fixture::sse(&[chunk, "data: [DONE]\n\n"]));
 
-    assert_eq!(
-        h.body(chat()).await,
-        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"HI\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n"
-    );
+    let body = h.body(chat()).await;
+    let said = gist(&body);
+    assert_eq!(said.message.text(), "HI");
+    assert_eq!(said.finish, Some(Finish::Length));
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
 }
 
 #[tokio::test]
@@ -1361,7 +1470,7 @@ async fn whole_untyped_bytes_answer_a_streaming_client_as_a_stream() {
 
 #[tokio::test]
 async fn a_unary_guardrail_refuses_with_its_status() {
-    let text = |e: &Reply| e.texts().next().is_some();
+    let text = |e: &Reply| matches!(e, Reply::Delta { .. });
     let h = Harness::new(vec![Arc::new(Guard(text))], Some("openai"));
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
@@ -1622,7 +1731,15 @@ async fn a_whole_message_a_filter_held_keeps_its_fields_and_usage() {
     assert_eq!(status, StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&body.unwrap_or_default()).unwrap_or_default();
-    assert_eq!(body, tool_call);
+    assert_eq!(body["id"], "c2");
+    assert_eq!(body["model"], "gpt-x");
+    assert_eq!(body["system_fingerprint"], "fp");
+    let (said, sent) = (&body["choices"][0], &tool_call["choices"][0]);
+    assert_eq!(said["message"]["content"], "hi");
+    assert_eq!(said["message"]["tool_calls"], sent["message"]["tool_calls"]);
+    assert_eq!(said["finish_reason"], "tool_calls");
+    assert_eq!(body["usage"]["prompt_tokens"], 4);
+    assert_eq!(body["usage"]["completion_tokens"], 1);
 }
 
 #[tokio::test]
@@ -1637,7 +1754,18 @@ async fn what_the_provider_sent_after_its_finish_is_kept_when_it_breaks_off() {
     let (_, _, body) = h.send(chat()).await;
 
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert_eq!(body, stream.concat() + TRUNCATED);
+    // What came is kept, the finish too, and the failure ends the stream.
+    let said = sent_chunks(&body);
+    let text: String = said
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "Hello world", "{body}");
+    assert!(
+        said.iter()
+            .any(|c| c["choices"][0]["finish_reason"] == "stop")
+    );
+    assert!(body.ends_with(TRUNCATED), "{body}");
 }
 
 #[tokio::test]
@@ -1646,12 +1774,16 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
 
     /// Keeps a finished answer and what it cost, to replay later: the
     /// filter sees every reply, the usage alone at the stream's end too.
-    struct Fill(String, f64, Entry);
+    struct Fill(String, f64, Entry, TextBlocks);
 
     impl Filter<Reply> for Fill {
         fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            event.texts().for_each(|text| self.0.push_str(text));
-            self.1 += event.usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
+            if let Some(text) = self.3.text(&event) {
+                self.0.push_str(text);
+            }
+            if let Reply::Usage(usage) = &event {
+                self.1 += usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
+            }
             out.push(event);
             Ok(())
         }
@@ -1669,7 +1801,12 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
     #[async_trait]
     impl Plugin for Cache {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(Fill(String::new(), 0.0, self.0.clone()))?;
+            cx.filter(Fill(
+                String::new(),
+                0.0,
+                self.0.clone(),
+                TextBlocks::default(),
+            ))?;
             Ok(None)
         }
     }
@@ -1685,22 +1822,20 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
 }
 
 #[tokio::test]
-async fn a_chunk_a_filter_splits_in_two_is_rebuilt_whole() {
+async fn a_delta_a_filter_splits_in_two_is_written_as_two_and_reads_back_whole() {
     /// Splits each text after its first character.
-    struct Split;
+    #[derive(Default)]
+    struct Split(TextBlocks);
 
     impl Filter<Reply> for Split {
-        fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            let split = |piece: Piece| match piece {
-                Piece::Text { block, text, .. } if text.len() > 1 => {
+        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            match (self.0.text(&reply), &reply) {
+                (Some(text), Reply::Delta { block, .. }) if text.len() > 1 => {
                     let (a, b) = text.split_at(1);
-                    vec![Piece::text(block, a), Piece::text(block, b)]
+                    out.extend([Reply::delta(*block, a), Reply::delta(*block, b)]);
                 }
-                piece => vec![piece],
-            };
-            let content = std::mem::take(&mut reply.content);
-            reply.content = content.into_iter().flat_map(split).collect();
-            out.push(reply);
+                _ => out.push(reply),
+            }
             Ok(())
         }
     }
@@ -1710,7 +1845,7 @@ async fn a_chunk_a_filter_splits_in_two_is_rebuilt_whole() {
     #[async_trait]
     impl Plugin for Splitter {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(Split)?;
+            cx.filter(Split::default())?;
             Ok(None)
         }
     }
@@ -1722,37 +1857,20 @@ async fn a_chunk_a_filter_splits_in_two_is_rebuilt_whole() {
 
     assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert!(body.contains("\"content\":\"Hello\""), "{body}");
-    assert!(body.contains("\"content\":\" world\""), "{body}");
+    assert!(body.contains("\"content\":\"H\""), "{body}");
+    assert!(body.contains("\"content\":\"ello\""), "{body}");
+    assert_eq!(gist(&body).message.text(), "Hello world");
 }
 
 /// The chunks an OpenAI client gets from `stream` through a filter that
 /// keeps the finish back to the end, adding a footer before it.
 async fn footed(stream: &[String]) -> (String, Vec<serde_json::Value>) {
-    struct Footer(Option<Finish>);
-
-    impl Filter<Reply> for Footer {
-        fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            if let Some(finish) = reply.finish.take() {
-                self.0 = Some(finish);
-            }
-            out.push(reply);
-            Ok(())
-        }
-
-        fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            out.push(Reply::text(0, " [footer]"));
-            out.extend(self.0.take().map(Reply::finished));
-            Ok(())
-        }
-    }
-
     struct Foot;
 
     #[async_trait]
     impl Plugin for Foot {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(Footer(None))?;
+            cx.filter(Footer(0, None))?;
             Ok(None)
         }
     }
@@ -1919,7 +2037,7 @@ async fn usage_on_every_chunk_does_not_hold_the_stream() {
 #[tokio::test]
 async fn an_edit_to_the_start_leaves_other_choices_alone() {
     let h = filtered(|e: &mut Reply| {
-        if let Some(start) = &mut e.start {
+        if let Reply::Start(start) = e {
             start.model = "alias".into();
         }
         Ok(())
@@ -1967,7 +2085,9 @@ async fn a_whole_message_a_filter_took_the_start_of_is_sent() {
     let (status, _, body) = h.send(unary_chat()).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.ok().as_deref(), Some(UNARY.as_bytes()));
+    let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
+    assert_eq!(gist(&body).message.text(), "hi");
+    assert_eq!(gist(&body).usage.get(units::INPUT_TOKENS), Some(4.0));
 }
 
 #[tokio::test]
@@ -2031,7 +2151,8 @@ async fn a_plugin_races_two_calls_and_keeps_the_first() {
     let (status, _, body) = h.send(unary_chat()).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body.ok().as_deref(), Some(UNARY.as_bytes()));
+    let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
+    assert_eq!(gist(&body).message.text(), "hi");
 }
 
 fn tool_call_message(content: serde_json::Value) -> String {
@@ -2043,7 +2164,7 @@ fn tool_call_message(content: serde_json::Value) -> String {
 
 #[tokio::test]
 async fn text_taken_beside_a_tool_call_leaves_the_call() {
-    let h = filtered(Silence);
+    let h = filtered(Silence::default());
     h.sites.openai.reply(fixture::json(
         StatusCode::OK,
         &tool_call_message(json!("Let me check")),
@@ -2119,13 +2240,19 @@ async fn every_filter_shape_writes_every_openai_message_shape() {
         let reply = json!({"id": "c2", "choices": [{"index": 0, "message": shape,
             "logprobs": null, "finish_reason": "stop"}]})
         .to_string();
-        for h in [
-            filtered(Footer(0, None)),
-            filtered(Silence),
+        let text = shape["content"].is_string();
+        let mut all = vec![
+            filtered(Footer(7, None)),
+            filtered(Silence::default()),
             filtered(HoldAll(Vec::new())),
             filtered(Disclaimer),
             filtered(Nameless),
-        ] {
+        ];
+        // A footer joins the text of a message that has some.
+        if text {
+            all.push(filtered(Footer(0, None)));
+        }
+        for h in all {
             h.sites.openai.reply(fixture::json(StatusCode::OK, &reply));
             let (status, _, body) = h.send(unary_chat()).await;
             let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
@@ -2141,9 +2268,10 @@ async fn other_choices_a_filter_took_leave_their_chunks() {
     struct Plain;
 
     impl Filter<Reply> for Plain {
-        fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            reply.content.retain(|p| !matches!(p, Piece::Other { .. }));
-            out.push(reply);
+        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+            if !matches!(reply, Reply::Other { .. }) {
+                out.push(reply);
+            }
             Ok(())
         }
     }
@@ -2188,7 +2316,7 @@ async fn a_block_a_filter_adds_joins_the_one_text_of_an_openai_message() {
 }
 
 #[tokio::test]
-async fn several_choices_are_relayed_in_the_order_they_came() {
+async fn several_choices_are_relayed_each_with_its_own_words() {
     let stream = [
         chunk(
             json!({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}, "finish_reason": "stop"}]}),
@@ -2201,7 +2329,23 @@ async fn several_choices_are_relayed_in_the_order_they_came() {
     let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
     h.sites.openai.reply(fixture::sse(&chunks));
 
-    assert_eq!(h.body(chat()).await, stream.concat());
+    let body = h.body(chat()).await;
+    let said = sent_chunks(&body);
+    // Each choice keeps its words, those that are not the first as they came.
+    let of = |index: u64| {
+        let choices = said
+            .iter()
+            .flat_map(|c| c["choices"].as_array().into_iter().flatten());
+        let own: Vec<_> = choices.filter(|c| c["index"] == index).collect();
+        let text: String = own
+            .iter()
+            .filter_map(|c| c["delta"]["content"].as_str())
+            .collect();
+        (text, own.iter().any(|c| c["finish_reason"] == "stop"))
+    };
+    assert_eq!(of(0), ("a".to_owned(), true), "{body}");
+    assert_eq!(of(1), ("b".to_owned(), true), "{body}");
+    assert!(body.ends_with("data: [DONE]\n\n"));
 }
 
 #[tokio::test]
@@ -2326,7 +2470,7 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
 }
 
 #[tokio::test]
-async fn a_calls_own_input_its_format_cannot_write_anew_is_the_plugins_fault() {
+async fn a_calls_own_input_its_format_cannot_write_is_refused_as_a_bad_request() {
     /// Asks again with a message of its own the format has no form for.
     struct Own;
 
@@ -2344,16 +2488,17 @@ async fn a_calls_own_input_its_format_cannot_write_anew_is_the_plugins_fault() {
 
     let (status, _, _) = h.send(unary_chat()).await;
 
-    // The plugin brought it, so it is not the client's fault.
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "config"));
+    // Without the bytes a request came as, the gateway cannot tell a plugin's
+    // message from the client's: a request it cannot write is the client's.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "bad_request"));
     assert!(h.sites.sent.sent().is_empty());
 }
 
-// A call's own input copied from the client's keeps its origin, so it is
-// written into the client's bytes, keeping what the kind has no place for.
+// A call's own input copied from the client's keeps what the kind has no
+// place for, in the format's own terms.
 #[tokio::test]
-async fn a_calls_own_input_copied_from_the_clients_keeps_its_bytes() {
+async fn a_calls_own_input_copied_from_the_clients_keeps_what_it_said() {
     /// Asks again with a trimmed copy of the client's request.
     struct Trim;
 
@@ -2453,7 +2598,8 @@ async fn a_judge_asks_whole_while_its_client_streams() {
                 .outputs::<Reply>()
                 .try_collect::<Vec<_>>()
                 .await?;
-            assert!(verdict.iter().any(|e| e.texts().any(|text| text == "hi")));
+            let hi = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta == "hi");
+            assert!(verdict.iter().any(hi));
             Ok(None)
         }
     }
@@ -2472,7 +2618,8 @@ async fn a_judge_asks_whole_while_its_client_streams() {
     assert_ne!(judge["stream"], true, "{judge}");
     assert!(judge.get("stream_options").is_none(), "{judge}");
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert_eq!(body, STREAM.concat());
+    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
 }
 
 #[tokio::test]
@@ -2847,7 +2994,8 @@ async fn a_gateway_dropped_mid_response_serves_what_it_began() {
     drop(h);
     let (_, _, body) = read_whole(resp).await;
 
-    assert_eq!(body.ok().as_deref(), Some(STREAM.concat().as_bytes()));
+    let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
+    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
     assert_eq!(says(ended.await), Ok(()));
 }
 
@@ -2904,7 +3052,8 @@ async fn a_providers_trailers_are_not_passed_on() {
 
     let collected = collected.unwrap_or_else(|e| panic!("{e}"));
     assert!(collected.trailers().is_none());
-    assert_eq!(&collected.to_bytes()[..], UNARY.as_bytes());
+    let body = String::from_utf8_lossy(&collected.to_bytes()).into_owned();
+    assert_eq!(gist(&body).message.text(), "hi");
     assert_eq!(says(log.only()), Ok(()));
 }
 
@@ -2995,7 +3144,8 @@ async fn a_providers_error_event_mid_stream_goes_as_it_came_to_its_format() {
     let (_, _, body) = h.send(chat()).await;
 
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert!(body.starts_with(content) && body.ends_with(error), "{body}");
+    assert_eq!(gist_text(&sent_chunks(&body)), "Hi");
+    assert!(body.ends_with(error), "{body}");
     assert!(h.log.only().is_err());
 }
 
@@ -3169,9 +3319,10 @@ async fn every_call_a_smart_router_makes_is_billed_once_on_the_provider_edge() {
                 .outputs::<Reply>()
                 .try_collect::<Vec<_>>()
                 .await?;
-            let pick = verdict
-                .iter()
-                .find_map(|e| e.texts().next().map(str::to_owned));
+            let pick = verdict.iter().find_map(|e| match e {
+                Reply::Delta { delta, .. } => Some(delta.clone()),
+                _ => None,
+            });
             cx.set_target(pick.unwrap_or_else(|| "openai".into()));
             Ok(None)
         }
@@ -3260,7 +3411,9 @@ async fn a_calls_own_copy_of_the_input_changes_only_that_call() {
     let sent = h.sites.sent.sent();
     let cooled: serde_json::Value = serde_json::from_slice(sent[0].body()).unwrap_or_default();
     assert_eq!(cooled["temperature"], 0.0);
-    assert_eq!(sent[1].body(), UNARY_REQ.as_bytes());
+    // The other call is the request as it said it.
+    let plain: serde_json::Value = serde_json::from_slice(sent[1].body()).unwrap_or_default();
+    assert_eq!(plain, json!({ "model": "gpt-x", "messages": [] }));
 }
 
 #[tokio::test]
@@ -3269,8 +3422,9 @@ async fn provider_edge_filters_run_before_client_edge_ones_each_last_added_first
     struct Mark(&'static str);
 
     fn mark(tag: String) -> impl FnMut(&mut Reply) -> Result<(), Fault> + Send + 'static {
+        let mut blocks = TextBlocks::default();
         move |e| {
-            for text in e.texts_mut() {
+            if let Some(text) = blocks.text_mut(e) {
                 text.push_str(&tag);
             }
             Ok(())
@@ -3342,7 +3496,8 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
         .reply(fixture::json(StatusCode::SERVICE_UNAVAILABLE, "{}"));
     h.sites.backup.reply(fixture::sse(STREAM));
 
-    assert_eq!(h.body(chat()).await, STREAM.concat());
+    let said = gist(&h.body(chat()).await);
+    assert_eq!(said.message, gist(&STREAM.concat()).message);
 
     // The fallback gave the answer, so the plugin after it had no client edge,
     // yet saw both calls.
@@ -3798,9 +3953,10 @@ async fn a_provider_filter_edits_a_call_a_plugin_collects() {
                 .outputs::<Reply>()
                 .try_collect::<Vec<_>>()
                 .await?;
-            let pick = verdict
-                .iter()
-                .find_map(|e| e.texts().next().map(str::to_owned));
+            let pick = verdict.iter().find_map(|e| match e {
+                Reply::Delta { delta, .. } => Some(delta.clone()),
+                _ => None,
+            });
             cx.set_target(pick.unwrap_or_default());
             Ok(None)
         }
@@ -3810,12 +3966,15 @@ async fn a_provider_filter_edits_a_call_a_plugin_collects() {
     let overrule =
         OnProvider(
             |px| match px.input::<Conversation>()?.model.as_deref() == Some("judge-1") {
-                true => px.filter(|r: &mut Reply| {
-                    for text in r.texts_mut() {
-                        *text = text.replace("openai", "backup");
-                    }
-                    Ok(())
-                }),
+                true => {
+                    let mut blocks = TextBlocks::default();
+                    px.filter(move |r: &mut Reply| {
+                        if let Some(text) = blocks.text_mut(r) {
+                            *text = text.replace("openai", "backup");
+                        }
+                        Ok(())
+                    })
+                }
                 _ => Ok(()),
             },
         );
@@ -3938,7 +4097,7 @@ async fn a_response_kept_past_its_request_ends_abandoned_and_reads_so() {
 #[tokio::test]
 async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
     let bill = Bill::default();
-    let guard = Guard(|e| e.texts().any(|text| text.contains("world")));
+    let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.contains("world")));
     let h = Harness::new(
         vec![Arc::new(bill.clone()), Arc::new(guard)],
         Some("openai"),
@@ -4219,7 +4378,7 @@ struct Garbling(Box<dyn Encoder<Reply>>);
 
 impl Encoder<Reply> for Garbling {
     fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
-        if reply.texts().any(|text| text == "bad") {
+        if matches!(reply, Reply::Delta { delta, .. } if delta == "bad") {
             out.extend_from_slice(b"GARBAGE");
             return Err(Fault::new("cannot write it")
                 .with(ErrorCode("unwritable".into()))
@@ -4250,7 +4409,10 @@ async fn a_response_whose_last_bytes_were_read_ends_complete() {
     let (_, mut body) = serve(&h.gw, unary_chat()).await.0.into_parts();
     let frame = http_body_util::BodyExt::frame(&mut body).await;
     let data = frame.and_then(|f| f.ok()?.into_data().ok());
-    assert_eq!(data.as_deref(), Some(UNARY.as_bytes()));
+    let data = data
+        .map(|d| String::from_utf8_lossy(&d).into_owned())
+        .unwrap_or_default();
+    assert_eq!(gist(&data).message.text(), "hi");
     // The host stops at the last bytes, without polling for the end.
     drop(body);
     h.gw.idle().await;
@@ -4312,8 +4474,10 @@ async fn a_panic_before_any_bytes_is_refused() {
 async fn a_panic_after_bytes_went_out_keeps_those_written_before_it() {
     let h = Harness::new(
         vec![Arc::new(Guard(|e| {
-            e.texts()
-                .any(|text| text == "boom" && panic!("a buggy guard"))
+            if matches!(e, Reply::Delta { delta, .. } if delta == "boom") {
+                panic!("a buggy guard");
+            }
+            false
         }))],
         Some("openai"),
     );
@@ -4386,7 +4550,7 @@ async fn a_client_edge_failure_ends_the_call_however_its_bytes_were_split() {
     ];
     for (chunks, want) in each {
         let bill = Bill::default();
-        let guard = Guard(|e| e.texts().any(|text| text.contains("world")));
+        let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.contains("world")));
         let h = Harness::new(
             vec![Arc::new(bill.clone()), Arc::new(guard)],
             Some("openai"),
@@ -4491,24 +4655,6 @@ async fn relayed_heads_and_errors_stay_within_one_format() {
     assert!(error.get("type").is_none(), "{body}");
     assert!(error["error"]["message"].is_string(), "{body}");
     assert!(!headers.contains_key("anthropic-organization-id"));
-}
-
-// A raw relay sends the client's body; an earlier plugin's edit would be
-// lost, so the relay refuses instead of dropping it.
-#[tokio::test]
-async fn a_raw_relay_refuses_a_request_a_plugin_edited() {
-    let h = Harness::new(
-        vec![Arc::new(Cool), Arc::new(explicit::Relay::RAW)],
-        Some("openai"),
-    );
-
-    let (status, _, _) = h.send(unary_chat()).await;
-
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(
-        h.sites.sent.sent().is_empty(),
-        "nothing reached the provider"
-    );
 }
 
 #[tokio::test]
@@ -4784,8 +4930,8 @@ async fn a_fallback_reads_a_call_to_its_first_content() {
 
     let body = h.body(chat()).await;
 
-    // What `until_content` read is sent as it came.
-    assert_eq!(body, STREAM.concat());
+    // What `until_content` read is sent, with the rest of the answer.
+    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
     assert_eq!(ends.all(), ["openai overloaded", "backup ok", "client"]);
 }
 
@@ -4842,7 +4988,9 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
     let (status, body) = h.text(unary_chat()).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, UNARY);
+    let said = gist(&body);
+    assert_eq!(said.message.text(), "hi");
+    assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(4.0));
     let order = returns.0.lock().map(|v| v.clone()).unwrap_or_default();
     assert_eq!(order, ["filter ended", "returned", "call ended"]);
     assert_eq!(ends.all(), ["openai ok", "client"]);
@@ -4857,7 +5005,21 @@ async fn a_plugin_answers_with_its_calls_events_read_as_they_are_sent() {
     impl Plugin for Merge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let first = cx.call("openai").await?.outputs::<Reply>();
+            // The second answer's blocks follow the first's, as one response.
             let second = cx.call("backup").await?.outputs::<Reply>();
+            let after = |reply: Reply| {
+                let block = |block: u32| block + 1;
+                futures::future::ready(Ok(match reply {
+                    Reply::Start(_) => None,
+                    Reply::BlockStart { block: b, kind } => {
+                        Some(Reply::block_start(block(b), kind))
+                    }
+                    Reply::Delta { block: b, delta } => Some(Reply::delta(block(b), delta)),
+                    Reply::BlockEnd { block: b } => Some(Reply::block_end(block(b))),
+                    other => Some(other),
+                }))
+            };
+            let second = futures::TryStreamExt::try_filter_map(second, after);
             let events = futures::StreamExt::chain(first, second);
             Ok(Some(Response::stream(events)))
         }
@@ -4902,7 +5064,7 @@ async fn a_fallback_skips_a_success_that_fails_after_only_its_start() {
 
     let body = h.body(chat()).await;
 
-    assert_eq!(body, STREAM.concat());
+    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
     assert_eq!(ends.all(), ["openai overloaded", "backup ok", "client"]);
 }
 
@@ -4947,7 +5109,7 @@ async fn buffer_until_rechecks_filtered_values_with_a_new_predicate() {
 
     impl Filter<Reply> for Mute {
         fn edit(&mut self, _output: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            out.push(Reply::default());
+            out.push(Reply::usage(Usage::default()));
             Ok(())
         }
     }
@@ -5098,7 +5260,7 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
     #[async_trait]
     impl Plugin for Waiting {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let opens = self.0.then(|| Ok(Reply::text(0, "Hi")));
+            let opens = self.0.then(|| text(0, "Hi")).into_iter().flatten().map(Ok);
             let pending = futures::stream::pending::<Result<Reply, Fault>>();
             let quiet = futures::StreamExt::chain(futures::stream::iter(opens), pending);
             Ok(Some(Response::stream(quiet)))
@@ -5140,13 +5302,14 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
     #[async_trait]
     impl Plugin for Cached {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let cached = [Ok(Reply::text(0, "world"))];
+            // Its first output, which the guard sees before anything is written.
+            let cached = [Ok(Reply::delta(0, "world"))];
             Ok(Some(Response::stream(futures::stream::iter(cached))))
         }
     }
 
     // So a guard refuses a cached answer as it refuses a provider's.
-    let guard = Guard(|e| e.texts().any(|text| text.contains("world")));
+    let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.contains("world")));
     let h = Harness::new(vec![Arc::new(guard), Arc::new(Cached)], None);
     let (status, body) = h.text(chat()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -5352,13 +5515,16 @@ async fn a_meter_sees_usage_a_filter_fails_on() {
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
 
-fn over_the_cap(_: &mut Reply) -> Result<(), Fault> {
-    Err(Fault::new("over the cap")
-        .with(ErrorCode("cap".into()))
-        .with(Status(402)))
+fn over_the_cap(reply: &mut Reply) -> Result<(), Fault> {
+    match reply {
+        Reply::Usage(_) => Err(Fault::new("over the cap")
+            .with(ErrorCode("cap".into()))
+            .with(Status(402))),
+        _ => Ok(()),
+    }
 }
 
-/// Fails a call at its first reply.
+/// Fails a call at the event that reports its usage.
 struct ProviderCap;
 
 #[async_trait]
@@ -5449,7 +5615,7 @@ async fn a_refusal_before_the_head_ends_a_plugins_response_filters() {
     impl Plugin for Answer {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(self.0.clone())?;
-            let answer = futures::stream::iter([Ok(Reply::text(0, "hi"))]);
+            let answer = futures::stream::iter(text(0, "hi").into_iter().map(Ok));
             Ok(Some(Response::stream(answer)))
         }
     }
@@ -5498,7 +5664,9 @@ async fn a_filter_added_after_a_call_is_made_misses_that_whole_calls_input() {
 #[tokio::test]
 async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
     let guard = || -> Vec<Arc<dyn Plugin>> {
-        vec![Arc::new(Guard(|e| e.texts().any(|text| text == " world")))]
+        vec![Arc::new(Guard(
+            |e| matches!(e, Reply::Delta { delta, .. } if delta == " world"),
+        ))]
     };
     let end = |h: &Harness| {
         let all = h.calls.all();
@@ -5533,7 +5701,8 @@ async fn r6_a_guard_refuses_a_plugins_answer_whether_or_not_it_awaited_first() {
     impl Plugin for Answer {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let waits = self.0;
-            let answer = [Reply::start("cached", "gpt-x"), Reply::text(0, "bomb")];
+            // Its first content, which the guard sees before anything is written.
+            let answer = [Reply::start("cached", "gpt-x"), Reply::delta(0, "bomb")];
             let answer = futures::StreamExt::then(
                 futures::stream::iter(answer.map(Ok)),
                 move |r| async move {
@@ -5549,7 +5718,7 @@ async fn r6_a_guard_refuses_a_plugins_answer_whether_or_not_it_awaited_first() {
     }
 
     let status = |waits: bool| async move {
-        let guard = Guard(|e| e.texts().any(|text| text == "bomb"));
+        let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta == "bomb"));
         let h = Harness::new(vec![Arc::new(guard), Arc::new(Answer(waits))], None);
         h.send(unary_chat()).await.0
     };
@@ -5596,7 +5765,9 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
 
     impl Encoder<Reply> for Tallying {
         fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
-            self.0.lock().map(|mut t| *t += &reply.usage).ok();
+            if let Reply::Usage(usage) = reply {
+                self.0.lock().map(|mut t| *t += usage).ok();
+            }
             self.1.encode(reply, out)
         }
 
@@ -5709,7 +5880,10 @@ async fn r11_2_the_documented_fallback_keeps_the_last_429() {
     // It still answers with the first success.
     h.sites.openai.reply(limited());
     h.sites.backup.reply(fixture::sse(STREAM));
-    assert_eq!(h.body(chat()).await, STREAM.concat());
+    assert_eq!(
+        gist(&h.body(chat()).await).message,
+        gist(&STREAM.concat()).message
+    );
 }
 
 // --- Plugin 1: PII redactor on the provider edge ---------------------------
@@ -5746,23 +5920,25 @@ struct Restore {
     vault: Arc<Vault>,
     held: String,
     block: u32,
+    texts: TextBlocks,
 }
 
 impl Filter<Reply> for Restore {
     fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.texts.note(&reply);
         // Nothing follows a finish, and text kept back goes before other
         // content: hold nothing past them.
-        let other = |p: &Piece| !matches!(p, Piece::Text { .. });
-        let last = reply.finish.is_some() || reply.content.iter().any(other);
-        for piece in &mut reply.content {
-            let Piece::Text { block, text, .. } = piece else {
-                continue;
-            };
-            let mut t = std::mem::take(&mut self.held) + text.as_str();
-            if let Some(i) = t.rfind('<').filter(|&i| !last && !t[i..].contains('>')) {
+        let text = matches!(&reply, Reply::Delta { block, .. } if self.texts.contains(*block));
+        let last = !text && reply.is_content();
+        if let (Reply::Delta { block, delta }, true) = (&mut reply, text) {
+            let mut t = std::mem::take(&mut self.held) + delta.as_str();
+            if let Some(i) = t.rfind('<').filter(|&i| !t[i..].contains('>')) {
                 self.held = t.split_off(i);
             }
-            (self.block, *text) = (*block, self.vault.restore(t));
+            (self.block, *delta) = (*block, self.vault.restore(t));
+            if delta.is_empty() {
+                return Ok(());
+            }
         }
         if last {
             self.end(&Ok(()), out)?;
@@ -5774,7 +5950,7 @@ impl Filter<Reply> for Restore {
     fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
         if !self.held.is_empty() {
             let held = std::mem::take(&mut self.held);
-            out.push(Reply::text(self.block, self.vault.restore(held)));
+            out.push(Reply::delta(self.block, self.vault.restore(held)));
         }
         Ok(())
     }
@@ -5807,6 +5983,7 @@ impl Plugin for Pii {
             vault,
             held: String::new(),
             block: 0,
+            texts: TextBlocks::default(),
         })
     }
 }
@@ -5870,7 +6047,10 @@ async fn r11_plugin_fallback_moves_on_and_keeps_the_last_error_as_sent() {
         .openai
         .reply(fixture::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
     h.sites.backup.reply(fixture::sse(STREAM));
-    assert_eq!(h.body(chat()).await, STREAM.concat());
+    assert_eq!(
+        gist(&h.body(chat()).await).message,
+        gist(&STREAM.concat()).message
+    );
 
     h.sites.openai.reply(limited());
     h.sites.backup.reply(limited());
@@ -5886,13 +6066,15 @@ struct Markup;
 impl Plugin for Markup {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         px.filter(|r: &mut Reply| {
-            if r.usage.get(units::INPUT_TOKENS).is_some() {
+            if let Reply::Usage(usage) = r
+                && usage.get(units::INPUT_TOKENS).is_some()
+            {
                 let mut marked = Usage::default();
-                for (unit, n) in r.usage.iter() {
+                for (unit, n) in usage.iter() {
                     let n = if unit == units::INPUT_TOKENS { 99.0 } else { n };
                     marked.add(unit, n);
                 }
-                r.usage = marked;
+                *usage = marked;
             }
             Ok(())
         })
@@ -5959,8 +6141,9 @@ async fn synthetic_outputs_use_the_callers_predicate() {
     #[async_trait]
     impl Plugin for FallsBack {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let mut quiet = Reply::default();
-            quiet.usage.add(units::INPUT_TOKENS, 1.0);
+            let mut one = Usage::default();
+            one.add(units::INPUT_TOKENS, 1.0);
+            let quiet = Reply::usage(one);
             // A policy accepting any event commits to the quiet reply.
             let made = [Ok(quiet.clone()), Err(Upstream::fault("gone"))];
             let mut unfiltered = Response::stream(futures::stream::iter(made));
@@ -6006,9 +6189,10 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     impl Plugin for Reads {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let read: Vec<Reply> = cx.call("openai").await?.outputs().try_collect().await?;
-            let noted = read
-                .iter()
-                .map(|r| (r.is_content(), r.usage.get(units::INPUT_TOKENS)));
+            let noted = read.iter().map(|r| match r {
+                Reply::Usage(u) => (false, u.get(units::INPUT_TOKENS)),
+                r => (r.is_content(), None),
+            });
             self.0.lock().map(|mut n| n.extend(noted)).ok();
             let said = read.into_iter().filter(Reply::is_content).map(Ok);
             Ok(Some(Response::stream(futures::stream::iter(said))))
@@ -6018,13 +6202,15 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     let reads = Reads::default();
     let h = Harness::new(vec![Arc::new(reads.clone())], None);
     let mut stream = STREAM.to_vec();
-    stream.insert(0, ": keep-alive\n\n");
+    // A line that is no chunk, as a server's own keep-alive may be.
+    stream.insert(0, "data: keep-alive\n\n");
     h.sites.openai.reply(fixture::sse(&stream));
 
     assert_eq!(h.send(chat()).await.0, StatusCode::OK);
     let noted = reads.0.lock().map(|n| n.clone()).unwrap_or_default();
     assert_eq!(noted.first(), Some(&(false, None)), "{noted:?}");
-    assert!(noted.contains(&(true, Some(5.0))), "{noted:?}");
+    // Usage is shown, though it is no content.
+    assert!(noted.contains(&(false, Some(5.0))), "{noted:?}");
 }
 
 // Filters see every value, yet `buffer_until(Reply::is_content)` matches neither
@@ -6057,7 +6243,10 @@ async fn until_content_commits_on_neither_a_keep_alive_nor_usage_alone() {
     h.sites.openai.reply(fixture::sse(&quiet));
     h.sites.backup.reply(fixture::sse(STREAM));
 
-    assert_eq!(h.body(chat()).await, STREAM.concat());
+    assert_eq!(
+        gist(&h.body(chat()).await).message,
+        gist(&STREAM.concat()).message
+    );
     let calls = metered(&h);
     let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
     assert_eq!(calls, [("backup/gpt-x", 5.0), ("openai/gpt-x", 7.0)]);
@@ -6079,6 +6268,25 @@ impl Plugin for ToEnd {
     }
 }
 
+/// `body` without the time its response says it was `created`, which two
+/// runs may not share.
+fn steady(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("\"created\":") {
+        let (head, tail) = rest.split_at(at);
+        out.push_str(head);
+        let tail = &tail["\"created\":".len()..];
+        let digits = tail
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(tail.len());
+        out.push_str("\"created\":0");
+        rest = &tail[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// What the client got for `reply` to `call`, relayed, then through
 /// `until_end`, with each run's end hooks.
 async fn relayed_and_read_to_its_end(
@@ -6097,7 +6305,7 @@ async fn relayed_and_read_to_its_end(
         let h = Harness::new(plugins, Some("openai"));
         h.sites.openai.reply(reply());
         let (status, headers, body) = h.send(call()).await;
-        let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
+        let body = steady(&String::from_utf8_lossy(&body.unwrap_or_default()));
         got.push((status, headers, body, ends.all()));
     }
     let [relayed, read]: [_; 2] = got.try_into().unwrap_or_else(|_| unreachable!());
@@ -6105,7 +6313,7 @@ async fn relayed_and_read_to_its_end(
 }
 
 #[tokio::test]
-async fn until_end_replays_a_stream_and_a_whole_body_byte_for_byte() {
+async fn until_end_replays_a_stream_and_a_whole_body_alike() {
     let stream = relayed_and_read_to_its_end(|| fixture::sse(STREAM), chat, None).await;
     let whole =
         relayed_and_read_to_its_end(|| fixture::json(StatusCode::OK, UNARY), unary_chat, None)
@@ -6116,8 +6324,8 @@ async fn until_end_replays_a_stream_and_a_whole_body_byte_for_byte() {
         assert_eq!(read.0, StatusCode::OK);
         assert_eq!(read.3, ["openai ok", "client"]);
     }
-    assert_eq!(stream[1].2, STREAM.concat());
-    assert_eq!(whole[1].2, UNARY);
+    assert_eq!(gist(&stream[1].2).message, gist(&STREAM.concat()).message);
+    assert_eq!(gist(&whole[1].2).message, gist(UNARY).message);
 }
 
 #[tokio::test]
@@ -6133,7 +6341,15 @@ async fn until_end_holds_a_failure_and_it_is_delivered_as_it_would_have_been() {
     };
     let [relayed, read] = relayed_and_read_to_its_end(broken, chat, Some("upstream")).await;
     assert_eq!(read, relayed);
-    assert!(read.2.starts_with(&STREAM[..2].concat()), "{}", read.2);
+    let text: String = sent_chunks(&read.2)
+        .iter()
+        .filter_map(|c| {
+            c["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(text, "Hello world", "{}", read.2);
     assert!(
         read.2.ends_with("\"code\":\"upstream\"}}\n\n"),
         "{}",
@@ -6180,7 +6396,7 @@ async fn until_end_says_how_a_response_ended_and_changes_nothing() {
     for (reply, seen) in cases {
         let text = |(status, headers, body): (StatusCode, HeaderMap, Result<_, Fault>)| {
             let body: bytes::Bytes = body.unwrap_or_default();
-            (status, headers, String::from_utf8_lossy(&body).into_owned())
+            (status, headers, steady(&String::from_utf8_lossy(&body)))
         };
         let relayed = Harness::new(Vec::new(), Some("openai"));
         relayed.sites.openai.reply(reply());
@@ -6243,7 +6459,8 @@ async fn a_response_dropped_after_until_end_ends_its_call_as_it_ended() {
         h.sites.openai.reply(reply);
         h.sites.backup.reply(fixture::sse(STREAM));
 
-        assert_eq!(h.body(chat()).await, STREAM.concat());
+        let body = h.body(chat()).await;
+        assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
         // Its end was held: dropped, the call ends so, before `backup` starts.
         assert_eq!(ends.all(), [openai, "backup ok", "client"]);
     }
@@ -6381,7 +6598,9 @@ async fn a_race_by_completion_picks_the_provider_that_finishes_first() {
         } else {
             FAST_REPLY
         };
-        assert_eq!(body, expected.concat(), "to its end: {to_end}");
+        let (said, sent) = (gist(&body), gist(&expected.concat()));
+        assert_eq!(said.message, sent.message, "to its end: {to_end}");
+        assert_eq!(said.start, sent.start, "to its end: {to_end}");
         let mut ends = ends.all();
         assert_eq!(ends.pop().as_deref(), Some("client"));
         ends.sort();

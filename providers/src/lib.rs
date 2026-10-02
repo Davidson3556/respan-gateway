@@ -2,20 +2,24 @@
 //! First-party conversation codecs. Shared message types live in
 //! [`respan_gateway_sdk`]; reusable wire helpers in [`respan_gateway_http::formats`].
 //!
-//! Unchanged same-format values retain their original bytes. Edited SSE values
-//! retain their envelope fields, and edited usage increments are accumulated
-//! back into the provider's cumulative wire counters. Unsupported nonzero usage
-//! units and orphan tool continuations fail explicitly instead of disappearing.
+//! Each codec decodes a request into a [`conversation::Conversation`], keeping the fields
+//! the kind has no place for in its `extra`, and writes a request from the
+//! value alone. A response, streamed or whole, decodes into the events of
+//! [`conversation::Reply`] and is encoded from them, so what survives a relay is what the
+//! events and `extra` say, not the provider's bytes; the codec modules
+//! document their mappings. Only an explicit raw relay
+//! ([`respan_gateway_http::relay::Relay::RAW`]) sends the client's own bytes.
 //!
-//! Request content edits preserve matching parts' vendor metadata, including
-//! cache markers. Ambiguous matching is bounded to 262,144 matrix cells; larger
-//! unchanged sequences and unambiguous single-part replacements use linear
-//! paths. Other oversized edits fail rather than allocate an unbounded matrix
-//! or guess which duplicate part owns the metadata.
+//! What a format has no form for stays in its own terms (an `Extra`, a
+//! `Content::Other`, a `Reply::Other`) and is written only by that format;
+//! translating it is refused where it could change the answer. A request
+//! that asks for several choices (`n > 1`) cannot be written and is refused.
 
 mod anthropic;
 mod common;
 mod openai;
+#[cfg(test)]
+mod round_trips;
 mod tools;
 
 pub use anthropic::AnthropicMessages;

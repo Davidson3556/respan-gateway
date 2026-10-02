@@ -41,20 +41,25 @@ async fn a_failed_call_with_no_usage_writes_no_row() -> Result<(), Fault> {
     Ok(())
 }
 
-/// Refuses every answer on the provider edge.
+/// Refuses the event that carries the usage on the provider edge.
 struct Refuses;
 
 #[async_trait]
 impl Plugin for Refuses {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        px.filter(|_: &mut respan_gateway_sdk::conversation::Reply| {
-            Err(BadRequest::fault("refused"))
-        })
+        px.filter(
+            |reply: &mut respan_gateway_sdk::conversation::Reply| match reply {
+                respan_gateway_sdk::conversation::Reply::Usage(_) => {
+                    Err(BadRequest::fault("refused"))
+                }
+                _ => Ok(()),
+            },
+        )
     }
 }
 
-// Registered last, billing's filter sees each reply before an earlier
-// plugin's filter fails on it, so the usage in it is still billed.
+// Registered last, billing's filter sees each event before an earlier
+// plugin's filter fails on it, so the usage in the event is still billed.
 #[tokio::test]
 async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<(), Fault> {
     let (openai, store) = (FakeOpenAi::start().await, Memory::default());

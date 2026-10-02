@@ -1,27 +1,19 @@
 //! Tools in both conversation formats, as the kind has them: the tools a
-//! request offers and its choice, an assistant's calls and their results,
-//! and the calls of a whole response being written. What a format says of
-//! tools that the kind has no form for, such as a tool the provider runs,
-//! stays in its `unsupported` fields.
+//! request offers and its choice, and an assistant's calls and their
+//! results. What a format says of tools that the kind has no form for, such
+//! as a tool the provider runs, stays in the `extra` of the request or the
+//! tool.
 
 use respan_gateway_sdk::{BadRequest, Fault};
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::ANTHROPIC;
 use crate::common::{
-    Names, only, patch_content, read_content, untranslatable, unwritable_content, write_content,
-    write_message,
+    Keep, MESSAGE_KEEP, Names, extra_of, kept_fields, message_extra, only, read_content,
+    untranslatable, write_content, write_extra, write_message,
 };
-use crate::conversation::{Content, Conversation, Message, Role, Tool, ToolChoice};
+use crate::conversation::{Content, Conversation, Extra, Message, Role, Tool, ToolChoice};
 use crate::openai::OPENAI;
-
-/// The start a tool call piece names: its id and the tool's name.
-pub(crate) fn start<'a>(
-    id: &'a Option<String>,
-    name: &'a Option<String>,
-) -> Option<(&'a str, &'a str)> {
-    id.as_deref().zip(name.as_deref())
-}
 
 /// A tool call's arguments as JSON: an object, `{}` for none.
 pub(crate) fn arguments_json(arguments: &str) -> Result<Value, Fault> {
@@ -48,7 +40,7 @@ fn set(v: &mut Map<String, Value>, key: &str, value: Option<Value>) {
 }
 
 /// Read `tools`, `tool_choice` and whether calls may be parallel with
-/// `read` each, taking each the kind can say out of `chat.unsupported`.
+/// `read` each, taking each the kind can say out of `chat.extra`.
 fn read_tools(
     chat: &mut Conversation,
     tools: Option<Vec<Tool>>,
@@ -58,16 +50,16 @@ fn read_tools(
 ) {
     if let Some(tools) = tools {
         chat.tools = tools;
-        chat.unsupported.shift_remove(keys[0]);
+        chat.extra.fields.shift_remove(keys[0]);
     }
     if let Some(choice) = choice {
         chat.tool_choice = choice;
-        chat.unsupported.shift_remove(keys[1]);
+        chat.extra.fields.shift_remove(keys[1]);
     }
     if let Some(parallel) = parallel {
         chat.parallel_tool_calls = parallel;
         if !keys[2].is_empty() {
-            chat.unsupported.shift_remove(keys[2]);
+            chat.extra.fields.shift_remove(keys[2]);
         }
     }
 }
@@ -107,7 +99,10 @@ fn openai_tool(tool: &Value) -> Option<Tool> {
     };
     let mut kind = Tool::new(function["name"].as_str()?, function["parameters"].clone());
     kind.description = description;
-    kind.unsupported = rest_of(function, &["name", "description", "parameters"]);
+    kind.extra = extra_of(
+        OPENAI,
+        rest_of(function, &["name", "description", "parameters"]),
+    );
     Some(kind)
 }
 
@@ -129,12 +124,22 @@ fn openai_choice(choice: &Value) -> Option<ToolChoice> {
     })
 }
 
+/// How a refusal names a message's fields.
+fn message_fields(_: &str) -> String {
+    "messages with fields the kind has no place for".into()
+}
+
+/// How a refusal names a tool's field `key`.
+fn tool_field(key: &str) -> String {
+    format!("a tool's '{key}'")
+}
+
 /// The kind's tools as OpenAI's fields of a request `v`.
 pub(crate) fn write_openai_tools(
     chat: &Conversation,
     v: &mut Map<String, Value>,
 ) -> Result<(), Fault> {
-    let tool = |t: &Tool| {
+    let tool = |t: &Tool| -> Result<Value, Fault> {
         let mut function = Map::new();
         function.insert("name".into(), t.name.as_str().into());
         if let Some(text) = &t.description {
@@ -143,10 +148,10 @@ pub(crate) fn write_openai_tools(
         if !t.parameters.is_null() {
             function.insert("parameters".into(), t.parameters.clone());
         }
-        function.extend(t.unsupported.clone());
-        json!({ "type": "function", "function": function })
+        write_extra(OPENAI, &t.extra, &mut function, tool_field, Keep::default())?;
+        Ok(json!({ "type": "function", "function": function }))
     };
-    let tools: Vec<Value> = chat.tools.iter().map(tool).collect();
+    let tools: Vec<Value> = chat.tools.iter().map(tool).collect::<Result<_, Fault>>()?;
     set(v, "tools", (!tools.is_empty()).then(|| tools.into()));
     let choice = match &chat.tool_choice {
         None => None,
@@ -190,7 +195,8 @@ fn anthropic_tool(tool: &Value) -> Option<Tool> {
     };
     let mut kind = Tool::new(tool["name"].as_str()?, tool["input_schema"].clone());
     kind.description = description;
-    kind.unsupported = rest_of(tool, &["type", "name", "description", "input_schema"]);
+    let rest = rest_of(tool, &["type", "name", "description", "input_schema"]);
+    kind.extra = extra_of(ANTHROPIC, rest);
     Some(kind)
 }
 
@@ -219,7 +225,7 @@ pub(crate) fn write_anthropic_tools(
     chat: &Conversation,
     v: &mut Map<String, Value>,
 ) -> Result<(), Fault> {
-    let tool = |t: &Tool| {
+    let tool = |t: &Tool| -> Result<Value, Fault> {
         let mut tool = Map::new();
         tool.insert("name".into(), t.name.as_str().into());
         if let Some(text) = &t.description {
@@ -230,10 +236,10 @@ pub(crate) fn write_anthropic_tools(
             false => json!({ "type": "object" }),
         };
         tool.insert("input_schema".into(), schema);
-        tool.extend(t.unsupported.clone());
-        Value::Object(tool)
+        write_extra(ANTHROPIC, &t.extra, &mut tool, tool_field, Keep::default())?;
+        Ok(Value::Object(tool))
     };
-    let tools: Vec<Value> = chat.tools.iter().map(tool).collect();
+    let tools: Vec<Value> = chat.tools.iter().map(tool).collect::<Result<_, Fault>>()?;
     set(v, "tools", (!tools.is_empty()).then(|| tools.into()));
     let one_at_a_time = chat.parallel_tool_calls == Some(false);
     let mut choice = match &chat.tool_choice {
@@ -260,16 +266,18 @@ pub(crate) fn write_anthropic_tools(
 /// translating it is refused, not dropped.
 pub(crate) fn anthropic_part(block: &Value) -> Option<Content> {
     match block["type"].as_str()? {
-        "tool_use" if only(block, &["type", "id", "name", "input"]) => {
+        "tool_use" => {
             let input = block["input"].as_object()?;
             let arguments = Value::Object(input.clone()).to_string();
             let (id, name) = (block["id"].as_str()?, block["name"].as_str()?);
-            Some(Content::tool_call(id, name, arguments))
+            let mut part = Content::tool_call(id, name, arguments);
+            if let Content::ToolCall { extra, .. } = &mut part {
+                let rest = rest_of(block, &["type", "id", "name", "input"]);
+                *extra = extra_of(ANTHROPIC, rest);
+            }
+            Some(part)
         }
         "tool_result" => {
-            if !only(block, &["type", "tool_use_id", "content", "is_error"]) {
-                return None;
-            }
             let is_error = match &block["is_error"] {
                 Value::Null => false,
                 is_error => is_error.as_bool()?,
@@ -281,10 +289,26 @@ pub(crate) fn anthropic_part(block: &Value) -> Option<Content> {
             }
             let content = read_content(ANTHROPIC, &block["content"]);
             let id = block["tool_use_id"].as_str()?;
-            Some(Content::tool_result(id, content, is_error))
+            let mut part = Content::tool_result(id, content, is_error);
+            if let Content::ToolResult { extra, .. } = &mut part {
+                let rest = rest_of(block, &["type", "tool_use_id", "content", "is_error"]);
+                *extra = extra_of(ANTHROPIC, rest);
+            }
+            Some(part)
         }
         _ => None,
     }
+}
+
+/// Write the fields of a tool part's `extra` into its Anthropic `block`:
+/// another format's are refused.
+fn block_fields(block: &mut Value, extra: &Extra) -> Result<(), Fault> {
+    let what = |key: &str| format!("a tool part's '{key}'");
+    let fields = kept_fields(ANTHROPIC, extra, what, Keep::default())?;
+    if let Some(block) = block.as_object_mut() {
+        block.extend(fields);
+    }
+    Ok(())
 }
 
 /// The kind's tool call or result as an Anthropic block.
@@ -294,18 +318,23 @@ pub(crate) fn anthropic_block(part: &Content) -> Result<Value, Fault> {
             id,
             name,
             arguments,
+            extra,
             ..
         } => {
             let input = arguments_json(arguments)?;
-            Ok(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
+            let mut block = json!({ "type": "tool_use", "id": id, "name": name, "input": input });
+            block_fields(&mut block, extra)?;
+            Ok(block)
         }
         Content::ToolResult {
             id,
             content,
             is_error,
+            extra,
             ..
         } => {
             let mut block = json!({ "type": "tool_result", "tool_use_id": id });
+            block_fields(&mut block, extra)?;
             if !content.is_empty() {
                 block["content"] = write_content(ANTHROPIC, content)?;
             }
@@ -318,78 +347,25 @@ pub(crate) fn anthropic_block(part: &Content) -> Result<Value, Fault> {
     }
 }
 
-/// An Anthropic tool block `old`, which read `was`, changed to read `now`,
-/// keeping what else it says, such as a cache marker.
-pub(crate) fn update_anthropic_block(
-    old: &Value,
-    was: &Content,
-    now: &Content,
-) -> Result<Value, Fault> {
-    let mut block = old.clone();
-    match (was, now) {
-        (
-            Content::ToolCall {
-                arguments: before, ..
-            },
-            Content::ToolCall {
-                id,
-                name,
-                arguments,
-                ..
-            },
-        ) => {
-            block["id"] = id.as_str().into();
-            block["name"] = name.as_str().into();
-            if before != arguments {
-                block["input"] = arguments_json(arguments)?;
-            }
-        }
-        (
-            Content::ToolResult {
-                content: before, ..
-            },
-            Content::ToolResult {
-                id,
-                content,
-                is_error,
-                ..
-            },
-        ) => {
-            block["tool_use_id"] = id.as_str().into();
-            if before != content {
-                let old = block.get("content");
-                block["content"] = patch_content(ANTHROPIC, old, before, content)?;
-            }
-            match is_error {
-                true => block["is_error"] = true.into(),
-                false => _ = block.as_object_mut().map(|b| b.shift_remove("is_error")),
-            }
-        }
-        _ => return anthropic_block(now),
-    }
-    Ok(block)
-}
-
-/// An OpenAI message read as the kind's ([`read_message`]
-/// (crate::common::read_message)) with its tools: a tool message as a user
+/// An OpenAI message read as the kind's ([`read_message`](crate::common::read_message)) with its tools: a tool message as a user
 /// message of one result, an assistant's `tool_calls` as calls after its
-/// content. What the kind cannot say of them stays unsupported.
+/// content. What the kind cannot say of them stays in the message's `extra`.
 pub(crate) fn read_openai_message(m: &Value, message: &mut Message) {
-    if message.role == Role::Other("tool".into()) {
+    if matches!(&message.role, Role::Other { name, .. } if name == "tool") {
         let Some(id) = m["tool_call_id"].as_str() else {
             return;
         };
         let content = std::mem::take(&mut message.content);
         message.content = vec![Content::tool_result(id, content, false)];
         message.role = Role::User;
-        message.unsupported.shift_remove("tool_call_id");
+        message.extra.fields.shift_remove("tool_call_id");
         return;
     }
     let calls = m["tool_calls"].as_array().into_iter().flatten();
     let calls: Option<Vec<Content>> = calls.map(openai_call).collect();
     if let Some(calls) = calls.filter(|calls| !calls.is_empty()) {
         message.content.extend(calls);
-        message.unsupported.shift_remove("tool_calls");
+        message.extra.fields.shift_remove("tool_calls");
     }
 }
 
@@ -409,20 +385,31 @@ fn openai_call(call: &Value) -> Option<Content> {
 }
 
 /// The kind's calls as OpenAI's `tool_calls`.
-fn openai_calls(calls: &[&Content]) -> Vec<Value> {
-    let call = |c: &&Content| match c {
-        Content::ToolCall {
+fn openai_calls(calls: &[&Content]) -> Result<Vec<Value>, Fault> {
+    let mut out = Vec::new();
+    for c in calls {
+        if let Content::ToolCall {
             id,
             name,
             arguments,
+            extra,
             ..
-        } => {
+        } = c
+        {
+            refuse_part_fields(extra)?;
             let function = json!({ "name": name, "arguments": arguments });
-            Some(json!({ "id": id, "type": "function", "function": function }))
+            out.push(json!({ "id": id, "type": "function", "function": function }));
         }
-        _ => None,
-    };
-    calls.iter().filter_map(call).collect()
+    }
+    Ok(out)
+}
+
+/// OpenAI has no place for the fields of a tool part.
+fn refuse_part_fields(extra: &Extra) -> Result<(), Fault> {
+    match extra.fields.keys().next() {
+        Some(key) => Err(untranslatable(&format!("a tool part's '{key}'"))),
+        None => Ok(()),
+    }
 }
 
 /// A tool message answering call `id` with `content`.
@@ -430,7 +417,9 @@ fn openai_result(
     id: &str,
     content: &[Content],
     is_error: bool,
+    extra: &Extra,
 ) -> Result<Map<String, Value>, Fault> {
+    refuse_part_fields(extra)?;
     // OpenAI's tool messages cannot say the call failed.
     if is_error {
         return Err(untranslatable("a tool result that is an error"));
@@ -454,26 +443,33 @@ pub(crate) fn write_openai_message(m: &Message, roles: &Names<Role>) -> Result<V
             id,
             content,
             is_error,
+            extra,
             ..
         } = result
         {
-            out.push(openai_result(id, content, *is_error)?);
+            out.push(openai_result(id, content, *is_error, extra)?);
         }
     }
     // A message of one result keeps its other fields, such as a name.
     if let ([only], true) = (&mut out[..], rest.is_empty()) {
-        only.extend(m.unsupported.clone());
+        write_extra(
+            OPENAI,
+            &message_extra(m),
+            only,
+            message_fields,
+            MESSAGE_KEEP,
+        )?;
         return Ok(out.into_iter().map(Value::Object).collect());
     }
     let mut out: Vec<Value> = out.into_iter().map(Value::Object).collect();
-    if !rest.is_empty() || results.is_empty() || !m.unsupported.is_empty() {
+    if !rest.is_empty() || results.is_empty() || !m.extra.is_empty() {
         let call = |p: &&Content| matches!(p, Content::ToolCall { .. });
         let calls: Vec<&Content> = rest.iter().copied().filter(call).collect();
         let mut said = m.clone();
         said.content = rest.into_iter().filter(|p| !call(p)).cloned().collect();
         let mut v = write_message(OPENAI, &said, roles)?;
         if !calls.is_empty() {
-            v["tool_calls"] = openai_calls(&calls).into();
+            v["tool_calls"] = openai_calls(&calls)?.into();
             if said.content.is_empty() {
                 v["content"] = Value::Null;
             }
@@ -481,134 +477,4 @@ pub(crate) fn write_openai_message(m: &Message, roles: &Names<Role>) -> Result<V
         out.push(v);
     }
     Ok(out)
-}
-
-/// An OpenAI message `old`, which read `was`, changed to read `now`, if its
-/// tools let it stay one message: a tool message's result, or an
-/// assistant's calls, written in. `None` if it must be written anew.
-pub(crate) fn update_openai_message(
-    old: &Value,
-    was: &Message,
-    now: &Message,
-    update: impl Fn(&Value, &Message, &Message) -> Result<Value, Fault>,
-) -> Result<Option<Value>, Fault> {
-    let result = |m: &Message| match &m.content[..] {
-        [
-            Content::ToolResult {
-                id,
-                content,
-                is_error,
-                ..
-            },
-        ] => Some((id.clone(), content.clone(), *is_error)),
-        _ => None,
-    };
-    let has_result = |m: &Message| {
-        m.content
-            .iter()
-            .any(|p| matches!(p, Content::ToolResult { .. }))
-    };
-    match (result(was), result(now)) {
-        (Some((_, before, _)), Some((id, content, is_error))) => {
-            if is_error {
-                return Err(untranslatable("a tool result that is an error"));
-            }
-            let (mut was, mut now) = (was.clone(), now.clone());
-            (was.content, now.content) = (before, content);
-            let mut v = update(old, &was, &now)?;
-            v["tool_call_id"] = id.into();
-            return Ok(Some(v));
-        }
-        _ if has_result(was) || has_result(now) => return Ok(None),
-        _ => {}
-    }
-    let call = |p: &&Content| matches!(p, Content::ToolCall { .. });
-    let split = |m: &Message| {
-        let calls: Vec<&Content> = m.content.iter().filter(call).collect();
-        let mut said = m.clone();
-        said.content
-            .retain(|p| !matches!(p, Content::ToolCall { .. }));
-        (said, openai_calls(&calls))
-    };
-    let ((was, before), (now, calls)) = (split(was), split(now));
-    let mut v = update(old, &was, &now)?;
-    if before != calls {
-        match calls.is_empty() {
-            true => _ = v.as_object_mut().map(|v| v.shift_remove("tool_calls")),
-            false => v["tool_calls"] = calls.into(),
-        }
-    }
-    // A message of calls alone has no content.
-    if was.content != now.content && now.content.is_empty() && v.get("tool_calls").is_some() {
-        v["content"] = Value::Null;
-    }
-    Ok(Some(v))
-}
-
-/// Tool calls of a whole response as they are written: id, name, and
-/// arguments in JSON text.
-#[derive(Debug, Default)]
-pub(crate) struct Calls(Vec<Pending>);
-
-#[derive(Debug)]
-struct Pending {
-    /// The call's number in the response.
-    key: u32,
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-impl Calls {
-    /// Add a piece of call `call`: a start makes the call, arguments go to
-    /// it. A start of a known call repeats it, as some providers send.
-    pub(crate) fn add(
-        &mut self,
-        call: u32,
-        start: Option<(&str, &str)>,
-        arguments: &str,
-    ) -> Result<(), Fault> {
-        match (start, self.0.iter().position(|c| c.key == call)) {
-            (Some((id, name)), None) => self.0.push(Pending {
-                key: call,
-                id: id.into(),
-                name: name.into(),
-                arguments: arguments.into(),
-            }),
-            (_, Some(at)) => self.0[at].arguments.push_str(arguments),
-            (None, None) => return Err(unwritable_content()),
-        }
-        Ok(())
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// As OpenAI's `tool_calls`.
-    pub(crate) fn openai(&self) -> Vec<Value> {
-        let call = |c: &Pending| {
-            let arguments = if c.arguments.is_empty() {
-                "{}"
-            } else {
-                &c.arguments
-            };
-            let function = json!({ "name": c.name, "arguments": arguments });
-            json!({ "id": c.id, "type": "function", "function": function })
-        };
-        self.0.iter().map(call).collect()
-    }
-
-    /// As Anthropic's `tool_use` blocks; arguments cut off are no input.
-    pub(crate) fn anthropic(&self) -> Result<Vec<Value>, Fault> {
-        let block = |c: &Pending| {
-            let input = arguments_json(&c.arguments).map_err(|_| unwritable_content())?;
-            Ok(json!({ "type": "tool_use", "id": c.id, "name": c.name, "input": input }))
-        };
-        self.0.iter().map(block).collect()
-    }
 }

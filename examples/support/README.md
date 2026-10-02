@@ -15,11 +15,20 @@ refuse what cannot be read.
 
 - `Readable` (for `Conversation` and `Reply`): `edit_all` runs an edit on
   every text, tools and tool-call JSON included, or fails with `UNREADABLE`
-  on content with no text form, such as an image.
-- `Holdback::new(rewrite)`: a `Reply` filter that holds back trailing text
-  that may start a match, so a `Rewrite` sees each match whole. A
-  keep-alive or usage alone passes at once unless replies wait before it.
-  `partial_match` is the helper for term lists.
+  on content with no text form, such as an image. A `Reply::Delta` is read
+  as plain text: it does not say what block it belongs to, so only a
+  `Holdback` reads a tool call's argument deltas as JSON text.
+- `Holdback::new(rewrite)`: a `Reply` filter that tracks what each block
+  holds from its `BlockStart` and holds back trailing text that may start a
+  match, so a `Rewrite` sees each match whole. Text and reasoning deltas are
+  text; a tool call's deltas are JSON text, held per block, so a match split
+  across them, escapes included, is seen whole and what replaces it is
+  escaped. Held text is released before another block opens, at its
+  `BlockEnd`, at the `Finish` and at the end. Events that show nothing yet
+  (the start, a block opening) wait, in order, until one that shows
+  something, so a refusal comes before any byte; a keep-alive or usage alone
+  passes at once unless events wait before it. `partial_match` is the helper
+  for term lists.
 - `Placeholders`: `hide(label, value)` returns `<LABEL_n>`. It is a
   `Rewrite`, so `Holdback::new(placeholders)` restores values across deltas.
 
@@ -30,14 +39,11 @@ Order: input filters run in registration order, so register any plugin
 that adds to the input BEFORE the plugin that checks or redacts it, or
 its text goes unchecked.
 
-With `Holdback`, matches split across a streamed tool call's argument
-pieces (`Piece::ToolCall`, held per call) are handled, including split JSON
-escapes. OpenAI choices beyond the first, which the formats keep as their own,
-retain independent text and tool-argument tails.
-
 Not handled: a match split across two text blocks (Anthropic's citations
-make many); an edit of a bare number in a streamed tool-argument fragment, which is written
-unquoted. Tool calls and text tool results are readable in requests; a tool
-result containing an image or another opaque payload is refused.
+make many); an edit of a bare number in a streamed tool-argument fragment,
+which is written unquoted; several choices (the kind has one: an answer with
+another choice is refused as unreadable). Tool calls and text tool results
+are readable in requests; a tool result containing an image or another opaque
+payload is refused.
 
 Used by: [guardrail](../policies/guardrail.rs), [pii](../policies/pii.rs), [realtime](../realtime/realtime.rs).

@@ -1348,6 +1348,7 @@ dependencies = [
  "respan-gateway-http",
  "respan-gateway-providers",
  "respan-gateway-sdk",
+ "serde_json",
  "tokio",
 ]
 

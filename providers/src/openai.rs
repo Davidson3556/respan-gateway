@@ -1,7 +1,38 @@
 //! OpenAI Chat Completions: `POST /chat/completions`, JSON or SSE, of the
 //! conversation kind.
+//!
+//! # Responses as events
+//!
+//! A chunk of a stream and a whole body decode into the same events, by
+//! these rules, which are deterministic:
+//!
+//! - [`Reply::Start`] comes once, with the first chunk that names an `id`. Its
+//!   `extra` holds the response's other fields (`created`, `system_fingerprint`,
+//!   `service_tier`, ...) in this format's terms.
+//! - Blocks are numbered in the order they open. The first choice's
+//!   `reasoning_content`, `content` and each `tool_calls` entry (by its
+//!   `index`, in a whole body by its place) open a [`Block::Reasoning`], a
+//!   [`Block::Text`] and a [`Block::ToolCall`] on their first non-empty
+//!   delta, or, for a call, on the entry that names its `id` and `name`.
+//!   Opening any block ends the text and reasoning blocks that are open;
+//!   tool calls stay open, as they interleave.
+//! - A `finish_reason`, or the end of the stream, ends every block still
+//!   open, in the order they opened, and a finish gives a [`Reply::Finish`].
+//! - `usage` (or Groq's `x_groq.usage`) gives a [`Reply::Usage`] of what it
+//!   adds to the totals reported so far.
+//! - What a chunk says that the kind has no form for (another choice,
+//!   `logprobs`, `refusal`, content in parts) is one [`Reply::Other`] of this
+//!   format, `{"choices": [..]}` with the first choice's body under `delta`,
+//!   which comes before the chunk's blocks. A data line that is no chunk is
+//!   an `Other` of its text. `[DONE]` ends the stream.
+//!
+//! Encoders do the reverse. A stream is written as chunks: the opening
+//! `role` chunk, a chunk per delta, and, at the end, the finish, the usage
+//! chunk if the client asked for it, and `[DONE]`. A whole body is written
+//! from the events collected: all text joined into the message `content`.
+//! Reasoning is written as `reasoning_content`.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use respan_gateway_http::{
     Body, Incoming, Outgoing, http::request::Parts as RequestHead,
     http::response::Parts as ResponseHead,
@@ -9,25 +40,25 @@ use respan_gateway_http::{
 use respan_gateway_http::{bytes, http};
 use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
-use respan_gateway_sdk::{Connection, EventSink, Fault, Format};
+use respan_gateway_sdk::{BadRequest, Connection, EventSink, Fault, Format, Upstream};
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
 
 use crate::Usage;
-use crate::common::ReplyParser;
 use crate::common::{
-    Names, Reading, SoFar, UnaryEncoder, Wire, error_event, join, only, patch_messages,
-    patch_sampling, post_json, probe, read_message, reads_back, refusal, says, set, split_around,
-    stop_json, supported_usage, tools_of, unix_now, unpatchable, unreadable_event,
-    unsupported_fields, unwritable_content, update_message, usage_step,
+    Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
+    extra_of, is_inert, merge_fields, only, post_json, probe, read_message, refusal, says, set,
+    stop_json, supported_usage, tag, unix_now, unreadable_event, unsupported_fields,
+    unwritable_content, unwritable_usage, usage_extra,
 };
-use crate::conversation::{Conversation, Finish, Message, Piece, Reply, Role, Start, units};
+use crate::conversation::{Block, Conversation, Finish, Reply, Role, Start, units};
 use crate::formats::errors::{merge_details, says_error};
-use crate::formats::sse::{event, event_as, event_data, event_json, is_stream};
+use crate::formats::sse::{event, event_data, is_stream};
 use crate::tools::{
-    read_openai_message, read_openai_tools, start, update_openai_message, write_openai_message,
-    write_openai_tools,
+    read_openai_message, read_openai_tools, write_openai_message, write_openai_tools,
 };
 use respan_gateway_http::Encoder;
+use respan_gateway_http::bytes::BytesMut;
 
 pub(crate) const OPENAI: &str = "openai-chat";
 
@@ -45,7 +76,7 @@ const FINISH: Names<Finish> = Names(
         ("function_call", Finish::ToolUse),
         ("content_filter", Finish::Filtered),
     ],
-    &[],
+    OPENAI,
 );
 
 impl OpenAiChat {
@@ -59,7 +90,7 @@ impl OpenAiChat {
         crate::formats::posts_to(head, "/chat/completions")
     }
 
-    /// Read a request lazily, retaining bytes for an unchanged relay.
+    /// Read a request lazily.
     pub fn read_request(
         &self,
         request: http::Request<Body>,
@@ -67,7 +98,7 @@ impl OpenAiChat {
         respan_gateway_http::messages(request, |_, raw| Self.decode_request(raw))
     }
 
-    /// Decode a finite request synchronously, retaining relay provenance.
+    /// Decode a finite request synchronously.
     pub fn decode_request(&self, bytes: Bytes) -> Result<Conversation, Fault> {
         crate::common::read_request::<Self>(bytes)
     }
@@ -80,8 +111,8 @@ impl OpenAiChat {
         post_json::<Self>(source, "/chat/completions")
     }
 
-    fn parser(&self, hold_start: bool) -> ReplyParser<Self> {
-        ReplyParser::new(Reading::<Self>::event, Reading::<Self>::end, hold_start)
+    fn parser(&self, hold_start: bool) -> ReplyParser<OpenAiReader> {
+        ReplyParser::new(hold_start)
     }
 
     /// Read provider response events with fresh per-body parser state.
@@ -110,11 +141,9 @@ impl OpenAiChat {
         head: &mut ResponseHead,
         request: &http::Request<Bytes>,
     ) -> Option<Box<dyn Encoder<Reply>>> {
-        crate::common::response_encoder(head, request, |head, relayed, asked| {
-            match is_stream(head) {
-                false => Box::new(UnaryEncoder::<Self>::new(relayed)),
-                true => Box::new(Chunks::new(relayed, asked.usage)),
-            }
+        crate::common::response_encoder(head, request, |head, asked| match is_stream(head) {
+            false => Box::new(UnaryEncoder::<Self>::new()),
+            true => Box::new(Chunks::new(asked.usage)),
         })
     }
 
@@ -173,10 +202,7 @@ impl OpenAiChat {
         if !head.status.is_success() {
             return Err(crate::formats::whole::answer(OPENAI, &head, bytes));
         }
-        Ok(vec![crate::common::unary_reply::<Self>(
-            head.status,
-            bytes,
-        )?])
+        crate::common::unary_reply::<Self>(head.status, bytes)
     }
 }
 
@@ -234,6 +260,9 @@ const INERT: &[(&str, f64)] = &[
     ("logprobs", 0.0),
 ];
 
+/// The two spellings of a response's token limit.
+const LIMITS: &[&str] = &["max_tokens", "max_completion_tokens"];
+
 const ROLES: Names<Role> = Names(
     &[
         ("system", Role::System),
@@ -241,17 +270,19 @@ const ROLES: Names<Role> = Names(
         ("user", Role::User),
         ("assistant", Role::Assistant),
     ],
-    &[],
+    OPENAI,
 );
 
 impl Wire for OpenAiChat {
     const NAME: &'static str = OPENAI;
+    const OWN: &'static [&'static str] = LIMITS;
+    type Reading = OpenAiReader;
 
     fn read(v: &Value) -> Conversation {
         let mut chat = Conversation::default();
         chat.stream = v["stream"] == true;
         // The larger of both spellings, so the limit read bounds what any
-        // provider enforces, and a lower one patches every spelling.
+        // provider enforces.
         chat.max_tokens = v["max_completion_tokens"]
             .as_u64()
             .max(v["max_tokens"].as_u64());
@@ -266,21 +297,35 @@ impl Wire for OpenAiChat {
             _ => Vec::new(),
         };
         chat.user = v["user"].as_str().map(Into::into);
-        chat.unsupported = unsupported_fields(v, KNOWN, INERT);
-        chat.unsupported_in = Some(OPENAI.into());
+        chat.extra.fields = unsupported_fields(v, KNOWN, INERT);
+        // The spelling of the limit is kept for this format to write again.
+        for key in LIMITS.iter().filter(|key| says(&v[**key])) {
+            chat.extra.fields.insert((*key).into(), v[*key].clone());
+        }
         if chat.user.is_some() {
-            chat.unsupported.shift_remove("user");
+            chat.extra.fields.shift_remove("user");
         }
         for m in v["messages"].as_array().into_iter().flatten() {
             let mut message = read_message(OPENAI, m, &ROLES);
             read_openai_message(m, &mut message);
+            tag(&mut message, OPENAI);
             chat.messages.push(message);
         }
         read_openai_tools(v, &mut chat);
+        chat.extra = extra_of(OPENAI, std::mem::take(&mut chat.extra.fields));
         chat
     }
 
-    fn write(chat: &Conversation) -> Result<Value, Fault> {
+    fn write(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
+        // Several choices cannot be represented as events.
+        let several = |n: &Value| n.as_u64().is_some_and(|n| n > 1);
+        if chat.extra.format.as_deref() == Some(OPENAI)
+            && chat.extra.fields.get("n").is_some_and(several)
+        {
+            return Err(BadRequest::fault(
+                "several choices (n > 1) cannot be represented; a raw relay can send them",
+            ));
+        }
         let mut v = Map::new();
         let mut messages = Vec::new();
         for m in &chat.messages {
@@ -289,222 +334,85 @@ impl Wire for OpenAiChat {
         v.insert("messages".into(), messages.into());
         write_openai_tools(chat, &mut v)?;
         set(&mut v, "stream", chat.stream.then_some(true.into()));
-        set(
-            &mut v,
-            "max_completion_tokens",
-            chat.max_tokens.map(Into::into),
-        );
+        // Under the key the client used, or the current spelling.
+        let own = chat.extra.format.as_deref() == Some(OPENAI);
+        let used = |key: &str| own && chat.extra.fields.contains_key(key);
+        let limit = chat.max_tokens.map(Value::from);
+        if used("max_tokens") {
+            set(&mut v, "max_tokens", limit.clone());
+        }
+        if used("max_completion_tokens") || !used("max_tokens") {
+            set(&mut v, "max_completion_tokens", limit);
+        }
         set(&mut v, "temperature", chat.temperature.map(Into::into));
         set(&mut v, "top_p", chat.top_p.map(Into::into));
         set(&mut v, "stop", stop_json(&chat.stop));
         set(&mut v, "user", chat.user.clone().map(Into::into));
-        Ok(v.into())
-    }
-
-    fn patch(
-        v: &mut Map<String, Value>,
-        before: &Conversation,
-        after: &Conversation,
-    ) -> Result<(), Fault> {
-        if before.max_tokens != after.max_tokens {
-            // Under every spelling the client used, or the current one.
-            let limit = after.max_tokens.map(Value::from);
-            let used = |key: &str| v.get(key).is_some_and(says);
-            let (old, new) = (used("max_tokens"), used("max_completion_tokens"));
-            if old {
-                set(v, "max_tokens", limit.clone());
-            }
-            if new || !old {
-                set(v, "max_completion_tokens", limit);
-            }
-        }
-        patch_sampling(v, before, after, "stop");
-        if before.user != after.user {
-            set(v, "user", after.user.clone().map(Into::into));
-        }
-        if tools_of(before) != tools_of(after) {
-            write_openai_tools(after, v)?;
-        }
-        if before.messages != after.messages {
-            let write = |m: &Message| write_openai_message(m, &ROLES);
-            let update = |old: &Value, was: &Message, now: &Message| {
-                let update =
-                    |o: &Value, w: &Message, n: &Message| update_message(OPENAI, o, w, n, &ROLES);
-                match update_openai_message(old, was, now, update)? {
-                    Some(v) => Ok(vec![v]),
-                    None => write(now),
-                }
-            };
-            let messages = patch_messages(&before.messages, &after.messages, write, update)?;
-            v.insert("messages".into(), messages.into());
-        }
-        Ok(())
+        Ok(v)
     }
 
     fn is_response(v: &Value) -> bool {
         v["choices"].is_array()
     }
 
-    /// Text as block 0.
-    fn reply(v: &Value) -> Reply {
-        let mut reply = Reply::start(
-            v["id"].as_str().unwrap_or_default(),
-            v["model"].as_str().unwrap_or_default(),
-        );
-        reply.content = content(v, "message");
-        reply.finish = finish(v);
-        reply
-    }
-
-    fn usage(v: &Value) -> Usage {
-        let mut usage = Usage::default();
-        // Groq reports it beside the response, under its own name.
-        let u = match &v["usage"] {
-            u if u.is_object() => u,
-            _ => &v["x_groq"]["usage"],
+    /// One text of every block, then the tool calls, as one choice; other
+    /// events as the choices they came in.
+    fn render(whole: &Whole) -> Result<Value, Fault> {
+        check_usage(&whole.usage)?;
+        let join = |kind: Block| -> String {
+            let same = |p: &&crate::common::Part| p.kind == kind;
+            whole
+                .parts()
+                .filter(same)
+                .map(|p| p.text.as_str())
+                .collect()
         };
-        for (unit, ptr) in [
-            (units::INPUT_TOKENS, "/prompt_tokens"),
-            (units::OUTPUT_TOKENS, "/completion_tokens"),
-            (
-                units::CACHED_INPUT_TOKENS,
-                "/prompt_tokens_details/cached_tokens",
-            ),
-            (
-                units::REASONING_TOKENS,
-                "/completion_tokens_details/reasoning_tokens",
-            ),
-        ] {
-            if let Some(n) = u.pointer(ptr).and_then(Value::as_f64) {
-                usage.add(unit, n);
-            }
-        }
-        usage
-    }
-
-    fn usage_body(u: &Usage) -> Value {
-        let get = |unit| u.get(unit).unwrap_or_default();
-        let (input, output) = (get(units::INPUT_TOKENS), get(units::OUTPUT_TOKENS));
-        let mut body = json!({
-            "prompt_tokens": input as u64,
-            "completion_tokens": output as u64,
-            "total_tokens": (input + output) as u64,
-        });
-        let cached = get(units::CACHED_INPUT_TOKENS);
-        if cached > 0.0 {
-            body["prompt_tokens_details"] = json!({ "cached_tokens": cached as u64 });
-        }
-        let reasoning = get(units::REASONING_TOKENS);
-        if reasoning > 0.0 {
-            body["completion_tokens_details"] = json!({ "reasoning_tokens": reasoning as u64 });
-        }
-        body
-    }
-
-    fn patch_usage(
-        v: &mut Value,
-        total: &Usage,
-        said: &Usage,
-        edited: &Usage,
-    ) -> Result<(), Fault> {
-        check_usage(total)?;
-        let path = if v["usage"].is_object() {
-            "/usage"
-        } else {
-            "/x_groq/usage"
-        };
-        let u = v
-            .pointer_mut(path)
-            .filter(|u| u.is_object())
-            .ok_or_else(|| unpatchable("this response has no place for edited usage"))?;
-        let changed = |unit| said.get(unit) != edited.get(unit);
-        let input = total.get(units::INPUT_TOKENS).unwrap_or_default();
-        let output = total.get(units::OUTPUT_TOKENS).unwrap_or_default();
-        if u.get("prompt_tokens").is_some()
-            || changed(units::INPUT_TOKENS)
-            || changed(units::CACHED_INPUT_TOKENS)
-        {
-            u["prompt_tokens"] = json!(input as u64);
-        }
-        if u.get("completion_tokens").is_some()
-            || changed(units::OUTPUT_TOKENS)
-            || changed(units::REASONING_TOKENS)
-        {
-            u["completion_tokens"] = json!(output as u64);
-        }
-        if u.get("total_tokens").is_some() {
-            u["total_tokens"] = json!((input + output) as u64);
-        }
-        for (unit, details, key) in [
-            (
-                units::CACHED_INPUT_TOKENS,
-                "prompt_tokens_details",
-                "cached_tokens",
-            ),
-            (
-                units::REASONING_TOKENS,
-                "completion_tokens_details",
-                "reasoning_tokens",
-            ),
-        ] {
-            if u[details].get(key).is_some() || changed(unit) {
-                if !u[details].is_null() && !u[details].is_object() {
-                    return Err(unpatchable(
-                        "this response has no place for edited usage details",
-                    ));
+        let (text, reasoning) = (join(Block::Text), join(Block::Reasoning));
+        let calls: Vec<Value> = whole
+            .parts()
+            .filter_map(|p| match &p.kind {
+                Block::ToolCall { id, name } => {
+                    let arguments = if p.text.is_empty() { "{}" } else { &p.text };
+                    Some(call_json(None, Some(id), Some(name), arguments))
                 }
-                u[details][key] = json!(total.get(unit).unwrap_or_default() as u64);
-            }
-        }
-        Ok(())
-    }
-
-    fn render(so_far: &SoFar) -> Result<Value, Fault> {
-        check_usage(&so_far.usage)?;
-        let text: String = so_far.text.values().map(String::as_str).collect();
-        let finish = so_far.finish.as_ref().unwrap_or(&Finish::Stop);
-        let (id, model) = so_far.start.clone().unwrap_or_default();
-        let mut message = json!({ "role": "assistant", "content": text });
-        if !so_far.calls.is_empty() {
-            message["tool_calls"] = so_far.calls.openai().into();
-            if text.is_empty() {
-                message["content"] = Value::Null;
-            }
-        }
-        Ok(json!({
-            "id": id,
-            "object": "chat.completion",
-            "created": unix_now(),
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": message,
-                "finish_reason": FINISH.reason(finish)?,
-            }],
-            "usage": Self::usage_body(&so_far.usage),
-        }))
-    }
-
-    /// One text of every block, then the tool calls, then other content.
-    fn in_order(content: &[Piece]) -> Vec<Piece> {
-        let text: Vec<&str> = content
-            .iter()
-            .filter_map(|p| match p {
-                Piece::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect();
-        let texts = (!text.is_empty()).then(|| Piece::text(0, text.concat()));
-        let calls = content
-            .iter()
-            .filter(|p| matches!(p, Piece::ToolCall { .. }));
-        let others = content.iter().filter(|p| matches!(p, Piece::Other { .. }));
-        let rest = calls.chain(others).cloned();
-        texts.into_iter().chain(rest).collect()
-    }
-
-    fn put(v: &mut Value, reply: &Reply) -> Result<(), Fault> {
-        put_choice(v, reply, "message")
+        let mut message = json!({ "role": "assistant", "content": text });
+        if !reasoning.is_empty() {
+            message["reasoning_content"] = reasoning.into();
+        }
+        if !calls.is_empty() {
+            if text.is_empty() {
+                message["content"] = Value::Null;
+            }
+            message["tool_calls"] = calls.into();
+        }
+        let finish = whole.finish.as_ref().unwrap_or(&Finish::Stop);
+        let mut usage_more = Map::new();
+        let mut choices = vec![json!({
+            "index": 0,
+            "message": message,
+            "finish_reason": FINISH.reason(finish)?,
+        })];
+        for item in &whole.items {
+            let Item::Other(format, raw) = item else {
+                continue;
+            };
+            if let (true, Some(fields)) = (&**format == OPENAI, usage_fields(raw)) {
+                usage_more.extend(fields.clone());
+                continue;
+            }
+            match (&**format == OPENAI, raw["choices"].as_array()) {
+                (true, Some(more)) => more.iter().for_each(|c| merge_choice(&mut choices, c)),
+                _ if !is_inert(format, raw) => return Err(unwritable_content()),
+                _ => {}
+            }
+        }
+        let mut body = envelope(whole.start.as_ref(), "chat.completion", unix_now());
+        body.insert("choices".into(), choices.into());
+        body.insert("usage".into(), usage_body(&whole.usage, &usage_more));
+        Ok(body.into())
     }
 
     fn error_body(fault: &Fault) -> Value {
@@ -534,6 +442,76 @@ impl Wire for OpenAiChat {
     }
 }
 
+/// A response's usage, as the kind counts it. Groq reports it beside the
+/// response, under its own name.
+fn usage_of(v: &Value) -> Usage {
+    let mut usage = Usage::default();
+    let u = usage_object(v);
+    for (unit, ptr) in [
+        (units::INPUT_TOKENS, "/prompt_tokens"),
+        (units::OUTPUT_TOKENS, "/completion_tokens"),
+        (
+            units::CACHED_INPUT_TOKENS,
+            "/prompt_tokens_details/cached_tokens",
+        ),
+        (
+            units::REASONING_TOKENS,
+            "/completion_tokens_details/reasoning_tokens",
+        ),
+    ] {
+        if let Some(n) = u.pointer(ptr).and_then(Value::as_f64) {
+            usage.add(unit, n);
+        }
+    }
+    usage
+}
+
+/// The usage object of a chunk or body: Groq reports it beside the response.
+fn usage_object(v: &Value) -> &Value {
+    match &v["usage"] {
+        u if u.is_object() => u,
+        _ => &v["x_groq"]["usage"],
+    }
+}
+
+/// What a usage object says that has no unit: vendor fields, and details
+/// beside the cached and reasoning counts.
+fn extra_usage(v: &Value) -> Map<String, Value> {
+    let known = ["prompt_tokens", "completion_tokens", "total_tokens"];
+    let details: [(&str, &[&str]); 2] = [
+        ("prompt_tokens_details", &["cached_tokens"]),
+        ("completion_tokens_details", &["reasoning_tokens"]),
+    ];
+    usage_extra(usage_object(v), &known, &details)
+}
+
+/// Usage as this format reports it.
+fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
+    let get = |unit| u.get(unit).unwrap_or_default();
+    let (input, output) = (get(units::INPUT_TOKENS), get(units::OUTPUT_TOKENS));
+    let mut body = json!({
+        "prompt_tokens": input as u64,
+        "completion_tokens": output as u64,
+        "total_tokens": (input + output) as u64,
+    });
+    let cached = get(units::CACHED_INPUT_TOKENS);
+    if cached > 0.0 {
+        body["prompt_tokens_details"] = json!({ "cached_tokens": cached as u64 });
+    }
+    let reasoning = get(units::REASONING_TOKENS);
+    if reasoning > 0.0 {
+        body["completion_tokens_details"] = json!({ "reasoning_tokens": reasoning as u64 });
+    }
+    merge_fields(&mut body, extra);
+    body
+}
+
+/// The usage fields an [`Reply::Other`] says, if it says only those.
+fn usage_fields(raw: &Value) -> Option<&Map<String, Value>> {
+    let only = raw.as_object().filter(|o| o.len() == 1)?;
+    only.get("usage")?.as_object()
+}
+
 fn check_usage(usage: &Usage) -> Result<(), Fault> {
     supported_usage(
         usage,
@@ -550,194 +528,32 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
         || usage.get(units::REASONING_TOKENS).unwrap_or_default() > output
         || input + output >= u64::MAX as f64
     {
-        return Err(unpatchable("this format cannot represent the edited usage"));
+        return Err(unwritable_usage());
     }
     Ok(())
 }
 
-/// Put an edited reply back into a response's choices, under `message`, or
-/// a chunk's, under `delta`; other content goes as it came.
-fn put_choice(v: &mut Value, reply: &Reply, key: &str) -> Result<(), Fault> {
-    let known = |p: &Piece| {
-        matches!(
-            p,
-            Piece::Text { .. } | Piece::ToolCall { .. } | Piece::Other { .. }
-        )
-    };
-    if !reply.content.iter().all(known) {
-        return Err(unwritable_content());
-    }
-    // Every chunk may name them, though some leave the model out.
-    if let Some(Start { id, model, .. }) = &reply.start {
-        for (field, value) in [("id", id), ("model", model)] {
-            if let Some(fields) = v.as_object_mut()
-                && (fields.contains_key(field) || !value.is_empty())
-            {
-                fields.insert(field.into(), value.as_str().into());
-            }
+/// The fields every chunk or body of a response has: id, `object`, `created`
+/// (the response's, if it kept one), model and the fields of the start's own
+/// `extra` if it is in this format.
+fn envelope(start: Option<&Start>, object: &str, now: u64) -> Map<String, Value> {
+    let (id, model) = start
+        .map(|s| (s.id.as_str(), s.model.as_str()))
+        .unwrap_or_default();
+    let fields = start.filter(|s| s.extra.format.as_deref() == Some(OPENAI));
+    let fields = fields.map(|s| &s.extra.fields);
+    let created = fields.and_then(|f| f.get("created")).cloned();
+    let mut v = Map::new();
+    v.insert("id".into(), id.into());
+    v.insert("object".into(), object.into());
+    v.insert("created".into(), created.unwrap_or_else(|| now.into()));
+    v.insert("model".into(), model.into());
+    for (key, value) in fields.into_iter().flatten() {
+        if key != "created" {
+            v.insert(key.clone(), value.clone());
         }
     }
-    // The choices are the other content, or the first choice bare if a
-    // filter took it; its text and finish follow.
-    let rest = rest_of(v, key);
-    let old_finish = v.pointer("/choices/0/finish_reason").cloned();
-    let other = reply.content.iter().find_map(|p| match p {
-        Piece::Other { format, raw, .. } if **format == *OPENAI && raw.is_array() => {
-            Some((**raw).clone())
-        }
-        _ => None,
-    });
-    let more = rest
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|c| says_more(c, key));
-    // Only the first choice is the conversation's.
-    let first = first_choice(v).is_some();
-    let taken = || {
-        let choice = &rest[0];
-        let mut bare = json!({ "index": 0 });
-        for (field, value) in choice.as_object().into_iter().flatten() {
-            if INERT_CHOICE.contains(&field.as_str()) {
-                bare[field] = value.clone();
-            }
-        }
-        if let Some(role) = choice[key].get("role") {
-            bare[key] = json!({ "role": role });
-        }
-        json!([bare])
-    };
-    match other {
-        Some(other) => v["choices"] = other,
-        None if more && first => v["choices"] = taken(),
-        None if more => v["choices"] = json!([]),
-        None if first => v["choices"] = rest,
-        None => {}
-    }
-    if !first {
-        return Ok(());
-    }
-    // A choice has one text: every block of it, in block order.
-    let mut texts: Vec<(u32, &str)> = reply
-        .content
-        .iter()
-        .filter_map(|p| match p {
-            Piece::Text { block, text, .. } => Some((*block, text.as_str())),
-            _ => None,
-        })
-        .collect();
-    texts.sort_by_key(|(block, _)| *block);
-    let joined: String = texts.iter().map(|(_, t)| *t).collect();
-    let text = (!texts.is_empty()).then_some(joined.as_str());
-    // A whole message's calls are whole and in order; a chunk's are parts,
-    // numbered.
-    let whole = key == "message";
-    let pieces = match whole {
-        true => join(reply.content.clone()),
-        false => reply.content.clone(),
-    };
-    let calls: Vec<Value> = pieces
-        .iter()
-        .filter_map(|p| match p {
-            Piece::ToolCall {
-                call,
-                id,
-                name,
-                arguments,
-                ..
-            } => {
-                let arguments = match (whole, arguments.is_empty()) {
-                    (true, true) => "{}",
-                    _ => arguments,
-                };
-                let index = (!whole).then_some(*call);
-                Some(call_json(index, id.as_deref(), name.as_deref(), arguments))
-            }
-            _ => None,
-        })
-        .collect();
-    if let Some(choice) = v.pointer_mut("/choices/0").and_then(Value::as_object_mut) {
-        let body = choice.entry(key).or_insert_with(|| json!({}));
-        if let Some(body) = body.as_object_mut() {
-            // A whole message needs `content`, even if null.
-            match (text, key) {
-                (Some(text), _) => _ = body.insert("content".into(), text.into()),
-                (None, "message") => _ = body.insert("content".into(), Value::Null),
-                (None, _) => _ = body.shift_remove("content"),
-            }
-            if !calls.is_empty() {
-                body.insert("tool_calls".into(), calls.into());
-            }
-        }
-        // The provider's spelling while unchanged; null if taken.
-        let reason = match (&reply.finish, old_finish) {
-            (Some(f), Some(Value::String(old))) if FINISH.finish(&old) == *f => Some(old.into()),
-            (Some(f), _) => Some(FINISH.reason(f)?.into()),
-            (None, old) => old.map(|_| Value::Null),
-        };
-        if let Some(reason) = reason {
-            choice.insert("finish_reason".into(), reason);
-        }
-    }
-    Ok(())
-}
-
-/// The choices without the first one's text, tool calls and finish.
-fn rest_of(v: &Value, key: &str) -> Value {
-    let mut rest = v["choices"].clone();
-    let typed_calls = first_choice(v).is_some_and(|c| tool_calls(&c[key]).is_some());
-    if first_choice(v).is_some()
-        && let Some(choice) = rest.get_mut(0).and_then(Value::as_object_mut)
-    {
-        choice.shift_remove("finish_reason");
-        if let Some(body) = choice.get_mut(key).and_then(Value::as_object_mut) {
-            // Content in parts stays: it is other content.
-            if body
-                .get("content")
-                .is_none_or(|c| c.is_string() || c.is_null())
-            {
-                body.shift_remove("content");
-            }
-            if typed_calls {
-                body.shift_remove("tool_calls");
-            }
-        }
-    }
-    rest
-}
-
-/// The tool calls of a choice's `body`, if each is a function call the
-/// kind can say: numbered by their `index`, else by place. `None` leaves
-/// them other content.
-fn tool_calls(body: &Value) -> Option<Vec<Piece>> {
-    let calls = body.get("tool_calls")?.as_array()?;
-    if calls.is_empty() {
-        return None;
-    }
-    let piece = |(at, c): (usize, &Value)| {
-        let function = &c["function"];
-        let function_call = c["type"].is_null() || c["type"] == "function";
-        let known =
-            only(c, &["index", "id", "type", "function"]) && only(function, &["name", "arguments"]);
-        if !function_call || !known {
-            return None;
-        }
-        let arguments = match &function["arguments"] {
-            Value::Null => "",
-            arguments => arguments.as_str()?,
-        };
-        let call = match c.get("index") {
-            Some(index) => u32::try_from(index.as_u64()?).ok()?,
-            None => u32::try_from(at).ok()?,
-        };
-        let mut piece = Piece::tool_arguments(call, arguments);
-        if let Piece::ToolCall { id, name, .. } = &mut piece {
-            *id = c["id"].as_str().map(Into::into);
-            *name = function["name"].as_str().map(Into::into);
-        }
-        Some(piece)
-    };
-    calls.iter().enumerate().map(piece).collect()
+    v
 }
 
 /// A tool call as OpenAI writes it: in a chunk, numbered `index`, with its
@@ -759,69 +575,40 @@ fn call_json(index: Option<u32>, id: Option<&str>, name: Option<&str>, arguments
     call.into()
 }
 
-impl Reading<OpenAiChat> {
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let data = event_data(&raw);
-        if self.done || data.as_deref().map(str::trim) == Some("[DONE]") {
-            self.done = true;
-            return Ok(());
-        }
-        let v = data
-            .as_deref()
-            .and_then(|d| serde_json::from_str::<Value>(d).ok());
-        let chunk = |v: &Value| v["choices"].is_array() || !v["usage"].is_null() || says_error(v);
-        let Some(v) = v.filter(chunk) else {
-            out.push(unreadable_event(&self.name, raw));
-            return Ok(());
-        };
-        if says_error(&v) {
-            return Err(error_event(&self.name, &raw, &v));
-        }
-        let mut reply = chunk_reply(&v);
-        reply.usage = self.totals.increment(&<OpenAiChat as Wire>::usage(&v));
-        out.push(reply.came(&self.name, raw));
-        Ok(())
+/// `choice` with its body under `key`, as `delta` or `message`.
+fn rekey(choice: &Value, key: &str) -> Value {
+    let mut choice = choice.clone();
+    let other = if key == "delta" { "message" } else { "delta" };
+    if let Some(fields) = choice.as_object_mut()
+        && let Some(body) = fields.shift_remove(other)
+    {
+        fields.entry(key).or_insert(body);
     }
-
-    fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-        self.ended()
-    }
+    choice
 }
 
-/// What a chunk says: a start, unless id-less (as Azure's filter results),
-/// its content and a finish.
-fn chunk_reply(v: &Value) -> Reply {
-    let id = v["id"].as_str().filter(|id| !id.is_empty());
-    let mut reply = match id {
-        Some(id) => Reply::start(id, v["model"].as_str().unwrap_or_default()),
-        None => Reply::default(),
+/// Put `more`, a choice of an [`Reply::Other`], among a whole body's
+/// `choices`: the first choice's fields join it, another is added.
+fn merge_choice(choices: &mut Vec<Value>, more: &Value) {
+    let more = rekey(more, "message");
+    let index = more["index"].as_u64().unwrap_or(0);
+    let at = choices
+        .iter()
+        .position(|c| c["index"].as_u64() == Some(index));
+    let (Some(at), Some(fields)) = (at, more.as_object()) else {
+        return choices.push(more);
     };
-    reply.content = content(v, "delta");
-    reply.finish = finish(v);
-    reply
-}
-
-/// The first choice, if it is index 0: the conversation's.
-fn first_choice(v: &Value) -> Option<&Value> {
-    let choice = v["choices"].get(0)?;
-    (choice["index"].as_u64().unwrap_or(0) == 0).then_some(choice)
-}
-
-/// The content of a response's choices, under `message`, or a chunk's,
-/// under `delta`: the first choice's text as block 0 and its tool calls,
-/// then anything else as one `Other` of the choices without them.
-fn content(v: &Value, key: &str) -> Vec<Piece> {
-    let first = first_choice(v);
-    let text = first.and_then(|c| c[key]["content"].as_str());
-    let calls = first.and_then(|c| tool_calls(&c[key])).unwrap_or_default();
-    let rest = rest_of(v, key);
-    let mut content: Vec<Piece> = text.map(|t| Piece::text(0, t)).into_iter().collect();
-    content.extend(calls);
-    let choices = rest.as_array().into_iter().flatten();
-    if choices.clone().any(|c| says_more(c, key)) {
-        content.push(Piece::other(OPENAI, rest));
+    for (key, value) in fields {
+        match (key.as_str(), value.as_object()) {
+            ("index", _) => {}
+            ("message", Some(body)) => {
+                for (k, x) in body {
+                    choices[at]["message"][k] = x.clone();
+                }
+            }
+            _ => choices[at][key] = value.clone(),
+        }
     }
-    content
 }
 
 /// Choice fields that carry no content: OpenRouter's, vLLM's and Azure's.
@@ -832,317 +619,526 @@ const INERT_CHOICE: &[&str] = &[
     "content_filter_offsets",
 ];
 
-/// Whether a choice says anything but its index, its body's role and
-/// [`INERT_CHOICE`] fields.
-fn says_more(choice: &Value, key: &str) -> bool {
-    let fields = choice.as_object().into_iter().flatten();
-    let fields = fields.filter(|(k, _)| *k != "index" && !INERT_CHOICE.contains(&k.as_str()));
-    fields.into_iter().any(|(k, x)| {
-        if k == key {
-            let body = x.as_object().into_iter().flatten();
-            body.filter(|(k, _)| *k != "role").any(|(_, y)| says(y))
-        } else {
-            says(x)
+/// Decodes chunks and whole bodies of OpenAI Chat into events, as the
+/// module says.
+#[derive(Debug)]
+pub(crate) struct OpenAiReader {
+    name: Arc<str>,
+    totals: Totals,
+    started: bool,
+    /// The vendor fields of the usage last said, to say them once.
+    usage_extra: Map<String, Value>,
+    /// The response's fields that came before its start, as Azure's first
+    /// chunk, which names no `id`, has.
+    early: Map<String, Value>,
+    done: bool,
+    /// Every block opened so far; a block's number is its place.
+    blocks: Vec<Opened>,
+}
+
+#[derive(Debug)]
+struct Opened {
+    key: Key,
+    open: bool,
+}
+
+/// What a block of a response is made of, in OpenAI's terms.
+#[derive(Debug, PartialEq)]
+enum Key {
+    Text,
+    Reasoning,
+    /// The tool call numbered so by `index`.
+    Call(u64),
+}
+
+impl Default for OpenAiReader {
+    fn default() -> Self {
+        Self {
+            name: Arc::from(OPENAI),
+            totals: Totals::default(),
+            started: false,
+            usage_extra: Map::new(),
+            early: Map::new(),
+            done: false,
+            blocks: Vec::new(),
         }
-    })
+    }
 }
 
-/// The first choice's finish.
-fn finish(v: &Value) -> Option<Finish> {
-    let reason = first_choice(v)?["finish_reason"].as_str()?;
-    Some(FINISH.finish(reason))
+/// A tool call's part of a chunk or body.
+struct Call {
+    index: u64,
+    start: Option<(String, String)>,
+    arguments: String,
 }
 
-/// A relayed chunk without the usage the gateway asked for: no `usage`
-/// field, and `None` for the usage chunk.
-fn without_usage(raw: &Bytes) -> Option<Bytes> {
-    if !raw.windows(7).any(|w| w == b"\"usage\"") {
-        return Some(raw.clone());
+impl OpenAiReader {
+    /// The block of `key`, if it is open.
+    fn open_block(&self, key: &Key) -> Option<u32> {
+        let at = self.blocks.iter().position(|b| b.open && b.key == *key);
+        at.and_then(|at| u32::try_from(at).ok())
     }
-    let mut v = event_json(raw).unwrap_or_default();
-    let direct = v.as_object_mut().and_then(|o| o.shift_remove("usage"));
-    let nested = v
-        .pointer_mut("/x_groq")
-        .and_then(Value::as_object_mut)
-        .and_then(|o| o.shift_remove("usage"));
-    if direct.is_none() && nested.is_none() {
-        return Some(raw.clone());
+
+    /// Open a block of `key` as `kind`, ending the open text and reasoning.
+    fn open(&mut self, key: Key, kind: Block, out: &mut Vec<Reply>) -> u32 {
+        for (n, block) in self.blocks.iter_mut().enumerate() {
+            if block.open && matches!(block.key, Key::Text | Key::Reasoning) {
+                block.open = false;
+                out.push(Reply::block_end(u32::try_from(n).unwrap_or(u32::MAX)));
+            }
+        }
+        let block = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
+        self.blocks.push(Opened { key, open: true });
+        out.push(Reply::block_start(block, kind));
+        block
     }
-    let reports = direct.as_ref().is_some_and(Value::is_object)
-        || nested.as_ref().is_some_and(Value::is_object);
-    if reports && v["choices"].as_array().is_none_or(Vec::is_empty) {
+
+    /// Delta `text` of the block of `key`, opened as `kind` if it is not.
+    fn say(&mut self, key: Key, kind: Block, text: &str, out: &mut Vec<Reply>) {
+        let block = match self.open_block(&key) {
+            Some(block) => block,
+            None => self.open(key, kind, out),
+        };
+        out.push(Reply::delta(block, text));
+    }
+
+    /// End every open block, in the order they opened.
+    fn close(&mut self, out: &mut Vec<Reply>) {
+        for (n, block) in self.blocks.iter_mut().enumerate() {
+            if std::mem::take(&mut block.open) {
+                out.push(Reply::block_end(u32::try_from(n).unwrap_or(u32::MAX)));
+            }
+        }
+    }
+
+    /// The events of one chunk, whose first choice's body is under `key`
+    /// (`delta`, or `message` in a whole body).
+    fn chunk(&mut self, v: &Value, key: &str, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let id = v["id"].as_str().filter(|id| !id.is_empty());
+        if !self.started {
+            self.early.extend(response_fields(v));
+        }
+        if let (Some(id), false) = (id, self.started) {
+            self.started = true;
+            let model = v["model"].as_str().unwrap_or_default();
+            let mut start = Start::new(id, model);
+            start.extra = extra_of(OPENAI, std::mem::take(&mut self.early));
+            out.push(Reply::Start(start));
+        }
+        let usage = self.totals.increment(&usage_of(v));
+        if !usage.is_empty() {
+            out.push(Reply::Usage(usage));
+        }
+        let extra = extra_usage(v);
+        if !extra.is_empty() && extra != self.usage_extra {
+            out.push(Reply::other(self.name.clone(), json!({ "usage": extra })));
+            self.usage_extra = extra;
+        }
+        // What the kind has no form for goes first, so a chunk that cannot be
+        // translated fails before any of it is written.
+        for choice in v["choices"].as_array().into_iter().flatten() {
+            if choice_index(choice) != 0 {
+                out.push(Reply::other(
+                    self.name.clone(),
+                    json!({ "choices": [rekey(choice, "delta")] }),
+                ));
+            }
+        }
+        let Some(first) = first_choice(v) else {
+            return Ok(());
+        };
+        let body = &first[key];
+        let calls = tool_calls(body);
+        if let Some(rest) = rest_of(first, key, calls.is_some()) {
+            out.push(Reply::other(
+                self.name.clone(),
+                json!({ "choices": [rest] }),
+            ));
+        }
+        if let Some(text) = body["reasoning_content"].as_str().filter(|t| !t.is_empty()) {
+            self.say(Key::Reasoning, Block::Reasoning, text, out);
+        }
+        if let Some(text) = body["content"].as_str().filter(|t| !t.is_empty()) {
+            self.say(Key::Text, Block::Text, text, out);
+        }
+        for call in calls.into_iter().flatten() {
+            let key = Key::Call(call.index);
+            let block = match (call.start, self.open_block(&key)) {
+                (Some((id, name)), None) => self.open(key, Block::ToolCall { id, name }, out),
+                (_, Some(block)) => block,
+                (None, None) => {
+                    return Err(Upstream::fault(
+                        "a tool call's arguments come before the call starts",
+                    ));
+                }
+            };
+            if !call.arguments.is_empty() {
+                out.push(Reply::delta(block, call.arguments));
+            }
+        }
+        if let Some(reason) = first["finish_reason"].as_str() {
+            self.close(out);
+            out.push(Reply::finished(FINISH.finish(reason)));
+        }
+        Ok(())
+    }
+}
+
+impl Reader for OpenAiReader {
+    fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if self.done {
+            return Ok(());
+        }
+        let data = event_data(&raw);
+        if data.as_deref().map(str::trim) == Some("[DONE]") {
+            self.close(out);
+            self.done = true;
+            return Ok(());
+        }
+        let v = data
+            .as_deref()
+            .and_then(|d| serde_json::from_str::<Value>(d).ok());
+        let chunk = |v: &Value| v["choices"].is_array() || !v["usage"].is_null() || says_error(v);
+        let Some(v) = v.filter(chunk) else {
+            unreadable_event(&self.name, &raw, out);
+            return Ok(());
+        };
+        if says_error(&v) {
+            return Err(error_event(&self.name, &raw, &v));
+        }
+        self.chunk(&v, "delta", out)
+    }
+
+    fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        ended(self.done)
+    }
+
+    fn body(&mut self, v: &Value, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.chunk(v, "message", out)?;
+        self.close(out);
+        self.done = true;
+        Ok(())
+    }
+}
+
+/// The fields of a chunk or body that are the response's, not an event's:
+/// what is neither its id, model, choices nor usage.
+fn response_fields(v: &Value) -> Map<String, Value> {
+    let known = [
+        "id",
+        "model",
+        "object",
+        "choices",
+        "usage",
+        "obfuscation",
+        "x_groq",
+    ];
+    let mut fields = unsupported_fields(v, &known, &[]);
+    let groq = v["x_groq"].as_object().into_iter().flatten();
+    let rest: Map<String, Value> = groq
+        .filter(|(k, x)| *k != "usage" && says(x))
+        .map(|(k, x)| (k.clone(), x.clone()))
+        .collect();
+    if !rest.is_empty() {
+        fields.insert("x_groq".into(), rest.into());
+    }
+    fields
+}
+
+/// A choice's `index`; a choice with none is the first.
+fn choice_index(choice: &Value) -> u64 {
+    choice["index"].as_u64().unwrap_or(0)
+}
+
+/// The first choice, if it is index 0: the conversation's.
+fn first_choice(v: &Value) -> Option<&Value> {
+    let choice = v["choices"].get(0)?;
+    (choice_index(choice) == 0).then_some(choice)
+}
+
+/// The first choice without what the kind has: its text, reasoning, tool
+/// calls (`typed`, if the kind has all of them), finish and what servers add
+/// to describe it; its body is under `delta`. `None` if nothing is left.
+fn rest_of(choice: &Value, key: &str, typed: bool) -> Option<Value> {
+    let mut rest = Map::new();
+    rest.insert("index".into(), 0.into());
+    let fields = choice.as_object().into_iter().flatten();
+    for (k, x) in fields {
+        if k == "index" || k == "finish_reason" || INERT_CHOICE.contains(&k.as_str()) {
+            continue;
+        }
+        if k != key {
+            if says(x) {
+                rest.insert(k.clone(), x.clone());
+            }
+            continue;
+        }
+        let mut body = Map::new();
+        for (field, y) in x.as_object().into_iter().flatten() {
+            let text = y.is_string() || y.is_null();
+            let ours = match field.as_str() {
+                "role" => true,
+                "content" | "reasoning_content" => text,
+                "tool_calls" => typed,
+                _ => false,
+            };
+            if !ours && says(y) {
+                body.insert(field.clone(), y.clone());
+            }
+        }
+        if !body.is_empty() {
+            rest.insert("delta".into(), body.into());
+        }
+    }
+    (rest.len() > 1).then(|| rest.into())
+}
+
+/// The tool calls of a choice's `body`, if each is a function call the
+/// kind can say: numbered by their `index`, else by place. `None` leaves
+/// them other content.
+fn tool_calls(body: &Value) -> Option<Vec<Call>> {
+    let calls = body.get("tool_calls")?.as_array()?;
+    if calls.is_empty() {
         return None;
     }
-    Some(event_as(Some(raw), None, &v).into())
+    let call = |(at, c): (usize, &Value)| {
+        let function = &c["function"];
+        let function_call = c["type"].is_null() || c["type"] == "function";
+        let known =
+            only(c, &["index", "id", "type", "function"]) && only(function, &["name", "arguments"]);
+        if !function_call || !known {
+            return None;
+        }
+        let arguments = match &function["arguments"] {
+            Value::Null => "",
+            arguments => arguments.as_str()?,
+        };
+        let index = match c.get("index") {
+            Some(index) => index.as_u64()?,
+            None => u64::try_from(at).ok()?,
+        };
+        let start = c["id"].as_str().zip(function["name"].as_str());
+        Some(Call {
+            index,
+            start: start.map(|(id, name)| (id.to_owned(), name.to_owned())),
+            arguments: arguments.to_owned(),
+        })
+    };
+    calls.iter().enumerate().map(call).collect()
 }
 
-/// A chunk `raw` with its edited reply put back; `None` if nothing of it
-/// is left.
-fn rebuild(
-    raw: &Bytes,
-    said: &Reply,
-    reply: &Reply,
-    before: &Usage,
-) -> Result<Option<Bytes>, Fault> {
-    let mut chunk = event_json(raw).unwrap_or_default();
-    put_choice(&mut chunk, reply, "delta")?;
-    let mut after = before.clone();
-    after += &reply.usage;
-    check_usage(&after)?;
-    let reported = OpenAiChat::usage(&chunk);
-    let different_total = reported.iter().any(|(unit, n)| after.get(&unit) != Some(n));
-    if different_total || usage_step(before, &reported) != reply.usage {
-        OpenAiChat::patch_usage(&mut chunk, &after, &said.usage, &reply.usage)?;
-    }
-    let silent = reply.content.is_empty()
-        && reply.finish.is_none()
-        && chunk["usage"].is_null()
-        && chunk["x_groq"]["usage"].is_null()
-        && chunk.pointer("/choices/0/delta/role").is_none();
-    if silent {
-        return Ok(None);
-    }
-    let mut again = chunk_reply(&chunk);
-    again.usage = usage_step(before, &OpenAiChat::usage(&chunk));
-    reads_back::<OpenAiChat>(reply, &again)?;
-    Ok(Some(event_as(Some(raw), None, &chunk).into()))
-}
-
-/// Writes OpenAI chunks: the provider's as they came, with edits written
-/// in, and others anew.
-#[derive(Debug, Default)]
+/// Writes events as OpenAI chunks: the opening chunk, one per delta, and
+/// at the end the finish, usage if the client asked for it, and `[DONE]`.
+#[derive(Debug)]
 struct Chunks {
-    so_far: SoFar,
-    /// Earlier edits may make the provider's later cumulative snapshots stale.
-    usage_changed: bool,
     /// Whether the client asked for the usage chunk; else it is hidden.
     show_usage: bool,
-    /// When the opening chunk was written, at the first content.
-    created: Option<u64>,
-    /// The provider's chunks that end the response, kept back to the end.
-    held: Option<BytesMut>,
-    /// A written finish, kept back to the end and sent before those chunks.
-    finish: Option<BytesMut>,
-    /// The tool calls written so far, by the number their maker gave them.
-    calls: Vec<u32>,
-    /// The places of the calls that have no arguments yet.
-    bare: Vec<usize>,
+    start: Option<Start>,
+    /// When the opening chunk was written.
+    created: u64,
+    began: bool,
+    /// The blocks seen, by number.
+    blocks: Vec<Slot>,
+    /// How many tool calls have started: the next one's `index`.
+    calls: u32,
+    usage: Usage,
+    /// The finish, written at the end, after the content released before it.
+    finish: Option<Finish>,
+    gate: Gate,
+    /// The vendor fields of usage, written in the usage chunk.
+    usage_extra: Map<String, Value>,
+}
+
+#[derive(Debug)]
+struct Slot {
+    block: u32,
+    kind: Block,
+    /// A tool call's `index`.
+    call: Option<u32>,
+    /// Whether it had arguments: else it ends with `{}`.
+    arguments: bool,
+    ended: bool,
 }
 
 impl Chunks {
-    fn new(relayed: bool, show_usage: bool) -> Self {
-        let so_far = SoFar {
-            relayed,
-            ..SoFar::default()
-        };
+    fn new(show_usage: bool) -> Self {
         Self {
-            so_far,
             show_usage,
-            ..Self::default()
+            start: None,
+            created: 0,
+            began: false,
+            blocks: Vec::new(),
+            calls: 0,
+            usage: Usage::default(),
+            finish: None,
+            gate: Gate::default(),
+            usage_extra: Map::new(),
         }
     }
 
     fn begin(&mut self, out: &mut BytesMut) {
-        if self.created.is_some() {
+        if std::mem::replace(&mut self.began, true) {
             return;
         }
-        self.created = Some(unix_now());
-        // The provider's chunks open the stream themselves.
-        if self.so_far.relayed {
-            return;
-        }
+        self.created = unix_now();
         let delta = json!({ "role": "assistant", "content": "" });
-        let choices = json!([{ "index": 0, "delta": delta, "finish_reason": null }]);
-        self.chunk(out, choices, None);
+        self.chunk(
+            out,
+            json!([{ "index": 0, "delta": delta, "finish_reason": null }]),
+            None,
+        );
     }
 
-    fn choice(&mut self, out: &mut BytesMut, delta: Value) {
-        self.begin(out);
-        let choices = json!([{ "index": 0, "delta": delta, "finish_reason": null }]);
-        self.chunk(out, choices, None);
-    }
-
-    /// Write a piece of tool call `call`. Among the provider's own chunks
-    /// it keeps the provider's number; else a start opens the next call,
-    /// and arguments go to the call they continue.
-    fn call(
-        &mut self,
-        call: u32,
-        start: Option<(&str, &str)>,
-        arguments: &str,
-        out: &mut BytesMut,
-    ) -> Result<(), Fault> {
-        let (id, name) = start.unzip();
-        if self.so_far.relayed {
-            let call = call_json(Some(call), id, name, arguments);
-            self.choice(out, json!({ "tool_calls": [call] }));
-            return Ok(());
-        }
-        let at = self.calls.iter().position(|k| *k == call);
-        let json = match (start, at) {
-            (Some(_), None) => {
-                let at = self.calls.len();
-                self.calls.push(call);
-                if arguments.is_empty() {
-                    self.bare.push(at);
-                }
-                call_json(Some(at as u32), id, name, arguments)
-            }
-            (_, Some(at)) => {
-                if !arguments.is_empty() {
-                    self.bare.retain(|b| *b != at);
-                }
-                call_json(Some(at as u32), None, None, arguments)
-            }
-            (None, None) => return Err(unwritable_content()),
-        };
-        self.choice(out, json!({ "tool_calls": [json] }));
-        Ok(())
-    }
-
-    /// Ends the tool calls: one that had no arguments has none, as JSON.
-    fn end_calls(&mut self, out: &mut BytesMut) {
-        for at in std::mem::take(&mut self.bare) {
-            let function = json!({ "arguments": "{}" });
-            let call = json!({ "index": at, "function": function });
-            self.choice(out, json!({ "tool_calls": [call] }));
-        }
+    fn delta(&self, out: &mut BytesMut, delta: Value) {
+        self.chunk(
+            out,
+            json!([{ "index": 0, "delta": delta, "finish_reason": null }]),
+            None,
+        );
     }
 
     fn chunk(&self, out: &mut BytesMut, choices: Value, usage: Option<Value>) {
-        let (id, model) = self.so_far.start.clone().unwrap_or_default();
-        let mut chunk = json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": self.created.unwrap_or_default(),
-            "model": model,
-            "choices": choices,
-        });
-        if let Some(u) = usage {
-            chunk["usage"] = u;
+        let mut chunk = envelope(self.start.as_ref(), "chat.completion.chunk", self.created);
+        chunk.insert("choices".into(), choices);
+        if let Some(usage) = usage {
+            chunk.insert("usage".into(), usage);
         }
-        out.extend_from_slice(event(None, &chunk).as_bytes());
+        out.extend_from_slice(event(None, Value::Object(chunk)).as_bytes());
     }
 
-    /// Relay the provider's chunk `raw`, which says `reply`. Its end (a
-    /// finish, or usage alone) is kept back until more content, so replies
-    /// a filter releases at the end go before it.
-    fn relay(&mut self, raw: &Bytes, reply: &Reply, out: &mut BytesMut) {
-        let raw = match self.show_usage {
-            true => raw.clone(),
-            false => match without_usage(raw) {
-                Some(rest) => rest,
-                None => return,
-            },
-        };
-        self.created.get_or_insert_with(unix_now);
-        let content = !reply.content.is_empty() || reply.finish.is_some();
-        let ends = reply.finish.is_some() || (reply.content.is_empty() && !reply.usage.is_empty());
-        if ends {
-            self.held.get_or_insert_default().extend_from_slice(&raw);
-        } else if let (Some(held), false) = (&mut self.held, content) {
-            held.extend_from_slice(&raw);
-        } else {
-            out.extend_from_slice(&self.held.take().unwrap_or_default());
-            out.extend_from_slice(&raw);
-        }
+    fn slot(&mut self, block: u32) -> Result<&mut Slot, Fault> {
+        let slot = self.blocks.iter_mut().find(|s| s.block == block);
+        slot.filter(|s| !s.ended).ok_or_else(unwritable_content)
     }
 
-    /// Write text, this format's other content among its own chunks, and a
-    /// finish, kept back for the end; else an `Err`.
-    fn write(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
-        // Buffered, so a reply failing partway writes nothing.
-        let mut all = BytesMut::new();
-        for piece in &reply.content {
-            match piece {
-                Piece::Text { text, .. } if text.is_empty() => {}
-                Piece::Text { text, .. } => self.choice(&mut all, json!({ "content": text })),
-                // Its choices, or an event that could not be read, as it came.
-                Piece::Other { format, raw, .. } if self.so_far.relayed && **format == *OPENAI => {
-                    self.begin(&mut all);
-                    match &**raw {
-                        Value::String(data) => all.extend_from_slice(event(None, data).as_bytes()),
-                        choices => self.chunk(&mut all, choices.clone(), None),
-                    }
-                }
-                Piece::ToolCall {
-                    call,
-                    id,
-                    name,
-                    arguments,
-                    ..
-                } => self.call(*call, start(id, name), arguments, &mut all)?,
-                _ => return Err(unwritable_content()),
+    fn open(&mut self, block: u32, kind: &Block, out: &mut BytesMut) -> Result<(), Fault> {
+        if let Some(had) = self.blocks.iter().find(|s| s.block == block) {
+            // A start repeated for an open block opens nothing more.
+            return match had.kind == *kind && !had.ended {
+                true => Ok(()),
+                false => Err(unwritable_content()),
+            };
+        }
+        self.begin(out);
+        let call = match kind {
+            Block::ToolCall { id, name } => {
+                let index = self.calls;
+                self.calls += 1;
+                let call = call_json(Some(index), Some(id), Some(name), "");
+                self.delta(out, json!({ "tool_calls": [call] }));
+                Some(index)
             }
+            _ => None,
+        };
+        self.blocks.push(Slot {
+            block,
+            kind: kind.clone(),
+            call,
+            arguments: false,
+            ended: false,
+        });
+        Ok(())
+    }
+
+    fn say(&mut self, block: u32, text: &str, out: &mut BytesMut) -> Result<(), Fault> {
+        let slot = self.slot(block)?;
+        if text.is_empty() {
+            return Ok(());
         }
-        if let Some(f) = &reply.finish {
-            self.begin(&mut all);
-            let mut finish = BytesMut::new();
-            let choices = json!([{ "index": 0, "delta": {}, "finish_reason": FINISH.reason(f)? }]);
-            self.chunk(&mut finish, choices, None);
-            self.finish = Some(finish);
+        let delta = match (&slot.kind, slot.call) {
+            (Block::Text, _) => json!({ "content": text }),
+            (Block::Reasoning, _) => json!({ "reasoning_content": text }),
+            (_, Some(index)) => {
+                slot.arguments = true;
+                json!({ "tool_calls": [call_json(Some(index), None, None, text)] })
+            }
+            _ => return Err(unwritable_content()),
+        };
+        self.delta(out, delta);
+        Ok(())
+    }
+
+    /// End a block: a call that had no arguments has none, as JSON.
+    fn close(&mut self, block: u32, out: &mut BytesMut) -> Result<(), Fault> {
+        let slot = self.blocks.iter_mut().find(|s| s.block == block);
+        let slot = slot.ok_or_else(unwritable_content)?;
+        let bare = slot.call.filter(|_| !slot.arguments && !slot.ended);
+        (slot.arguments, slot.ended) = (true, true);
+        if let Some(index) = bare {
+            let call = call_json(Some(index), None, None, "{}");
+            self.delta(out, json!({ "tool_calls": [call] }));
         }
-        out.extend_from_slice(&all);
         Ok(())
     }
 }
 
 impl Encoder<Reply> for Chunks {
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
-        if reply
-            .came_in(OPENAI)
-            .is_some_and(|o| serde_json::from_slice::<Value>(&o.bytes).is_err())
-        {
-            self.so_far.relayed = true;
-        }
-        let before = self.so_far.usage.clone();
-        self.so_far.note(reply);
-        check_usage(&self.so_far.usage)?;
-        let own = reply
-            .came_in(OPENAI)
-            .filter(|o| serde_json::from_slice::<Value>(&o.bytes).is_err());
-        let Some(own) = own else {
-            self.usage_changed |= !reply.usage.is_empty();
-            return self.write(reply, out);
-        };
-        self.usage_changed |= own.said.usage != reply.usage;
-        if own.said == *reply {
-            let chunk = event_json(&own.bytes).unwrap_or_default();
-            let reported = OpenAiChat::usage(&chunk);
-            self.usage_changed |= usage_step(&before, &reported) != reply.usage;
-            if self.usage_changed {
-                let different = reported
-                    .iter()
-                    .any(|(unit, n)| self.so_far.usage.get(&unit) != Some(n))
-                    || usage_step(&before, &reported) != reply.usage;
-                if different {
-                    if let Some(bytes) = rebuild(&own.bytes, &own.said, reply, &before)? {
-                        self.relay(&bytes, reply, out);
-                    }
-                    return Ok(());
-                }
-            }
-            self.relay(&own.bytes, reply, out);
-            return Ok(());
-        }
-        // What the chunk has no place for is written anew around it.
-        let v = event_json(&own.bytes).unwrap_or_default();
-        let first = first_choice(&v).is_some();
-        let holds = |p: &Piece| first || matches!(p, Piece::Other { .. });
-        let (ahead, inside, after) = split_around(reply, holds, first);
-        let mut all = BytesMut::new();
-        self.write(&ahead, &mut all)?;
-        if let Some(bytes) = rebuild(&own.bytes, &own.said, &inside, &before)? {
-            self.relay(&bytes, &inside, &mut all);
-        }
-        self.write(&after, &mut all)?;
-        out.extend_from_slice(&all);
+        let mut made = BytesMut::new();
+        self.write(reply, &mut made)?;
+        self.gate.pass(reply, &made, out);
         Ok(())
     }
 
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        if end.is_ok() {
+            self.gate.release(out);
+        }
+        self.write_end(end, out)
+    }
+}
+
+impl Chunks {
+    fn write(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+        match reply {
+            Reply::Start(start) => _ = self.start.get_or_insert_with(|| start.clone()),
+            Reply::BlockStart { block, kind } => self.open(*block, kind, out)?,
+            Reply::Delta { block, delta } => self.say(*block, delta, out)?,
+            Reply::BlockEnd { block } => self.close(*block, out)?,
+            Reply::Usage(usage) => {
+                self.usage += usage;
+                check_usage(&self.usage)?;
+            }
+            Reply::Finish(finish) => {
+                FINISH.reason(finish)?;
+                self.finish = Some(finish.clone());
+                self.begin(out);
+            }
+            Reply::Other { format, raw } if **format == *OPENAI && usage_fields(raw).is_some() => {
+                if let Some(fields) = usage_fields(raw) {
+                    self.usage_extra.extend(fields.clone());
+                }
+            }
+            Reply::Other { format, raw } if **format == *OPENAI => match &**raw {
+                // An event that could not be read, as it came.
+                Value::String(data) => out.extend_from_slice(event(None, data).as_bytes()),
+                v if v["choices"].is_array() => {
+                    self.begin(out);
+                    let choices = v["choices"].as_array().into_iter().flatten();
+                    let choices: Vec<Value> = choices.map(|c| rekey(c, "delta")).collect();
+                    self.chunk(out, choices.into(), None);
+                }
+                other => out.extend_from_slice(event(None, other).as_bytes()),
+            },
+            Reply::Other { format, raw } if is_inert(format, raw) => {}
+            Reply::Other { .. } => return Err(unwritable_content()),
+            _ => return Err(unwritable_content()),
+        }
+        Ok(())
+    }
+
+    fn write_end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         if let Err(f) = end {
-            out.extend_from_slice(&self.held.take().unwrap_or_default());
+            // What the provider finished before it broke off is kept.
+            if let Some(finish) = self.finish.take() {
+                self.begin(out);
+                let reason = FINISH.reason(&finish)?;
+                self.chunk(
+                    out,
+                    json!([{ "index": 0, "delta": {}, "finish_reason": reason }]),
+                    None,
+                );
+            }
             let body = match f.get::<respan_gateway_http::RawReply>().map(|r| r.0.body()) {
                 Some(raw) => String::from_utf8_lossy(raw).into_owned(),
                 None => OpenAiChat::error_body(f).to_string(),
@@ -1150,17 +1146,29 @@ impl Encoder<Reply> for Chunks {
             out.extend_from_slice(event(None, body).as_bytes());
             return Ok(());
         }
-        if !self.so_far.relayed && self.so_far.finish.is_none() {
-            self.write(&Reply::finished(Finish::Stop), out)?;
-        }
         self.begin(out);
-        self.end_calls(out);
-        out.extend_from_slice(&self.finish.take().unwrap_or_default());
-        out.extend_from_slice(&self.held.take().unwrap_or_default());
-        // Relayed chunks carry their own usage chunk.
-        if !self.so_far.relayed && self.show_usage && !self.so_far.usage.is_empty() {
-            let usage = OpenAiChat::usage_body(&self.so_far.usage);
-            self.chunk(out, json!([]), Some(usage));
+        let open: Vec<u32> = self
+            .blocks
+            .iter()
+            .filter(|s| !s.ended)
+            .map(|s| s.block)
+            .collect();
+        for block in open {
+            self.close(block, out)?;
+        }
+        let finish = self.finish.take().unwrap_or(Finish::Stop);
+        let reason = FINISH.reason(&finish)?;
+        self.chunk(
+            out,
+            json!([{ "index": 0, "delta": {}, "finish_reason": reason }]),
+            None,
+        );
+        if self.show_usage && !self.usage.is_empty() {
+            self.chunk(
+                out,
+                json!([]),
+                Some(usage_body(&self.usage, &self.usage_extra)),
+            );
         }
         out.extend_from_slice(b"data: [DONE]\n\n");
         Ok(())
@@ -1169,23 +1177,12 @@ impl Encoder<Reply> for Chunks {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
-    use crate::common::{patch_request, write_request};
-    use crate::conversation::{Content, Tool, ToolChoice};
+    use crate::common::{finish_raw, write_request};
+    use crate::conversation::{Content, Extra, Message, Tool, ToolChoice};
 
-    /// A chunk's reply, as decoded, for editing.
-    fn said(raw: &Bytes) -> Reply {
-        chunk_reply(&event_json(raw).unwrap_or_default())
-    }
-
-    /// The rebuilt event, or empty bytes.
-    fn rebuilt(raw: &Bytes, reply: &Reply) -> Result<Bytes, Fault> {
-        rebuild(raw, &said(raw), reply, &Usage::default()).map(Option::unwrap_or_default)
-    }
-
-    /// The replies of `chunks`, and how the stream ended.
+    /// The events of `chunks`, and how the stream ended.
     fn decode_all(chunks: &[&str]) -> (Vec<Reply>, Result<(), Fault>) {
         let mut d = OpenAiChat.parser(false);
         let mut out = Vec::new();
@@ -1196,6 +1193,63 @@ mod tests {
         }
         let end = d.finish(&mut out);
         (out, end)
+    }
+
+    /// The events of one whole body.
+    fn decode_body(v: &Value) -> Vec<Reply> {
+        let mut out = Vec::new();
+        OpenAiReader::default()
+            .body(v, &mut out)
+            .expect("a whole response");
+        out
+    }
+
+    /// `replies` as a stream a client that asked for usage as `usage` gets,
+    /// whole, and how it ended.
+    fn stream_of(replies: &[Reply], usage: bool) -> Result<String, Fault> {
+        let mut enc = Chunks::new(usage);
+        let mut out = BytesMut::new();
+        for reply in replies {
+            enc.encode(reply, &mut out)?;
+        }
+        enc.end(&Ok(()), &mut out)?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// `replies` as a whole body.
+    fn body_of(replies: &[Reply]) -> Result<Value, Fault> {
+        let mut whole = Whole::default();
+        replies.iter().try_for_each(|r| whole.add(r))?;
+        OpenAiChat::render(&whole)
+    }
+
+    /// The JSON of each data line, but `[DONE]`.
+    fn chunks_of(stream: &str) -> Vec<Value> {
+        let data = stream
+            .split("\n\n")
+            .filter_map(|e| e.strip_prefix("data: "));
+        data.filter_map(|d| serde_json::from_str(d).ok()).collect()
+    }
+
+    fn text_events(block: u32, text: &str) -> Vec<Reply> {
+        vec![
+            Reply::block_start(block, Block::Text),
+            Reply::delta(block, text),
+            Reply::block_end(block),
+        ]
+    }
+
+    fn call(id: &str, name: &str) -> Block {
+        Block::ToolCall {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    fn usage(unit: &'static str, n: f64) -> Reply {
+        let mut u = Usage::default();
+        u.add(unit, n);
+        Reply::usage(u)
     }
 
     #[test]
@@ -1218,20 +1272,23 @@ mod tests {
         };
         let content = batches(&[role, ": ping\n\n", text]);
         assert!(content[0].0.is_empty() && content[1].0.is_empty());
-        // The start, the ping held behind it, and the text, each as it came.
+        // The start, the usage held behind it, and the text, in order.
         let kinds: Vec<bool> = content[2].0.iter().map(Reply::is_content).collect();
-        assert_eq!(kinds, [true, false, true]);
-        assert!(content[2].0.iter().all(|r| r.came_in(OPENAI).is_some()));
+        assert_eq!(kinds, [true, false, true, true]);
+        assert!(matches!(&content[2].0[0], Reply::Start(s) if s.id == "c1"));
         // A failure first leaves only the usage held, saying nothing.
         let failed = batches(&[role, error]);
         assert!(failed[1].1);
         assert_eq!(failed[1].0.len(), 1);
-        let usage = &failed[1].0[0];
-        assert!(!usage.is_content() && usage.usage.get(units::INPUT_TOKENS) == Some(2.0));
+        let held = &failed[1].0[0];
+        assert!(
+            matches!(held, Reply::Usage(u) if u.get(units::INPUT_TOKENS) == Some(2.0)),
+            "{held:?}"
+        );
     }
 
     #[test]
-    fn a_stream_decodes_into_conversation_replies() {
+    fn a_stream_decodes_into_events() {
         let (out, end) = decode_all(&[
             "data: {\"id\":\"x\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"He",
             "llo\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n",
@@ -1239,16 +1296,23 @@ mod tests {
             "data: [DONE]\n\n",
         ]);
         assert!(end.is_ok());
-        let mut hello = Reply::start("x", "m");
-        hello.content = vec![Piece::text(0, "Hello")];
-        assert_eq!(out[0], hello);
-        assert_eq!(out[1].finish, Some(Finish::Stop));
-        assert_eq!(out[1].usage.get(units::OUTPUT_TOKENS), Some(1.0));
-        // Totals repeated in a later chunk add only what changed; usage
-        // alone is no content.
-        assert_eq!(out[2].usage.get(units::OUTPUT_TOKENS), Some(1.0));
-        assert_eq!(out[2].usage.get(units::INPUT_TOKENS), None);
-        assert!(!out[2].is_content());
+        let mut first = usage(units::INPUT_TOKENS, 3.0);
+        if let Reply::Usage(u) = &mut first {
+            u.add(units::OUTPUT_TOKENS, 1.0);
+        }
+        assert_eq!(
+            out,
+            [
+                Reply::start("x", "m"),
+                Reply::block_start(0, Block::Text),
+                Reply::delta(0, "Hello"),
+                // Totals repeated in a later chunk add only what changed.
+                first,
+                Reply::block_end(0),
+                Reply::finished(Finish::Stop),
+                usage(units::OUTPUT_TOKENS, 1.0),
+            ]
+        );
     }
 
     /// Chunks as OpenAI sends them, with the fields it sets to null.
@@ -1261,49 +1325,74 @@ mod tests {
             "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n",
         ]);
-        let with = |mut start: Reply, content: Vec<Piece>, finish: Option<Finish>| {
-            start.content = content;
-            start.finish = finish;
-            start
-        };
+        let mut start = Reply::start("c1", "gpt");
+        if let Reply::Start(s) = &mut start {
+            let fields = json!({ "created": 1, "system_fingerprint": "fp" });
+            let fields = fields.as_object().cloned().unwrap_or_default();
+            s.extra = Extra::new(OPENAI, fields);
+        }
         assert_eq!(
             out,
             [
-                with(Reply::start("c1", "gpt"), vec![Piece::text(0, "")], None),
-                // Every chunk names its response.
-                with(Reply::start("c1", "gpt"), vec![Piece::text(0, "Hi")], None),
-                with(
-                    Reply::start("c1", ""),
-                    vec![Piece::tool_call(0, "call_1", "f", "")],
-                    None
-                ),
-                with(Reply::start("c1", ""), vec![], Some(Finish::ToolUse)),
+                start,
+                // An empty text opens no block.
+                Reply::block_start(0, Block::Text),
+                Reply::delta(0, "Hi"),
+                // A tool call ends the text before it, and starts its own.
+                Reply::block_end(0),
+                Reply::block_start(1, call("call_1", "f")),
+                Reply::block_end(1),
+                Reply::finished(Finish::ToolUse),
             ]
         );
-        // Each chunk is one reply that keeps its bytes.
-        assert!(out.iter().all(|r| r.came_in(OPENAI).is_some()));
+    }
+
+    #[test]
+    fn blocks_are_numbered_in_the_order_they_open() {
+        let (out, _) = decode_all(&[
+            "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hm\"}}]}\n\n",
+            "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":3,\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"{\"}},{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"g\",\"arguments\":\"\"}}]}}]}\n\n",
+            "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":3,\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        assert_eq!(
+            out[1..],
+            [
+                Reply::block_start(0, Block::Reasoning),
+                Reply::delta(0, "hm"),
+                Reply::block_end(0),
+                Reply::block_start(1, Block::Text),
+                Reply::delta(1, "Hi"),
+                Reply::block_end(1),
+                // Each call, by its `index`, is a block, as it opens.
+                Reply::block_start(2, call("a", "f")),
+                Reply::delta(2, "{"),
+                Reply::block_start(3, call("b", "g")),
+                Reply::delta(2, "}"),
+                Reply::block_end(2),
+                Reply::block_end(3),
+                Reply::finished(Finish::ToolUse),
+            ]
+        );
     }
 
     #[test]
     fn a_choice_with_logprobs_is_other_content() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"logprobs\":{\"content\":[]}}]}\n\n",
-        );
-        // Its text is text, as in a whole response, so a filter sees it.
+        let (out, _) = decode_all(&[
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"logprobs\":{\"content\":[]}}]}\n\n",
+        ]);
+        // Its text is text, as in a whole response, so a filter sees it; the
+        // rest is other content, which comes first.
+        let rest = json!({ "choices": [{ "index": 0, "logprobs": { "content": [] } }] });
         assert_eq!(
-            said(&raw).content,
+            out[1..],
             [
-                Piece::text(0, "Hi"),
-                Piece::other(
-                    OPENAI,
-                    json!([{ "index": 0, "delta": {}, "logprobs": { "content": [] } }])
-                ),
+                Reply::other(OPENAI, rest),
+                Reply::block_start(0, Block::Text),
+                Reply::delta(0, "Hi"),
             ]
         );
-        let mut edited = said(&raw);
-        edited.content[0] = Piece::text(0, "HI");
-        let out = rebuilt(&raw, &edited);
-        assert!(out.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"content\":\"HI\"")));
     }
 
     #[test]
@@ -1311,7 +1400,7 @@ mod tests {
         let (out, _) = decode_all(&[
             "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\",\"stop_reason\":null}]}\n\n",
         ]);
-        assert!(out[0].content.is_empty() && out[0].finish == Some(Finish::Stop));
+        assert_eq!(out[1..], [Reply::finished(Finish::Stop)]);
     }
 
     #[test]
@@ -1319,34 +1408,39 @@ mod tests {
         let (out, _) = decode_all(&[
             "data: {\"id\":\"x\",\"choices\":[{\"index\":1,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         ]);
-        assert!(out.iter().all(|r| r.finish.is_none()));
+        assert!(!out.iter().any(|r| matches!(r, Reply::Finish(_))));
+        // The other choice is kept, in this format's words.
+        assert!(matches!(&out[1..], [Reply::Other { format, .. }] if &**format == OPENAI));
     }
 
     #[test]
     fn content_the_kind_cannot_hold_is_other() {
         let (out, _) = decode_all(&[
-            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hm\"}}]}\n\n",
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"no\"}}]}\n\n",
         ]);
-        let reasoning = json!([{ "index": 0, "delta": { "reasoning_content": "hm" } }]);
-        assert_eq!(out[0].content, [Piece::other(OPENAI, reasoning)]);
+        let refusal = json!({ "choices": [{ "index": 0, "delta": { "refusal": "no" } }] });
+        assert_eq!(out[1..], [Reply::other(OPENAI, refusal)]);
     }
 
     #[test]
-    fn a_chunk_is_one_reply_of_all_it_says() {
+    fn a_chunk_is_all_it_says_as_events_in_order() {
         let (out, _) = decode_all(&[
-            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":1}}\n\n",
         ]);
-        let [chunk] = &out[..] else {
-            panic!("{out:?}");
-        };
-        let mut hi = Reply::start("x", "");
-        hi.content = vec![Piece::text(0, "hi")];
-        hi.finish = Some(Finish::Stop);
-        assert_eq!(chunk, &hi);
-        assert!(chunk.came_in(OPENAI).is_some());
+        assert_eq!(
+            out,
+            [
+                Reply::start("x", ""),
+                usage(units::OUTPUT_TOKENS, 1.0),
+                Reply::block_start(0, Block::Text),
+                Reply::delta(0, "hi"),
+                Reply::block_end(0),
+                Reply::finished(Finish::Stop),
+            ]
+        );
     }
 
-    // N5: a decoder ends only at the end of its body, so what follows the
+    // A decoder ends only at the end of its body, so what follows the
     // terminator is read and ignored; a body that ends before it is cut
     // short.
     #[test]
@@ -1378,371 +1472,292 @@ mod tests {
         let error = "data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n";
         let (_, end) = decode_all(&[error]);
         let mut bytes = BytesMut::new();
-        let mut enc = Chunks::new(true, false);
+        let mut enc = Chunks::new(false);
         assert!(enc.end(&end, &mut bytes).is_ok());
         // Its fields are the format's, so it is written as it came.
         assert_eq!(&bytes[..], error.as_bytes());
     }
 
     #[test]
-    fn an_edited_event_keeps_its_chunk_shape() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"x\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+    fn an_edited_start_is_written_in_every_chunk() {
+        let mut replies = vec![Reply::start("y", "alias")];
+        replies.extend(text_events(0, "HI"));
+        let stream = stream_of(&replies, false).expect("a stream");
+        let chunks = chunks_of(&stream);
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c["id"] == "y" && c["model"] == "alias")
         );
-        let mut edited = Reply::start("y", "m");
-        edited.content = vec![Piece::text(0, "HI")];
-        assert_eq!(
-            rebuilt(&raw, &edited).ok(),
-            Some(Bytes::from_static(
-                b"data: {\"id\":\"y\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"HI\"}}]}\n\n"
-            ))
-        );
+        let text: String = chunks
+            .iter()
+            .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+            .collect();
+        assert_eq!(text, "HI");
         // Text a filter replaced with a finish is the finish.
-        let finish = rebuilt(&raw, &Reply::finished(Finish::Length)).unwrap_or_default();
-        assert!(String::from_utf8_lossy(&finish).contains("\"finish_reason\":\"length\""));
+        let length = [Reply::start("y", "m"), Reply::finished(Finish::Length)];
+        let stream = stream_of(&length, false).expect("a stream");
+        assert!(stream.contains("\"finish_reason\":\"length\""), "{stream}");
     }
 
     #[test]
     fn a_finish_edited_beside_a_tool_call_is_written() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
-        );
-        let mut edited = said(&raw);
-        edited.finish = Some(Finish::Stop);
-        let out = rebuilt(&raw, &edited);
-        assert!(
-            out.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"finish_reason\":\"stop\""))
-        );
+        let replies = [
+            Reply::block_start(0, call("t", "f")),
+            Reply::block_end(0),
+            Reply::finished(Finish::Stop),
+        ];
+        let stream = stream_of(&replies, false).expect("a stream");
+        assert!(stream.contains("\"finish_reason\":\"stop\""), "{stream}");
+        // A call that had no arguments has none, as JSON.
+        assert!(stream.contains("\"arguments\":\"{}\""), "{stream}");
     }
 
     #[test]
     fn a_tool_call_emptied_in_a_stream_fails_rather_than_leave_a_shell() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0}]}}]}\n\n",
-        );
-        assert!(rebuilt(&raw, &Reply::other(OPENAI, json!({}))).is_err());
-    }
-
-    #[test]
-    fn a_model_renamed_in_a_chunk_without_one_is_written() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        );
-        let mut edited = said(&raw);
-        edited.start = Reply::start("c1", "alias").start;
-        let out = rebuilt(&raw, &edited);
-        assert!(out.is_ok_and(|b| String::from_utf8_lossy(&b).contains("\"model\":\"alias\"")));
+        // Arguments for a call that never started.
+        let replies = [Reply::delta(0, "{}")];
+        assert!(stream_of(&replies, false).is_err());
+        assert!(body_of(&replies).is_err());
+        // A call that is a shell, with no id or name, cannot be decoded.
+        let (_, end) = decode_all(&[
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0}]}}]}\n\n",
+        ]);
+        assert!(end.is_err());
     }
 
     #[test]
     fn the_text_of_the_opening_chunk_can_be_cleared() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"SECRET\"}}]}\n\n",
-        );
-        let mut edited = said(&raw);
-        edited.content = vec![Piece::text(0, "")];
-        let out = rebuilt(&raw, &edited);
-        assert!(out.is_ok_and(|b| !String::from_utf8_lossy(&b).contains("SECRET")));
+        let (out, _) = decode_all(&[
+            "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"SECRET\"}}]}\n\n",
+        ]);
+        let kept: Vec<Reply> = out
+            .into_iter()
+            .filter(|r| !matches!(r, Reply::Delta { .. }))
+            .collect();
+        let stream = stream_of(&kept, false).expect("a stream");
+        assert!(!stream.contains("SECRET"), "{stream}");
     }
 
     #[test]
     fn a_tool_call_a_filter_replaces_with_text_is_gone() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0}]}}]}\n\n",
-        );
-        let out = rebuilt(&raw, &Reply::text(0, "[removed]")).unwrap_or_default();
-        let out = String::from_utf8_lossy(&out);
-        assert!(
-            out.contains("\"content\":\"[removed]\"") && !out.contains("tool_calls"),
-            "{out}"
-        );
-        // Changing a tool call, rather than taking it, fails the response.
-        let v = json!({ "id": "c1", "model": "m", "choices": [{ "index": 0, "finish_reason": "tool_calls",
-            "message": { "role": "assistant", "content": "ok", "tool_calls": [{ "id": "t" }] } }] });
-        let whole = Bytes::from(v.to_string());
-        let mut edited = OpenAiChat::reply(&v);
-        edited.content = vec![
-            Piece::text(0, "ok"),
-            Piece::other(OPENAI, json!({ "not": "choices" })),
-        ];
-        let said = OpenAiChat::reply(&v);
-        assert!(crate::common::rebuild_whole::<OpenAiChat>(&whole, &said, &edited).is_err());
+        let mut replies = vec![Reply::start("x", "m")];
+        replies.extend(text_events(0, "[removed]"));
+        let stream = stream_of(&replies, false).expect("a stream");
+        assert!(stream.contains("\"content\":\"[removed]\""), "{stream}");
+        assert!(!stream.contains("tool_calls"), "{stream}");
+        // What it cannot write fails the response.
+        let foreign = [Reply::other("anthropic-messages", json!({ "type": "x" }))];
+        assert!(body_of(&foreign).is_err());
     }
 
     #[test]
-    fn a_whole_response_decodes_into_one_reply() {
+    fn a_whole_response_decodes_into_events() {
         let v = json!({
-            "id": "c1", "model": "gpt",
+            "id": "c1", "model": "gpt", "created": 7,
             "choices": [{ "index": 0, "finish_reason": "tool_calls", "message": {
                 "role": "assistant", "content": "ok", "refusal": null,
                 "tool_calls": [{ "id": "t", "type": "function", "function": { "name": "f", "arguments": "{}" } }],
             }}],
+            "usage": { "prompt_tokens": 2, "completion_tokens": 1 },
         });
-        let mut whole = Reply::start("c1", "gpt");
-        whole.content = vec![Piece::text(0, "ok"), Piece::tool_call(0, "t", "f", "{}")];
-        whole.finish = Some(Finish::ToolUse);
-        assert_eq!(OpenAiChat::reply(&v), whole);
-        // Its text can be edited beside the tool call.
-        let mut edited = OpenAiChat::reply(&v);
-        edited.content[0] = Piece::text(0, "OK");
-        let raw = Bytes::from(v.to_string());
-        let said = OpenAiChat::reply(&v);
-        let out = crate::common::rebuild_whole::<OpenAiChat>(&raw, &said, &edited);
-        assert!(String::from_utf8_lossy(&out.unwrap_or_default()).contains("\"content\":\"OK\""));
+        let mut start = Reply::start("c1", "gpt");
+        if let Reply::Start(s) = &mut start {
+            let fields = json!({ "created": 7 });
+            s.extra = Extra::new(OPENAI, fields.as_object().cloned().unwrap_or_default());
+        }
+        let mut totals = usage(units::INPUT_TOKENS, 2.0);
+        if let Reply::Usage(u) = &mut totals {
+            u.add(units::OUTPUT_TOKENS, 1.0);
+        }
+        assert_eq!(
+            decode_body(&v),
+            [
+                start,
+                totals,
+                Reply::block_start(0, Block::Text),
+                Reply::delta(0, "ok"),
+                Reply::block_end(0),
+                Reply::block_start(1, call("t", "f")),
+                Reply::delta(1, "{}"),
+                Reply::block_end(1),
+                Reply::finished(Finish::ToolUse),
+            ]
+        );
         // Logprobs and content that is not text are other content too.
         let logprobs = json!({ "choices": [{ "index": 0, "logprobs": { "content": [] },
             "message": { "role": "assistant", "content": "ok" } }] });
         assert!(matches!(
-            OpenAiChat::reply(&logprobs).content.last(),
-            Some(Piece::Other { .. })
+            decode_body(&logprobs).first(),
+            Some(Reply::Other { .. })
         ));
         let parts = json!({ "choices": [{ "index": 0,
             "message": { "role": "assistant", "content": [{ "type": "text", "text": "ok" }] } }] });
         assert!(matches!(
-            OpenAiChat::reply(&parts).content.last(),
-            Some(Piece::Other { .. })
+            decode_body(&parts).first(),
+            Some(Reply::Other { .. })
         ));
-        let mut patched = v.clone();
-        assert!(OpenAiChat::put(&mut patched, &Reply::text(0, "OK")).is_ok());
-        assert_eq!(patched["choices"][0]["message"]["content"], "OK");
-        // An edit that points nowhere changes nothing.
-        let mut empty = json!({});
-        assert!(OpenAiChat::put(&mut empty, &Reply::text(3, "x")).is_ok());
-        assert_eq!(empty, json!({}));
+        // A whole body collects what the events say, and keeps its other fields.
+        let again = body_of(&decode_body(&v)).expect("a body");
+        assert_eq!(again["created"], 7);
+        let (said, sent) = (&again["choices"][0]["message"], &v["choices"][0]["message"]);
+        assert_eq!(said["content"], "ok");
+        assert_eq!(said["tool_calls"], sent["tool_calls"]);
+        assert_eq!(again["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(again["usage"]["prompt_tokens"], 2);
     }
 
     #[test]
     fn unsupported_usage_edits_fail_instead_of_disappearing() {
-        let raw = Bytes::from_static(
-            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n",
-        );
-        let mut edited = said(&raw);
-        edited.usage.add(units::OUTPUT_TOKENS, 2.0);
-        assert!(rebuilt(&raw, &edited).is_err(), "no usage object to patch");
-        let with_usage =
-            Bytes::from_static(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\n");
-        let mut unknown = said(&with_usage);
-        unknown.usage.add("credits", 3.0);
-        assert!(
-            rebuilt(&with_usage, &unknown).is_err(),
-            "unknown usage unit"
-        );
-        let mut synthetic = Reply::text(0, "ok");
-        synthetic.usage.add("credits", 3.0);
-        let mut out = BytesMut::new();
-        assert!(
-            Chunks::new(false, true)
-                .encode(&synthetic, &mut out)
-                .is_err()
-        );
+        let mut synthetic = vec![Reply::start("x", "m")];
+        synthetic.extend(text_events(0, "ok"));
+        synthetic.push(usage("credits", 3.0));
+        assert!(stream_of(&synthetic, true).is_err());
+        assert!(body_of(&synthetic).is_err());
+        // Cached tokens are part of the input: more than it is no usage.
+        let more = [usage(units::CACHED_INPUT_TOKENS, 3.0)];
+        assert!(body_of(&more).is_err());
     }
 
     #[test]
-    fn groq_stream_usage_rebuilds_in_its_nested_location() {
+    fn groq_usage_is_read_from_beside_the_response_and_its_other_fields_are_kept() {
         let events = [
-            "data: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"vendor\":\"a\"},\"queue_time\":0.2}}\n\n",
+            "data: {\"id\":\"g\",\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"vendor\":\"a\"},\"queue_time\":0.2}}\n\n",
             "id: groq\nevent: completion.chunk\ndata: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"vendor\":\"b\"},\"queue_time\":0.3}}\n\n",
-            "data: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"vendor\":\"c\"}}}\n\n",
+            "data: [DONE]\n\n",
         ];
-        let (mut replies, _) = decode_all(&[events[0], events[1], events[2], "data: [DONE]\n\n"]);
-        replies[1].usage = Usage::default();
-        replies[1].usage.add(units::OUTPUT_TOKENS, 3.0);
-        let mut encoder = Chunks::new(true, true);
-        let mut out = BytesMut::new();
-        for reply in &replies {
-            encoder.encode(reply, &mut out).expect("encode chat chunk");
-        }
-        encoder.end(&Ok(()), &mut out).expect("finish chat stream");
-        let text = String::from_utf8_lossy(&out);
-        assert!(
-            text.contains(events[0]) && text.contains("id: groq"),
-            "{text}"
-        );
-        assert!(
-            !text.contains("\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7"),
-            "{text}"
-        );
-        let (again, _) = decode_all(&[&text]);
-        assert_eq!(
-            again
-                .iter()
-                .map(|r| r.usage.get(units::OUTPUT_TOKENS))
-                .collect::<Vec<_>>(),
-            [Some(1.0), Some(3.0), None]
-        );
-        let rebuilt = text
-            .split("\n\n")
-            .find(|event| event.contains("id: groq"))
-            .expect("Groq event with id survives");
-        let v: Value = event_json(rebuilt.as_bytes()).expect("parse rebuilt Groq event");
-        assert_eq!(v["x_groq"]["usage"]["completion_tokens"], 4);
-        assert_eq!(v["x_groq"]["usage"]["vendor"], "b");
-        assert_eq!(v["x_groq"]["queue_time"], 0.3);
+        let (out, _) = decode_all(&events);
+        let sums: Vec<_> = out
+            .iter()
+            .filter_map(|r| match r {
+                Reply::Usage(u) => u.get(units::OUTPUT_TOKENS),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sums, [1.0, 6.0]);
+        let Some(Reply::Start(start)) = out.first() else {
+            panic!("{out:?}");
+        };
+        assert_eq!(start.extra.fields["x_groq"], json!({ "queue_time": 0.2 }));
+        let stream = stream_of(&out, true).expect("a stream");
+        let last = chunks_of(&stream).pop().unwrap_or_default();
+        assert_eq!(last["usage"]["completion_tokens"], 7);
+        assert_eq!(last["x_groq"], json!({ "queue_time": 0.2 }));
     }
 
     #[test]
-    fn edited_whole_usage_keeps_nested_details_and_groq_usage() {
-        for usage_path in ["usage", "x_groq"] {
+    fn whole_usage_keeps_its_details_and_groq_usage_is_counted() {
+        for groq in [false, true] {
             let u = json!({
                 "prompt_tokens": 4, "completion_tokens": 7, "total_tokens": 11,
                 "prompt_tokens_details": {"cached_tokens": 2, "audio_tokens": 1},
-                "completion_tokens_details": {"reasoning_tokens": 3, "accepted_prediction_tokens": 2},
-                "vendor": {"keep": true},
+                "completion_tokens_details": {"reasoning_tokens": 3},
             });
-            let mut response = json!({"id":"c", "model":"m", "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]});
-            if usage_path == "usage" {
-                response["usage"] = u.clone();
-            } else {
-                response["x_groq"] = json!({"usage":u.clone(),"elapsed":12});
+            let mut v = json!({"id": "c", "model": "m", "choices": [{"index": 0,
+                "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]});
+            match groq {
+                false => v["usage"] = u,
+                true => v["x_groq"] = json!({ "usage": u, "elapsed": 12 }),
             }
-            let raw = Bytes::from(response.to_string());
-            let mut said = OpenAiChat::reply(&response);
-            said.usage = OpenAiChat::usage(&response);
-            let mut edited = said.clone();
-            edited.usage = Usage::default();
-            for (unit, value) in [
-                (units::INPUT_TOKENS, 4.0),
-                (units::OUTPUT_TOKENS, 3.0),
-                (units::CACHED_INPUT_TOKENS, 0.0),
-                (units::REASONING_TOKENS, 0.0),
-            ] {
-                // Zero totals are represented by absent usage units in the
-                // typed value; the wire fields themselves must become zero.
-                if value > 0.0 {
-                    edited.usage.add(unit, value);
+            let events = decode_body(&v);
+            let total = events.iter().fold(Usage::default(), |mut all, r| {
+                if let Reply::Usage(u) = r {
+                    all += u;
                 }
+                all
+            });
+            for (unit, n) in [
+                (units::INPUT_TOKENS, 4.0),
+                (units::OUTPUT_TOKENS, 7.0),
+                (units::CACHED_INPUT_TOKENS, 2.0),
+                (units::REASONING_TOKENS, 3.0),
+            ] {
+                assert_eq!(total.get(unit), Some(n), "groq {groq}");
             }
-            let bytes = crate::common::rebuild_whole::<OpenAiChat>(&raw, &said, &edited)
-                .expect("rebuild whole chat usage");
-            let got: Value = serde_json::from_slice(&bytes).expect("parse rebuilt chat response");
-            let usage = if usage_path == "usage" {
-                &got["usage"]
-            } else {
-                &got["x_groq"]["usage"]
-            };
-            assert_eq!(usage["completion_tokens"], 3);
-            assert_eq!(usage["total_tokens"], 7);
+            let again = body_of(&events).expect("a body");
+            let usage = &again["usage"];
+            assert_eq!(usage["total_tokens"], 11);
+            // What has no unit travels with the response.
             assert_eq!(
                 usage["prompt_tokens_details"],
-                json!({"cached_tokens":0,"audio_tokens":1})
+                json!({"cached_tokens": 2, "audio_tokens": 1})
             );
             assert_eq!(
                 usage["completion_tokens_details"],
-                json!({"reasoning_tokens":0,"accepted_prediction_tokens":2})
+                json!({"reasoning_tokens": 3})
             );
-            assert_eq!(usage["vendor"], json!({"keep":true}));
-            if usage_path == "x_groq" {
-                assert_eq!(got["x_groq"]["elapsed"], 12);
+            if groq {
+                assert_eq!(again["x_groq"], json!({ "elapsed": 12 }));
             }
         }
     }
 
     #[test]
-    fn a_usage_chunk_the_client_did_not_ask_for_is_not_relayed() {
+    fn a_usage_chunk_the_client_did_not_ask_for_is_not_written() {
         let first = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3}}\n\n";
         // OpenAI repeats the totals in a usage chunk the client did not ask
         // for; its own fields, such as `obfuscation`, do not keep it.
         let again =
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3},\"obfuscation\":\"xyz\"}\n\n";
         let (replies, end) = decode_all(&[first, again, "data: [DONE]\n\n"]);
-        let counted = replies.iter().map(|r| r.usage.get(units::INPUT_TOKENS));
-        assert_eq!(counted.collect::<Vec<_>>(), [Some(3.0), None]);
+        assert!(end.is_ok());
+        let counted: Vec<_> = replies
+            .iter()
+            .filter_map(|r| match r {
+                Reply::Usage(u) => u.get(units::INPUT_TOKENS),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counted, [3.0]);
         // It counts, but neither it nor the usage on a chunk with choices is
-        // relayed.
-        let mut encoder = Chunks::new(true, false);
-        let mut out = BytesMut::new();
-        for reply in &replies {
-            assert!(encoder.encode(reply, &mut out).is_ok());
-        }
-        assert!(encoder.end(&end, &mut out).is_ok());
-        let out = String::from_utf8_lossy(&out);
+        // written.
+        let out = stream_of(&replies, false).expect("a stream");
         assert!(!out.contains("usage") && out.contains("\"stop\""), "{out}");
+        assert!(!out.contains("obfuscation"), "{out}");
         assert!(out.ends_with("data: [DONE]\n\n"));
     }
 
     #[test]
     fn nested_groq_usage_is_hidden_when_not_requested() {
-        let content = Bytes::from_static(b"id: groq\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"x_groq\":{\"usage\":{\"prompt_tokens\":1},\"trace\":\"x\"}}\n\n");
-        let filtered = without_usage(&content).expect("content remains after hiding usage");
-        let text = String::from_utf8_lossy(&filtered);
-        assert!(
-            text.contains("id: groq") && text.contains("\"trace\":\"x\""),
-            "{text}"
-        );
-        assert!(!text.contains("\"usage\""), "{text}");
-        let only = Bytes::from_static(
-            b"data: {\"choices\":[],\"x_groq\":{\"usage\":{\"prompt_tokens\":1}}}\n\n",
-        );
-        assert!(without_usage(&only).is_none());
+        let (replies, _) = decode_all(&[
+            "id: groq\ndata: {\"id\":\"g\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}],\"x_groq\":{\"usage\":{\"prompt_tokens\":1},\"trace\":\"x\"}}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let out = stream_of(&replies, false).expect("a stream");
+        assert!(out.contains("\"trace\":\"x\""), "{out}");
+        assert!(!out.contains("\"usage\""), "{out}");
     }
 
     #[test]
-    fn edited_text_keeps_the_sse_envelope_and_unedited_bytes() {
-        let raw = Bytes::from_static(b"id: 7\nevent: completion.chunk\nretry: 1500\n: preserve\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"secret\"}}]}\n\n");
-        let mut edited = said(&raw);
-        edited.content = vec![Piece::text(0, "public")];
-        let rebuilt = rebuilt(&raw, &edited).expect("rebuild edited chat event");
-        let text = String::from_utf8_lossy(&rebuilt);
-        for line in [
-            "id: 7",
-            "event: completion.chunk",
-            "retry: 1500",
-            ": preserve",
-        ] {
-            assert!(text.contains(line), "{text}");
-        }
-        assert!(
-            text.contains("public") && !text.contains("secret"),
-            "{text}"
-        );
-        let mut encoder = Chunks::new(true, true);
-        let mut out = BytesMut::new();
-        encoder
-            .encode(
-                &said(&raw).came(&std::sync::Arc::from(OPENAI), raw.clone()),
-                &mut out,
-            )
-            .expect("relay unchanged chat event");
-        assert_eq!(&out[..], &raw[..]);
+    fn an_sse_envelope_is_no_part_of_a_response() {
+        let plain = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"secret\"}}]}\n\n";
+        let wrapped = "id: 7\nevent: completion.chunk\nretry: 1500\n: kept\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"secret\"}}]}\n\n";
+        assert_eq!(decode_all(&[plain]).0, decode_all(&[wrapped]).0);
     }
 
     #[test]
-    fn edited_stream_usage_remains_cumulative_and_keeps_vendor_fields() {
+    fn stream_usage_is_cumulative_on_the_wire_and_written_as_one_total() {
         let events = [
-            "id: first\n: vendor comment\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"vendor\":9}}\n\n",
-            "id: second\nevent: completion.chunk\nretry: 3000\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"total_tokens\":8,\"vendor\":10}}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2,\"vendor\":9}}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"total_tokens\":8,\"vendor\":10}}\n\n",
             "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":7,\"total_tokens\":8,\"vendor\":11}}\n\n",
+            "data: [DONE]\n\n",
         ];
-        let (mut replies, _) = decode_all(&[events[0], events[1], events[2], "data: [DONE]\n\n"]);
-        assert_eq!(replies[1].usage.get(units::OUTPUT_TOKENS), Some(6.0));
-        replies[1].usage = Usage::default();
-        replies[1].usage.add(units::OUTPUT_TOKENS, 3.0);
-        let mut encoder = Chunks::new(true, true);
-        let mut out = BytesMut::new();
-        for reply in &replies {
-            encoder.encode(reply, &mut out).expect("encode chat chunk");
-        }
-        encoder.end(&Ok(()), &mut out).expect("finish chat stream");
-        let text = String::from_utf8_lossy(&out);
-        assert!(text.contains(events[0]), "{text}");
-        assert!(
-            text.contains("id: second")
-                && text.contains("retry: 3000")
-                && text.contains(": vendor comment"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\"vendor\":10") && text.contains("\"vendor\":11"),
-            "{text}"
-        );
-        let (again, _) = decode_all(&[&text]);
-        assert_eq!(
-            again
-                .iter()
-                .map(|r| r.usage.get(units::OUTPUT_TOKENS))
-                .collect::<Vec<_>>(),
-            [Some(1.0), Some(3.0), None]
-        );
+        let (mut replies, _) = decode_all(&events);
+        let outputs: Vec<_> = replies
+            .iter()
+            .filter_map(|r| match r {
+                Reply::Usage(u) => u.get(units::OUTPUT_TOKENS),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, [1.0, 6.0]);
+        replies.retain(|r| matches!(r, Reply::Usage(_)));
+        // A plugin lowers the second increment: the total follows it.
+        replies[1] = usage(units::OUTPUT_TOKENS, 2.0);
+        let stream = stream_of(&replies, true).expect("a stream");
+        let last = chunks_of(&stream).pop().unwrap_or_default();
+        assert_eq!(last["usage"]["completion_tokens"], 3, "{stream}");
     }
 
     #[test]
@@ -1759,64 +1774,45 @@ mod tests {
                     format!("data: {event}\n\n")
                 })
                 .into();
-            let (replies, _) =
+            let (mut replies, _) =
                 decode_all(&[&events[0], &events[1], &events[2], "data: [DONE]\n\n"]);
-            let mut encoder = Chunks::new(true, true);
-            let mut out = BytesMut::new();
-            for (index, reply) in replies.iter().enumerate() {
-                if index != 1 {
-                    encoder.encode(reply, &mut out).expect("encode chat chunk");
-                }
-            }
-            encoder.end(&Ok(()), &mut out).expect("finish chat stream");
-            let text = String::from_utf8_lossy(&out);
-            let (again, _) = decode_all(&[&text]);
+            // The second report, which adds 6, is dropped.
+            replies.retain(
+                |r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6.0)),
+            );
+            let stream = stream_of(&replies, true).expect("a stream");
+            let again = decode_all(&[&stream]).0;
             let total: f64 = again
                 .iter()
-                .filter_map(|r| r.usage.get(units::OUTPUT_TOKENS))
+                .filter_map(|r| match r {
+                    Reply::Usage(u) => u.get(units::OUTPUT_TOKENS),
+                    _ => None,
+                })
                 .sum();
-            assert_eq!(total, 1.0, "groq={groq}: {text}");
-            assert!(text.contains("\"vendor\":9"), "{text}");
+            assert_eq!(total, 1.0, "groq={groq}: {stream}");
         }
     }
 
     #[test]
-    fn usage_correction_preserves_unchanged_decreases_and_upward_edits() {
-        for (totals, edited, expected) in [
-            ([7, 1, 0], None, [7.0, 1.0, 0.0]),
-            ([1, 7, 7], Some(3.0), [3.0, 9.0, 9.0]),
-        ] {
+    fn usage_never_decreases_and_edits_upward_are_summed() {
+        for (totals, edited, expected) in [([7, 1, 0], None, 7.0), ([1, 7, 7], Some(3.0), 9.0)] {
             let events = totals.map(|n| {
                 format!("data: {{\"choices\":[],\"usage\":{{\"completion_tokens\":{n}}}}}\n\n")
             });
             let (mut replies, _) =
                 decode_all(&[&events[0], &events[1], &events[2], "data: [DONE]\n\n"]);
             if let Some(amount) = edited {
-                replies[0].usage = Usage::default();
-                replies[0].usage.add(units::OUTPUT_TOKENS, amount);
+                replies[0] = usage(units::OUTPUT_TOKENS, amount);
             }
-            let mut encoder = Chunks::new(true, true);
-            let mut out = BytesMut::new();
-            for reply in &replies {
-                encoder.encode(reply, &mut out).expect("encode chat chunk");
-            }
-            encoder.end(&Ok(()), &mut out).expect("finish chat stream");
-            let text = String::from_utf8_lossy(&out);
-            let reported: Vec<_> = text
-                .split("\n\n")
-                .filter_map(|e| event_json(&Bytes::copy_from_slice(e.as_bytes())))
-                .filter_map(|v| OpenAiChat::usage(&v).get(units::OUTPUT_TOKENS))
-                .collect();
-            assert_eq!(reported, expected, "{text}");
-            if edited.is_none() {
-                assert_eq!(text, format!("{}data: [DONE]\n\n", events.concat()));
-            }
+            let stream = stream_of(&replies, true).expect("a stream");
+            let last = chunks_of(&stream).pop().unwrap_or_default();
+            assert_eq!(last["usage"]["completion_tokens"], expected, "{stream}");
         }
     }
 
     /// `body`, relayed unread, as it goes to a provider.
     fn with_usage(body: &'static str) -> Bytes {
-        crate::common::finish_raw::<OpenAiChat>(Bytes::from_static(body.as_bytes()))
+        finish_raw::<OpenAiChat>(Bytes::from_static(body.as_bytes()))
     }
 
     #[test]
@@ -1852,13 +1848,12 @@ mod tests {
         );
     }
 
-    /// The client's `body` with `edit` made to its conversation.
-    fn patched(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
-        let before = OpenAiChat::read(&body);
-        let mut chat = before.clone();
+    /// The client's `body` as the conversation it says, with `edit` made,
+    /// written as a request.
+    fn written(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
+        let mut chat = OpenAiChat.decode_request(Bytes::from(body.to_string()))?;
         edit(&mut chat);
-        let raw = Bytes::from(body.to_string());
-        Ok(patch_request::<OpenAiChat>(&raw, &before, &chat)?.into())
+        Ok(write_request::<OpenAiChat>(&chat)?.into())
     }
 
     #[test]
@@ -1874,16 +1869,16 @@ mod tests {
             "stop": "x",
             "n": 1,
         });
-        let chat = OpenAiChat::read(&body);
         assert_eq!(
-            OpenAiChat::write(&chat).ok(),
+            written(body, |_| {}).ok(),
             Some(json!({
+                "model": "m",
                 "messages": [
                     { "role": "system", "content": "be brief" },
                     { "role": "user", "content": "hi" },
-                    { "role": "system", "content": "and kind" },
+                    { "role": "developer", "content": "and kind" },
                 ],
-                "max_completion_tokens": 5,
+                "max_tokens": 5,
                 "stop": ["x"],
             }))
         );
@@ -1905,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn an_edited_tool_call_and_result_are_written_into_the_clients_json() {
+    fn an_edited_tool_call_and_result_are_written_into_the_request() {
         let call = json!({ "id": "c1", "type": "function",
             "function": { "name": "lookup", "arguments": "{\"email\":\"bob@x.io\"}" } });
         let tool = json!({ "type": "function", "function": { "name": "lookup", "strict": true,
@@ -1926,14 +1921,15 @@ mod tests {
             )]
         );
         assert_eq!(chat.tool_choice, Some(ToolChoice::Required));
-        assert_eq!(chat.tools[0].unsupported.get("strict"), Some(&json!(true)));
-        assert!(chat.unsupported.is_empty());
-        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
+        assert_eq!(chat.tools[0].extra.fields.get("strict"), Some(&json!(true)));
+        assert_eq!(chat.tools[0].extra.format.as_deref(), Some(OPENAI));
+        assert!(chat.extra.is_empty());
+        assert_eq!(written(body.clone(), |_| {}).ok(), Some(body.clone()));
         let mut expected = body.clone();
         expected["messages"][1]["tool_calls"][0]["function"]["arguments"] =
             "{\"email\":\"<EMAIL_1>\"}".into();
         expected["messages"][2]["content"] = "<EMAIL_1> is Bob".into();
-        assert_eq!(patched(body, hide_email).ok(), Some(expected));
+        assert_eq!(written(body, hide_email).ok(), Some(expected));
     }
 
     #[test]
@@ -1956,8 +1952,7 @@ mod tests {
             ]))
         );
         // OpenAI cannot say a call failed.
-        let failed = Message::new(Role::User, "");
-        let mut failed = failed;
+        let mut failed = Message::new(Role::User, "");
         failed.content = vec![Content::tool_result("c1", vec!["no".into()], true)];
         assert!(write_request::<OpenAiChat>(&Conversation::new([failed])).is_err());
     }
@@ -1966,17 +1961,15 @@ mod tests {
     fn what_a_conversation_cannot_hold_is_kept_or_refused() {
         let body = json!({ "model": "m", "messages": [
             { "role": "user", "name": "alice", "content": "hi" },
-        ], "tools": [{ "type": "function", "function": { "name": "f" } }], "n": 2 });
+        ], "tools": [{ "type": "function", "function": { "name": "f" } }], "seed": 7 });
         let chat = OpenAiChat::read(&body);
-        assert_eq!(
-            chat.unsupported,
-            *json!({ "n": 2 }).as_object().unwrap_or(&Map::new())
-        );
+        assert_eq!(chat.extra.fields.get("seed"), Some(&json!(7)));
+        assert_eq!(chat.extra.format.as_deref(), Some(OPENAI));
         // A function tool is the kind's.
         assert_eq!(chat.tools, [Tool::new("f", Value::Null)]);
         assert_eq!(chat.messages[0].text(), "hi");
         assert_eq!(
-            chat.messages[0].unsupported.get("name"),
+            chat.messages[0].extra.fields.get("name"),
             Some(&json!("alice"))
         );
         // To another format it is refused; to OpenAI it is kept.
@@ -1985,14 +1978,24 @@ mod tests {
             err.map(|e| respan_gateway_http::status(&e).as_u16()),
             Some(400)
         );
-        assert!(write_request::<OpenAiChat>(&chat).is_ok());
-        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body));
-        // With the unsupported cleared and only plain messages, it is
-        // sent.
+        assert_eq!(written(body.clone(), |_| {}).ok(), Some(body));
+        // With the extra fields cleared and only plain messages, it is sent.
         let mut chat = chat;
-        chat.unsupported.clear();
+        chat.extra = Extra::default();
         chat.messages = vec![Message::new(Role::User, "hi")];
-        assert!(write_request::<OpenAiChat>(&chat).is_ok());
+        assert!(write_request::<crate::anthropic::AnthropicMessages>(&chat).is_ok());
+    }
+
+    #[test]
+    fn several_choices_are_refused_as_a_bad_request() {
+        let body = json!({ "model": "m", "messages": [], "n": 2 });
+        let chat = OpenAiChat::read(&body);
+        assert_eq!(chat.extra.fields.get("n"), Some(&json!(2)));
+        let refused = write_request::<OpenAiChat>(&chat).err();
+        assert!(refused.is_some_and(|f| f.is::<respan_gateway_sdk::BadRequest>()));
+        // One choice is the default, and says nothing.
+        let one = OpenAiChat::read(&json!({ "model": "m", "messages": [], "n": 1 }));
+        assert!(one.extra.is_empty());
     }
 
     #[test]
@@ -2002,12 +2005,12 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }] });
         let chat = OpenAiChat::read(&body);
         assert_eq!(chat.user.as_deref(), Some("bob@x.io"));
-        assert!(chat.unsupported.is_empty());
+        assert!(chat.extra.is_empty());
         // Kept as it came, or changed or removed by a plugin.
-        assert_eq!(patched(body.clone(), |_| {}).ok(), Some(body.clone()));
-        let redacted = patched(body.clone(), |c| c.user = Some("[x]".into()));
+        assert_eq!(written(body.clone(), |_| {}).ok(), Some(body.clone()));
+        let redacted = written(body.clone(), |c| c.user = Some("[x]".into()));
         assert_eq!(redacted.ok().map(|v| v["user"].clone()), Some(json!("[x]")));
-        let removed = patched(body.clone(), |c| c.user = None);
+        let removed = written(body.clone(), |c| c.user = None);
         assert_eq!(
             removed.ok(),
             Some(json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] }))
@@ -2021,10 +2024,10 @@ mod tests {
             back.ok().map(|v| v["user"].clone()),
             Some(json!("bob@x.io"))
         );
-        // A user that is not a string is not the kind's: it stays unsupported.
+        // A user that is not a string is not the kind's: it stays in `extra`.
         let odd = OpenAiChat::read(&json!({ "user": 7, "messages": [] }));
         assert_eq!(
-            (odd.user, odd.unsupported.get("user")),
+            (odd.user, odd.extra.fields.get("user")),
             (None, Some(&json!(7)))
         );
     }
@@ -2032,9 +2035,9 @@ mod tests {
     #[test]
     fn a_plugin_that_removes_tools_sends_the_request_without_them() {
         let body = json!({ "model": "m", "messages": [], "tools": [{ "type": "function" }] });
-        let edited = patched(body, |c| {
-            c.unsupported.remove("tools");
-            c.unsupported.insert("seed".into(), 7.into());
+        let edited = written(body, |c| {
+            c.extra.fields.shift_remove("tools");
+            c.extra.fields.insert("seed".into(), 7.into());
         });
         assert_eq!(
             edited.ok(),
@@ -2043,48 +2046,61 @@ mod tests {
     }
 
     #[test]
-    fn a_new_limit_leaves_no_old_one_behind() {
-        let messages = json!([{ "role": "user", "content": "hi" }]);
-        for (body, want) in [
+    fn the_limit_is_read_as_the_larger_spelling_and_written_under_the_clients_key() {
+        let v = json!({ "max_tokens": 100_000, "max_completion_tokens": 10, "messages": [] });
+        assert_eq!(OpenAiChat::read(&v).max_tokens, Some(100_000));
+        for (limits, want) in [
+            (json!({ "max_tokens": 4000 }), json!({ "max_tokens": 10 })),
+            (
+                json!({ "max_completion_tokens": 4000 }),
+                json!({ "max_completion_tokens": 10 }),
+            ),
             (
                 json!({ "max_tokens": 4000, "max_completion_tokens": 4000 }),
                 json!({ "max_tokens": 10, "max_completion_tokens": 10 }),
             ),
-            (json!({ "max_tokens": 4000 }), json!({ "max_tokens": 10 })),
             (json!({}), json!({ "max_completion_tokens": 10 })),
-            // A key set to null is no spelling the client used.
-            (
-                json!({ "max_tokens": null, "max_completion_tokens": 5 }),
-                json!({ "max_tokens": null, "max_completion_tokens": 10 }),
-            ),
         ] {
-            let mut body = body;
-            body["messages"] = messages.clone();
-            let mut want = want;
-            want["messages"] = messages.clone();
-            assert_eq!(patched(body, |c| c.max_tokens = Some(10)).ok(), Some(want));
+            let mut body = json!({ "model": "m", "messages": [] });
+            if let Some(fields) = body.as_object_mut() {
+                fields.extend(limits.as_object().cloned().unwrap_or_default());
+            }
+            let edited = written(body.clone(), |c| c.max_tokens = Some(10)).unwrap_or_default();
+            for key in ["max_tokens", "max_completion_tokens"] {
+                assert_eq!(edited.get(key), want.get(key), "{body}: {edited}");
+            }
+            // Removed, it is gone under every spelling.
+            let none = written(body, |c| c.max_tokens = None).unwrap_or_default();
+            assert!(
+                none.get("max_tokens").is_none() && none.get("max_completion_tokens").is_none()
+            );
         }
+        // Another format writes its own spelling.
+        let chat = OpenAiChat::read(
+            &json!({ "max_tokens": 7, "messages": [{"role":"user","content":"hi"}] }),
+        );
+        let sent = write_request::<crate::anthropic::AnthropicMessages>(&chat).map(Value::from);
+        assert_eq!(sent.map(|v| v["max_tokens"].clone()).ok(), Some(json!(7)));
     }
 
     #[test]
     fn whether_it_streams_is_written_with_its_options() {
         let body = json!({ "model": "m", "stream": true, "stream_options": { "include_usage": true },
             "messages": [{ "role": "user", "content": "hi" }] });
-        let out = patched(body, |c| c.stream = false).unwrap_or_default();
-        assert_eq!(out["stream"], false);
+        let out = written(body, |c| c.stream = false).unwrap_or_default();
+        assert!(out.get("stream").is_none());
         assert!(out.get("stream_options").is_none());
     }
 
     #[test]
-    fn a_removed_field_leaves_the_others_in_their_order() {
+    fn a_removed_field_is_not_written_and_the_others_are() {
         let body =
             json!({ "model": "m", "temperature": 0.5, "messages": [], "top_p": 0.9, "seed": 1 });
-        let out = patched(body, |c| c.temperature = None).unwrap_or_default();
-        let keys: Vec<&String> = out
-            .as_object()
-            .map(|o| o.keys().collect())
-            .unwrap_or_default();
-        assert_eq!(keys, ["model", "messages", "top_p", "seed"]);
+        let out = written(body, |c| c.temperature = None).unwrap_or_default();
+        assert_eq!(
+            out,
+            json!({ "model": "m", "messages": [], "top_p": 0.9, "seed": 1 })
+        );
     }
 
     #[test]
@@ -2094,32 +2110,33 @@ mod tests {
             { "role": "assistant", "content": "yo", "refusal": null },
         ]});
         let chat = OpenAiChat::read(&body);
-        assert!(chat.unsupported.is_empty(), "{:?}", chat.unsupported);
+        assert!(chat.extra.is_empty(), "{:?}", chat.extra);
         assert_eq!(chat.messages.len(), 2);
+        assert!(chat.messages.iter().all(Message::is_plain));
     }
 
     #[test]
-    fn an_edited_message_keeps_its_role_and_form() {
+    fn an_edited_message_is_written_with_its_role_and_its_other_fields() {
         let body = json!({ "model": "m", "messages": [
-            { "role": "developer", "content": "key sk-1", "name": null },
+            { "role": "developer", "content": "key sk-1", "name": "ops" },
         ]});
-        // Edited in place, it keeps its form; a message made anew would not.
-        let edited = patched(body, |c| c.messages[0].content = vec!["key [x]".into()]);
+        let edited = written(body, |c| c.messages[0].content = vec!["key [x]".into()]);
+        // The message keeps its spelling of the role, and its name.
         assert_eq!(
             edited.map(|v| v["messages"].clone()).ok(),
-            Some(json!([{ "role": "developer", "content": "key [x]", "name": null }]))
+            Some(json!([{ "role": "developer", "content": "key [x]", "name": "ops" }]))
         );
     }
 
     #[test]
     fn a_system_prompt_can_be_added_to_a_conversation_with_tool_calls() {
-        let call = json!({ "role": "assistant", "tool_calls": [{ "id": "t", "type": "function", "function": { "name": "f", "arguments": "{}" } }] });
+        let call = json!({ "role": "assistant", "content": null, "tool_calls": [{ "id": "t", "type": "function", "function": { "name": "f", "arguments": "{}" } }] });
         let result = json!({ "role": "tool", "tool_call_id": "t", "content": "42" });
         let body = json!({ "model": "m", "messages": [
             { "role": "user", "content": "hi" }, call.clone(), result.clone(),
             { "role": "user", "content": "thanks" },
         ]});
-        let edited = patched(body, |c| {
+        let edited = written(body, |c| {
             c.messages.insert(0, Message::new(Role::System, "be kind"))
         });
         assert_eq!(
@@ -2148,9 +2165,9 @@ mod tests {
             chat.messages[1].content,
             [Content::tool_result("t", vec!["42".into()], false)]
         );
-        assert!(chat.messages[1].unsupported.is_empty());
+        assert!(chat.messages[1].extra.is_empty());
         // The text is edited in its part, beside the image and tool result.
-        let edited = patched(body, |c| {
+        let edited = written(body, |c| {
             c.messages[0].content[0] = "WHAT IS THIS?".into();
         });
         assert_eq!(
@@ -2163,12 +2180,12 @@ mod tests {
     }
 
     #[test]
-    fn a_long_conversation_changed_throughout_keeps_each_message_in_its_form() {
+    fn a_long_conversation_changed_throughout_is_written_message_by_message() {
         let messages: Vec<Value> = (0..5000)
             .map(|i| json!({ "role": "user", "content": format!("m{i}") }))
             .collect();
         let body = json!({ "model": "m", "messages": messages });
-        let edited = patched(body, |c| {
+        let edited = written(body, |c| {
             c.messages.insert(0, Message::new(Role::System, "be kind"));
             for m in &mut c.messages[1..] {
                 m.content = vec![m.text().to_uppercase().into()];
@@ -2187,7 +2204,8 @@ mod tests {
 
     #[test]
     fn an_insert_and_an_edit_elsewhere_keep_the_messages_between() {
-        // Claude Code marks cache breakpoints on earlier messages.
+        // Claude Code marks cache breakpoints on earlier messages: a part
+        // with a marker is the format's own, and is written as it is.
         let cached = json!({ "role": "user", "content": [
             { "type": "text", "text": "the repo", "cache_control": { "type": "ephemeral" } },
         ]});
@@ -2196,7 +2214,7 @@ mod tests {
             { "role": "assistant", "content": "ok" },
             { "role": "user", "content": "my SSN is 123" },
         ]});
-        let edited = patched(body, |c| {
+        let edited = written(body, |c| {
             c.messages.insert(0, Message::new(Role::System, "be kind"));
             c.messages[3].content = vec!["my SSN is [redacted]".into()];
         });
@@ -2215,7 +2233,7 @@ mod tests {
     fn messages_are_added_where_the_plugin_puts_them_among_images() {
         let image = json!({ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": "u" } }] });
         let body = json!({ "model": "m", "messages": [image] });
-        let added = patched(body, |c| {
+        let added = written(body, |c| {
             c.messages.insert(0, Message::new(Role::System, "be kind"));
             c.messages.push(Message::new(Role::User, "and"));
         });
@@ -2231,7 +2249,7 @@ mod tests {
 
     #[test]
     fn a_message_added_to_a_request_with_none_does_not_panic() {
-        let edited = patched(json!({ "model": "m" }), |c| {
+        let edited = written(json!({ "model": "m" }), |c| {
             c.messages.insert(0, Message::new(Role::System, "be kind"));
         });
         assert_eq!(
@@ -2241,12 +2259,12 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_changes_only_what_the_edit_changed() {
+    fn an_edit_changes_only_what_the_edit_changed() {
         let body = json!({
-            "model": "m", "temperature": 1, "top_p": 1, "stop": "x",
+            "model": "m", "temperature": 0.5, "top_p": 0.25, "stop": ["x"],
             "messages": [{ "role": "user", "content": "hi" }],
         });
-        let edited = patched(body.clone(), |c| {
+        let edited = written(body.clone(), |c| {
             c.messages[0] = Message::new(Role::User, "HI")
         });
         let mut expected = body;
@@ -2260,7 +2278,7 @@ mod tests {
         let body = json!({ "model": "m", "messages": [
             { "role": "user", "content": "hi" }, image.clone(),
         ]});
-        let edited = patched(body.clone(), |c| {
+        let edited = written(body.clone(), |c| {
             c.messages[0] = Message::new(Role::User, "HI")
         });
         assert_eq!(
@@ -2268,7 +2286,7 @@ mod tests {
             Some(json!([{ "role": "user", "content": "HI" }, image]))
         );
         // Removing it removes it; sending it in another format is refused.
-        let removed = patched(body.clone(), |c| drop(c.messages.pop()));
+        let removed = written(body.clone(), |c| drop(c.messages.pop()));
         assert_eq!(
             removed.map(|v| v["messages"].clone()).ok(),
             Some(json!([{ "role": "user", "content": "hi" }]))
@@ -2288,19 +2306,19 @@ mod tests {
                 { "type": "file", "file": { "file_data": "x" } }] }] }));
         // A part in OpenAI's shape does not reach Anthropic.
         assert!(write_request::<AnthropicMessages>(&chat).is_err());
-        // One rewritten into Anthropic's does, byte for byte.
-        chat.messages[0].content[1] =
-            crate::conversation::Content::other("anthropic-messages", pdf.clone());
+        // One rewritten into Anthropic's does, as it is.
+        chat.messages[0].content[1] = Content::other("anthropic-messages", pdf.clone());
         let sent = write_request::<AnthropicMessages>(&chat).map(Value::from);
         assert_eq!(
             sent.map(|v| v["messages"][0]["content"][1].clone()).ok(),
             Some(pdf)
         );
         // The same holds for the fields of a request.
-        chat.unsupported
-            .insert("thinking".into(), json!({ "type": "enabled" }));
+        let thinking = json!({ "thinking": { "type": "enabled" } });
+        let fields = thinking.as_object().cloned().unwrap_or_default();
+        chat.extra = Extra::new(OPENAI, fields.clone());
         assert!(write_request::<AnthropicMessages>(&chat).is_err());
-        chat.unsupported_in = Some("anthropic-messages".into());
+        chat.extra = Extra::new("anthropic-messages", fields);
         let sent = write_request::<AnthropicMessages>(&chat).map(Value::from);
         assert_eq!(
             sent.map(|v| v["thinking"].clone()).ok(),
@@ -2308,98 +2326,96 @@ mod tests {
         );
     }
 
-    /// Fields tagged as another format's are refused in a patched request,
-    /// as `write_request` refuses them.
+    /// Fields tagged as another format's are refused in a request, as a
+    /// message's and a tool's are.
     #[test]
-    fn fields_in_another_format_are_not_patched_into_the_clients_request() {
-        let raw: Bytes = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.into();
-        let v: Value = serde_json::from_slice(&raw).unwrap_or_default();
-        let before = OpenAiChat::read(&v);
-        assert_eq!(before.unsupported_in.as_deref(), Some(OpenAiChat::NAME));
-        let mut after = before.clone();
-        after.unsupported_in = Some("anthropic-messages".into());
-        after
-            .unsupported
-            .insert("thinking".into(), json!({ "type": "enabled" }));
-        assert!(write_request::<OpenAiChat>(&after).is_err());
-        let patched = patch_request::<OpenAiChat>(&raw, &before, &after);
-        assert!(patched.is_err(), "sent: {:?}", patched.map(Value::from));
-        // Tagged for this format, the same change is written in.
-        after.unsupported_in = Some(OpenAiChat::NAME.into());
-        let patched = patch_request::<OpenAiChat>(&raw, &before, &after);
+    fn fields_in_another_format_are_not_written_into_a_request() {
+        let body = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{ "type": "function", "function": { "name": "f" } }] });
+        let chat = OpenAiChat::read(&body);
+        let thinking = json!({ "thinking": { "type": "enabled" } });
+        let fields = thinking.as_object().cloned().unwrap_or_default();
+        let mut foreign = chat.clone();
+        foreign.extra = Extra::new("anthropic-messages", fields.clone());
+        let mut message = chat.clone();
+        message.messages[0].extra = Extra::new("anthropic-messages", fields.clone());
+        let mut tool = chat.clone();
+        tool.tools[0].extra = Extra::new("anthropic-messages", fields.clone());
+        let mut role = chat.clone();
+        role.messages[0].role = Role::other("anthropic-messages", "critic");
+        for chat in [foreign, message, tool, role] {
+            let sent = write_request::<OpenAiChat>(&chat);
+            assert!(sent.is_err(), "sent: {:?}", sent.map(Value::from));
+        }
+        // Tagged for this format, the same is written.
+        let mut own = chat;
+        own.extra = Extra::new(OPENAI, fields);
+        let sent = write_request::<OpenAiChat>(&own).map(Value::from);
         assert_eq!(
-            patched.map(|v| v["thinking"].clone()).ok(),
+            sent.map(|v| v["thinking"].clone()).ok(),
             Some(json!({ "type": "enabled" }))
         );
     }
 
-    /// A message's fields tagged as another format's are refused in a
-    /// patched request too, changed message or new one.
     #[test]
-    fn a_messages_fields_in_another_format_are_not_patched_in() {
-        let raw: Bytes = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.into();
-        let v: Value = serde_json::from_slice(&raw).unwrap_or_default();
-        let before = OpenAiChat::read(&v);
-        let mut changed = before.clone();
-        changed.unsupported_in = Some("anthropic-messages".into());
-        changed.messages[0]
-            .unsupported
-            .insert("cache_control".into(), json!({ "type": "ephemeral" }));
-        let mut added = before.clone();
-        added.unsupported_in = Some("anthropic-messages".into());
-        let mut message = Message::new(Role::User, "more");
-        message.unsupported.insert("x".into(), json!(1));
-        added.messages.push(message);
-        for chat in [changed, added] {
-            assert!(write_request::<OpenAiChat>(&chat).is_err());
-            let patched = patch_request::<OpenAiChat>(&raw, &before, &chat);
-            assert!(patched.is_err(), "sent: {:?}", patched.map(Value::from));
-        }
-    }
-
-    #[test]
-    fn a_stream_made_from_replies_always_finishes() {
-        let mut enc = Chunks::new(false, false);
-        let mut out = BytesMut::new();
-        let mut text = Reply::start("x", "m");
-        text.content = vec![Piece::text(0, "hi")];
-        assert!(enc.encode(&text, &mut out).is_ok());
-        assert!(enc.end(&Ok(()), &mut out).is_ok());
-        assert!(String::from_utf8_lossy(&out).contains("\"finish_reason\":\"stop\""));
+    fn a_stream_made_from_events_always_finishes() {
+        let mut replies = vec![Reply::start("x", "m")];
+        replies.extend(text_events(0, "hi"));
+        let out = stream_of(&replies, false).expect("a stream");
+        assert!(out.contains("\"finish_reason\":\"stop\""), "{out}");
+        assert!(out.ends_with("data: [DONE]\n\n"), "{out}");
     }
 
     #[test]
     fn a_translated_tool_call_is_refused() {
-        let mut enc = Chunks::new(false, false);
-        let other = Reply::other(OPENAI, json!({}));
-        assert!(enc.encode(&other, &mut BytesMut::new()).is_err());
+        // An event another format has no form in this one for is refused...
+        let other = Reply::other(
+            "anthropic-messages",
+            json!({ "type": "content_block_start" }),
+        );
+        assert!(stream_of(&[other], false).is_err());
+        // ... but a keep-alive changes no answer, and is dropped.
+        let ping = Reply::other("anthropic-messages", json!({ "type": "ping" }));
+        assert!(stream_of(&[ping], false).is_ok());
     }
 
-    // An edit that puts text where the chunk has no place for it, as in a
-    // chunk of another choice, is written anew beside it.
+    // What a chunk has no place for is written beside the text.
     #[test]
     fn text_a_chunk_has_no_place_for_is_written_beside_it() {
-        let raw = Bytes::from_static(
-            b"data: {\"id\":\"x\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"B\"}}]}\n\n",
-        );
-        let (replies, _) = decode_all(&[std::str::from_utf8(&raw).unwrap_or_default()]);
-        let mut edited = replies[0].clone();
-        edited.content.insert(0, Piece::text(0, "note "));
-        let mut enc = Chunks::new(true, true);
-        let mut out = BytesMut::new();
-        assert!(enc.encode(&edited, &mut out).is_ok());
-        let out = String::from_utf8_lossy(&out);
+        let (replies, _) = decode_all(&[
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"B\"}}]}\n\n",
+        ]);
+        let mut edited = replies;
+        edited.extend(text_events(0, "note "));
+        let out = stream_of(&edited, true).expect("a stream");
         assert!(
             out.contains("\"content\":\"note \"") && out.contains("\"index\":1"),
             "{out}"
         );
     }
+
     #[test]
-    fn the_limit_read_is_the_larger_spelling_and_a_lower_one_patches_both() {
-        let v = json!({ "max_tokens": 100_000, "max_completion_tokens": 10, "messages": [] });
-        assert_eq!(OpenAiChat::read(&v).max_tokens, Some(100_000));
-        let body = json!({ "max_tokens": 100_000, "max_completion_tokens": 10 });
-        let want = json!({ "max_tokens": 10, "max_completion_tokens": 10 });
-        assert_eq!(patched(body, |c| c.max_tokens = Some(10)).ok(), Some(want));
+    fn a_whole_body_joins_every_text_and_keeps_reasoning_and_calls() {
+        let replies = [
+            Reply::start("x", "m"),
+            Reply::block_start(0, Block::Reasoning),
+            Reply::delta(0, "hm"),
+            Reply::block_end(0),
+            Reply::block_start(1, Block::Text),
+            Reply::delta(1, "one "),
+            Reply::block_end(1),
+            Reply::block_start(2, Block::Text),
+            Reply::delta(2, "two"),
+            Reply::block_end(2),
+            Reply::block_start(3, call("t", "f")),
+            Reply::block_end(3),
+        ];
+        let body = body_of(&replies).expect("a body");
+        let message = &body["choices"][0]["message"];
+        assert_eq!(message["content"], "one two");
+        assert_eq!(message["reasoning_content"], "hm");
+        // A call with no arguments has none, as JSON.
+        assert_eq!(message["tool_calls"][0]["function"]["arguments"], "{}");
+        assert_eq!(body["choices"][0]["finish_reason"], "stop");
     }
 }

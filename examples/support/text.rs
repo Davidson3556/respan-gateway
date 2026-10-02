@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_sdk::conversation::{Content, Conversation, Piece, Reply, ToolChoice};
+use respan_gateway_sdk::conversation::{Block, Content, Conversation, Reply, ToolChoice};
 use respan_gateway_sdk::{Fault, Filter};
-use serde_json::{self, Map, Value, json};
+use serde_json::{self, Map, Value};
 
 /// The code of a refusal of content that cannot be read.
 pub const UNREADABLE: &str = "unreadable_content";
@@ -342,7 +342,7 @@ impl Readable for Conversation {
             for part in &mut message.content {
                 edit_content(part, &mut edit)?;
             }
-            edit_fields(&mut message.unsupported, &mut edit)?;
+            edit_fields(&mut message.extra.fields, &mut edit)?;
         }
         for text in self.stop.iter_mut().chain(&mut self.user) {
             edit(text)?;
@@ -353,12 +353,12 @@ impl Readable for Conversation {
                 edit(text)?;
             }
             edit_json(&mut tool.parameters, false, &mut edit)?;
-            edit_fields(&mut tool.unsupported, &mut edit)?;
+            edit_fields(&mut tool.extra.fields, &mut edit)?;
         }
         if let Some(ToolChoice::Tool(name)) = &mut self.tool_choice {
             edit(name)?;
         }
-        edit_fields(&mut self.unsupported, &mut edit)
+        edit_fields(&mut self.extra.fields, &mut edit)
     }
 }
 
@@ -485,34 +485,68 @@ fn readable_anthropic(raw: &Value) -> bool {
     }
 }
 
-fn readable_piece(piece: &Piece) -> bool {
-    match piece {
-        Piece::Text { .. } | Piece::ToolCall { .. } => true,
-        Piece::Other { format, raw, .. } if matches!(format.as_ref(), "openai-chat" | "openai") => {
-            raw.as_array()
-                .is_some_and(|choices| !choices.is_empty() && choices.iter().all(openai_choice))
+/// Whether `raw`, an event of `format` the kind has no form for, is one this
+/// reader knows and can read: what the OpenAI or Anthropic format keeps
+/// beside the typed events, such as a refusal or a keep-alive.
+fn readable_other(format: &str, raw: &Value) -> bool {
+    match format {
+        "openai-chat" | "openai" => {
+            // The kind has one choice; another one is no content a
+            // [`Holdback`] could hold apart, so it is not read.
+            let first = |c: &Value| c.get("index").is_none_or(|i| i == 0);
+            raw.get("choices").is_some_and(|choices| {
+                choices.as_array().is_some_and(|c| {
+                    !c.is_empty() && c.iter().all(|c| first(c) && openai_choice(c))
+                })
+            }) || only_usage(raw)
         }
-        Piece::Other { format, raw, .. } if format.as_ref() == "anthropic-messages" => {
-            readable_anthropic(raw)
-        }
+        "anthropic-messages" => inert(format, raw) || readable_anthropic(raw),
         _ => false,
     }
 }
 
-/// Its texts and other content, such as a tool call. In a stream, a tool
-/// call's arguments come in fragments, each read on its own: a match split
-/// across fragments is not seen whole, unless a [`Holdback`] holds them.
+/// Whether `raw` holds only usage fields.
+fn only_usage(raw: &Value) -> bool {
+    raw.as_object()
+        .is_some_and(|o| o.len() == 1 && o.contains_key("usage"))
+}
+
+/// Whether `raw` says no text and does not change what a reader sees: a
+/// keep-alive, usage alone, a stop's details, a signature.
+fn inert(format: &str, raw: &Value) -> bool {
+    match format {
+        "anthropic-messages" => {
+            matches!(raw["type"].as_str(), Some("ping" | "message_delta"))
+                || raw["delta"]["type"] == "signature_delta"
+        }
+        _ => only_usage(raw),
+    }
+}
+
+/// Whether a reader knows `reply`: every event but an [`Reply::Other`] it
+/// has no reading for.
+fn readable_event(reply: &Reply) -> bool {
+    match reply {
+        Reply::Other { format, raw } => readable_other(format, raw),
+        _ => true,
+    }
+}
+
+/// Its texts: a delta is read as text, a tool call's name, and the events
+/// the kind has no form for as their format keeps them. A tool call's
+/// arguments are deltas too, and a delta does not say what it belongs to: a
+/// [`Holdback`] knows from the block's start, and reads them as JSON text.
+/// In a stream a match split across deltas is not seen whole, unless a
+/// [`Holdback`] holds them.
 impl Readable for Reply {
     fn edit_all(
         &mut self,
         mut edit: impl FnMut(&mut String) -> Result<(), Fault>,
     ) -> Result<(), Fault> {
-        if !self.content.iter().all(readable_piece) {
+        if !readable_event(self) {
             return Err(unreadable("content this reader does not know"));
         }
-        self.content
-            .iter_mut()
-            .try_for_each(|p| edit_piece(p, &mut edit))
+        edit_event(self, &mut edit)
     }
 }
 
@@ -532,18 +566,14 @@ fn edit_arguments(arguments: &mut String, edit: &mut Edit) -> Result<(), Fault> 
     }
 }
 
-fn edit_piece(piece: &mut Piece, edit: &mut Edit) -> Result<(), Fault> {
-    match piece {
-        Piece::Text { text, .. } => edit(text),
-        Piece::ToolCall {
-            name, arguments, ..
-        } => {
-            if let Some(name) = name {
-                edit(name)?;
-            }
-            edit_arguments(arguments, edit)
-        }
-        Piece::Other { raw, .. } => {
+fn edit_event(reply: &mut Reply, edit: &mut Edit) -> Result<(), Fault> {
+    match reply {
+        Reply::Delta { delta, .. } => edit(delta),
+        Reply::BlockStart {
+            kind: Block::ToolCall { name, .. },
+            ..
+        } => edit(name),
+        Reply::Other { format, raw } if !inert(format, raw) => {
             let delta = is_delta(raw);
             edit_raw(Arc::make_mut(raw), "", delta, edit)
         }
@@ -587,36 +617,44 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
     longest
 }
 
+/// What a [`Holdback`] holds a block's text as.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Kind {
+    /// Text or reasoning, read as plain text.
+    Text,
+    /// A tool call's arguments, JSON text.
+    Arguments,
+}
+
 /// A [`Reply`] filter that runs every text through a [`Rewrite`], holding
-/// back what may start a match. Text is held per block: text of another
-/// block, other content, a finish or the end releases it, so a match split
-/// across two text blocks (Anthropic's citations make many) is not seen
-/// whole; holding across would move text into a block that does not say
-/// it. A reply left showing nothing waits, whole, until one that shows
-/// something, so nothing is sent while the start is held; one that is no
-/// content ([`Reply::is_content`]), such as a keep-alive or usage alone,
-/// passes at once unless replies wait before it. Other content, such as a
-/// tool call, is rewritten as [`Readable`] reads it. A streamed tool call's
-/// arguments (`function.arguments` in a chunk's `delta`, as OpenAI sends
-/// them) are held per call like text, so a match split across their
-/// fragments is seen whole and what replaces it is escaped as JSON text; the
-/// tail held at a finish or the end is released as a chunk of just that call's
-/// arguments. Anthropic's `partial_json` is held the same way. OpenAI
-/// choices retain independent text and argument tails, including when their
-/// chunks interleave or one choice finishes before the others.
+/// back what may start a match. It tracks what each block holds from its
+/// [`Reply::BlockStart`]: the deltas of a text or reasoning block are text, a
+/// tool call's are JSON text, so a match split across their fragments is seen
+/// whole and what replaces it is escaped as JSON. A tail is held per block:
+/// a text tail is released, rewritten, before another block opens, at the
+/// block's end, at a finish and at the end of the response, a call's tail
+/// at its block's end, a finish and the end. A match split across two text
+/// blocks (Anthropic's citations make many) is not seen whole; holding across
+/// would move text into a block that does not say it. Events that show
+/// nothing yet (the start, a block opening, held text) wait, in order, until
+/// one that shows something, so nothing is sent while the start is held; an
+/// event that is no content ([`Reply::is_content`]), such as a keep-alive or
+/// usage alone, passes at once unless events wait before it. Other events are
+/// rewritten as [`Readable`] reads them, and refused if it cannot read them.
+/// A delta of a block that never opened is read as text.
 #[derive(Debug)]
 pub struct Holdback<R> {
     rewrite: R,
+    /// What each open block holds.
+    kinds: BTreeMap<u32, Kind>,
     /// The block whose trailing text is held, and that text.
     held: Option<(u32, String)>,
-    /// The tails of typed tool calls' arguments held, by call.
+    /// The tails of tool calls' arguments held, by block.
     calls: BTreeMap<u32, String>,
-    /// The tails of tool-call arguments held in other content, by place.
-    arguments: Vec<Tail>,
-    /// Text tails of OpenAI choices other than choice zero (the typed text).
-    choices: BTreeMap<u64, (Arc<str>, String)>,
-    /// Replies that show nothing yet, in order.
+    /// Events that show nothing yet, in order.
     waiting: Vec<Reply>,
+    /// Whether an event that shows something has gone out.
+    shown: bool,
 }
 
 impl<R: Rewrite> Holdback<R> {
@@ -624,11 +662,11 @@ impl<R: Rewrite> Holdback<R> {
     pub fn new(rewrite: R) -> Self {
         Self {
             rewrite,
+            kinds: BTreeMap::new(),
             held: None,
             calls: BTreeMap::new(),
-            arguments: Vec::new(),
-            choices: BTreeMap::new(),
             waiting: Vec::new(),
+            shown: false,
         }
     }
 
@@ -639,155 +677,165 @@ impl<R: Rewrite> Holdback<R> {
         self.rewrite.rewrite(text)
     }
 
-    /// The held text's block and the text, rewritten, if any.
-    fn release(&mut self) -> Result<Option<(u32, String)>, Fault> {
-        match self.held.take() {
-            Some((block, text)) if !text.is_empty() => Ok(Some((block, self.rewritten(&text)?))),
-            _ => Ok(None),
-        }
-    }
-
-    /// Release the held text into `reply`.
-    fn release_into(&mut self, reply: &mut Reply) -> Result<(), Fault> {
-        if let Some((block, text)) = self.release()? {
-            reply.content.push(Piece::text(block, text));
+    /// Release the held text, rewritten, as a delta.
+    fn release_text(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if let Some((block, text)) = self.held.take() {
+            let text = self.rewritten(&text)?;
+            if !text.is_empty() {
+                out.push(Reply::delta(block, text));
+            }
         }
         Ok(())
     }
 
-    /// Choice zero may arrive as typed text or inside a later array entry.
-    /// Both share `held`; other choices retain independent tails.
-    fn hold_choices(&mut self, format: &Arc<str>, raw: &mut Arc<Value>) {
-        let Some(choices) = Arc::make_mut(raw).as_array_mut() else {
-            return;
-        };
-        for choice in choices {
-            let index = choice["index"].as_u64().unwrap_or(0);
-            let finished = choice["finish_reason"].is_string();
-            if !choice["delta"]["content"].is_string() && !finished {
-                continue;
-            }
-            let before = if index == 0 {
-                self.held.take().map(|(_, text)| text)
-            } else {
-                self.choices.remove(&index).map(|(_, text)| text)
-            }
-            .unwrap_or_default();
-            let text = choice["delta"]["content"].as_str().unwrap_or_default();
-            let mut text = before + text;
-            let keep = if finished {
-                0
-            } else {
-                self.rewrite.pending(&text)
-            };
-            let mut cut = text.len().saturating_sub(keep);
-            while !text.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            let tail = text.split_off(cut);
-            if !tail.is_empty() {
-                if index == 0 {
-                    self.held = Some((0, tail));
-                } else {
-                    self.choices.insert(index, (format.clone(), tail));
-                }
-            }
-            if !text.is_empty() || choice["delta"]["content"].is_string() {
-                choice["delta"]["content"] = text.into();
+    /// Release the arguments held of call `block`, rewritten, as a delta.
+    fn release_call(&mut self, block: u32, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if let Some(mut text) = self.calls.remove(&block) {
+            edit_json_text(&mut text, &mut |t| {
+                *t = self.rewritten(t)?;
+                Ok(())
+            })?;
+            if !text.is_empty() {
+                out.push(Reply::delta(block, text));
             }
         }
+        Ok(())
     }
 
-    /// Hold back the tail of each tool call's arguments in `raw` that may
-    /// start a match or is a cut-off escape, with what was held of the call
-    /// before in front. With `open` false nothing is held: the message ends
-    /// the response.
-    fn hold_arguments(&mut self, format: &Arc<str>, raw: &mut Arc<Value>, open: bool) {
-        let finished: Vec<_> = raw
-            .as_array()
+    /// Release everything held: the text, then each call's arguments.
+    fn release_all(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        self.release_text(out)?;
+        let blocks: Vec<u32> = self.calls.keys().copied().collect();
+        blocks
             .into_iter()
-            .flatten()
-            .filter(|choice| choice["finish_reason"].is_string())
-            .filter_map(|choice| choice["index"].as_u64())
-            .collect();
-        let (rewrite, tails) = (&self.rewrite, &mut self.arguments);
-        for_arguments(Arc::make_mut(raw), &mut |path, arguments| {
-            let at = tails.iter().position(|t| t.path == path);
-            let before = at.map(|i| tails.remove(i).text).unwrap_or_default();
-            let mut text = before + arguments;
-            let choice = choice_index(path);
-            let open = (open || choice != 0) && !finished.contains(&choice);
-            let cut = if open {
-                held_from(&text, |t| rewrite.pending(t))
-            } else {
-                text.len()
-            };
-            let tail = text.split_off(cut);
-            if !tail.is_empty() {
-                let (format, path) = (format.clone(), path.to_vec());
-                tails.push(Tail {
-                    format,
-                    path,
-                    text: tail,
-                });
-            }
-            *arguments = text;
-        });
+            .try_for_each(|block| self.release_call(block, out))
     }
 
-    /// Hold back the tail of tool call `call`'s `arguments` that may start a
+    /// Hold back the tail of call `block`'s `arguments` that may start a
     /// match or is a cut-off escape, with what was held of the call before
-    /// in front, unless `open` is false; rewrite the rest.
-    fn hold_call(&mut self, call: u32, arguments: &mut String, open: bool) -> Result<(), Fault> {
-        let mut text = self.calls.remove(&call).unwrap_or_default() + arguments.as_str();
-        if open {
-            let cut = held_from(&text, |t| self.rewrite.pending(t));
-            let tail = text.split_off(cut);
-            if !tail.is_empty() {
-                self.calls.insert(call, tail);
-            }
+    /// in front; rewrite the rest.
+    fn hold_call(&mut self, block: u32, delta: String, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        let mut text = self.calls.remove(&block).unwrap_or_default() + &delta;
+        let cut = held_from(&text, |t| self.rewrite.pending(t));
+        let tail = text.split_off(cut);
+        if !tail.is_empty() {
+            self.calls.insert(block, tail);
         }
         edit_arguments(&mut text, &mut |t| {
             *t = self.rewritten(t)?;
             Ok(())
         })?;
-        *arguments = text;
+        if !text.is_empty() {
+            out.push(Reply::delta(block, text));
+        }
         Ok(())
     }
 
-    /// Release the typed calls' arguments held, rewritten.
-    fn release_calls(&mut self) -> Result<Vec<Piece>, Fault> {
-        let mut pieces = Vec::new();
-        for (call, mut text) in std::mem::take(&mut self.calls) {
-            edit_json_text(&mut text, &mut |t| {
-                *t = self.rewritten(t)?;
-                Ok(())
-            })?;
-            pieces.push(Piece::tool_arguments(call, text));
+    /// Hold back the tail of `delta`, text of `block`, that may start a
+    /// match, with the held text in front; rewrite the rest.
+    fn hold_text(&mut self, block: u32, delta: String, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if self.held.as_ref().is_some_and(|(b, _)| *b != block) {
+            self.release_text(out)?;
         }
-        Ok(pieces)
+        let mut text = self.held.take().map(|(_, t)| t).unwrap_or_default() + &delta;
+        let mut at = text.len().saturating_sub(self.rewrite.pending(&text));
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        let tail = text.split_off(at);
+        if !tail.is_empty() {
+            self.held = Some((block, tail));
+        }
+        let text = self.rewritten(&text)?;
+        if !text.is_empty() {
+            out.push(Reply::delta(block, text));
+        }
+        Ok(())
     }
 
-    /// Release the arguments held, rewritten, as one piece for each call.
-    fn release_arguments(&mut self, choice: Option<u64>) -> Result<Vec<Piece>, Fault> {
-        let (tails, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.arguments)
-            .into_iter()
-            .partition(|tail| choice.is_none_or(|index| choice_index(&tail.path) == index));
-        self.arguments = kept;
-        let mut pieces = Vec::with_capacity(tails.len());
-        for Tail {
-            format,
-            path,
-            mut text,
-        } in tails
-        {
-            edit_json_text(&mut text, &mut |t| {
-                *t = self.rewritten(t)?;
-                Ok(())
-            })?;
-            pieces.push(Piece::other(format, skeleton(&path, text)));
+    /// The events `reply` becomes, in order.
+    fn rewrite_event(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        match reply {
+            Reply::BlockStart { block, kind } => {
+                self.release_text(out)?;
+                let kind = match kind {
+                    Block::ToolCall { id, name } => {
+                        self.kinds.insert(block, Kind::Arguments);
+                        let name = self.rewritten(&name)?;
+                        Block::ToolCall { id, name }
+                    }
+                    kind => {
+                        self.kinds.insert(block, Kind::Text);
+                        kind
+                    }
+                };
+                out.push(Reply::block_start(block, kind));
+            }
+            Reply::Delta { block, delta } => match self.kinds.get(&block) {
+                Some(Kind::Arguments) => self.hold_call(block, delta, out)?,
+                _ => self.hold_text(block, delta, out)?,
+            },
+            Reply::BlockEnd { block } => {
+                if self.held.as_ref().is_some_and(|(b, _)| *b == block) {
+                    self.release_text(out)?;
+                }
+                self.release_call(block, out)?;
+                self.kinds.remove(&block);
+                out.push(Reply::block_end(block));
+            }
+            Reply::Finish(finish) => {
+                self.release_all(out)?;
+                out.push(Reply::Finish(finish));
+            }
+            mut other @ Reply::Other { .. } => {
+                if !matches!(&other, Reply::Other { format, raw } if inert(format, raw)) {
+                    self.release_text(out)?;
+                }
+                edit_event(&mut other, &mut |text| {
+                    *text = self.rewritten(text)?;
+                    Ok(())
+                })?;
+                out.push(other);
+            }
+            reply => out.push(reply),
         }
-        Ok(pieces)
+        Ok(())
+    }
+
+    /// Send `event`, or let it wait if nothing has been shown yet and it
+    /// shows nothing.
+    fn emit(&mut self, event: Reply, out: &mut Vec<Reply>) {
+        let shows = match &event {
+            Reply::Finish(_) | Reply::Delta { .. } => true,
+            Reply::BlockStart { kind, .. } => matches!(kind, Block::ToolCall { .. }),
+            _ => false,
+        };
+        // No content, such as a keep-alive or usage alone, is not delayed
+        // unless events wait before it.
+        if self.shown || shows || (!event.is_content() && self.waiting.is_empty()) {
+            self.shown |= shows;
+            out.append(&mut self.waiting);
+            out.push(event);
+        } else {
+            self.waiting.push(event);
+        }
+    }
+}
+
+impl<R: Rewrite> Filter<Reply> for Holdback<R> {
+    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        if !readable_event(&reply) {
+            return Err(unreadable("content this reader does not know"));
+        }
+        let mut events = Vec::new();
+        self.rewrite_event(reply, &mut events)?;
+        events.into_iter().for_each(|event| self.emit(event, out));
+        Ok(())
+    }
+
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+        out.append(&mut self.waiting);
+        self.release_all(out)
     }
 }
 
@@ -820,224 +868,6 @@ fn held_from(text: &str, pending: impl Fn(&str) -> usize) -> usize {
         cut -= step.len();
     }
     last + cut
-}
-
-/// The tail of a tool call's arguments a [`Holdback`] holds, as JSON text.
-#[derive(Debug)]
-struct Tail {
-    /// The format of the chunks the call is in.
-    format: Arc<str>,
-    /// Where the arguments are in a chunk.
-    path: Vec<Step>,
-    text: String,
-}
-
-/// A step from a message's content to a value in it: what makes the same
-/// tool call's arguments in another chunk the same place.
-#[derive(Debug, Clone, PartialEq)]
-enum Step {
-    Key(String),
-    /// An element of an array.
-    Element,
-    /// The `index` the object being entered names itself by.
-    Index(u64),
-}
-
-fn choice_index(path: &[Step]) -> u64 {
-    // Only the outer choices array identifies a choice; deeper indexes name tools.
-    match path {
-        [Step::Element, Step::Index(index), ..] => *index,
-        _ => 0,
-    }
-}
-
-/// Runs `visit` on each streamed tool call's arguments in `v` (a chunk's
-/// choices), with their place in it.
-fn for_arguments(v: &mut Value, visit: &mut impl FnMut(&[Step], &mut String)) {
-    fn walk(
-        v: &mut Value,
-        parent: &str,
-        delta: bool,
-        path: &mut Vec<Step>,
-        visit: &mut impl FnMut(&[Step], &mut String),
-    ) {
-        match v {
-            Value::Array(items) => {
-                for item in items {
-                    path.push(Step::Element);
-                    walk(item, parent, delta, path, visit);
-                    path.pop();
-                }
-            }
-            Value::Object(fields) => {
-                let index = fields.get("index").and_then(Value::as_u64);
-                path.extend(index.map(Step::Index));
-                for (name, value) in fields.iter_mut() {
-                    path.push(Step::Key(name.clone()));
-                    let calls = ["function", "function_call"].contains(&parent);
-                    let arguments = (calls && name == "arguments") || name == "partial_json";
-                    match value {
-                        Value::String(s) if delta && arguments => visit(path, s),
-                        _ => walk(value, name, delta || name == "delta", path, visit),
-                    }
-                    path.pop();
-                }
-                if index.is_some() {
-                    path.pop();
-                }
-            }
-            _ => {}
-        }
-    }
-    walk(v, "", is_delta(v), &mut Vec::new(), visit);
-}
-
-/// The chunk that holds only `text` at `path`.
-fn skeleton(path: &[Step], text: String) -> Value {
-    match path {
-        [] => text.into(),
-        [Step::Key(name), rest @ ..] => {
-            let mut object = json!({ name.as_str(): skeleton(rest, text) });
-            if name == "partial_json" {
-                object["type"] = "input_json_delta".into();
-            }
-            object
-        }
-        [Step::Element, rest @ ..] => Value::Array(vec![skeleton(rest, text)]),
-        [Step::Index(n), rest @ ..] => {
-            let mut object = skeleton(rest, text);
-            object["index"] = (*n).into();
-            object
-        }
-    }
-}
-
-/// Whether a reader sees something in it: a finish or content that is not
-/// empty text.
-fn shows(reply: &Reply) -> bool {
-    let empty = |p: &Piece| matches!(p, Piece::Text { text, .. } if text.is_empty());
-    reply.finish.is_some() || reply.content.iter().any(|p| !empty(p))
-}
-
-impl<R: Rewrite> Filter<Reply> for Holdback<R> {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if !reply.content.iter().all(readable_piece) {
-            return Err(unreadable("content this reader does not know"));
-        }
-        let pieces = std::mem::take(&mut reply.content);
-        let (last, open) = (pieces.len(), reply.finish.is_none());
-        for (i, piece) in pieces.into_iter().enumerate() {
-            let (block, text) = match piece {
-                Piece::Text { block, text, .. } => (block, text),
-                Piece::ToolCall {
-                    call,
-                    id,
-                    mut name,
-                    mut arguments,
-                    ..
-                } => {
-                    self.release_into(&mut reply)?;
-                    if let Some(name) = &mut name {
-                        *name = self.rewritten(name)?;
-                    }
-                    self.hold_call(call, &mut arguments, open)?;
-                    let mut piece = Piece::tool_arguments(call, arguments);
-                    if let Piece::ToolCall { id: i, name: n, .. } = &mut piece {
-                        (*i, *n) = (id, name);
-                    }
-                    reply.content.push(piece);
-                    continue;
-                }
-                mut other => {
-                    let choices = matches!(&other, Piece::Other { raw, .. } if raw.is_array());
-                    if !choices {
-                        self.release_into(&mut reply)?;
-                    }
-                    if let Piece::Other { format, raw, .. } = &mut other {
-                        self.hold_choices(format, raw);
-                        self.hold_arguments(format, raw, open);
-                    }
-                    edit_piece(&mut other, &mut |text| {
-                        *text = self.rewritten(text)?;
-                        Ok(())
-                    })?;
-                    if let Piece::Other { raw, .. } = &other {
-                        let finished: Vec<_> = raw
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter(|choice| choice["finish_reason"].is_string())
-                            .filter_map(|choice| choice["index"].as_u64())
-                            .collect();
-                        for index in finished {
-                            let content = self.release_arguments(Some(index))?;
-                            if !content.is_empty() {
-                                out.append(&mut self.waiting);
-                                let mut tail = Reply::default();
-                                tail.content = content;
-                                out.push(tail);
-                            }
-                        }
-                    }
-                    reply.content.push(other);
-                    continue;
-                }
-            };
-            if self.held.as_ref().is_some_and(|(b, _)| *b != block) {
-                self.release_into(&mut reply)?;
-            }
-            let mut text = self.held.take().map(|(_, t)| t).unwrap_or_default() + &text;
-            // Only the reply's last text can continue in the next reply.
-            let keep = if open && (i + 1 == last || block == 0) {
-                self.rewrite.pending(&text)
-            } else {
-                0
-            };
-            let mut at = text.len().saturating_sub(keep);
-            while !text.is_char_boundary(at) {
-                at -= 1;
-            }
-            self.held = Some((block, text.split_off(at)));
-            reply
-                .content
-                .push(Piece::text(block, self.rewritten(&text)?));
-        }
-        if !open {
-            self.release_into(&mut reply)?;
-            reply.content.extend(self.release_calls()?);
-            reply.content.extend(self.release_arguments(Some(0))?);
-        }
-        // No content, such as a keep-alive or usage alone, is not delayed
-        // unless replies wait before it.
-        if shows(&reply) || (!reply.is_content() && self.waiting.is_empty()) {
-            out.append(&mut self.waiting);
-            out.push(reply);
-        } else {
-            self.waiting.push(reply);
-        }
-        Ok(())
-    }
-
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        out.append(&mut self.waiting);
-        if let Some((block, text)) = self.release()? {
-            out.push(Reply::text(block, text));
-        }
-        let mut arguments = Reply::default();
-        arguments.content = self.release_calls()?;
-        arguments.content.extend(self.release_arguments(None)?);
-        if !arguments.content.is_empty() {
-            out.push(arguments);
-        }
-        for (index, (format, text)) in std::mem::take(&mut self.choices) {
-            let text = self.rewritten(&text)?;
-            out.push(Reply::other(
-                format,
-                json!([{ "index": index, "delta": { "content": text } }]),
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Values hidden behind placeholders, `<LABEL_n>`, for one request; clones

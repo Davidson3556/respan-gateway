@@ -11,7 +11,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Body, Completion, Frames};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Finish, Reply};
+use respan_gateway_sdk::conversation::{Block, Finish, Reply};
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response};
 use respan_gateway_sdk::{async_trait, futures};
 #[allow(dead_code, unused_imports)]
@@ -90,7 +90,12 @@ impl Plugin for Probing {
                 Ok(Some(backup))
             }
             Answer::Own => {
-                let own = [Reply::text(0, "hi"), Reply::finished(Finish::Stop)];
+                let own = [
+                    Reply::block_start(0, Block::Text),
+                    Reply::delta(0, "hi"),
+                    Reply::block_end(0),
+                    Reply::finished(Finish::Stop),
+                ];
                 Ok(Some(Response::stream(stream::iter(
                     own.map(Ok::<_, Fault>),
                 ))))

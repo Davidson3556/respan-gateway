@@ -1,6 +1,5 @@
 //! Explicit HTTP forwarding policy for local proxies and live sessions.
 use crate::{self as h, ClientHead, Credential, ProviderError, ProviderHead, SendRaw, Wire};
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response, async_trait};
 
 /// Opt into raw request, credentials, response head and error body forwarding.
@@ -11,11 +10,10 @@ pub struct Relay {
 impl Relay {
     /// Forward the client's original request, its key, and the provider's
     /// head and error body. A whole body goes out as the client sent it
-    /// ([`SendRaw`]), so it refuses a conversation that a plugin before it
-    /// edited, rather than drop the edit. Filters that plugins after it
-    /// add in `on_provider` are not checked: register it last. The request
-    /// keeps the client's path and headers as they came, so its provider
-    /// sits at the vendor's origin.
+    /// ([`SendRaw`]), unedited: an edit a plugin made to the conversation is
+    /// not sent, and keeping a raw relay and such plugins apart is the
+    /// composer's responsibility. The request keeps the client's path and
+    /// headers as they came, so its provider sits at the vendor's origin.
     pub const RAW: Self = Self { raw: true };
     /// Encode typed input, forwarding only response heads and raw errors.
     pub const HEADS: Self = Self { raw: false };
@@ -48,7 +46,6 @@ impl Plugin for Relay {
         };
         let mut call = cx.call(target);
         if self.raw {
-            refuse_edited(cx)?;
             let wire = cx
                 .extensions()
                 .get::<Wire>()
@@ -82,20 +79,6 @@ impl Plugin for Relay {
         Ok(Some(response))
     }
 }
-/// `Err` if a plugin edited the client's conversation, which a raw relay
-/// would send unedited. Other kinds keep no original to compare with.
-fn refuse_edited(cx: &ClientContext) -> Result<(), Fault> {
-    let Ok(now) = cx.input::<Conversation>() else {
-        return Ok(());
-    };
-    match now.said() {
-        Some(said) if said != now => Err(Fault::config(
-            "a plugin edited the request, which a raw relay would send unedited",
-        )),
-        _ => Ok(()),
-    }
-}
-
 /// `fault` with its provider's error body to write as it came, if that
 /// provider spoke the `client`'s format.
 fn raw_fault(fault: Fault, client: &str) -> Fault {
