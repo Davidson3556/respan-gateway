@@ -28,7 +28,6 @@ use respan_gateway_sdk::async_trait;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
-use respan_gateway_sdk::relayed::Relayed;
 use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
 use respan_gateway_sdk::{
     ClientContext, Connection, EventSink, EventStream, Fault, Filter, Format, Gateway, Plugin,
@@ -199,22 +198,11 @@ fn openai(fake: &FakeOpenAi) -> impl Clone + Fn(http::Request<Body>) -> SendFutu
 struct Jev {
     prompt: String,
     model: Option<String>,
-    /// Fields of the body jev has no place for, by name.
-    unknown: Vec<String>,
-    /// The client's body it was decoded from.
-    origin: Relayed<Jev>,
-}
-
-impl Jev {
-    /// Decoded by `format` from `raw`.
-    fn came(mut self, format: &Arc<str>, raw: Bytes) -> Self {
-        let said = Jev {
-            origin: Relayed::default(),
-            ..self.clone()
-        };
-        self.origin = Relayed::came(format, raw, said);
-        self
-    }
+    /// Fields of the body jev has no place for, by name, kept for the format
+    /// that decoded them (`from`) alone.
+    unknown: Vec<(String, Value)>,
+    /// The format that decoded `unknown`.
+    from: &'static str,
 }
 
 /// A jev response message: an answer, or, with no text, one that says
@@ -222,23 +210,13 @@ impl Jev {
 #[derive(Clone, PartialEq, Default)]
 struct Answer {
     text: Option<String>,
-    /// The provider's message it was decoded from.
-    origin: Relayed<Answer>,
 }
 
 impl Answer {
     fn new(text: impl Into<String>) -> Self {
         Answer {
             text: Some(text.into()),
-            origin: Relayed::default(),
         }
-    }
-
-    /// Decoded by `format` from `raw`.
-    fn came(mut self, format: &Arc<str>, raw: Bytes) -> Self {
-        let said = self.clone();
-        self.origin = Relayed::came(format, raw, said);
-        self
     }
 }
 
@@ -296,8 +274,8 @@ impl Format<Outgoing, Answer, Jev> for JevFormat {
 
 impl JevFormat {
     fn inputs(&self, request: http::Request<Body>) -> Result<EventStream<Jev>, Fault> {
-        let (jev, name) = (*self, Arc::from(self.name));
-        respan_gateway_http::messages(request, move |_, raw| Ok(jev.read(&raw)?.came(&name, raw)))
+        let jev = *self;
+        respan_gateway_http::messages(request, move |_, raw| jev.read(&raw))
     }
 
     fn prepare(
@@ -318,24 +296,24 @@ impl JevFormat {
         &self,
         response: http::Response<Body>,
     ) -> futures::stream::BoxStream<'static, Result<Answer, Fault>> {
-        let (answer, name): (_, Arc<str>) = (self.answer, Arc::from(self.name));
+        let (answer, name) = (self.answer, self.name);
         let decode = move |raw: Bytes, out: &mut Vec<Answer>| {
             if raw.starts_with(b":") {
-                out.push(Answer::default().came(&name, raw));
+                out.push(Answer::default());
                 return Ok(());
             }
             let v = formats::json(&raw);
             if let Some(message) = v.as_ref().and_then(|v| v["error"]["message"].as_str()) {
                 return Err(Upstream::fault(message).with(
                     respan_gateway_http::ProviderError::new(
-                        name.to_string(),
+                        name.to_owned(),
                         http::Response::new(raw),
                     ),
                 ));
             }
             let text = v.as_ref().and_then(|v| v[answer].as_str());
             let text = text.ok_or_else(|| Upstream::fault("not a jev answer"))?;
-            out.push(Answer::new(text).came(&name, raw));
+            out.push(Answer::new(text));
             Ok(())
         };
         sse::or_whole(self.name, response, decode)
@@ -369,34 +347,29 @@ impl JevFormat {
 impl JevFormat {
     fn response_body(&self, head: &mut Head) -> Box<dyn Encoder<Answer>> {
         default_content_type(head, "application/json");
-        // Answers are written as they came, edits in their shape; others and
-        // failures in jev: in a stream, as an event shaped like the original.
-        let (key, name, stream) = (self.answer, self.name, sse::is_stream(head));
-        let frame = move |like: Option<&Bytes>, v: Value| -> Bytes {
+        // Answers and failures are written in jev: in a stream, as an event.
+        let (key, stream) = (self.answer, sse::is_stream(head));
+        let frame = move |v: Value| -> Bytes {
             match stream {
-                true => sse::event_as(like, None, v).into(),
+                true => sse::event(None, v).into(),
                 false => v.to_string().into(),
             }
         };
         let write = move |answers: &[Answer]| {
-            if let [one] = answers
-                && let Some(bytes) = one.origin.bytes(name, one)
-            {
-                return Ok(bytes.clone());
-            }
             let texts: Vec<&str> = answers.iter().filter_map(|a| a.text.as_deref()).collect();
             if texts.is_empty() && answers.iter().all(|a| a.text.is_none()) {
-                // What is no content, from another format, writes nothing.
-                return Ok(Bytes::new());
+                // No content is a keep-alive comment in a stream, else nothing.
+                return Ok(match stream {
+                    true => sse::comment("keep-alive").into(),
+                    false => Bytes::new(),
+                });
             }
-            let like = answers.iter().find_map(|a| a.origin.came_in(name));
-            let like = like.map(|o| &o.bytes);
-            Ok(frame(like, json!({ key: texts.concat() })))
+            Ok(frame(json!({ key: texts.concat() })))
         };
         let fail =
             move |f: &Fault| match f.get::<respan_gateway_http::RawReply>().map(|r| r.0.body()) {
                 Some(raw) => raw.clone(),
-                None => frame(None, json!({ "error": f.message() })),
+                None => frame(json!({ "error": f.message() })),
             };
         Box::new(Relay::new(write, fail, stream))
     }
@@ -409,60 +382,41 @@ impl JevFormat {
             .and_then(|v| v.get(self.prompt)?.as_str())
             .ok_or_else(|| BadRequest::fault("no prompt"))?;
         let known = [self.prompt, "model"];
-        let unknown = v.into_iter().flatten().map(|(k, _)| k);
+        let unknown = v.into_iter().flatten();
         Ok(Jev {
             prompt: prompt.to_owned(),
             model: v.and_then(|v| v.get("model")?.as_str()).map(Into::into),
             unknown: unknown
-                .filter(|k| !known.contains(&k.as_str()))
-                .cloned()
+                .filter(|(k, _)| !known.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            origin: Relayed::default(),
+            from: self.name,
         })
     }
 
-    /// The client's body `raw`, which read `before`, with the prompt
-    /// replaced, else a new body if no field is lost.
-    fn write(&self, jev: &Jev, original: Option<(&Bytes, &Jev)>) -> Result<Value, Fault> {
-        let original = original
-            .and_then(|(raw, before)| Some((serde_json::from_slice::<Value>(raw).ok()?, before)));
-        match original {
-            Some((mut v, before)) => {
-                v[self.prompt] = jev.prompt.clone().into();
-                if before.model != jev.model {
-                    v["model"] = jev.model.clone().into();
-                }
-                Ok(v)
-            }
-            None if jev.unknown.is_empty() => {
-                let mut v = json!({ self.prompt: jev.prompt });
-                if let Some(model) = &jev.model {
-                    v["model"] = model.clone().into();
-                }
-                Ok(v)
-            }
-            None => Err(BadRequest::fault(format!(
-                "'{}' cannot be translated",
-                jev.unknown[0]
-            ))),
+    /// A jev body: the prompt and model, and the unknown fields only for
+    /// the format that decoded them, else no field may be lost.
+    fn write(&self, jev: &Jev) -> Result<Value, Fault> {
+        if let Some((name, _)) = jev.unknown.first()
+            && jev.from != self.name
+        {
+            return Err(BadRequest::fault(format!("'{name}' cannot be translated")));
         }
+        let mut v = serde_json::Map::from_iter(jev.unknown.iter().cloned());
+        v.insert(self.prompt.into(), jev.prompt.clone().into());
+        if let Some(model) = &jev.model {
+            v.insert("model".into(), model.clone().into());
+        }
+        Ok(Value::Object(v))
     }
 }
 
-/// Writes jev requests: the client's bytes as they came, with an edit
-/// written into them, or a new body.
+/// Writes jev requests from their values.
 struct Prompts(JevFormat);
 
 impl Encoder<Jev> for Prompts {
     fn encode(&mut self, jev: &Jev, out: &mut BytesMut) -> Result<(), Fault> {
-        let origin = jev.origin.came_in(self.0.name);
-        if let Some(bytes) = jev.origin.bytes(self.0.name, jev) {
-            out.extend_from_slice(bytes);
-            return Ok(());
-        }
-        let v = self.0.write(jev, origin.map(|o| (&o.bytes, &o.said)));
-        let v = v.map_err(|f| jev.origin.whose(jev, f))?;
-        out.extend_from_slice(v.to_string().as_bytes());
+        out.extend_from_slice(self.0.write(jev)?.to_string().as_bytes());
         Ok(())
     }
 
@@ -528,7 +482,7 @@ async fn a_field_jev_has_no_place_for_is_kept_or_refused() {
     let request_sent: Value = serde_json::from_slice(&sent.all()[0].body).unwrap_or_default();
     assert_eq!(request_sent, json!({ "prompt": "please, hi", "seed": 7 }));
 
-    // Translation would lose it, so it is refused.
+    // Translation would lose it, so it is refused as a bad request.
     let (status, _, _) = read_whole(serve(&other, to("jev-v2", request)).await.0).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(sent.all().len(), 1);
@@ -759,7 +713,7 @@ async fn a_plugin_asking_for_another_kind_is_told_so_before_decoding() {
 }
 
 #[tokio::test]
-async fn a_request_a_plugin_only_looked_at_keeps_its_bytes() {
+async fn a_request_a_plugin_only_looked_at_is_sent_with_what_it_said() {
     struct Look;
 
     #[async_trait]
@@ -781,12 +735,13 @@ async fn a_request_a_plugin_only_looked_at_keeps_its_bytes() {
         Some("v2"),
     )
     .unwrap_or_else(|e| panic!("{e}"));
-    // Bytes a re-encoding would not reproduce.
+    // Spacing a re-encoding would not reproduce.
     let request = r#"{"prompt":"hi",  "seed":7}"#;
 
     let _ = read_whole(serve(&gw, to("jev-v2", request)).await.0).await;
 
-    assert_eq!(&sent.all()[0].body[..], request.as_bytes());
+    let sent: Value = serde_json::from_slice(&sent.all()[0].body).unwrap_or_default();
+    assert_eq!(sent, json!({ "prompt": "hi", "seed": 7 }));
 }
 
 #[test]
@@ -1131,7 +1086,7 @@ async fn a_providers_error_body_is_relayed_once() {
 }
 
 #[tokio::test]
-async fn a_jev_stream_is_relayed_and_edited_event_by_event() {
+async fn a_jev_stream_is_written_and_edited_event_by_event() {
     /// Drops the answer `b`.
     struct Mute;
 
@@ -1174,13 +1129,22 @@ async fn a_jev_stream_is_relayed_and_edited_event_by_event() {
     let (_, _, polite) = read_whole(serve(&polite, hi()).await.0).await;
     let (_, _, dropped) = read_whole(serve(&drop, hi()).await.0).await;
 
-    assert_eq!(dropped.ok().as_deref(), Some(chunks[0].as_bytes()));
+    // Each event is written from its answer: the provider's `id:` field is
+    // not carried.
+    assert_eq!(
+        dropped.ok().as_deref(),
+        Some(&b"data: {\"text\":\"a\"}\n\n"[..])
+    );
 
-    assert_eq!(plain.ok().as_deref(), Some(chunks.concat().as_bytes()));
+    let plain = String::from_utf8(plain.unwrap_or_default().to_vec()).unwrap_or_default();
+    assert_eq!(
+        plain,
+        "data: {\"text\":\"a\"}\n\ndata: {\"text\":\"b\"}\n\n"
+    );
     let polite = String::from_utf8(polite.unwrap_or_default().to_vec()).unwrap_or_default();
     assert_eq!(
         polite,
-        "id: 1\ndata: {\"text\":\"a, thanks\"}\n\ndata: {\"text\":\"b, thanks\"}\n\n"
+        "data: {\"text\":\"a, thanks\"}\n\ndata: {\"text\":\"b, thanks\"}\n\n"
     );
 }
 
@@ -1382,7 +1346,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             Ok(io.bind(
                 |request| {
-                    respan_gateway_http::messages(request, |head, raw| {
+                    respan_gateway_http::messages(request, |head, _| {
                         let prompt = head
                             .headers
                             .get("x-prompt")
@@ -1392,9 +1356,8 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
                             prompt: prompt.to_owned(),
                             model: None,
                             unknown: Vec::new(),
-                            origin: Relayed::default(),
-                        }
-                        .came(&Arc::from("jev-headed"), raw))
+                            from: "jev-headed",
+                        })
                     })
                 },
                 |reply, source| {
@@ -1712,7 +1675,7 @@ async fn what_filters_kept_back_goes_before_a_relayed_providers_error() {
 }
 
 #[tokio::test]
-async fn an_input_that_cannot_be_translated_is_the_fault_of_whoever_brought_it() {
+async fn an_input_that_cannot_be_translated_is_a_bad_request_whoever_brought_it() {
     /// Adds a field jev-v2 cannot say.
     struct Add;
 
@@ -1720,7 +1683,7 @@ async fn an_input_that_cannot_be_translated_is_the_fault_of_whoever_brought_it()
     impl Plugin for Add {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(|jev: &mut Jev| {
-                jev.unknown.push("extra".into());
+                jev.unknown.push(("extra".into(), Value::Null));
                 Ok(())
             })?;
             Ok(None)
@@ -1742,7 +1705,7 @@ async fn an_input_that_cannot_be_translated_is_the_fault_of_whoever_brought_it()
     let added = read_whole(serve(&adding, to("jev-v1", r#"{"input":"hi"}"#)).await.0).await;
 
     assert_eq!(refused.0, StatusCode::BAD_REQUEST);
-    assert_eq!(added.0, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(added.0, StatusCode::BAD_REQUEST);
     assert!(sent.all().is_empty());
 }
 
@@ -1954,7 +1917,7 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
 // A message that is no content, such as an SSE comment, reaches filters, and
 // goes out where it came when they pass it on.
 #[tokio::test]
-async fn a_keep_alive_reaches_filters_and_goes_where_it_came() {
+async fn a_keep_alive_reaches_filters_and_goes_on_as_a_comment() {
     /// Counts the keep-alives it is shown, passing everything on.
     #[derive(Clone, Default)]
     struct Counts(Arc<std::sync::atomic::AtomicUsize>);

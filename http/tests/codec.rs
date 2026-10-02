@@ -36,21 +36,19 @@ use respan_gateway_sdk::conversation::{Conversation, Reply};
 #[cfg(feature = "reqwest")]
 use respan_gateway_sdk::conversation::{Message, Role};
 use respan_gateway_sdk::futures;
-use respan_gateway_sdk::relayed::Relayed;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
     ClientContext, Connection, EventStream, Fault, Format, Gateway, Plugin, ProviderContext,
     Response, async_trait,
 };
 
-/// A message in: its number in its stream, its text, and the bytes it came
-/// in.
+/// A message in: its number in its stream and its text.
 #[derive(Debug, Clone, PartialEq)]
-struct In(usize, String, Relayed<In>);
+struct In(usize, String);
 
 impl In {
     fn new(n: usize, text: impl Into<String>) -> Self {
-        In(n, text.into(), Relayed::default())
+        In(n, text.into())
     }
 }
 
@@ -80,7 +78,7 @@ impl Format<Incoming, In, Out> for Msg {
                 if let Some(raw) = body.full_bytes().cloned() {
                     Ok(EventStream::lazy(move || {
                         let mut out = Vec::new();
-                        let mut decoder = Numbering(0, Arc::from("msg"));
+                        let mut decoder = Numbering(0);
                         decoder.decode(raw.clone(), &mut out)?;
                         decoder.end(&mut out)?;
                         if out.len() != 1 {
@@ -91,7 +89,7 @@ impl Format<Incoming, In, Out> for Msg {
                 } else {
                     Ok(EventStream::stream(respan_gateway_http::formats::read(
                         body,
-                        Numbering(0, Arc::from("msg")),
+                        Numbering(0),
                         |state, bytes, out| state.decode(bytes, out),
                         |state, end, out| {
                             end?;
@@ -143,16 +141,13 @@ impl Format<Outgoing, Out, In> for Msg {
     }
 }
 
-/// Numbers the messages it decodes, each keeping its bytes.
-struct Numbering(usize, Arc<str>);
+/// Numbers the messages it decodes.
+struct Numbering(usize);
 
 impl Numbering {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<In>) -> Result<(), Fault> {
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        let kept = |n, text: String| {
-            let origin = Relayed::came(&self.1, bytes.clone(), In::new(n, text.clone()));
-            In(n, text, origin)
-        };
+        let kept = In::new;
         match &*text {
             "bad" => return Err(BadRequest::fault("not msg")),
             "two" => out.extend([kept(0, text.clone()), kept(0, text)]),
@@ -169,17 +164,14 @@ impl Numbering {
     }
 }
 
-/// Numbers the frames it writes, each as it came or as its text.
+/// Numbers the frames it writes, each as its text.
 struct Numbered(usize);
 
 impl Encoder<In> for Numbered {
     fn encode(&mut self, input: &In, out: &mut BytesMut) -> Result<(), Fault> {
-        let text = match input.2.bytes("msg", input) {
-            Some(raw) => String::from_utf8_lossy(raw).into_owned(),
-            None => input.1.clone(),
-        };
+        let text = &input.1;
         if text.contains("no") {
-            return Err(input.2.whose(input, Fault::internal("msg cannot say no")));
+            return Err(BadRequest::fault("msg cannot say no"));
         }
         self.0 += 1;
         out.extend_from_slice(format!("{}|{text}", self.0).as_bytes());
@@ -358,14 +350,13 @@ async fn r7_a_bad_frame_aborts_the_call() {
     assert_eq!(echo.seen(), ["/msg", "1|a", "Err(bad_request)"]);
 }
 
-// Content that cannot be written is whose it is, by one rule for the first
-// input and later frames alike: the client's if filters left it equal to its
-// decoding, else a plugin's. The kind tells them apart (`Relayed::whose`).
+// Content that cannot be written is a bad request, by one rule for the first
+// input and later frames alike, edited or not: the gateway cannot tell.
 #[tokio::test]
-async fn r8_the_fault_of_content_that_cannot_be_written_is_whose_it_is() {
+async fn r8_content_that_cannot_be_written_is_a_bad_request_edited_or_not() {
     let cases = [
-        ("yes", Some(("yes", "no")), "config"),
-        ("no", Some(("no", "no!")), "config"),
+        ("yes", Some(("yes", "no")), "bad_request"),
+        ("no", Some(("no", "no!")), "bad_request"),
         ("no", None, "bad_request"),
     ];
     for (body, edit, code) in cases {

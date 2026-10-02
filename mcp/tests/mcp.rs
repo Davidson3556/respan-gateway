@@ -135,7 +135,7 @@ fn bare(status: StatusCode) -> Reply {
 }
 
 /// Script only MCP replies in arrival order; retain the actual sent heads and
-/// bytes to assert exact unedited relay. This is local to the MCP scenarios.
+/// bytes to assert what was sent. This is local to the MCP scenarios.
 #[derive(Default, Clone)]
 struct ScriptedMcp {
     replies: Arc<Mutex<VecDeque<Reply>>>,
@@ -205,14 +205,22 @@ impl ScriptedMcp {
     }
 }
 
+/// The JSON of each `data:` line of an event stream.
+fn events_json(sse: &str) -> Vec<serde_json::Value> {
+    let data = sse.lines().filter_map(|l| l.strip_prefix("data: "));
+    data.filter_map(|d| serde_json::from_str(d).ok()).collect()
+}
+
 #[tokio::test]
-async fn an_unedited_message_relays_byte_exact_and_an_edited_one_into_its_event() {
+async fn an_unedited_message_relays_what_it_said_and_an_edited_one_is_written_in_its_event() {
     let body = r#"{ "jsonrpc":"2.0",  "id":1, "method":"tools/list" }"#;
     let events = [
         ": hi\n\nid: 7\n",
         "data: {\"jsonrpc\":\"2.0\", \"id\":1,\"result\":{}}\n\n",
     ];
     let json = r#"{"jsonrpc":"2.0" , "id":1,"result":{}}"#;
+    let result = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": {} });
+    let parse = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).ok();
     for plugin in [None, Some(false)] {
         let mock = ScriptedMcp::new();
         mock.reply(sse(&events));
@@ -220,31 +228,104 @@ async fn an_unedited_message_relays_byte_exact_and_an_edited_one_into_its_event(
         let gw = gateway(mock.clone().connect(), plugin.map(|edit| Touch { edit }));
         let posted = || request(Method::POST, body, &[(SESSION, "s1")]);
         let (status, headers, sse, outcome) = send(&gw, posted()).await;
-        assert_eq!((status, &sse[..]), (StatusCode::OK, &events.concat()[..]));
+        // The event is written from the message: its `id:` is kept, the
+        // provider's comment and its spacing are not.
+        assert_eq!(status, StatusCode::OK);
+        assert!(sse.starts_with("id: 7\ndata: {"), "{sse}");
+        assert_eq!(events_json(&sse), std::slice::from_ref(&result));
         assert_eq!(headers["content-type"], "text/event-stream");
         assert!(outcome.is_ok());
         let (_, _, whole, _) = send(&gw, posted()).await;
-        assert_eq!(whole, json);
+        assert_eq!(parse(whole.as_bytes()), Some(result.clone()));
         let sent = &mock.sent()[0];
-        assert_eq!(
-            (sent.uri().to_string(), &sent.body()[..]),
-            (format!("{AT}/mcp?x=1"), body.as_bytes())
-        );
+        assert_eq!(sent.uri().to_string(), format!("{AT}/mcp?x=1"));
+        assert_eq!(parse(sent.body()), parse(body.as_bytes()));
         assert_eq!(sent.headers()[SESSION], "s1");
     }
     let mock = ScriptedMcp::new();
     mock.reply(sse(&events));
     let gw = gateway(mock.clone().connect(), Some(Touch { edit: true }));
     let (_, _, sse, _) = send(&gw, request(Method::POST, body, &[])).await;
-    let edited = r#"id: 7
-data: {"jsonrpc":"2.0","id":1,"result":{"edited":true}}
+    let edited = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": { "edited": true } });
+    assert_eq!(events_json(&sse), [edited]);
+    assert!(sse.starts_with("id: 7\ndata: {"), "{sse}");
+}
 
-"#;
-    assert_eq!(sse, format!(": hi\n\n{edited}"));
+/// Reads the ids of events and sets one.
+struct Resume(Arc<Mutex<Vec<Option<String>>>>);
+
+#[async_trait]
+impl Plugin for Resume {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let seen = self.0.clone();
+        cx.filter(move |out: &mut ToClient| {
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(out.event_id.clone());
+            if out.event_id.as_deref() == Some("2") {
+                out.event_id = Some("2b".into());
+            }
+            Ok(())
+        })?;
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn an_sse_event_id_and_name_round_trip_and_a_plugin_may_edit_them() {
+    let events = [
+        "id: 1\ndata\n\n",
+        "id: 2\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n\n",
+        "data: {\"jsonrpc\":\"2.0\",\"method\":\"m\"}\n\n",
+    ];
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&events));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let gw = typed_gateway(mock.connect(), None).plugin(Resume(seen.clone()));
+    let (_, headers, body, _) = send(&gw, request(Method::GET, "", &[])).await;
+    assert_eq!(headers[CONTENT_TYPE], "text/event-stream");
+    // The priming event, a named one with its id edited, and one with none.
+    let want = concat!(
+        ": stream\n\n",
+        "id: 1\ndata: \n\n",
+        "id: 2b\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n\n",
+        "data: {\"jsonrpc\":\"2.0\",\"method\":\"m\"}\n\n",
+    );
+    assert_eq!(body, want);
+    let ids = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(ids, [Some("1".into()), Some("2".into()), None]);
+}
+
+/// Edits an event id into one that would add lines to the stream.
+struct Inject;
+
+#[async_trait]
+impl Plugin for Inject {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.filter(|out: &mut ToClient| {
+            if out.event_id.is_some() {
+                out.event_id = Some("2\ndata: injected".into());
+            }
+            Ok(())
+        })?;
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn an_event_id_that_would_break_its_line_is_refused_not_written() {
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&[
+        "id: 2\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n\n",
+    ]));
+    let gw = typed_gateway(mock.connect(), None).plugin(Inject);
+    let (_, _, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
+    assert!(!body.contains("injected"), "{body}");
+    assert!(outcome.is_err_and(|f| f.is::<respan_gateway_sdk::Internal>()));
 }
 
 /// A plugin-created response has no provider response head; the format must
-/// choose the client's framing rather than copying the value's original wire.
+/// choose the client's framing rather than any wire the value came in.
 struct Rebuild;
 
 #[async_trait]

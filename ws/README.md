@@ -21,8 +21,8 @@ events; OpenAI Realtime and Gemini Live run through the same code.
   route `serve_ws` on top of `respan_gateway_axum::router`.
 - `JsonEvents::new(name, path)`: direct incoming/outgoing `Format` bindings whose kind is one JSON event per
   frame, `ClientEvent` in and `ProviderEvent` out (each has `json: Value`).
-  A relay to a format of the same name is byte for byte while an event is
-  unedited; an edited one is written from its JSON. Plugins filter events with
+  Every event is written from its JSON, so a relay to a format of the same
+  name keeps what an event says, not its exact bytes. Plugins filter events with
   `cx.filter(|e: &mut ProviderEvent| ..)` (client edge) or `px.filter(..)`
   (provider edge), and drop one with a `Filter` that does not push it.
 - `CloseCode(u16)`: a hint on a `Fault` that picks the code the client is

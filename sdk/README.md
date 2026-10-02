@@ -36,9 +36,7 @@ it, and translating it is refused if it could change the answer.
 Conversation values are plain data: they keep nothing of the bytes they were
 decoded from, and compare by what they say. Only an explicit raw relay
 (`respan_gateway_http::relay::Relay::RAW`) sends a request's own bytes, and a
-response is always written again from its events. The `relayed` module, which
-other kinds (MCP, WebSocket) still use, keeps a value with the bytes it came
-from.
+response is always written again from its events.
 
 The SDK depends on core, `bytes` and `serde_json`, not HTTP.
 

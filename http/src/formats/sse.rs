@@ -173,22 +173,6 @@ pub fn event(name: Option<&str>, data: impl std::fmt::Display) -> String {
     out
 }
 
-/// `data` as an event with the fields of `like` but its `data`, such as
-/// `event` and `id`; without `like`, an event named `name`.
-pub fn event_as(like: Option<&Bytes>, name: Option<&str>, data: impl std::fmt::Display) -> String {
-    let Some(like) = like else {
-        return event(name, data);
-    };
-    let like = String::from_utf8_lossy(like);
-    // Any line ending the decoder reads, a bare `\r` too.
-    let fields = like
-        .split(['\n', '\r'])
-        .filter(|l| !l.is_empty() && !l.starts_with("data:") && *l != "data");
-    let mut out: String = fields.flat_map(|l| [l, "\n"]).collect();
-    out.push_str(&event(None, data));
-    out
-}
-
 /// An event's `data:` as JSON.
 pub fn event_json(raw: &[u8]) -> Option<Value> {
     serde_json::from_str(&event_data(raw)?).ok()
@@ -277,16 +261,10 @@ mod tests {
     }
 
     #[test]
-    fn an_event_rewritten_in_the_shape_of_another_keeps_its_fields() {
-        let like = Bytes::from_static(b"id: 7\nevent: message\ndata: {\"a\":1}\n\n");
-        let again = event_as(Some(&like), None, "{\"a\":2}");
+    fn an_event_is_named_if_asked_and_its_data_reads_as_json() {
+        assert_eq!(event(Some("message"), 1), "event: message\ndata: 1\n\n");
         assert_eq!(
-            event_as(None, Some("message"), 1),
-            "event: message\ndata: 1\n\n"
-        );
-        assert_eq!(again, "id: 7\nevent: message\ndata: {\"a\":2}\n\n");
-        assert_eq!(
-            crate::formats::json(again.as_bytes()),
+            event_json(event(None, "{\"a\":2}").as_bytes()),
             Some(serde_json::json!({"a": 2}))
         );
         assert_eq!(
@@ -364,8 +342,6 @@ mod tests {
     #[test]
     fn a_bare_data_line_is_empty_data() {
         assert_eq!(event_data(b"data\n\n").as_deref(), Some(""));
-        let like = Bytes::from_static(b"id: 1\ndata\n\n");
-        assert_eq!(event_as(Some(&like), None, "x"), "id: 1\ndata: x\n\n");
     }
 
     #[tokio::test]
@@ -408,18 +384,10 @@ mod tests {
     }
 
     #[test]
-    fn an_event_rewritten_with_bare_cr_endings_loses_its_old_data() {
-        let like = Bytes::from_static(b"event: message\rdata: {\"secret\":1}\r\r");
-        let again = event_as(Some(&like), None, "{}");
-        assert_eq!(again, "event: message\ndata: {}\n\n");
-    }
-
-    #[test]
     fn data_of_several_lines_is_an_event_of_several_data_lines() {
         assert_eq!(event(None, "not\njson"), "data: not\ndata: json\n\n");
-        let like = Bytes::from_static(b"id: 7\ndata: x\n\n");
-        let again = event_as(Some(&like), None, "a\n\ndata: b");
-        assert_eq!(again, "id: 7\ndata: a\ndata: \ndata: data: b\n\n");
+        let again = event(None, "a\n\ndata: b");
+        assert_eq!(again, "data: a\ndata: \ndata: data: b\n\n");
         assert_eq!(
             event_data(event(None, "a\r\nb").as_bytes()).as_deref(),
             Some("a\nb")

@@ -1,6 +1,6 @@
 #![cfg(feature = "ws")]
-//! Plugins over a session's events: `JsonEvents` keeps unedited events
-//! byte-exact, lets filters edit, drop and count them in either direction,
+//! Plugins over a session's events: `JsonEvents` writes unedited events
+//! as they said, lets filters edit, drop and count them in either direction,
 //! and a failing filter closes the client with its code. The events are
 //! mockllm's OpenAI Realtime; the SDK knows none of their names.
 #![allow(clippy::unwrap_used)]
@@ -63,6 +63,10 @@ async fn turn(ws: &mut Ws) -> Vec<String> {
     hear_until(ws, is_done).await
 }
 
+fn json_of(text: &str) -> Value {
+    serde_json::from_str(text).unwrap()
+}
+
 /// A plugin that adds the filters `add` makes on the client edge.
 struct OnClient<F>(F);
 
@@ -76,10 +80,10 @@ impl<F: Fn(&mut ClientContext) -> Result<(), Fault> + Send + Sync + 'static> Plu
     }
 }
 
-// An unedited event is written as the bytes it came in; an edited one as its
-// JSON, and only that one.
+// Every event is written from its JSON: an unedited one says what it said, and
+// only the edited one says something else.
 #[tokio::test(flavor = "multi_thread")]
-async fn only_an_edited_event_is_rewritten() {
+async fn only_an_edited_event_says_something_else() {
     let openai = FakeOpenAi::start().await;
     openai.answer(Answer::text("Hi there"));
     let tap = Tap::to(ws_base(&openai)).await;
@@ -110,7 +114,8 @@ async fn only_an_edited_event_is_rewritten() {
             assert_eq!(serde_json::from_str::<Value>(got).unwrap(), want);
             edited += 1;
         } else {
-            assert_eq!(got, came, "an event nobody edited is byte-exact");
+            let (got, came) = (json_of(got), json_of(came));
+            assert_eq!(got, came, "an event nobody edited says what it said");
         }
     }
     assert!(edited >= 1, "the session had deltas");

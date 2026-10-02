@@ -13,7 +13,6 @@ pub use respan_gateway_core::*;
 
 pub mod conversation;
 mod fault;
-pub mod relayed;
 mod usage;
 
 pub use conversation::{

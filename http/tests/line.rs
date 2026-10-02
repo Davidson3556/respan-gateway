@@ -8,8 +8,6 @@ use respan_gateway_sdk::{BadRequest, ErrorCode, Truncated, Upstream};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use respan_gateway_sdk::relayed::Relayed;
-
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use http::StatusCode;
@@ -30,17 +28,17 @@ use respan_gateway_sdk::{
 #[path = "../../tests/support/http.rs"]
 mod http_helpers;
 
-/// What a client sends: one message, which keeps the bytes it came in.
+/// What a client sends: one message.
 #[derive(Debug, Clone, PartialEq)]
-struct LIn(String, Relayed<LIn>);
+struct LIn(String);
 
-/// What a line says: text, usage, or no content, with its bytes.
+/// What a line says: text, usage, or no content.
 #[derive(Debug, Clone, PartialEq)]
-struct LOut(String, Usage, Relayed<LOut>);
+struct LOut(String, Usage);
 
 /// A line a plugin says.
 fn out(text: impl Into<String>) -> LOut {
-    LOut(text.into(), Usage::default(), Relayed::default())
+    LOut(text.into(), Usage::default())
 }
 
 const LINE: &str = "line";
@@ -66,8 +64,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Incoming, LIn, LOut> for Li
             |request| {
                 respan_gateway_http::messages(request, |_, raw| {
                     let text = String::from_utf8_lossy(&raw).into_owned();
-                    let said = LIn(text.clone(), Relayed::default());
-                    Ok(LIn(text, Relayed::came(&Arc::from(LINE), raw, said)))
+                    Ok(LIn(text))
                 })
             },
             |reply, source| {
@@ -139,15 +136,12 @@ fn line_head(
     head
 }
 
-/// Writes each input as it came while unchanged, else its text.
+/// Writes each input as its text.
 struct Lines;
 
 impl Encoder<LIn> for Lines {
     fn encode(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
-        match input.1.bytes(LINE, input) {
-            Some(raw) => out.extend_from_slice(raw),
-            None => out.extend_from_slice(input.0.as_bytes()),
-        }
+        out.extend_from_slice(input.0.as_bytes());
         Ok(())
     }
 
@@ -162,19 +156,17 @@ struct LineDecoder(bool, bool);
 
 impl LineDecoder {
     fn decode(&mut self, bytes: Bytes, output: &mut Vec<LOut>) -> Result<(), Fault> {
-        let name: Arc<str> = Arc::from(LINE);
         for line in String::from_utf8_lossy(&bytes).lines() {
             self.0 = true;
             if self.1 {
                 continue;
             }
-            let raw = Bytes::from(format!("{line}\n"));
             let said = match line.split_once(':') {
                 Some(("i", x)) => out(x),
                 Some(("u", n)) => {
                     let mut u = Usage::default();
                     u.add("t", n.parse().unwrap_or(0.0));
-                    LOut(String::new(), u, Relayed::default())
+                    LOut(String::new(), u)
                 }
                 Some(("x", m)) => return Err(Upstream::fault(m)),
                 _ if line == "e" => {
@@ -183,8 +175,7 @@ impl LineDecoder {
                 }
                 _ => out(""),
             };
-            let came = Relayed::came(&name, raw, said.clone());
-            output.push(LOut(said.0, said.1, came));
+            output.push(said);
         }
         Ok(())
     }
@@ -1358,9 +1349,7 @@ struct Untranslatable;
 impl Encoder<LIn> for Untranslatable {
     fn encode(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
         match input.0.contains("untranslatable") {
-            true => Err(input
-                .1
-                .whose(input, Fault::internal("pathed cannot say it"))),
+            true => Err(BadRequest::fault("pathed cannot say it")),
             false => Lines.encode(input, out),
         }
     }
@@ -1448,13 +1437,13 @@ async fn k9_8_a_format_writes_the_model_into_the_calls_path() {
     assert_eq!(lock(&paths.0).clone(), ["/models/m1", "/models/m2"]);
 }
 
-// Client content the provider's format cannot say is the client's fault, a
-// 400, only as decoded; changed by a filter, it is a 500, whatever the change.
+// Client content the provider's format cannot say is a bad request, a 400,
+// changed by a filter or not: the gateway cannot tell.
 #[tokio::test]
-async fn v9_1_untranslatable_content_is_the_clients_fault_only_as_decoded() {
+async fn v9_1_untranslatable_content_is_a_bad_request_edited_or_not() {
     let paths = Paths::default();
     let (status, _) = run(&pathed(&paths, Some("m2 untranslatable")), line_req("m1")).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let (status, _) = run(&pathed(&paths, None), line_req("untranslatable")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
@@ -1483,7 +1472,7 @@ async fn v9_1_untranslatable_content_is_the_clients_fault_only_as_decoded() {
         .map(|g| g.plugin(Tag))
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, _) = run(&gw, line_req("untranslatable")).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(lock(&paths.0).is_empty());
 }
 
@@ -1691,10 +1680,9 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Se
     }
 }
 
-// A call's first input is given as a value exactly when a filter ran over it;
-// an unfiltered one goes as the client's bytes.
+// A call's first input is always given as a value, filtered or not.
 #[tokio::test]
-async fn r10_6_first_is_an_item_only_for_an_input_not_the_clients() {
+async fn r10_6_first_is_always_a_value() {
     /// Reads the input, then sets it to `.0`, if any.
     struct Touch(Option<&'static str>);
 
@@ -1728,7 +1716,7 @@ async fn r10_6_first_is_an_item_only_for_an_input_not_the_clients() {
         let (status, _) = run(&gw, req(http::Method::POST)).await;
         assert_eq!(status, StatusCode::OK);
     }
-    // Read only: the client's bytes; filtered, even to what it was: a value.
+    // Read only, or filtered even to what it was: a value.
     assert_eq!(lock(&seen).clone(), [true, true, true]);
 }
 
@@ -1805,11 +1793,11 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
     );
 }
 
-/// Line's kind, whose request encoder writes a change into the client's
-/// bytes, as a model-in-path format does; notes whether it got a first
-/// input, and its bytes.
+/// Line's kind, as a format that reads the first input for its head, as a
+/// model-in-path format does; notes whether it got a first input, and its
+/// text.
 #[derive(Clone)]
-struct InPath(Shared<(bool, Bytes)>);
+struct InPath(Shared<(bool, String)>);
 
 impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for InPath {
     fn name(&self) -> &str {
@@ -1822,24 +1810,15 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for In
         let seen = self.0.clone();
         Ok(io.bind(
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let raw = false;
-                let (value, raw) = if source.is_single() && !raw {
+                let (value, text) = if source.is_single() {
                     let first = source.value().expect("single input")?;
-                    (
-                        true,
-                        first
-                            .1
-                            .came_in(LINE)
-                            .map(|origin| origin.bytes.clone())
-                            .unwrap_or_default(),
-                    )
+                    (true, first.0.clone())
                 } else {
-                    (false, Bytes::new())
+                    (false, String::new())
                 };
-                lock(&seen).push((value, raw));
+                lock(&seen).push((value, text));
                 let head = line_head(None);
-                let (request, sink) =
-                    respan_gateway_http::request(LINE, source, Box::new(AsItCame))?;
+                let (request, sink) = respan_gateway_http::request(LINE, source, Box::new(Lines))?;
                 Ok((http::Request::from_parts(head, request.into_body()), sink))
             },
             line_outputs,
@@ -1848,30 +1827,9 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for In
     }
 }
 
-/// Writes an input's bytes as they are, changed or not, as a format whose
-/// model is in the path does; one without, as Line does.
-struct AsItCame;
-
-impl Encoder<LIn> for AsItCame {
-    fn encode(&mut self, input: &LIn, out: &mut BytesMut) -> Result<(), Fault> {
-        match input.1.came_in(LINE) {
-            Some(origin) => {
-                out.extend_from_slice(&origin.bytes);
-                Ok(())
-            }
-            None => Lines.encode(input, out),
-        }
-    }
-
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
-        Lines.end(end, out)
-    }
-}
-
-// The first input is the changed one, given as `first`, even with the
-// client's bytes to write it into.
+// The first input a format reads for its head is the changed one.
 #[tokio::test]
-async fn r11_first_is_a_changed_input_even_with_the_clients_bytes() {
+async fn r11_first_is_the_changed_input() {
     struct Change;
 
     #[async_trait]
@@ -1899,7 +1857,7 @@ async fn r11_first_is_a_changed_input_even_with_the_clients_bytes() {
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(lock(&seen).clone(), [(true, Bytes::from_static(b"hi"))]);
+    assert_eq!(lock(&seen).clone(), [(true, "m2".to_owned())]);
 }
 
 /// Adds a provider filter that panics on every output.

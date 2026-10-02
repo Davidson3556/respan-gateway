@@ -12,7 +12,6 @@ use respan_gateway_http::{
     self as h, Body, Encoder, Incoming, Outgoing, http::request::Parts as RequestHead,
 };
 use respan_gateway_sdk::futures::{StreamExt, stream::BoxStream};
-use respan_gateway_sdk::relayed::Relayed;
 use respan_gateway_sdk::{BadRequest, Connection, Fault, Format, Upstream};
 use serde_json::{self, Value};
 
@@ -29,36 +28,23 @@ macro_rules! event {
         $(#[$doc])*
         #[derive(Debug, Clone, PartialEq)]
         pub struct $name {
-            /// The event. Edit it in place: an unedited event is written as
-            /// the bytes it came in, an edited one as this JSON.
+            /// The event, written as this JSON.
             pub json: Value,
-            origin: Relayed<$name>,
         }
 
         impl $name {
-            /// An event of your own, which came from nowhere.
+            /// An event of `json`.
             pub fn new(json: Value) -> Self {
-                Self { json, origin: Relayed::default() }
-            }
-
-            /// Decoded from `raw` by the format called `name`.
-            fn decoded(name: &Arc<str>, raw: Bytes, json: Value) -> Self {
-                let said = Self::new(json.clone());
-                Self { json, origin: Relayed::came(name, raw, said) }
+                Self { json }
             }
         }
 
         impl Encoder<$name> for Writes {
             fn encode(&mut self, event: &$name, out: &mut BytesMut) -> Result<(), Fault> {
-                match event.origin.bytes(&self.name, event) {
-                    Some(bytes) => out.extend_from_slice(bytes),
-                    None => {
-                        let text = serde_json::to_vec(&event.json);
-                        out.extend_from_slice(&text.map_err(|e| {
-                            Fault::internal("an event could not be written").with_source(e)
-                        })?);
-                    }
-                }
+                let text = serde_json::to_vec(&event.json);
+                out.extend_from_slice(&text.map_err(|e| {
+                    Fault::internal("an event could not be written").with_source(e)
+                })?);
                 Ok(())
             }
 
@@ -78,14 +64,12 @@ event!(
     ProviderEvent
 );
 
-/// Writes each event as it came, or as its JSON once edited.
-struct Writes {
-    name: Arc<str>,
-}
+/// Writes each event as its JSON.
+struct Writes;
 
 /// A WebSocket session of JSON text frames, one event per frame, as a
 /// format of a kind of its own. It relays to a format of the same name,
-/// byte for byte while an event is unedited, and reads no event's fields:
+/// writing each event from its parsed JSON, and reads no event's fields:
 /// what an event means is for the plugins and the tests of the protocol
 /// behind it.
 ///
@@ -136,15 +120,12 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
     }
 
     fn bind(&self, io: Incoming) -> Result<Connection<ClientEvent, ProviderEvent>, Fault> {
-        let name = self.name.clone();
-        let reader_name = name.clone();
-        let writer_name = name.clone();
         Ok(io.bind(
-            move |request| {
-                h::messages(request, move |_, raw| {
+            |request| {
+                h::messages(request, |_, raw| {
                     let json = serde_json::from_slice(&raw)
                         .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
-                    Ok(ClientEvent::decoded(&reader_name, raw, json))
+                    Ok(ClientEvent::new(json))
                 })
             },
             move |reply, _source| {
@@ -162,7 +143,7 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
                     head.headers
                         .insert(UPGRADE, HeaderValue::from_static("websocket"));
                 }
-                Ok(reply.open(head, Bytes::new(), Box::new(Writes { name: writer_name })))
+                Ok(reply.open(head, Bytes::new(), Box::new(Writes)))
             },
             h::plain_refusal,
         ))
@@ -194,13 +175,7 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
                 head.headers
                     .insert(CONNECTION, HeaderValue::from_static("upgrade"));
                 formats::body_changed(&mut head);
-                let (request, sink) = h::request(
-                    &writer_name,
-                    source,
-                    Box::new(Writes {
-                        name: writer_name.clone(),
-                    }),
-                )?;
+                let (request, sink) = h::request(&writer_name, source, Box::new(Writes))?;
                 Ok((Request::from_parts(head, request.into_body()), sink))
             },
             move |answer, sent| response_events(reader_name, answer, sent),
@@ -224,7 +199,7 @@ fn response_events(
             let raw = raw?;
             let json = serde_json::from_slice(&raw)
                 .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
-            Ok(ProviderEvent::decoded(&name, raw, json))
+            Ok(ProviderEvent::new(json))
         })
         .boxed()
 }

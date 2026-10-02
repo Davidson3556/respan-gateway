@@ -60,7 +60,7 @@ async fn a_batch_over_the_cap_is_split_and_merged_in_order_with_usage_summed() -
 }
 
 #[tokio::test]
-async fn a_batch_within_the_cap_is_relayed_byte_for_byte() -> Result<(), Fault> {
+async fn a_batch_within_the_cap_is_sent_whole_with_what_it_said() -> Result<(), Fault> {
     let (openai, transport) = provider().await?;
     openai.answer(answer(&[0.5, 1.5], 2));
     let gw = gateway(transport.connect(), 2)?;
@@ -69,7 +69,8 @@ async fn a_batch_within_the_cap_is_relayed_byte_for_byte() -> Result<(), Fault> 
     assert_eq!(status, StatusCode::OK);
     let requests = openai.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(&requests[0].raw[..], body.as_bytes());
+    let sent: Value = serde_json::from_slice(&requests[0].raw).unwrap_or_default();
+    assert_eq!(sent, json!({ "model": MODEL, "input": ["a", "b"] }));
     Ok(())
 }
 

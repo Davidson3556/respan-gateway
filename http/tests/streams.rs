@@ -33,7 +33,6 @@ use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::conversation::{Conversation, Message, Reply, Role};
 use respan_gateway_sdk::futures;
-use respan_gateway_sdk::relayed::Relayed;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
     ClientContext, EventSink, EventStream, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
@@ -84,14 +83,14 @@ fn with_plugins(gw: Gateway, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
     plugins.into_iter().fold(gw, Gateway::plugin)
 }
 
-/// What a talk client says: one message, `{"say": ...}`, and the bytes it
-/// came in.
+/// What a talk client says: one message, `{"say": ...}`, and the other
+/// fields of the object.
 #[derive(Clone, PartialEq)]
-struct Say(String, Relayed<Say>);
+struct Say(String, serde_json::Map<String, Value>);
 
 impl Say {
     fn new(text: impl Into<String>) -> Self {
-        Say(text.into(), Relayed::default())
+        Say(text.into(), serde_json::Map::new())
     }
 }
 
@@ -112,15 +111,18 @@ struct Talk;
 
 fn read_talk(request: http::Request<Body>, strict: bool) -> Result<EventStream<Say>, Fault> {
     respan_gateway_http::messages(request, move |_, raw| {
-        let v = serde_json::from_slice::<Value>(&raw).ok();
-        let text = match v.as_ref().and_then(|v| v["say"].as_str()) {
+        let mut rest = match serde_json::from_slice::<Value>(&raw) {
+            Ok(Value::Object(fields)) => fields,
+            _ => serde_json::Map::new(),
+        };
+        let v = rest.remove("say");
+        let text = match v.as_ref().and_then(Value::as_str) {
             _ if raw.is_empty() && !strict => String::new(),
             _ if raw.is_empty() => return Err(BadRequest::fault("an empty message is not talk")),
             Some(s) => s.to_owned(),
             None => return Err(BadRequest::fault("not talk")),
         };
-        let origin = Relayed::came(&Arc::from("talk"), raw, Say::new(text.clone()));
-        Ok(Say(text, origin))
+        Ok(Say(text, rest))
     })
 }
 
@@ -181,8 +183,7 @@ impl Format<Outgoing, Heard, Say> for Talk {
         Ok(io.bind(
             |source| {
                 let live = !source.is_single();
-                let (request, sink) =
-                    respan_gateway_http::request("talk", source, Box::new(Says("talk")))?;
+                let (request, sink) = respan_gateway_http::request("talk", source, Box::new(Says))?;
                 let (mut head, body) = request.into_parts();
                 set_path(&mut head, "/talk");
                 if live {
@@ -199,21 +200,14 @@ impl Format<Outgoing, Heard, Say> for Talk {
     }
 }
 
-/// Writes each talk message of format `.0`: as it came, with an edit
-/// written into it, or anew.
-struct Says(&'static str);
+/// Writes each talk message from its text and its other fields.
+struct Says;
 
 impl Encoder<Say> for Says {
     fn encode(&mut self, say: &Say, out: &mut BytesMut) -> Result<(), Fault> {
-        let origin = say.1.came_in(self.0);
-        if let Some(bytes) = say.1.bytes(self.0, say) {
-            out.extend_from_slice(bytes);
-            return Ok(());
-        }
-        let raw = origin.and_then(|o| serde_json::from_slice(&o.bytes).ok());
-        let mut v: Value = raw.unwrap_or_else(|| json!({}));
-        v["say"] = say.0.clone().into();
-        out.extend_from_slice(v.to_string().as_bytes());
+        let mut v = say.1.clone();
+        v.insert("say".into(), say.0.clone().into());
+        out.extend_from_slice(Value::Object(v).to_string().as_bytes());
         Ok(())
     }
 
@@ -502,7 +496,7 @@ async fn a_101_head_goes_out_at_once() {
 }
 
 #[tokio::test]
-async fn a_framed_requests_inputs_are_relayed_as_one_call_each_as_it_came() {
+async fn a_framed_requests_inputs_are_relayed_as_one_call_each_with_what_they_said() {
     let echo = Echo::default();
     let (gw, calls) = talk(&echo, Vec::new());
     let (send, req) = upgrade();
@@ -515,7 +509,8 @@ async fn a_framed_requests_inputs_are_relayed_as_one_call_each_as_it_came() {
     gw.idle().await;
 
     assert_eq!(frames, [r#"{"heard":"a"}"#, r#"{"heard":"b"}"#]);
-    assert_eq!(echo.frames(), [r#"{"say":"a"}"#, r#"{ "say": "b" }"#]);
+    // Each frame is written from its value: the client's spacing is not kept.
+    assert_eq!(echo.frames(), [r#"{"say":"a"}"#, r#"{"say":"b"}"#]);
     assert_eq!((echo.calls(), calls.all().len()), (1, 1));
     assert!(ended.await.is_ok());
 }
@@ -547,11 +542,11 @@ async fn a_provider_edge_input_filter_redacts_streamed_inputs() {
     drop(send);
     let frames = frames(resp).await;
 
-    // A changed input is written into its own bytes; an unchanged one goes
-    // as it came.
+    // A changed input is written with its other fields; the client's spacing
+    // is not kept for the unchanged one.
     assert_eq!(
         echo.frames(),
-        [r#"{"say":"my ***","id":7}"#, r#"{ "say": "fine" }"#]
+        [r#"{"id":7,"say":"my ***"}"#, r#"{"say":"fine"}"#]
     );
     assert_eq!(frames, [r#"{"heard":"my ***"}"#, r#"{"heard":"fine"}"#]);
 }
@@ -619,8 +614,10 @@ async fn an_input_filter_edits_the_input_that_came_with_the_head_at_once() {
     let frames = frames(resp).await;
 
     let seen = seen.0.lock().map(|s| s.clone()).ok().flatten();
-    assert_eq!(seen, Some(Say::new("my ***")));
-    assert_eq!(echo.frames(), [r#"{"say":"my ***","id":1}"#]);
+    let mut kept = Say::new("my ***");
+    kept.1.insert("id".into(), 1.into());
+    assert_eq!(seen, Some(kept));
+    assert_eq!(echo.frames(), [r#"{"id":1,"say":"my ***"}"#]);
     assert_eq!(frames, [r#"{"heard":"my ***"}"#]);
 }
 
@@ -659,7 +656,9 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
 
     assert_eq!(whole.status(), StatusCode::OK);
     assert_eq!(framed.status(), StatusCode::SWITCHING_PROTOCOLS);
-    assert!(frames(whole).await.is_empty());
+    // The empty body's one empty input is written as a value, not as the
+    // empty bytes it came in.
+    assert_eq!(frames(whole).await, [r#"{"heard":""}"#]);
     assert!(frames(framed).await.is_empty());
     assert!(whole_ended.await.is_ok() && framed_ended.await.is_ok());
     gw.idle().await;
@@ -669,7 +668,7 @@ async fn a_whole_request_carries_one_input_even_empty_and_an_upgrading_head_none
     );
     let noted = quiet.0.lock().map(|s| s.clone()).unwrap_or_default();
     assert_eq!(noted, [(r#"Say("")"#.to_owned(), 1), (none, 0)]);
-    assert!(echo.frames().is_empty());
+    assert_eq!(echo.frames(), [r#"{"say":""}"#]);
     assert_eq!((echo.calls(), calls.all().len()), (2, 2));
 }
 
@@ -1212,7 +1211,7 @@ impl Format<Outgoing, Heard, Say> for TalkHttp {
                     return Err(Fault::config("talk-http cannot stream a request"));
                 }
                 let (request, sink) =
-                    respan_gateway_http::request("talk-http", source, Box::new(Says("talk-http")))?;
+                    respan_gateway_http::request("talk-http", source, Box::new(Says))?;
                 let (mut head, body) = request.into_parts();
                 set_path(&mut head, "/talk");
                 Ok((http::Request::from_parts(head, body), sink))

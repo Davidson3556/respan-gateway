@@ -314,7 +314,7 @@ async fn only_a_relay_carries_the_clients_anthropic_version() {
 
 /// A lookalike of the marker a plugin might try to set.
 #[derive(Clone)]
-struct Relayed;
+struct Lookalike;
 
 /// Sends every request to OpenAI, and in `on_provider` does all it can to
 /// make every call look like a relay: a marker in its extensions, which
@@ -329,7 +329,7 @@ impl Plugin for Forges {
     }
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        px.extensions_mut().insert(Relayed);
+        px.extensions_mut().insert(Lookalike);
         Ok(())
     }
 }

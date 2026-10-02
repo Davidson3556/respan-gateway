@@ -3,8 +3,9 @@
 //! for owned incoming and outgoing HTTP messages. Plugins
 //! then read and edit its values, whatever bytes they came in.
 //!
-//! Each value keeps the bytes it came in (`Relayed`), so a message no one
-//! changed relays byte for byte, and a changed one is written into them.
+//! Values are plain data and the format writes each one from its fields, so
+//! a message relays by what it says, not by its bytes; the fields the kind
+//! has no form for ride along in `rest`.
 //! `cargo run -p respan-gateway-examples --example custom_format` runs it
 //! against a mock provider.
 //!
@@ -22,7 +23,7 @@ use respan_gateway_sdk::{
     ClientContext, Connection, Fault, Format, Gateway, Plugin, ProviderContext, Response,
     async_trait,
 };
-use respan_gateway_sdk::{Usage, conversation::units::INPUT_TOKENS, relayed::Relayed};
+use respan_gateway_sdk::{Usage, conversation::units::INPUT_TOKENS};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -30,14 +31,15 @@ use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
 #[path = "../tests/support.rs"]
 mod provider_support;
-use serde_json::{self, Value, json};
+use serde_json::{self, Map, Value, json};
 
 /// The kind's input: texts to embed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmbedRequest {
     pub model: Option<String>,
     pub input: Vec<String>,
-    origin: Relayed<EmbedRequest>,
+    /// The other fields of the body, such as `dimensions`.
+    pub rest: Map<String, Value>,
 }
 
 /// The kind's output: a vector per input, and the usage.
@@ -45,7 +47,8 @@ pub struct EmbedRequest {
 pub struct Embeddings {
     pub vectors: Vec<Vec<f64>>,
     pub usage: Usage,
-    origin: Relayed<Embeddings>,
+    /// The other fields of the body, such as `model`.
+    pub rest: Map<String, Value>,
 }
 
 const NAME: &str = "openai-embeddings";
@@ -119,25 +122,28 @@ impl Format<Outgoing, Embeddings, EmbedRequest> for OpenAiEmbeddings {
 }
 
 fn read_request(raw: Bytes) -> Result<EmbedRequest, Fault> {
-    let name: Arc<str> = Arc::from(NAME);
-    let v: Value = serde_json::from_slice(&raw).map_err(|_| BadRequest::fault("not JSON"))?;
-    let mut said = EmbedRequest::default();
-    said.model = v["model"].as_str().map(Into::into);
-    said.input = match &v["input"] {
-        Value::String(one) => vec![one.clone()],
-        // Texts; token arrays are relayed but not read here.
-        all => serde_json::from_value(all.clone()).unwrap_or_default(),
+    let mut v: Map<String, Value> =
+        serde_json::from_slice(&raw).map_err(|_| BadRequest::fault("not a JSON object"))?;
+    let model = v.remove("model").and_then(|m| m.as_str().map(Into::into));
+    let input = match v.remove("input") {
+        Some(Value::String(one)) => vec![one],
+        // Texts; token arrays are not read here.
+        all => serde_json::from_value(all.unwrap_or_default()).unwrap_or_default(),
     };
-    said.origin = Relayed::came(&name, raw, said.clone());
-    Ok(said)
+    Ok(EmbedRequest {
+        model,
+        input,
+        rest: v,
+    })
 }
 
 fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
-    let name: Arc<str> = Arc::from(NAME);
-    let v: Value = serde_json::from_slice(&raw).map_err(|_| Upstream::fault("not JSON"))?;
+    let mut v: Map<String, Value> =
+        serde_json::from_slice(&raw).map_err(|_| Upstream::fault("not a JSON object"))?;
     let mut said = Embeddings::default();
     let malformed = || Upstream::fault("invalid embedding indices or vectors");
-    let data = v["data"].as_array().ok_or_else(malformed)?;
+    let data = v.remove("data").ok_or_else(malformed)?;
+    let data = data.as_array().ok_or_else(malformed)?;
     let mut ordered = vec![None; data.len()];
     for item in data {
         let index = item["index"]
@@ -145,7 +151,7 @@ fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
             .and_then(|index| usize::try_from(index).ok())
             .and_then(|index| ordered.get_mut(index))
             .ok_or_else(malformed)?;
-        // Base64 vectors can relay unread, but cannot be edited as floats.
+        // Base64 vectors are not read here: they are malformed for this kind.
         let vector: Vec<f64> =
             serde_json::from_value(item["embedding"].clone()).map_err(|_| malformed())?;
         if vector.is_empty() || index.replace(vector).is_some() {
@@ -156,10 +162,11 @@ fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
         .into_iter()
         .collect::<Option<_>>()
         .ok_or_else(malformed)?;
-    if let Some(tokens) = v["usage"]["prompt_tokens"].as_f64() {
+    let usage = v.remove("usage");
+    if let Some(tokens) = usage.and_then(|u| u["prompt_tokens"].as_f64()) {
         said.usage.add(INPUT_TOKENS, tokens);
     }
-    said.origin = Relayed::came(&name, raw, said.clone());
+    said.rest = v;
     Ok(said)
 }
 
@@ -168,42 +175,32 @@ fn error(fault: &Fault) -> Bytes {
     Bytes::from(json!({ "error": { "message": fault.message() } }).to_string())
 }
 
-/// The JSON a value came in, to write its changes into.
-fn origin_json<T: PartialEq>(origin: &Relayed<T>) -> Value {
-    let bytes = origin.came_in(NAME).map(|o| &o.bytes[..]).unwrap_or(b"{}");
-    serde_json::from_slice(bytes).unwrap_or_default()
-}
-
-/// A request: the client's bytes while they say the same.
+/// A request, written from its fields.
 fn write_request(one: &[EmbedRequest]) -> Result<Bytes, Fault> {
-    // None if the client's bytes go unread.
     let [r] = one else {
         return Ok(Bytes::new());
     };
-    if let Some(bytes) = r.origin.bytes(NAME, r) {
-        return Ok(bytes.clone());
-    }
-    let mut v = origin_json(&r.origin);
-    (v["model"], v["input"]) = (json!(r.model), json!(r.input));
-    Ok(v.to_string().into())
+    let mut v = r.rest.clone();
+    v.insert("model".into(), json!(r.model));
+    v.insert("input".into(), json!(r.input));
+    Ok(Value::Object(v).to_string().into())
 }
 
-/// A response: the provider's bytes while they say the same.
+/// A response, written from its fields.
 fn write_embeddings(one: &[Embeddings]) -> Result<Bytes, Fault> {
     let [e] = one else {
         return Err(Fault::internal("one response, one body"));
     };
-    if let Some(bytes) = e.origin.bytes(NAME, e) {
-        return Ok(bytes.clone());
-    }
-    let mut v = origin_json(&e.origin);
+    let mut v = e.rest.clone();
     let data = e.vectors.iter().enumerate();
-    v["data"] = data
-        .map(|(i, v)| json!({ "index": i, "embedding": v }))
-        .collect();
+    let data = data.map(|(i, v)| json!({ "index": i, "embedding": v }));
+    v.insert("data".into(), data.collect());
     let tokens = e.usage.get(INPUT_TOKENS);
-    v["usage"] = json!({ "prompt_tokens": tokens, "total_tokens": tokens });
-    Ok(v.to_string().into())
+    v.insert(
+        "usage".into(),
+        json!({ "prompt_tokens": tokens, "total_tokens": tokens }),
+    );
+    Ok(Value::Object(v).to_string().into())
 }
 
 /// A plugin on the new kind: every request uses `model`.

@@ -3,7 +3,7 @@
 //! concurrently, and answered as one: the vectors in the client's order (a
 //! call's vector `i` is input `i` of its chunk, and the chunks are joined in
 //! order, so the merged index is the original one) and the usage of every
-//! call summed. A batch within the cap is not split: it relays byte for byte.
+//! call summed. A batch within the cap is not split: it is sent whole.
 //!
 //! Each chunk is a subrequest, `cx.call(p).with_input(chunk)`, so it is a
 //! call like any other: every plugin's `on_provider` runs before it, and a

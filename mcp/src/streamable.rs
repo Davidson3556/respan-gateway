@@ -22,7 +22,6 @@ use respan_gateway_http::{
 };
 use respan_gateway_sdk::futures::stream::BoxStream;
 use respan_gateway_sdk::futures::{StreamExt, stream};
-use respan_gateway_sdk::relayed::Relayed;
 use respan_gateway_sdk::{
     BadRequest, Connection, EventSink, EventStream, Fault, Format, Truncated,
 };
@@ -34,10 +33,6 @@ use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, reques
 pub const SESSION: &str = "mcp-session-id";
 
 const NAME: &str = "mcp";
-// Output provenance includes wire framing: a rebuilt response may be written
-// with a different content type than the provider answer it collected.
-const JSON_ORIGIN: &str = "mcp/json";
-const SSE_ORIGIN: &str = "mcp/sse";
 const JSON: &str = "application/json";
 const SSE: &str = "text/event-stream";
 
@@ -89,7 +84,6 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
                         let read = read(&raw).filter(|(m, _)| !m.is_empty());
                         (input.messages, input.batch) = read.ok_or_else(bad)?;
                     }
-                    input.origin = Relayed::came(&Arc::from(NAME), raw, input.clone());
                     Ok(input)
                 })
             },
@@ -137,10 +131,8 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
                 }
                 let write = |inputs: &[ToServer]| {
                     let posts = inputs.iter().filter(|i| i.method == Method::POST);
-                    let mut bytes = posts.map(|i| match i.origin.bytes(NAME, i) {
-                        Some(bytes) => bytes.clone(),
-                        None => body(&i.messages, i.batch).to_string().into(),
-                    });
+                    let mut bytes =
+                        posts.map(|i| Bytes::from(body(&i.messages, i.batch).to_string()));
                     Ok::<_, Fault>(bytes.next_back().unwrap_or_default())
                 };
                 let (request, sink) = h::request(
@@ -165,12 +157,14 @@ fn response_events(
     }
     let (head, body) = answer.into_parts();
     let is_event = sse::is_stream(&head);
-    let origin = Arc::from(if is_event { SSE_ORIGIN } else { JSON_ORIGIN });
     let on_message = move |raw: Bytes, out: &mut Vec<ToClient>| {
         if !raw.is_empty() {
             let mut output = ToClient::new(Vec::new());
             (output.messages, output.batch) = read(&raw).unwrap_or_default();
-            output.origin = Relayed::came(&origin, raw, output.clone());
+            if is_event {
+                output.event_id = field(&raw, "id");
+                output.event = field(&raw, "event");
+            }
             out.push(output);
         }
         Ok(())
@@ -229,7 +223,7 @@ fn response_body(
     let write = move |outputs: &[ToClient]| {
         forget_answered(&mut lock(&left), outputs);
         Ok::<_, Fault>(if stream {
-            outputs.first().map(event).unwrap_or_default()
+            outputs.first().map(event).transpose()?.unwrap_or_default()
         } else {
             whole(outputs)
         })
@@ -243,24 +237,45 @@ fn response_body(
     }
 }
 
-/// An output as an event: its bytes while it says the same.
-fn event(output: &ToClient) -> Bytes {
-    if let Some(bytes) = output.origin.bytes(SSE_ORIGIN, output) {
-        return bytes.clone();
-    } else if output.messages.is_empty() {
-        return Bytes::new();
-    }
-    let like = output.origin.came_in(SSE_ORIGIN).map(|o| &o.bytes);
-    sse::event_as(like, None, body(&output.messages, output.batch)).into()
+/// The value of the last `name:` line of an event, if any.
+fn field(raw: &[u8], name: &str) -> Option<String> {
+    let text = String::from_utf8_lossy(raw);
+    let lines = text.split(['\n', '\r']);
+    let mut values = lines.filter_map(|l| l.strip_prefix(name)?.strip_prefix(':'));
+    values
+        .next_back()
+        .map(|v| v.strip_prefix(' ').unwrap_or(v).to_owned())
 }
 
-/// Outputs as one JSON body: the one's bytes while it says the same.
-fn whole(outputs: &[ToClient]) -> Bytes {
-    if let [one] = outputs
-        && let Some(bytes) = one.origin.bytes(JSON_ORIGIN, one)
-    {
-        return bytes.clone();
+/// An output as an event: its messages as `data:`, with its `id:` and
+/// `event:` if it has them. An event with an id and no messages stays, as the
+/// event that primes a client's `Last-Event-ID`. An id or name that would
+/// break its line (a plugin's edit) is refused rather than written.
+fn event(output: &ToClient) -> Result<Bytes, Fault> {
+    if output.messages.is_empty() && output.event_id.is_none() {
+        return Ok(Bytes::new());
     }
+    let mut out = String::new();
+    for (name, value) in [("id", &output.event_id), ("event", &output.event)] {
+        if let Some(value) = value {
+            if value.contains(['\r', '\n', '\0']) {
+                return Err(Fault::internal(format!(
+                    "an SSE {name} cannot hold a line break or NUL"
+                )));
+            }
+            out.push_str(&format!("{name}: {value}\n"));
+        }
+    }
+    let data = match output.messages.is_empty() {
+        true => String::new(),
+        false => body(&output.messages, output.batch).to_string(),
+    };
+    out.push_str(&sse::event(None, data));
+    Ok(out.into())
+}
+
+/// Outputs as one JSON body.
+fn whole(outputs: &[ToClient]) -> Bytes {
     let batch = outputs.len() > 1 || outputs.iter().any(|o| o.batch);
     let all: Vec<Value> = outputs.iter().flat_map(|o| o.messages.clone()).collect();
     if all.is_empty() {

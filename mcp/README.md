@@ -1,7 +1,10 @@
 # respan-gateway-mcp
 
 The Model Context Protocol on the gateway. Messages stay JSON-RPC values
-that keep their bytes, so an unedited message relays byte for byte.
+(every field survives), and output is always written from them, in the
+framing, JSON or event stream, the client needs. A `ToClient` carries its
+SSE `event_id` and `event` name (for `Last-Event-ID` resumption), written
+only in an event stream; SSE comments are dropped.
 
 - `ToServer` / `ToClient`: the kind, a client's request and a server's
   message.

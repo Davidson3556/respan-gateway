@@ -4,13 +4,12 @@
 //! MCP server run as a child process ([`StdioTransport`]).
 //!
 //! Messages are JSON-RPC 2.0, kept as JSON so every field MCP adds
-//! survives, and each value keeps the bytes it came in, so an unedited
-//! message relays byte for byte.
+//! survives. Output is always written from the parsed messages, in the framing
+//! (JSON or event stream) the client needs.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use respan_gateway_http::http::Method;
-use respan_gateway_sdk::relayed::Relayed;
 use serde_json::{Value, json};
 
 mod session;
@@ -34,7 +33,6 @@ pub struct ToServer {
     pub messages: Vec<Value>,
     /// Whether they came as a JSON array (a batch).
     pub batch: bool,
-    origin: Relayed<ToServer>,
 }
 
 impl ToServer {
@@ -44,7 +42,6 @@ impl ToServer {
             batch: method == Method::POST && messages.len() != 1,
             method,
             messages,
-            origin: Relayed::default(),
         }
     }
 
@@ -62,7 +59,12 @@ pub struct ToClient {
     pub messages: Vec<Value>,
     /// Whether they came as a JSON array (a batch).
     pub batch: bool,
-    origin: Relayed<ToClient>,
+    /// The SSE `id:` of its event, which a client resumes from
+    /// (`Last-Event-ID`); written only when the client's framing is an event
+    /// stream, and ignored in a JSON body.
+    pub event_id: Option<String>,
+    /// The SSE `event:` name of its event, written like `event_id`.
+    pub event: Option<String>,
 }
 
 impl ToClient {
@@ -71,7 +73,8 @@ impl ToClient {
         Self {
             batch: messages.len() != 1,
             messages,
-            origin: Relayed::default(),
+            event_id: None,
+            event: None,
         }
     }
 
