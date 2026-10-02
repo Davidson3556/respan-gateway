@@ -138,7 +138,7 @@ impl Plugin for Cache {
         let reply = [
             Reply::start("c0", "cached"),
             Reply::block_start(0, Block::Text),
-            Reply::delta(0, "a bomb"),
+            Reply::text(0, "a bomb"),
             Reply::block_end(0),
         ];
         Ok(Some(Response::stream(stream::iter(reply.map(Ok)))))

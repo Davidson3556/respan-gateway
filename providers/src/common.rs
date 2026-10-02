@@ -21,7 +21,7 @@ use serde_json::{self, Map, Value};
 use crate::Usage;
 use crate::anthropic::ANTHROPIC;
 use crate::conversation::{
-    Block, Content, Conversation, Extra, Finish, Message, Reply, Role, Start,
+    Block, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role, Start,
 };
 use crate::formats::errors::{provider_error, says_error};
 use crate::formats::sse::{content_type, event_data};
@@ -421,7 +421,9 @@ impl Whole {
                 })),
             },
             Reply::Delta { block, delta } => match self.part(*block) {
-                Some(part) if !part.ended => part.text.push_str(delta),
+                Some(part) if !part.ended && fits(delta, &part.kind) => {
+                    part.text.push_str(delta.as_str())
+                }
                 _ => return Err(unwritable_content()),
             },
             Reply::BlockEnd { block } => match self.part(*block) {
@@ -574,11 +576,21 @@ pub(crate) fn only(object: &Value, these: &[&str]) -> bool {
     })
 }
 
+/// Whether `delta` is of the kind of `block`.
+pub(crate) fn fits(delta: &Delta, block: &Block) -> bool {
+    matches!(
+        (delta, block),
+        (Delta::Text(_), Block::Text)
+            | (Delta::Arguments(_), Block::ToolCall { .. })
+            | (Delta::Reasoning(_), Block::Reasoning)
+    )
+}
+
 /// Whether a reply shows the client something: not a start, usage, or the
 /// opening or end of a text block, which says nothing yet.
 pub(crate) fn shows(reply: &Reply) -> bool {
     match reply {
-        Reply::Delta { delta, .. } => !delta.is_empty(),
+        Reply::Delta { delta, .. } => !delta.as_str().is_empty(),
         Reply::BlockStart { kind, .. } => *kind != Block::Text,
         Reply::Finish(_) => true,
         _ => false,
@@ -1035,7 +1047,7 @@ mod tests {
                 let replies = [
                     Reply::start("r", "m"),
                     Reply::block_start(0, Block::Text),
-                    Reply::delta(0, "hello"),
+                    Reply::text(0, "hello"),
                     Reply::block_end(0),
                     Reply::finished(Finish::Stop),
                 ];
@@ -1323,7 +1335,7 @@ mod tests {
     #[test]
     fn orphan_tool_arguments_fail_in_unary_and_streaming_responses() {
         // Arguments of a call that never started, in either format's words.
-        let orphan = [Reply::delta(0, "{}")];
+        let orphan = [Reply::arguments(0, "{}")];
         let ask = http::Request::new(()).into_parts().0;
         for stream in [false, true] {
             let body: Bytes = json!({"stream": stream, "stream_options": {"include_usage": true}})
@@ -1357,12 +1369,12 @@ mod tests {
         };
         let replies = [
             call(0, "a", "alpha"),
-            Reply::delta(0, "{\"a\":"),
+            Reply::arguments(0, "{\"a\":"),
             call(1, "b", "beta"),
-            Reply::delta(1, "{\"b\":"),
-            Reply::delta(0, "1}"),
+            Reply::arguments(1, "{\"b\":"),
+            Reply::arguments(0, "1}"),
             call(1, "b", "beta"),
-            Reply::delta(1, "2}"),
+            Reply::arguments(1, "2}"),
             Reply::block_end(0),
             Reply::block_end(1),
         ];
@@ -1564,9 +1576,9 @@ mod tests {
         for reply in [
             Reply::start("r", "m"),
             Reply::block_start(3, Block::Text),
-            Reply::delta(3, "a"),
+            Reply::text(3, "a"),
             Reply::block_start(3, Block::Text),
-            Reply::delta(3, "b"),
+            Reply::text(3, "b"),
             Reply::block_end(3),
             Reply::other("f", json!(1)),
             Reply::finished(Finish::Stop),
@@ -1576,8 +1588,8 @@ mod tests {
         let texts: Vec<_> = whole.parts().map(|p| p.text.as_str()).collect();
         assert_eq!(texts, ["ab"]);
         assert!(matches!(whole.items[1], Item::Other(..)));
-        assert!(whole.add(&Reply::delta(3, "c")).is_err(), "ended");
-        assert!(whole.add(&Reply::delta(9, "c")).is_err(), "never opened");
+        assert!(whole.add(&Reply::text(3, "c")).is_err(), "ended");
+        assert!(whole.add(&Reply::text(9, "c")).is_err(), "never opened");
         assert!(whole.add(&Reply::block_end(9)).is_err());
         let call = Block::ToolCall {
             id: "t".into(),

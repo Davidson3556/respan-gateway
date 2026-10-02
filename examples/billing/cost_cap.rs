@@ -90,7 +90,7 @@ impl Plugin for Cap {
             // other events their whole JSON, an overestimate, which errs
             // toward cutting.
             let chars = match reply {
-                Reply::Delta { delta, .. } => delta.len(),
+                Reply::Delta { delta, .. } => delta.as_str().len(),
                 Reply::BlockStart {
                     kind: Block::ToolCall { name, .. },
                     ..

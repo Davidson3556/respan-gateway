@@ -11,18 +11,20 @@ A `Fault` carries typed facts that each edge renders as it knows: `BadRequest`,
 `ErrorCode`. Core adds only its own markers (`Abandoned`, `Internal`, `Config`,
 `NotFound`).
 
-A response is a sequence of events, the same for a stream and a whole body:
-`Reply::Start`, then for each content block a `BlockStart`, its `Delta`s and a
+A reply is a sequence of events, the same for a stream and a whole body, and
+a `Reply` is one such event, not a whole reply: `Reply::Start`, then for each content block a `BlockStart`, its `Delta`s and a
 `BlockEnd`, with `Usage` increments, a `Finish` and `Other` (an event the kind
-has no form for, in its format's own JSON) among them. An encoder collects the
+has no form for, in its format's own JSON) among them. A `Delta` is a
+`Delta::Text`, `Delta::Arguments` or `Delta::Reasoning`, of its block's own
+kind, so a plugin need not track what a block holds. An encoder collects the
 events into one body or writes them as a stream, so a plugin handles one shape;
-`Assembled` folds them into the whole answer for plugins that need it (a
+`Assembled` is the whole reply, folded from its events, for plugins that need it (a
 judge, a cache). `Reply::is_content` is true of a start, a block event or a
 finish, not of usage or `Other`.
 
 Tools are typed too: a request's `Tool`s and `ToolChoice`, an assistant's
 `Content::ToolCall` and its `Content::ToolResult`, and a response's
-`Block::ToolCall`, whose arguments stream as `Delta`s of JSON text.
+`Block::ToolCall`, whose arguments stream as `Delta::Arguments` of JSON text.
 `Message::text` exposes typed text, explicitly skipping tool calls and other
 content; `Message::is_plain` checks whether all content is known text and the
 message has no `Extra`. Holdback, JSON-text rewriting and placeholders remain

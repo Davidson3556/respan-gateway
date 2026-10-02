@@ -313,7 +313,7 @@ async fn an_expired_claim_cannot_renew_or_publish_a_result() -> Result<(), Fault
     assert!(store.renew(&key, owner).await.is_err());
     let stale = vec![
         Reply::block_start(0, respan_gateway_sdk::conversation::Block::Text),
-        Reply::delta(0, "stale"),
+        Reply::text(0, "stale"),
         Reply::block_end(0),
     ];
     store.finish(&key, owner, Some(Arc::new(stale))).await?;

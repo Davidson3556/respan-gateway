@@ -47,11 +47,11 @@ use std::sync::Arc;
 use crate::Usage;
 use crate::common::{
     Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
-    extra_of, is_inert, merge_fields, post_json, probe, read_message, refusal, says, set,
+    extra_of, fits, is_inert, merge_fields, post_json, probe, read_message, refusal, says, set,
     stop_json, supported_usage, tag, unix_now, unreadable_event, unsupported_fields,
     unwritable_content, unwritable_usage, usage_extra,
 };
-use crate::conversation::{Block, Conversation, Finish, Reply, Role, Start, units};
+use crate::conversation::{Block, Conversation, Delta, Finish, Reply, Role, Start, units};
 use crate::formats::errors::{merge_details, says_error};
 use crate::formats::sse::{event, event_data, is_stream};
 use crate::tools::{
@@ -748,13 +748,13 @@ impl OpenAiReader {
         block
     }
 
-    /// Delta `text` of the block of `key`, opened as `kind` if it is not.
-    fn say(&mut self, key: Key, kind: Block, text: &str, out: &mut Vec<Reply>) {
+    /// Delta `delta` of the block of `key`, opened as `kind` if it is not.
+    fn say(&mut self, key: Key, kind: Block, delta: Delta, out: &mut Vec<Reply>) {
         let block = match self.open_block(&key) {
             Some(block) => block,
             None => self.open(key, kind, out),
         };
-        out.push(Reply::delta(block, text));
+        out.push(Reply::Delta { block, delta });
     }
 
     /// End every open block, in the order they opened.
@@ -811,10 +811,15 @@ impl OpenAiReader {
             ));
         }
         if let Some(text) = body["reasoning_content"].as_str().filter(|t| !t.is_empty()) {
-            self.say(Key::Reasoning, Block::Reasoning, text, out);
+            self.say(
+                Key::Reasoning,
+                Block::Reasoning,
+                Delta::Reasoning(text.into()),
+                out,
+            );
         }
         if let Some(text) = body["content"].as_str().filter(|t| !t.is_empty()) {
-            self.say(Key::Text, Block::Text, text, out);
+            self.say(Key::Text, Block::Text, Delta::Text(text.into()), out);
         }
         for call in calls.into_iter().flatten() {
             let key = Key::Call(call.index);
@@ -841,7 +846,7 @@ impl OpenAiReader {
                 }
             };
             if !call.arguments.is_empty() {
-                out.push(Reply::delta(block, call.arguments));
+                out.push(Reply::arguments(block, call.arguments));
             }
         }
         if let Some(reason) = first["finish_reason"].as_str() {
@@ -1120,15 +1125,19 @@ impl Chunks {
         Ok(())
     }
 
-    fn say(&mut self, block: u32, text: &str, out: &mut BytesMut) -> Result<(), Fault> {
+    fn say(&mut self, block: u32, part: &Delta, out: &mut BytesMut) -> Result<(), Fault> {
         let slot = self.slot(block)?;
+        if !fits(part, &slot.kind) {
+            return Err(unwritable_content());
+        }
+        let text = part.as_str();
         if text.is_empty() {
             return Ok(());
         }
-        let delta = match (&slot.kind, slot.call) {
-            (Block::Text, _) => json!({ "content": text }),
-            (Block::Reasoning, _) => json!({ "reasoning_content": text }),
-            (_, Some(index)) => {
+        let delta = match (part, slot.call) {
+            (Delta::Text(_), _) => json!({ "content": text }),
+            (Delta::Reasoning(_), _) => json!({ "reasoning_content": text }),
+            (Delta::Arguments(_), Some(index)) => {
                 slot.arguments = true;
                 json!({ "tool_calls": [call_json(Some(index), None, None, text)] })
             }
@@ -1322,7 +1331,7 @@ mod tests {
     fn text_events(block: u32, text: &str) -> Vec<Reply> {
         vec![
             Reply::block_start(block, Block::Text),
-            Reply::delta(block, text),
+            Reply::text(block, text),
             Reply::block_end(block),
         ]
     }
@@ -1393,7 +1402,7 @@ mod tests {
             [
                 Reply::start("x", "m"),
                 Reply::block_start(0, Block::Text),
-                Reply::delta(0, "Hello"),
+                Reply::text(0, "Hello"),
                 // Totals repeated in a later chunk add only what changed.
                 first,
                 Reply::block_end(0),
@@ -1425,7 +1434,7 @@ mod tests {
                 start,
                 // An empty text opens no block.
                 Reply::block_start(0, Block::Text),
-                Reply::delta(0, "Hi"),
+                Reply::text(0, "Hi"),
                 // A tool call ends the text before it, and starts its own.
                 Reply::block_end(0),
                 Reply::block_start(1, call("call_1", "f")),
@@ -1448,16 +1457,16 @@ mod tests {
             out[1..],
             [
                 Reply::block_start(0, Block::Reasoning),
-                Reply::delta(0, "hm"),
+                Reply::reasoning(0, "hm"),
                 Reply::block_end(0),
                 Reply::block_start(1, Block::Text),
-                Reply::delta(1, "Hi"),
+                Reply::text(1, "Hi"),
                 Reply::block_end(1),
                 // Each call, by its `index`, is a block, as it opens.
                 Reply::block_start(2, call("a", "f")),
-                Reply::delta(2, "{"),
+                Reply::arguments(2, "{"),
                 Reply::block_start(3, call("b", "g")),
-                Reply::delta(2, "}"),
+                Reply::arguments(2, "}"),
                 Reply::block_end(2),
                 Reply::block_end(3),
                 Reply::finished(Finish::ToolUse),
@@ -1478,7 +1487,7 @@ mod tests {
             [
                 Reply::other(OPENAI, rest),
                 Reply::block_start(0, Block::Text),
-                Reply::delta(0, "Hi"),
+                Reply::text(0, "Hi"),
             ]
         );
     }
@@ -1521,7 +1530,7 @@ mod tests {
                 Reply::start("x", ""),
                 usage(units::OUTPUT_TOKENS, 1.0),
                 Reply::block_start(0, Block::Text),
-                Reply::delta(0, "hi"),
+                Reply::text(0, "hi"),
                 Reply::block_end(0),
                 Reply::finished(Finish::Stop),
             ]
@@ -1604,7 +1613,7 @@ mod tests {
     #[test]
     fn a_tool_call_emptied_in_a_stream_fails_rather_than_leave_a_shell() {
         // Arguments for a call that never started.
-        let replies = [Reply::delta(0, "{}")];
+        let replies = [Reply::arguments(0, "{}")];
         assert!(stream_of(&replies, false).is_err());
         assert!(body_of(&replies).is_err());
         // A call that is a shell, with no id or name, cannot be decoded.
@@ -1664,10 +1673,10 @@ mod tests {
                 start,
                 totals,
                 Reply::block_start(0, Block::Text),
-                Reply::delta(0, "ok"),
+                Reply::text(0, "ok"),
                 Reply::block_end(0),
                 Reply::block_start(1, call("t", "f")),
-                Reply::delta(1, "{}"),
+                Reply::arguments(1, "{}"),
                 Reply::block_end(1),
                 Reply::finished(Finish::ToolUse),
             ]
@@ -2487,13 +2496,13 @@ mod tests {
         let replies = [
             Reply::start("x", "m"),
             Reply::block_start(0, Block::Reasoning),
-            Reply::delta(0, "hm"),
+            Reply::reasoning(0, "hm"),
             Reply::block_end(0),
             Reply::block_start(1, Block::Text),
-            Reply::delta(1, "one "),
+            Reply::text(1, "one "),
             Reply::block_end(1),
             Reply::block_start(2, Block::Text),
-            Reply::delta(2, "two"),
+            Reply::text(2, "two"),
             Reply::block_end(2),
             Reply::block_start(3, call("t", "f")),
             Reply::block_end(3),

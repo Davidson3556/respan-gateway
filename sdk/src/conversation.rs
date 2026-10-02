@@ -2,16 +2,17 @@
 //! through these types, and plugins read any conversation through them:
 //! `cx.filter(|c: &mut Conversation| ..)` for the input and
 //! `cx.filter(|r: &mut Reply| ..)` for the output, one [`Reply`] per event of
-//! the response.
+//! the reply: a `Reply` is one event, not a whole reply.
 //!
-//! A response is a sequence of events that follows the lifecycle of a
+//! A reply is a sequence of events that follows the lifecycle of a
 //! stream: [`Reply::Start`], then for each content block a
-//! [`Reply::BlockStart`], its [`Reply::Delta`]s and a [`Reply::BlockEnd`],
+//! [`Reply::BlockStart`], its [`Reply::Delta`]s (each a [`Delta`] of its
+//! block's own kind) and a [`Reply::BlockEnd`],
 //! with [`Reply::Usage`], [`Reply::Finish`] and [`Reply::Other`] among them.
 //! A response that was not streamed decodes into the same sequence, and an
 //! encoder collects the events into one body or writes them as a stream, so a
 //! plugin handles one shape. [`Assembled`] folds the events into the whole
-//! answer for plugins that need it.
+//! reply for plugins that need it.
 //!
 //! Tools are the kind's too: the tools a request offers ([`Tool`],
 //! [`ToolChoice`]), the calls an assistant made and their results
@@ -88,8 +89,9 @@ pub struct Conversation {
     pub model: Option<String>,
     /// The messages, in order.
     pub messages: Vec<Message>,
-    /// Whether the request asks for a stream. The client gets the framing
-    /// it asked for.
+    /// Whether the request asks for a stream: the framing the client asked
+    /// for, which the value carries so that a translated call asks the
+    /// provider for the same.
     pub stream: bool,
     /// The most tokens the answer may have.
     pub max_tokens: Option<u64>,
@@ -355,8 +357,9 @@ impl From<String> for Content {
     }
 }
 
-/// The kind's output: one event of a response, streamed or not. Filters see
-/// every event, those that are no content ([`Reply::is_content`]) included,
+/// The kind's output: one event of a reply, streamed or not (a `Reply` is
+/// not a whole reply; [`Assembled`] is the whole reply, folded from its
+/// events). Filters see every event, those that are no content ([`Reply::is_content`]) included,
 /// such as a usage report.
 ///
 /// Blocks are numbered by the format that decodes them, and may be open
@@ -373,13 +376,12 @@ pub enum Reply {
         /// What it holds.
         kind: Block,
     },
-    /// The next part of block `block`: text, tool-call argument JSON, or
-    /// reasoning.
+    /// The next part of block `block`, of the block's own kind.
     Delta {
         /// The block it belongs to.
         block: u32,
-        /// The text, or the part of a tool call's arguments.
-        delta: String,
+        /// The part, which says what it holds.
+        delta: Delta,
     },
     /// Block `block` is complete.
     BlockEnd {
@@ -420,8 +422,8 @@ pub struct Start {
 pub enum Block {
     /// Text.
     Text,
-    /// A tool call the model makes; its [`Reply::Delta`]s are its arguments,
-    /// as JSON text.
+    /// A tool call the model makes; its [`Delta::Arguments`] are its
+    /// arguments, as JSON text.
     ToolCall {
         /// The call's id, which its result names.
         id: String,
@@ -430,6 +432,34 @@ pub enum Block {
     },
     /// The model's reasoning.
     Reasoning,
+}
+
+/// The next part of a block, of the block's own kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Delta {
+    /// Text of a [`Block::Text`].
+    Text(String),
+    /// The next part of a [`Block::ToolCall`]'s arguments, as JSON text.
+    Arguments(String),
+    /// Reasoning of a [`Block::Reasoning`].
+    Reasoning(String),
+}
+
+impl Delta {
+    /// The text it holds, whatever its kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Delta::Text(s) | Delta::Arguments(s) | Delta::Reasoning(s) => s,
+        }
+    }
+
+    /// The text it holds, to append to.
+    pub fn as_mut_string(&mut self) -> &mut String {
+        match self {
+            Delta::Text(s) | Delta::Arguments(s) | Delta::Reasoning(s) => s,
+        }
+    }
 }
 
 impl Start {
@@ -454,11 +484,27 @@ impl Reply {
         Reply::BlockStart { block, kind }
     }
 
-    /// The next part of block `block`.
-    pub fn delta(block: u32, delta: impl Into<String>) -> Self {
+    /// The next text of the [`Block::Text`] `block`.
+    pub fn text(block: u32, text: impl Into<String>) -> Self {
         Reply::Delta {
             block,
-            delta: delta.into(),
+            delta: Delta::Text(text.into()),
+        }
+    }
+
+    /// The next part of the arguments of the [`Block::ToolCall`] `block`.
+    pub fn arguments(block: u32, json: impl Into<String>) -> Self {
+        Reply::Delta {
+            block,
+            delta: Delta::Arguments(json.into()),
+        }
+    }
+
+    /// The next reasoning of the [`Block::Reasoning`] `block`.
+    pub fn reasoning(block: u32, text: impl Into<String>) -> Self {
+        Reply::Delta {
+            block,
+            delta: Delta::Reasoning(text.into()),
         }
     }
 
@@ -528,7 +574,7 @@ impl Finish {
 /// The events of a response folded into the whole answer, for plugins that
 /// need it (a judge, a cache, a job store). Unary and streamed responses
 /// fold alike.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Assembled {
     /// The response's start, if one came.
     pub start: Option<Start>,
@@ -562,13 +608,21 @@ enum Place {
     Reasoning(usize),
 }
 
-/// An empty message of the assistant, which is what an answer starts as.
-impl Default for Message {
+/// An empty answer: an assistant's message with no content yet.
+impl Default for Assembled {
     fn default() -> Self {
         Self {
-            role: Role::Assistant,
-            content: Vec::new(),
-            extra: Extra::default(),
+            start: None,
+            message: Message {
+                role: Role::Assistant,
+                content: Vec::new(),
+                extra: Extra::default(),
+            },
+            reasoning: Vec::new(),
+            finish: None,
+            usage: Usage::default(),
+            other: Vec::new(),
+            blocks: Vec::new(),
         }
     }
 }
@@ -576,7 +630,7 @@ impl Default for Message {
 impl Assembled {
     /// Fold the next event of the response in. A sequence that cannot be a
     /// response is an `Err`: a start twice, a block that opens as another
-    /// kind, a delta or an end for a block that is not open.
+    /// kind, a delta of another kind than its block, a delta or an end for a block that is not open.
     pub fn push(&mut self, reply: &Reply) -> Result<(), Fault> {
         match reply {
             Reply::Start(start) => match self.start {
@@ -586,14 +640,20 @@ impl Assembled {
             Reply::BlockStart { block, kind } => self.open(*block, kind)?,
             Reply::Delta { block, delta } => {
                 let place = self.open_place(*block)?;
-                match place {
-                    Place::Reasoning(at) => self.reasoning[at].push_str(delta),
-                    Place::Content(at) => match &mut self.message.content[at] {
-                        Content::Text { text, .. } => text.push_str(delta),
-                        Content::ToolCall { arguments, .. } => arguments.push_str(delta),
-                        _ => {}
+                let (held, part) = match (place, delta) {
+                    (Place::Reasoning(at), Delta::Reasoning(part)) => {
+                        (&mut self.reasoning[at], part)
+                    }
+                    (Place::Content(at), delta) => match (&mut self.message.content[at], delta) {
+                        (Content::Text { text, .. }, Delta::Text(part)) => (text, part),
+                        (Content::ToolCall { arguments, .. }, Delta::Arguments(part)) => {
+                            (arguments, part)
+                        }
+                        _ => return Err(malformed("a delta is not of its block's kind")),
                     },
-                }
+                    _ => return Err(malformed("a delta is not of its block's kind")),
+                };
+                held.push_str(part);
             }
             Reply::BlockEnd { block } => {
                 self.open_place(*block)?;
@@ -728,11 +788,11 @@ mod tests {
         let all = fold(&[
             Reply::start("r1", "m"),
             Reply::block_start(0, Block::Reasoning),
-            Reply::delta(0, "hm"),
+            Reply::reasoning(0, "hm"),
             Reply::block_end(0),
             Reply::block_start(1, Block::Text),
-            Reply::delta(1, "Hel"),
-            Reply::delta(1, "lo"),
+            Reply::text(1, "Hel"),
+            Reply::text(1, "lo"),
             Reply::block_end(1),
             Reply::block_start(
                 2,
@@ -741,8 +801,8 @@ mod tests {
                     name: "f".into(),
                 },
             ),
-            Reply::delta(2, "{\"a\":"),
-            Reply::delta(2, "1}"),
+            Reply::arguments(2, "{\"a\":"),
+            Reply::arguments(2, "1}"),
             Reply::block_end(2),
             Reply::other("chat", json!({"type": "ping"})),
             Reply::usage(usage.clone()),
@@ -769,23 +829,51 @@ mod tests {
     fn a_sequence_that_is_no_response_is_refused() {
         let text = || Reply::block_start(0, Block::Text);
         for events in [
-            vec![Reply::delta(0, "x")],
+            vec![Reply::text(0, "x")],
             vec![Reply::block_end(0)],
-            vec![text(), Reply::block_end(0), Reply::delta(0, "x")],
+            vec![text(), Reply::block_end(0), Reply::text(0, "x")],
             vec![text(), Reply::block_start(0, Block::Reasoning)],
+            vec![text(), Reply::reasoning(0, "x")],
+            vec![text(), Reply::arguments(0, "{}")],
+            vec![Reply::block_start(0, Block::Reasoning), Reply::text(0, "x")],
             vec![Reply::start("a", "m"), Reply::start("b", "m")],
         ] {
             let end = fold(&events).err();
             assert!(end.is_some_and(|f| f.is::<Upstream>()), "{events:?}");
         }
         // A start repeated for an open block, as a filter adding to it writes.
-        assert!(fold(&[text(), Reply::delta(0, "a"), text(), Reply::delta(0, "b")]).is_ok());
+        assert!(fold(&[text(), Reply::text(0, "a"), text(), Reply::text(0, "b")]).is_ok());
+    }
+
+    #[test]
+    fn a_delta_of_another_kind_than_its_block_is_refused() {
+        let call = Block::ToolCall {
+            id: "t".into(),
+            name: "f".into(),
+        };
+        for (kind, wrong) in [
+            (Block::Text, Reply::arguments(0, "{}")),
+            (Block::Text, Reply::reasoning(0, "x")),
+            (call.clone(), Reply::text(0, "x")),
+            (call, Reply::reasoning(0, "x")),
+            (Block::Reasoning, Reply::text(0, "x")),
+            (Block::Reasoning, Reply::arguments(0, "{}")),
+        ] {
+            let mut all = Assembled::default();
+            all.push(&Reply::block_start(0, kind.clone()))
+                .expect("opens");
+            let end = all.push(&wrong).err();
+            assert!(
+                end.is_some_and(|f| f.is::<Upstream>()),
+                "{kind:?} {wrong:?}"
+            );
+        }
     }
 
     #[test]
     fn only_usage_and_other_events_are_no_content() {
         assert!(Reply::start("a", "m").is_content());
-        assert!(Reply::delta(0, "x").is_content());
+        assert!(Reply::text(0, "x").is_content());
         assert!(Reply::finished(Finish::Stop).is_content());
         assert!(!Reply::usage(Usage::default()).is_content());
         assert!(!Reply::other("f", json!(1)).is_content());

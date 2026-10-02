@@ -3,18 +3,20 @@
 #[path = "../support/text.rs"]
 mod text;
 
-use respan_gateway_sdk::conversation::{Block, Content, Conversation, Message, Reply, Role, Tool};
+use respan_gateway_sdk::conversation::{
+    Block, Content, Conversation, Delta, Message, Reply, Role, Tool,
+};
 use respan_gateway_sdk::{Fault, Filter};
 #[path = "text_support/mod.rs"]
 mod support;
 
 use serde_json::{self, Value, json};
-use support::{arguments_of, opened, run_filter as run};
+use support::{arguments_of, run_filter as run};
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE};
 
 /// The next part of the arguments of the tool call in block 0.
 fn call(arguments: &str) -> Reply {
-    Reply::delta(0, arguments)
+    Reply::arguments(0, arguments)
 }
 
 fn args(out: &[Reply]) -> String {
@@ -30,7 +32,7 @@ fn whole_call(arguments: &str) -> Vec<Reply> {
     };
     vec![
         Reply::block_start(0, kind),
-        Reply::delta(0, arguments),
+        Reply::arguments(0, arguments),
         Reply::block_end(0),
     ]
 }
@@ -57,7 +59,7 @@ fn a_fragment_that_is_only_a_placeholder_is_escaped() {
     let frags = ["{\"to\":\"".to_owned(), ph, "\"}".to_owned()];
     let out = run(
         &mut Holdback::new(vault),
-        opened(frags.iter().map(|f| call(f)).collect()),
+        frags.iter().map(|f| call(f)).collect(),
     )
     .unwrap_or_default();
     let joined = args(&out);
@@ -118,11 +120,19 @@ fn restored(raw_json: Value, vault: Placeholders) -> Value {
 fn reasoning(text: &str, vault: Placeholders) -> String {
     let events = vec![
         Reply::block_start(0, Block::Reasoning),
-        Reply::delta(0, text),
+        Reply::reasoning(0, text),
         Reply::block_end(0),
     ];
     let out = run(&mut Holdback::new(vault), events).unwrap_or_default();
-    arguments_of(&out, 0)
+    out.iter()
+        .filter_map(|e| match e {
+            Reply::Delta {
+                delta: Delta::Reasoning(text),
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -146,7 +156,7 @@ fn prose_in_other_content_is_restored_unescaped() {
 fn an_anthropic_partial_json_piece_is_escaped() {
     let vault = Placeholders::default();
     let name = vault.hide("NAME", "Robert \"Bob\" Smith");
-    let out = run(&mut Holdback::new(vault), opened(vec![call(&name)])).unwrap_or_default();
+    let out = run(&mut Holdback::new(vault), vec![call(&name)]).unwrap_or_default();
     assert_eq!(args(&out), "Robert \\\"Bob\\\" Smith");
 }
 
@@ -201,7 +211,7 @@ fn a_legacy_function_call_fragment_is_escaped() {
     let frags = ["{\"dir\":\"".to_owned(), path, "\"}".to_owned()];
     let out = run(
         &mut Holdback::new(vault),
-        opened(frags.iter().map(|f| call(f)).collect()),
+        frags.iter().map(|f| call(f)).collect(),
     )
     .unwrap_or_default();
     let joined = args(&out);
@@ -221,7 +231,7 @@ fn a_streamed_piece_that_parses_is_edited_as_text() {
         });
         assert!(edited.is_ok());
         if let Reply::Delta { delta, .. } = &reply {
-            joined.push_str(delta);
+            joined.push_str(delta.as_str());
         }
     }
     let parsed: Value = serde_json::from_str(&joined).unwrap_or_default();
@@ -303,7 +313,7 @@ impl Rewrite for MaskDigits {
 #[test]
 fn a_unicode_escape_in_streamed_arguments_is_kept_whole() {
     let piece = "{\"note\":\"don\\u2019t call 5551234\"}";
-    let out = run(&mut Holdback::new(MaskDigits), opened(vec![call(piece)])).unwrap_or_default();
+    let out = run(&mut Holdback::new(MaskDigits), vec![call(piece)]).unwrap_or_default();
     let parsed: Value = serde_json::from_str(&args(&out)).unwrap_or_default();
     assert_eq!(parsed["note"], "don\u{2019}t call ****", "{}", args(&out));
 }
@@ -415,7 +425,7 @@ fn tool_indexes_do_not_delay_argument_tails_until_after_the_finish() -> Result<(
         name: "f".into(),
     };
     filter.edit(Reply::block_start(2, kind), &mut out)?;
-    filter.edit(Reply::delta(2, "{\"to\":\"<NA"), &mut out)?;
+    filter.edit(Reply::arguments(2, "{\"to\":\"<NA"), &mut out)?;
     filter.edit(Reply::finished(Finish::Length), &mut out)?;
     assert_eq!(out.last(), Some(&Reply::finished(Finish::Length)));
     assert!(

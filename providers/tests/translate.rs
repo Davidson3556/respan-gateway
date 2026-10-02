@@ -10,7 +10,7 @@ use mockllm::{Answer, FakeAnthropic, FakeOpenAi, Request};
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::async_trait;
-use respan_gateway_sdk::conversation::{Block, Conversation, Extra, Finish, Reply, units};
+use respan_gateway_sdk::conversation::{Block, Conversation, Delta, Extra, Finish, Reply, units};
 use respan_gateway_sdk::{ClientContext, Fault, Plugin, ProviderContext, Response, Upstream};
 #[allow(dead_code)] // Shared hooks also expose a call log not used by this suite.
 #[path = "../../tests/support/hooks.rs"]
@@ -27,7 +27,8 @@ use respan_gateway_sdk::Filter;
 use serde_json::{Value, json};
 use support::{
     Adds, CHAT, Call, Disclaimer, Flip, Footer, HoldAll, MESSAGES, Metered, Nameless, Shout,
-    Silence, TextBlocks, Unmask, add_provider, fault_code, providers, says, text, with_plugins,
+    Silence, TextBlocks, Unmask, add_provider, fault_code, providers, says, text, text_of,
+    with_plugins,
 };
 use support::{SendRequest, http_sender, sender};
 
@@ -2116,10 +2117,7 @@ impl Filter<Reply> for Note {
         out.push(event);
         if first {
             // Into the answer's first block, which opens as it comes.
-            out.extend([
-                Reply::block_start(0, Block::Text),
-                Reply::delta(0, "Note: "),
-            ]);
+            out.extend([Reply::block_start(0, Block::Text), Reply::text(0, "Note: ")]);
         }
         Ok(())
     }
@@ -2511,7 +2509,8 @@ struct LagByOne(Vec<Reply>, TextBlocks);
 
 impl Filter<Reply> for LagByOne {
     fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let text = self.1.text(&event).is_some();
+        self.1.note(&event);
+        let text = text_of(&event).is_some();
         let ends = matches!(&event, Reply::BlockEnd { block } if self.1.contains(*block));
         match (text, ends) {
             (true, _) => {
@@ -2640,8 +2639,11 @@ async fn a_guardrail_ending_an_anthropic_stream_early_ends_it() {
     impl Filter<Reply> for Cut {
         fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
             match reply {
-                Reply::Delta { block, delta } if delta == " world" => {
-                    out.push(Reply::delta(block, " [cut]"));
+                Reply::Delta {
+                    block,
+                    delta: Delta::Text(text),
+                } if text == " world" => {
+                    out.push(Reply::text(block, " [cut]"));
                     out.push(Reply::finished(Finish::Filtered));
                 }
                 reply => out.push(reply),
@@ -3461,19 +3463,16 @@ async fn parallel_openai_tool_calls_reach_an_anthropic_client_in_blocks_that_do_
 
 /// Restores a hidden email in tool calls' arguments, as a PII plugin does.
 #[derive(Clone, Default)]
-struct RestoreArguments(Vec<u32>);
+struct RestoreArguments;
 
 impl Filter<Reply> for RestoreArguments {
     fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        match &mut reply {
-            Reply::BlockStart {
-                block,
-                kind: Block::ToolCall { .. },
-            } => self.0.push(*block),
-            Reply::Delta { block, delta } if self.0.contains(block) => {
-                *delta = delta.replace("<EMAIL_1>", "bob@x.io");
-            }
-            _ => {}
+        if let Reply::Delta {
+            delta: Delta::Arguments(arguments),
+            ..
+        } = &mut reply
+        {
+            *arguments = arguments.replace("<EMAIL_1>", "bob@x.io");
         }
         out.push(reply);
         Ok(())
@@ -3501,7 +3500,7 @@ async fn an_edited_tool_call_is_written_into_anthropics_own_events() {
             event(json!({"type": "content_block_stop", "index": 1})),
         ],
     );
-    let h = Harness::new(vec![Arc::new(Adds(RestoreArguments::default()))]).await;
+    let h = Harness::new(vec![Arc::new(Adds(RestoreArguments))]).await;
     let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
     h.anthropic.answer(sse(&chunks));
     let body = json!({ "model": "claude-x", "max_tokens": 10, "stream": true,
@@ -3557,12 +3556,8 @@ async fn an_edited_tool_call_is_written_into_openais_own_chunks() {
         chunk(json!([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}])),
         "data: [DONE]\n\n".to_owned(),
     ];
-    let plugins = || -> Vec<Arc<dyn Plugin>> {
-        vec![
-            Arc::new(ToOpenAi),
-            Arc::new(Adds(RestoreArguments::default())),
-        ]
-    };
+    let plugins =
+        || -> Vec<Arc<dyn Plugin>> { vec![Arc::new(ToOpenAi), Arc::new(Adds(RestoreArguments))] };
     let h = Harness::with(plugins()).await;
     let chunks: Vec<&str> = stream.iter().map(String::as_str).collect();
     h.openai.answer(sse(&chunks));

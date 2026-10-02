@@ -16,12 +16,12 @@ refuse what cannot be read.
 - `Readable` (for `Conversation` and `Reply`): `edit_all` runs an edit on
   every text, tools and tool-call JSON included, or fails with `UNREADABLE`
   on content with no text form, such as an image. A `Reply::Delta` is read
-  as plain text: it does not say what block it belongs to, so only a
-  `Holdback` reads a tool call's argument deltas as JSON text.
-- `Holdback::new(rewrite)`: a `Reply` filter that tracks what each block
-  holds from its `BlockStart` and holds back trailing text that may start a
-  match, so a `Rewrite` sees each match whole. Text and reasoning deltas are
-  text; a tool call's deltas are JSON text, held per block, so a match split
+  as plain text, so only a `Holdback` reads a `Delta::Arguments` as JSON
+  text.
+- `Holdback::new(rewrite)`: a `Reply` filter that holds back trailing
+  text that may start a match, so a `Rewrite` sees each match whole. Text and
+  reasoning deltas are text; a tool call's `Delta::Arguments` are JSON text,
+  held per block, so a match split
   across them, escapes included, is seen whole and what replaces it is
   escaped. Held text is released before another block opens, at its
   `BlockEnd`, at the `Finish` and at the end. Events that show nothing yet

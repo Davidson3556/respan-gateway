@@ -485,7 +485,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
             let hi = [
                 Reply::start("own", "m"),
                 Reply::block_start(0, Block::Text),
-                Reply::delta(0, "hi"),
+                Reply::text(0, "hi"),
                 Reply::block_end(0),
                 Reply::usage(shown),
             ];

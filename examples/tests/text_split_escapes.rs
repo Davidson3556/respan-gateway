@@ -9,11 +9,11 @@ use respan_gateway_sdk::conversation::{Block, Finish, Reply};
 mod support;
 
 use serde_json::{Value, json};
-use support::{arguments_of, opened, run_filter as run};
+use support::{arguments_of, run_filter as run};
 use text::{Holdback, Placeholders};
 
 fn call_at(index: u32, arguments: &str) -> Reply {
-    Reply::delta(index, arguments)
+    Reply::arguments(index, arguments)
 }
 
 fn args_of(out: &[Reply], index: u32) -> String {
@@ -29,7 +29,7 @@ fn a_split_backslash_escape_before_a_placeholder_is_restored() {
     let frags = ["{\"p\":\"C:\\".to_owned(), format!("\\{ph}\"}}")];
     let out = run(
         &mut Holdback::new(vault),
-        opened(frags.iter().map(|f| call_at(0, f)).collect()),
+        frags.iter().map(|f| call_at(0, f)).collect(),
     )
     .unwrap_or_default();
     let joined = args_of(&out, 0);
@@ -43,7 +43,7 @@ fn control_unsplit_backslash_before_a_placeholder_is_restored() {
     let vault = Placeholders::default();
     let ph = vault.hide("NAME", "bob");
     let whole = format!("{{\"p\":\"C:\\\\{ph}\"}}");
-    let out = run(&mut Holdback::new(vault), opened(vec![call_at(0, &whole)])).unwrap_or_default();
+    let out = run(&mut Holdback::new(vault), vec![call_at(0, &whole)]).unwrap_or_default();
     let joined = args_of(&out, 0);
     let parsed: Value = serde_json::from_str(&joined).unwrap_or_default();
     assert_eq!(parsed["p"], "C:\\bob", "{joined}");
@@ -59,7 +59,7 @@ fn a_split_escaped_quote_then_placeholder_keeps_json_valid() {
     let frags = ["{\"s\":\"say \\".to_owned(), format!("\"{ph}\\\"\"}}")];
     let out = run(
         &mut Holdback::new(vault),
-        opened(frags.iter().map(|f| call_at(0, f)).collect()),
+        frags.iter().map(|f| call_at(0, f)).collect(),
     )
     .unwrap_or_default();
     let joined = args_of(&out, 0);
@@ -75,12 +75,12 @@ fn two_interleaved_calls_with_split_placeholders_are_restored() {
     let b = vault.hide("EMAIL", "b@x.io");
     let (a1, a2) = a.split_at(4);
     let (b1, b2) = b.split_at(3);
-    let replies = opened(vec![
+    let replies = vec![
         call_at(0, &format!("{{\"to\":\"{a1}")),
         call_at(1, &format!("{{\"to\":\"{b1}")),
         call_at(0, &format!("{a2}\"}}")),
         call_at(1, &format!("{b2}\"}}")),
-    ]);
+    ];
     let out = run(&mut Holdback::new(vault), replies).unwrap_or_default();
     let (ja, jb) = (args_of(&out, 0), args_of(&out, 1));
     let pa: Value = serde_json::from_str(&ja).unwrap_or_default();
@@ -101,7 +101,7 @@ fn a_tail_at_the_end_is_released_restored() {
     let partial = &ph[..ph.len() - 1];
     let out = run(
         &mut Holdback::new(vault),
-        opened(vec![call_at(0, &format!("{{\"to\":\"{partial}"))]),
+        vec![call_at(0, &format!("{{\"to\":\"{partial}"))],
     )
     .unwrap_or_default();
     let joined = args_of(&out, 0);
@@ -117,11 +117,11 @@ fn a_tail_at_a_finish_is_released_with_its_index() {
     let (p1, p2) = ph.split_at(4);
     let out = run(
         &mut Holdback::new(vault),
-        opened(vec![
+        vec![
             call_at(2, &format!("{{\"to\":\"{p1}")),
             call_at(2, p2),
             Reply::finished(Finish::ToolUse),
-        ]),
+        ],
     )
     .unwrap_or_default();
     let joined = args_of(&out, 2);
@@ -147,7 +147,7 @@ fn a_restore_into_malformed_whole_arguments_stays_escaped() {
     };
     let whole = vec![
         Reply::block_start(0, kind),
-        Reply::delta(0, args),
+        Reply::arguments(0, args),
         Reply::block_end(0),
     ];
     let out = run(&mut Holdback::new(vault), whole).unwrap_or_default();
@@ -177,12 +177,12 @@ impl text::Rewrite for Refuse {
 fn a_split_backslash_hides_a_term_from_a_refusing_check() {
     let unsplit = run(
         &mut Holdback::new(Refuse),
-        opened(vec![call_at(0, "{\"s\":\"a\\\\bomb\"}")]),
+        vec![call_at(0, "{\"s\":\"a\\\\bomb\"}")],
     );
     assert!(unsplit.is_err(), "control: unsplit is refused");
     let split = run(
         &mut Holdback::new(Refuse),
-        opened(vec![call_at(0, "{\"s\":\"a\\"), call_at(0, "\\bomb\"}")]),
+        vec![call_at(0, "{\"s\":\"a\\"), call_at(0, "\\bomb\"}")],
     );
     assert!(
         split.is_err(),
@@ -218,7 +218,7 @@ impl text::Rewrite for MaskDigits {
 fn a_split_unicode_escape_stays_valid_json() {
     let out = run(
         &mut Holdback::new(MaskDigits),
-        opened(vec![call_at(0, "{\"n\":\"don\\u"), call_at(0, "2019t\"}")]),
+        vec![call_at(0, "{\"n\":\"don\\u"), call_at(0, "2019t\"}")],
     )
     .unwrap_or_default();
     let joined = args_of(&out, 0);
@@ -233,7 +233,7 @@ fn a_split_unicode_escape_stays_valid_json() {
 fn an_escaped_letter_hides_a_term_from_a_refusing_check() {
     let out = run(
         &mut Holdback::new(Refuse),
-        opened(vec![call_at(0, "{\"s\":\"\\u0062omb\"}")]),
+        vec![call_at(0, "{\"s\":\"\\u0062omb\"}")],
     );
     assert!(out.is_err(), "passed: {:?}", out.map(|o| args_of(&o, 0)));
 }
@@ -245,7 +245,7 @@ fn a_split_surrogate_pair_is_one_character() {
     let vault = Placeholders::default();
     let ph = vault.hide("NAME", "bob");
     let frags = ["{\"s\":\"\\ud83d", "\\ude", "00 ", &ph, "\"}"];
-    let calls = opened(frags.iter().map(|f| call_at(0, f)).collect());
+    let calls = frags.iter().map(|f| call_at(0, f)).collect();
     let out = run(&mut Holdback::new(vault), calls).unwrap_or_default();
     let joined = args_of(&out, 0);
     let parsed: Value = serde_json::from_str(&joined).unwrap_or_default();

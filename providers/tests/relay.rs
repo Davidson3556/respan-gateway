@@ -29,7 +29,7 @@ use respan_gateway_http::{Completion, Encoder, HttpClient, Incoming};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::async_trait;
 use respan_gateway_sdk::conversation::{
-    Assembled, Content, Conversation, Extra, Finish, Message, Reply, Role, set_model, units,
+    Assembled, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role, set_model, units,
 };
 use respan_gateway_sdk::{
     BadRequest, ClientContext, Connection, ErrorCode, Fault, Filter, Format, Gateway, Plugin,
@@ -39,8 +39,8 @@ use respan_gateway_sdk::{Details, Usage};
 use serde_json::json;
 use support::{
     Adds, Call, Disclaimer, Flip, Footer, HoldAll, Metered, Nameless, SendRequest, Shout, Silence,
-    TextBlocks, Unmask, add_provider, fault_code, http_sender, providers, says, sender, text,
-    with_plugins,
+    Unmask, add_provider, fault_code, http_sender, providers, says, sender, text, text_of,
+    text_of_mut, with_plugins,
 };
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -409,9 +409,8 @@ impl Transcript {
 impl Plugin for Transcript {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let text = self.0.clone();
-        let mut blocks = TextBlocks::default();
         cx.filter(move |e: &mut Reply| {
-            if let (Ok(mut t), Some(event)) = (text.lock(), blocks.text(e)) {
+            if let (Ok(mut t), Some(event)) = (text.lock(), text_of(e)) {
                 t.push_str(event);
             }
             Ok(())
@@ -585,7 +584,8 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
                 .outputs::<Reply>()
                 .try_collect::<Vec<_>>()
                 .await?;
-            let unsafe_ = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta == "UNSAFE");
+            let unsafe_ =
+                |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "UNSAFE");
             match verdict.iter().any(unsafe_) {
                 true => Err(Fault::new("the judge refused")
                     .with(ErrorCode("unsafe".into()))
@@ -674,9 +674,8 @@ async fn a_filter_may_keep_state_that_is_not_sync() {
     impl Plugin for Count {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let seen = std::cell::Cell::new(0);
-            let mut blocks = TextBlocks::default();
             cx.filter(move |e: &mut Reply| {
-                if let Some(text) = blocks.text_mut(e) {
+                if let Some(text) = text_of_mut(e) {
                     seen.set(seen.get() + 1);
                     *text = format!("{}:{text}", seen.get());
                 }
@@ -988,9 +987,8 @@ impl Plugin for Named {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         self.note("client");
         let name = self.0;
-        let mut blocks = TextBlocks::default();
         cx.filter(move |r: &mut Reply| {
-            if let Some(text) = blocks.text_mut(r) {
+            if let Some(text) = text_of_mut(r) {
                 *text = format!("{name}({text})");
             }
             Ok(())
@@ -1361,7 +1359,8 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
     let end = h.log.only();
     assert!(matches!(end, Err(f) if respan_gateway_http::status(&f) == StatusCode::FORBIDDEN));
 
-    let world = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.contains("world"));
+    let world =
+        |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world"));
     let h = Harness::new(vec![Arc::new(Guard(world))], Some("openai"));
     h.sites.openai.reply(fixture::sse(STREAM));
 
@@ -1427,9 +1426,8 @@ async fn a_filter_edits_several_events_of_one_chunk_in_its_shape() {
     #[async_trait]
     impl Plugin for Truncate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let mut blocks = TextBlocks::default();
             cx.filter(move |e: &mut Reply| {
-                if let Some(text) = blocks.text_mut(e) {
+                if let Some(text) = text_of_mut(e) {
                     *text = text.to_uppercase();
                 }
                 if let Reply::Finish(finish) = e {
@@ -1774,11 +1772,11 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
 
     /// Keeps a finished answer and what it cost, to replay later: the
     /// filter sees every reply, the usage alone at the stream's end too.
-    struct Fill(String, f64, Entry, TextBlocks);
+    struct Fill(String, f64, Entry);
 
     impl Filter<Reply> for Fill {
         fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            if let Some(text) = self.3.text(&event) {
+            if let Some(text) = text_of(&event) {
                 self.0.push_str(text);
             }
             if let Reply::Usage(usage) = &event {
@@ -1801,12 +1799,7 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
     #[async_trait]
     impl Plugin for Cache {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(Fill(
-                String::new(),
-                0.0,
-                self.0.clone(),
-                TextBlocks::default(),
-            ))?;
+            cx.filter(Fill(String::new(), 0.0, self.0.clone()))?;
             Ok(None)
         }
     }
@@ -1825,14 +1818,14 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
 async fn a_delta_a_filter_splits_in_two_is_written_as_two_and_reads_back_whole() {
     /// Splits each text after its first character.
     #[derive(Default)]
-    struct Split(TextBlocks);
+    struct Split;
 
     impl Filter<Reply> for Split {
         fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            match (self.0.text(&reply), &reply) {
+            match (text_of(&reply), &reply) {
                 (Some(text), Reply::Delta { block, .. }) if text.len() > 1 => {
                     let (a, b) = text.split_at(1);
-                    out.extend([Reply::delta(*block, a), Reply::delta(*block, b)]);
+                    out.extend([Reply::text(*block, a), Reply::text(*block, b)]);
                 }
                 _ => out.push(reply),
             }
@@ -1845,7 +1838,7 @@ async fn a_delta_a_filter_splits_in_two_is_written_as_two_and_reads_back_whole()
     #[async_trait]
     impl Plugin for Splitter {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(Split::default())?;
+            cx.filter(Split)?;
             Ok(None)
         }
     }
@@ -2598,7 +2591,7 @@ async fn a_judge_asks_whole_while_its_client_streams() {
                 .outputs::<Reply>()
                 .try_collect::<Vec<_>>()
                 .await?;
-            let hi = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta == "hi");
+            let hi = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "hi");
             assert!(verdict.iter().any(hi));
             Ok(None)
         }
@@ -3320,7 +3313,7 @@ async fn every_call_a_smart_router_makes_is_billed_once_on_the_provider_edge() {
                 .try_collect::<Vec<_>>()
                 .await?;
             let pick = verdict.iter().find_map(|e| match e {
-                Reply::Delta { delta, .. } => Some(delta.clone()),
+                Reply::Delta { delta, .. } => Some(delta.as_str().to_owned()),
                 _ => None,
             });
             cx.set_target(pick.unwrap_or_else(|| "openai".into()));
@@ -3422,9 +3415,8 @@ async fn provider_edge_filters_run_before_client_edge_ones_each_last_added_first
     struct Mark(&'static str);
 
     fn mark(tag: String) -> impl FnMut(&mut Reply) -> Result<(), Fault> + Send + 'static {
-        let mut blocks = TextBlocks::default();
         move |e| {
-            if let Some(text) = blocks.text_mut(e) {
+            if let Some(text) = text_of_mut(e) {
                 text.push_str(&tag);
             }
             Ok(())
@@ -3954,7 +3946,7 @@ async fn a_provider_filter_edits_a_call_a_plugin_collects() {
                 .try_collect::<Vec<_>>()
                 .await?;
             let pick = verdict.iter().find_map(|e| match e {
-                Reply::Delta { delta, .. } => Some(delta.clone()),
+                Reply::Delta { delta, .. } => Some(delta.as_str().to_owned()),
                 _ => None,
             });
             cx.set_target(pick.unwrap_or_default());
@@ -3966,15 +3958,12 @@ async fn a_provider_filter_edits_a_call_a_plugin_collects() {
     let overrule =
         OnProvider(
             |px| match px.input::<Conversation>()?.model.as_deref() == Some("judge-1") {
-                true => {
-                    let mut blocks = TextBlocks::default();
-                    px.filter(move |r: &mut Reply| {
-                        if let Some(text) = blocks.text_mut(r) {
-                            *text = text.replace("openai", "backup");
-                        }
-                        Ok(())
-                    })
-                }
+                true => px.filter(move |r: &mut Reply| {
+                    if let Some(text) = text_of_mut(r) {
+                        *text = text.replace("openai", "backup");
+                    }
+                    Ok(())
+                }),
                 _ => Ok(()),
             },
         );
@@ -4097,7 +4086,8 @@ async fn a_response_kept_past_its_request_ends_abandoned_and_reads_so() {
 #[tokio::test]
 async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
     let bill = Bill::default();
-    let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.contains("world")));
+    let guard =
+        Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world")));
     let h = Harness::new(
         vec![Arc::new(bill.clone()), Arc::new(guard)],
         Some("openai"),
@@ -4378,7 +4368,7 @@ struct Garbling(Box<dyn Encoder<Reply>>);
 
 impl Encoder<Reply> for Garbling {
     fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
-        if matches!(reply, Reply::Delta { delta, .. } if delta == "bad") {
+        if matches!(reply, Reply::Delta { delta, .. } if delta.as_str() == "bad") {
             out.extend_from_slice(b"GARBAGE");
             return Err(Fault::new("cannot write it")
                 .with(ErrorCode("unwritable".into()))
@@ -4474,7 +4464,7 @@ async fn a_panic_before_any_bytes_is_refused() {
 async fn a_panic_after_bytes_went_out_keeps_those_written_before_it() {
     let h = Harness::new(
         vec![Arc::new(Guard(|e| {
-            if matches!(e, Reply::Delta { delta, .. } if delta == "boom") {
+            if matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "boom") {
                 panic!("a buggy guard");
             }
             false
@@ -4550,7 +4540,8 @@ async fn a_client_edge_failure_ends_the_call_however_its_bytes_were_split() {
     ];
     for (chunks, want) in each {
         let bill = Bill::default();
-        let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.contains("world")));
+        let guard =
+            Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world")));
         let h = Harness::new(
             vec![Arc::new(bill.clone()), Arc::new(guard)],
             Some("openai"),
@@ -5014,7 +5005,10 @@ async fn a_plugin_answers_with_its_calls_events_read_as_they_are_sent() {
                     Reply::BlockStart { block: b, kind } => {
                         Some(Reply::block_start(block(b), kind))
                     }
-                    Reply::Delta { block: b, delta } => Some(Reply::delta(block(b), delta)),
+                    Reply::Delta { block: b, delta } => Some(Reply::Delta {
+                        block: block(b),
+                        delta,
+                    }),
                     Reply::BlockEnd { block: b } => Some(Reply::block_end(block(b))),
                     other => Some(other),
                 }))
@@ -5303,13 +5297,14 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
     impl Plugin for Cached {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             // Its first output, which the guard sees before anything is written.
-            let cached = [Ok(Reply::delta(0, "world"))];
+            let cached = [Ok(Reply::text(0, "world"))];
             Ok(Some(Response::stream(futures::stream::iter(cached))))
         }
     }
 
     // So a guard refuses a cached answer as it refuses a provider's.
-    let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.contains("world")));
+    let guard =
+        Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world")));
     let h = Harness::new(vec![Arc::new(guard), Arc::new(Cached)], None);
     let (status, body) = h.text(chat()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -5665,7 +5660,7 @@ async fn a_filter_added_after_a_call_is_made_misses_that_whole_calls_input() {
 async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
     let guard = || -> Vec<Arc<dyn Plugin>> {
         vec![Arc::new(Guard(
-            |e| matches!(e, Reply::Delta { delta, .. } if delta == " world"),
+            |e| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == " world"),
         ))]
     };
     let end = |h: &Harness| {
@@ -5702,7 +5697,7 @@ async fn r6_a_guard_refuses_a_plugins_answer_whether_or_not_it_awaited_first() {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let waits = self.0;
             // Its first content, which the guard sees before anything is written.
-            let answer = [Reply::start("cached", "gpt-x"), Reply::delta(0, "bomb")];
+            let answer = [Reply::start("cached", "gpt-x"), Reply::text(0, "bomb")];
             let answer = futures::StreamExt::then(
                 futures::stream::iter(answer.map(Ok)),
                 move |r| async move {
@@ -5718,7 +5713,7 @@ async fn r6_a_guard_refuses_a_plugins_answer_whether_or_not_it_awaited_first() {
     }
 
     let status = |waits: bool| async move {
-        let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta == "bomb"));
+        let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "bomb"));
         let h = Harness::new(vec![Arc::new(guard), Arc::new(Answer(waits))], None);
         h.send(unary_chat()).await.0
     };
@@ -5920,17 +5915,25 @@ struct Restore {
     vault: Arc<Vault>,
     held: String,
     block: u32,
-    texts: TextBlocks,
 }
 
 impl Filter<Reply> for Restore {
     fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        self.texts.note(&reply);
         // Nothing follows a finish, and text kept back goes before other
         // content: hold nothing past them.
-        let text = matches!(&reply, Reply::Delta { block, .. } if self.texts.contains(*block));
+        let text = matches!(
+            &reply,
+            Reply::Delta {
+                delta: Delta::Text(_),
+                ..
+            }
+        );
         let last = !text && reply.is_content();
-        if let (Reply::Delta { block, delta }, true) = (&mut reply, text) {
+        if let Reply::Delta {
+            block,
+            delta: Delta::Text(delta),
+        } = &mut reply
+        {
             let mut t = std::mem::take(&mut self.held) + delta.as_str();
             if let Some(i) = t.rfind('<').filter(|&i| !t[i..].contains('>')) {
                 self.held = t.split_off(i);
@@ -5950,7 +5953,7 @@ impl Filter<Reply> for Restore {
     fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
         if !self.held.is_empty() {
             let held = std::mem::take(&mut self.held);
-            out.push(Reply::delta(self.block, self.vault.restore(held)));
+            out.push(Reply::text(self.block, self.vault.restore(held)));
         }
         Ok(())
     }
@@ -5983,7 +5986,6 @@ impl Plugin for Pii {
             vault,
             held: String::new(),
             block: 0,
-            texts: TextBlocks::default(),
         })
     }
 }

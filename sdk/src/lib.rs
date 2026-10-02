@@ -16,8 +16,8 @@ mod fault;
 mod usage;
 
 pub use conversation::{
-    Assembled, Block, Content, Conversation, Extra, Finish, Message, Reply, Role, Start, Tool,
-    ToolChoice, set_model,
+    Assembled, Block, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role, Start,
+    Tool, ToolChoice, set_model,
 };
 pub use fault::{BadRequest, ErrorCode, RetryAfter, Truncated, Upstream};
 pub use usage::Usage;

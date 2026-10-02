@@ -43,12 +43,12 @@ use std::sync::Arc;
 use crate::Usage;
 use crate::common::{
     Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
-    extra_of, is_inert, merge_fields, post_json, read_content, read_message, refusal, says, set,
-    stop_json, supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
+    extra_of, fits, is_inert, merge_fields, post_json, read_content, read_message, refusal, says,
+    set, stop_json, supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
     unwritable_usage, usage_extra, write_content, write_message,
 };
 use crate::conversation::{
-    Block, Content, Conversation, Finish, Message, Reply, Role, Start, units,
+    Block, Content, Conversation, Delta, Finish, Message, Reply, Role, Start, units,
 };
 use crate::formats::errors::{merge_details, says_error};
 use crate::formats::sse::{event, event_json, is_stream};
@@ -748,7 +748,7 @@ impl AnthropicReader {
             Some("text") => {
                 self.fields(block, b, &["type", "text"], out);
                 out.push(Reply::block_start(block, Block::Text));
-                out.extend(text().map(|t| Reply::delta(block, t)));
+                out.extend(text().map(|t| Reply::text(block, t)));
             }
             Some("tool_use") => {
                 let call = b["id"].as_str().zip(b["name"].as_str());
@@ -763,14 +763,14 @@ impl AnthropicReader {
                 self.fields(block, b, &["type", "id", "name", "input"], out);
                 out.push(Reply::block_start(block, kind));
                 if !input.is_empty() {
-                    out.push(Reply::delta(block, b["input"].to_string()));
+                    out.push(Reply::arguments(block, b["input"].to_string()));
                 }
             }
             Some("thinking") => {
                 self.fields(block, b, &["type", "thinking", "signature"], out);
                 out.push(Reply::block_start(block, Block::Reasoning));
                 let thinking = b["thinking"].as_str().filter(|t| !t.is_empty());
-                out.extend(thinking.map(|t| Reply::delta(block, t)));
+                out.extend(thinking.map(|t| Reply::reasoning(block, t)));
                 if says(&b["signature"]) {
                     let delta = json!({ "type": "signature_delta", "signature": b["signature"] });
                     self.other(
@@ -857,9 +857,11 @@ impl Reader for AnthropicReader {
                 let delta = &v["delta"];
                 let text = |key: &str| delta[key].as_str().unwrap_or_default();
                 match delta["type"].as_str() {
-                    Some("text_delta") => out.push(Reply::delta(block, text("text"))),
-                    Some("input_json_delta") => out.push(Reply::delta(block, text("partial_json"))),
-                    Some("thinking_delta") => out.push(Reply::delta(block, text("thinking"))),
+                    Some("text_delta") => out.push(Reply::text(block, text("text"))),
+                    Some("input_json_delta") => {
+                        out.push(Reply::arguments(block, text("partial_json")))
+                    }
+                    Some("thinking_delta") => out.push(Reply::reasoning(block, text("thinking"))),
                     _ => self.other(v, out),
                 }
             }
@@ -943,7 +945,7 @@ struct Slot {
     /// Its index once it is open on the wire.
     index: Option<u32>,
     /// What came for it while it waited.
-    held: String,
+    held: Option<Delta>,
     ended: bool,
 }
 
@@ -991,7 +993,7 @@ impl EventStream {
             Block::Reasoning => json!({ "type": "thinking", "thinking": "" }),
             _ => return Err(unwritable_content()),
         };
-        let (held, kind) = (std::mem::take(&mut wb.held), wb.kind.clone());
+        let held = wb.held.take();
         let mut content = content;
         if let Some(at) = self.fields.iter().position(|(b, _)| *b == block) {
             merge_fields(&mut content, &self.fields.remove(at).1);
@@ -999,7 +1001,9 @@ impl EventStream {
         let start =
             json!({ "type": "content_block_start", "index": index, "content_block": content });
         emit(out, start);
-        delta(index, &kind, &held, out);
+        if let Some(held) = held {
+            delta(index, &held, out);
+        }
         Ok(())
     }
 
@@ -1032,22 +1036,26 @@ impl EventStream {
             block,
             kind: kind.clone(),
             index: None,
-            held: String::new(),
+            held: None,
             ended: false,
         });
         self.waiting.push(block);
         self.pump(out)
     }
 
-    fn say(&mut self, block: u32, text: &str, out: &mut BytesMut) -> Result<(), Fault> {
+    fn say(&mut self, block: u32, part: &Delta, out: &mut BytesMut) -> Result<(), Fault> {
         let wb = self.find(block)?;
-        if wb.ended {
+        if wb.ended || !fits(part, &wb.kind) {
             return Err(unwritable_content());
         }
-        match (wb.index, text.is_empty()) {
+        match (wb.index, part.as_str().is_empty()) {
             (_, true) => {}
-            (Some(index), false) => delta(index, &wb.kind, text, out),
-            (None, false) => wb.held.push_str(text),
+            (Some(index), false) => delta(index, part, out),
+            // The block is not open on the wire yet: keep what it says.
+            (None, false) => match &mut wb.held {
+                Some(held) => held.as_mut_string().push_str(part.as_str()),
+                None => wb.held = Some(part.clone()),
+            },
         }
         Ok(())
     }
@@ -1087,11 +1095,12 @@ impl EventStream {
     }
 }
 
-fn delta(index: u32, kind: &Block, text: &str, out: &mut BytesMut) {
-    let delta = match kind {
-        Block::Text => json!({ "type": "text_delta", "text": text }),
-        Block::ToolCall { .. } => json!({ "type": "input_json_delta", "partial_json": text }),
-        Block::Reasoning => json!({ "type": "thinking_delta", "thinking": text }),
+fn delta(index: u32, part: &Delta, out: &mut BytesMut) {
+    let text = part.as_str();
+    let delta = match part {
+        Delta::Text(_) => json!({ "type": "text_delta", "text": text }),
+        Delta::Arguments(_) => json!({ "type": "input_json_delta", "partial_json": text }),
+        Delta::Reasoning(_) => json!({ "type": "thinking_delta", "thinking": text }),
         _ => return,
     };
     if !text.is_empty() {
@@ -1255,7 +1264,7 @@ mod tests {
     fn text_events(block: u32, text: &str) -> Vec<Reply> {
         vec![
             Reply::block_start(block, Block::Text),
-            Reply::delta(block, text),
+            Reply::text(block, text),
             Reply::block_end(block),
         ]
     }
@@ -1383,7 +1392,7 @@ mod tests {
         }
         assert_eq!(total.get(units::INPUT_TOKENS), Some(5.0));
         assert_eq!(total.get(units::OUTPUT_TOKENS), Some(7.0));
-        assert!(out.contains(&Reply::delta(0, "hm")));
+        assert!(out.contains(&Reply::reasoning(0, "hm")));
     }
 
     #[test]
@@ -1416,7 +1425,7 @@ mod tests {
             out,
             [
                 Reply::block_start(2, Block::Text),
-                Reply::delta(2, "Well, "),
+                Reply::text(2, "Well, "),
                 // An empty text opens a block that says nothing yet.
                 Reply::block_start(3, Block::Text),
             ]
@@ -1559,19 +1568,19 @@ mod tests {
                 Reply::start("m", "c"),
                 totals,
                 Reply::block_start(0, Block::Reasoning),
-                Reply::delta(0, "hm"),
+                Reply::reasoning(0, "hm"),
                 Reply::other(ANTHROPIC, signature),
                 Reply::block_end(0),
                 Reply::block_start(1, Block::Text),
-                Reply::delta(1, "ok"),
+                Reply::text(1, "ok"),
                 Reply::block_end(1),
                 Reply::block_start(2, call("t", "f")),
-                Reply::delta(2, "{\"a\":1}"),
+                Reply::arguments(2, "{\"a\":1}"),
                 Reply::block_end(2),
                 // What the kind has no place for comes before the block opens.
                 Reply::other(ANTHROPIC, cited),
                 Reply::block_start(3, Block::Text),
-                Reply::delta(3, "cited"),
+                Reply::text(3, "cited"),
                 Reply::block_end(3),
                 Reply::finished(Finish::ToolUse),
             ]
@@ -1798,7 +1807,7 @@ mod tests {
         assert_eq!(out.len(), 5);
         assert!(matches!(&out[0], Reply::Other { .. }));
         assert_eq!(out[1], Reply::block_start(0, Block::Text));
-        assert_eq!(out[2], Reply::delta(0, "x"));
+        assert_eq!(out[2], Reply::text(0, "x"));
         // And written as it is, in this format.
         let stream = stream_of(&out).expect("a stream");
         assert!(stream.contains("citations_delta"), "{stream}");
@@ -1814,7 +1823,7 @@ mod tests {
         assert!(stream_of(std::slice::from_ref(&foreign)).is_err());
         assert!(body_of(&[foreign]).is_err());
         // Text for a block that never opened.
-        assert!(stream_of(&[Reply::delta(0, "x")]).is_err());
+        assert!(stream_of(&[Reply::text(0, "x")]).is_err());
         // A block that opens as another kind.
         let events = [
             Reply::block_start(0, Block::Text),
@@ -1900,8 +1909,8 @@ mod tests {
         let replies = [
             Reply::start("m", "c"),
             Reply::block_start(0, Block::Text),
-            Reply::delta(0, "a"),
-            Reply::delta(0, "b"),
+            Reply::text(0, "a"),
+            Reply::text(0, "b"),
             Reply::block_end(0),
         ];
         let stream = stream_of(&replies).expect("a stream");
@@ -1927,9 +1936,9 @@ mod tests {
         let replies = [
             Reply::block_start(0, call("a", "f")),
             Reply::block_start(1, call("b", "g")),
-            Reply::delta(1, "{\"b\":"),
-            Reply::delta(0, "{}"),
-            Reply::delta(1, "1}"),
+            Reply::arguments(1, "{\"b\":"),
+            Reply::arguments(0, "{}"),
+            Reply::arguments(1, "1}"),
             Reply::block_end(0),
             Reply::block_end(1),
         ];

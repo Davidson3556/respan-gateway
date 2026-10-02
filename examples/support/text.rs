@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_sdk::conversation::{Block, Content, Conversation, Reply, ToolChoice};
+use respan_gateway_sdk::conversation::{Block, Content, Conversation, Delta, Reply, ToolChoice};
 use respan_gateway_sdk::{Fault, Filter};
 use serde_json::{self, Map, Value};
 
@@ -534,10 +534,9 @@ fn readable_event(reply: &Reply) -> bool {
 
 /// Its texts: a delta is read as text, a tool call's name, and the events
 /// the kind has no form for as their format keeps them. A tool call's
-/// arguments are deltas too, and a delta does not say what it belongs to: a
-/// [`Holdback`] knows from the block's start, and reads them as JSON text.
-/// In a stream a match split across deltas is not seen whole, unless a
-/// [`Holdback`] holds them.
+/// arguments are deltas too ([`Delta::Arguments`]): a [`Holdback`] reads them
+/// as JSON text. In a stream a match split across deltas is not seen whole,
+/// unless a [`Holdback`] holds them.
 impl Readable for Reply {
     fn edit_all(
         &mut self,
@@ -568,7 +567,7 @@ fn edit_arguments(arguments: &mut String, edit: &mut Edit) -> Result<(), Fault> 
 
 fn edit_event(reply: &mut Reply, edit: &mut Edit) -> Result<(), Fault> {
     match reply {
-        Reply::Delta { delta, .. } => edit(delta),
+        Reply::Delta { delta, .. } => edit(delta.as_mut_string()),
         Reply::BlockStart {
             kind: Block::ToolCall { name, .. },
             ..
@@ -617,20 +616,11 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
     longest
 }
 
-/// What a [`Holdback`] holds a block's text as.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Kind {
-    /// Text or reasoning, read as plain text.
-    Text,
-    /// A tool call's arguments, JSON text.
-    Arguments,
-}
-
 /// A [`Reply`] filter that runs every text through a [`Rewrite`], holding
-/// back what may start a match. It tracks what each block holds from its
-/// [`Reply::BlockStart`]: the deltas of a text or reasoning block are text, a
-/// tool call's are JSON text, so a match split across their fragments is seen
-/// whole and what replaces it is escaped as JSON. A tail is held per block:
+/// back what may start a match. A text or reasoning delta is text, a tool
+/// call's [`Delta::Arguments`] are JSON text, so a match split across their
+/// fragments is seen whole and what replaces it is escaped as JSON. A tail
+/// is held per block, which is why it still knows each block:
 /// a text tail is released, rewritten, before another block opens, at the
 /// block's end, at a finish and at the end of the response, a call's tail
 /// at its block's end, a finish and the end. A match split across two text
@@ -641,14 +631,12 @@ enum Kind {
 /// event that is no content ([`Reply::is_content`]), such as a keep-alive or
 /// usage alone, passes at once unless events wait before it. Other events are
 /// rewritten as [`Readable`] reads them, and refused if it cannot read them.
-/// A delta of a block that never opened is read as text.
 #[derive(Debug)]
 pub struct Holdback<R> {
     rewrite: R,
-    /// What each open block holds.
-    kinds: BTreeMap<u32, Kind>,
-    /// The block whose trailing text is held, and that text.
-    held: Option<(u32, String)>,
+    /// The block whose trailing text is held, and that text, as the delta
+    /// it came in.
+    held: Option<(u32, Delta)>,
     /// The tails of tool calls' arguments held, by block.
     calls: BTreeMap<u32, String>,
     /// Events that show nothing yet, in order.
@@ -662,7 +650,6 @@ impl<R: Rewrite> Holdback<R> {
     pub fn new(rewrite: R) -> Self {
         Self {
             rewrite,
-            kinds: BTreeMap::new(),
             held: None,
             calls: BTreeMap::new(),
             waiting: Vec::new(),
@@ -679,10 +666,11 @@ impl<R: Rewrite> Holdback<R> {
 
     /// Release the held text, rewritten, as a delta.
     fn release_text(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if let Some((block, text)) = self.held.take() {
-            let text = self.rewritten(&text)?;
+        if let Some((block, mut delta)) = self.held.take() {
+            let text = self.rewritten(delta.as_str())?;
             if !text.is_empty() {
-                out.push(Reply::delta(block, text));
+                *delta.as_mut_string() = text;
+                out.push(Reply::Delta { block, delta });
             }
         }
         Ok(())
@@ -696,7 +684,7 @@ impl<R: Rewrite> Holdback<R> {
                 Ok(())
             })?;
             if !text.is_empty() {
-                out.push(Reply::delta(block, text));
+                out.push(Reply::arguments(block, text));
             }
         }
         Ok(())
@@ -726,29 +714,41 @@ impl<R: Rewrite> Holdback<R> {
             Ok(())
         })?;
         if !text.is_empty() {
-            out.push(Reply::delta(block, text));
+            out.push(Reply::arguments(block, text));
         }
         Ok(())
     }
 
-    /// Hold back the tail of `delta`, text of `block`, that may start a
-    /// match, with the held text in front; rewrite the rest.
-    fn hold_text(&mut self, block: u32, delta: String, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if self.held.as_ref().is_some_and(|(b, _)| *b != block) {
+    /// Hold back the tail of `delta`, text or reasoning of `block`, that may
+    /// start a match, with the held text in front; rewrite the rest.
+    fn hold_text(
+        &mut self,
+        block: u32,
+        mut delta: Delta,
+        out: &mut Vec<Reply>,
+    ) -> Result<(), Fault> {
+        let other = |(b, held): &(u32, Delta)| {
+            *b != block || std::mem::discriminant(held) != std::mem::discriminant(&delta)
+        };
+        if self.held.as_ref().is_some_and(other) {
             self.release_text(out)?;
         }
-        let mut text = self.held.take().map(|(_, t)| t).unwrap_or_default() + &delta;
+        let held = self.held.take().map(|(_, d)| d.as_str().to_owned());
+        let mut text = held.unwrap_or_default() + delta.as_str();
         let mut at = text.len().saturating_sub(self.rewrite.pending(&text));
         while !text.is_char_boundary(at) {
             at -= 1;
         }
         let tail = text.split_off(at);
         if !tail.is_empty() {
-            self.held = Some((block, tail));
+            let mut held = delta.clone();
+            *held.as_mut_string() = tail;
+            self.held = Some((block, held));
         }
         let text = self.rewritten(&text)?;
         if !text.is_empty() {
-            out.push(Reply::delta(block, text));
+            *delta.as_mut_string() = text;
+            out.push(Reply::Delta { block, delta });
         }
         Ok(())
     }
@@ -760,27 +760,22 @@ impl<R: Rewrite> Holdback<R> {
                 self.release_text(out)?;
                 let kind = match kind {
                     Block::ToolCall { id, name } => {
-                        self.kinds.insert(block, Kind::Arguments);
                         let name = self.rewritten(&name)?;
                         Block::ToolCall { id, name }
                     }
-                    kind => {
-                        self.kinds.insert(block, Kind::Text);
-                        kind
-                    }
+                    kind => kind,
                 };
                 out.push(Reply::block_start(block, kind));
             }
-            Reply::Delta { block, delta } => match self.kinds.get(&block) {
-                Some(Kind::Arguments) => self.hold_call(block, delta, out)?,
-                _ => self.hold_text(block, delta, out)?,
+            Reply::Delta { block, delta } => match delta {
+                Delta::Arguments(arguments) => self.hold_call(block, arguments, out)?,
+                delta => self.hold_text(block, delta, out)?,
             },
             Reply::BlockEnd { block } => {
                 if self.held.as_ref().is_some_and(|(b, _)| *b == block) {
                     self.release_text(out)?;
                 }
                 self.release_call(block, out)?;
-                self.kinds.remove(&block);
                 out.push(Reply::block_end(block));
             }
             Reply::Finish(finish) => {

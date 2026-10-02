@@ -19,7 +19,7 @@ use respan_gateway_sdk::conversation::{
 use respan_gateway_sdk::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
 use respan_gateway_sdk::{ErrorCode, Upstream, Usage};
 use serde_json::{self, json};
-use support::{opened, run_filter as run};
+use support::run_filter as run;
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
 
 /// Refuses text holding "bomb".
@@ -54,7 +54,7 @@ fn text(replies: &[Reply]) -> String {
 /// Text block `block` opens and says each of `deltas`.
 fn said(block: u32, deltas: &[&str]) -> Vec<Reply> {
     let open = Reply::block_start(block, Block::Text);
-    let deltas = deltas.iter().map(|d| Reply::delta(block, *d));
+    let deltas = deltas.iter().map(|d| Reply::text(block, *d));
     std::iter::once(open).chain(deltas).collect()
 }
 
@@ -108,12 +108,12 @@ fn held_text_goes_before_other_content_and_at_the_end() {
         out,
         [
             Reply::block_start(0, Block::Text),
-            Reply::delta(0, "a "),
-            Reply::delta(0, "<EMAIL_"),
+            Reply::text(0, "a "),
+            Reply::text(0, "<EMAIL_"),
             Reply::other("anthropic-messages", tool_use),
             Reply::block_start(1, Block::Text),
-            Reply::delta(1, "b "),
-            Reply::delta(1, "<EM"),
+            Reply::text(1, "b "),
+            Reply::text(1, "<EM"),
         ]
     );
 }
@@ -125,9 +125,9 @@ fn an_event_left_showing_nothing_waits_for_one_that_does() {
     for event in [Reply::start("c1", "m"), Reply::block_start(0, Block::Text)] {
         assert!(holdback.edit(event, &mut out).is_ok());
     }
-    assert!(holdback.edit(Reply::delta(0, "bo"), &mut out).is_ok());
+    assert!(holdback.edit(Reply::text(0, "bo"), &mut out).is_ok());
     assert!(out.is_empty(), "{out:?}");
-    assert!(holdback.edit(Reply::delta(0, "at"), &mut out).is_ok());
+    assert!(holdback.edit(Reply::text(0, "at"), &mut out).is_ok());
     assert_eq!(text(&out), "boat");
     assert_eq!(out[0], Reply::start("c1", "m"));
 }
@@ -156,10 +156,10 @@ fn a_keep_alive_or_usage_alone_passes_at_once_unless_events_wait() {
     }
     assert!(holdback.edit(keep_alive(), &mut out).is_ok());
     assert!(out.is_empty(), "{out:?}");
-    assert!(holdback.edit(Reply::delta(1, "at"), &mut out).is_ok());
+    assert!(holdback.edit(Reply::text(1, "at"), &mut out).is_ok());
     assert_eq!(out[0], Reply::start("c1", "m"));
     assert_eq!(out[2], keep_alive(), "{out:?}");
-    assert_eq!(out[3], Reply::delta(1, "at"), "{out:?}");
+    assert_eq!(out[3], Reply::text(1, "at"), "{out:?}");
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn content_that_cannot_be_read_is_refused() {
     );
     assert_eq!(plain.messages[0].text(), "HI");
     assert_eq!(
-        Reply::delta(0, "hi").read_all().ok().as_deref(),
+        Reply::text(0, "hi").read_all().ok().as_deref(),
         Some("hi\n")
     );
 }
@@ -340,7 +340,7 @@ fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault>
 }
 
 fn call_delta(block: u32, arguments: &str) -> Reply {
-    Reply::delta(block, arguments)
+    Reply::arguments(block, arguments)
 }
 
 /// The arguments of each streamed call in `replies`, by call.
@@ -352,21 +352,21 @@ fn arguments_by_call(replies: &[Reply]) -> Vec<String> {
         };
         let at = *block as usize;
         calls.resize(calls.len().max(at + 1), String::new());
-        calls[at].push_str(delta);
+        calls[at].push_str(delta.as_str());
     }
     calls
 }
 
 #[test]
 fn a_placeholder_split_across_three_argument_deltas_is_restored_by_call() {
-    let deltas = opened(vec![
+    let deltas = vec![
         call_delta(0, r#"{"to":"<EMA"#),
         call_delta(1, r#"{"cc":"<EMAIL_1>","n":"#),
         call_delta(0, "IL_"),
         call_delta(0, r#"1>"}"#),
         call_delta(1, "3}"),
         Reply::finished(Finish::ToolUse),
-    ]);
+    ];
     let out = run(&mut Holdback::new(email()), deltas).unwrap_or_default();
     assert_eq!(
         arguments_by_call(&out),
@@ -380,7 +380,7 @@ fn a_tail_held_at_the_end_is_sent_then_and_never_lost() {
     // The stream ends (cut) inside a placeholder: what was held goes out.
     let out = run(
         &mut Holdback::new(email()),
-        opened(vec![call_delta(0, r#"{"to":"<EMA"#)]),
+        vec![call_delta(0, r#"{"to":"<EMA"#)],
     );
     assert_eq!(
         arguments_by_call(&out.unwrap_or_default()),
@@ -764,7 +764,7 @@ fn a_value_restored_into_a_streamed_tool_fragment_is_escaped() {
     let frags = [format!("{{\"to\":\"{ph}"), "\"}".to_owned()];
     let out = run(
         &mut Holdback::new(vault),
-        opened(frags.iter().map(|f| call_delta(0, f)).collect()),
+        frags.iter().map(|f| call_delta(0, f)).collect(),
     )
     .unwrap_or_default();
     let joined = arguments_by_call(&out).concat();

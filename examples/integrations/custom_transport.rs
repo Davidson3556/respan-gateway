@@ -62,7 +62,7 @@ impl Format<Model, Reply, Conversation> for Local {
             let mut replies = vec![Reply::start("local-1", model)];
             // Each word keeps the space before the next: "you ", "said: ", ...
             replies.push(Reply::block_start(0, Block::Text));
-            replies.extend(answer.split_inclusive(' ').map(|w| Reply::delta(0, w)));
+            replies.extend(answer.split_inclusive(' ').map(|w| Reply::text(0, w)));
             replies.push(Reply::block_end(0));
             replies.push(Reply::usage(usage));
             replies.push(Reply::finished(Finish::Stop));

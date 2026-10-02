@@ -31,7 +31,7 @@ use respan_gateway_http::formats::set_path;
 use respan_gateway_http::{Asked, Completion, Incoming, Outgoing};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Conversation, Message, Reply, Role};
+use respan_gateway_sdk::conversation::{Conversation, Delta, Message, Reply, Role};
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
@@ -761,7 +761,10 @@ async fn a_bridge_calls_a_provider_of_another_kind_once_per_input_and_streams_ba
 /// The text of `reply`, if it has any, as heard.
 fn heard(reply: &Reply) -> Option<Heard> {
     match reply {
-        Reply::Delta { delta, .. } if !delta.is_empty() => Some(Heard(delta.clone())),
+        Reply::Delta {
+            delta: Delta::Text(text),
+            ..
+        } if !text.is_empty() => Some(Heard(text.clone())),
         _ => None,
     }
 }

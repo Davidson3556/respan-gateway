@@ -92,7 +92,7 @@ impl Plugin for Probing {
             Answer::Own => {
                 let own = [
                     Reply::block_start(0, Block::Text),
-                    Reply::delta(0, "hi"),
+                    Reply::text(0, "hi"),
                     Reply::block_end(0),
                     Reply::finished(Finish::Stop),
                 ];

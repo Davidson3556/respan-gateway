@@ -879,7 +879,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
                             let answer = stream::iter([
                                 Ok(Reply::start("local-1", "local")),
                                 Ok(Reply::block_start(0, Block::Text)),
-                                Ok(Reply::delta(0, "Local answer")),
+                                Ok(Reply::text(0, "Local answer")),
                                 Ok(Reply::block_end(0)),
                                 Ok(Reply::finished(Finish::Stop)),
                             ]);

@@ -672,7 +672,7 @@ async fn a_plugin_made_response_of_another_kind_fails_loudly() {
     #[async_trait]
     impl Plugin for Wrong {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let wrong = [Ok(respan_gateway_sdk::conversation::Reply::delta(0, "hi"))];
+            let wrong = [Ok(respan_gateway_sdk::conversation::Reply::text(0, "hi"))];
             Ok(Some(Response::stream(futures::stream::iter(wrong))))
         }
     }
