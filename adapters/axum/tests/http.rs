@@ -13,6 +13,9 @@ use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
 use tokio::net::TcpListener;
 
+#[path = "../../../tests/support/relay.rs"]
+mod relay;
+
 const SSE: &str =
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
 
@@ -36,7 +39,7 @@ where
 
 /// A gateway serving OpenAI clients, sent to the provider at `base`.
 fn openai_gateway(base: impl Into<String>) -> Gateway {
-    gateway_to(OpenAiChat, http(base).connect())
+    gateway_to(OpenAiChat, http(base).connect()).plugin(relay::Relay::RAW)
 }
 
 async fn spawn(app: Router) -> String {
@@ -379,7 +382,11 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
             respan_gateway_http::connect(move |mut call| {
                 let before = before.clone();
                 async move {
-                    assert!(respan_gateway_http::is_relayed(&call));
+                    assert!(
+                        call.extensions()
+                            .get::<respan_gateway_sdk::Extensions>()
+                            .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some())
+                    );
                     credentials(&mut call, &http::HeaderMap::new());
                     assert_eq!(call.headers(), &before);
                     assert_eq!(call.uri(), "/v1/chat?beta=1&key=k");
@@ -389,7 +396,8 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
         )
         .expect("valid test setup")
         .target("relay")
-        .expect("valid test setup");
+        .expect("valid test setup")
+        .plugin(relay::Relay::RAW);
     let (answer, ended) =
         respan_gateway_http::serve(&gateway, http::Request::from_parts(head, Body::full(""))).await;
     BodyExt::collect(answer.into_body())
@@ -494,7 +502,7 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
             http(format!("{provider}/v1")).connect(),
         )
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
-        .and_then(|g| g.plugin("log", log.clone()))
+        .map(|g| g.plugin(log.clone()).plugin(relay::Relay::HEADS))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     let base = spawn(router(gateway.clone())).await;
@@ -691,7 +699,7 @@ async fn l6_bodiless(with_304: bool) {
                 respan_gateway_http::formats::opaque::Passthrough,
             >, _, _>(Passthrough)
         })
-        .and_then(|g| g.plugin("ends", ends.clone()))
+        .map(|g| g.plugin(ends.clone()))
         .and_then(|g| g.target("any"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     let base = spawn(router(gateway.clone())).await;

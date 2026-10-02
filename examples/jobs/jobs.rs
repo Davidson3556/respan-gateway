@@ -374,7 +374,7 @@ fn gateway<S: Store>(
             })),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("idempotent", Idempotent(store.clone()))?
+        .plugin(Idempotent(store.clone()))
         .target("openai")
 }
 

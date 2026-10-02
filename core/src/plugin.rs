@@ -273,19 +273,10 @@ impl Filters {
         }
         let end = match self.chain.take().and_then(|mut c| c.end(&end, values)) {
             None => end,
-            Some(f) => failed(f, &end),
+            Some(f) => Err(f),
         };
         self.ended = Some(end.clone());
         end
-    }
-}
-
-/// `fault` failing a response that ended `end`, keeping the provider's
-/// answer `end` carries.
-pub(crate) fn failed(fault: Fault, end: &Result<()>) -> Result<()> {
-    match end {
-        Err(end) => Err(fault.with_answer_of(end)),
-        Ok(()) => Err(fault),
     }
 }
 
@@ -331,7 +322,7 @@ mod tests {
     }
 
     fn one(s: &str) -> Values {
-        crate::values::one(s.to_owned())
+        Box::new(vec![s.to_owned()])
     }
 
     fn strings(values: Option<Values>) -> Vec<String> {

@@ -71,7 +71,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Incoming, LIn, LOut> for Li
                 })
             },
             |reply, source| {
-                let head = respan_gateway_http::response_head(LINE, source);
+                let head = reply.head();
                 if bodiless(reply.request().method(), head.status) {
                     return Ok(reply.empty(head, source));
                 }
@@ -101,7 +101,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Li
         Ok(io.bind(
             LINE,
             |source| {
-                let head = line_head(respan_gateway_http::request_head(LINE, source));
+                let head = line_head(None);
                 let (request, sink) = respan_gateway_http::request(LINE, source, Box::new(Lines))?;
                 Ok((http::Request::from_parts(head, request.into_body()), sink))
             },
@@ -372,9 +372,9 @@ fn gateway(script: Script, log: &Log, plugin: impl Plugin) -> Gateway {
         )
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("p"))
-        .and_then(|g| g.plugin("log", log.clone()))
-        .and_then(|g| g.plugin("x", plugin))
-        .and_then(|g| g.plugin("meter", Meter(log.clone())))
+        .map(|g| g.plugin(log.clone()))
+        .map(|g| g.plugin(plugin))
+        .map(|g| g.plugin(Meter(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -464,7 +464,7 @@ async fn f2_usage_is_metered_on_the_call_though_the_client_edge_failed_first() {
 async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::OK, vec![]);
-    let gw = gateway(script, &log, Log::default());
+    let gw = gateway(script, &log, Log::default()).plugin(explicit::Relay::RAW);
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(log.calls()[0], Ok(()));
@@ -666,7 +666,7 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
 async fn f9_a_101_to_a_whole_request_is_refused_whoever_sent_it() {
     let log = Log::default();
     let script = Script::default().then(StatusCode::SWITCHING_PROTOCOLS, vec!["e\n"]);
-    let gw = gateway(script, &log, Log::default());
+    let gw = gateway(script, &log, Log::default()).plugin(explicit::Relay::HEADS);
     let (status, body) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
@@ -887,7 +887,18 @@ struct Fallback;
 #[async_trait]
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut resp = cx.call("p").await?;
+        let head = respan_gateway_http::ProviderHead::default();
+        let mut call = cx.call("p").with_extension(head.clone());
+        if let Some(wire) = cx.extensions().get::<respan_gateway_http::Wire>()
+            && wire.get().is_some_and(|r| r.method() == http::Method::HEAD)
+        {
+            call = call.with_extension(respan_gateway_http::SendRaw(wire.clone()));
+        }
+        let mut resp = call.await?;
+        if let Some(client) = cx.extensions().get::<respan_gateway_http::ClientHead>() {
+            client.set(head.get());
+        }
+
         match resp.buffer_until(|out: &LOut| !out.0.is_empty()).await {
             Ok(()) => Ok(Some(resp)),
             Err(_) => {
@@ -1307,9 +1318,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Pa
         Ok(io.bind(
             "pathed",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let mut head = respan_gateway_http::request_head("pathed", source)
-                    .cloned()
-                    .unwrap_or_else(|| http::Request::new(()).into_parts().0);
+                let mut head = http::Request::new(()).into_parts().0;
                 let model = if source.is_single() {
                     source.value().expect("single input")?.0.as_str()
                 } else {
@@ -1399,7 +1408,7 @@ fn pathed(paths: &Paths, model: Option<&'static str>) -> Gateway {
         )
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("pathed"))
-        .and_then(|g| g.plugin("model", Model(model)))
+        .map(|g| g.plugin(Model(model)))
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -1455,7 +1464,7 @@ async fn v9_1_untranslatable_content_is_the_clients_fault_only_as_decoded() {
         )
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("pathed"))
-        .and_then(|g| g.plugin("tag", Tag))
+        .map(|g| g.plugin(Tag))
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, _) = run(&gw, line_req("untranslatable")).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -1588,7 +1597,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Po
         Ok(io.bind(
             "posted",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let mut head = line_head(respan_gateway_http::request_head("posted", source));
+                let mut head = line_head(None);
                 head.method = http::Method::POST;
                 let (request, sink) =
                     respan_gateway_http::request("posted", source, Box::new(Lines))?;
@@ -1626,8 +1635,8 @@ async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
             respan_gateway_http::connect(script.clone().into_sender()),
         )
         .and_then(|g| g.client::<LIn, _, _>(Line))
-        .and_then(|g| g.plugin("log", log.clone()))
-        .and_then(|g| g.plugin("x", Fallback(log.clone())))
+        .map(|g| g.plugin(log.clone()))
+        .map(|g| g.plugin(Fallback(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!(log.notes(), ["content false"]);
@@ -1650,9 +1659,9 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Se
         Ok(io.bind(
             "line",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let raw = respan_gateway_http::raw_body(LINE, source).is_some();
+                let raw = false;
                 lock(&seen).push(source.is_single() && !raw);
-                let head = line_head(respan_gateway_http::request_head(LINE, source));
+                let head = line_head(None);
                 let (request, sink) = respan_gateway_http::request(LINE, source, Box::new(Lines))?;
                 Ok((http::Request::from_parts(head, request.into_body()), sink))
             },
@@ -1694,13 +1703,13 @@ async fn r10_6_first_is_an_item_only_for_an_input_not_the_clients() {
             )
             .and_then(|g| g.client::<LIn, _, _>(Line))
             .and_then(|g| g.target("p"))
-            .and_then(|g| g.plugin("x", Touch(to)))
+            .map(|g| g.plugin(Touch(to)))
             .unwrap_or_else(|e| panic!("{e}"));
         let (status, _) = run(&gw, req(http::Method::POST)).await;
         assert_eq!(status, StatusCode::OK);
     }
     // Read only: the client's bytes; filtered, even to what it was: a value.
-    assert_eq!(lock(&seen).clone(), [false, true, true]);
+    assert_eq!(lock(&seen).clone(), [true, true, true]);
 }
 
 // Usage before content does not send the head, so a success that then fails
@@ -1761,8 +1770,8 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
         )
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("posted"))
-        .and_then(|g| g.plugin("log", log.clone()))
-        .and_then(|g| g.plugin("meter", Meter(log.clone())))
+        .map(|g| g.plugin(log.clone()))
+        .map(|g| g.plugin(Meter(log.clone())))
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, body) = run(&gw, req(http::Method::HEAD)).await;
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
@@ -1792,7 +1801,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for In
         Ok(io.bind(
             "line",
             move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let raw = respan_gateway_http::raw_body(LINE, source).is_some();
+                let raw = false;
                 let (value, raw) = if source.is_single() && !raw {
                     let first = source.value().expect("single input")?;
                     (
@@ -1807,7 +1816,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for In
                     (false, Bytes::new())
                 };
                 lock(&seen).push((value, raw));
-                let head = line_head(respan_gateway_http::request_head(LINE, source));
+                let head = line_head(None);
                 let (request, sink) =
                     respan_gateway_http::request(LINE, source, Box::new(AsItCame))?;
                 Ok((http::Request::from_parts(head, request.into_body()), sink))
@@ -1865,7 +1874,7 @@ async fn r11_first_is_a_changed_input_even_with_the_clients_bytes() {
         )
         .and_then(|g| g.client::<LIn, _, _>(Line))
         .and_then(|g| g.target("p"))
-        .and_then(|g| g.plugin("x", Change))
+        .map(|g| g.plugin(Change))
         .unwrap_or_else(|e| panic!("{e}"));
     let (status, _) = run(&gw, req(http::Method::POST)).await;
     assert_eq!(status, StatusCode::OK);
@@ -1894,3 +1903,6 @@ async fn r11_a_filter_that_panics_fails_the_call_internal() {
     let internal = call.as_ref().is_err_and(|f| f.code() == "internal");
     assert_eq!((t(&log.metered()[0]), internal), (None, true));
 }
+
+#[path = "../../tests/support/relay.rs"]
+mod explicit;

@@ -17,6 +17,7 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+respan-gateway-plugins = { workspace = true, features = ["http-relay"] }
 respan-gateway-sdk.workspace = true
 respan-gateway-http.workspace = true
 serde_json.workspace = true
@@ -28,7 +29,6 @@ sha2 = "0.10"
 hmac = "0.12"
 getrandom = "0.3"
 reqwest.workspace = true
-respan-gateway-plugins.workspace = true
 respan-gateway-axum = { workspace = true, features = ["ws"] }
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-providers.workspace = true

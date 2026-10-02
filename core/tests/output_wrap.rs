@@ -58,12 +58,9 @@ fn gw(body: fn() -> Text, wrap: OutWrap, meter: &Meter, rec: &Rec) -> Gateway {
             connect(fnt(move |_| async move { Ok(answer(200, body())) }.boxed())),
         )
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("meter", meter.clone())
-        .unwrap()
-        .plugin("wrap", wrap)
-        .unwrap()
+        .plugin(rec.clone())
+        .plugin(meter.clone())
+        .plugin(wrap)
         .target("p")
         .unwrap()
 }
@@ -273,8 +270,7 @@ async fn a_retry_after_part_of_a_wrapped_session_was_read() {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(dialer))
         .unwrap()
-        .plugin("retry", Retry)
-        .unwrap();
+        .plugin(Retry);
     let (tx, r) = upload();
     send(&tx, "x");
     send(&tx, "y");
@@ -358,8 +354,7 @@ async fn fallback_resumes_a_pending_input_check_once() {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(dialer))
         .unwrap()
-        .plugin("gate", gate)
-        .unwrap();
+        .plugin(gate);
     let (tx, request) = upload();
     send(&tx, "x");
     drop(tx);

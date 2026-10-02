@@ -37,7 +37,7 @@ impl Plugin for Slow {
 async fn a_client_that_leaves_during_a_wrap_ends_its_session_then() {
     let probe = Probe::start().await;
     let (gateway, ends, calls) = relay(&probe.base());
-    let gateway = gateway.plugin("slow", Slow).unwrap();
+    let gateway = gateway.plugin(Slow);
     let server = serve(gateway).await;
     let mut ws = connect(server.addr, PATH, &[]).await.unwrap();
     probe.connected(0).await;
@@ -99,7 +99,7 @@ async fn l7_look_ahead_keeps_order_and_ends_right_under_random_sessions() {
     for seed in 0..120u64 {
         let probe = Probe::start().await;
         let (gateway, ends, calls) = relay(&probe.base());
-        let gateway = gateway.plugin("jitter", Jitter(seed)).unwrap();
+        let gateway = gateway.plugin(Jitter(seed));
         let server = serve(gateway).await;
         let mut ws = connect(server.addr, PATH, &[]).await.unwrap();
         probe.connected(0).await;

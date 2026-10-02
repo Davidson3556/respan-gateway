@@ -65,14 +65,11 @@ async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<
             provider_support::openai(&openai.base_url())?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("refuses", Refuses)?
-        .plugin(
-            "billing",
-            Billing {
-                prices,
-                store: store.clone(),
-            },
-        )?
+        .plugin(Refuses)
+        .plugin(Billing {
+            prices,
+            store: store.clone(),
+        })
         .target("openai")?;
     ask(&gw, &openai, "acme", SMALL, Some((1_000, 500))).await;
     assert_eq!(openai.requests().len(), 1);

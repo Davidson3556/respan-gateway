@@ -20,17 +20,13 @@ fn gateway_of(rec: &Rec, dialer: Dialer) -> Gateway {
         .unwrap()
         .target("a")
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
+        .plugin(rec.clone())
 }
 
 /// A provider that refuses a relayed call at its head, as a 403 does.
 fn refusing() -> Dialer {
     fnt(|c| {
-        assert!(
-            c.relayed,
-            "a same-name call with the session's inputs relays"
-        );
+        assert!(!c.relayed, "same-name calls have no implicit relay");
         async { Ok(answer(403, chunks(vec!["denied"]))) }.boxed()
     })
 }
@@ -61,9 +57,7 @@ async fn a_refused_upgrade_is_a_complete_answer() {
 async fn a_refusal_at_the_head_is_clean_whoever_holds_it() {
     for mode in [0u8, 1, 2] {
         let rec = Rec::default();
-        let gw = gateway_of(&rec, refusing())
-            .plugin("mode", Mode(mode))
-            .unwrap();
+        let gw = gateway_of(&rec, refusing()).plugin(Mode(mode));
         let (res, _) = handle(&gw, req(vec!["q"])).await;
         assert_eq!(read(res).await, Ok((403, "ERR x".into())), "mode {mode}");
         gw.idle().await;
@@ -157,7 +151,7 @@ async fn a_call_is_sent_only_once_handed_to_its_transport() {
             }
             .boxed()
         });
-        let gw = gateway_of(&rec, t).plugin("fails", Fails(mode)).unwrap();
+        let gw = gateway_of(&rec, t).plugin(Fails(mode));
         let (res, _) = handle(&gw, req(vec!["q"])).await;
         let _ = read(res).await;
         gw.idle().await;
@@ -187,10 +181,8 @@ async fn a_provider_stream_panic_while_until_end_reads_refuses_internal() {
             .unwrap()
             .provider::<In, _, _>("a", Toy, connect(t))
             .unwrap()
-            .plugin("rec", rec.clone())
-            .unwrap()
-            .plugin("mode", Mode(mode))
-            .unwrap();
+            .plugin(rec.clone())
+            .plugin(Mode(mode));
         let (res, end) = handle(&gw, req(vec!["q"])).await;
         assert_eq!(
             read(res).await,
@@ -226,10 +218,8 @@ async fn outputs_end_abandoned_once_the_writer_loses_completion() {
         let gw = Gateway::new()
             .client::<In, _, _>(Toy)
             .unwrap()
-            .plugin("rec", rec.clone())
-            .unwrap()
-            .plugin("endless", Endless)
-            .unwrap();
+            .plugin(rec.clone())
+            .plugin(Endless);
         let mut req = req_of(vec!["q"], streams);
         req.quirk = 1;
         let (res, end) = handle(&gw, req).await;
@@ -281,9 +271,7 @@ async fn outputs_ready_together_are_one_batch() {
             let body = lock(&body).take().unwrap();
             async move { Ok(answer(200, body)) }.boxed()
         });
-        let gw = gateway_of(&Rec::default(), t)
-            .plugin("meter", Meter(Arc::clone(&seen)))
-            .unwrap();
+        let gw = gateway_of(&Rec::default(), t).plugin(Meter(Arc::clone(&seen)));
         let (res, _) = handle(&gw, req(vec!["q"])).await;
         assert_eq!(read(res).await, Ok((400, "ERR bad_request".into())));
         gw.idle().await;

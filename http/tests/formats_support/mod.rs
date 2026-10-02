@@ -31,13 +31,8 @@ use respan_gateway_sdk::conversation::{Conversation, Reply};
 pub fn with_plugins(
     gateway: Gateway,
     plugins: impl IntoIterator<Item = Arc<dyn Plugin>>,
-) -> Result<Gateway, Fault> {
-    plugins
-        .into_iter()
-        .enumerate()
-        .try_fold(gateway, |gw, (i, plugin)| {
-            gw.plugin(format!("p{i}"), plugin)
-        })
+) -> Gateway {
+    plugins.into_iter().fold(gateway, Gateway::plugin)
 }
 
 /// Usage seen at the provider edge, including a reply subsequently refused by

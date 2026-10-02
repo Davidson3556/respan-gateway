@@ -1,11 +1,11 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
-use crate::events::{Metadata, Single};
+use crate::events::Single;
 use crate::fault::guarded;
 use crate::format::AnyFormat;
 use crate::plugin::Filters;
-use crate::values::{Values, clone_values, one, view};
+use crate::values::{Value, Values, clone_value, take, view_value};
 use crate::{EventStream, Fault, Result};
 
 /// The current whole-input snapshot, or the shared live reader's marker.
@@ -13,31 +13,18 @@ use crate::{EventStream, Fault, Result};
 #[derive(Clone)]
 pub(crate) struct Input {
     format: Arc<dyn AnyFormat>,
-    single: Option<Arc<Single<Values>>>,
-    metadata: Metadata,
-    /// An explicitly supplied call input, never eligible for relay.
-    pub(crate) own: bool,
+    single: Option<Arc<Single<Value>>>,
 }
 
 impl Input {
-    pub(crate) fn new(
-        format: Arc<dyn AnyFormat>,
-        single: Option<Arc<Single<Values>>>,
-        metadata: Metadata,
-    ) -> Self {
-        Self {
-            format,
-            single,
-            metadata,
-            own: false,
-        }
+    pub(crate) fn new(format: Arc<dyn AnyFormat>, single: Option<Arc<Single<Value>>>) -> Self {
+        Self { format, single }
     }
 
-    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: Arc<Single<Values>>) -> Self {
+    pub(crate) fn own(format: Arc<dyn AnyFormat>, input: Arc<Single<Value>>) -> Self {
         Self {
             single: Some(input),
-            own: true,
-            ..Self::new(format, None, None)
+            ..Self::new(format, None)
         }
     }
 
@@ -45,11 +32,7 @@ impl Input {
         self.single.is_none()
     }
 
-    pub(crate) fn metadata_copy(&self) -> Metadata {
-        self.metadata.clone()
-    }
-
-    fn value(&self) -> Result<&Values> {
+    fn value(&self) -> Result<&Value> {
         self.single
             .as_ref()
             .ok_or_else(|| {
@@ -64,29 +47,25 @@ impl Input {
         if self.format.kind().0 != TypeId::of::<T>() {
             return Err(Fault::wrong_kind::<T>());
         }
-        match view::<T>(self.value()?) {
-            Some([value]) => Ok(value),
-            _ => Err(Fault::wrong_kind::<T>()),
-        }
+        view_value::<T>(self.value()?).ok_or_else(Fault::wrong_kind::<T>)
     }
 
     /// A whole input stays one value; its next snapshot owns either the edit
-    /// or its failure. The metadata belongs to this snapshot, not the value.
+    /// or its failure.
     pub(crate) fn filter<T: Clone + Send + Sync + 'static>(
         &mut self,
         mut filters: Filters,
     ) -> Result<()> {
         let filtered = self.get::<T>().cloned().and_then(|input| {
             guarded(|| {
-                let mut values = Some(one(input));
-                let edited = match &mut values {
-                    Some(values) => filters.run(values),
-                    None => Ok(()),
-                };
+                let mut values: Values = Box::new(vec![input]);
+                let edited = filters.run(&mut values);
+                let mut values = Some(values);
                 filters.end(edited, &mut values)?;
-                match values {
-                    Some(values) if values.len() == 1 => Ok(values),
-                    _ => Err(Fault::internal(
+                let values = values.map(take::<T>).transpose()?.unwrap_or_default();
+                match <[T; 1]>::try_from(values) {
+                    Ok([value]) => Ok(Box::new(value) as Value),
+                    Err(_) => Err(Fault::internal(
                         "an input filter left other than one input where a whole body is one",
                     )),
                 }
@@ -94,11 +73,11 @@ impl Input {
         });
         let outcome = filtered.as_ref().map(|_| ()).map_err(Clone::clone);
         let _ = filters.end(outcome.clone(), &mut None);
-        self.single = Some(Single::ready(filtered, clone_values::<T>));
+        self.single = Some(Single::ready(filtered, clone_value::<T>));
         outcome
     }
 
-    pub(crate) fn events(&self, relay: bool) -> Result<EventStream<Values>> {
+    pub(crate) fn events(&self) -> Result<EventStream<Value>> {
         let single = self
             .single
             .as_ref()
@@ -108,11 +87,7 @@ impl Input {
         if let Some(fault) = single.known_error() {
             return Err(fault);
         }
-        let mut events = single.clone().into_events();
-        if relay {
-            events.set_metadata(self.metadata_copy());
-        }
-        Ok(events)
+        Ok(single.clone().into_events())
     }
 }
 
@@ -157,8 +132,8 @@ mod tests {
             copies: copies.clone(),
         };
         let format = Arc::new(Erased::<_, (), Counted, ()>::client(Protocol));
-        let single = Single::ready(Ok(one(value)), clone_values::<Counted>);
-        let mut input = Input::new(format, Some(single), None);
+        let single = Single::ready(Ok(Box::new(value) as Value), clone_value::<Counted>);
+        let mut input = Input::new(format, Some(single));
         let previous = input.clone();
         assert_eq!(copies.load(Ordering::SeqCst), 0);
         input

@@ -4,6 +4,7 @@
 //! `cargo test` runs; see `examples/README.md` for the list.
 
 pub mod admission;
+pub use respan_gateway_plugins::relay;
 pub mod rest;
 pub mod store;
 

@@ -45,7 +45,7 @@ impl Format<h::Incoming, String, Vec<u8>> for Echo {
                     .map_err(|_| Fault::bad_request("expected UTF-8"))
             }),
             |reply, source| {
-                let head = h::response_head("echo", source);
+                let head = reply.head();
                 if h::bodiless(reply.request().method(), head.status) {
                     return Ok(reply.empty(head, source));
                 }
@@ -132,9 +132,7 @@ utilities; ordinary conversions and collection need no additional facade.
 `messages` decodes a complete body lazily or maps explicitly live message frames.
 `request` constructs an actual `Request<Body>` and working `EventSink`:
 
-- An untouched lazy source can relay eligible raw bytes without decoding. The
-  encoder still finalizes framing.
-- A finite generated or edited value is encoded and finalized synchronously.
+- Every finite value is decoded, encoded and finalized synchronously.
   Failure occurs before the provider attempt is marked sent.
 - A live source stays caller-owned. The sink encodes each submitted value with
   byte-reader backpressure, not an unbounded event queue.
@@ -142,8 +140,15 @@ utilities; ordinary conversions and collection need no additional facade.
 The request can be modified before returning it from the preparation callback.
 The outgoing binding then snapshots the actual sent head and initial bytes for
 the response reader. Client negotiation and refusal formatting instead receive
-the original request. Raw relay eligibility comes from private metadata, never
-from comparing body bytes.
+the original request. A plugin can explicitly bypass whole-body encoding with
+`SendRaw(Wire)`. For live input, this supplies the handshake head while typed
+events continue through the encoder. The adapter publishes `Wire` separately
+from `Credential`; credentials must be copied deliberately.
+
+A plugin attaches a `ProviderHead` slot to a call and copies its result into the
+exchange's `ClientHead` to forward a response head. Otherwise `Reply::head()`
+returns a fresh success head. Provider failures carry `ProviderError` for
+inspection; only an explicit `RawReply` opts into writing their original body.
 
 The incoming response handle constructs real sinks:
 

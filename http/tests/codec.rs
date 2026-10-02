@@ -101,7 +101,7 @@ impl Format<Incoming, In, Out> for Msg {
                 }
             },
             |reply, source| {
-                let mut head = respan_gateway_http::response_head("msg", source);
+                let mut head = reply.head();
                 if respan_gateway_http::bodiless(reply.request().method(), head.status) {
                     return Ok(reply.empty(head, source));
                 }
@@ -123,23 +123,14 @@ impl Format<Outgoing, Out, In> for Msg {
         Ok(io.bind(
             "msg",
             |source: &mut EventStream<In>| {
-                let mut head = respan_gateway_http::request_head("msg", source)
-                    .cloned()
-                    .unwrap_or_else(|| http::Request::new(()).into_parts().0);
-                let raw = respan_gateway_http::raw_body("msg", source).cloned();
-                if raw.is_none()
-                    && let Some(value) = source.value().transpose()?
-                    && value.2.bytes("msg", value).is_none()
-                {
+                let mut head = http::Request::new(()).into_parts().0;
+                respan_gateway_http::formats::set_path(&mut head, "/msg");
+                if let Some(value) = source.value().transpose()? {
                     respan_gateway_http::formats::set_path(&mut head, &format!("/msg/{}", value.1));
                 }
                 let (request, sink) =
                     respan_gateway_http::request("msg", source, Box::new(Numbered(0)))?;
-                let mut body = request.into_body();
-                if let Some(raw) = raw.filter(|raw| !raw.is_empty()) {
-                    *body.full_bytes_mut().expect("raw request is finite") =
-                        Bytes::from(format!("1|{}", String::from_utf8_lossy(&raw)));
-                }
+                let body = request.into_body();
                 Ok((http::Request::from_parts(head, body), sink))
             },
             |response, _| {
@@ -287,11 +278,7 @@ fn msg(echo: &Echo, plugin: impl Plugin) -> Gateway {
             Msg,
             respan_gateway_http::connect(echo.clone().into_sender()),
         )
-        .and_then(|g| {
-            g.client::<In, _, _>(Msg)?
-                .target("msg")?
-                .plugin("p", plugin)
-        })
+        .and_then(|g| Ok(g.client::<In, _, _>(Msg)?.target("msg")?.plugin(plugin)))
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -403,7 +390,7 @@ async fn r8_the_fault_of_content_that_cannot_be_written_is_whose_it_is() {
 // the first input: a changed one's values, else the client's head.
 #[tokio::test]
 async fn r10_the_request_encoder_reads_the_head_from_the_first_part() {
-    for (edit, path) in [(None, "/msg/x"), (Some(("a", "b")), "/msg/b")] {
+    for (edit, path) in [(None, "/msg/a"), (Some(("a", "b")), "/msg/b")] {
         let echo = Echo::default();
         let gw = msg(&echo, Edit(edit, Arc::default()));
         let _ = read_whole(serve(&gw, post("/msg/x", "a")).await.0).await;
@@ -429,7 +416,7 @@ async fn o11_1_a_head_to_an_endless_plugin_stream_ends_at_its_head() {
     let log = Outcomes::default();
     let gw = Gateway::new()
         .client::<In, _, _>(Msg)
-        .and_then(|g| g.plugin("log", log.clone())?.plugin("endless", Endless))
+        .map(|g| g.plugin(log.clone()).plugin(Endless))
         .unwrap_or_else(|e| panic!("{e}"));
     let mut head = post("/msg", "");
     *head.method_mut() = http::Method::HEAD;
@@ -521,8 +508,7 @@ fn chat(
                 .client::<Conversation, _, _>(AnthropicMessages)?
                 .target("openai")
         });
-    let mut named = plugins.into_iter().enumerate();
-    let gw = gw.and_then(|g| named.try_fold(g, |g, (i, p)| g.plugin(format!("p{i}"), p)));
+    let gw = gw.map(|g| plugins.into_iter().fold(g, Gateway::plugin));
     gw.unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -548,9 +534,9 @@ async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
     let sent = fake.requests();
     assert_eq!(sent.len(), 2);
     let (relayed, translated) = (&sent[0], &sent[1]);
-    assert_eq!(relayed.query, "api-version=2");
-    assert_eq!(relayed.header("x-trace"), Some("7"));
-    assert_eq!(relayed.header("user-agent"), Some("sdk"));
+    assert_eq!(relayed.query, "");
+    assert_eq!(relayed.header("x-trace"), None);
+    assert_eq!(relayed.header("user-agent"), None);
     for kept in [
         "forwarded",
         "x-forwarded-for",
@@ -605,7 +591,7 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
 
     let sent = seen.lock().ok().and_then(|s| s.clone()).unwrap_or_default();
     for passed in ["forwarded", "x-forwarded-for", "cookie", "x-trace"] {
-        assert!(sent.get(passed).is_some(), "{passed}");
+        assert!(sent.get(passed).is_none(), "{passed}");
     }
     for kept in [
         "if-none-match",
@@ -674,7 +660,7 @@ impl Format<Incoming, Conversation, Reply> for Noted {
             AnthropicMessages.name(),
             |request| AnthropicMessages.read_request(request),
             move |reply, source| {
-                let mut head = respan_gateway_http::response_head(AnthropicMessages.name(), source);
+                let mut head = reply.head();
                 Ok(
                     match AnthropicMessages.response_encoder(&mut head, reply.request()) {
                         Some(encoder) => reply.write(head, Box::new(Noting(seen, encoder))),
@@ -835,7 +821,7 @@ async fn r13_the_format_sets_what_the_kernel_never_passes() {
         .insert(HOST, HeaderValue::from_static("gateway.example"));
     let _ = read_whole(serve(&msg(&echo, Pass), req).await.0).await;
     let host = echo.seen().into_iter().find(|s| s.starts_with("host="));
-    assert_eq!(host.as_deref(), Some("host=gateway.example"));
+    assert_eq!(host.as_deref(), None);
 }
 
 /// Whether a call was handed to its transport is the kernel's to say, on

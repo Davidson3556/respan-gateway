@@ -159,8 +159,8 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
             AnthropicMessages,
             provider_support::anthropic(&claude.base_url())?.connect(),
         )?
-        .plugin("log", log.clone())?
-        .plugin("resilient", Resilient)?
+        .plugin(log.clone())
+        .plugin(Resilient)
         .target("openai")?;
     let (status, _, body) = read_whole(serve(&gw, req).await.0).await;
     gw.idle().await;

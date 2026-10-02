@@ -11,7 +11,7 @@ events; OpenAI Realtime and Gemini Live run through the same code.
 - `WsTransport::new(base_url)`: an outbound native HTTP sender to a `ws://` or `wss://`
   provider. It strips and keys a call as `HttpClient` does (`proxy_call`,
   `strip_client_origin_headers`, `credentials`, `CallHeaders`), so a client's
-  key passes only on a same-dialect relay. `.with_headers(map)` sets the
+  key passes only when a plugin explicitly supplies it. `.with_headers(map)` sets the
   transport's own keys; `.max_message(bytes)` (default 16 MiB).
 - Axum hosting is in the separate `respan-gateway-axum` adapter, behind its
   optional `ws` feature: `respan_gateway_axum::ws::{router, serve_ws,
@@ -69,8 +69,9 @@ A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
   and `aws-lc-rs`, which makes rustls's own choice panic. It is tested for
   building and failing cleanly, not against a real TLS server.
 - A provider's refusal of the upgrade (a 401) is a complete answer: the
-  provider edge reads its body before the gateway answers, and on a relay the
-  client gets the provider's status and body as they came. An incomplete or malformed
+  provider edge reads its body before the gateway answers. A plugin can opt into
+  its original status and body with `RawReply`; otherwise the client format
+  writes its own error. An incomplete or malformed
   refusal body fails as `truncated`. Refusal bodies have a hard **1 MiB** limit,
   enforced during collection with `http-body-util::Limited`; exceeding it fails
   as `upstream`, never as a successful partial answer. The handshake's 10 s

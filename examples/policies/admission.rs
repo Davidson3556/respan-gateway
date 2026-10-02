@@ -164,6 +164,18 @@ impl Plugin for Admission {
             bounded(outputs.boxed(), monitoring)
         })?;
         cx.extensions_mut().insert(held);
+        // Explicitly forward the demonstration's tracing label.
+        if let Some(label) = cx
+            .extensions()
+            .get::<Asked>()
+            .and_then(|a| a.headers.get("x-case-label"))
+            .cloned()
+        {
+            let mut headers = http::HeaderMap::new();
+            headers.insert("x-case-label", label);
+            cx.extensions_mut()
+                .insert(respan_gateway_http::CallHeaders(headers));
+        }
         Ok(None)
     }
 
@@ -200,7 +212,7 @@ fn gateway(
             })),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("admission", admission)?
+        .plugin(admission)
         .target("openai")
 }
 

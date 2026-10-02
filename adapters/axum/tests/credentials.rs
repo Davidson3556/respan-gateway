@@ -126,7 +126,7 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
         .unwrap()
         .target("p")
         .unwrap();
-    let server = serve(gateway).await;
+    let server = serve_typed(gateway).await;
     let mut ws = connect(server.addr, PATH, CLIENT).await.unwrap();
     // The session works, translated, and its head is the provider's own.
     say(&mut ws, r#"{"hello":1}"#).await;
@@ -178,8 +178,7 @@ async fn a_key_set_for_the_call_replaces_the_clients() {
             WsTransport::new(probe.base()).unwrap().connect(),
         )
         .unwrap()
-        .plugin("tenant", Tenant)
-        .unwrap()
+        .plugin(Tenant)
         .target("p")
         .unwrap();
     let server = serve(gateway).await;

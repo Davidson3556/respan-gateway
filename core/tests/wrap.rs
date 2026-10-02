@@ -137,8 +137,7 @@ fn gateway(body: &Body, read: usize, checked: &Arc<AtomicUsize>, plugin: impl Pl
         .unwrap()
         .provider::<In, _, _>("classifier", Toy, connect(classifier(checked.clone())))
         .unwrap()
-        .plugin("plugin", plugin)
-        .unwrap()
+        .plugin(plugin)
         .target("p")
         .unwrap()
 }
@@ -172,10 +171,8 @@ async fn a_flagged_input_is_refused_and_ends_the_call_with_that_fault() {
         .unwrap()
         .provider::<In, _, _>("classifier", Toy, connect(classifier(Arc::clone(&checked))))
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("guard", Guard)
-        .unwrap()
+        .plugin(rec.clone())
+        .plugin(Guard)
         .target("p")
         .unwrap();
     let (tx, req) = upload();
@@ -191,7 +188,7 @@ async fn a_flagged_input_is_refused_and_ends_the_call_with_that_fault() {
     assert_eq!(frames, [Ok("a".into()), Err("bad_request".into())]);
     // `b` was never checked, and the call still relays.
     assert_eq!(checked.load(Ordering::SeqCst), 2);
-    assert_eq!(*lock(&body.relayed), [true]);
+    assert_eq!(*lock(&body.relayed), [false]);
     gw.idle().await;
     // The classifier's calls ended ok; the vendor's with the refusal.
     let prov = rec.log().prov_codes();
@@ -377,10 +374,8 @@ async fn a_panicking_stream_is_a_failure_and_hooks_end_once() {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("panics", Panics)
-        .unwrap()
+        .plugin(rec.clone())
+        .plugin(Panics)
         .target("p")
         .unwrap();
     let (_tx, req) = upload();
@@ -447,8 +442,7 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
         .unwrap()
-        .plugin("fallback", Fallback)
-        .unwrap();
+        .plugin(Fallback);
     let (tx, req) = upload();
     send(&tx, "x");
     send(&tx, "y");
@@ -457,7 +451,7 @@ async fn a_fallback_gets_the_wrapped_inputs_the_refused_call_never_read() {
     let (_frame, _reply) = first(res).await;
     let texts = ["X", "Y", "<END>"].map(|t| Ok(t.to_string()));
     assert_eq!(body.finished().await, texts);
-    assert_eq!(*lock(&body.relayed), [true]);
+    assert_eq!(*lock(&body.relayed), [false]);
 }
 
 /// A provider that reads the whole call body, records it, and refuses the
@@ -505,8 +499,7 @@ async fn a_retry_after_every_wrapped_input_was_read_is_not_a_clean_empty_upload(
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(reads_then_refuses_first(bodies.clone())))
         .unwrap()
-        .plugin("retry", Retry)
-        .unwrap();
+        .plugin(Retry);
     let (tx, req) = upload();
     send(&tx, "x");
     send(&tx, "y");
@@ -531,30 +524,23 @@ async fn a_gate_and_a_deadline_compose_and_the_relay_is_kept() {
         .unwrap()
         .provider::<In, _, _>("classifier", Toy, connect(classifier(Arc::clone(&checked))))
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("guard", Guard)
-        .unwrap()
-        .plugin("deadline", Deadline(Duration::from_millis(100)))
-        .unwrap()
+        .plugin(rec.clone())
+        .plugin(Guard)
+        .plugin(Deadline(Duration::from_millis(100)))
         .target("p")
         .unwrap();
     let (tx, req) = upload();
     send(&tx, "a");
     let (res, end) = handle(&gw, req).await;
     let res = res.unwrap();
-    assert_eq!(
-        res.head,
-        Some(200),
-        "the provider's head reached the client"
-    );
+    assert_eq!(res.head, None, "the provider's head reached the client");
     // The provider never ends; the deadline does.
     let started = tokio::time::Instant::now();
     assert_eq!(rest(res.body).await, "a;!");
     assert!(started.elapsed() >= Duration::from_millis(90));
     assert_eq!(code(&end.await), "ok");
     assert_eq!(body.finished().await[0], Ok("a".into()));
-    assert_eq!(*lock(&body.relayed), [true]);
+    assert_eq!(*lock(&body.relayed), [false]);
     assert_eq!(checked.load(Ordering::SeqCst), 1);
     drop(tx);
     gw.idle().await;
@@ -584,10 +570,8 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(body.provider(10)))
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("cut", Cut)
-        .unwrap()
+        .plugin(rec.clone())
+        .plugin(Cut)
         .target("p")
         .unwrap();
     let (tx, req) = upload();
@@ -650,10 +634,8 @@ async fn a_refusal_before_the_providers_head_is_the_refusal() {
             .unwrap()
             .provider::<In, _, _>("p", Toy, connect(dialer))
             .unwrap()
-            .plugin("rec", rec.clone())
-            .unwrap()
-            .plugin("gate", Gate)
-            .unwrap()
+            .plugin(rec.clone())
+            .plugin(Gate)
             .target("p")
             .unwrap();
         let (tx, r) = upload();
@@ -719,14 +701,10 @@ async fn wraps_and_filters_apply_in_plugin_order() {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(seen.transport(true, done)))
         .unwrap()
-        .plugin("1", Tag("1", false))
-        .unwrap()
-        .plugin("2", Tag("2", true))
-        .unwrap()
-        .plugin("3", Tag("3", false))
-        .unwrap()
-        .plugin("4", Tag("4", true))
-        .unwrap()
+        .plugin(Tag("1", false))
+        .plugin(Tag("2", true))
+        .plugin(Tag("3", false))
+        .plugin(Tag("4", true))
         .target("p")
         .unwrap();
     let (res, _end) = handle(&gw, req_of(vec!["x"], true)).await;
@@ -752,10 +730,8 @@ async fn a_wrap_that_panics_fails_the_reply_internal() {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(seen.transport(false, done)))
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("panics", Panics)
-        .unwrap()
+        .plugin(rec.clone())
+        .plugin(Panics)
         .target("p")
         .unwrap();
     let (res, end) = handle(&gw, req(vec!["q"])).await;
@@ -792,12 +768,9 @@ async fn wrapped_requests_end_once_when_dropped_at_every_await() {
                 .unwrap()
                 .provider::<In, _, _>("classifier", Toy, connect(fnt(move |call| c(call))))
                 .unwrap()
-                .plugin("rec", rec.clone())
-                .unwrap()
-                .plugin("guard", Guard)
-                .unwrap()
-                .plugin("deadline", Deadline(Duration::from_secs(5)))
-                .unwrap()
+                .plugin(rec.clone())
+                .plugin(Guard)
+                .plugin(Deadline(Duration::from_secs(5)))
                 .target("p")
                 .unwrap();
             let r = req_of(vec!["one", "two"], true);

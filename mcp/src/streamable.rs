@@ -92,7 +92,7 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
                 })
             },
             |reply, source| {
-                let head = h::response_head(NAME, source);
+                let head = reply.head();
                 Ok(response_body(reply, head, source))
             },
             |fault, request, head| {
@@ -119,14 +119,9 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
                         "a call in mcp carries one body, not streamed inputs",
                     ));
                 }
-                let mut head = h::request_head(NAME, source)
-                    .cloned()
-                    .unwrap_or_else(|| Request::new(()).into_parts().0);
-                if h::raw_body(NAME, source).is_none() {
-                    formats::body_changed(&mut head);
-                    if let Some(value) = source.value() {
-                        head.method = value?.method.clone();
-                    }
+                let mut head = Request::new(()).into_parts().0;
+                if let Some(value) = source.value() {
+                    head.method = value?.method.clone();
                 }
                 formats::set_path(&mut head, path);
                 head.headers

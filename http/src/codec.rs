@@ -3,7 +3,7 @@
 use crate::Body;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
-use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
+use http::request::Parts as RequestHead;
 use respan_gateway_sdk::{EventSink, EventStream, Fault};
 
 /// Stateful values-to-bytes encoding, independent of heads and transport I/O.
@@ -31,70 +31,28 @@ pub fn encode_all<T: 'static>(
     Ok(bytes.freeze())
 }
 
-/// The eligible original client head, if this is a same-format relay.
-pub fn request_head<'a, T>(name: &str, source: &'a EventStream<T>) -> Option<&'a RequestHead> {
-    source
-        .metadata::<crate::driver::RequestMetadata>(name)
-        .map(|m| &*m.head)
-}
-
-/// Original finite bytes only while the source remains eligible and lazy.
-pub fn raw_body<'a, T>(name: &str, source: &'a EventStream<T>) -> Option<&'a Bytes> {
-    source
-        .metadata::<crate::driver::RequestMetadata>(name)
-        .and_then(|m| m.body.as_ref())
-        .filter(|_| source.is_lazy())
-}
-
-/// The eligible provider head, or a fresh success head for a new response.
-pub fn response_head<T>(name: &str, source: &EventStream<T>) -> ResponseHead {
-    source
-        .metadata::<crate::driver::ResponseMetadata>(name)
-        .map(|m| m.0.clone())
-        .unwrap_or_else(|| http::Response::new(()).into_parts().0)
-}
-
 /// Prepare the actual request and per-item sink. Finite input is encoded now;
-/// unchanged lazy input bypasses semantic encoding. Live input stays caller-owned.
+/// live input stays caller-owned. Explicit raw requests bypass this helper.
 pub fn request<T: Clone + Send + Sync + 'static>(
-    name: &str,
+    _name: &str,
     source: &mut EventStream<T>,
-    mut encoder: Box<dyn Encoder<T>>,
+    encoder: Box<dyn Encoder<T>>,
 ) -> Result<(http::Request<Body>, EventSink<T>), Fault> {
     if let Some(fault) = source.refusal() {
         return Err(fault.clone());
     }
-    let mut head = request_head(name, source)
-        .cloned()
-        .unwrap_or_else(|| http::Request::new(()).into_parts().0);
-    let raw = raw_body(name, source).cloned();
-    if raw.is_none() {
-        crate::formats::body_changed(&mut head);
-    }
     if source.is_single() {
-        let bytes = match raw {
-            Some(bytes) => {
-                let mut end = BytesMut::new();
-                encoder.end(&Ok(()), &mut end)?;
-                crate::body::join(bytes, end.freeze())
-            }
-            None => {
-                let value = source
-                    .value()
-                    .transpose()?
-                    .ok_or_else(|| Fault::internal("a whole request has no input"))?;
-                let mut bytes = BytesMut::new();
-                encoder.encode(value, &mut bytes)?;
-                encoder.end(&Ok(()), &mut bytes)?;
-                bytes.freeze()
-            }
-        };
+        let value = source
+            .value()
+            .transpose()?
+            .ok_or_else(|| Fault::internal("a whole request has no input"))?;
+        let bytes = encode_all(encoder, std::slice::from_ref(value))?;
         source.stop();
         let sink = EventSink::new(futures::sink::drain().sink_map_err(|never| match never {}));
-        Ok((http::Request::from_parts(head, Body::full(bytes)), sink))
+        Ok((http::Request::new(Body::full(bytes)), sink))
     } else {
         let (sink, body) = crate::driver::upload::encoding(encoder);
-        Ok((http::Request::from_parts(head, body), sink))
+        Ok((http::Request::new(body), sink))
     }
 }
 

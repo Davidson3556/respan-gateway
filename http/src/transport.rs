@@ -8,7 +8,7 @@ use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue, request::Parts as RequestHead};
 use respan_gateway_sdk::{Extensions, Fault};
 
-use crate::credential::{Credential, is_credential, take_protocol_keys, take_query};
+use crate::credential::{is_credential, take_protocol_keys, take_query};
 use crate::{HOP_BY_HOP, remove_if, strip_named};
 
 /// A body, its bytes one item per data frame, ending with an `Err` if it
@@ -17,14 +17,6 @@ pub type Frames = BoxStream<'static, Result<Bytes, Fault>>;
 
 /// Actual completion of an outgoing transfer, independent of response headers.
 pub type Completion = BoxFuture<'static, Result<(), Fault>>;
-
-#[derive(Clone)]
-pub(crate) struct Relayed(pub(crate) bool);
-
-/// Whether this request carries eligible same-format client provenance.
-pub fn is_relayed(call: &http::Request<crate::Body>) -> bool {
-    call.extensions().get::<Relayed>().is_some_and(|r| r.0)
-}
 
 /// Make a cloneable provider factory from an ordinary async sending function.
 /// `Some(completion)` remains authoritative even after response EOF; `None`
@@ -123,28 +115,22 @@ impl std::fmt::Debug for CallHeaders {
 }
 
 /// Decide whose keys `call` carries: its [`CallHeaders`] over the
-/// transport's own `headers`, after removing the call's credential headers
-/// and parameters; with neither, the client's [`Credential`], only on a
-/// call that is `relayed`, as a key is for its own protocol's provider.
+/// transport's own `headers`, replacing credentials already in the head.
+/// With neither, preserve only credentials explicitly supplied in the head.
+/// The exchange's `Credential` extension is never copied automatically.
 pub fn credentials(call: &mut http::Request<crate::Body>, headers: &HeaderMap) {
-    let relayed = is_relayed(call);
     let extensions = call
         .extensions()
         .get::<Extensions>()
         .cloned()
         .unwrap_or_default();
     let (mut head, body) = std::mem::take(call).into_parts();
-    keys(&mut head, &extensions, relayed, headers);
+    keys(&mut head, &extensions, headers);
     *call = http::Request::from_parts(head, body);
 }
 
-/// [`credentials`] for a call of `head` and `extensions`, `relayed` or not.
-pub(crate) fn keys(
-    head: &mut RequestHead,
-    extensions: &Extensions,
-    relayed: bool,
-    headers: &HeaderMap,
-) {
+/// [`credentials`] for a call of `head` and `extensions`.
+pub(crate) fn keys(head: &mut RequestHead, extensions: &Extensions, headers: &HeaderMap) {
     let mut own = headers.clone();
     if let Some(CallHeaders(call)) = extensions.get::<CallHeaders>() {
         let sent = |n: &&HeaderName| !is_connection_header(n);
@@ -156,15 +142,8 @@ pub(crate) fn keys(
         }
     }
     if own.is_empty() {
-        let client = extensions.get::<Credential>().filter(|_| relayed);
-        match client.cloned() {
-            Some(client) => client.restore(head),
-            // No key follows a subprotocol's marker (`token`), so it goes:
-            // a provider refuses a marker with no key.
-            None => {
-                take_protocol_keys(&mut head.headers, true);
-            }
-        }
+        // The only credentials already present are deliberately supplied by
+        // the caller (for example in SendRaw); exchange Credential is ignored.
         return;
     }
     remove_if(&mut head.headers, |n| is_credential(n.as_str()));
@@ -180,6 +159,7 @@ pub(crate) fn keys(
 mod tests {
 
     use super::*;
+    use crate::Credential;
 
     fn head(headers: &[(&'static str, &'static str)]) -> http::request::Parts {
         let mut req = http::Request::new(());
@@ -226,7 +206,18 @@ mod tests {
             extensions.insert(Credential::of(client));
         }
         call.extensions_mut().insert(extensions);
-        call.extensions_mut().insert(Relayed(relayed));
+        if relayed {
+            let (mut head, body) = call.into_parts();
+            if let Some(credential) = head
+                .extensions
+                .get::<Extensions>()
+                .and_then(|e| e.get::<Credential>())
+                .cloned()
+            {
+                credential.restore(&mut head);
+            }
+            call = http::Request::from_parts(head, body);
+        }
         call
     }
 
@@ -279,7 +270,10 @@ mod tests {
         // No key at all, as on a call not a relay.
         let mut unrelayed = call(marked(), None, false);
         credentials(&mut unrelayed, &HeaderMap::new());
-        assert_eq!(unrelayed.headers()["sec-websocket-protocol"], "realtime");
+        assert_eq!(
+            unrelayed.headers()["sec-websocket-protocol"],
+            "realtime, token"
+        );
         // The client's own key comes back after its marker.
         let mut client = HeaderMap::new();
         client.insert("sec-websocket-protocol", HeaderValue::from_static("dg"));

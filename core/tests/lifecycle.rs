@@ -24,8 +24,7 @@ fn gateway_of(rec: &Rec) -> Gateway {
         .unwrap()
         .target("a")
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
+        .plugin(rec.clone())
 }
 
 /// A request counts as in flight while its one-shot edge reads its body.
@@ -81,7 +80,7 @@ async fn a_rebuilt_gateway_counts_only_its_own_requests() {
     let (res, _) = handle(&gw, req(vec!["q"])).await;
     let running = res.unwrap();
     let old = gw.clone();
-    let rebuilt = gw.plugin("more", Rec::default()).unwrap();
+    let rebuilt = gw.plugin(Rec::default());
     rebuilt.idle().await;
     assert!(
         old.idle().now_or_never().is_none(),
@@ -114,9 +113,7 @@ impl Plugin for Steal {
 async fn a_response_of_another_request_is_refused() {
     let rec = Rec::default();
     let stash = Arc::default();
-    let gw = gateway_of(&rec)
-        .plugin("steal", Steal(Arc::clone(&stash)))
-        .unwrap();
+    let gw = gateway_of(&rec).plugin(Steal(Arc::clone(&stash)));
     let (first, _) = handle(&gw, req(vec!["q"])).await;
     drop(first);
     let (second, _) = handle(&gw, req(vec!["q"])).await;
@@ -149,18 +146,17 @@ fn noting(seen: &Arc<Mutex<Vec<bool>>>) -> Dialer {
 
 /// The kernel alone says a call relays the client's message.
 #[tokio::test(flavor = "current_thread")]
-async fn only_original_input_carries_relay_metadata() {
+async fn original_and_explicit_input_both_use_typed_values() {
     let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
         .provider::<In, _, _>("a", Toy, connect(noting(&seen)))
         .unwrap()
-        .plugin("two", TwoCalls)
-        .unwrap();
+        .plugin(TwoCalls);
     let (res, _) = handle(&gw, req(vec!["q"])).await;
     let _ = read(res).await;
-    assert_eq!(*lock(&seen), [false, true]);
+    assert_eq!(*lock(&seen), [false, false]);
 }
 
 /// A job that outlives its request reaches the gateway through the
@@ -197,7 +193,7 @@ async fn a_job_hands_its_gateway_a_request_of_its_own() {
     }
 
     let rec = Rec::default();
-    let gw = gateway_of(&rec).plugin("detach", Detach).unwrap();
+    let gw = gateway_of(&rec).plugin(Detach);
     let (res, _end) = handle(&gw, req(vec!["hi"])).await;
     assert_eq!(read(res).await.map(|(s, _)| s), Ok(200));
     tokio::time::timeout(Duration::from_secs(2), gw.idle())
@@ -266,9 +262,7 @@ async fn idle_waits_for_a_job_started_in_an_end_hook() {
     let mut early = 0;
     for _ in 0..rounds {
         let done = Arc::new(AtomicUsize::new(0));
-        let gw = gateway_of(&Rec::default())
-            .plugin("detach", Detach(done.clone()))
-            .unwrap();
+        let gw = gateway_of(&Rec::default()).plugin(Detach(done.clone()));
         let (res, end) = handle(&gw, req(vec!["hi"])).await;
         let _ = read(res).await;
         let _ = end.await;
@@ -301,7 +295,7 @@ async fn an_unregistered_input_is_rejected_before_sending() {
         }
     }
     let rec = Rec::default();
-    let gw = gateway_of(&rec).plugin("wrong", TryWrongInput).unwrap();
+    let gw = gateway_of(&rec).plugin(TryWrongInput);
     let (response, end) = handle(&gw, req(vec!["q"])).await;
     assert!(read(response).await.is_ok());
     assert_eq!(end.await, Ok(()));

@@ -123,13 +123,13 @@ fn gateway_with(
     + Send
     + Sync
     + 'static,
-    middle: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
+    middle: impl FnOnce(Gateway) -> Gateway,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
         .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("pii", Pii)?;
-    middle(gw)?.plugin("pii-input", PiiInput)?.target("openai")
+        .plugin(Pii);
+    middle(gw).plugin(PiiInput).target("openai")
 }
 
 fn gateway(
@@ -138,7 +138,7 @@ fn gateway(
     + Sync
     + 'static,
 ) -> Result<Gateway, Fault> {
-    gateway_with(transport, Ok)
+    gateway_with(transport, |gw| gw)
 }
 
 /// A streamed chat of one user message, with `more` fields.

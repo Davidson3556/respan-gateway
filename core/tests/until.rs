@@ -43,10 +43,8 @@ async fn run(
         .unwrap()
         .provider::<In, _, _>("a", Toy, connect(t))
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("mode", Mode(mode))
-        .unwrap();
+        .plugin(rec.clone())
+        .plugin(Mode(mode));
     let (res, _) = handle(&gw, req(vec!["q"])).await;
     let got = read(res).await;
     gw.idle().await;
@@ -141,8 +139,7 @@ async fn buffer_until_holds_a_response_without_content_to_its_end() {
         .unwrap()
         .provider::<In, _, _>("a", Toy, connect(t))
         .unwrap()
-        .plugin("probe", Probe(reads.clone(), at_return.clone()))
-        .unwrap();
+        .plugin(Probe(reads.clone(), at_return.clone()));
     let (res, _) = handle(&gw, req(vec!["q"])).await;
     let (_, body) = read(res).await.unwrap();
     assert_eq!(
@@ -173,10 +170,8 @@ async fn a_buffer_predicate_panic_settles_both_edges_as_internal() {
         .unwrap()
         .provider::<In, _, _>("a", Toy, connect(transport))
         .unwrap()
-        .plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("panic", Panic)
-        .unwrap();
+        .plugin(rec.clone())
+        .plugin(Panic);
     let (response, end) = handle(&gateway, req(vec!["q"])).await;
     assert_eq!(read(response).await, Ok((500, "ERR internal".into())));
     assert_eq!(code(&end.await), "internal");
@@ -252,18 +247,13 @@ async fn buffered_filter_end_is_known_before_hooks_and_replayed_once() {
                 .unwrap()
                 .provider::<In, _, _>("a", Toy, connect(transport))
                 .unwrap()
-                .plugin("rec", rec.clone())
-                .unwrap()
-                .plugin(
-                    "buffer",
-                    Buffer {
-                        ends: ends.clone(),
-                        rec: rec.clone(),
-                        fail,
-                        discard,
-                    },
-                )
-                .unwrap();
+                .plugin(rec.clone())
+                .plugin(Buffer {
+                    ends: ends.clone(),
+                    rec: rec.clone(),
+                    fail,
+                    discard,
+                });
             let (response, end) = handle(&gateway, req(vec!["q"])).await;
             let (_, body) = read(response).await.unwrap();
             let _ = end.await;

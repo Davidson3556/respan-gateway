@@ -146,13 +146,10 @@ fn base(
 }
 
 /// `guard` first, `guard-input` last, and `middle` between them.
-fn guarded(
-    gw: Gateway,
-    middle: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
-) -> Result<Gateway, Fault> {
+fn guarded(gw: Gateway, middle: impl FnOnce(Gateway) -> Gateway) -> Result<Gateway, Fault> {
     let terms = Terms(vec!["bomb", "launch code"]);
-    middle(gw.plugin("guard", Guard(terms.clone()))?)?
-        .plugin("guard-input", GuardInput(terms))?
+    middle(gw.plugin(Guard(terms.clone())))
+        .plugin(GuardInput(terms))
         .target("openai")
 }
 
@@ -163,9 +160,9 @@ fn gateway_with(
     + Send
     + Sync
     + 'static,
-    extra: impl FnOnce(Gateway) -> Result<Gateway, Fault>,
+    extra: impl FnOnce(Gateway) -> Gateway,
 ) -> Result<Gateway, Fault> {
-    guarded(base(transport)?, |gw| extra(gw.plugin("cache", Cache)?))
+    guarded(base(transport)?, |gw| extra(gw.plugin(Cache)))
 }
 
 fn gateway(
@@ -174,7 +171,7 @@ fn gateway(
     + Sync
     + 'static,
 ) -> Result<Gateway, Fault> {
-    gateway_with(transport, Ok)
+    gateway_with(transport, |gw| gw)
 }
 
 /// A streamed OpenAI chat of one user message.

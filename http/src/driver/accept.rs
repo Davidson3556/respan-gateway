@@ -1,7 +1,7 @@
 //! Client input and its one response handoff.
 
 use super::writer::Writer;
-use super::{End, PANICKED, RequestMetadata, Written};
+use super::{End, PANICKED, Written};
 use crate::{Body, Encoder, Frames, Unwritten, answered, bodiless, plain};
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
@@ -62,6 +62,8 @@ impl Handoff {
 pub struct Incoming {
     request: http::Request<Body>,
     live: bool,
+    wire: crate::Wire,
+    head: crate::ClientHead,
     reply: oneshot::Sender<Written>,
 }
 impl Incoming {
@@ -77,10 +79,23 @@ impl Incoming {
             Self {
                 request,
                 live,
+                wire: crate::Wire {
+                    live,
+                    ..Default::default()
+                },
+                head: crate::ClientHead::default(),
                 reply,
             },
             async move { answer.await.ok() }.boxed(),
         )
+    }
+    /// Shared original request, filled before plugin hooks run.
+    pub fn wire(&self) -> crate::Wire {
+        self.wire.clone()
+    }
+    /// Shared response head selection for this exchange.
+    pub fn client_head(&self) -> crate::ClientHead {
+        self.head.clone()
     }
     /// The request, available before binding for protocol recognition.
     pub fn request(&self) -> &http::Request<Body> {
@@ -100,6 +115,8 @@ impl Incoming {
             request,
             live,
             reply,
+            wire,
+            head: client_head,
         } = self;
         let (head, body) = request.into_parts();
         let head = Arc::new(head);
@@ -108,7 +125,6 @@ impl Incoming {
         let ask = head.clone();
         let format = name.to_owned();
         let incoming = {
-            let format = name.to_owned();
             async move {
                 let (raw, body) = if live {
                     (None, Body::stream(body))
@@ -122,12 +138,11 @@ impl Incoming {
                 if live {
                     let _ = saved.set(Bytes::new());
                 }
-                let came = RequestMetadata {
-                    head: head.clone(),
-                    body: raw,
-                };
-                Ok(read(http::Request::from_parts((*head).clone(), body))?
-                    .with_metadata(&format, came))
+                let _ = wire.request.set(http::Request::from_parts(
+                    (*head).clone(),
+                    raw.unwrap_or_default(),
+                ));
+                read(http::Request::from_parts((*head).clone(), body))
             }
             .boxed()
         };
@@ -141,6 +156,7 @@ impl Incoming {
             }
             let reply = Reply {
                 name: format,
+                head: client_head,
                 request: Arc::new(http::Request::from_parts((*ask).clone(), raw)),
                 slot: Arc::new(Mutex::new(Handoff {
                     sender: Some(reply),
@@ -180,6 +196,7 @@ impl Incoming {
 /// Owns a client's response handoff and original request. Its methods construct
 /// real event sinks; there is no intermediate response plan.
 pub struct Reply {
+    head: crate::ClientHead,
     name: String,
     request: Arc<http::Request<Bytes>>,
     slot: Slot,
@@ -190,11 +207,22 @@ impl Reply {
     fn fallback(&self) -> Self {
         Self {
             name: self.name.clone(),
+            head: self.head.clone(),
             request: self.request.clone(),
             slot: self.slot.clone(),
             refuse: self.refuse.clone(),
             live: self.live,
         }
+    }
+    /// The explicitly selected client head, or a fresh success head.
+    pub fn head(&self) -> ResponseHead {
+        self.head
+            .get()
+            .unwrap_or_else(|| http::Response::new(()).into_parts().0)
+    }
+    /// Use the explicitly selected head, falling back to a typed event head.
+    pub fn head_or(&self, head: ResponseHead) -> ResponseHead {
+        self.head.get().unwrap_or(head)
     }
     /// The original request, independently of any rewritten provider call.
     pub fn request(&self) -> &http::Request<Bytes> {

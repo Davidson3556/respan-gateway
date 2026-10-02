@@ -52,8 +52,7 @@ fn gw(mark: &Arc<()>, how: u8, body: fn() -> Text) -> Gateway {
         .unwrap()
         .provider::<In, _, _>("p", Toy, connect(dialer))
         .unwrap()
-        .plugin("mark", Mark(mark.clone(), how))
-        .unwrap()
+        .plugin(Mark(mark.clone(), how))
         .target("p")
         .unwrap()
 }

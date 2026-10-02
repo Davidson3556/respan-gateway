@@ -92,7 +92,7 @@ impl Credential {
     }
 
     /// Put its headers and parameters on `head` where it has none of a name.
-    pub(crate) fn restore(&self, head: &mut http::request::Parts) {
+    pub fn restore(&self, head: &mut http::request::Parts) {
         for name in self.headers.keys() {
             let ours = self.headers.get_all(name);
             if name == SEC_WEBSOCKET_PROTOCOL {

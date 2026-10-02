@@ -2,13 +2,13 @@
 
 use super::reader::Observation;
 use super::upload::Upload;
-use super::{RequestMetadata, ResponseMetadata};
+
 use crate::{Body, Completion};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::{Future, FutureExt, Stream, stream};
+use futures::{Future, FutureExt, SinkExt, Stream, stream};
 use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
 use respan_gateway_sdk::{Connection, EventSink, EventStream, Extensions, Fault};
 use std::pin::Pin;
@@ -30,7 +30,7 @@ impl Outgoing {
     /// Bind synchronous request preparation and a standard response stream.
     pub fn bind<I, O, P, R, S>(
         self,
-        name: &str,
+        _name: &str,
         prepare: P,
         read: R,
         success: S,
@@ -51,13 +51,34 @@ impl Outgoing {
     {
         let (answer, answered) = oneshot::channel();
         let incoming = async move { answered.await.map_err(|_| Fault::abandoned())? }.boxed();
-        let name = name.to_owned();
+
         let outgoing = EventSink::preparing(move |events: &mut EventStream<I>| {
             if let Some(fault) = events.refusal() {
                 return Err(fault.clone());
             }
-            let relayed = events.metadata::<RequestMetadata>(&name).is_some();
-            let (mut request, mut sink) = prepare(events)?;
+            let (mut request, mut sink) = match self.extensions.get::<crate::SendRaw>() {
+                Some(crate::SendRaw(wire)) => {
+                    let raw = wire
+                        .get()
+                        .ok_or_else(|| Fault::internal("raw request unavailable"))?
+                        .clone();
+                    let (mut head, bytes) = raw.into_parts();
+                    crate::proxy_call(&mut head);
+                    if wire.is_live() {
+                        let (encoded, sink) = prepare(events)?;
+                        (http::Request::from_parts(head, encoded.into_body()), sink)
+                    } else {
+                        events.stop();
+                        (
+                            http::Request::from_parts(head, Body::full(bytes)),
+                            EventSink::new(
+                                futures::sink::drain().sink_map_err(|never| match never {}),
+                            ),
+                        )
+                    }
+                }
+                None => prepare(events)?,
+            };
             sink.prepare(events)?;
             let streaming = request.body().is_streaming();
             if !streaming {
@@ -92,10 +113,8 @@ impl Outgoing {
                 .map(|h| h.failed.clone())
                 .unwrap_or_default();
             request = http::Request::from_parts(head, body);
+            let provider_head = self.extensions.get::<crate::ProviderHead>().cloned();
             request.extensions_mut().insert(self.extensions);
-            request
-                .extensions_mut()
-                .insert(crate::transport::Relayed(relayed));
             let failure = failed.clone();
             let settled = handoff.as_ref().map(|h| h.settled.clone());
             let delivery = async move {
@@ -103,6 +122,9 @@ impl Outgoing {
                 let response = async move {
                     let (response, completion) = (self.send)(request).await?;
                     let (head, body) = response.into_parts();
+                    if let Some(slot) = provider_head {
+                        slot.set(Some(head.clone()));
+                    }
                     let decide = !success(&head, &sent.clone().into_parts().0);
                     let (body, observation) = Observation::body(body, failure);
                     let stream = read(http::Response::from_parts(head.clone(), body), sent);
@@ -121,10 +143,7 @@ impl Outgoing {
                         }
                         None => EventStream::stream(stream),
                     };
-                    Ok::<_, Fault>((
-                        response.with_metadata(&name, ResponseMetadata(head)),
-                        completion,
-                    ))
+                    Ok::<_, Fault>((response, completion))
                 }
                 .await;
                 match response {

@@ -20,6 +20,9 @@ use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plug
 use respan_gateway_sdk::{async_trait, codes};
 use serde_json::{Value, json};
 
+#[path = "../../tests/support/relay.rs"]
+mod relay;
+
 const AT: &str = "http://mcp.test";
 
 /// An MCP server in `sh`: answers each request with an empty result.
@@ -28,18 +31,25 @@ const ECHO: &str = r#"while IFS= read -r line; do
   [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
 done"#;
 
-fn gateway(
+fn typed_gateway(
     transport: impl Fn(Extensions) -> Outgoing + Send + Sync + 'static,
     plugin: Option<Touch>,
 ) -> Gateway {
     let gw = Gateway::new().provider::<ToServer, _, _>("mcp", StreamableHttp::default(), transport);
     let gw = gw.and_then(|g| g.client::<ToServer, _, _>(StreamableHttp::default()));
     let gw = match plugin {
-        Some(p) => gw.and_then(|g| g.plugin("touch", p)),
+        Some(p) => gw.map(|g| g.plugin(p)),
         None => gw,
     };
     gw.and_then(|g| g.target("mcp"))
         .unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn gateway(
+    transport: impl Fn(Extensions) -> Outgoing + Send + Sync + 'static,
+    plugin: Option<Touch>,
+) -> Gateway {
+    typed_gateway(transport, plugin).plugin(relay::Relay::RAW)
 }
 
 /// Filters every input and output, changing them only if `edit`.
@@ -256,9 +266,7 @@ async fn a_rebuilt_sse_answer_is_json_when_posted() {
     let mock = ScriptedMcp::new();
     let event = "id: 7\ndata: {\"jsonrpc\":\"2.0\", \"id\":1,\"result\":{}}\n\n";
     mock.reply(sse(&[event]));
-    let gw = gateway(mock.connect(), None)
-        .plugin("rebuild", Rebuild)
-        .expect("rebuild plugin");
+    let gw = typed_gateway(mock.connect(), None).plugin(Rebuild);
     let (status, headers, body, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[CONTENT_TYPE], "application/json");
@@ -277,9 +285,7 @@ async fn a_rebuilt_json_answer_is_framed_for_get() {
         StatusCode::OK,
         r#"{"jsonrpc":"2.0", "method":"notifications/message"}"#,
     ));
-    let gw = gateway(mock.connect(), None)
-        .plugin("rebuild", Rebuild)
-        .expect("rebuild plugin");
+    let gw = typed_gateway(mock.connect(), None).plugin(Rebuild);
     let (status, headers, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[CONTENT_TYPE], "text/event-stream");
@@ -472,9 +478,7 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
         .insert("retry-after", http::HeaderValue::from_static("7"));
     failed.reply(refusal);
     let probe = RefusalProbe::default();
-    let gw = gateway(failed.clone().connect(), None)
-        .plugin("probe", probe.clone())
-        .expect("probe plugin");
+    let gw = gateway(failed.clone().connect(), None).plugin(probe.clone());
     let (status, headers, body, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
     gw.idle().await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
@@ -520,10 +524,8 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
             second.clone().connect(),
         )
         .expect("second")
-        .plugin("fallback", Fallback)
-        .expect("fallback")
-        .plugin("probe", probe.clone())
-        .expect("probe");
+        .plugin(Fallback)
+        .plugin(probe.clone());
     let (status, _, body, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
     gw.idle().await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -773,7 +775,8 @@ async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
             StdioTransport::new("sh", ["-c", ECHO]).connect(),
         )?
         .client::<ToServer, _, _>(StreamableHttp::default())?
-        .plugin("auth", Authenticates)?
+        .plugin(Authenticates)
+        .plugin(relay::Relay::RAW)
         .target("mcp")?;
     let session = init(&gw, &[("authorization", "Bearer alice")]).await;
     for (key, status) in [
@@ -995,9 +998,7 @@ async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request()
             ""
         };
         mock.reply(json_reply(StatusCode::OK, answer));
-        let gw = gateway(mock.clone().connect(), None)
-            .plugin("rewrite-id", Rewrite)
-            .expect("rewrite plugin");
+        let gw = typed_gateway(mock.clone().connect(), None).plugin(Rewrite);
         let (status, _, body, ended) = send(&gw, request(Method::POST, INIT, &[])).await;
         let sent: Value = serde_json::from_slice(mock.sent()[0].body()).expect("sent JSON");
         assert_eq!(sent["id"], 9);

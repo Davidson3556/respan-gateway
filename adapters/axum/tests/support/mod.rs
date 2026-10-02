@@ -80,7 +80,16 @@ impl Drop for Server {
 }
 
 /// Serve `gateway` on a free local port with the SDK's router.
+#[path = "../../../../tests/support/relay.rs"]
+mod relay;
+#[allow(unused_imports)]
+pub use relay::Relay;
+
 pub async fn serve(gateway: Gateway) -> Server {
+    serve_typed(gateway.plugin(relay::Relay::RAW)).await
+}
+
+pub async fn serve_typed(gateway: Gateway) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = respan_gateway_axum::ws::router(gateway.clone());
@@ -584,10 +593,8 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
         .unwrap()
         .provider::<Sent<Raw>, _, _>("p", Raw, transport.connect())
         .unwrap()
-        .plugin("ends", ends.clone())
-        .unwrap()
-        .plugin("calls", calls.clone())
-        .unwrap()
+        .plugin(ends.clone())
+        .plugin(calls.clone())
         .target("p")
         .unwrap();
     (gateway, ends, calls)

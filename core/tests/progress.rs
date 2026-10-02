@@ -121,14 +121,10 @@ async fn first_content_does_not_drain_every_ready_event() {
         .unwrap()
         .provider::<Input, Output, _>("p", Protocol(read.clone(), false), |_| Io)
         .unwrap()
-        .plugin(
-            "inspect",
-            Inspect {
-                read,
-                at_first_content: at_first_content.clone(),
-            },
-        )
-        .unwrap();
+        .plugin(Inspect {
+            read,
+            at_first_content: at_first_content.clone(),
+        });
     gateway.handle(Io, Extensions::new()).await.unwrap();
     gateway.idle().await;
     assert!(
@@ -263,8 +259,7 @@ async fn batch_boundaries_preserve_order_filtering_and_the_final_outcome() {
             .unwrap()
             .provider::<Input, Output, _>("p", Protocol(read, fail), |_| Io)
             .unwrap()
-            .plugin("observe", observe.clone())
-            .unwrap();
+            .plugin(observe.clone());
         gateway.handle(Io, Extensions::new()).await.unwrap();
         gateway.idle().await;
         assert_eq!(
@@ -309,8 +304,7 @@ async fn cancelling_borrowed_hold_replays_the_full_provider_batch() {
         .unwrap()
         .provider::<Input, Output, _>("p", Protocol(reads, false), |_| Io)
         .unwrap()
-        .plugin("cancel-hold", CancelHold(seen.clone()))
-        .unwrap();
+        .plugin(CancelHold(seen.clone()));
     gw.handle(Io, Extensions::new()).await.unwrap();
     gw.idle().await;
     assert_eq!(*seen.lock().unwrap(), (0..10_000).collect::<Vec<_>>());
@@ -361,14 +355,10 @@ async fn collecting_hot_outputs_yields_even_when_filters_suppress_all_values() {
             .unwrap()
             .provider::<Input, Output, _>("p", Protocol(count.clone(), false), |_| Io)
             .unwrap()
-            .plugin(
-                "collect-hot",
-                CollectHot {
-                    count: count.clone(),
-                    suppress,
-                },
-            )
-            .unwrap();
+            .plugin(CollectHot {
+                count: count.clone(),
+                suppress,
+            });
         gateway.handle(Io, Extensions::new()).await.unwrap();
         gateway.idle().await;
         assert!(count.load(Ordering::SeqCst) < 10_000);
@@ -472,8 +462,7 @@ async fn receiving_can_open_before_delivery_completes() {
     let gateway = Gateway::new()
         .client(Custom)
         .unwrap()
-        .plugin("release", Release(std::sync::Mutex::new(Some(send))))
-        .unwrap();
+        .plugin(Release(std::sync::Mutex::new(Some(send))));
     let handled = tokio::time::timeout(
         std::time::Duration::from_secs(1),
         gateway.handle((opening, deliver), Extensions::new()),
@@ -538,8 +527,7 @@ async fn delivery_failure_keeps_precedence_over_a_full_batch_filter_failure() {
         .unwrap()
         .provider::<Input, Output, _>("p", Protocol(read, false), |_| Io)
         .unwrap()
-        .plugin("fail", FailAtBoundary(ends.clone()))
-        .unwrap()
+        .plugin(FailAtBoundary(ends.clone()))
         .target("p")
         .unwrap();
     let expected = Err(Fault::internal("cannot prepare delivery"));
@@ -569,10 +557,8 @@ async fn a_buffered_filter_result_does_not_override_delivery_failure() {
         .unwrap()
         .provider::<Input, Output, _>("p", Protocol(Arc::new(AtomicUsize::new(0)), false), |_| Io)
         .unwrap()
-        .plugin("fail", FailAtBoundary(ends.clone()))
-        .unwrap()
-        .plugin("buffer", BufferBeforeDelivery)
-        .unwrap();
+        .plugin(FailAtBoundary(ends.clone()))
+        .plugin(BufferBeforeDelivery);
     let expected = Err(Fault::internal("cannot prepare delivery"));
     assert_eq!(gateway.handle(Io, Extensions::new()).await, expected);
     gateway.idle().await;

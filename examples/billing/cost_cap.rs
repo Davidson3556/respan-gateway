@@ -171,8 +171,8 @@ fn gateway(
     Gateway::new()
         .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("cap", Cap)? // before accounting
-        .plugin("accounting", accounting)?
+        .plugin(Cap) // before accounting
+        .plugin(accounting)
         .target("openai")
 }
 

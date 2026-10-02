@@ -8,7 +8,7 @@ use futures::{FutureExt, StreamExt};
 
 use crate::Fault;
 use crate::call::{CallEdge, SharedCall};
-use crate::events::{MAX_BATCH, Metadata};
+use crate::events::MAX_BATCH;
 use crate::fault::PANICKED;
 use crate::leg::{cut, locked, on_close, run, yield_ready};
 use crate::values::{AnyEvents, Values, erase, take, view};
@@ -17,8 +17,6 @@ use crate::values::{AnyEvents, Values, erase, take, view};
 /// and unread, its call ends abandoned.
 #[must_use = "a response does nothing unless sent or read"]
 pub struct Response {
-    /// Format-owned relay metadata, absent on translated or synthetic outputs.
-    pub(crate) metadata: Metadata,
     pub(crate) feed: Feed,
     /// What [`Response::buffer_until`] or [`Response::until_end`] read,
     /// to be read again first.
@@ -29,9 +27,7 @@ pub struct Response {
 
 impl std::fmt::Debug for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Response")
-            .field("relayed", &self.metadata.is_some())
-            .finish_non_exhaustive()
+        f.debug_struct("Response").finish_non_exhaustive()
     }
 }
 
@@ -165,9 +161,8 @@ impl Batch {
 }
 
 impl Response {
-    fn new(metadata: Metadata, feed: Feed, output: TypeId) -> Self {
+    fn new(feed: Feed, output: TypeId) -> Self {
         Self {
-            metadata,
             feed,
             ahead: VecDeque::new(),
             output,
@@ -204,12 +199,12 @@ impl Response {
         S: Stream<Item = Result<T>> + Send + 'static,
     {
         let feed = Feed::made(erase(stream.boxed()));
-        Self::new(None, feed, TypeId::of::<T>())
+        Self::new(feed, TypeId::of::<T>())
     }
 
     /// Buffer outputs until `predicate` matches, the stream ends, or it fails.
     /// Values are inspected after provider filters. Buffered values are replayed
-    /// when sent or read, retaining relay metadata and call ownership.
+    /// when sent or read, retaining call ownership.
     /// A fault before a match is returned, with the response still owned by
     /// the caller; a fault after a match stays buffered for replay.
     /// A clean end succeeds even if no value matched.
@@ -263,7 +258,7 @@ impl Response {
         }
     }
 
-    /// Buffer the entire response, retaining its metadata, buffered events,
+    /// Buffer the entire response, retaining its buffered events,
     /// terminal result and call ownership even when it fails. Streaming-input
     /// calls return unread to avoid deadlocking duplex peers.
     pub async fn until_end(&mut self) -> Result<()> {
@@ -357,9 +352,9 @@ impl Response {
         .boxed()
     }
 
-    /// A provider's output flow through its call, with metadata retained
-    /// only on a relay: cut at the call's end, so a waiting reader wakes.
-    pub(crate) fn of_call(metadata: Metadata, events: AnyEvents, mut call: CallEdge) -> Self {
+    /// A provider's output flow through its call, cut at the call's end
+    /// so a waiting reader wakes.
+    pub(crate) fn of_call(events: AnyEvents, mut call: CallEdge) -> Self {
         let px = call.cx();
         let (live, refused) = (px.live, px.refused);
         let events = cut(events, on_close(&px.ended));
@@ -370,7 +365,7 @@ impl Response {
             live,
             refused,
         };
-        Self::new(metadata, feed, output)
+        Self::new(feed, output)
     }
 }
 
@@ -391,9 +386,9 @@ pub(crate) enum Feed {
 impl Feed {
     /// Outputs made of `events`: each a success, the first `Err` the end.
     pub(crate) fn made(events: AnyEvents) -> Self {
-        let batches = events.map(|values| match values {
-            Ok(values) => Batch {
-                values: Some(values),
+        let batches = events.map(|value| match value {
+            Ok(value) => Batch {
+                values: Some(value.batch()),
                 ..Batch::default()
             },
             Err(fault) => Batch::ending(Err(fault)),
@@ -431,8 +426,8 @@ impl Feed {
         let item = AssertUnwindSafe(events.next()).catch_unwind().await;
         let read = item.map(|item| {
             let mut batch = match item {
-                Some(Ok(values)) => Batch {
-                    values: Some(values),
+                Some(Ok(value)) => Batch {
+                    values: Some(value.batch()),
                     ..Batch::default()
                 },
                 Some(Err(fault)) => Batch::ending(Err(fault)),
@@ -448,7 +443,7 @@ impl Feed {
                 {
                     let end = match events.next().now_or_never() {
                         None => break,
-                        Some(Some(Ok(more))) => match values.append(more) {
+                        Some(Some(Ok(more))) => match values.push(more) {
                             Ok(()) => {
                                 count += 1;
                                 continue;

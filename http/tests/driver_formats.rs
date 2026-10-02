@@ -69,7 +69,12 @@ fn marking(
 {
     use respan_gateway_sdk::futures::FutureExt;
     move |request| {
-        lock(&marks).push(respan_gateway_http::is_relayed(&request));
+        lock(&marks).push(
+            request
+                .extensions()
+                .get::<respan_gateway_sdk::Extensions>()
+                .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some()),
+        );
         let at = at.clone();
         async move { at.send(request).await }.boxed()
     }
@@ -144,9 +149,9 @@ impl Harness {
                     .client::<Conversation, _, _>(AnthropicMessages)
             });
         let gw = gw
-            .and_then(|g| g.plugin("outcomes", outcomes.clone()))
-            .and_then(|g| g.plugin("head-only", head_only.clone()))
-            .and_then(|g| g.plugin("route", Route))
+            .map(|g| g.plugin(outcomes.clone()))
+            .map(|g| g.plugin(head_only.clone()))
+            .map(|g| g.plugin(Route).plugin(RelaySame))
             .unwrap();
         Self {
             gw,
@@ -566,7 +571,7 @@ async fn a_slow_refusal_is_refused() {
             respan_gateway_http::connect(|request| async move { SlowRefusal.send(request).await }),
         )
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
-        .and_then(|g| g.plugin("head-only", head_only.clone()))
+        .map(|g| g.plugin(head_only.clone()).plugin(explicit::Relay::RAW))
         .and_then(|g| g.target("openai"))
         .unwrap();
     let resp = respan_gateway_http::serve(&gw, post_keyed(CHAT, UNARY_REQ)).await;
@@ -617,8 +622,8 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
                 ),
             )
             .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
-            .and_then(|g| g.plugin("outcomes", outcomes.clone()))
-            .and_then(|g| g.plugin("head-only", head_only.clone()))
+            .map(|g| g.plugin(outcomes.clone()))
+            .map(|g| g.plugin(head_only.clone()))
             .and_then(|g| g.target("openai"))
             .unwrap();
         let resp = respan_gateway_http::serve(&gw, req).await;
@@ -635,5 +640,32 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
             (503, vec![true]),
             "body {body:?}, ends {ends:?}"
         );
+    }
+}
+
+#[path = "../../tests/support/relay.rs"]
+mod explicit;
+struct RelaySame;
+#[async_trait]
+impl Plugin for RelaySame {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        let same = (cx.format() == "openai-chat" && cx.target() == Some("openai"))
+            || (cx.format() == "anthropic-messages" && cx.target() == Some("anthropic"));
+        if same {
+            explicit::Relay::RAW.on_client(cx).await
+        } else {
+            Ok(None)
+        }
+    }
+    async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
+        if px
+            .extensions()
+            .get::<respan_gateway_http::SendRaw>()
+            .is_some()
+        {
+            explicit::Relay::RAW.on_provider(px).await
+        } else {
+            Ok(())
+        }
     }
 }

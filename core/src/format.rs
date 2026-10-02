@@ -7,7 +7,7 @@ use crate::events::Single;
 use futures::future::{BoxFuture, ready};
 use futures::{FutureExt, SinkExt};
 
-use crate::values::{Values, clone_values, one, take_one};
+use crate::values::{Value, clone_value, take_value};
 use crate::{EventSink, EventStream, Fault, Result};
 
 /// A receive future and a standard outgoing sink. Synchronous preparation
@@ -42,12 +42,11 @@ pub(crate) trait AnyFormat: Send + Sync + 'static {
     /// The gateway's input and output types, whichever edge it is on.
     fn kind(&self) -> (TypeId, TypeId);
     fn matches(&self, io: &dyn Any) -> bool;
-    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<Values, Values>>;
+    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<Value, Value>>;
 }
 
-/// The connection with each value erased alone; its sink takes one value per
-/// item, as the kernel writes them.
-fn erase_connection<R, W>((opening, send): Connection<R, W>) -> Connection<Values, Values>
+/// The connection with each value erased.
+fn erase_connection<R, W>((opening, send): Connection<R, W>) -> Connection<Value, Value>
 where
     R: Clone + Send + Sync + 'static,
     W: Clone + Send + Sync + 'static,
@@ -55,16 +54,16 @@ where
     let opening = async move {
         opening
             .await
-            .map(|events| events.map_values(|v| Ok(one(v)), clone_values::<R>))
+            .map(|events| events.map_values(|v| Ok(Box::new(v) as Value), clone_value::<R>))
     };
-    let send = EventSink::preparing(move |events: &mut EventStream<Values>| {
+    let send = EventSink::preparing(move |events: &mut EventStream<Value>| {
         let mut send = send;
         let mut typed =
-            std::mem::replace(events, EventStream::empty()).map_values(take_one::<W>, W::clone);
+            std::mem::replace(events, EventStream::empty()).map_values(take_value::<W>, W::clone);
         let prepared = send.prepare(&mut typed);
-        *events = typed.map_values(|value| Ok(one(value)), clone_values::<W>);
+        *events = typed.map_values(|value| Ok(Box::new(value) as Value), clone_value::<W>);
         prepared?;
-        Ok(send.with(|event: Result<Values>| ready(Ok(event.and_then(take_one::<W>)))))
+        Ok(send.with(|event: Result<Value>| ready(Ok(event.and_then(take_value::<W>)))))
     });
     (opening.boxed(), send)
 }
@@ -114,7 +113,7 @@ where
         io.downcast_ref::<T>()
             .is_some_and(|io| self.format.matches(io))
     }
-    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<Values, Values>> {
+    fn bind(&self, io: Box<dyn Any + Send>) -> Result<Connection<Value, Value>> {
         let io = io
             .downcast::<T>()
             .map_err(|_| Fault::internal("a transport of another type than its format's"))?;
@@ -125,11 +124,11 @@ where
 /// Snapshot an explicitly supplied input of registered type `T`.
 pub(crate) fn snapshot<T: Clone + Send + Sync + 'static>(
     value: &dyn Any,
-) -> Result<Arc<Single<Values>>> {
+) -> Result<Arc<Single<Value>>> {
     let value = value
         .downcast_ref::<T>()
         .ok_or_else(Fault::wrong_kind::<T>)?;
-    Ok(Single::ready(Ok(one(value.clone())), clone_values::<T>))
+    Ok(Single::ready(Ok(Box::new(value.clone())), clone_value::<T>))
 }
 
 /// Whether `T` is `format`'s input type (`true`) or output type (`false`);
@@ -149,18 +148,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn erased_preparation_preserves_lazy_metadata_and_stopped_source() {
+    async fn erased_preparation_preserves_deferred_decode_and_stopped_source() {
         let held = Arc::new(());
         let captured = held.clone();
         let mut source = EventStream::lazy(move || -> Result<u8> {
             let _keep_alive = &captured;
             panic!("raw relay decoded during erasure");
         })
-        .map_values(|v| Ok(one(v)), clone_values::<u8>)
-        .with_metadata("toy", 23_u16);
+        .map_values(|v| Ok(Box::new(v) as Value), clone_value::<u8>);
         let sink = EventSink::preparing(|source: &mut EventStream<u8>| {
-            assert!(source.is_single() && source.is_lazy());
-            assert_eq!(source.metadata::<u16>("toy"), Some(&23));
             source.stop();
             Ok(futures::sink::unfold(
                 (),
@@ -174,8 +170,6 @@ mod tests {
             sink,
         ));
         sink.prepare(&mut source).expect("prepare");
-        assert!(source.is_single() && source.is_lazy());
-        assert_eq!(source.metadata::<u16>("toy"), Some(&23));
         assert_eq!(Arc::strong_count(&held), 2);
         crate::events::deliver(source, sink)
             .await

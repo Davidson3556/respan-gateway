@@ -113,8 +113,8 @@ fn gateway(
             provider_support::openai(&strong.base_url())?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("egress", egress)?
-        .plugin("judge", Judge)?
+        .plugin(egress)
+        .plugin(Judge)
         .target("cheap")
 }
 

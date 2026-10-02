@@ -206,7 +206,7 @@ impl RespDec {
         if self.status != 200 {
             return Err(Fault::new("refused", "refused")
                 .with(respan_gateway_http::Status(self.status))
-                .with_answer("toy", ()));
+                .with(()));
         }
         let s = String::from_utf8_lossy(&bytes).to_string();
         match s.as_str() {
@@ -353,10 +353,8 @@ fn gateway_of(
         .unwrap()
         .target("a")
         .unwrap()
-        .plugin("calls", calls.clone())
-        .unwrap()
-        .plugin("outcomes", outcomes.clone())
-        .unwrap();
+        .plugin(calls.clone())
+        .plugin(outcomes.clone());
     (gw, calls, outcomes)
 }
 
@@ -669,7 +667,11 @@ async fn only_a_call_written_from_the_clients_origin_is_relayed() {
     let marking = {
         let marks = marks.clone();
         fnt(move |c| {
-            lock(&marks).push(respan_gateway_http::is_relayed(&c));
+            lock(&marks).push(
+                c.extensions()
+                    .get::<respan_gateway_sdk::Extensions>()
+                    .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some()),
+            );
             future::ready(Ok(answer(200, chunks(vec!["a", "DONE"])))).boxed()
         })
     };
@@ -693,7 +695,7 @@ async fn only_a_call_written_from_the_clients_origin_is_relayed() {
     let (opened, written) = future::join(incoming, written).await;
     opened.unwrap();
     written.unwrap();
-    assert_eq!(*lock(&marks), [true, false]);
+    assert_eq!(*lock(&marks), [false, false]);
 }
 
 /// A refusal no codec can write goes as plain text, with its body, even to
@@ -849,10 +851,8 @@ async fn a_client_that_leaves_ends_the_request_before_its_call() {
         .unwrap()
         .provider::<In, _, _>("a", Toy::default(), respan_gateway_http::connect(transport))
         .unwrap()
-        .plugin("calls", calls.clone())
-        .unwrap()
-        .plugin("read", ReadToEnd)
-        .unwrap();
+        .plugin(calls.clone())
+        .plugin(ReadToEnd);
     let (resp, end) = open(&gw, chunks(vec!["q"]), false).await;
     let resp = resp.unwrap();
     assert_eq!(resp.status(), 200);
@@ -902,7 +902,10 @@ async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<(bool, Str
         fnt(move |c| {
             let seen = seen.clone();
             async move {
-                let relayed = respan_gateway_http::is_relayed(&c);
+                let relayed = c
+                    .extensions()
+                    .get::<respan_gateway_sdk::Extensions>()
+                    .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some());
                 let body: Vec<_> = c.into_body().into_data_stream().collect().await;
                 let body = body
                     .into_iter()
@@ -921,8 +924,7 @@ async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<(bool, Str
         .unwrap()
         .target("a")
         .unwrap()
-        .plugin("plugin", plugin)
-        .unwrap();
+        .plugin(plugin);
     let (resp, _) = open(&gw, chunks(vec!["client question"]), false).await;
     let _ = read(resp).await;
     lock(&seen).clone()
@@ -935,7 +937,10 @@ async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<(bool, Str
 #[tokio::test(flavor = "multi_thread")]
 async fn a_filter_edited_input_still_relays_but_a_calls_own_input_does_not() {
     let edited = provider_saw(Rewrites).await;
-    assert_eq!(edited, [(true, "the plugin's own prompt<END>".to_string())]);
+    assert_eq!(
+        edited,
+        [(false, "the plugin's own prompt<END>".to_string())]
+    );
     let own = provider_saw(Asks).await;
     assert_eq!(own, [(false, "own prompt<END>".to_string())]);
 }
@@ -1084,7 +1089,7 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
         let done = Arc::new(AtomicUsize::new(0));
         let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "DONE"])))).boxed());
         let (gw, _, _) = gateway_of(Toy::default(), transport);
-        let gw = gw.plugin("detach", Detach(done.clone())).unwrap();
+        let gw = gw.plugin(Detach(done.clone()));
         let req = http::Request::post("/x")
             .body(respan_gateway_http::Body::full("q"))
             .unwrap();

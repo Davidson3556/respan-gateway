@@ -20,7 +20,7 @@ use crate::fault::{PANICKED, guarded};
 use crate::lifecycle::Latch;
 use crate::plugin::Filters;
 use crate::response::{Batch, Feed};
-use crate::values::{AnyEvents, Values};
+use crate::values::{AnyBatches, AnyEvents, Value, Values};
 use crate::{Fault, Result};
 
 /// One stage's filters of one direction, shared by whoever runs or ends it.
@@ -179,15 +179,14 @@ struct Reading {
     /// Taken from `later` on the first poll.
     events: Option<AnyEvents>,
     layers: Vec<Layer>,
-    /// One value each.
-    ready: VecDeque<Result<Values>>,
+    ready: VecDeque<Result<Value>>,
     ended: bool,
     /// Told the first failure, which ends the call that reads them.
     failed: Option<oneshot::Sender<Fault>>,
 }
 
 impl Reading {
-    async fn next(&mut self) -> Option<Result<Values>> {
+    async fn next(&mut self) -> Option<Result<Value>> {
         loop {
             if let Some(item) = self.ready.pop_front() {
                 if let Err(fault) = &item
@@ -241,15 +240,14 @@ impl Reading {
 
     /// Each input through the layers, as it is ready; once a layer ended,
     /// they are cut.
-    fn filter(&mut self, values: Values) -> Result<()> {
+    fn filter(&mut self, input: Value) -> Result<()> {
         let layers: Vec<&Layer> = self.layers.iter().collect();
-        for mut input in values.split() {
-            if layers.iter().any(|l| locked(l).ended()) {
-                return Err(Fault::abandoned());
-            }
-            run(&layers, &mut input)?;
-            self.ready.extend(input.split().into_iter().map(Ok));
+        if layers.iter().any(|l| locked(l).ended()) {
+            return Err(Fault::abandoned());
         }
+        let mut values = input.batch();
+        run(&layers, &mut values)?;
+        self.ready.extend(values.split().into_iter().map(Ok));
         Ok(())
     }
 
@@ -287,8 +285,6 @@ pub(crate) struct ToClient {
     ahead: VecDeque<Batch>,
     feed: Feed,
     layer: Layer,
-    /// Whether it relays, so a provider's words go with a failure.
-    relayed: bool,
     ready: VecDeque<Result<Values>>,
     done: bool,
     batches: usize,
@@ -301,7 +297,6 @@ impl ToClient {
         ahead: VecDeque<Batch>,
         feed: Feed,
         layer: Layer,
-        relayed: bool,
         discarded: Arc<Mutex<Vec<Batch>>>,
     ) -> Self {
         let (ready, done) = (VecDeque::new(), false);
@@ -309,7 +304,6 @@ impl ToClient {
             ahead,
             feed,
             layer,
-            relayed,
             ready,
             done,
             batches: 0,
@@ -317,7 +311,7 @@ impl ToClient {
         }
     }
 
-    pub(crate) fn events(self) -> AnyEvents {
+    pub(crate) fn events(self) -> AnyBatches {
         stream::unfold(self, |mut o| async move { o.next().await.map(|v| (v, o)) }).boxed()
     }
 
@@ -348,7 +342,7 @@ impl ToClient {
     }
 
     /// The next batch, through the client's output filters; at the end, what
-    /// they kept back and the end, a failure unrelayed unless it relays.
+    /// they kept back and the end, including any filter failure.
     async fn step(&mut self) {
         let mut batch = match self.ahead.pop_front() {
             Some(batch) => batch,
@@ -370,11 +364,6 @@ impl ToClient {
         let end = end_layers(&[&self.layer], end, &mut tail);
         self.ready.extend(tail.map(Ok));
         if let Err(fault) = end {
-            // A provider's words go only where its head would.
-            let fault = match self.relayed {
-                true => fault,
-                false => fault.unrelayed(),
-            };
             self.ready.push_back(Err(fault));
         }
     }

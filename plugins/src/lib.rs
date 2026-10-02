@@ -9,3 +9,6 @@ mod router;
 pub mod routing;
 
 pub use router::ModelRouter;
+
+#[cfg(feature = "http-relay")]
+pub mod relay;

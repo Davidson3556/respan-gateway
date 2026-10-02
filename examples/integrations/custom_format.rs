@@ -69,8 +69,8 @@ impl Format<Incoming, EmbedRequest, Embeddings> for OpenAiEmbeddings {
         Ok(io.bind(
             NAME,
             |request| h::messages(request, |_, raw| read_request(raw)),
-            |reply, source| {
-                let mut head = h::response_head(NAME, source);
+            |reply, _source| {
+                let mut head = reply.head();
                 formats::default_content_type(&mut head, "application/json");
                 Ok(reply.write(head, Box::new(Relay::new(write_embeddings, error, false))))
             },
@@ -252,8 +252,8 @@ async fn embed(body: &'static str) -> Result<(Bytes, StatusCode, Bytes, Usage), 
     openai.answer(Answer::raw(ANSWER));
     let provider = provider_support::openai(&openai.base_url())?;
     let gw = Gateway::new()
-        .plugin("pin", PinModel(PINNED))?
-        .plugin("metered", metered.clone())?
+        .plugin(PinModel(PINNED))
+        .plugin(metered.clone())
         .provider::<EmbedRequest, _, _>("openai", OpenAiEmbeddings, provider.connect())?
         .client::<EmbedRequest, _, _>(OpenAiEmbeddings)?
         .target("openai")?;

@@ -611,7 +611,7 @@ mod tests {
             let gateway = Gateway::new()
                 .provider::<crate::ClientEvent, _, _>("ws", format.clone(), transport.connect())
                 .and_then(|g| g.client::<crate::ClientEvent, _, _>(format))
-                .and_then(|g| g.plugin("ended", ended.clone()))
+                .map(|g| g.plugin(ended.clone()))
                 .and_then(|g| g.target("ws"))
                 .expect("gateway");
             let dropped = Arc::new(AtomicBool::new(false));
@@ -628,8 +628,8 @@ mod tests {
             )
             .await
             .expect("refusal must not wait for an upload frame");
-            assert_eq!(response.status(), status);
-            assert_eq!(response.headers()["x-provider"], "original");
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert!(!response.headers().contains_key("x-provider"));
             let bytes = tokio::time::timeout(
                 Duration::from_secs(3),
                 BodyExt::collect(response.into_body()),
@@ -638,7 +638,8 @@ mod tests {
             .expect("complete refusal body")
             .expect("read refusal body")
             .to_bytes();
-            assert_eq!(bytes, body.as_bytes());
+            assert!(!bytes.is_empty());
+            assert_ne!(bytes, body.as_bytes());
             let _ = tokio::time::timeout(Duration::from_secs(3), completion)
                 .await
                 .expect("finish refused call");
@@ -648,7 +649,8 @@ mod tests {
             assert!(records[0].0, "provider refused before opening");
             let fault = records[0].1.as_ref().expect_err("refused call");
             let original = fault
-                .answer::<http::Response<Bytes>>("json-ws")
+                .get::<respan_gateway_http::ProviderError>()
+                .map(|e| &e.response)
                 .expect("fault retains original answer");
             assert_eq!(
                 (

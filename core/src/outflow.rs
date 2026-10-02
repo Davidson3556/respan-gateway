@@ -13,7 +13,7 @@ use crate::format::AnyFormat;
 use crate::leg::{ToClient, cut, on_close};
 use crate::lifecycle::EndHooks;
 use crate::response::{Batch, Feed};
-use crate::values::Values;
+use crate::values::Value;
 use crate::{ClientContext, EventStream, Fault, Response, Result};
 
 /// The client's response through its output stages, one value per item, and
@@ -23,7 +23,7 @@ pub(crate) async fn outflow(
     resp: Result<Response>,
     hooks: &mut EndHooks<ClientContext>,
     discarded: &Arc<Mutex<Vec<Batch>>>,
-) -> (EventStream<Values>, Option<SharedCall>) {
+) -> (EventStream<Value>, Option<SharedCall>) {
     let cx = hooks.cx();
     // A call's response goes only to its own request; one of another kind
     // fails, even with no outputs.
@@ -54,34 +54,16 @@ pub(crate) async fn outflow(
             Ok(Some(Err(fault))) => fault,
             _ => Fault::internal(PANICKED),
         };
-        // A provider's words go only where its head would.
-        let fault = match resp.metadata.is_some() {
-            true => fault,
-            false => fault.unrelayed(),
-        };
         return (EventStream::refused(fault), None);
     }
     let call = resp.feed.call().cloned();
-    let Response {
-        metadata,
-        feed,
-        ahead,
-        ..
-    } = resp;
-    let relayed = metadata.is_some();
+    let Response { feed, ahead, .. } = resp;
     let ended = cx.ended.clone();
     let stages = match cx.stages() {
         Ok(stages) => stages,
         Err(fault) => return (EventStream::refused(fault), call),
     };
-    let mut events = ToClient::new(
-        ahead,
-        feed,
-        stages.latest.clone(),
-        relayed,
-        discarded.clone(),
-    )
-    .events();
+    let mut events = ToClient::new(ahead, feed, stages.latest.clone(), discarded.clone()).events();
     // Each wrap, the last added first, then the filters added before it.
     for (wrap, layer) in stages.wrapped.iter_mut().rev() {
         let Some(wrap) = wrap.take() else { continue };
@@ -90,14 +72,7 @@ pub(crate) async fn outflow(
         let panicked = || stream::once(ready(Err(Fault::internal(PANICKED)))).boxed();
         let outputs = std::panic::catch_unwind(wrap).unwrap_or_else(|_| panicked());
         let feed = Feed::made(outputs);
-        events = ToClient::new(
-            VecDeque::new(),
-            feed,
-            layer.clone(),
-            relayed,
-            discarded.clone(),
-        )
-        .events();
+        events = ToClient::new(VecDeque::new(), feed, layer.clone(), discarded.clone()).events();
     }
     // Once the request ends, its outputs are cut.
     let events = cut(events, on_close(&ended));
@@ -107,7 +82,6 @@ pub(crate) async fn outflow(
             Err(fault) => vec![Err(fault)],
         })
     });
-    let mut flow = EventStream::stream(events);
-    flow.set_metadata(metadata);
+    let flow = EventStream::stream(events);
     (flow, call)
 }

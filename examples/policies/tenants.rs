@@ -107,11 +107,11 @@ fn gateway(
     + 'static,
     tenants: Tenants,
 ) -> Result<Gateway, Fault> {
-    Gateway::new()
+    Ok(Gateway::new()
         .provider::<Conversation, _, _>("openai", OpenAiChat, openai)?
         .provider::<Conversation, _, _>("azure", OpenAiChat, azure)?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("tenants", tenants)
+        .plugin(tenants))
 }
 
 fn bearer(key: &str) -> Result<HeaderValue, Fault> {

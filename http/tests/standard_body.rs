@@ -55,7 +55,7 @@ async fn standard_frame_adapter_preserves_data_and_head_but_discards_trailers() 
 
     let decoded = Arc::new(AtomicUsize::new(0));
     let mut input = open(request, decoded.clone()).await.expect("open request");
-    assert!(input.is_lazy());
+    assert!(input.is_single());
     assert_eq!(decoded.load(Ordering::SeqCst), 0);
     assert_eq!(
         input
@@ -149,7 +149,7 @@ async fn standard_full_and_empty_bodies_decode_lazily() {
         let mut input = open(Request::new(body), decoded.clone())
             .await
             .expect("open standard body");
-        assert!(input.is_lazy());
+        assert!(input.is_single());
         assert_eq!(decoded.load(Ordering::SeqCst), 0);
         assert_eq!(
             input.next().await.expect("input").expect("decode"),

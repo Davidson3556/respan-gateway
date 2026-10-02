@@ -11,17 +11,21 @@ use respan_gateway_http::http::{self, StatusCode, request::Parts as RequestHead}
 use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format};
 
 /// A request's message in format `F`, as the client sent it.
-pub struct Sent<F>(pub Bytes, PhantomData<fn() -> F>);
+pub struct Sent<F>(pub http::Request<Bytes>, PhantomData<fn() -> F>);
 
 /// A response's message in format `F`, as the provider sent it.
-pub struct Got<F>(pub Bytes, PhantomData<fn() -> F>);
+pub struct Got<F>(pub http::Response<Bytes>, PhantomData<fn() -> F>);
 
 macro_rules! bytes_type {
-    ($name:ident) => {
+    ($name:ident, $http:ident, $($field:ident),+) => {
         impl<F> $name<F> {
             /// The message `bytes`.
             pub fn new(bytes: impl Into<Bytes>) -> Self {
-                Self(bytes.into(), PhantomData)
+                Self(http::$http::new(bytes.into()), PhantomData)
+            }
+            /// An owned head and body.
+            pub fn from_http(message: http::$http<Bytes>) -> Self {
+                Self(message, PhantomData)
             }
         }
 
@@ -31,10 +35,10 @@ macro_rules! bytes_type {
             }
         }
 
-        /// Equal when the bytes are.
         impl<F> PartialEq for $name<F> {
             fn eq(&self, other: &Self) -> bool {
-                self.0 == other.0
+                $(self.0.$field() == other.0.$field() &&)+
+                self.0.headers() == other.0.headers() && self.0.body() == other.0.body()
             }
         }
 
@@ -46,7 +50,7 @@ macro_rules! bytes_type {
 
         impl<F: 'static> Encoder<$name<F>> for Writes {
             fn encode(&mut self, value: &$name<F>, out: &mut BytesMut) -> Result<(), Fault> {
-                out.extend_from_slice(&value.0);
+                out.extend_from_slice(value.0.body());
                 Ok(())
             }
 
@@ -60,30 +64,36 @@ macro_rules! bytes_type {
 /// Writes each message as it came.
 struct Writes;
 
-bytes_type!(Sent);
-bytes_type!(Got);
+bytes_type!(Sent, Request, method, uri, version);
+bytes_type!(Got, Response, status, version);
 
 /// One message per finite body or explicitly live frame.
 pub fn read_request<F: 'static>(
     request: http::Request<Body>,
 ) -> Result<EventStream<Sent<F>>, Fault> {
-    crate::messages(request, |_, raw| Ok(Sent::new(raw)))
+    crate::messages(request, |head, raw| {
+        Ok(Sent::from_http(http::Request::from_parts(
+            head.clone(),
+            raw,
+        )))
+    })
 }
 
-/// Relay eligible client metadata and its safe forwarded path.
+/// Encode the typed request head and body with its safe forwarded path.
 pub fn write_request<F: 'static>(
     name: &str,
     source: &mut EventStream<Sent<F>>,
 ) -> Result<(http::Request<Body>, EventSink<Sent<F>>), Fault> {
-    let relayed = crate::request_head(name, source).is_some();
-    let (mut request, sink) = crate::request(name, source, Box::new(Writes))?;
-    if relayed {
-        let path = crate::formats::forwarded_path(request.uri().path());
-        let (mut head, body) = request.into_parts();
-        crate::formats::set_path(&mut head, &path);
-        request = http::Request::from_parts(head, body);
-    }
-    Ok((request, sink))
+    let head = source
+        .value()
+        .transpose()?
+        .map(|sent| sent.0.clone().into_parts().0)
+        .unwrap_or_else(|| http::Request::new(()).into_parts().0);
+    let (request, sink) = crate::request(name, source, Box::new(Writes))?;
+    let path = crate::formats::forwarded_path(head.uri.path());
+    let mut head = head;
+    crate::formats::set_path(&mut head, &path);
+    Ok((http::Request::from_parts(head, request.into_body()), sink))
 }
 
 /// Relay successes and ordinary redirects. A failed or unasked upgrade is a
@@ -97,10 +107,36 @@ pub fn read_response<F: 'static>(
     let status = response.status();
     let switched = status == StatusCode::SWITCHING_PROTOCOLS && asked;
     let relayed = status.is_success() || (status.is_redirection() && !asked);
-    if relayed && bodiless(&call.method, status) {
-        crate::formats::whole::nothing(response.into_body())
-    } else if relayed || switched {
-        response.into_body().map(|raw| raw.map(Got::new)).boxed()
+    if relayed || switched {
+        let (head, body) = response.into_parts();
+        let empty = bodiless(&call.method, status);
+        let first = (empty || switched)
+            .then(|| Got::from_http(http::Response::from_parts(head.clone(), Bytes::new())));
+        let rest = futures::stream::unfold(
+            (body, head, first.is_some(), empty),
+            |(mut body, head, seen, empty)| async move {
+                if empty {
+                    return None;
+                }
+                match body.next().await {
+                    Some(raw) => Some((
+                        raw.map(|raw| {
+                            Got::from_http(http::Response::from_parts(head.clone(), raw))
+                        }),
+                        (body, head, true, false),
+                    )),
+                    None if !seen => Some((
+                        Ok(Got::from_http(http::Response::from_parts(
+                            head.clone(),
+                            Bytes::new(),
+                        ))),
+                        (body, head, true, true),
+                    )),
+                    None => None,
+                }
+            },
+        );
+        futures::stream::iter(first.map(Ok)).chain(rest).boxed()
     } else {
         crate::formats::whole::refusal(name, response)
     }
@@ -108,15 +144,64 @@ pub fn read_response<F: 'static>(
 
 /// Write opaque response bytes, retaining an unread bodyless source.
 pub fn write_response<F: 'static>(
-    name: &str,
+    _name: &str,
     reply: Reply,
     source: &mut EventStream<Got<F>>,
 ) -> EventSink<Got<F>> {
-    let head = crate::response_head(name, source);
-    if bodiless(reply.request().method(), head.status) {
-        reply.empty(head, source)
-    } else {
-        reply.write(head, Box::new(Writes))
+    let _ = source;
+    EventSink::new(OpaqueSink {
+        reply: Some(reply),
+        sink: None,
+    })
+}
+
+struct OpaqueSink<F> {
+    reply: Option<Reply>,
+    sink: Option<EventSink<Got<F>>>,
+}
+impl<F> Unpin for OpaqueSink<F> {}
+impl<F: 'static> futures::Sink<Result<Got<F>, Fault>> for OpaqueSink<F> {
+    type Error = Fault;
+    fn poll_ready(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Fault>> {
+        match &mut self.sink {
+            Some(sink) => std::pin::Pin::new(sink).poll_ready(cx),
+            None => std::task::Poll::Ready(Ok(())),
+        }
+    }
+    fn start_send(
+        mut self: std::pin::Pin<&mut Self>,
+        item: Result<Got<F>, Fault>,
+    ) -> Result<(), Fault> {
+        if let Some(reply) = self.reply.take() {
+            let head = match &item {
+                Ok(got) => reply.head_or(got.0.clone().into_parts().0),
+                Err(_) => reply.head(),
+            };
+            self.sink = Some(reply.open(head, Bytes::new(), Box::new(Writes)));
+        }
+        std::pin::Pin::new(self.sink.as_mut().expect("opaque sink initialized")).start_send(item)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Fault>> {
+        match &mut self.sink {
+            Some(sink) => std::pin::Pin::new(sink).poll_flush(cx),
+            None => std::task::Poll::Ready(Ok(())),
+        }
+    }
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Fault>> {
+        if let Some(reply) = self.reply.take() {
+            let head = reply.head();
+            self.sink = Some(reply.open(head, Bytes::new(), Box::new(Writes)));
+        }
+        std::pin::Pin::new(self.sink.as_mut().expect("opaque sink initialized")).poll_close(cx)
     }
 }
 
@@ -206,7 +291,7 @@ mod tests {
         let mut writer = Writes;
         let mut out = BytesMut::new();
         assert!(writer.encode(&Sent::<Raw>::new("b"), &mut out).is_ok());
-        assert_eq!((&got[0].0[..], &out[..]), (&b"a"[..], &b"b"[..]));
+        assert_eq!((&got[0].0.body()[..], &out[..]), (&b"a"[..], &b"b"[..]));
     }
 
     // A provider's 101 the call did not ask for fails it, now this
@@ -226,7 +311,11 @@ mod tests {
         .expect("expected value")
         .err();
         assert_eq!(fault.as_ref().map(Fault::code), Some("upstream"));
-        let answer = fault.and_then(|f| f.answer::<http::Response<Bytes>>("raw").cloned());
+        let answer = fault.and_then(|f| {
+            f.get::<respan_gateway_http::ProviderError>()
+                .map(|e| &e.response)
+                .cloned()
+        });
         assert!(answer.is_none(), "never relayed");
     }
 }

@@ -143,7 +143,7 @@ fn gateway(
         .provider::<Conversation, _, _>("openai", OpenAiChat, provider)?
         .client::<Conversation, _, _>(OpenAiChat)?
         // Last, so its filter sees each reply first.
-        .plugin("billing", Billing { prices, store })?
+        .plugin(Billing { prices, store })
         .target("openai")
 }
 

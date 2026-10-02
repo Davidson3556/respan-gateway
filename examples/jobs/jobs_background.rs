@@ -200,11 +200,12 @@ impl Jobs {
         let (jobs, home) = (self.clone(), (tenant(cx), deployment));
         cx.wrap(move |events: EventStream<Got<Rest>>| {
             stream::once(async move {
-                let body = events.try_fold(BytesMut::new(), |mut bytes, chunk| async move {
-                    bytes.extend_from_slice(&chunk.0); Ok(bytes)
+                let (head, body) = events.try_fold((None, BytesMut::new()), |(head, mut bytes), chunk| async move {
+                    let (next, body) = chunk.0.into_parts();
+                    bytes.extend_from_slice(&body); Ok((head.or(Some(next)), bytes))
                 }).await?;
-                if body.is_empty() { return Ok(None); }
-                let mut got = Got::new(body.freeze());
+                let Some(head) = head else { return Ok(None); };
+                let mut got = Got::from_http(http::Response::from_parts(head, body.freeze()));
                 let native = jobs.show(&mut got, &id, home).await?;
                 if remember && let Some(native) = native {
                     jobs.db(move |tx| {
@@ -335,7 +336,10 @@ impl Jobs {
         id: &str,
         home: Home,
     ) -> Result<Option<String>, Fault> {
-        let mut body: Value = serde_json::from_slice(&got.0)
+        if got.0.body().is_empty() {
+            return Ok(None);
+        }
+        let mut body: Value = serde_json::from_slice(got.0.body())
             .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
         let event = body["type"]
             .as_str()
@@ -364,7 +368,7 @@ impl Jobs {
                 }
             }
         }
-        *got = Got::new(body.to_string());
+        *got.0.body_mut() = body.to_string().into();
         Ok(native)
     }
 
@@ -528,6 +532,25 @@ impl Jobs {
 
 #[async_trait]
 impl Plugin for Jobs {
+    async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
+        // This application authenticates the upstream using the job owner's key.
+        let mut headers = px
+            .extensions()
+            .get::<Credential>()
+            .map(|c| c.headers().clone())
+            .unwrap_or_default();
+        if let Some(key) = px
+            .extensions()
+            .get::<Asked>()
+            .and_then(|a| a.headers.get("idempotency-key"))
+        {
+            headers.insert("idempotency-key", key.clone());
+        }
+        px.extensions_mut()
+            .insert(respan_gateway_http::CallHeaders(headers));
+        Ok(())
+    }
+
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let Ok(ask) = cx.input::<Ask>().cloned() else {
             return Ok(None);
@@ -541,7 +564,7 @@ impl Plugin for Jobs {
                 .ok_or_else(|| Fault::internal("bad job id"))?;
             let output = job.output.clone();
             cx.filter(move |got: &mut Got<Rest>| {
-                lock(&output).extend_from_slice(&got.0);
+                lock(&output).extend_from_slice(got.0.body());
                 Ok(())
             })?;
             self.chain(cx, &body).await?;
@@ -681,11 +704,11 @@ fn gateway(
     + 'static,
     jobs: &Jobs,
 ) -> Result<Gateway, Fault> {
-    Gateway::new()
+    Ok(Gateway::new()
         .client::<Ask, _, _>(RESPONSES)?
         .provider::<Ask, _, _>("east", RESPONSES, east)?
         .provider::<Ask, _, _>("west", RESPONSES, west)?
-        .plugin("jobs", jobs.clone())
+        .plugin(jobs.clone()))
 }
 
 fn request(method: &str, path: &str, body: &str) -> http::Request<Body> {

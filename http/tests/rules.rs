@@ -26,6 +26,9 @@ use hooks::{Calls, Outcomes};
 use http_support::{post, read_whole, serve};
 use scripted::{Scripted, json, sse};
 
+#[path = "../../tests/support/relay.rs"]
+mod relay;
+
 const OPENAI: &str = "http://openai.test/v1";
 const BACKUP: &str = "http://backup.test/v1";
 const CHAT: &str = "/v1/chat/completions";
@@ -73,10 +76,8 @@ fn gateway(
         .into_iter()
         .try_fold(Gateway::new(), |gw, add| add(gw))?
         .client::<Conversation, _, _>(OpenAiChat)?;
-    let gw = plugins
-        .into_iter()
-        .enumerate()
-        .try_fold(gw, |gw, (i, plugin)| gw.plugin(format!("p{i}"), plugin))?;
+    let gw = plugins.into_iter().fold(gw, Gateway::plugin);
+    let gw = gw.plugin(relay::Relay::RAW);
     match target {
         Some(target) => gw.target(target),
         None => Ok(gw),
@@ -153,7 +154,7 @@ impl Plugin for Cool {
             chat.temperature = Some(0.0);
             Ok(())
         })?;
-        Ok(None)
+        cx.call("openai").await.map(Some)
     }
 }
 
@@ -463,7 +464,7 @@ async fn a_relay_passes_the_clients_end_to_end_headers() {
     for name in denied {
         assert!(headers.get(name).is_none(), "{name}");
     }
-    assert_eq!(headers.get_all("content-type").iter().count(), 1);
+    assert_eq!(headers.get_all("content-type").iter().count(), 0);
 }
 
 #[tokio::test]
@@ -507,7 +508,7 @@ async fn a_clients_connection_header_names_only_its_own_headers() {
 
     // The format's content type stays; a header `Connection` names goes.
     let sent = h.mock.sent();
-    assert_eq!(sent[0].headers()["content-type"], "application/json");
+    assert!(!sent[0].headers().contains_key("content-type"));
     assert!(sent[0].headers().get("x-hop").is_none());
 }
 

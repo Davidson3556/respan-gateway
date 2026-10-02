@@ -167,7 +167,7 @@ impl Config {
             let router = models.iter().fold(router, |router, m| {
                 router.route(m.prefix.clone(), m.provider.clone())
             });
-            gateway = gateway.plugin(p.name.clone(), router)?;
+            gateway = gateway.plugin(router);
         }
         if self.serve.iter().any(|name| name == PASSTHROUGH) {
             let mut own = self
@@ -179,7 +179,7 @@ impl Config {
                     format!("serve: {PASSTHROUGH} needs exactly one provider of that format");
                 return Err(Fault::config(message));
             };
-            gateway = gateway.plugin(PASSTHROUGH, SendTo(name.clone()))?;
+            gateway = gateway.plugin(SendTo(name.clone()));
         }
         match &self.target {
             Some(target) => gateway
@@ -212,6 +212,14 @@ impl Plugin for SendTo {
 /// cycle.
 fn ordered(plugins: &[PluginConfig]) -> Result<Vec<&PluginConfig>, Fault> {
     let index = |name: &str| plugins.iter().position(|p| p.name == name);
+    // `after` names a plugin, so a name is one plugin's.
+    let mut each = plugins.iter().enumerate();
+    if let Some((_, p)) = each.find(|(i, p)| index(&p.name) != Some(*i)) {
+        return Err(Fault::config(format!(
+            "plugin '{}' is registered twice",
+            p.name
+        )));
+    }
     for p in plugins {
         if let Some(first) = p.after.iter().find(|a| index(a).is_none()) {
             return Err(Fault::config(format!(

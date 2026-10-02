@@ -62,7 +62,7 @@ async fn a_request_keeps_the_version_it_started_with() -> Result<(), Fault> {
     let tenants = Tenants::default();
     tenants.upsert("gw-acme", tenant(1, "openai", "sk-acme")?);
     let gw = gateway(first.connect(), second.connect(), tenants.clone())?
-        .plugin("edits", EditsMidway(tenants.clone()))?;
+        .plugin(EditsMidway(tenants.clone()));
     assert_eq!(send(&gw, "gw-acme").await?, StatusCode::OK);
     assert_eq!(openai.requests().len(), 1);
     assert_eq!(auth(&openai.requests()[0]), Some("Bearer sk-acme"));

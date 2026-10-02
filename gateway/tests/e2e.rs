@@ -141,7 +141,15 @@ fn openai_stream_text(body: &str) -> (String, bool) {
 #[tokio::test]
 async fn openai_whole_relay_is_byte_exact_and_passes_the_clients_key() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let headers = [
         OPENAI_KEY,
         ("openai-beta", "assistants=v9"),
@@ -170,7 +178,15 @@ async fn openai_whole_relay_is_byte_exact_and_passes_the_clients_key() {
 #[tokio::test]
 async fn openai_stream_relay_is_byte_exact_and_passes_the_clients_key() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let request = openai_request(
         r#","stream":true,"stream_options":{"include_usage":true},"metadata":{"kept":"yes"}"#,
     );
@@ -193,9 +209,17 @@ async fn openai_stream_relay_is_byte_exact_and_passes_the_clients_key() {
 }
 
 #[tokio::test]
-async fn usage_the_client_did_not_ask_for_is_asked_for_and_hidden() {
+async fn raw_proxy_preserves_the_clients_usage_request() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let request = openai_request(r#","stream":true,"metadata":{"kept":"yes"}"#);
     // What the provider sends when asked for usage: `"usage":null` on each
     // chunk, then a chunk of usage alone.
@@ -216,7 +240,7 @@ async fn usage_the_client_did_not_ask_for_is_asked_for_and_hidden() {
     let (body, ended) = read_all(resp).await;
     assert_eq!(ended, Ok(()));
     let seen = body_of(&openai, 0);
-    assert_eq!(seen["stream_options"]["include_usage"], true);
+    assert!(seen["stream_options"]["include_usage"].is_null());
     assert_eq!(seen["metadata"]["kept"], "yes");
     // What the provider sends a client that did not ask for usage.
     assert_eq!(body, sse(&OPENAI_STREAM), "the usage is hidden");
@@ -257,7 +281,15 @@ target: p
 #[tokio::test]
 async fn anthropic_stream_relay_is_byte_exact_and_passes_the_clients_key() {
     let anthropic = FakeAnthropic::start().await;
-    let gw = Gateway::start(&one_provider("anthropic-messages", &anthropic.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--anthropic",
+        "--url",
+        &anthropic.base_url(),
+    ])
+    .await;
     let request = claude_request(r#","stream":true,"metadata":{"user_id":"u1"}"#);
     let mut headers = ANTHROPIC_KEY.to_vec();
     headers.push(("anthropic-beta", "some-future-beta-2099-01-01"));
@@ -283,7 +315,15 @@ async fn anthropic_stream_relay_is_byte_exact_and_passes_the_clients_key() {
 #[tokio::test]
 async fn anthropic_whole_relay_is_byte_exact_and_sends_a_default_version() {
     let anthropic = FakeAnthropic::start().await;
-    let gw = Gateway::start(&one_provider("anthropic-messages", &anthropic.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--anthropic",
+        "--url",
+        &anthropic.base_url(),
+    ])
+    .await;
     let request = claude_request(r#","metadata":{"user_id":"u1"}"#);
 
     let answer = r#"{"id":"msg_1", "type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}"#;
@@ -467,7 +507,15 @@ target: openai
 #[tokio::test]
 async fn a_relayed_429_keeps_its_retry_after_and_body() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
 
     openai.answer(Answer::error(429).retry_after(7));
     let resp = post(gw.url(CHAT), &[OPENAI_KEY], OPENAI_REQUEST).await;
@@ -523,7 +571,15 @@ async fn a_translated_500_reaches_an_openai_client_in_its_format() {
 #[tokio::test]
 async fn a_relayed_529_passes_through_byte_exact() {
     let anthropic = FakeAnthropic::start().await;
-    let gw = Gateway::start(&one_provider("anthropic-messages", &anthropic.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--anthropic",
+        "--url",
+        &anthropic.base_url(),
+    ])
+    .await;
 
     anthropic.answer(Answer::error(529).message("Overloaded, try later"));
     let resp = post(gw.url(MESSAGES), &ANTHROPIC_KEY, claude_request("")).await;
@@ -543,7 +599,15 @@ async fn a_relayed_529_passes_through_byte_exact() {
 async fn a_request_the_provider_refuses_is_relayed_as_it_refused() {
     // The gateway does not check what it relays unread: the provider does.
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let request = openai_request(r#","x_new_field":1"#);
 
     let resp = post(gw.url(CHAT), &[OPENAI_KEY], request.clone()).await;
@@ -576,7 +640,15 @@ async fn an_unreachable_provider_is_a_502_in_the_clients_format() {
 #[tokio::test]
 async fn a_relayed_stream_cut_mid_body_ends_truncated_without_a_hang() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let request = openai_request(r#","stream":true"#);
     // The role chunk and "hel", then the connection drops.
     openai.answer(script(&OPENAI_STREAM).cut_after(2));
@@ -598,7 +670,15 @@ async fn a_relayed_stream_cut_mid_body_ends_truncated_without_a_hang() {
 #[tokio::test]
 async fn an_anthropic_stream_cut_after_content_ends_with_an_anthropic_error_event() {
     let anthropic = FakeAnthropic::start().await;
-    let gw = Gateway::start(&one_provider("anthropic-messages", &anthropic.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--anthropic",
+        "--url",
+        &anthropic.base_url(),
+    ])
+    .await;
     let request = claude_request(r#","stream":true"#);
 
     // message_start, content_block_start, ping, "hel", then a drop.
@@ -623,7 +703,15 @@ async fn an_anthropic_stream_cut_before_content_is_refused_502() {
     // The start is held until the first content, so a failure before any
     // can still be refused with a status. Anthropic pings before content.
     let anthropic = FakeAnthropic::start().await;
-    let gw = Gateway::start(&one_provider("anthropic-messages", &anthropic.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--anthropic",
+        "--url",
+        &anthropic.base_url(),
+    ])
+    .await;
 
     anthropic.answer(Answer::text("hel lo").cut_after(3));
     let resp = post(
@@ -643,7 +731,15 @@ async fn an_anthropic_stream_cut_before_content_is_refused_502() {
 #[tokio::test]
 async fn a_stream_that_ends_before_done_ends_truncated() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let chunk = json!({
         "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": GPT,
         "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "hel" }, "finish_reason": null }]
@@ -695,7 +791,15 @@ async fn a_translated_stream_cut_mid_body_ends_truncated_without_a_hang() {
 #[tokio::test]
 async fn a_slow_first_byte_is_waited_for() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let request = openai_request(r#","stream":true"#);
 
     openai.answer(script(&OPENAI_STREAM).delay_first(700));
@@ -820,7 +924,15 @@ async fn an_unknown_path_is_a_404() {
 #[tokio::test]
 async fn a_body_over_32_mib_is_refused_413_in_the_clients_format() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     let mut big = format!(r#"{{"model":"{GPT}","messages":[{{"role":"user","content":""#);
     big.push_str(&"x".repeat(32 * 1024 * 1024));
     big.push_str("\"}]}");
@@ -836,7 +948,15 @@ async fn a_body_over_32_mib_is_refused_413_in_the_clients_format() {
 #[tokio::test]
 async fn cookies_and_forwarding_headers_do_not_reach_the_provider() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
 
     let resp = post(
         gw.url(CHAT),
@@ -873,7 +993,15 @@ async fn cookies_and_forwarding_headers_do_not_reach_the_provider() {
 async fn set_cookie_and_hsts_do_not_reach_the_client() {
     // A provider behind a CDN that sets cookies, HSTS and Alt-Svc.
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
 
     openai.answer(
         Answer::text("hello")
@@ -896,7 +1024,15 @@ async fn set_cookie_and_hsts_do_not_reach_the_client() {
 #[tokio::test]
 async fn sigterm_finishes_an_open_stream_then_exits() {
     let openai = FakeOpenAi::start().await;
-    let mut gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let mut gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
 
     // Five events 200 ms apart: the role chunk, "a", " b", the finish, [DONE].
     openai.answer(Answer::text("a b").pace(200));
@@ -937,7 +1073,15 @@ async fn sigterm_finishes_an_open_stream_then_exits() {
 #[tokio::test]
 async fn sigterm_cuts_a_stream_still_open_at_the_shutdown_deadline() {
     let openai = FakeOpenAi::start().await;
-    let mut gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    let mut gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--openai",
+        "--url",
+        &openai.base_url(),
+    ])
+    .await;
     // The first event opens the response; the next is delayed beyond the
     // binary's 30-second shutdown deadline.
     openai.answer(script(&OPENAI_STREAM[1..]).pace(60_000));
@@ -1016,29 +1160,20 @@ fn check_says_ok_for_a_good_config_and_fails_a_bad_one() {
 
 // The vendor's other endpoints, and running with no config file.
 
-/// A config serving `format` and then `passthrough`, both to `base_url`
-/// (the vendor's origin), with no key of their own.
-fn with_passthrough(format: &str, base_url: &str) -> String {
-    format!(
-        "providers:
-  p: {{ format: {format}, base_url: '{base_url}' }}
-  any: {{ format: passthrough, base_url: '{base_url}' }}
-serve: [{format}, passthrough]
-target: p
-"
-    )
-}
-
 const COUNT_TOKENS: &str = "/v1/messages/count_tokens";
 const RESPONSES: &str = "/v1/responses";
 
 #[tokio::test]
 async fn an_endpoint_no_format_knows_is_relayed_byte_exact_with_the_clients_key() {
     let anthropic = FakeAnthropic::start().await;
-    let gw = Gateway::start(&with_passthrough(
-        "anthropic-messages",
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--anthropic",
+        "--url",
         &anthropic.base_url(),
-    ))
+    ])
     .await;
     let counted = r#"{ "input_tokens":  12,"x_new":1 }"#;
     anthropic.answer(Answer::raw(counted).header("x-request-id", "req_1"));
@@ -1070,10 +1205,14 @@ async fn an_endpoint_no_format_knows_is_relayed_byte_exact_with_the_clients_key(
 #[tokio::test]
 async fn the_chat_format_still_answers_its_own_path_before_the_catch_all() {
     let anthropic = FakeAnthropic::start().await;
-    let gw = Gateway::start(&with_passthrough(
-        "anthropic-messages",
+    let gw = Gateway::run(&[
+        "proxy",
+        "--listen",
+        "127.0.0.1:0",
+        "--anthropic",
+        "--url",
         &anthropic.base_url(),
-    ))
+    ])
     .await;
     anthropic.answer(script(&ANTHROPIC_STREAM));
     let headers = [ANTHROPIC_KEY[0], ANTHROPIC_KEY[1]];
@@ -1229,10 +1368,37 @@ fn proxy_without_a_vendor_or_with_a_bad_address_is_a_usage_error() {
     let bin = env!("CARGO_BIN_EXE_respan-gateway");
     for args in [
         &["proxy"][..],
-        &["proxy", "--anthropic", "--listen", "nowhere"],
-        &["proxy", "--anthropic", "check", "--listen"],
-        &["proxy", "--openai", "check", "--url"],
-        &["proxy", "--openai", "--anthropic"],
+        &[
+            "proxy",
+            "--listen",
+            "127.0.0.1:0",
+            "--anthropic",
+            "--listen",
+            "nowhere",
+        ],
+        &[
+            "proxy",
+            "--listen",
+            "127.0.0.1:0",
+            "--anthropic",
+            "check",
+            "--listen",
+        ],
+        &[
+            "proxy",
+            "--listen",
+            "127.0.0.1:0",
+            "--openai",
+            "check",
+            "--url",
+        ],
+        &[
+            "proxy",
+            "--listen",
+            "127.0.0.1:0",
+            "--openai",
+            "--anthropic",
+        ],
         &["--config"],
         &["-c"],
     ] {

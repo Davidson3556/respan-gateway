@@ -19,6 +19,7 @@ async fn served_until(
     after: Duration,
 ) -> (Outcomes, Ws, tokio::task::JoinHandle<()>, Gateway) {
     let (gateway, ends, _calls) = relay(&probe.base());
+    let gateway = gateway.plugin(Relay::RAW);
     let app = axum::Router::new()
         .fallback(
             move |State(gw): State<Gateway>, ws: WebSocketUpgrade, req: Request| async move {

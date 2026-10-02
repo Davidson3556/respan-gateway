@@ -412,7 +412,7 @@ fn gateway_with(
         .provider::<Conversation, _, _>("anthropic", AnthropicMessages, anthropic)?
         .client::<Conversation, _, _>(OpenAiChat)?
         .client::<Conversation, _, _>(AnthropicMessages)?
-        .plugin("guard", plugin)?
+        .plugin(plugin)
         .target(target)
 }
 

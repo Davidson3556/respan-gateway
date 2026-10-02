@@ -84,13 +84,12 @@ pub fn providers(list: impl IntoIterator<Item = AddProvider>) -> Result<Gateway,
     list.into_iter().try_fold(Gateway::new(), |g, add| add(g))
 }
 
-/// `gateway` with `plugins` registered in order, named by position.
+/// `gateway` with `plugins` registered in order.
 pub fn with_plugins(
     gateway: Gateway,
     plugins: impl IntoIterator<Item = std::sync::Arc<dyn Plugin>>,
-) -> Result<Gateway, Fault> {
-    let mut named = plugins.into_iter().enumerate();
-    named.try_fold(gateway, |gw, (i, p)| gw.plugin(format!("p{i}"), p))
+) -> Gateway {
+    plugins.into_iter().fold(gateway, Gateway::plugin)
 }
 
 /// One chat call's usage, summed by [`Metered`]'s filter.

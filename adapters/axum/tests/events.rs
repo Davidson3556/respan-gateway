@@ -36,19 +36,17 @@ fn is_done(text: &str) -> bool {
 }
 
 /// A gateway relaying JSON events to `base`, recorders first, then `plugins`.
-fn gateway_of(base: &str, plugins: Vec<(&str, Arc<dyn Plugin>)>) -> (Gateway, Outcomes, Calls) {
+fn gateway_of(base: &str, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Outcomes, Calls) {
     let (ends, calls) = (Outcomes::default(), Calls::default());
     let mut gateway = Gateway::new()
         .client::<ClientEvent, _, _>(events())
         .unwrap()
         .provider::<ClientEvent, _, _>("p", events(), WsTransport::new(base).unwrap().connect())
         .unwrap()
-        .plugin("ends", ends.clone())
-        .unwrap()
-        .plugin("calls", calls.clone())
-        .unwrap();
-    for (name, plugin) in plugins {
-        gateway = gateway.plugin(name, plugin).unwrap();
+        .plugin(ends.clone())
+        .plugin(calls.clone());
+    for plugin in plugins {
+        gateway = gateway.plugin(plugin);
     }
     (gateway.target("p").unwrap(), ends, calls)
 }
@@ -95,7 +93,7 @@ async fn only_an_edited_event_is_rewritten() {
             Ok(())
         })
     });
-    let (gateway, ends, _) = gateway_of(&tap.base(), vec![("hide", Arc::new(hide))]);
+    let (gateway, ends, _) = gateway_of(&tap.base(), vec![Arc::new(hide)]);
     let server = serve(gateway).await;
     let mut ws = connect(server.addr, PATH, KEY).await.unwrap();
     let mut heard = vec![heard_text(&mut ws).await];
@@ -147,7 +145,7 @@ async fn a_filter_can_drop_events_either_way() {
         }))?;
         cx.filter(Drop(|e: &ClientEvent| e.json["type"] == "session.update"))
     });
-    let (gateway, _, _) = gateway_of(&tap.base(), vec![("drop", Arc::new(drop_items))]);
+    let (gateway, _, _) = gateway_of(&tap.base(), vec![Arc::new(drop_items)]);
     let server = serve(gateway).await;
     let mut ws = connect(server.addr, PATH, KEY).await.unwrap();
     let created = heard_text(&mut ws).await;
@@ -185,7 +183,7 @@ async fn a_filter_can_edit_what_the_provider_reads() {
             Ok(())
         })
     });
-    let (gateway, ..) = gateway_of(&ws_base(&openai), vec![("force", Arc::new(force_text))]);
+    let (gateway, ..) = gateway_of(&ws_base(&openai), vec![Arc::new(force_text)]);
     let server = serve(gateway).await;
     let mut ws = connect(server.addr, PATH, KEY).await.unwrap();
     heard_text(&mut ws).await;
@@ -231,8 +229,7 @@ impl Plugin for Turns {
 async fn a_provider_edge_plugin_counts_turns() {
     let openai = FakeOpenAi::start().await;
     let turns = Turns::default();
-    let (gateway, ends, calls) =
-        gateway_of(&ws_base(&openai), vec![("turns", Arc::new(turns.clone()))]);
+    let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![Arc::new(turns.clone())]);
     let server = serve(gateway).await;
     let mut ws = connect(server.addr, PATH, KEY).await.unwrap();
     heard_text(&mut ws).await;
@@ -268,7 +265,7 @@ async fn a_failing_filter_closes_the_client_with_its_code_and_no_message() {
             },
         )
     });
-    let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![("policy", Arc::new(policy))]);
+    let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![Arc::new(policy)]);
     let server = serve(gateway).await;
     let mut ws = connect(server.addr, PATH, KEY).await.unwrap();
     heard_text(&mut ws).await;
@@ -377,7 +374,7 @@ async fn a_plugin_can_refuse_a_session_before_the_upgrade() {
     let refuse = OnClient(|_: &mut ClientContext| {
         Err(Fault::new("over_limit", "too many sessions").with(Status(429)))
     });
-    let (gateway, ends, calls) = gateway_of(&probe.base(), vec![("refuse", Arc::new(refuse))]);
+    let (gateway, ends, calls) = gateway_of(&probe.base(), vec![Arc::new(refuse)]);
     let server = serve(gateway).await;
     let refused = connect(server.addr, PATH, &[]).await;
     let Err(tokio_tungstenite::tungstenite::Error::Http(resp)) = refused else {
@@ -403,7 +400,7 @@ async fn a_filter_refusing_an_input_closes_the_client_with_its_code() {
             false => Ok(()),
         })
     });
-    let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![("policy", Arc::new(policy))]);
+    let (gateway, ends, calls) = gateway_of(&ws_base(&openai), vec![Arc::new(policy)]);
     let server = serve(gateway).await;
     let mut ws = connect(server.addr, PATH, KEY).await.unwrap();
     heard_text(&mut ws).await;

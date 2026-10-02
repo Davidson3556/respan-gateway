@@ -36,6 +36,8 @@ pub struct Ask {
     pub method: Method,
     /// The path; the query stays as it came (`Asked` has it).
     pub path: String,
+    /// Query parameters retained independently of path edits.
+    pub query: Option<String>,
     /// The body.
     pub body: Bytes,
 }
@@ -46,6 +48,7 @@ impl Ask {
         Self {
             method: Method::GET,
             path: path.into(),
+            query: None,
             body: Bytes::new(),
         }
     }
@@ -75,18 +78,16 @@ impl Rest {
                 "a REST call carries one finite request, not streamed inputs",
             ));
         }
-        // Raw relay does not need to decode the original body. Otherwise the
-        // typed request owns its method and path, including plugin edits.
-        let ask = if h::raw_body(self.name, source).is_none() {
-            source.value().transpose()?.cloned()
-        } else {
-            None
-        };
+        let ask = source.value().transpose()?.cloned();
         let (request, sink) = h::request(self.name, source, Box::new(WriteBody))?;
         let (mut head, body) = request.into_parts();
         if let Some(ask) = ask {
             head.method = ask.method;
-            set_path(&mut head, &ask.path);
+            let path = match ask.query {
+                Some(query) => format!("{}?{query}", ask.path),
+                None => ask.path,
+            };
+            set_path(&mut head, &path);
         }
         Ok((h::http::Request::from_parts(head, body), sink))
     }
@@ -110,6 +111,7 @@ impl Format<Incoming, Ask, Got<Rest>> for Rest {
                     Ok(Ask {
                         method: head.method.clone(),
                         path: head.uri.path().to_owned(),
+                        query: head.uri.query().map(str::to_owned),
                         body,
                     })
                 })
@@ -152,6 +154,7 @@ mod tests {
             method: Method::DELETE,
             path: "/v1/files/file-1?permanent=true".into(),
             body: Bytes::from_static(b"payload"),
+            query: None,
         };
         let (request, _) = codec
             .request(&mut EventStream::single(ask))

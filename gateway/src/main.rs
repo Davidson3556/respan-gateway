@@ -146,6 +146,11 @@ async fn main() -> ExitCode {
         Ok(built) => built,
         Err(e) => return fail(&format!("{config_path}: {}", e.message())),
     };
+    let gateway = if proxy {
+        gateway.plugin(respan_gateway_plugins::relay::Relay::RAW)
+    } else {
+        gateway
+    };
     if check_only {
         println!("{config_path}: ok");
         return ExitCode::SUCCESS;

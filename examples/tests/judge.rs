@@ -14,7 +14,7 @@ async fn the_verdict_picks_the_target_and_the_provider_edge_covers_the_judge() -
     strong.answer(answer("ok"));
     let egress = Egress::default();
     let meter = Meter::default();
-    let gw = gateway(&judge, &cheap, &strong, egress.clone())?.plugin("meter", meter.clone())?;
+    let gw = gateway(&judge, &cheap, &strong, egress.clone())?.plugin(meter.clone());
     let (status, _, _) =
         read_whole(serve(&gw, post("/v1/chat/completions", REQUEST)).await.0).await;
     assert_eq!(status, http::StatusCode::OK);

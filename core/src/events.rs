@@ -1,6 +1,5 @@
 //! Symmetric standard streams and sinks with protocol-owned preparation.
 
-use std::any::Any;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
@@ -10,7 +9,6 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt, Sink, Stream, StreamExt};
 
-use crate::extensions::FormatData;
 use crate::fault::guarded;
 use crate::{Fault, Result};
 
@@ -19,14 +17,11 @@ use crate::{Fault, Result};
 /// would make any other Tokio resource yield.
 pub(crate) const MAX_BATCH: usize = 128;
 
-pub(crate) type Metadata = Option<FormatData>;
-
 /// Typed events: one replayable value or a live stream. The first fault
-/// ends the stream. Protocol implementations may retain private relay data.
+/// ends the stream. Protocol data belongs in typed events or explicit extensions.
 /// Opening and writing are ordinary futures, outside this stream.
 pub struct EventStream<T> {
     shape: Shape<T>,
-    metadata: Metadata,
     ended: bool,
 }
 
@@ -48,9 +43,6 @@ enum SingleValue<T> {
     Deferred {
         decoded: OnceLock<Result<T>>,
         decode: Box<dyn Fn() -> Result<T> + Send + Sync>,
-        /// Original lazy-input provenance, preserved through mapping.
-        /// Mapping a ready value defers work too, but keeps this false.
-        lazy: bool,
     },
 }
 
@@ -64,29 +56,20 @@ impl<T> Single<T> {
 
     fn deferred(
         decode: impl Fn() -> Result<T> + Send + Sync + 'static,
-        lazy: bool,
         clone: fn(&T) -> T,
     ) -> Arc<Self> {
         Arc::new(Self {
             value: SingleValue::Deferred {
                 decoded: OnceLock::new(),
                 decode: Box::new(decode),
-                lazy,
             },
             clone,
         })
     }
 
-    fn is_lazy(&self) -> bool {
-        matches!(self.value, SingleValue::Deferred { lazy: true, .. })
-    }
-
     pub(crate) fn known_error(&self) -> Option<Fault> {
-        // An original lazy decode failure does not prevent raw-byte relay.
-        // Edited or mapped ready values must report their known failures.
         let result = match &self.value {
             SingleValue::Ready(value) => value,
-            SingleValue::Deferred { lazy: true, .. } => return None,
             SingleValue::Deferred { decoded, .. } => decoded.get()?,
         };
         result.as_ref().err().cloned()
@@ -109,7 +92,6 @@ impl<T> Single<T> {
     pub(crate) fn into_events(self: Arc<Self>) -> EventStream<T> {
         EventStream {
             shape: Shape::Single(self),
-            metadata: None,
             ended: false,
         }
     }
@@ -125,23 +107,21 @@ impl<T> fmt::Debug for EventStream<T> {
         };
         f.debug_struct("EventStream")
             .field("state", &state)
-            .field("format", &self.metadata.as_ref().map(FormatData::format))
             .finish()
     }
 }
 
 impl<T> EventStream<T> {
-    /// An empty stream with no protocol metadata.
+    /// An empty stream.
     pub fn empty() -> Self {
         Self {
             shape: Shape::Empty,
-            metadata: None,
             ended: false,
         }
     }
 
     /// Stop yielding events without decoding or polling the source.
-    /// Retain its shape, metadata and ownership until this stream is dropped,
+    /// Retain its shape and ownership until this stream is dropped,
     /// so already-encoded or bodyless delivery can finish before releasing it.
     pub fn stop(&mut self) {
         self.ended = true;
@@ -151,7 +131,6 @@ impl<T> EventStream<T> {
     pub fn refused(fault: Fault) -> Self {
         Self {
             shape: Shape::Refused(fault),
-            metadata: None,
             ended: false,
         }
     }
@@ -159,12 +138,6 @@ impl<T> EventStream<T> {
     /// Whether these events contain a replayable single value.
     pub fn is_single(&self) -> bool {
         matches!(self.shape, Shape::Single(_))
-    }
-
-    /// Whether this single value came from a lazy decoder.
-    /// Inspecting it keeps this property; replacing it with `single` does not.
-    pub fn is_lazy(&self) -> bool {
-        matches!(&self.shape, Shape::Single(value) if value.is_lazy())
     }
 
     /// The refusal, before the stream has been read.
@@ -181,31 +154,6 @@ impl<T> EventStream<T> {
             Shape::Single(value) => Some(value.value()),
             _ => None,
         }
-    }
-
-    /// Retain protocol-owned data under its format identity.
-    /// Use a private metadata type in the protocol implementation. The
-    /// kernel carries this data unopened and removes it across translations.
-    pub fn with_metadata<M: Any + Send + Sync>(mut self, format: &str, metadata: M) -> Self {
-        self.metadata = Some(FormatData::new(format, metadata));
-        self
-    }
-
-    /// Read private data when its format and concrete type both match.
-    pub fn metadata<M: Any>(&self, format: &str) -> Option<&M> {
-        self.metadata.as_ref()?.get(format)
-    }
-
-    pub(crate) fn metadata_copy(&self) -> Metadata {
-        self.metadata.clone()
-    }
-
-    pub(crate) fn set_metadata(&mut self, metadata: Metadata) {
-        self.metadata = metadata;
-    }
-
-    pub(crate) fn clear_metadata(&mut self) {
-        self.metadata = None;
     }
 
     pub(crate) fn take_single(&mut self) -> Option<Arc<Single<T>>> {
@@ -228,7 +176,7 @@ impl<T: Clone + Send + Sync + 'static> EventStream<T> {
     /// A replayable value decoded only when a reader needs it.
     /// Internal snapshots share its result, including decoding failures.
     pub fn lazy(decode: impl Fn() -> Result<T> + Send + Sync + 'static) -> Self {
-        Single::deferred(decode, true, T::clone).into_events()
+        Single::deferred(decode, T::clone).into_events()
     }
 }
 
@@ -237,7 +185,6 @@ impl<T> EventStream<T> {
     pub fn stream(events: impl Stream<Item = Result<T>> + Send + 'static) -> Self {
         Self {
             shape: Shape::Stream(events.boxed()),
-            metadata: None,
             ended: false,
         }
     }
@@ -252,14 +199,10 @@ impl<T: Send + Sync + 'static> EventStream<T> {
         clone: fn(&U) -> U,
     ) -> EventStream<U> {
         let shape = match self.shape {
-            Shape::Single(value) => {
-                let lazy = value.is_lazy();
-                Shape::Single(Single::deferred(
-                    move || value.cloned().and_then(&map),
-                    lazy,
-                    clone,
-                ))
-            }
+            Shape::Single(value) => Shape::Single(Single::deferred(
+                move || value.cloned().and_then(&map),
+                clone,
+            )),
             Shape::Stream(events) => {
                 Shape::Stream(events.map(move |event| event.and_then(&map)).boxed())
             }
@@ -268,7 +211,6 @@ impl<T: Send + Sync + 'static> EventStream<T> {
         };
         EventStream {
             shape,
-            metadata: self.metadata,
             ended: self.ended,
         }
     }
@@ -350,7 +292,7 @@ impl<T> EventSink<T> {
         }
     }
 
-    /// Construct the real per-event sink synchronously from source metadata.
+    /// Construct the real per-event sink synchronously from the source stream.
     /// Call `prepare` before using the standard sink operations. Preparation
     /// must not initiate I/O or retain a live source to read from the sink.
     /// It may inspect/encode a finite value, stop an already-encoded or
@@ -509,7 +451,6 @@ mod tests {
             .clone()
             .into_events()
             .map_values(|value| Ok(u16::from(value)), Clone::clone);
-        assert!(mapped.is_lazy());
         assert_eq!(decodes.load(Ordering::SeqCst), 0);
         assert_eq!(single.value(), Ok(&17));
         assert_eq!(mapped.value(), Some(Ok(&17_u16)));
@@ -518,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn mapping_defers_and_memoizes_failures_without_changing_relay_provenance() {
+    fn mapping_defers_and_memoizes_failures() {
         for lazy in [false, true] {
             let events = if lazy {
                 EventStream::lazy(|| Ok(7_u8))
@@ -536,7 +477,6 @@ mod tests {
                 },
                 Clone::clone,
             );
-            assert_eq!(mapped.is_lazy(), lazy);
             assert_eq!(maps.load(Ordering::SeqCst), 0);
             let Some(single) = mapped.take_single() else {
                 panic!("single expected")
@@ -546,8 +486,7 @@ mod tests {
             assert_eq!(single.value(), Err(fault.clone()));
             assert_eq!(replay.value(), Some(Err(fault.clone())));
             assert_eq!(maps.load(Ordering::SeqCst), 1);
-            assert_eq!(replay.is_lazy(), lazy);
-            assert_eq!(single.known_error(), (!lazy).then_some(fault));
+            assert_eq!(single.known_error(), Some(fault));
         }
     }
 
@@ -593,17 +532,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mapping_preserves_metadata_and_single_shape() {
-        let mut events = EventStream::single(7_u8)
-            .with_metadata("toy", 201_u16)
-            .map_values(|value| Ok(u16::from(value)), Clone::clone);
+    async fn mapping_preserves_single_shape() {
+        let events =
+            EventStream::single(7_u8).map_values(|value| Ok(u16::from(value)), Clone::clone);
         assert!(events.is_single());
-        assert!(!events.is_lazy());
-        assert_eq!(events.metadata::<u16>("toy"), Some(&201));
-        assert_eq!(events.metadata::<u16>("other"), None);
-        assert_eq!(events.metadata::<u8>("toy"), None);
-        events.clear_metadata();
-        assert_eq!(events.metadata::<u16>("toy"), None);
         assert_eq!(events.try_collect::<Vec<_>>().await, Ok(vec![7_u16]));
     }
 
@@ -804,11 +736,9 @@ mod tests {
                 EventStream::stream(stream::poll_fn(move |_| -> Poll<Option<Result<u8>>> {
                     let _keep_alive = &captured;
                     panic!("stopped source was read");
-                }))
-                .with_metadata("toy", 23_u16);
+                }));
             source.stop();
             let source = source.map_values(Ok, Clone::clone);
-            assert_eq!(source.metadata::<u16>("toy"), Some(&23));
             let (finish, finished) = oneshot::channel();
             let sink = EventSink::new(Probe {
                 close: Some(async { finished.await.map_err(|_| Fault::abandoned())? }.boxed()),
@@ -834,11 +764,8 @@ mod tests {
 
     #[tokio::test]
     async fn preparation_can_relay_lazy_source_without_decoding() {
-        let mut source = EventStream::lazy(|| -> Result<u8> { panic!("raw relay decoded") })
-            .with_metadata("raw", "bytes");
+        let mut source = EventStream::lazy(|| -> Result<u8> { panic!("raw relay decoded") });
         let mut sink = EventSink::preparing(|source: &mut EventStream<u8>| {
-            assert!(source.is_lazy());
-            assert_eq!(source.metadata::<&str>("raw"), Some(&"bytes"));
             source.stop();
             Ok(Probe::default())
         });

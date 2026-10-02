@@ -34,7 +34,7 @@ fn slow_west(
             backend.send(request).await
         }
     });
-    gateway(east.transport()?.connect(), slow, &jobs)?.plugin("seen", seen.clone())
+    Ok(gateway(east.transport()?.connect(), slow, &jobs)?.plugin(seen.clone()))
 }
 
 fn get(id: &str) -> http::Request<Body> {

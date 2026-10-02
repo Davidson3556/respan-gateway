@@ -126,8 +126,8 @@ async fn the_guard_is_registered_first() -> Result<(), Fault> {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     let late = guarded(
-        base(provider_support::openai(&fake.base_url())?.connect())?.plugin("cache", Cache)?,
-        Ok,
+        base(provider_support::openai(&fake.base_url())?.connect())?.plugin(Cache),
+        |gw| gw,
     )?;
     let (status, body) = send(&late, chat("cached", "hi".into())).await;
     assert!(status == StatusCode::OK && body.contains("bomb"), "{body}");
@@ -157,14 +157,14 @@ async fn the_input_check_sees_what_an_earlier_plugin_adds() -> Result<(), Fault>
     let fake = FakeOpenAi::start().await;
     let gw = gateway_with(
         provider_support::openai(&fake.base_url())?.connect(),
-        |gw| gw.plugin("rag", Rag),
+        |gw| gw.plugin(Rag),
     )?;
     let (status, body) = send(&gw, chat("gpt", "hi".into())).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(fake.requests().is_empty());
     fake.answer(deltas(&["ok"]));
     let (status, _) = send(
-        &gateway(provider_support::openai(&fake.base_url())?.connect())?.plugin("rag", Rag)?,
+        &gateway(provider_support::openai(&fake.base_url())?.connect())?.plugin(Rag),
         chat("gpt", "hi".into()),
     )
     .await;

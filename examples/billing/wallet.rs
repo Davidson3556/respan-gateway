@@ -101,7 +101,7 @@ fn gateway(
         .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
         // Register it last, so it prices the call as other plugins left it.
-        .plugin("accounting", accounting)?
+        .plugin(accounting)
         .target("openai")
 }
 

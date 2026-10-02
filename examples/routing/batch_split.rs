@@ -109,7 +109,7 @@ fn gateway(
     Gateway::new()
         .provider::<EmbedRequest, _, _>("openai", OpenAiEmbeddings, provider)?
         .client::<EmbedRequest, _, _>(OpenAiEmbeddings)?
-        .plugin("split", Split(cap))?
+        .plugin(Split(cap))
         .target("openai")
 }
 

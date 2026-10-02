@@ -161,8 +161,8 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
             provider_support::openai(&eu_fake.base_url())?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("hedge", Hedge)?
-        .plugin("accounting", accounting)?;
+        .plugin(Hedge)
+        .plugin(accounting);
     eu_fake.answer(answer());
 
     assert!(ask(&gw, "sk-b1").await?.is_success());

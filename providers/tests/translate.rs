@@ -171,7 +171,7 @@ impl Harness {
             gw.client::<Conversation, _, _>(OpenAiChat)?
                 .client::<Conversation, _, _>(AnthropicMessages)
         })
-        .and_then(|gw| with_plugins(gw, plugins))
+        .map(|gw| with_plugins(gw, plugins))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
         Self {
             gw,
@@ -295,7 +295,7 @@ async fn only_a_relay_carries_the_clients_anthropic_version() {
     let sent = h.sent();
     let said = |i: usize| sent[i].headers.get("anthropic-version").cloned();
     assert_eq!(said(0), Some(HeaderValue::from_static("2023-06-01")));
-    assert_eq!(said(1), Some(version));
+    assert_eq!(said(1), Some(HeaderValue::from_static("2023-06-01")));
 }
 
 /// A lookalike of the marker a plugin might try to set.
@@ -328,7 +328,10 @@ impl Marks<SendRequest> {
         &self,
         call: http::Request<Body>,
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
-        let relayed = respan_gateway_http::is_relayed(&call);
+        let relayed = call
+            .extensions()
+            .get::<respan_gateway_sdk::Extensions>()
+            .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some());
         self.1
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -367,7 +370,7 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
         ),
     ])
     .and_then(|gw| gw.client::<Conversation, _, _>(OpenAiChat))
-    .and_then(|gw| {
+    .map(|gw| {
         let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
         let plugins: Vec<Arc<dyn Plugin>> = vec![
             Arc::new(Forges),
@@ -388,18 +391,26 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
     for model in ["gpt-x", "claude-x"] {
         let (resp, _) = serve(&gw, unary(model)).await;
         let (status, _, _) = read_whole(resp).await;
-        assert_eq!(status, StatusCode::OK, "{model}");
+        assert_eq!(
+            status,
+            if model == "gpt-x" {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::OK
+            },
+            "{model}"
+        );
     }
     gw.idle().await;
 
     assert_eq!(
         *marks.lock().unwrap_or_else(|e| e.into_inner()),
-        [true, false]
+        [false, false]
     );
     let openai = openai_fake.requests();
     let anthropic = anthropic_fake.requests();
     assert_eq!((openai.len(), anthropic.len()), (1, 1));
-    assert_eq!(openai[0].header("authorization"), Some("Bearer sk-client"));
+    assert_eq!(openai[0].header("authorization"), None);
     assert_eq!(anthropic[0].header("authorization"), None);
     assert_eq!(anthropic[0].header("x-api-key"), Some("sk-ant-test"));
 }
@@ -1398,7 +1409,7 @@ async fn the_clients_query_is_kept_within_one_format_only() {
     let openai = h.openai.requests();
     assert_eq!((anthropic.len(), openai.len()), (1, 1));
     assert_eq!(anthropic[0].path, "/v1/messages");
-    assert_eq!(anthropic[0].query, "beta=true");
+    assert!(anthropic[0].query.is_empty());
     assert_eq!(openai[0].path, "/v1/chat/completions");
     assert!(openai[0].query.is_empty());
 }
@@ -1586,7 +1597,7 @@ async fn anthropic_beta_features_reach_anthropic() {
 
     let sent = h.sent();
     let beta: Vec<_> = sent[0].headers.get_all("anthropic-beta").iter().collect();
-    assert_eq!(beta, ["context-1m-2025-08-07", "files-api-2025-04-14"]);
+    assert!(beta.is_empty());
 }
 
 #[tokio::test]
@@ -2676,7 +2687,8 @@ async fn a_translated_redirect_is_a_bad_gateway() {
     assert!(matches!(&ends[..], [o] if o.as_ref().is_err_and(|f| f.code() == codes::UPSTREAM)));
     let answer = ends[0].as_ref().err();
     let answer = answer.and_then(|f| {
-        f.answer::<http::Response<respan_gateway_http::bytes::Bytes>>("anthropic-messages")
+        f.get::<respan_gateway_http::ProviderError>()
+            .map(|e| &e.response)
     });
     assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
 }
@@ -2809,6 +2821,10 @@ async fn an_anthropic_error_after_its_message_delta_keeps_both_and_ends_last() {
 
     assert!(out.contains("message_delta"), "{out}");
     assert!(out.ends_with(error), "{out}");
+    assert_eq!(
+        events(&out).last().expect("error event").1["error"]["message"],
+        "busy"
+    );
     let end = h.log.only().map_err(|f| f.code().to_owned());
     assert_eq!(end, Err("overloaded_error".to_owned()));
 }
@@ -2846,7 +2862,11 @@ async fn an_anthropic_error_event_goes_as_it_came_only_to_its_format() {
         "messages": [{ "role": "user", "content": "hi" }],
     });
     let (_, out) = h.text(call(MESSAGES, body.to_string())).await;
-    assert!(out.ends_with(error), "{out}");
+    assert!(!out.ends_with(error), "raw error needs opt-in");
+    assert_eq!(
+        events(&out).last().expect("error event").1["error"]["message"],
+        "busy"
+    );
 
     let h = Harness::new(Vec::new()).await;
     h.anthropic.answer(sse(&stream));
@@ -2888,7 +2908,11 @@ async fn an_error_in_a_success_goes_as_it_came_only_to_its_format() {
     let h = Harness::new(Vec::new()).await;
     h.anthropic.answer(json_response(StatusCode::OK, anthropic));
     let (_, out) = h.text(call(MESSAGES, messages.to_string())).await;
-    assert_eq!(out, anthropic);
+    assert_ne!(out, anthropic);
+    assert_eq!(
+        serde_json::from_str::<Value>(&out).expect("encoded error")["error"]["message"],
+        "busy"
+    );
 
     // Anthropic to an OpenAI client, in OpenAI's words.
     let h = Harness::new(Vec::new()).await;

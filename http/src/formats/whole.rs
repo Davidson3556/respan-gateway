@@ -39,7 +39,7 @@ pub fn read<T: Send + 'static>(
 /// The fault of a provider's answer in `format` that is no success: its
 /// code, message and fields, an error's status and `Retry-After`, else a
 /// 502. Unless informational (an unasked 101), it carries the answer as
-/// `http::Response<Bytes>` ([`Fault::with_answer`]), for `format` to write.
+/// `http::Response<Bytes>` ([`crate::ProviderError`]), for `format` to write.
 pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault {
     let v = crate::formats::sse::failure_json(&body).unwrap_or_default();
     let fault = crate::formats::errors::provider_error(head.status, &v);
@@ -50,7 +50,10 @@ pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault 
         Some(wait) => fault.with_retry_after(wait),
         None => fault,
     };
-    fault.with_answer(format, http::Response::from_parts(head.clone(), body))
+    fault.with(crate::ProviderError::new(
+        format,
+        http::Response::from_parts(head.clone(), body),
+    ))
 }
 
 /// Read a whole answer as a refusal, including an unsuccessful 2xx handshake.
@@ -113,7 +116,7 @@ pub(crate) fn answered(status: StatusCode) -> String {
 }
 
 /// Encodes outputs of `T` through `write`, which returns their bytes or
-/// `Err`, and a failure through `fail` ([`Fault::answer`]). A stream is
+/// `Err`, and a failure through `fail`. A stream is
 /// written output by output; a whole body once, at its end.
 pub struct Relay<T, W, F, B> {
     write: W,

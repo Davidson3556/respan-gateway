@@ -179,7 +179,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
             )
         })
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
-        .and_then(|g| g.plugin("probing", probing))
+        .map(|g| g.plugin(probing))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|f| panic!("{f}"));
     let req = post(CHAT, if whole { WHOLE_REQ } else { STREAM_REQ });

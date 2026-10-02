@@ -86,21 +86,21 @@ the provider edge own them
   `EventStream<T>` implements `Stream<Item = Result<T, Fault>>`, and
   `EventSink<T>` implements `Sink<Result<T, Fault>, Error = Fault>`.
   An optional synchronous preparation step configures the sink from stream
-  metadata or a finite input before delivery. The kernel pumps events with
+  its shape or a finite input before delivery. The kernel pumps events with
   backpressure concurrently with receiving, then closes the sink. The gateway
   chooses the type order for each edge; Format has no client/provider methods.
-  Formats with the same name can relay original bytes and compatible
-  metadata even across different concrete transports;
-  formats of one kind translate. HTTP formats implement this same contract
+  Formats of one kind translate through typed events. Calls always encode
+  typed input unless an application explicitly supplies raw HTTP data. HTTP formats implement this same contract
   directly: `Format<Incoming, Input, Output>` accepts a client exchange and
   `Format<Outgoing, Output, Input>` makes a provider call. The HTTP crate
   supplies native HTTP bodies and stream/sink construction helpers, not a
   second format trait or an implementation macro.
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, as filters and wraps left them, or
-  one input of its own (`with_input`). Only a call of the request's inputs
-  to a provider of the client's format name is a relay, and carries the
-  client's protocol metadata and key.
+  one input of its own (`with_input`). HTTP plugins opt into raw requests
+  with `SendRaw(Wire)`, choose heads with `ProviderHead` and `ClientHead`,
+  and opt into raw errors with `RawReply`. Credentials remain separate and
+  must be copied explicitly. The binary's `proxy` mode registers this policy.
 - **Response**: what a call, or `Response::stream`, gives back: read
   (`outputs`), held (`buffer_until`, `until_end`) or sent. Holding borrows the
   response mutably; buffered events, errors and call ownership remain available
@@ -164,7 +164,7 @@ and ordinary HTTP hosts do not need unrelated hosting or transport code.
 
 HTTP formats prepare actual requests and event sinks synchronously, then let
 core drive delivery. Response readers return streams. Finite inputs are encoded
-before sending; untouched lazy inputs can relay raw bytes without decoding.
+before sending; an explicit `SendRaw` request can bypass deferred decoding.
 `Encoder<T>` only writes values and terminal framing; it does not choose heads,
 open responses or act as a transport. Stateful parsers and encoders remain
 protocol code, while HTTP helpers own backpressure and response handoff.

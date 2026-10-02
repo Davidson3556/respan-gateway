@@ -66,8 +66,10 @@ pub use reqwest;
 pub use {bytes, http, http_body, http_body_util};
 
 pub use body::Body;
-pub use codec::{Encoder, encode_all, messages, raw_body, request, request_head, response_head};
+pub use codec::{Encoder, encode_all, messages, request};
+mod wire;
 pub use credential::Credential;
+pub use wire::{ClientHead, ProviderError, ProviderHead, RawReply, SendRaw, Wire};
 
 /// `s` with its `%XX` escapes decoded, a bad UTF-8 sequence replaced: how a
 /// path or a parameter's name is compared, so a spelling cannot dodge a match.
@@ -90,8 +92,8 @@ pub use driver::{Incoming, Outgoing, Reply, drive};
 #[cfg(feature = "reqwest")]
 pub use reqwest_backend::HttpClient;
 pub use transport::{
-    CallHeaders, Completion, Frames, connect, credentials, is_connection_header, is_relayed,
-    proxy_call, strip_client_origin_headers, strip_origin_headers,
+    CallHeaders, Completion, Frames, connect, credentials, is_connection_header, proxy_call,
+    strip_client_origin_headers, strip_origin_headers,
 };
 pub use watchdog::watchdog;
 
@@ -213,8 +215,10 @@ where
     B: http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
-    let (Arrived { head, body, to }, extensions) = arrive(req);
+    let (Arrived { head, body, to }, mut extensions) = arrive(req);
     let (wire, answer) = Incoming::accept(http::Request::from_parts(head, body), streaming);
+    extensions.insert(wire.wire());
+    extensions.insert(wire.client_head());
     let handled = gateway.handle(wire, extensions);
     async move {
         let (resp, ended) = match driver::drive(handled.boxed(), answer).await {
@@ -473,11 +477,11 @@ pub fn error_head(head: &mut http::response::Parts, fault: &Fault) {
     }
 }
 
-/// A refusal in format `name`: if `name` read `fault`'s answer, an
-/// `http::Response<Bytes>`, its head replaces `head` and its body comes
-/// back; else [`error_head`] and `None`, for the format's own words.
-pub fn answered(name: &str, fault: &Fault, head: &mut http::response::Parts) -> Option<Bytes> {
-    match fault.answer::<http::Response<Bytes>>(name) {
+/// Use an explicitly supplied [`RawReply`], replacing `head` and returning
+/// its body. Otherwise apply [`error_head`] and return `None` so the client
+/// format writes its own error. Format names do not authorize forwarding.
+pub fn answered(_name: &str, fault: &Fault, head: &mut http::response::Parts) -> Option<Bytes> {
+    match fault.get::<RawReply>().map(|raw| &raw.0) {
         Some(answer) => {
             let (parts, body) = answer.clone().into_parts();
             *head = parts;
@@ -618,16 +622,16 @@ mod tests {
     }
 
     #[test]
-    fn an_answer_replaces_the_head_only_in_its_format() {
+    fn only_an_explicit_raw_reply_replaces_the_head() {
         let mut answer = http::Response::new(Bytes::from_static(b"busy"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         let fault = Fault::new("busy", "busy")
             .with(Status(429))
-            .with_answer("f", answer)
+            .with(ProviderError::new("f", answer.clone()))
             .with_retry_after(Duration::from_secs(3));
         let (mut head, ()) = http::Response::new(()).into_parts();
         assert_eq!(
-            answered("f", &fault, &mut head).as_deref(),
+            answered("f", &fault.clone().with(RawReply(answer)), &mut head).as_deref(),
             Some(&b"busy"[..])
         );
         assert!(head.headers.get(RETRY_AFTER).is_none(), "as it came");

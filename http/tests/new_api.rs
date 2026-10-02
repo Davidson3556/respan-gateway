@@ -50,15 +50,11 @@ fn writer(fail_encode: bool, fail_end: bool) -> Writes {
 }
 
 #[tokio::test]
-async fn raw_skips_semantic_encoding_but_finalizes_and_prefix_is_one_initial_body() {
+async fn default_request_decodes_encodes_and_finalizes_one_initial_body() {
     let (incoming, _answer) = h::Incoming::accept(Request::new(Body::full("raw")), false);
     let (read, _sink) = incoming.bind(
         "test",
-        |request| {
-            h::messages(request, |_, _| -> Result<u8, Fault> {
-                panic!("raw relay must stay lazy")
-            })
-        },
+        |request| h::messages(request, |_, _| -> Result<u8, Fault> { Ok(b'r') }),
         |reply, source: &mut EventStream<u8>| {
             Ok(reply.empty(
                 respan_gateway_http::http::Response::new(()).into_parts().0,
@@ -71,19 +67,22 @@ async fn raw_skips_semantic_encoding_but_finalizes_and_prefix_is_one_initial_bod
     let encode = writer(false, false);
     let (calls, ends) = (encode.calls.clone(), encode.ends.clone());
     let (request, _) = h::request("test", &mut source, Box::new(encode)).expect("expected value");
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(ends.load(Ordering::SeqCst), 1);
-    assert!(source.is_lazy(), "stop retains source shape and ownership");
+    assert!(
+        source.is_single(),
+        "stop retains source shape and ownership"
+    );
     let mut body = request
         .into_body()
         .with_prefix(Bytes::from_static(b"prefix:"));
-    assert_eq!(body.full_bytes().expect("expected value"), "prefix:raw!");
+    assert_eq!(body.full_bytes().expect("expected value"), "prefix:r!");
     assert_eq!(
         body.next()
             .await
             .expect("expected value")
             .expect("expected value"),
-        "prefix:raw!"
+        "prefix:r!"
     );
     assert!(body.next().await.is_none());
 }

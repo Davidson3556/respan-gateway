@@ -10,10 +10,8 @@ use crate::Body;
 use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
 use http_body_util::BodyExt;
 use respan_gateway_sdk::Fault;
-use std::sync::Arc;
 
 pub use accept::{Incoming, Reply};
 pub use dial::Outgoing;
@@ -21,12 +19,6 @@ pub(crate) use dial::Sending;
 const PANICKED: &str = "a plugin or format panicked";
 pub(crate) type End = BoxFuture<'static, Result<(), Fault>>;
 pub(crate) type Written = (http::Response<Body>, End);
-
-pub(crate) struct RequestMetadata {
-    pub(crate) head: Arc<RequestHead>,
-    pub(crate) body: Option<Bytes>,
-}
-pub(crate) struct ResponseMetadata(pub(crate) ResponseHead);
 
 /// Drive the gateway alongside an HTTP reply, then let its body own the
 /// remaining work. Cancelling either stage cancels the gateway exchange.

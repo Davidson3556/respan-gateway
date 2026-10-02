@@ -51,6 +51,7 @@ fn upgrade() -> respan_gateway_http::http::Request<respan_gateway_http::Body> {
 async fn a_refused_upgrade_is_a_complete_answer() {
     let refusing = refusing().await;
     let (gateway, ..) = relay(&format!("ws://{refusing}"));
+    let gateway = gateway.plugin(Relay::RAW);
     let (resp, _) = serve_http(&gateway, upgrade()).await;
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -64,6 +65,7 @@ async fn a_refused_upgrade_is_a_complete_answer() {
 async fn a_refused_upgrade_is_the_providers_answer_as_it_came() {
     let refusing = refusing().await;
     let (gateway, ends, _) = relay(&format!("ws://{refusing}"));
+    let gateway = gateway.plugin(Relay::RAW);
     let (resp, _) = serve_http(&gateway, upgrade()).await;
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::FORBIDDEN);

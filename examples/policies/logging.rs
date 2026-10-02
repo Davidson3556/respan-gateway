@@ -193,8 +193,8 @@ fn gateway(
     Gateway::new()
         .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("tenancy", Tenancy(&["zdr-bank"]))?
-        .plugin("log", log)?
+        .plugin(Tenancy(&["zdr-bank"]))
+        .plugin(log)
         .target("openai")
 }
 

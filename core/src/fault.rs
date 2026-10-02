@@ -1,11 +1,9 @@
-use std::any::Any;
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::extensions::FormatData;
 use crate::{Extensions, Result};
 
 pub(crate) const PANICKED: &str = "a plugin or format panicked";
@@ -52,8 +50,6 @@ struct Fields {
     source: Option<Arc<dyn Error + Send + Sync>>,
     /// Hints for the edges, which the kernel never reads.
     hints: Extensions,
-    /// A provider's own words for it, owned by the format that read them.
-    answer: Option<FormatData>,
 }
 
 impl Fault {
@@ -65,7 +61,6 @@ impl Fault {
             retry_after: None,
             source: None,
             hints: Extensions::new(),
-            answer: None,
         }))
     }
 
@@ -96,35 +91,6 @@ impl Fault {
     /// How long to wait before trying again, if said.
     pub fn retry_after(&self) -> Option<Duration> {
         self.0.retry_after
-    }
-
-    /// The provider's own words for this failure, as `format` read them,
-    /// which that format writes as they came.
-    pub fn with_answer<A: Any + Send + Sync>(mut self, format: &str, answer: A) -> Self {
-        self.0.answer = Some(FormatData::new(format, answer));
-        self
-    }
-
-    /// The provider's words as `A`, if they came in `format`
-    /// ([`Fault::with_answer`]).
-    pub fn answer<A: Any>(&self, format: &str) -> Option<&A> {
-        self.0.answer.as_ref()?.get(format)
-    }
-
-    /// The same fault with `other`'s answer and retry, if any.
-    pub(crate) fn with_answer_of(mut self, other: &Fault) -> Self {
-        if other.0.answer.is_some() {
-            self.0.answer = other.0.answer.clone();
-        }
-        self.0.retry_after = self.0.retry_after.or(other.0.retry_after);
-        self
-    }
-
-    /// The same fault without the provider's words, which go only to a
-    /// client whose own message the call relayed, as a head does.
-    pub(crate) fn unrelayed(mut self) -> Self {
-        self.0.answer = None;
-        self
     }
 
     /// The machine-readable code, one of [`codes`] or the plugin's own.
@@ -192,7 +158,6 @@ impl fmt::Debug for Fault {
             .field("message", &self.0.message)
             .field("retry_after", &self.0.retry_after)
             .field("source", &self.0.source.as_ref().map(|s| s.to_string()))
-            .field("answer", &self.0.answer.as_ref().map(FormatData::format))
             .finish()
     }
 }
@@ -269,14 +234,6 @@ mod tests {
         assert_eq!(f.as_ref().map(Fault::code), Some("over_limit"));
         assert_eq!(f.as_ref().and_then(Fault::get::<Limit>), Some(&Limit(3)));
         assert!(f.as_ref().and_then(|f| f.source()).is_some());
-    }
-
-    #[test]
-    fn an_answer_is_read_only_by_its_format_and_as_its_type() {
-        let f = Fault::upstream("x").with_answer("f", 7_u8);
-        assert_eq!(f.answer::<u8>("f"), Some(&7));
-        assert_eq!(f.answer::<u8>("g"), None);
-        assert_eq!(f.answer::<u16>("f"), None);
     }
 
     #[test]

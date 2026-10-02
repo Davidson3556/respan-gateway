@@ -99,8 +99,8 @@ fn gateway(
     let gw = Gateway::new().client::<Conversation, _, _>(OpenAiChat);
     let gw = gw.and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, transport));
     let gw = gw.and_then(|g| g.target("p"));
-    let gw = gw.and_then(|g| g.plugin("first", first));
-    gw.and_then(|g| g.plugin("accounting", accounting))
+    let gw = gw.map(|g| g.plugin(first));
+    gw.map(|g| g.plugin(accounting))
         .unwrap_or_else(|f| panic!("{f}"))
 }
 
@@ -308,7 +308,7 @@ async fn a_quote_without_accounts_is_refused_with_http_401() {
         .client::<Conversation, _, _>(OpenAiChat)
         .and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, http(&fake)))
         .and_then(|g| g.target("p"))
-        .and_then(|g| g.plugin("accounting", accounting))
+        .map(|g| g.plugin(accounting))
         .unwrap_or_else(|f| panic!("{f}"));
     let (status, _) = send(&gw, ask(false)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -426,7 +426,7 @@ async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     });
     let gw = gw.and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, no_head));
     let gw = gw.and_then(|g| g.target("p"));
-    let gw = gw.and_then(|g| g.plugin("accounting", accounting));
+    let gw = gw.map(|g| g.plugin(accounting));
     let gw = gw.unwrap_or_else(|f| panic!("{f}"));
     let (status, _) = send(&gw, ask(false)).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);

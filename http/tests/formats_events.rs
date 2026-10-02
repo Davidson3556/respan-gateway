@@ -82,11 +82,11 @@ where
     let gw = Gateway::new()
         .provider::<I, O, _>("p", format.clone(), connect(transport))
         .and_then(|g| {
-            g.client::<I, O, _>(format)?
-                .plugin("log", log.clone())?
-                .plugin("calls", calls.clone())
+            Ok(g.client::<I, O, _>(format)?
+                .plugin(log.clone())
+                .plugin(calls.clone()))
         });
-    let gw = gw.and_then(|g| with_plugins(g, plugins));
+    let gw = gw.map(|g| with_plugins(g, plugins));
     let gw = gw.and_then(|g| g.target("p"));
     (gw.unwrap_or_else(|e| panic!("{e}")), log, calls)
 }
@@ -215,7 +215,17 @@ async fn a_passthrough_of_no_kind_relays_a_whole_body_and_a_failure_as_they_came
         let (gw, _, _) = gateway(Raw, transport, Vec::new());
         let (got, _, read) = read_whole(serve(&gw, post("/raw", "x")).await.0).await;
 
-        assert_eq!((got, read.ok()), (status, Some(Bytes::from(body))));
+        assert_eq!(
+            (got, read.ok()),
+            (
+                status,
+                Some(Bytes::from(if status.is_success() {
+                    body
+                } else {
+                    "the provider returned 503"
+                }))
+            )
+        );
     }
 }
 
@@ -348,11 +358,11 @@ impl Plugin for Reads {
 // Must hold: a whole request no plugin reads is relayed undecoded, as the
 // client's bytes; one read is decoded once, and still goes as it came.
 #[tokio::test]
-async fn a_request_no_plugin_reads_stays_undecoded() {
+async fn a_request_no_plugin_reads_is_decoded_for_encoding() {
     const UNARY: &str = r#"{"id":"c","choices":[{"message":{"content":"hi"}}]}"#;
     let chat = r#"{"model":"m",  "messages":[{"role":"user","content":"hi"}]}"#;
     for (plugins, decoded) in [
-        (Vec::new(), 0),
+        (Vec::new(), 1),
         (vec![Arc::new(Reads) as Arc<dyn Plugin>], 1),
     ] {
         let format = Counted::default();

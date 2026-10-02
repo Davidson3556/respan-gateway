@@ -302,6 +302,7 @@ async fn ending(
     use axum::extract::{Request, State};
     let probe = Probe::start().await;
     let (gateway, ends, calls) = relay(&probe.base());
+    let gateway = gateway.plugin(Relay::RAW);
     let app = axum::Router::new()
         .fallback(
             move |State(gw): State<Gateway>, ws: WebSocketUpgrade, req: Request| {

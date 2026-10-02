@@ -36,7 +36,7 @@ fn gateway(
     Gateway::new()
         .provider::<Conversation, _, _>("openai", OpenAiChat, provider)?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("tally", tally)?
+        .plugin(tally)
         .target("openai")
 }
 

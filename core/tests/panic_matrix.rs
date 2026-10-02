@@ -70,8 +70,7 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                         .unwrap()
                         .target("a")
                         .unwrap()
-                        .plugin("rec", rec.clone())
-                        .unwrap();
+                        .plugin(rec.clone());
                     let (tx, mut req) = upload();
                     req.streams = streams;
                     send(&tx, "one");

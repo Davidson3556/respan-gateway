@@ -15,7 +15,6 @@ use respan_gateway_core::{
 struct Input(u8);
 #[derive(Clone)]
 struct Output(u8);
-struct PrivateMetadata;
 #[derive(Clone)]
 struct FromHook;
 
@@ -45,9 +44,9 @@ fn client(io: Io) -> Result<Connection<Input, Output>, Fault> {
     let Io::Client(trace) = io else {
         return Err(Fault::config("wrong direction"));
     };
-    let incoming = EventStream::lazy(|| Ok(Input(7))).with_metadata("messages", PrivateMetadata);
-    let outgoing = EventSink::preparing(move |outputs: &mut EventStream<Output>| {
-        let relayed = outputs.metadata::<PrivateMetadata>("messages").is_some();
+    let incoming = EventStream::lazy(|| Ok(Input(7)));
+    let outgoing = EventSink::preparing(move |_outputs: &mut EventStream<Output>| {
+        let relayed = false;
         Ok(futures::sink::unfold(
             trace,
             move |trace, output: Result<Output, Fault>| async move {
@@ -71,7 +70,7 @@ fn provider(io: Io) -> Result<Connection<Output, Input>, Fault> {
     let (answer, answered) = oneshot::channel();
     let incoming = async move { answered.await.map_err(|_| Fault::abandoned()) }.boxed();
     let outgoing = EventSink::preparing(move |inputs: &mut EventStream<Input>| {
-        let relayed = inputs.metadata::<PrivateMetadata>("messages").is_some();
+        let relayed = false;
         let value = inputs
             .value()
             .transpose()?
@@ -85,8 +84,7 @@ fn provider(io: Io) -> Result<Connection<Output, Input>, Fault> {
                 if fail {
                     return Err(Fault::upstream("retry this attempt"));
                 }
-                let outputs =
-                    EventStream::single(Output(input.0)).with_metadata("messages", PrivateMetadata);
+                let outputs = EventStream::single(Output(input.0));
                 answer
                     .take()
                     .ok_or_else(|| Fault::internal("extra input"))?
@@ -208,7 +206,7 @@ fn hooks(trace: &Arc<Trace>) -> Hooks {
 }
 
 #[tokio::test]
-async fn same_format_relays_metadata_across_different_transports() {
+async fn same_format_sends_plain_typed_input_across_different_transports() {
     let trace = Arc::new(Trace::default());
     let factories = trace.clone();
     let gateway = Gateway::new()
@@ -220,8 +218,7 @@ async fn same_format_relays_metadata_across_different_transports() {
             Second(attempt(&factories, extensions, false))
         })
         .unwrap()
-        .plugin("hooks", hooks(&trace))
-        .unwrap()
+        .plugin(hooks(&trace))
         .target("p")
         .unwrap();
     gateway
@@ -232,8 +229,8 @@ async fn same_format_relays_metadata_across_different_transports() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(true, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(false, 7)]);
     assert_eq!(*trace.factories.lock().unwrap(), [(1, true)]);
 
     // The first registered transport does not consume an incompatible
@@ -243,12 +240,12 @@ async fn same_format_relays_metadata_across_different_transports() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 7), (2, true, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(true, 7), (true, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7), (2, false, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(false, 7), (false, 7)]);
 }
 
 #[tokio::test]
-async fn same_transport_preserves_original_provenance_even_after_a_filter() {
+async fn same_transport_sends_filtered_typed_input() {
     let trace = Arc::new(Trace::default());
     let factories = trace.clone();
     let mut plugin = hooks(&trace);
@@ -260,8 +257,7 @@ async fn same_transport_preserves_original_provenance_even_after_a_filter() {
             First(attempt(&factories, extensions, false), Cell::new(0))
         })
         .unwrap()
-        .plugin("hooks", plugin)
-        .unwrap()
+        .plugin(plugin)
         .target("p")
         .unwrap();
     gateway
@@ -272,8 +268,8 @@ async fn same_transport_preserves_original_provenance_even_after_a_filter() {
         .await
         .unwrap();
     gateway.idle().await;
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 8)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(true, 8)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 8)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(false, 8)]);
 }
 
 #[tokio::test]
@@ -289,8 +285,7 @@ async fn own_input_does_not_relay_metadata_on_the_same_transport() {
             First(attempt(&factories, extensions, false), Cell::new(0))
         })
         .unwrap()
-        .plugin("hooks", plugin)
-        .unwrap()
+        .plugin(plugin)
         .target("p")
         .unwrap();
     gateway
@@ -318,8 +313,7 @@ async fn retries_create_distinct_transports_after_each_attempts_hooks() {
             First(attempt(&factories, extensions, true), Cell::new(0))
         })
         .unwrap()
-        .plugin("hooks", plugin)
-        .unwrap()
+        .plugin(plugin)
         .target("p")
         .unwrap();
     gateway
@@ -331,8 +325,8 @@ async fn retries_create_distinct_transports_after_each_attempts_hooks() {
         .unwrap();
     gateway.idle().await;
     assert_eq!(*trace.factories.lock().unwrap(), [(1, true), (2, true)]);
-    assert_eq!(*trace.sent.lock().unwrap(), [(1, true, 7), (2, true, 7)]);
-    assert_eq!(*trace.received.lock().unwrap(), [(true, 7)]);
+    assert_eq!(*trace.sent.lock().unwrap(), [(1, false, 7), (2, false, 7)]);
+    assert_eq!(*trace.received.lock().unwrap(), [(false, 7)]);
 }
 
 #[tokio::test]
@@ -348,8 +342,7 @@ async fn rejected_provider_hook_does_not_create_a_transport() {
             First(attempt(&factories, extensions, false), Cell::new(0))
         })
         .unwrap()
-        .plugin("hooks", plugin)
-        .unwrap()
+        .plugin(plugin)
         .target("p")
         .unwrap();
     assert!(
@@ -374,8 +367,7 @@ async fn a_panicking_transport_factory_is_an_unsent_internal_failure() {
         .unwrap()
         .provider::<Input, _, _>("p", Messages, |_| -> First { panic!("factory failed") })
         .unwrap()
-        .plugin("hooks", hooks(&trace))
-        .unwrap()
+        .plugin(hooks(&trace))
         .target("p")
         .unwrap();
     let fault = gateway

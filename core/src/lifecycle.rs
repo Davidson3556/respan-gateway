@@ -7,7 +7,6 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use tokio::sync::Notify;
 
-use crate::gateway::Registered;
 use crate::{ClientContext, Fault, Plugin, Result};
 
 /// The context an edge's hooks get: [`ClientContext`] on the client edge,
@@ -85,7 +84,7 @@ impl<E: Edge> EndHooks<E> {
             if let Some(first) = after {
                 first.idle().await;
             }
-            for Registered { plugin, .. } in cx.client().gateway.plugins.iter().take(ran) {
+            for plugin in cx.client().gateway.plugins.iter().take(ran) {
                 // One plugin's panic must not cost the others their hook.
                 let hook = AssertUnwindSafe(cx.hook(&**plugin, &end));
                 let _ = hook.catch_unwind().await;

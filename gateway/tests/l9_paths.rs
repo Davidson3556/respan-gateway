@@ -137,6 +137,7 @@ async fn l9_passthrough_forwards_case_sensitive_paths_byte_for_byte() {
             .iter()
             .map(|h| h.lines().next().unwrap_or_default().to_owned())
             .collect();
+        let target = target.split("?key=").next().unwrap();
         let want = format!("{method} /pt{target} HTTP/1.1");
         if lines != [want.clone()] {
             wrong.push(format!(

@@ -55,12 +55,15 @@ impl Format<Incoming, Sent<Models>, Got<Models>> for Models {
         Ok(io.bind(
             "models",
             opaque::read_request,
-            |reply, source| {
+            |reply, _source| {
                 // A merged list has no provider's head to borrow a content type from.
-                let mut head = h::response_head("models", source);
+                let mut head = reply.head();
                 formats::default_content_type(&mut head, "application/json");
                 let write = |one: &[Got<Models>]| {
-                    Ok(one.iter().flat_map(|g| g.0.to_vec()).collect::<Vec<u8>>())
+                    Ok(one
+                        .iter()
+                        .flat_map(|g| g.0.body().to_vec())
+                        .collect::<Vec<u8>>())
                 };
                 let fail = |fault: &Fault| {
                     json!({ "error": { "message": fault.message() } })
@@ -102,7 +105,7 @@ impl Plugin for MergeModels {
         let lists: Vec<Result<Vec<Value>, Fault>> =
             join_all(calls.into_iter().map(|call| async move {
                 let frames: Vec<Got<Models>> = call.await?.outputs().try_collect().await?;
-                let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.to_vec()).collect();
+                let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.body().to_vec()).collect();
                 let mut list: Value = serde_json::from_slice(&bytes)
                     .map_err(|_| Fault::upstream("a provider's models are not JSON"))?;
                 match list["data"].take() {
@@ -231,10 +234,9 @@ fn gateway(a: &LocalModels, b: &LocalModels) -> Result<Gateway, Fault> {
         let transport = HttpClient::new(&server.url)?.with_headers(key(token))?;
         gateway = gateway.provider::<Sent<Models>, _, _>(name, Models, transport.connect())?;
     }
-    gateway.plugin(
-        "merge",
-        MergeModels(providers.iter().map(|(name, ..)| *name).collect()),
-    )
+    Ok(gateway.plugin(MergeModels(
+        providers.iter().map(|(name, ..)| *name).collect(),
+    )))
 }
 
 fn request() -> http::Request<respan_gateway_http::Body> {

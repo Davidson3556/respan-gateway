@@ -148,8 +148,8 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
                     Ok(ClientEvent::decoded(&reader_name, raw, json))
                 })
             },
-            move |reply, source| {
-                let mut head = h::response_head(&writer_name, source);
+            move |reply, _source| {
+                let mut head = reply.head();
                 let ask = reply.request();
                 let asks = ask
                     .headers()
@@ -188,18 +188,13 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
                         "JSON events flow in a WebSocket session, not in a call with one input",
                     ));
                 }
-                let client = h::request_head(&writer_name, source);
-                let mut head = client
-                    .cloned()
-                    .unwrap_or_else(|| Request::new(()).into_parts().0);
-                if client.is_none() {
-                    head.method = Method::GET;
-                    formats::set_path(&mut head, &path);
-                    head.headers
-                        .insert(UPGRADE, HeaderValue::from_static("websocket"));
-                    head.headers
-                        .insert(CONNECTION, HeaderValue::from_static("upgrade"));
-                }
+                let mut head = Request::new(()).into_parts().0;
+                head.method = Method::GET;
+                formats::set_path(&mut head, &path);
+                head.headers
+                    .insert(UPGRADE, HeaderValue::from_static("websocket"));
+                head.headers
+                    .insert(CONNECTION, HeaderValue::from_static("upgrade"));
                 formats::body_changed(&mut head);
                 let (request, sink) = h::request(
                     &writer_name,
@@ -265,7 +260,8 @@ mod tests {
                 .expect("refusal")
                 .expect_err("a WebSocket call did not upgrade");
             let original = fault
-                .answer::<Response<Bytes>>(&name)
+                .get::<respan_gateway_http::ProviderError>()
+                .map(|e| &e.response)
                 .expect("original provider answer");
             assert_eq!(
                 (

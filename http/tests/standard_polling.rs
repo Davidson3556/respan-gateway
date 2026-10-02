@@ -282,7 +282,7 @@ fn loose_size_hint_and_pending_eof_do_not_change_lazy_whole_body_decoding() {
     assert_eq!(probe.polls(), 5);
     assert_eq!(probe.drops(), 1);
     assert_eq!(probe.hint_reads.load(Ordering::SeqCst), 1);
-    assert!(input.is_lazy());
+    assert!(input.is_single());
     assert_eq!(decoded.load(Ordering::SeqCst), 0);
     assert!(
         matches!(Pin::new(&mut input).poll_next(&mut cx), Poll::Ready(Some(Ok(bytes)))

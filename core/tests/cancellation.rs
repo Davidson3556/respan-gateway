@@ -45,9 +45,7 @@ async fn cancellation_finishes_hooks_filters_and_delivery_once() {
                     for b in POINTS {
                         let rec = Rec::default();
                         let ends = Ends::default();
-                        let gw = gateway(scenario, &rec)
-                            .plugin("ends", ends.clone())
-                            .unwrap();
+                        let gw = gateway(scenario, &rec).plugin(ends.clone());
                         let end = drive(&gw, streams, quirk, h, b).await;
                         let idle = tokio::time::timeout(Duration::from_secs(2), gw.idle()).await;
                         let (cs, ce, ps, pe) = {
@@ -133,10 +131,8 @@ async fn spawned_calls_end_with_their_request() {
             .unwrap()
             .provider::<In, _, _>("a", Toy, connect(t))
             .unwrap()
-            .plugin("rec", rec.clone())
-            .unwrap()
-            .plugin("spawner", Spawner(std::sync::Arc::clone(&tasks)))
-            .unwrap();
+            .plugin(rec.clone())
+            .plugin(Spawner(std::sync::Arc::clone(&tasks)));
         let (res, _) = handle(&gw, req(vec!["q"])).await;
         let _ = read(res).await;
         tokio::time::timeout(Duration::from_secs(2), gw.idle())
@@ -188,9 +184,7 @@ async fn provider_end_hooks_precede_the_clients() {
         (3, usize::MAX),
     ] {
         let log = std::sync::Arc::default();
-        let gw = gateway(scenario, &Rec::default())
-            .plugin("ordered", Ordered(std::sync::Arc::clone(&log)))
-            .unwrap();
+        let gw = gateway(scenario, &Rec::default()).plugin(Ordered(std::sync::Arc::clone(&log)));
         let (res, _) = handle(&gw, req(vec!["q"])).await;
         let mut body = res.unwrap().body;
         let mut n = 0;

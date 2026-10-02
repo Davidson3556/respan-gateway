@@ -79,11 +79,8 @@ fn providers(list: impl IntoIterator<Item = AddProvider>) -> Result<Gateway, Fau
     list.into_iter().try_fold(Gateway::new(), |gw, add| add(gw))
 }
 
-fn with_plugins(gw: Gateway, plugins: Vec<Arc<dyn Plugin>>) -> Result<Gateway, Fault> {
-    plugins
-        .into_iter()
-        .enumerate()
-        .try_fold(gw, |gw, (i, p)| gw.plugin(format!("p{i}"), p))
+fn with_plugins(gw: Gateway, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
+    plugins.into_iter().fold(gw, Gateway::plugin)
 }
 
 /// What a talk client says: one message, `{"say": ...}`, and the bytes it
@@ -128,9 +125,9 @@ fn read_talk(request: http::Request<Body>, strict: bool) -> Result<EventStream<S
 
 fn talk_reply(
     reply: respan_gateway_http::Reply,
-    source: &mut EventStream<Heard>,
+    _source: &mut EventStream<Heard>,
 ) -> Result<EventSink<Heard>, Fault> {
-    let mut head = respan_gateway_http::response_head("talk", source);
+    let mut head = reply.head();
     if reply.request().headers().contains_key(UPGRADE) && head.status == StatusCode::OK {
         head.status = StatusCode::SWITCHING_PROTOCOLS;
         head.headers
@@ -345,8 +342,8 @@ fn talk_with_openai(
         add_provider("openai", OpenAiChat, openai),
     ];
     let gw = providers(list).and_then(|g| g.client::<Say, _, _>(Talk));
-    let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
-    let gw = gw.and_then(|g| with_plugins(g, plugins));
+    let gw = gw.map(|g| g.plugin(calls.clone()));
+    let gw = gw.map(|g| with_plugins(g, plugins));
     let gw = gw.and_then(|g| g.target("echo"));
     (gw.unwrap_or_else(|e| panic!("{e}")), calls)
 }
@@ -774,8 +771,8 @@ fn heard(reply: &Reply) -> Option<Heard> {
 fn talk_to(list: Vec<AddProvider>, plugins: Vec<Arc<dyn Plugin>>) -> (Gateway, Calls) {
     let calls = Calls::default();
     let gw = providers(list).and_then(|g| g.client::<Say, _, _>(Talk));
-    let gw = gw.and_then(|g| g.plugin("calls", calls.clone()));
-    let gw = gw.and_then(|g| with_plugins(g, plugins));
+    let gw = gw.map(|g| g.plugin(calls.clone()));
+    let gw = gw.map(|g| with_plugins(g, plugins));
     (gw.unwrap_or_else(|e| panic!("{e}")), calls)
 }
 
@@ -1184,7 +1181,7 @@ async fn a_streamed_call_goes_without_the_clients_content_encoding() {
     let heads = echo.heads();
     assert_eq!(heads.len(), 2);
     assert!(!heads[0].contains_key(CONTENT_ENCODING), "{:?}", heads[0]);
-    assert_eq!(heads[1][CONTENT_ENCODING], "gzip");
+    assert!(!heads[1].contains_key(CONTENT_ENCODING));
 }
 
 /// Talk over plain HTTP: the same kind, whose calls never switch protocols.
@@ -1286,7 +1283,8 @@ async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
     let echo = Echo::default();
     let gw = providers([add_provider("raw", Raw, echo.sender())])
         .and_then(|g| g.client::<Sent<Raw>, _, _>(Raw)?.target("raw"))
-        .unwrap_or_else(|e| panic!("{e}"));
+        .unwrap_or_else(|e| panic!("{e}"))
+        .plugin(explicit::Relay::RAW);
     let (send, req) = upgrade();
 
     // Raw says nothing of framing: the request's `Upgrade` does.
@@ -1626,9 +1624,9 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
     });
     let gw = providers([add_provider("raw", Raw, empty)])
         .and_then(|g| {
-            g.client::<Sent<Raw>, _, _>(Raw)?
+            Ok(g.client::<Sent<Raw>, _, _>(Raw)?
                 .target("raw")?
-                .plugin("calls", calls.clone())
+                .plugin(calls.clone()))
         })
         .unwrap_or_else(|e| panic!("{e}"));
     let (resp, ended) = serve(&gw, post("/any", "x")).await;
@@ -1857,7 +1855,7 @@ async fn r8_4_an_input_a_filter_adds_at_the_end_is_sent() {
             }),
         )
         .and_then(|g| g.client::<Say, _, _>(Strict))
-        .and_then(|g| g.plugin("p", P))
+        .map(|g| g.plugin(P))
         .and_then(|g| g.target("echo"))
         .unwrap_or_else(|e| panic!("{e}"));
     let (send, req) = upgrade();
@@ -1980,3 +1978,6 @@ async fn r11_plugin_ws_to_sse_bridge() {
     assert_eq!(calls.all().len(), 2);
     assert_eq!(ended.await, Ok(()));
 }
+
+#[path = "../../tests/support/relay.rs"]
+mod explicit;

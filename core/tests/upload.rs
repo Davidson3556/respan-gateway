@@ -54,9 +54,7 @@ async fn an_abandoned_upload_ends_the_providers_body_with_an_err() {
 async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     let seen = Seen::default();
     let rec = Rec::default();
-    let gw = gateway_of(&seen, true, done)
-        .plugin("rec", rec.clone())
-        .unwrap();
+    let gw = gateway_of(&seen, true, done).plugin(rec.clone());
     let (tx, req) = upload();
     send(&tx, "hello");
     tx.unbounded_send(Err(Fault::bad_request("client broke")))
@@ -108,8 +106,7 @@ async fn take_inputs_ends_with_an_err_when_the_request_ends_first() {
     let gw = Gateway::new()
         .client::<In, _, _>(Toy)
         .unwrap()
-        .plugin("tap", Tap(Arc::clone(&taps)))
-        .unwrap();
+        .plugin(Tap(Arc::clone(&taps)));
     let (tx, req) = upload();
     send(&tx, "one");
     let (res, _) = handle(&gw, req).await;
@@ -144,9 +141,7 @@ impl Plugin for Collect {
 async fn values_decoded_before_a_decoder_err_are_kept() {
     let got = Arc::default();
     let seen = Seen::default();
-    let gw = gateway_of(&seen, true, done)
-        .plugin("collect", Collect(Arc::clone(&got)))
-        .unwrap();
+    let gw = gateway_of(&seen, true, done).plugin(Collect(Arc::clone(&got)));
     let (tx, req) = upload();
     send(&tx, "ok");
     send(&tx, "BAD");
@@ -229,8 +224,7 @@ async fn a_retry_after_every_input_was_read_is_not_a_clean_empty_upload() {
         .unwrap()
         .provider::<In, _, _>("a", Toy, connect(reads_then_refuses_first(bodies.clone())))
         .unwrap()
-        .plugin("retry", Retry)
-        .unwrap();
+        .plugin(Retry);
     let (tx, req) = upload();
     send(&tx, "x");
     send(&tx, "y");

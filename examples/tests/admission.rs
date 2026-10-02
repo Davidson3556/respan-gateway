@@ -323,14 +323,11 @@ async fn losing_the_store_cancels_a_call_waiting_for_its_provider_head() -> Resu
             OpenAiChat,
             respan_gateway_http::connect(supervised(transport)),
         )?
-        .plugin(
-            "admission",
-            Admission {
-                slots: slots.clone(),
-                paid: Duration::from_secs(2),
-                free: Duration::from_secs(2),
-            },
-        )?
+        .plugin(Admission {
+            slots: slots.clone(),
+            paid: Duration::from_secs(2),
+            free: Duration::from_secs(2),
+        })
         .target("p")?;
     let request = tokio::spawn({
         let gw = gw.clone();

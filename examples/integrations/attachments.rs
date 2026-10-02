@@ -388,10 +388,10 @@ impl PdfToText {
                 let mut bytes = Vec::new();
                 let mut chunks = call.await?.outputs::<Got<Rest>>();
                 while let Some(chunk) = chunks.try_next().await? {
-                    if chunk.0.len() > limit.saturating_sub(bytes.len()) {
+                    if chunk.0.body().len() > limit.saturating_sub(bytes.len()) {
                         return Err(too_large());
                     }
-                    bytes.extend_from_slice(&chunk.0);
+                    bytes.extend_from_slice(chunk.0.body());
                 }
                 Ok(bytes)
             }
@@ -655,7 +655,7 @@ impl Fixture {
 }
 
 fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
-    Gateway::new()
+    Ok(Gateway::new()
         .provider::<Conversation, _, _>(
             "text-only",
             OpenAiChat,
@@ -672,8 +672,8 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
             HttpClient::new(&fixture.files.url)?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("pdf-to-text", pdfs)?
-        .plugin("fallback", Fallback)
+        .plugin(pdfs)
+        .plugin(Fallback))
 }
 
 const REQUEST: &str = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"text","text":"Summarise this."},{"type":"file","file":{"filename":"q3.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjcKJcfsj6IKMSAwIG9iago="}}]}]}"#;
@@ -692,7 +692,7 @@ async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
 
 /// As `gateway`, with the PDF reader an Anthropic model.
 fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
-    Gateway::new()
+    Ok(Gateway::new()
         .provider::<Conversation, _, _>(
             "text-only",
             OpenAiChat,
@@ -709,8 +709,8 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
             HttpClient::new(&fixture.files.url)?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("pdf-to-text", pdfs)?
-        .plugin("fallback", Fallback)
+        .plugin(pdfs)
+        .plugin(Fallback))
 }
 
 /// An Anthropic model's answer.

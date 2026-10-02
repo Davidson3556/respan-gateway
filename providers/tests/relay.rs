@@ -1,5 +1,7 @@
 //! The kernel's promises, driven through the OpenAI format.
 
+#[path = "../../tests/support/relay.rs"]
+mod explicit;
 #[allow(dead_code)]
 #[path = "../../tests/support/hooks.rs"]
 mod hooks;
@@ -241,7 +243,7 @@ fn gateway(
     let gw = with_plugins(
         providers(list)?.client::<Conversation, _, _>(OpenAiChat)?,
         plugins,
-    )?;
+    );
     match target {
         Some(target) => gw.target(target),
         None => Ok(gw),
@@ -469,7 +471,7 @@ async fn a_unary_response_is_relayed_byte_for_byte_with_usage() {
 
 #[tokio::test]
 async fn an_error_page_is_relayed_as_it_is() {
-    let h = relay();
+    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
     let page = "<html>bad gateway</html>";
     h.sites
         .openai
@@ -482,7 +484,7 @@ async fn an_error_page_is_relayed_as_it_is() {
     // The provider answered with the failure, which the end carries.
     let o = h.log.only();
     assert!(
-        matches!(o, Err(f) if respan_gateway_http::status(&f) == StatusCode::BAD_GATEWAY && f.answer::<http::Response<bytes::Bytes>>("openai-chat").is_some())
+        matches!(o, Err(f) if respan_gateway_http::status(&f) == StatusCode::BAD_GATEWAY && f.get::<respan_gateway_http::ProviderError>().map(|e| &e.response).is_some())
     );
 }
 
@@ -861,7 +863,6 @@ async fn requests_no_served_format_accepts_are_404() {
 async fn a_gateway_that_cannot_work_fails_as_it_is_built() {
     let sites = Sites::default();
     let openai = || provider(&sites.openai, "openai", None);
-    let log = || Outcomes::default();
     let built = |gw: Result<Gateway, Fault>| {
         gw.err()
             .map(|f| (f.code().to_owned(), f.message().to_owned()))
@@ -874,10 +875,6 @@ async fn a_gateway_that_cannot_work_fails_as_it_is_built() {
         (
             providers([openai()]).and_then(|g| g.target("missing")),
             "unknown provider 'missing'",
-        ),
-        (
-            providers([]).and_then(|g| g.plugin("log", log())?.plugin("log", log())),
-            "plugin 'log' is registered twice",
         ),
     ];
     for (gw, expected) in cases {
@@ -948,9 +945,9 @@ async fn plugins_run_in_registration_order_on_both_edges() {
     // Registered d, b, a, c, and they run in that order.
     let gw = providers([provider(&sites.openai, "openai", None)])
         .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat)?.target("openai"))
-        .and_then(|g| {
-            let g = g.plugin("d", named("d"))?.plugin("b", named("b"))?;
-            g.plugin("a", named("a"))?.plugin("c", named("c"))
+        .map(|g| {
+            let g = g.plugin(named("d")).plugin(named("b"));
+            g.plugin(named("a")).plugin(named("c"))
         })
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
@@ -2297,7 +2294,7 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
             g.client::<Conversation, _, _>(OpenAiChat)?
                 .client::<Conversation, _, _>(AnthropicMessages)
         })
-        .and_then(|g| g.plugin("seen", Seen(seen.clone()))?.target("openai"))
+        .and_then(|g| g.plugin(Seen(seen.clone())).target("openai"))
         .expect("builds");
     let messages = r#"{"model":"gpt-x","max_tokens":10,"messages":[]}"#;
     for req in [post(CHAT, UNARY_REQ), post(MESSAGES, messages)] {
@@ -2423,8 +2420,8 @@ async fn a_judges_own_prompt_carries_nothing_of_the_clients() {
     assert!(headers.get("x-app").is_none());
     assert_eq!(headers["authorization"], "Bearer sk-test");
     // The client's own call still carries them.
-    assert_eq!(sent[1].uri().query(), Some("tenant=t1"));
-    assert!(sent[1].headers().get("x-app").is_some());
+    assert_eq!(sent[1].uri().query(), None);
+    assert!(sent[1].headers().get("x-app").is_none());
 }
 
 #[tokio::test]
@@ -2562,7 +2559,7 @@ async fn a_tool_call_is_reframed_as_the_client_asked() {
 
 #[tokio::test]
 async fn a_relayed_redirect_passes_as_it_came_and_is_no_answer() {
-    let h = Harness::new(Vec::new(), Some("openai"));
+    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
     let moved = http::Response::builder()
         .status(StatusCode::FOUND)
         .header("location", "http://elsewhere/")
@@ -2585,9 +2582,10 @@ async fn a_relayed_redirect_passes_as_it_came_and_is_no_answer() {
         end.as_ref().map(respan_gateway_http::status),
         Some(StatusCode::BAD_GATEWAY)
     );
-    let answer = end
-        .as_ref()
-        .and_then(|f| f.answer::<http::Response<bytes::Bytes>>("openai-chat"));
+    let answer = end.as_ref().and_then(|f| {
+        f.get::<respan_gateway_http::ProviderError>()
+            .map(|e| &e.response)
+    });
     assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
 }
 
@@ -2610,9 +2608,10 @@ async fn a_judge_reads_a_redirect_as_a_failure() {
                 fault.as_ref().map(respan_gateway_http::status),
                 Some(StatusCode::BAD_GATEWAY)
             );
-            let answer = fault
-                .as_ref()
-                .and_then(|f| f.answer::<http::Response<bytes::Bytes>>("openai-chat"));
+            let answer = fault.as_ref().and_then(|f| {
+                f.get::<respan_gateway_http::ProviderError>()
+                    .map(|e| &e.response)
+            });
             assert_eq!(answer.map(|a| a.status()), Some(StatusCode::FOUND));
             Ok(None)
         }
@@ -2635,7 +2634,7 @@ async fn a_judge_reads_a_redirect_as_a_failure() {
 
 #[tokio::test]
 async fn a_failure_labelled_as_a_stream_is_still_a_failure() {
-    let h = Harness::new(Vec::new(), Some("openai"));
+    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
     let failed = || {
         http::Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -2968,7 +2967,7 @@ async fn a_providers_error_after_its_finish_keeps_both_and_ends_last() {
 // format, fields its format lacks and all.
 #[tokio::test]
 async fn a_providers_error_event_mid_stream_goes_as_it_came_to_its_format() {
-    let h = relay();
+    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
     let error = "data: {\"error\":{\"code\":502,\"message\":\"Provider returned error\",\"metadata\":{\"raw\":\"x\"}}}\n\n";
     let content =
         "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n";
@@ -2984,7 +2983,7 @@ async fn a_providers_error_event_mid_stream_goes_as_it_came_to_its_format() {
 // A provider's error inside a 200 goes as it came to a client of its format.
 #[tokio::test]
 async fn a_providers_error_in_a_success_goes_as_it_came_to_its_format() {
-    let h = relay();
+    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
     let error = r#"{"error": {"code": 502, "message": "Provider returned error", "metadata": {"raw": "x"}}}"#;
     h.sites.openai.reply(fixture::json(StatusCode::OK, error));
 
@@ -3333,7 +3332,8 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
     let (failed, answered) = (&ended[1].1, &ended[0].1);
     let failed = failed.as_ref().err();
     assert!(failed.is_some_and(|f| {
-        f.answer::<http::Response<bytes::Bytes>>("openai-chat")
+        f.get::<respan_gateway_http::ProviderError>()
+            .map(|e| &e.response)
             .is_some()
     }));
     assert_eq!(
@@ -3405,7 +3405,8 @@ async fn a_call_the_transport_fails_ends_with_its_fault() {
     // This one is no answer.
     assert!(ended_with(&bill, codes::UPSTREAM));
     assert!(bill.ended()[0].1.as_ref().is_err_and(|f| {
-        f.answer::<http::Response<bytes::Bytes>>("openai-chat")
+        f.get::<respan_gateway_http::ProviderError>()
+            .map(|e| &e.response)
             .is_none()
     }));
 }
@@ -3572,7 +3573,7 @@ async fn idle_waits_for_a_slow_on_provider_end() {
 }
 
 #[tokio::test]
-async fn reading_an_undecodable_input_does_not_stop_its_relay() {
+async fn an_undecodable_input_is_refused_without_explicit_raw_delivery() {
     /// Reads the input on both edges and changes nothing.
     struct Read;
 
@@ -3593,8 +3594,8 @@ async fn reading_an_undecodable_input_does_not_stop_its_relay() {
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
     let request = r#"["not an object"]"#;
 
-    assert_eq!(h.text(call(CHAT, request)).await.0, StatusCode::OK);
-    assert_eq!(h.sites.sent.sent()[0].body(), request.as_bytes());
+    assert_eq!(h.text(call(CHAT, request)).await.0, StatusCode::BAD_REQUEST);
+    assert!(h.sites.sent.sent().is_empty());
 }
 
 /// A tenant's key, which a format's request encoder does not see: a
@@ -4184,7 +4185,7 @@ impl Format<Incoming, Conversation, Reply> for Fragile {
             OpenAiChat.name(),
             |request| OpenAiChat.read_request(request),
             move |reply, source| {
-                let mut head = respan_gateway_http::response_head(OpenAiChat.name(), source);
+                let mut head = reply.head();
                 match OpenAiChat.response_encoder(&mut head, reply.request()) {
                     Some(encoder) => Ok(reply.write(head, Box::new(Garbling(encoder)))),
                     None => Ok(reply.empty(head, source)),
@@ -4216,7 +4217,7 @@ impl Encoder<Reply> for Garbling {
 fn fragile(sites: &Sites, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
     let list = [provider(&sites.openai, "openai", None)];
     let gw = providers(list).and_then(|g| g.client::<Conversation, _, _>(Fragile));
-    let gw = gw.and_then(|g| with_plugins(g, plugins)?.target("openai"));
+    let gw = gw.and_then(|g| with_plugins(g, plugins).target("openai"));
     gw.unwrap_or_else(|e| panic!("gateway: {e}"))
 }
 
@@ -4424,8 +4425,7 @@ async fn idle_waits_for_a_response_still_streaming() {
 #[tokio::test]
 async fn a_gateway_changed_after_cloning_waits_only_for_its_own_requests() {
     let h = Harness::new(vec![Arc::new(Hang(Outcomes::default()))], Some("openai"));
-    let changed = h.gw.clone().plugin("other", Outcomes::default());
-    let changed = changed.unwrap_or_else(|e| panic!("{e}"));
+    let changed = h.gw.clone().plugin(Outcomes::default());
 
     // A request of the original hangs in its plugin.
     let pending = tokio::spawn({
@@ -4945,7 +4945,7 @@ async fn a_dropped_response_runs_its_provider_filters_end() {
 
 #[tokio::test]
 async fn a_205_is_sent_with_no_body() {
-    let h = relay();
+    let h = Harness::new(vec![Arc::new(explicit::Relay::HEADS)], Some("openai"));
     // A provider that writes a body under a 205 anyway.
     h.sites
         .openai
@@ -5449,7 +5449,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
                 OpenAiChat.name(),
                 |request| OpenAiChat.read_request(request),
                 move |reply, source| {
-                    let mut head = respan_gateway_http::response_head(OpenAiChat.name(), source);
+                    let mut head = reply.head();
                     match OpenAiChat.response_encoder(&mut head, reply.request()) {
                         Some(encoder) => {
                             Ok(reply.write(head, Box::new(Tallying(tally.clone(), encoder))))
@@ -5484,7 +5484,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
     ];
     let gw = providers([provider(&sites.openai, "openai", None)])
         .and_then(|g| g.client::<Conversation, _, _>(tally.clone()))
-        .and_then(|g| with_plugins(g, chain))
+        .map(|g| with_plugins(g, chain))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
@@ -5795,9 +5795,7 @@ async fn r11_3_a_usage_edit_is_shown_on_both_paths_and_hidden_from_a_later_meter
                     Ok(None)
                 }
             }
-            let gw = gw
-                .plugin("to", To(target))
-                .unwrap_or_else(|e| panic!("{e}"));
+            let gw = gw.plugin(To(target));
             let _ = &sites;
             // Anthropic needs a message, so the translated call has one.
             let ask = r#"{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}"#;

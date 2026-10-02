@@ -16,20 +16,13 @@ use crate::provider::Provider;
 use crate::response::Batch;
 use crate::{ClientContext, EventStream, Extensions, Fault, Format, Plugin, Response, Result};
 
-/// A registered plugin and its name.
-#[derive(Clone)]
-pub(crate) struct Registered {
-    name: String,
-    pub(crate) plugin: Arc<dyn Plugin>,
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct Registry {
     /// The client formats, in the order they are tried.
     clients: Vec<Arc<dyn AnyFormat>>,
     /// In registration order, which is the order their hooks run, on both
     /// edges.
-    pub(crate) plugins: Vec<Registered>,
+    pub(crate) plugins: Vec<Arc<dyn Plugin>>,
     pub(crate) providers: HashMap<String, Provider>,
     /// The provider called if no plugin sets a target.
     pub(crate) target: Option<String>,
@@ -39,7 +32,7 @@ pub(crate) struct Registry {
 
 /// The gateway. It has no server: an adapter or embedder hands it requests
 /// and owns their transport's rules. Built by value, each setting checked as
-/// given: `Gateway::new().provider(..)?.client(..)?.plugin(..)?.target(..)?`.
+/// given: `Gateway::new().provider(..)?.client(..)?.plugin(..).target(..)?`.
 #[derive(Clone, Default)]
 pub struct Gateway {
     pub(crate) inner: Arc<Registry>,
@@ -47,10 +40,9 @@ pub struct Gateway {
 
 impl std::fmt::Debug for Gateway {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let names: Vec<&str> = self.inner.plugins.iter().map(|p| &*p.name).collect();
         f.debug_struct("Gateway")
             .field("formats", &self.inner.clients.len())
-            .field("plugins", &names)
+            .field("plugins", &self.inner.plugins.len())
             .field("providers", &self.inner.providers.len())
             .field("target", &self.inner.target)
             .finish()
@@ -93,8 +85,7 @@ impl Gateway {
     /// over transport `T`. The first registered
     /// format whose `matches` accepts the transport handles it.
     /// Formats sharing a name must share their event types, but may use
-    /// different transports. Same-name formats relay protocol metadata
-    /// regardless of transport type when carrying the original input.
+    /// different transports. Calls carry typed events and explicit extensions.
     pub fn client<I, O, T>(self, format: impl Format<T, I, O>) -> Result<Gateway>
     where
         T: Send + 'static,
@@ -104,21 +95,13 @@ impl Gateway {
         self.add_client(Arc::new(Erased::<_, T, I, O>::client(format)))
     }
 
-    /// Register `plugin` as `name`; its hooks run on every request and call,
-    /// after those of the plugins registered before it, on both edges. A
-    /// plugin that replies skips the ones after it, so register it after
-    /// every plugin that must see each request. `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) if the name is taken.
-    pub fn plugin(mut self, name: impl Into<String>, plugin: impl Plugin) -> Result<Gateway> {
-        let name = name.into();
-        if self.inner.plugins.iter().any(|p| p.name == name) {
-            return Err(Fault::config(format!(
-                "plugin '{name}' is registered twice"
-            )));
-        }
-        let plugin = Arc::new(plugin);
-        self.inner_mut().plugins.push(Registered { name, plugin });
-        Ok(self)
+    /// Register `plugin`; its hooks run on every request and call, after
+    /// those of the plugins registered before it, on both edges. A plugin
+    /// that replies skips the ones after it, so register it after every
+    /// plugin that must see each request.
+    pub fn plugin(mut self, plugin: impl Plugin) -> Gateway {
+        self.inner_mut().plugins.push(Arc::new(plugin));
+        self
     }
 
     /// The provider called if every plugin passes and none set a target
@@ -335,7 +318,7 @@ impl Drop for Delivery {
 }
 
 async fn run(gateway: &Registry, hooks: &mut EndHooks<ClientContext>) -> Result<Response> {
-    for Registered { plugin, .. } in &gateway.plugins {
+    for plugin in &gateway.plugins {
         if let Some(resp) = plugin.on_client(hooks.begin()).await? {
             return Ok(resp);
         }

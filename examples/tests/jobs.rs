@@ -237,7 +237,7 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
             OpenAiChat,
             respan_gateway_http::connect(supervised(transport)),
         )?
-        .plugin("idempotent", Idempotent(store))?
+        .plugin(Idempotent(store))
         .target("openai")?;
     let first = tokio::spawn({
         let gw = gw.clone();

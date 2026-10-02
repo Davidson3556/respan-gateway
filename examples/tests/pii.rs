@@ -73,7 +73,7 @@ async fn what_an_earlier_plugin_adds_is_redacted_too() -> Result<(), Fault> {
     fake.answer(deltas(&["ok"]));
     let gw = gateway_with(
         provider_support::openai(&fake.base_url())?.connect(),
-        |gw| gw.plugin("rag", Rag),
+        |gw| gw.plugin(Rag),
     )?;
     let (status, _, sent) = ask_via(&gw, &fake, chat("hi".into(), json!({}))).await?;
     assert_eq!(status, StatusCode::OK);
@@ -437,8 +437,8 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
             provider_support::anthropic(&fake.base_url())?.connect(),
         )?
         .client::<Conversation, _, _>(OpenAiChat)?
-        .plugin("pii", Pii)?
-        .plugin("pii-input", PiiInput)?
+        .plugin(Pii)
+        .plugin(PiiInput)
         .target("anthropic")?;
     let (status, _, body) = read_whole(serve(&gw, chat(PROMPT.into(), json!({}))).await.0).await;
     let body = String::from_utf8_lossy(&body?).into_owned();
@@ -460,8 +460,8 @@ async fn anthropic_tool_history_is_redacted_and_its_reply_restored() -> Result<(
             AnthropicMessages,
             provider_support::anthropic(&fake.base_url())?.connect(),
         )?
-        .plugin("pii", Pii)?
-        .plugin("pii-input", PiiInput)?
+        .plugin(Pii)
+        .plugin(PiiInput)
         .target("p")?;
     let body = json!({"model":"c","max_tokens":10,"messages":[
         {"role":"assistant","content":[{"type":"tool_use","id":"call1","name":"send","input":{"to":"bob@x.io"}}]},

@@ -145,8 +145,7 @@ fn gateway_with(
             move |_| Io::Provider(dialer.clone())
         })
         .unwrap()
-        .plugin("record", record.clone())
-        .unwrap()
+        .plugin(record.clone())
         .target("provider")
         .unwrap()
 }
@@ -239,8 +238,7 @@ async fn refused_opening_releases_upload_before_held_response_is_replayed() {
     let refusal = Fault::new("refused", "provider declined input");
     let record = Record::default();
     let gw = gateway_with(&record, writing, EventStream::refused(refusal.clone()))
-        .plugin("hold-refusal", RefusalHeld(finish.clone()))
-        .unwrap();
+        .plugin(RefusalHeld(finish.clone()));
     assert_eq!(
         gw.handle(
             Io::Client {
@@ -403,8 +401,7 @@ async fn synchronous_preparation_controls_sent_status_while_delivery_progresses(
             .unwrap()
             .provider::<Input, _, _>("provider", protocol, |_| Io::Ready)
             .unwrap()
-            .plugin("record", record.clone())
-            .unwrap()
+            .plugin(record.clone())
             .target("provider")
             .unwrap();
         let mut handled = gw

@@ -67,7 +67,7 @@ pub fn clean_path(path: &str) -> String {
 /// slash. An escaped `%2F` stays inside its segment here, where matching
 /// may read it a slash: matching reads at least what the provider does, so
 /// the provider never gets a structure the router did not look at.
-pub(crate) fn forwarded_path(path: &str) -> String {
+pub fn forwarded_path(path: &str) -> String {
     let mut kept: Vec<&str> = Vec::new();
     for raw in path.split(['/', '\\']) {
         let name = raw.split(';').next().unwrap_or_default();

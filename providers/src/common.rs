@@ -266,9 +266,9 @@ pub(crate) fn probe(raw: &[u8]) -> Asked {
     }
 }
 
-/// Finish a success's head and return whether its replies are relayed as
-/// their bytes. One framed otherwise than the client asked is reframed; a
-/// head without a content type gets the client's framing.
+/// Finish a success head and report whether its framing matches the client's
+/// request. Otherwise select the client's framing; per-value provenance
+/// determines whether an encoder can reuse an event's original bytes.
 fn made_head(head: &mut ResponseHead, asks_stream: bool) -> bool {
     let reframe = crate::formats::sse::is_stream(head) != asks_stream;
     if reframe {
@@ -314,10 +314,9 @@ pub(crate) fn read_response<W: Wire>(
     )
 }
 
-/// A response of format `W` to the client's request `ask` with `body`, from
-/// the provider's head `answer` if relayed: nothing for a bodiless one, else
-/// `encoder` of the head, whether it relays the provider's bytes, and what
-/// the client [`Asked`].
+/// Choose response framing from the explicitly selected head and the client's
+/// request. Bodiless responses need no encoder. Otherwise pass the head,
+/// whether its framing already matched, and what the client [`Asked`].
 pub(crate) fn response_encoder(
     head: &mut ResponseHead,
     request: &http::Request<Bytes>,
@@ -357,7 +356,10 @@ pub(crate) fn refusal<W: Wire>(fault: &Fault, head: &mut ResponseHead) -> Bytes 
     }
     let json = HeaderValue::from_static("application/json");
     head.headers.insert(CONTENT_TYPE, json);
-    match fault.answer::<Bytes>(W::NAME) {
+    match fault
+        .get::<respan_gateway_http::RawReply>()
+        .map(|r| r.0.body())
+    {
         Some(words) => words.clone(),
         None => W::error_body(fault).to_string().into(),
     }
@@ -374,7 +376,10 @@ pub(crate) fn unary_reply<W: Wire>(status: StatusCode, raw: Bytes) -> Result<Rep
     }
     Err(
         match crate::formats::sse::failure_json(&raw).filter(says_error) {
-            Some(v) => provider_error(status, &v).with_answer(W::NAME, raw),
+            Some(v) => provider_error(status, &v).with(respan_gateway_http::ProviderError::new(
+                W::NAME,
+                http::Response::new(raw),
+            )),
             None => Fault::upstream("the provider's success is not a response of its format"),
         },
     )
@@ -1158,7 +1163,10 @@ pub(crate) fn unreadable_event(name: &Arc<str>, raw: Bytes) -> Reply {
 /// to a client of this format.
 pub(crate) fn error_event(name: &Arc<str>, raw: &[u8], v: &Value) -> Fault {
     let data = Bytes::from(event_data(raw).unwrap_or_default());
-    provider_error(StatusCode::OK, v).with_answer(name, data)
+    provider_error(StatusCode::OK, v).with(respan_gateway_http::ProviderError::new(
+        name.to_string(),
+        http::Response::new(data),
+    ))
 }
 
 /// Whether a JSON value says anything: not null or empty.
@@ -1535,7 +1543,7 @@ mod tests {
             ),
         ];
         let call = http::Request::new(Bytes::new());
-        for (anthropic, name, body) in cases {
+        for (anthropic, _name, body) in cases {
             let successful_sse = if anthropic {
                 "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
             } else {
@@ -1579,7 +1587,8 @@ mod tests {
                     assert_eq!(fault.retry_after(), Some(std::time::Duration::from_secs(7)));
                     assert_eq!(
                         fault
-                            .answer::<http::Response<Bytes>>(name)
+                            .get::<respan_gateway_http::ProviderError>()
+                            .map(|e| &e.response)
                             .map(|a| a.body().clone()),
                         Some(bytes.clone())
                     );

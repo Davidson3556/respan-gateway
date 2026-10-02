@@ -15,7 +15,7 @@ use respan_gateway_core::*;
 async fn cut_requests_leave_nothing_behind() {
     let rec = Rec::default();
     let ends = Ends::default();
-    let gw = gateway(2, &rec).plugin("ends", ends.clone()).unwrap();
+    let gw = gateway(2, &rec).plugin(ends.clone());
     let mut tasks = vec![];
     for i in 0..2000u64 {
         let gw = gw.clone();
@@ -76,7 +76,7 @@ impl Format<Io, Out, In> for Counted {
 /// A big body goes through a one-shot request to the provider intact, as
 /// the origin's own, never decoded.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_big_body_relays_whole() {
+async fn a_big_body_decodes_once() {
     let big = "x".repeat(8 * 1024 * 1024);
     let len = Arc::new(AtomicUsize::new(0));
     let seen = len.clone();
@@ -108,7 +108,11 @@ async fn a_big_body_relays_whole() {
     assert_eq!(read(res).await, Ok((200, "a;!".into())));
     // the body, and the toy's end marker
     assert_eq!(len.load(Ordering::SeqCst), 8 * 1024 * 1024 + "<END>".len());
-    assert_eq!(decodes.load(Ordering::SeqCst), 0, "a relay decodes nothing");
+    assert_eq!(
+        decodes.load(Ordering::SeqCst),
+        1,
+        "typed encoding decodes once"
+    );
 }
 
 /// Wrapped sessions on many threads, each dropped at a different point: an
@@ -153,10 +157,8 @@ async fn wrapped_sessions_dropped_at_random_end_once() {
             .unwrap()
             .provider::<In, _, _>("p", Toy, connect(seen.transport(false, endless)))
             .unwrap()
-            .plugin("rec", rec.clone())
-            .unwrap()
-            .plugin("both", Both)
-            .unwrap()
+            .plugin(rec.clone())
+            .plugin(Both)
             .target("p")
             .unwrap();
         let (tx, req) = upload();

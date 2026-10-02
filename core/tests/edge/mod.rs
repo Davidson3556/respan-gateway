@@ -143,31 +143,18 @@ impl Format<Io, Out, In> for Toy {
             let result = answered.await.map_err(|_| Fault::abandoned())?.await?;
             let status = result.status;
             Ok(if status != 200 {
-                EventStream::refused(
-                    Fault::new("x", "x")
-                        .with(Wire(status))
-                        .with_answer("toy", ()),
-                )
+                EventStream::refused(Fault::new("x", "x").with(Wire(status)))
             } else {
                 EventStream::stream(events(result.body))
-            }
-            .with_metadata("toy", status))
+            })
         };
         let outgoing = EventSink::preparing(move |flow: &mut EventStream<In>| {
             if extensions.get::<Unsendable>().is_some() {
                 return Err(Fault::config("the toy cannot send this call"));
             }
-            let relayed = flow.metadata::<ToyOrigin>("toy");
-            let raw = flow
-                .is_lazy()
-                .then(|| relayed.and_then(|o| o.body.clone()))
-                .flatten();
             let streams = !flow.is_single();
-            let relayed = relayed.is_some();
-            let prefix = if let Some(raw) = raw {
-                flow.stop();
-                Some(format!("{raw}<END>"))
-            } else if flow.is_single() {
+            let relayed = false;
+            let prefix = if flow.is_single() {
                 let text = flow
                     .value()
                     .transpose()?
@@ -260,13 +247,7 @@ pub fn accept_toy(io: Io, decodes: Option<Arc<AtomicUsize>>) -> Result<Connectio
     let incoming = async move {
         boom(19);
         if streams {
-            return Ok(EventStream::stream(inputs(frames)).with_metadata(
-                "toy",
-                ToyOrigin {
-                    head: "/".into(),
-                    body: None,
-                },
-            ));
+            return Ok(EventStream::stream(inputs(frames)));
         }
         let (mut frames, mut all) = (frames, String::new());
         while let Some(frame) = frames.next().await {
@@ -282,17 +263,10 @@ pub fn accept_toy(io: Io, decodes: Option<Arc<AtomicUsize>>) -> Result<Connectio
                 "BAD" => Err(Fault::bad_request("bad")),
                 _ => Ok(In(body.clone())),
             }
-        })
-        .with_metadata(
-            "toy",
-            ToyOrigin {
-                head: "/".into(),
-                body: Some(all),
-            },
-        ))
+        }))
     };
     let outgoing = EventSink::preparing(move |flow: &mut EventStream<Out>| {
-        let head = flow.metadata::<u16>("toy").copied();
+        let head: Option<u16> = None;
         let refusal = flow.refusal().cloned();
         if quirk == 2 {
             if streams {
@@ -1180,8 +1154,7 @@ pub fn gateway(scenario: usize, rec: &Rec) -> Gateway {
             .unwrap()
             .provider::<In, _, _>("b", Toy, connect(fast_ok))
             .unwrap()
-            .plugin("racer", Racer)
-            .unwrap(),
+            .plugin(Racer),
         3 => gw
             .provider::<In, _, _>("a", Toy, connect(cut))
             .unwrap()
@@ -1189,10 +1162,7 @@ pub fn gateway(scenario: usize, rec: &Rec) -> Gateway {
             .unwrap(),
         _ => unreachable!(),
     };
-    gw.plugin("rec", rec.clone())
-        .unwrap()
-        .plugin("rec2", rec.clone())
-        .unwrap()
+    gw.plugin(rec.clone()).plugin(rec.clone())
 }
 
 /// Counts each filter's end, to check every one gets exactly one.

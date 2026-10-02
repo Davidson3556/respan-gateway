@@ -124,7 +124,7 @@ impl OpenAiChat {
         reply: respan_gateway_http::Reply,
         source: &mut TypedStream<Reply>,
     ) -> Result<EventSink<Reply>, Fault> {
-        let mut head = respan_gateway_http::response_head(OPENAI, source);
+        let mut head = reply.head();
         Ok(match self.response_encoder(&mut head, reply.request()) {
             Some(encoder) => reply.write(head, encoder),
             None => reply.empty(head, source),
@@ -1091,10 +1091,18 @@ impl Chunks {
 
 impl Encoder<Reply> for Chunks {
     fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+        if reply
+            .came_in(OPENAI)
+            .is_some_and(|o| serde_json::from_slice::<Value>(&o.bytes).is_err())
+        {
+            self.so_far.relayed = true;
+        }
         let before = self.so_far.usage.clone();
         self.so_far.note(reply);
         check_usage(&self.so_far.usage)?;
-        let own = reply.came_in(OPENAI).filter(|_| self.so_far.relayed);
+        let own = reply
+            .came_in(OPENAI)
+            .filter(|o| serde_json::from_slice::<Value>(&o.bytes).is_err());
         let Some(own) = own else {
             self.usage_changed |= !reply.usage.is_empty();
             return self.write(reply, out);
@@ -1137,7 +1145,7 @@ impl Encoder<Reply> for Chunks {
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         if let Err(f) = end {
             out.extend_from_slice(&self.held.take().unwrap_or_default());
-            let body = match f.answer::<Bytes>(OPENAI) {
+            let body = match f.get::<respan_gateway_http::RawReply>().map(|r| r.0.body()) {
                 Some(raw) => String::from_utf8_lossy(raw).into_owned(),
                 None => OpenAiChat::error_body(f).to_string(),
             };

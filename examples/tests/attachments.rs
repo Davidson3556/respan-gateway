@@ -503,8 +503,8 @@ async fn completion_hooks_see_conversion_facts_for_each_attempt() -> Result<(), 
         .answer(Answer::error(503).message("unavailable"));
     fixture.pdf.answer(Answer::raw(OK));
     let records = Record(Arc::default());
-    let gw = gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?
-        .plugin("records", records.clone())?;
+    let gw =
+        gateway(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?.plugin(records.clone());
     assert_eq!(send(&gw, "acme", REQUEST).await, StatusCode::OK);
     gw.idle().await;
     let records = records

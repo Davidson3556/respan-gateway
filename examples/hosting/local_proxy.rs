@@ -82,6 +82,7 @@ fn gateway(
         .provider::<Conversation, _, _>("anthropic", AnthropicMessages, transport)?
         .client::<Conversation, _, _>(AnthropicMessages)?
         .target("anthropic")
+        .map(|g| g.plugin(Relay::RAW))
 }
 
 fn serve_address(args: &[String]) -> Result<Option<&str>, &'static str> {
@@ -166,3 +167,5 @@ const STREAM: &[&str] = &[
 #[cfg(test)]
 #[path = "../tests/local_proxy.rs"]
 mod tests;
+
+use respan_gateway_examples::relay::Relay;

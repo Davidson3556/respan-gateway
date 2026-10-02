@@ -13,7 +13,7 @@ use crate::input::Input;
 use crate::leg::{Later, Layer, inputs, locked};
 use crate::lifecycle::{Edge, InFlight, Latch};
 use crate::plugin::Filters;
-use crate::values::{AnyEvents, Values, erase, take_one, typed};
+use crate::values::{AnyBatches, AnyEvents, Value, erase, take_value, typed};
 use crate::{Call, EventStream, Extensions, Fault, Filter, Gateway, Plugin, Result};
 
 /// One client request, as the client edge's hooks see it.
@@ -79,7 +79,7 @@ pub(crate) struct Stages {
 }
 
 /// A plugin's wrap of the outputs sent to the client, erased.
-pub(crate) type Wrap = Box<dyn FnOnce(AnyEvents) -> AnyEvents + Send>;
+pub(crate) type Wrap = Box<dyn FnOnce(AnyBatches) -> AnyEvents + Send>;
 
 impl std::fmt::Debug for ClientContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,18 +117,17 @@ impl Edge for ClientContext {
 impl ClientContext {
     pub(crate) fn new(
         format: Arc<dyn AnyFormat>,
-        mut incoming: EventStream<Values>,
+        mut incoming: EventStream<Value>,
         extensions: Extensions,
         gateway: Arc<Registry>,
     ) -> Self {
-        let metadata = incoming.metadata_copy();
         let single = incoming.take_single();
         let later = match single.is_some() || incoming.refusal().is_some() {
             true => Later::new(None),
             false => Later::new(Some(incoming.boxed())),
         };
         Self {
-            input: Input::new(format.clone(), single, metadata),
+            input: Input::new(format.clone(), single),
             format,
             extensions,
             target: gateway.target.clone(),
@@ -176,8 +175,8 @@ impl ClientContext {
 
     /// The request's one input as `T`, as filters left it. `Err` with
     /// [`codes::INTERNAL`](crate::codes::INTERNAL) for another type or a
-    /// streaming request; or the decoder's or a filter's `Err`. A relay
-    /// sends the body unread, so a plugin that vets input refuses on `Err`.
+    /// streaming request; or the decoder's or a filter's `Err`. A plugin
+    /// that vets input must refuse on `Err`.
     pub fn input<T: Any>(&self) -> Result<&T> {
         self.input.get()
     }
@@ -200,7 +199,7 @@ impl ClientContext {
             return stream::once(ready(self.input.get::<T>().cloned())).boxed();
         }
         let items = inputs(self.later.clone(), None, &self.ended);
-        items.map(|item| item.and_then(take_one::<T>)).boxed()
+        items.map(|item| item.and_then(take_value::<T>)).boxed()
     }
 
     /// The provider called if every plugin passes; initially the gateway's
@@ -306,9 +305,8 @@ impl ClientContext {
     /// a last item `Err(Fault::new(code, message))`, as `MaxLength` in
     /// `examples/realtime/realtime.rs` does.
     ///
-    /// The stream takes the place of the one it wraps, and the request stays
-    /// what it was: a call of its inputs relays as before, and the provider's
-    /// head still reaches the client. Wraps and filters apply in plugin
+    /// The stream takes the place of the one it wraps.
+    /// Wraps and filters apply in plugin
     /// order: a wrap sees inputs after the filters and wraps added before it,
     /// outputs before them. Its stream is pulled as its reader reads; the
     /// request's end cuts what it wraps and what it gives with

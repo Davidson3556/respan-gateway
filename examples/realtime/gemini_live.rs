@@ -139,7 +139,7 @@ fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault>
     Gateway::new()
         .client::<ClientEvent, _, _>(format())?
         .provider::<ClientEvent, _, _>("gemini", format(), transport.connect())?
-        .plugin("turns", sessions)?
+        .plugin(sessions)
         .target("gemini")
 }
 #[tokio::main]

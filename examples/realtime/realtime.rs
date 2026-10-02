@@ -855,17 +855,14 @@ fn gateway_with_audio(
         .client::<ClientEvent, _, _>(realtime())?
         .provider::<ClientEvent, _, _>("openai", realtime(), WsTransport::new(provider)?.connect())?
         .target("openai")?
-        .plugin("ends", ends.clone())?
-        .plugin("audio", audio::Validate(allow_audio))?;
-    let gw = if allow_audio {
-        gw
-    } else {
-        gw.plugin("pii", Pii)?
-    };
-    gw.plugin("meter", meter.clone())?
-        .plugin("vet", Vet)?
-        .plugin("reserve", Reserve(wallets.clone()))?
-        .plugin("max", MaxLength(longest))
+        .plugin(ends.clone())
+        .plugin(audio::Validate(allow_audio));
+    let gw = if allow_audio { gw } else { gw.plugin(Pii) };
+    Ok(gw
+        .plugin(meter.clone())
+        .plugin(Vet)
+        .plugin(Reserve(wallets.clone()))
+        .plugin(MaxLength(longest)))
 }
 
 /// Serve `gateway` to WebSocket clients on a free port.
@@ -993,6 +990,7 @@ async fn main() -> Result<(), Fault> {
         &wallets,
         HOUR,
     )?;
+    let gw = gw.plugin(respan_gateway_examples::relay::Relay::RAW);
     let addr = listen(&gw).await;
 
     let mut ws = client(addr).await;

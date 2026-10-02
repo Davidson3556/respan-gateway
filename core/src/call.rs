@@ -9,9 +9,7 @@ use futures::channel::oneshot;
 use futures::future::{BoxFuture, pending};
 use futures::{FutureExt, StreamExt, stream};
 
-use crate::events::Metadata;
 use crate::fault::{PANICKED, guarded};
-use crate::gateway::Registered;
 use crate::input::Input;
 use crate::leg::{Later, cut, inputs, locked};
 use crate::lifecycle::{EndHooks, Latch};
@@ -195,7 +193,7 @@ async fn send(
     // A panic ends this call as internal before unwinding, so the drop
     // during unwinding does not end it abandoned.
     match AssertUnwindSafe(sent).catch_unwind().await {
-        Ok(Ok((metadata, events))) => Ok(Response::of_call(metadata, events, edge)),
+        Ok(Ok(events)) => Ok(Response::of_call(events, edge)),
         Ok(Err(fault)) => {
             edge.finish(Err(fault.clone()));
             Err(fault)
@@ -210,24 +208,16 @@ async fn send(
 /// Open receiving and close the sending sink concurrently. A call counts
 /// as sent only after the sink has accepted its input sequence. `later` are
 /// the client edge's live inputs, if the call carries them.
-async fn dial(
-    p: &Provider,
-    later: Option<Arc<Later>>,
-    edge: &mut CallEdge,
-) -> Result<(Metadata, AnyEvents)> {
+async fn dial(p: &Provider, later: Option<Arc<Later>>, edge: &mut CallEdge) -> Result<AnyEvents> {
     let px = edge.cx();
-    let relay = !px.input.own && px.client.format.name() == p.format.name();
     let (fail, mut failed) = oneshot::channel();
     let mut outgoing = match later {
         Some(later) => {
             let call = Some((px.inputs.clone(), fail));
             EventStream::stream(inputs(later, call, &px.ended))
         }
-        None => px.input.events(relay)?,
+        None => px.input.events()?,
     };
-    if relay {
-        outgoing.set_metadata(px.client.input.metadata_copy());
-    }
     let (opening, mut sink) = guarded(|| {
         let io = (p.factory)(px.client.extensions.clone());
         p.format.bind(io)
@@ -246,7 +236,7 @@ async fn dial(
             opened.map(|incoming| (incoming, Some(writing)))
         }
     };
-    let (mut incoming, writing) = match opened {
+    let (incoming, writing) = match opened {
         Ok(opened) => opened,
         Err(fault) => return Err(failed.try_recv().ok().flatten().unwrap_or(fault)),
     };
@@ -254,10 +244,6 @@ async fn dial(
     // A refusal never consumes the outgoing half. Release it before the
     // response is handed to routing, which may retain this attempt.
     let writing = if px.refused { None } else { writing };
-    if !relay {
-        incoming.clear_metadata();
-    }
-    let metadata = incoming.metadata_copy();
     let events = drive_writer(incoming.boxed(), writing);
     let failed = async {
         match failed.await {
@@ -265,7 +251,7 @@ async fn dial(
             Err(_) => pending().await,
         }
     };
-    Ok((metadata, cut(events, failed.boxed())))
+    Ok(cut(events, failed.boxed()))
 }
 
 /// Keep the other half progressing as the response is read. Dropping the
@@ -393,7 +379,7 @@ impl CallEdge {
     /// Run each plugin's `on_provider` until one refuses.
     pub(crate) async fn start(&mut self) -> Result<()> {
         let gateway = self.cx().client.gateway.clone();
-        for Registered { plugin, .. } in &gateway.plugins {
+        for plugin in &gateway.plugins {
             plugin.on_provider(self.begin()).await?;
         }
         Ok(())

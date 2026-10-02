@@ -163,7 +163,7 @@ async fn accounting_settles_on_a_wire_of_its_own() {
             g.provider::<Question, _, _>("p", Pipe, move |_| Io::Provider(transport.clone()))
         });
         let gw = gw.and_then(|g| g.target("p"));
-        let gw = gw.and_then(|g| g.plugin("accounting", accounting));
+        let gw = gw.map(|g| g.plugin(accounting));
         let gw = gw.unwrap_or_else(|f| panic!("{f}"));
         let handled = gw.handle(Io::Client(Question(question.into())), Extensions::new());
         drop(handled.await);
