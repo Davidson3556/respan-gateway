@@ -131,17 +131,24 @@ fn a_role_and_a_finish_of_a_format_are_written_by_that_format_alone() {
 }
 
 #[test]
-fn the_developer_role_is_written_back_by_its_format_and_as_system_by_another() {
+fn the_developer_role_is_a_role_of_its_own_that_anthropic_writes_as_system() {
     let body = openai(json!([
         { "role": "developer", "content": "be brief" },
         { "role": "user", "content": "hi" },
     ]));
     assert_eq!(same::<OpenAiChat>(&body), body);
     let chat = read_request::<OpenAiChat>(Bytes::from(body.to_string())).expect("chat");
-    assert_eq!(chat.messages[0].role, Role::System);
+    assert_eq!(chat.messages[0].role, Role::Developer);
+    assert!(chat.messages[0].is_plain());
     let to_anthropic = sent::<OpenAiChat, AnthropicMessages>(&body).expect("translated");
     assert_eq!(to_anthropic["system"], "be brief");
-    // A message that is no longer a system message is not a developer's.
+    // After the conversation starts it has no place in Anthropic.
+    let late = openai(json!([
+        { "role": "user", "content": "hi" },
+        { "role": "developer", "content": "be brief" },
+    ]));
+    assert!(refused::<OpenAiChat, AnthropicMessages>(&late));
+    // Edited to another role, it is written as that role.
     let mut edited = chat;
     edited.messages[0].role = Role::User;
     let again = write_request::<OpenAiChat>(&edited)
@@ -375,5 +382,69 @@ fn unknown_fields_of_an_anthropic_block_survive_its_format_and_are_dropped_by_an
                 assert!(!words.contains(key.as_str()), "{words}");
             }
         }
+    }
+}
+
+#[test]
+fn unknown_fields_of_an_openai_tool_call_survive_its_format_and_are_dropped_by_another() {
+    let entry = |arguments: &str| {
+        json!({ "index": 0, "id": "t", "type": "function",
+            "function": { "name": "f", "arguments": arguments, "vendor_fn": null },
+            "extra_content": { "thought": "x" }, "empty": [] })
+    };
+    let chunk = |delta: Value, finish: Value| {
+        let choice = json!([{ "index": 0, "delta": delta, "finish_reason": finish }]);
+        format!(
+            "data: {}\n\n",
+            json!({ "id": "c", "model": "m", "choices": choice })
+        )
+    };
+    let stream = [
+        chunk(json!({ "tool_calls": [entry("")] }), Value::Null),
+        chunk(
+            json!({ "tool_calls": [{ "index": 0, "function": { "arguments": "{}" } }] }),
+            Value::Null,
+        ),
+        chunk(json!({}), json!("tool_calls")),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    let whole = json!({ "id": "c", "model": "m", "choices": [{ "index": 0, "finish_reason": "tool_calls",
+        "message": { "role": "assistant", "content": null, "tool_calls": [entry("{}")] } }] });
+    let call = http::Request::new(()).into_parts().0;
+    let decode = |r| OpenAiChat.decode_response(r, &call).expect("decoded");
+    for (is_stream, text) in [(false, whole.to_string()), (true, stream)] {
+        let replies = decoded::<OpenAiChat>(decode, is_stream, &text);
+        // The choice stays readable events: no opaque choice among them.
+        assert!(
+            replies
+                .iter()
+                .any(|r| matches!(r, Reply::BlockStart { .. })),
+            "stream {is_stream}"
+        );
+        let out = OpenAiChat
+            .encode_response(&request_of(is_stream), &replies)
+            .expect("written");
+        let body = String::from_utf8_lossy(out.body()).into_owned();
+        let found: Value = match is_stream {
+            false => serde_json::from_str::<Value>(&body).unwrap_or_default()["choices"][0]["message"]["tool_calls"][0].clone(),
+            true => body
+                .split("\n\n")
+                .filter_map(|e| serde_json::from_str::<Value>(e.strip_prefix("data: ")?).ok())
+                .find_map(|c| c["choices"][0]["delta"]["tool_calls"][0].get("id").map(|_| c["choices"][0]["delta"]["tool_calls"][0].clone()))
+                .unwrap_or_default(),
+        };
+        // Even null and empty ones, whose presence says something.
+        assert_eq!(
+            found["extra_content"],
+            json!({ "thought": "x" }),
+            "stream {is_stream}: {body}"
+        );
+        assert_eq!(found["empty"], json!([]), "stream {is_stream}: {body}");
+        assert_eq!(found["function"]["vendor_fn"], Value::Null);
+        assert!(found["function"].get("vendor_fn").is_some(), "{found}");
+        let to_anthropic = AnthropicMessages.encode_response(&request_of(is_stream), &replies);
+        let to_anthropic = to_anthropic.expect("translated");
+        assert!(!String::from_utf8_lossy(to_anthropic.body()).contains("extra_content"));
     }
 }

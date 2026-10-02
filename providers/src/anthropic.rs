@@ -266,25 +266,23 @@ const ROLES: Names<Role> = Names(
     ANTHROPIC,
 );
 
+/// Whether a message is instructions: Anthropic has one system prompt for a
+/// system's and a developer's alike.
+fn is_system(m: &Message) -> bool {
+    matches!(m.role, Role::System | Role::Developer)
+}
+
 /// The parts of the leading system messages, as the system prompt, and
 /// the rest; a later system message is refused.
 fn split_system(chat: &Conversation) -> Result<(Vec<Content>, &[Message]), Fault> {
-    let lead = chat
-        .messages
-        .iter()
-        .take_while(|m| m.role == Role::System)
-        .count();
+    let lead = chat.messages.iter().take_while(|m| is_system(m)).count();
     let (system, rest) = chat.messages.split_at(lead);
-    if rest.iter().any(|m| m.role == Role::System) {
+    if rest.iter().any(is_system) {
         return Err(BadRequest::fault(
             "Anthropic has no place for a system message after the conversation starts",
         ));
     }
-    // The spelling of a system role is for the format that decoded it.
-    if system
-        .iter()
-        .any(|m| m.extra.fields.keys().any(|k| k != "role"))
-    {
+    if system.iter().any(|m| !m.extra.is_empty()) {
         return Err(BadRequest::fault(
             "Anthropic's system prompt has no place for a message's other fields",
         ));

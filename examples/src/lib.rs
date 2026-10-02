@@ -131,8 +131,7 @@ pub mod chat_bound {
     /// bytes bound them: its text, tool calls and results, tools, the JSON
     /// of what the kind has no place for (`extra`), and 8 a message for
     /// framing. A format's own spelling of a field the kind has (the key a
-    /// token limit was written under, a role's name) is no input and is not
-    /// counted. Content with no byte bound, such as an image, is refused.
+    /// token limit was written under) is no input and is not counted. Content with no byte bound, such as an image, is refused.
     pub fn input_bound(chat: &Conversation) -> Result<u64, Fault> {
         let json = |m: &Map<_, _>, spellings: &[&str]| {
             let kept: Map<_, _> = m
@@ -149,7 +148,7 @@ pub mod chat_bound {
             bytes += tool.name.len() + description + parameters + json(&tool.extra.fields, &[]);
         }
         for m in &chat.messages {
-            bytes += content_bytes(&m.content)? + json(&m.extra.fields, &["role"]) + 8;
+            bytes += content_bytes(&m.content)? + json(&m.extra.fields, &[]) + 8;
         }
         Ok(bytes as u64)
     }

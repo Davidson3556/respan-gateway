@@ -53,10 +53,10 @@ pub mod units {
 /// `format` whenever `fields` says something, or the value needs it, as a
 /// [`Role::Other`] does.
 ///
-/// `fields` may also hold a field's own spelling, such as the `role` a
-/// message was written with (`developer`) or the key a limit was written
-/// under: the format that decoded it honours it when it writes the value
-/// again, and any other format writes its own spelling and drops it.
+/// `fields` may also hold a field's own spelling, such as the key a limit
+/// was written under: the format that decoded it honours it when it writes
+/// the value again, and any other format writes its own spelling and drops
+/// it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extra {
     /// The name of the format `fields` are in.
@@ -186,6 +186,9 @@ impl Message {
 pub enum Role {
     /// Instructions for the model.
     System,
+    /// Instructions for the model with a developer's authority, as OpenAI
+    /// defines them; a format that has no such role writes them as system.
+    Developer,
     /// The person or program using the model.
     User,
     /// The model.

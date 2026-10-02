@@ -512,9 +512,9 @@ impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
 /// signature, a stop sequence). A format drops these when translating, and
 /// refuses any other event it has no form for.
 pub(crate) fn is_inert(format: &str, raw: &Value) -> bool {
-    let usage_only = raw
-        .as_object()
-        .is_some_and(|o| o.len() == 1 && o.contains_key("usage"));
+    let usage_only = raw.as_object().is_some_and(|o| {
+        o.len() == 1 && (o.contains_key("usage") || o.contains_key("call_fields"))
+    });
     (format == crate::openai::OPENAI && usage_only)
         || format == ANTHROPIC
             && (matches!(
@@ -763,13 +763,6 @@ pub(crate) fn read_message(format: &str, m: &Value, roles: &Names<Role>) -> Mess
     let mut message = Message::new(role, "");
     message.content = read_content(format, &m["content"]);
     message.extra.fields = fields.map(|(k, v)| (k.clone(), v.clone())).collect();
-    // A role's own spelling, such as `developer`, is kept for the format.
-    if roles
-        .name(&message.role)
-        .is_some_and(|written| written != name)
-    {
-        message.extra.fields.insert("role".into(), name.into());
-    }
     tag(&mut message, format);
     message
 }
@@ -778,22 +771,6 @@ pub(crate) fn read_message(format: &str, m: &Value, roles: &Names<Role>) -> Mess
 /// anything the kind has no form for.
 pub(crate) fn tag(message: &mut Message, format: &str) {
     message.extra.format = (!message.extra.is_empty()).then(|| Arc::from(format));
-}
-
-/// What a message's `extra` keeps of another format: the role's spelling is
-/// dropped.
-pub(crate) const MESSAGE_KEEP: Keep = Keep {
-    own: &[],
-    droppable: &["role"],
-};
-
-/// A message's `extra` without the spelling of a role it no longer has.
-pub(crate) fn message_extra(m: &Message) -> Extra {
-    let mut extra = m.extra.clone();
-    if m.role != Role::System {
-        extra.fields.shift_remove("role");
-    }
-    extra
 }
 
 /// A message written anew: role, content and its other fields.
@@ -806,7 +783,7 @@ pub(crate) fn write_message(
     v.insert("role".into(), role_of(format, m, roles)?);
     v.insert("content".into(), write_content(format, &m.content)?);
     let fields = |_: &str| "messages with fields the kind has no place for".to_owned();
-    write_extra(format, &message_extra(m), &mut v, fields, MESSAGE_KEEP)?;
+    write_extra(format, &m.extra, &mut v, fields, Keep::default())?;
     Ok(v.into())
 }
 

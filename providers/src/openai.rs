@@ -47,7 +47,7 @@ use std::sync::Arc;
 use crate::Usage;
 use crate::common::{
     Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
-    extra_of, is_inert, merge_fields, only, post_json, probe, read_message, refusal, says, set,
+    extra_of, is_inert, merge_fields, post_json, probe, read_message, refusal, says, set,
     stop_json, supported_usage, tag, unix_now, unreadable_event, unsupported_fields,
     unwritable_content, unwritable_usage, usage_extra,
 };
@@ -266,7 +266,7 @@ const LIMITS: &[&str] = &["max_tokens", "max_completion_tokens"];
 const ROLES: Names<Role> = Names(
     &[
         ("system", Role::System),
-        ("developer", Role::System),
+        ("developer", Role::Developer),
         ("user", Role::User),
         ("assistant", Role::Assistant),
     ],
@@ -368,12 +368,24 @@ impl Wire for OpenAiChat {
                 .collect()
         };
         let (text, reasoning) = (join(Block::Text), join(Block::Reasoning));
+        let fields: Vec<_> = whole
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Other(f, raw) if **f == *OPENAI => call_fields_of(raw),
+                _ => None,
+            })
+            .collect();
         let calls: Vec<Value> = whole
             .parts()
             .filter_map(|p| match &p.kind {
                 Block::ToolCall { id, name } => {
                     let arguments = if p.text.is_empty() { "{}" } else { &p.text };
-                    Some(call_json(None, Some(id), Some(name), arguments))
+                    let mut call = call_json(None, Some(id), Some(name), arguments);
+                    for (_, entry, function) in fields.iter().filter(|(b, ..)| *b == p.block) {
+                        merge_call(&mut call, entry, function);
+                    }
+                    Some(call)
                 }
                 _ => None,
             })
@@ -399,6 +411,9 @@ impl Wire for OpenAiChat {
             let Item::Other(format, raw) = item else {
                 continue;
             };
+            if &**format == OPENAI && call_fields_of(raw).is_some() {
+                continue;
+            }
             if let (true, Some(fields)) = (&**format == OPENAI, usage_fields(raw)) {
                 usage_more.extend(fields.clone());
                 continue;
@@ -665,11 +680,51 @@ impl Default for OpenAiReader {
     }
 }
 
+/// JSON fields.
+type Fields = Map<String, Value>;
+
 /// A tool call's part of a chunk or body.
 struct Call {
     index: u64,
     start: Option<(String, String)>,
     arguments: String,
+    /// The entry's fields, and its function's, that the kind has no place
+    /// for, even null or empty ones.
+    entry: Map<String, Value>,
+    function: Map<String, Value>,
+}
+
+/// The fields of tool call `block` the kind has no place for, as the
+/// [`Reply::Other`] that carries them: before the call's block opens.
+fn call_fields(block: u32, call: &Call) -> Option<Value> {
+    if call.entry.is_empty() && call.function.is_empty() {
+        return None;
+    }
+    let fields = json!({ "block": block, "entry": call.entry, "function": call.function });
+    Some(json!({ "call_fields": fields }))
+}
+
+/// What a [`call_fields`] event says: the block, the entry's fields and the
+/// function's.
+fn call_fields_of(raw: &Value) -> Option<(u32, &Fields, &Fields)> {
+    let only = raw.as_object().filter(|o| o.len() == 1)?;
+    let fields = only.get("call_fields")?;
+    let block = u32::try_from(fields["block"].as_u64()?).ok()?;
+    Some((
+        block,
+        fields["entry"].as_object()?,
+        fields["function"].as_object()?,
+    ))
+}
+
+/// Put the fields of a `call_fields` event into the tool call `call`.
+fn merge_call(call: &mut Value, entry: &Map<String, Value>, function: &Map<String, Value>) {
+    if let Some(call) = call.as_object_mut() {
+        call.extend(entry.clone());
+    }
+    if let Some(f) = call["function"].as_object_mut() {
+        f.extend(function.clone());
+    }
 }
 
 impl OpenAiReader {
@@ -763,8 +818,21 @@ impl OpenAiReader {
         }
         for call in calls.into_iter().flatten() {
             let key = Key::Call(call.index);
+            let call_fields_source = Call {
+                index: call.index,
+                start: None,
+                arguments: String::new(),
+                entry: call.entry.clone(),
+                function: call.function.clone(),
+            };
             let block = match (call.start, self.open_block(&key)) {
-                (Some((id, name)), None) => self.open(key, Block::ToolCall { id, name }, out),
+                (Some((id, name)), None) => {
+                    let next = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
+                    if let Some(fields) = call_fields(next, &call_fields_source) {
+                        out.push(Reply::other(self.name.clone(), fields));
+                    }
+                    self.open(key, Block::ToolCall { id, name }, out)
+                }
                 (_, Some(block)) => block,
                 (None, None) => {
                     return Err(Upstream::fault(
@@ -904,11 +972,14 @@ fn tool_calls(body: &Value) -> Option<Vec<Call>> {
     let call = |(at, c): (usize, &Value)| {
         let function = &c["function"];
         let function_call = c["type"].is_null() || c["type"] == "function";
-        let known =
-            only(c, &["index", "id", "type", "function"]) && only(function, &["name", "arguments"]);
-        if !function_call || !known {
+        if !function_call {
             return None;
         }
+        let unknown = |v: &Value, known: &[&str]| -> Map<String, Value> {
+            let fields = v.as_object().into_iter().flatten();
+            let fields = fields.filter(|(k, _)| !known.contains(&k.as_str()));
+            fields.map(|(k, x)| (k.clone(), x.clone())).collect()
+        };
         let arguments = match &function["arguments"] {
             Value::Null => "",
             arguments => arguments.as_str()?,
@@ -922,6 +993,8 @@ fn tool_calls(body: &Value) -> Option<Vec<Call>> {
             index,
             start: start.map(|(id, name)| (id.to_owned(), name.to_owned())),
             arguments: arguments.to_owned(),
+            entry: unknown(c, &["index", "id", "type", "function"]),
+            function: unknown(function, &["name", "arguments"]),
         })
     };
     calls.iter().enumerate().map(call).collect()
@@ -947,6 +1020,8 @@ struct Chunks {
     gate: Gate,
     /// The vendor fields of usage, written in the usage chunk.
     usage_extra: Map<String, Value>,
+    /// The fields of tool calls that have not started, by block.
+    call_fields: Vec<(u32, Fields, Fields)>,
 }
 
 #[derive(Debug)]
@@ -973,6 +1048,7 @@ impl Chunks {
             finish: None,
             gate: Gate::default(),
             usage_extra: Map::new(),
+            call_fields: Vec::new(),
         }
     }
 
@@ -1024,7 +1100,11 @@ impl Chunks {
             Block::ToolCall { id, name } => {
                 let index = self.calls;
                 self.calls += 1;
-                let call = call_json(Some(index), Some(id), Some(name), "");
+                let mut call = call_json(Some(index), Some(id), Some(name), "");
+                if let Some(at) = self.call_fields.iter().position(|(b, ..)| *b == block) {
+                    let (_, entry, function) = self.call_fields.remove(at);
+                    merge_call(&mut call, &entry, &function);
+                }
                 self.delta(out, json!({ "tool_calls": [call] }));
                 Some(index)
             }
@@ -1107,6 +1187,14 @@ impl Chunks {
             Reply::Other { format, raw } if **format == *OPENAI && usage_fields(raw).is_some() => {
                 if let Some(fields) = usage_fields(raw) {
                     self.usage_extra.extend(fields.clone());
+                }
+            }
+            Reply::Other { format, raw }
+                if **format == *OPENAI && call_fields_of(raw).is_some() =>
+            {
+                if let Some((block, entry, function)) = call_fields_of(raw) {
+                    self.call_fields
+                        .push((block, entry.clone(), function.clone()));
                 }
             }
             Reply::Other { format, raw } if **format == *OPENAI => match &**raw {

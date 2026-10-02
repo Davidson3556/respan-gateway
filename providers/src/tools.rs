@@ -9,8 +9,8 @@ use serde_json::{Map, Value, json};
 
 use crate::anthropic::ANTHROPIC;
 use crate::common::{
-    Keep, MESSAGE_KEEP, Names, extra_of, kept_fields, message_extra, only, read_content,
-    untranslatable, write_content, write_extra, write_message,
+    Keep, Names, extra_of, kept_fields, only, read_content, untranslatable, write_content,
+    write_extra, write_message,
 };
 use crate::conversation::{Content, Conversation, Extra, Message, Role, Tool, ToolChoice};
 use crate::openai::OPENAI;
@@ -452,13 +452,7 @@ pub(crate) fn write_openai_message(m: &Message, roles: &Names<Role>) -> Result<V
     }
     // A message of one result keeps its other fields, such as a name.
     if let ([only], true) = (&mut out[..], rest.is_empty()) {
-        write_extra(
-            OPENAI,
-            &message_extra(m),
-            only,
-            message_fields,
-            MESSAGE_KEEP,
-        )?;
+        write_extra(OPENAI, &m.extra, only, message_fields, Keep::default())?;
         return Ok(out.into_iter().map(Value::Object).collect());
     }
     let mut out: Vec<Value> = out.into_iter().map(Value::Object).collect();
