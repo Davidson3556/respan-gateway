@@ -10,6 +10,7 @@ use bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, Completion, http::response::Parts as ResponseHead};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{
@@ -177,7 +178,7 @@ impl Harness {
             .collect();
         let body = body
             .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .map_err(|f| f.code().to_owned());
+            .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
         Got {
             status: status.as_u16(),
             headers,
@@ -188,8 +189,10 @@ impl Harness {
     /// Each session's end, as its code.
     fn ends(&self) -> Vec<String> {
         let code = |e: &Result<(), Fault>| {
-            e.as_ref()
-                .map_or_else(|f| f.code().to_owned(), |()| "ok".into())
+            e.as_ref().map_or_else(
+                |f| respan_gateway_http::error_code(f).into_owned(),
+                |()| "ok".into(),
+            )
         };
         self.outcomes.all().iter().map(code).collect()
     }
@@ -217,7 +220,7 @@ fn cut(chunks: &[&str]) -> scripted::Reply {
     let mut reply = sse(chunks);
     reply
         .body_mut()
-        .push(Err(Fault::upstream("connection reset")));
+        .push(Err(Upstream::fault("connection reset")));
     reply
 }
 
@@ -633,7 +636,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let ends: Vec<_> = outcomes
             .all()
             .into_iter()
-            .map(|e| e.map_err(|f| f.code().to_owned()))
+            .map(|e| e.map_err(|f| respan_gateway_http::error_code(&f).into_owned()))
             .collect();
         assert_eq!(
             (status.as_u16(), lock(&head_only.0).clone()),

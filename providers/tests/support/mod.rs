@@ -334,3 +334,13 @@ impl Filter<Reply> for Footer {
         Ok(())
     }
 }
+
+/// The code a client's error body would carry for `fault`.
+pub fn fault_code(fault: &Fault) -> String {
+    respan_gateway_http::error_code(fault).into_owned()
+}
+
+/// `r` with its fault as its message, which tests can compare.
+pub fn says<T>(r: Result<T, Fault>) -> Result<T, String> {
+    r.map_err(|f| f.message().to_owned())
+}

@@ -1,12 +1,13 @@
 //! Private example policy: reserve before every call, settle once when it ends.
 //! Quotes, conservative charges and priced tallies are application policy, not SDK APIs.
 
+use respan_gateway_sdk::{Abandoned, ErrorCode, Internal, Truncated};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use respan_gateway_http::Status;
-use respan_gateway_sdk::{Fault, Plugin, ProviderContext, async_trait, codes};
+use respan_gateway_sdk::{Fault, Plugin, ProviderContext, async_trait};
 
 use crate::ledger::{Amount, HoldId, Ledger};
 
@@ -104,7 +105,7 @@ impl<L: Ledger> Accounting<L> {
 /// Whether `fault` says a response was cut off or its client left, which the
 /// provider may still bill, not that it refused.
 fn is_cut(fault: &Fault) -> bool {
-    [codes::ABANDONED, codes::TRUNCATED, codes::INTERNAL].contains(&fault.code())
+    fault.is::<Abandoned>() || fault.is::<Truncated>() || fault.is::<Internal>()
 }
 
 /// One call's hold, in the call's extensions.
@@ -123,7 +124,9 @@ impl<L: Ledger> Plugin for Accounting<L> {
         let Quote { accounts, reserve } = (self.quote)(px, tally.clone())?;
         if accounts.is_empty() {
             let msg = "no account to charge";
-            return Err(Fault::new(NO_ACCOUNT, msg).with(Status(401)));
+            return Err(Fault::new(msg)
+                .with(ErrorCode(NO_ACCOUNT.into()))
+                .with(Status(401)));
         }
         let hold = Arc::new(Hold {
             id: HoldId::new(),

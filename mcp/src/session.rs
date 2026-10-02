@@ -10,8 +10,8 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::sse;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
-use respan_gateway_sdk::Fault;
 use respan_gateway_sdk::futures::stream;
+use respan_gateway_sdk::{ErrorCode, Fault, Upstream};
 use serde_json::{self, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -64,9 +64,9 @@ impl Session {
         let mut child = command
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| Fault::upstream("the MCP server could not be started").with_source(e))?;
+            .map_err(|e| Upstream::fault("the MCP server could not be started").with_source(e))?;
         let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err(Fault::upstream("the MCP server has no stdio"));
+            return Err(Upstream::fault("the MCP server has no stdio"));
         };
         let (lines, mut written) = mpsc::channel::<Bytes>(BACKLOG);
         tokio::spawn(async move {
@@ -154,7 +154,7 @@ impl Session {
         // stdin fills the queue, and a POST waiting for room must still end.
         let until = Instant::now() + self.timeout;
         match timeout_at(until, self.stdin.send(lines.into())).await {
-            Ok(sent) => sent.map_err(|_| Fault::upstream("the MCP server stopped"))?,
+            Ok(sent) => sent.map_err(|_| Upstream::fault("the MCP server stopped"))?,
             Err(_) => return Err(late()),
         }
         if !asks {
@@ -203,7 +203,9 @@ fn route(routes: &mut Routes, v: Value) {
 /// The fault of a POST the child did not take or answer in time.
 fn late() -> Fault {
     let msg = "the MCP server did not answer in time";
-    Fault::new(TIMED_OUT, msg).with(Status(504))
+    Fault::new(msg)
+        .with(ErrorCode(TIMED_OUT.into()))
+        .with(Status(504))
 }
 
 /// An event stream of what `rx` receives, until it closes, or failing at

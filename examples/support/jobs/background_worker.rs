@@ -2,6 +2,7 @@
 //! holds and the webhook outbox; task handles only speed up local cancellation.
 
 use super::*;
+use respan_gateway_sdk::Upstream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn now() -> i64 {
@@ -152,7 +153,7 @@ impl Jobs {
             .timeout(Duration::from_secs(3))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| Fault::upstream(e.to_string()))?;
+            .map_err(|e| Upstream::fault(e.to_string()))?;
         for (id, url, body) in notices {
             let sent = client
                 .post(url)

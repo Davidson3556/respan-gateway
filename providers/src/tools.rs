@@ -4,7 +4,7 @@
 //! tools that the kind has no form for, such as a tool the provider runs,
 //! stays in its `unsupported` fields.
 
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{BadRequest, Fault};
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::ANTHROPIC;
@@ -28,7 +28,7 @@ pub(crate) fn arguments_json(arguments: &str) -> Result<Value, Fault> {
     if arguments.trim().is_empty() {
         return Ok(json!({}));
     }
-    let not_json = |_| Fault::bad_request("a tool call's arguments are not JSON");
+    let not_json = |_| BadRequest::fault("a tool call's arguments are not JSON");
     serde_json::from_str(arguments).map_err(not_json)
 }
 

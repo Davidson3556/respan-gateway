@@ -32,14 +32,14 @@ use respan_gateway_sdk::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, set_model, units,
 };
 use respan_gateway_sdk::{
-    ClientContext, Connection, Fault, Filter, Format, Gateway, Plugin, ProviderContext, Response,
-    codes,
+    BadRequest, ClientContext, Connection, ErrorCode, Fault, Filter, Format, Gateway, Plugin,
+    ProviderContext, Response, Upstream,
 };
 use respan_gateway_sdk::{Details, Usage};
 use serde_json::json;
 use support::{
     Adds, Call, Disclaimer, Flip, Footer, HoldAll, Metered, Nameless, SendRequest, Shout, Silence,
-    Unmask, add_provider, http_sender, providers, sender, with_plugins,
+    Unmask, add_provider, fault_code, http_sender, providers, says, sender, with_plugins,
 };
 
 const OPENAI: &str = "http://openai.test/v1";
@@ -170,7 +170,7 @@ impl Local {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .pop_front()
-                    .ok_or_else(|| Fault::upstream("no scripted provider response"))?;
+                    .ok_or_else(|| Upstream::fault("no scripted provider response"))?;
                 let (mut head, frames) = answer.into_parts();
                 respan_gateway_http::strip_origin_headers(&mut head.headers);
                 Ok((
@@ -338,7 +338,9 @@ impl Plugin for Guard {
         let catches = self.0;
         cx.filter(move |e: &mut Reply| {
             if catches(e) {
-                return Err(Fault::new("blocked", "not allowed").with(Status(403)));
+                return Err(Fault::new("not allowed")
+                    .with(ErrorCode("blocked".into()))
+                    .with(Status(403)));
             }
             Ok(())
         })?;
@@ -409,7 +411,7 @@ struct Fallback(Vec<&'static str>);
 #[async_trait]
 impl Plugin for Fallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut last = Err(Fault::upstream("no providers"));
+        let mut last = Err(Upstream::fault("no providers"));
         for name in &self.0 {
             match cx.call(*name).await {
                 Ok(mut resp) => {
@@ -451,7 +453,7 @@ async fn a_stream_is_relayed_byte_for_byte_with_usage() {
     h.sites.openai.reply(fixture::sse(STREAM));
 
     assert_eq!(h.body(chat()).await, STREAM.concat());
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
     let usage = h.usage.total();
     assert_eq!(usage.get(units::INPUT_TOKENS), Some(5.0));
     assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(2.0));
@@ -464,7 +466,7 @@ async fn a_unary_response_is_relayed_byte_for_byte_with_usage() {
     fake.answer(Answer::raw(UNARY));
 
     assert_eq!(h.body(valid_unary_chat()).await, UNARY);
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(4.0));
 }
 
@@ -528,7 +530,9 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
                 .await?;
             let unsafe_ = |e: &Reply| e.texts().any(|text| text == "UNSAFE");
             match verdict.iter().any(unsafe_) {
-                true => Err(Fault::new("unsafe", "the judge refused").with(Status(403))),
+                true => Err(Fault::new("the judge refused")
+                    .with(ErrorCode("unsafe".into()))
+                    .with(Status(403))),
                 false => Ok(None),
             }
         }
@@ -652,7 +656,8 @@ async fn edits_apply_the_last_added_first() {
 
 #[tokio::test]
 async fn a_refusal_is_an_error_in_the_client_format() {
-    let fault = Fault::new("insufficient_credits", "balance too low")
+    let fault = Fault::new("balance too low")
+        .with(ErrorCode("insufficient_credits".into()))
         .with(Status(402))
         .with(Details(json!({ "balance": 0.12 })));
     let h = Harness::new(vec![Arc::new(Refuse(fault.clone()))], Some("openai"));
@@ -670,7 +675,11 @@ async fn a_refusal_is_an_error_in_the_client_format() {
     assert_eq!(err["error"]["balance"], 0.12);
     assert!(h.sites.sent.sent().is_empty());
     // The fault carries the status.
-    assert_eq!(h.log.only(), Err(fault));
+    let logged = h.log.only().expect_err("the refusal is logged");
+    assert_eq!(logged.message(), fault.message());
+    assert_eq!(fault_code(&logged), "insufficient_credits");
+    assert_eq!(logged.get::<Status>().map(|s| s.0), Some(402));
+    assert_eq!(logged.get::<Details>(), fault.get::<Details>());
 }
 
 #[tokio::test]
@@ -684,7 +693,7 @@ async fn a_plugin_can_respond_itself() {
     assert_eq!(body["usage"]["completion_tokens"], 1);
     // A plugin's own answer passes no provider edge, so
     // no meter there sees its usage; no call ran.
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
     assert!(h.usage.all().is_empty());
 }
 
@@ -699,7 +708,7 @@ async fn a_plugin_can_answer_by_calling_providers() {
 
     assert_eq!(h.body(chat()).await, STREAM.concat());
     assert_eq!(h.sites.sent.sent().len(), 2);
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
 }
 
 #[tokio::test]
@@ -729,7 +738,7 @@ async fn a_cut_stream_ends_with_an_error_event_relayed_or_filtered() {
             );
         }
         assert!(!body.contains("[DONE]"));
-        assert!(matches!(h.log.only(), Err(f) if f.code() == codes::TRUNCATED));
+        assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "truncated"));
     }
 }
 
@@ -740,21 +749,21 @@ async fn a_transport_error_mid_stream_ends_with_an_error_event() {
     broken.body_mut().truncate(2);
     broken
         .body_mut()
-        .push(Err(Fault::upstream("connection reset")));
+        .push(Err(Upstream::fault("connection reset")));
     h.sites.openai.reply(broken);
 
     let body = h.body(chat()).await;
 
     assert!(body.starts_with(&STREAM[..2].concat()), "{body}");
     assert!(body.ends_with("\"type\":\"upstream\",\"param\":null,\"code\":\"upstream\"}}\n\n"));
-    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "upstream"));
 }
 
 #[tokio::test]
 async fn a_unary_body_cut_before_any_bytes_is_an_error_in_the_client_format() {
     let h = relay();
     let mut reset = fixture::json(StatusCode::OK, UNARY);
-    *reset.body_mut() = vec![Err(Fault::upstream("connection reset"))];
+    *reset.body_mut() = vec![Err(Upstream::fault("connection reset"))];
     h.sites.openai.reply(reset);
 
     let (status, _, body) = h.send(unary_chat()).await;
@@ -763,7 +772,7 @@ async fn a_unary_body_cut_before_any_bytes_is_an_error_in_the_client_format() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
-    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "upstream"));
 }
 
 #[tokio::test]
@@ -776,7 +785,7 @@ async fn a_broken_unary_success_is_refused_as_the_providers_failure() {
     let (status, body) = h.text(unary_chat()).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
-    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "upstream"));
 }
 
 #[tokio::test]
@@ -790,7 +799,7 @@ async fn a_client_that_leaves_mid_response_ends_once() {
     h.gw.idle().await;
 
     let o = h.log.only();
-    assert!(matches!(o, Err(f) if f.code() == codes::ABANDONED));
+    assert!(matches!(o, Err(f) if fault_code(&f) == "abandoned"));
 }
 
 #[tokio::test]
@@ -803,7 +812,7 @@ async fn a_client_that_leaves_before_a_response_ends_once() {
     h.gw.idle().await;
 
     let o = h.log.only();
-    assert!(matches!(o, Err(f) if f.code() == codes::ABANDONED));
+    assert!(matches!(o, Err(f) if fault_code(&f) == "abandoned"));
     assert_eq!(
         hang.all().len(),
         1,
@@ -816,7 +825,7 @@ async fn only_plugins_that_ran_get_end_hooks() {
     let after = Outcomes::default();
     let h = Harness::new(
         vec![
-            Arc::new(Refuse(Fault::bad_request("no"))),
+            Arc::new(Refuse(BadRequest::fault("no"))),
             Arc::new(after.clone()),
         ],
         Some("openai"),
@@ -839,7 +848,7 @@ async fn a_panicking_end_hook_does_not_skip_the_others() {
 
     let _ = h.send(chat()).await;
 
-    assert_eq!(after.only(), Ok(()));
+    assert_eq!(says(after.only()), Ok(()));
 }
 
 #[tokio::test]
@@ -862,10 +871,8 @@ async fn requests_no_served_format_accepts_are_404() {
 async fn a_gateway_that_cannot_work_fails_as_it_is_built() {
     let sites = Sites::default();
     let openai = || provider(&sites.openai, "openai", None);
-    let built = |gw: Result<Gateway, Fault>| {
-        gw.err()
-            .map(|f| (f.code().to_owned(), f.message().to_owned()))
-    };
+    let built =
+        |gw: Result<Gateway, Fault>| gw.err().map(|f| (fault_code(&f), f.message().to_owned()));
     let cases = [
         (
             providers([openai(), openai()]),
@@ -877,7 +884,7 @@ async fn a_gateway_that_cannot_work_fails_as_it_is_built() {
         ),
     ];
     for (gw, expected) in cases {
-        let expected = Some((codes::CONFIG.to_owned(), expected.to_owned()));
+        let expected = Some(("config".to_owned(), expected.to_owned()));
         assert_eq!(built(gw), expected);
     }
 }
@@ -893,7 +900,7 @@ async fn a_gateway_with_no_target_and_no_plugins_refuses_404_in_the_clients_form
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(headers["content-type"], "application/json");
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert!(body.contains(codes::NOT_FOUND), "{body}");
+    assert!(body.contains("not_found"), "{body}");
     assert!(sites.sent.sent().is_empty());
 }
 
@@ -1039,7 +1046,9 @@ async fn caller_values_reach_plugins_by_type() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             match cx.extensions().get::<Tenant>() {
                 Some(Tenant("acme")) => Ok(None),
-                _ => Err(Fault::new("forbidden", "unknown tenant").with(Status(403))),
+                _ => Err(Fault::new("unknown tenant")
+                    .with(ErrorCode("forbidden".into()))
+                    .with(Status(403))),
             }
         }
     }
@@ -1080,15 +1089,17 @@ async fn a_panic_in_a_filter_is_refused_as_internal() {
     // format, not a dropped connection.
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = body.map(|b| String::from_utf8_lossy(&b).into_owned());
-    assert!(body.is_ok_and(|b| b.contains(codes::INTERNAL)));
-    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::INTERNAL));
+    assert!(body.is_ok_and(|b| b.contains("internal")));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "internal"));
 }
 
 #[tokio::test]
 async fn a_client_body_that_breaks_off_is_refused_in_the_clients_format() {
     let h = relay();
     let broken = futures::stream::iter([Err::<http_body::Frame<bytes::Bytes>, _>(
-        Fault::new("too_large", "request body too large").with(Status(413)),
+        Fault::new("request body too large")
+            .with(ErrorCode("too_large".into()))
+            .with(Status(413)),
     )]);
     let body = Body::stream(http_body_util::BodyExt::into_data_stream(
         http_body_util::StreamBody::new(broken),
@@ -1123,14 +1134,18 @@ async fn a_plugin_that_panics_is_refused_as_internal() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = body.map(|b| String::from_utf8_lossy(&b).into_owned());
-    assert!(body.is_ok_and(|b| b.contains(codes::INTERNAL)));
-    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::INTERNAL));
+    assert!(body.is_ok_and(|b| b.contains("internal")));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "internal"));
 }
 
 #[tokio::test]
 async fn a_refusal_its_format_cannot_write_is_a_plain_500() {
     // OpenAI has no error under a success, so the refusal cannot be written.
-    let refuse = Refuse(Fault::new("odd", "not an error").with(Status(200)));
+    let refuse = Refuse(
+        Fault::new("not an error")
+            .with(ErrorCode("odd".into()))
+            .with(Status(200)),
+    );
     let h = Harness::new(vec![Arc::new(refuse)], Some("openai"));
 
     let (status, headers, body) = h.send(unary_chat()).await;
@@ -1140,7 +1155,7 @@ async fn a_refusal_its_format_cannot_write_is_a_plain_500() {
     assert_eq!(body.ok().as_deref(), Some(&b"not an error"[..]));
     // The adapter wrote the plain 500.
     let o = h.log.only();
-    assert!(matches!(o, Err(f) if f.code() == "odd"));
+    assert!(matches!(o, Err(f) if fault_code(&f) == "odd"));
 }
 
 #[tokio::test]
@@ -1250,7 +1265,7 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
         body.ends_with("\"type\":\"blocked\",\"param\":null,\"code\":\"blocked\"}}\n\n"),
         "{body}"
     );
-    assert!(matches!(h.log.only(), Err(f) if f.code() == "blocked"));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "blocked"));
 }
 
 #[tokio::test]
@@ -1294,7 +1309,7 @@ async fn plugins_see_the_request_and_change_its_model() {
     let sent: serde_json::Value =
         serde_json::from_slice(h.sites.sent.sent()[0].body()).unwrap_or_default();
     assert_eq!(sent["model"], "gpt-small");
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
     assert_eq!(redirect.0.lock().map(|s| *s).ok().flatten(), Some("hi"));
 }
 
@@ -1341,7 +1356,7 @@ async fn whole_untyped_bytes_answer_a_streaming_client_as_a_stream() {
     assert!(body.starts_with("data: {"), "{body}");
     assert!(body.contains("\"content\":\"hi\""), "{body}");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
 }
 
 #[tokio::test]
@@ -1443,7 +1458,7 @@ async fn a_client_that_leaves_before_the_head_ends_abandoned() {
     assert!(gave_up.is_err());
     gw.idle().await;
 
-    assert!(matches!(log.only(), Err(f) if f.code() == codes::ABANDONED));
+    assert!(matches!(log.only(), Err(f) if fault_code(&f) == "abandoned"));
 }
 
 #[test]
@@ -1941,7 +1956,7 @@ async fn an_embedder_reads_how_its_request_ended() {
     let (resp, ended) = serve(&h.gw, req).await;
     let _ = read_whole(resp).await;
 
-    assert_eq!(ended.await, Ok(()));
+    assert_eq!(says(ended.await), Ok(()));
 }
 
 #[tokio::test]
@@ -1989,8 +2004,8 @@ async fn every_response_says_how_its_request_ended() {
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     // Its end is that of the plain refusal.
-    let end = ended.await.map_err(|f| f.code().to_owned());
-    assert_eq!(end, Err(codes::NOT_FOUND.to_owned()));
+    let end = ended.await.map_err(|f| fault_code(&f));
+    assert_eq!(end, Err("not_found".to_owned()));
 }
 
 #[tokio::test]
@@ -2153,7 +2168,7 @@ async fn other_choices_a_filter_took_leave_their_chunks() {
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(!body.contains("error") && !body.contains("\"B\""), "{body}");
     assert!(body.ends_with("data: [DONE]\n\n"));
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
 }
 
 #[tokio::test]
@@ -2246,8 +2261,8 @@ async fn collecting_the_wrong_type_fails_even_with_nothing_said() {
                 .try_collect::<Vec<_>>()
                 .await;
             assert_eq!(
-                got.err().map(|f| f.code().to_owned()),
-                Some(codes::INTERNAL.to_owned())
+                got.err().map(|f| fault_code(&f)),
+                Some("internal".to_owned())
             );
             // Its own kind reads, though empty.
             let got = cx
@@ -2257,7 +2272,7 @@ async fn collecting_the_wrong_type_fails_even_with_nothing_said() {
                 .try_collect::<Vec<_>>()
                 .await;
             assert!(got.is_ok_and(|events| events.is_empty()));
-            Err(Fault::bad_request("checked"))
+            Err(BadRequest::fault("checked"))
         }
     }
 
@@ -2331,7 +2346,7 @@ async fn a_calls_own_input_its_format_cannot_write_anew_is_the_plugins_fault() {
 
     // The plugin brought it, so it is not the client's fault.
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::CONFIG));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "config"));
     assert!(h.sites.sent.sent().is_empty());
 }
 
@@ -2697,8 +2712,8 @@ async fn a_success_framed_as_an_event_is_the_providers_failure_on_every_path() {
         // Refused and counted a provider failure, plugin or not.
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(body.contains("\"code\":\"upstream\""), "{body}");
-        let end = h.log.only().map_err(|f| f.code().to_owned());
-        assert_eq!(end, Err(codes::UPSTREAM.to_owned()));
+        let end = h.log.only().map_err(|f| fault_code(&f));
+        assert_eq!(end, Err("upstream".to_owned()));
     }
 }
 
@@ -2717,7 +2732,10 @@ async fn a_failure_of_several_events_keeps_the_providers_words() {
                 .await;
             let fault = answer.err();
             assert_eq!(fault.as_ref().map(Fault::message), Some("busy"));
-            assert_eq!(fault.as_ref().map(Fault::code), Some("overloaded_error"));
+            assert_eq!(
+                fault.as_ref().map(fault_code).as_deref(),
+                Some("overloaded_error")
+            );
             assert_eq!(
                 fault.map(|f| respan_gateway_http::status(&f).as_u16()),
                 Some(529)
@@ -2796,7 +2814,7 @@ async fn an_error_in_a_success_says_what_the_provider_answered() {
             o.map_err(|f| {
                 (
                     respan_gateway_http::status(&f),
-                    f.code().to_owned(),
+                    fault_code(&f),
                     f.message().to_owned(),
                 )
             })
@@ -2830,7 +2848,7 @@ async fn a_gateway_dropped_mid_response_serves_what_it_began() {
     let (_, _, body) = read_whole(resp).await;
 
     assert_eq!(body.ok().as_deref(), Some(STREAM.concat().as_bytes()));
-    assert_eq!(ended.await, Ok(()));
+    assert_eq!(says(ended.await), Ok(()));
 }
 
 #[tokio::test]
@@ -2887,7 +2905,7 @@ async fn a_providers_trailers_are_not_passed_on() {
     let collected = collected.unwrap_or_else(|e| panic!("{e}"));
     assert!(collected.trailers().is_none());
     assert_eq!(&collected.to_bytes()[..], UNARY.as_bytes());
-    assert_eq!(log.only(), Ok(()));
+    assert_eq!(says(log.only()), Ok(()));
 }
 
 #[tokio::test]
@@ -2902,7 +2920,7 @@ async fn a_providers_error_event_in_a_stream_goes_out_as_it_came() {
 
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.ends_with(error), "{body}");
-    let end = h.log.only().map_err(|f| f.code().to_owned());
+    let end = h.log.only().map_err(|f| fault_code(&f));
     assert_eq!(end, Err("server_error".to_owned()));
 }
 
@@ -2916,7 +2934,9 @@ async fn a_guard_refuses_what_it_cannot_read() {
             let chat = cx.input::<Conversation>()?;
             if !chat.messages.iter().all(Message::is_plain) {
                 let why = "content the guard cannot read";
-                return Err(Fault::new("unreadable", why).with(Status(403)));
+                return Err(Fault::new(why)
+                    .with(ErrorCode("unreadable".into()))
+                    .with(Status(403)));
             }
             Ok(None)
         }
@@ -2957,7 +2977,7 @@ async fn a_providers_error_after_its_finish_keeps_both_and_ends_last() {
         assert_eq!(finished, !held, "{body}");
         assert!(body.ends_with(error), "held {held}: {body}");
         assert_eq!(body.contains("[footer]"), held, "{body}");
-        let end = h.log.only().map_err(|f| f.code().to_owned());
+        let end = h.log.only().map_err(|f| fault_code(&f));
         assert_eq!(end, Err("server_error".to_owned()));
     }
 }
@@ -3061,7 +3081,7 @@ async fn a_response_dropped_unsent_cancels_its_provider_body() {
     gw.idle().await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(log.only(), Ok(()));
+    assert_eq!(says(log.only()), Ok(()));
     assert!(dropped.load(Ordering::SeqCst));
 }
 
@@ -3188,7 +3208,9 @@ async fn a_call_refused_on_the_provider_edge_refuses_the_request_before_sending(
     #[async_trait]
     impl Plugin for Deny {
         async fn on_provider(&self, _px: &mut ProviderContext) -> Result<(), Fault> {
-            Err(Fault::new("denied", "no calls").with(Status(403)))
+            Err(Fault::new("no calls")
+                .with(ErrorCode("denied".into()))
+                .with(Status(403)))
         }
     }
 
@@ -3202,7 +3224,7 @@ async fn a_call_refused_on_the_provider_edge_refuses_the_request_before_sending(
     assert!(h.sites.sent.sent().is_empty());
     // Refused before the plugins after it ran on the provider edge.
     assert_eq!(bill.started(), ["client"]);
-    assert!(matches!(h.log.only(), Err(f) if f.code() == "denied"));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "denied"));
 }
 
 #[tokio::test]
@@ -3303,8 +3325,8 @@ async fn a_call_dropped_unread_ends_once_as_abandoned() {
     assert_eq!(ended.len(), 2);
     let (call, dropped) = &ended[0];
     assert_eq!(call, "backup/gpt-x");
-    assert!(matches!(&dropped, Err(f) if f.code() == codes::ABANDONED));
-    assert_eq!(ended[1].1, Ok(()));
+    assert!(matches!(&dropped, Err(f) if fault_code(f) == "abandoned"));
+    assert_eq!(says(ended[1].1.clone()), Ok(()));
 }
 
 #[tokio::test]
@@ -3339,7 +3361,7 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
         failed.map(respan_gateway_http::status),
         Some(StatusCode::SERVICE_UNAVAILABLE)
     );
-    assert_eq!(*answered, Ok(()));
+    assert_eq!(says(answered.clone()), Ok(()));
     let backup = metered(&h)
         .into_iter()
         .find(|(c, _)| c.starts_with("backup"));
@@ -3348,7 +3370,7 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
 
 fn ended_with(bill: &Bill, code: &str) -> bool {
     let ended = bill.ended();
-    ended.len() == 1 && matches!(&ended[0].1, Err(f) if f.code() == code)
+    ended.len() == 1 && matches!(&ended[0].1, Err(f) if fault_code(f) == code)
 }
 
 #[tokio::test]
@@ -3362,7 +3384,7 @@ async fn a_panic_in_on_provider_ends_the_call_and_refuses_the_request() {
 
     assert_eq!(h.text(chat()).await.0, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(h.sites.sent.sent().is_empty());
-    assert!(ended_with(&bill, codes::INTERNAL));
+    assert!(ended_with(&bill, "internal"));
 }
 
 #[tokio::test]
@@ -3376,8 +3398,8 @@ async fn a_panic_in_a_provider_filter_ends_the_call_as_internal() {
     h.sites.openai.reply(fixture::sse(STREAM));
 
     assert_eq!(h.text(chat()).await.0, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(ended_with(&bill, codes::INTERNAL));
-    assert!(matches!(h.log.only(), Err(f) if f.code() == codes::INTERNAL));
+    assert!(ended_with(&bill, "internal"));
+    assert!(matches!(h.log.only(), Err(f) if fault_code(&f) == "internal"));
 }
 
 #[tokio::test]
@@ -3392,7 +3414,7 @@ async fn a_client_that_leaves_mid_stream_ends_the_call_abandoned() {
     drop(body);
     h.gw.idle().await;
 
-    assert!(ended_with(&bill, codes::ABANDONED));
+    assert!(ended_with(&bill, "abandoned"));
 }
 
 #[tokio::test]
@@ -3402,7 +3424,7 @@ async fn a_call_the_transport_fails_ends_with_its_fault() {
 
     assert_eq!(h.text(chat()).await.0, StatusCode::BAD_GATEWAY);
     // This one is no answer.
-    assert!(ended_with(&bill, codes::UPSTREAM));
+    assert!(ended_with(&bill, "upstream"));
     assert!(bill.ended()[0].1.as_ref().is_err_and(|f| {
         f.get::<respan_gateway_http::ProviderError>()
             .map(|e| &e.response)
@@ -3419,7 +3441,9 @@ async fn a_refused_call_ends_for_the_refusing_plugin_and_those_before_it() {
     impl Plugin for Deny {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             self.0.on_provider(px).await?;
-            Err(Fault::new("denied", "no calls").with(Status(403)))
+            Err(Fault::new("no calls")
+                .with(ErrorCode("denied".into()))
+                .with(Status(403)))
         }
 
         async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
@@ -3829,7 +3853,7 @@ impl Ends {
 #[async_trait]
 impl Plugin for Ends {
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
-        let end = end.as_ref().err().map_or("ok", |f| f.code());
+        let end = end.as_ref().err().map_or("ok".to_owned(), fault_code);
         let end = format!("{} {end}", px.provider());
         self.0.lock().map(|mut e| e.push(end)).ok();
     }
@@ -3908,10 +3932,7 @@ async fn a_response_kept_past_its_request_ends_abandoned_and_reads_so() {
         .outputs::<Reply>()
         .try_collect::<Vec<_>>()
         .await;
-    assert_eq!(
-        read.err().map(|f| f.code().to_owned()),
-        Some(codes::ABANDONED.into())
-    );
+    assert_eq!(read.err().map(|f| fault_code(&f)), Some("abandoned".into()));
 }
 
 #[tokio::test]
@@ -3938,7 +3959,10 @@ async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
     let ended = bill.ended();
     assert_eq!(ended.len(), 1);
     let end = &ended[0].1;
-    assert_eq!(end.as_ref().err().map(|f| f.code()), Some("blocked"));
+    assert_eq!(
+        end.as_ref().err().map(fault_code).as_deref(),
+        Some("blocked")
+    );
     assert_eq!(input_tokens(&h.usage.all()[0]), 5.0);
 }
 
@@ -4029,7 +4053,7 @@ async fn a_response_goes_only_to_the_request_whose_call_it_answers() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
-    assert!(body.contains(codes::INTERNAL), "{body}");
+    assert!(body.contains("internal"), "{body}");
     let mut ends = ends.all();
     ends.sort();
     assert_eq!(ends, ["backup abandoned", "client", "client", "openai ok"]);
@@ -4076,10 +4100,7 @@ async fn a_reader_waiting_on_a_kept_response_wakes_as_its_request_closes() {
 
     assert_eq!(status, StatusCode::OK);
     let read = read.expect("the reader woke").expect("the reader ran");
-    assert_eq!(
-        read.err().map(|f| f.code().to_owned()),
-        Some(codes::ABANDONED.into())
-    );
+    assert_eq!(read.err().map(|f| fault_code(&f)), Some("abandoned".into()));
     assert!(dropped.load(Ordering::SeqCst));
 }
 
@@ -4110,7 +4131,7 @@ async fn filters_of_a_call_abandoned_at_close_get_their_end() {
         }
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-            let end = end.as_ref().err().map_or("ok", |f| f.code());
+            let end = end.as_ref().err().map_or("ok".to_owned(), fault_code);
             self.0.lock().map(|mut n| n.push(end.to_owned())).ok();
             Ok(())
         }
@@ -4136,13 +4157,13 @@ async fn filters_of_a_call_abandoned_at_close_get_their_end() {
 
     assert_eq!(closes(&h, unary_chat()).await, StatusCode::OK);
     let noted = note.0.lock().map(|n| n.clone()).unwrap_or_default();
-    assert_eq!(noted, [codes::ABANDONED]);
+    assert_eq!(noted, ["abandoned"]);
 }
 
 // How a response begins and ends, whatever goes wrong around it.
 
-fn code(end: &Result<(), Fault>) -> &str {
-    end.as_ref().err().map_or("ok", |f| f.code())
+fn code(end: &Result<(), Fault>) -> String {
+    end.as_ref().err().map_or("ok".to_owned(), fault_code)
 }
 
 /// Reads a body frame by frame: the text that arrived, and the fault that
@@ -4200,7 +4221,9 @@ impl Encoder<Reply> for Garbling {
     fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
         if reply.texts().any(|text| text == "bad") {
             out.extend_from_slice(b"GARBAGE");
-            return Err(Fault::new("unwritable", "cannot write it").with(Status(422)));
+            return Err(Fault::new("cannot write it")
+                .with(ErrorCode("unwritable".into()))
+                .with(Status(422)));
         }
         self.0.encode(reply, out)
     }
@@ -4232,7 +4255,7 @@ async fn a_response_whose_last_bytes_were_read_ends_complete() {
     drop(body);
     h.gw.idle().await;
 
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
 }
 
 /// Filters the response sent to the client through a filter that panics.
@@ -4256,10 +4279,10 @@ async fn a_panic_before_the_head_ends_the_call_that_answered_internal() {
     let (status, _, _) = h.send(chat()).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(code(&h.log.only()), codes::INTERNAL);
+    assert_eq!(code(&h.log.only()), "internal");
     // The call ends with the panic that refused its response.
     let ended = bill.ended();
-    assert_eq!(code(&ended[0].1), codes::INTERNAL);
+    assert_eq!(code(&ended[0].1), "internal");
 }
 
 #[tokio::test]
@@ -4281,8 +4304,8 @@ async fn a_panic_before_any_bytes_is_refused() {
     let (status, body) = h.text(unary_chat()).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(body.contains(codes::INTERNAL), "{body}");
-    assert_eq!(code(&h.log.only()), codes::INTERNAL);
+    assert!(body.contains("internal"), "{body}");
+    assert_eq!(code(&h.log.only()), "internal");
 }
 
 #[tokio::test]
@@ -4308,7 +4331,7 @@ async fn a_panic_after_bytes_went_out_keeps_those_written_before_it() {
         text.contains("\"Hi\"") && text.contains("\" world\""),
         "{text}"
     );
-    assert!(text.contains(codes::INTERNAL), "{text}");
+    assert!(text.contains("internal"), "{text}");
     assert!(fault.is_none());
 }
 
@@ -4346,8 +4369,8 @@ async fn an_empty_stream_of_another_kind_is_refused() {
     let (status, body) = h.text(unary_chat()).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(body.contains(codes::INTERNAL), "{body}");
-    assert_eq!(code(&h.log.only()), codes::INTERNAL);
+    assert!(body.contains("internal"), "{body}");
+    assert_eq!(code(&h.log.only()), "internal");
 }
 
 #[tokio::test]
@@ -4374,7 +4397,11 @@ async fn a_client_edge_failure_ends_the_call_however_its_bytes_were_split() {
 
         assert!(body.contains("blocked"), "{body}");
         let ended = bill.ended();
-        let end = ended[0].1.as_ref().err().map_or("ok", |f| f.code());
+        let end = ended[0]
+            .1
+            .as_ref()
+            .err()
+            .map_or("ok".to_owned(), fault_code);
         assert_eq!(end, want, "{chunks:?}");
     }
 }
@@ -4506,7 +4533,7 @@ async fn idle_waits_for_a_response_still_streaming() {
 
     let _ = read_whole(resp).await;
     h.gw.idle().await;
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
 }
 
 #[tokio::test]
@@ -4531,7 +4558,9 @@ async fn a_gateway_changed_after_cloning_waits_only_for_its_own_requests() {
 async fn a_body_that_broke_off_is_refused_without_its_model_read() {
     let sites = Sites::default();
     let gw = fragile(&sites, Vec::new());
-    let too_large = Fault::new("too_large", "too large").with(Status(413));
+    let too_large = Fault::new("too large")
+        .with(ErrorCode("too_large".into()))
+        .with(Status(413));
     let broken = futures::stream::iter([Err::<http_body::Frame<bytes::Bytes>, _>(too_large)]);
     let mut req = http::Request::new(http_body_util::StreamBody::new(broken));
     *req.method_mut() = http::Method::POST;
@@ -4542,7 +4571,7 @@ async fn a_body_that_broke_off_is_refused_without_its_model_read() {
 
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(headers["content-type"], "application/json");
-    let end = ended.await.map_err(|f| f.code().to_owned());
+    let end = ended.await.map_err(|f| fault_code(&f));
     assert_eq!(end, Err("too_large".to_owned()));
 }
 
@@ -4572,7 +4601,7 @@ async fn a_call_read_in_on_client_is_metered_like_the_targets() {
     assert_eq!(h.text(unary_chat()).await.0, StatusCode::OK);
 
     let fault = read.0.lock().ok().and_then(|mut f| f.take());
-    assert_eq!(fault, None);
+    assert!(fault.is_none());
     let calls = metered(&h);
     let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
     assert_eq!(calls, [("backup/gpt-x", 4.0), ("openai/gpt-x", 4.0)]);
@@ -4966,7 +4995,11 @@ async fn buffer_until_rechecks_filtered_values_with_a_new_predicate() {
 
 #[tokio::test]
 async fn a_provider_hook_that_fails_refuses_the_call() {
-    let unsigned = OnProvider(|_| Err(Fault::new("unsigned", "no key").with(Status(403))));
+    let unsigned = OnProvider(|_| {
+        Err(Fault::new("no key")
+            .with(ErrorCode("unsigned".into()))
+            .with(Status(403)))
+    });
     let h = Harness::new(vec![Arc::new(unsigned)], Some("openai"));
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
@@ -5042,7 +5075,7 @@ async fn a_205_is_sent_with_no_body() {
 
     assert_eq!(status, StatusCode::RESET_CONTENT);
     assert_eq!(body.ok(), Some(bytes::Bytes::new()));
-    assert_eq!(h.log.only(), Ok(()));
+    assert_eq!(says(h.log.only()), Ok(()));
 }
 
 // A call's usage is metered on its provider edge, as decoded.
@@ -5078,7 +5111,11 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
     #[async_trait]
     impl Plugin for Failing {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let fails = [Err::<Reply, _>(Fault::new("no", "no").with(Status(403)))];
+            let fails = [Err::<Reply, _>(
+                Fault::new("no")
+                    .with(ErrorCode("no".into()))
+                    .with(Status(403)),
+            )];
             Ok(Some(Response::stream(futures::stream::iter(fails))))
         }
     }
@@ -5164,12 +5201,13 @@ async fn a_failed_input_filter_fails_the_input_for_every_later_reader() {
                 chat.temperature = Some(0.0);
                 Ok(())
             })?;
-            let fails = |_: &mut Conversation| Err(Fault::new("no", "no").with(Status(403)));
+            let fails = |_: &mut Conversation| {
+                Err(Fault::new("no")
+                    .with(ErrorCode("no".into()))
+                    .with(Status(403)))
+            };
             let _ = cx.filter(fails);
-            let read = cx
-                .input::<Conversation>()
-                .err()
-                .map(|f| f.code().to_owned());
+            let read = cx.input::<Conversation>().err().map(|f| fault_code(&f));
             assert_eq!(read.as_deref(), Some("no"));
             Ok(None)
         }
@@ -5205,7 +5243,7 @@ async fn a_failed_input_filter_fails_the_input_for_every_later_reader() {
         h.text(unary_chat()).await.0,
         StatusCode::INTERNAL_SERVER_ERROR
     );
-    assert_eq!(code(&h.log.only()), codes::INTERNAL);
+    assert_eq!(code(&h.log.only()), "internal");
     assert!(h.sites.sent.sent().is_empty());
 }
 
@@ -5237,8 +5275,8 @@ async fn a_call_is_a_copy_sent_until_the_request_ends() {
 
     let late = keep.0.lock().ok().and_then(|mut k| k.take());
     let late = late.unwrap_or_else(|| panic!("no call kept"));
-    let refused = late.await.err().map(|f| f.code().to_owned());
-    assert_eq!(refused.as_deref(), Some(codes::INTERNAL));
+    let refused = late.await.err().map(|f| fault_code(&f));
+    assert_eq!(refused.as_deref(), Some("internal"));
     assert_eq!(h.sites.sent.sent().len(), 2);
 }
 
@@ -5273,7 +5311,7 @@ async fn a_meter_sees_usage_though_a_filter_keeps_all_back_and_another_fails_at_
     let h = Harness::new(vec![Arc::new(Both)], Some("openai"));
     h.sites.openai.reply(fixture::sse(STREAM));
     let _ = h.send(chat()).await;
-    assert_eq!(code(&h.calls.all()[0]), codes::INTERNAL);
+    assert_eq!(code(&h.calls.all()[0]), "internal");
     assert_eq!(h.usage.total().get(units::INPUT_TOKENS), Some(5.0));
 }
 
@@ -5299,7 +5337,7 @@ async fn a_calls_response_read_to_its_end_then_dropped_ends_ok() {
 
     let all = h.calls.all();
     assert_eq!(all.len(), 1);
-    assert_eq!(all[0], Ok(()));
+    assert_eq!(says(all[0].clone()), Ok(()));
     assert_eq!(h.usage.all()[0].get(units::INPUT_TOKENS), Some(4.0));
 }
 
@@ -5315,7 +5353,9 @@ async fn a_meter_sees_usage_a_filter_fails_on() {
 }
 
 fn over_the_cap(_: &mut Reply) -> Result<(), Fault> {
-    Err(Fault::new("cap", "over the cap").with(Status(402)))
+    Err(Fault::new("over the cap")
+        .with(ErrorCode("cap".into()))
+        .with(Status(402)))
 }
 
 /// Fails a call at its first reply.
@@ -5392,7 +5432,11 @@ async fn a_refusal_before_the_head_ends_a_plugins_response_filters() {
         }
 
         fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-            let end = end.as_ref().err().map_or("ok", |f| f.code()).to_owned();
+            let end = end
+                .as_ref()
+                .err()
+                .map_or("ok".to_owned(), fault_code)
+                .to_owned();
             self.0.lock().map(|mut e| e.push(end)).ok();
             Ok(())
         }
@@ -5420,7 +5464,7 @@ async fn a_refusal_before_the_head_ends_a_plugins_response_filters() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let ends = ends.0.lock().map(|e| e.clone()).unwrap_or_default();
-    assert_eq!(ends, [codes::INTERNAL]);
+    assert_eq!(ends, ["internal"]);
 }
 
 #[tokio::test]
@@ -5460,7 +5504,7 @@ async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
         let all = h.calls.all();
         let o = &all[0];
         (
-            o.as_ref().err().map(|f| f.code().to_owned()),
+            o.as_ref().err().map(fault_code),
             h.usage.all()[0].get(units::OUTPUT_TOKENS),
         )
     };
@@ -5635,7 +5679,7 @@ struct ArchFallback(Vec<&'static str>);
 #[async_trait]
 impl Plugin for ArchFallback {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut last = Err(Fault::upstream("no provider to try"));
+        let mut last = Err(Upstream::fault("no provider to try"));
         for name in &self.0 {
             match cx.call(*name).await {
                 Ok(mut resp) => {
@@ -5749,7 +5793,7 @@ impl Plugin for Pii {
         px.filter(move |chat: &mut Conversation| {
             for message in &mut chat.messages {
                 if !message.is_plain() {
-                    return Err(Fault::bad_request("content PII redaction cannot read"));
+                    return Err(BadRequest::fault("content PII redaction cannot read"));
                 }
                 for part in &mut message.content {
                     if let Content::Text { text, .. } = part {
@@ -5795,7 +5839,7 @@ struct Fallback11(Vec<&'static str>);
 #[async_trait]
 impl Plugin for Fallback11 {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut last = Err(Fault::upstream("no provider to fall back on"));
+        let mut last = Err(Upstream::fault("no provider to fall back on"));
         for name in &self.0 {
             // A provider's error answer is the failure
             // `until_content` returns, not a status to check first.
@@ -5918,11 +5962,11 @@ async fn synthetic_outputs_use_the_callers_predicate() {
             let mut quiet = Reply::default();
             quiet.usage.add(units::INPUT_TOKENS, 1.0);
             // A policy accepting any event commits to the quiet reply.
-            let made = [Ok(quiet.clone()), Err(Fault::upstream("gone"))];
+            let made = [Ok(quiet.clone()), Err(Upstream::fault("gone"))];
             let mut unfiltered = Response::stream(futures::stream::iter(made));
             assert!(unfiltered.buffer_until(|_: &Reply| true).await.is_ok());
             drop(unfiltered);
-            let made = [Ok(quiet), Err(Fault::upstream("gone"))];
+            let made = [Ok(quiet), Err(Upstream::fault("gone"))];
             let content = |r: &Reply| std::future::ready(r.is_content());
             let made = futures::stream::iter(made).try_filter(content);
             let mut made = Response::stream(made);
@@ -6030,7 +6074,7 @@ impl Plugin for ToEnd {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let mut resp = cx.call("openai").await?;
         let end = resp.until_end().await;
-        assert_eq!(end.as_ref().err().map(Fault::code), self.0);
+        assert_eq!(end.as_ref().err().map(fault_code).as_deref(), self.0);
         Ok(Some(resp))
     }
 }
@@ -6084,7 +6128,7 @@ async fn until_end_holds_a_failure_and_it_is_delivered_as_it_would_have_been() {
         broken.body_mut().truncate(2);
         broken
             .body_mut()
-            .push(Err(Fault::upstream("connection reset")));
+            .push(Err(Upstream::fault("connection reset")));
         broken
     };
     let [relayed, read] = relayed_and_read_to_its_end(broken, chat, Some("upstream")).await;
@@ -6115,7 +6159,11 @@ async fn until_end_says_how_a_response_ended_and_changes_nothing() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut resp = cx.call("openai").await?;
             let end = resp.until_end().await;
-            let seen = end.as_ref().err().map_or("ok", |f| f.code()).to_owned();
+            let seen = end
+                .as_ref()
+                .err()
+                .map_or("ok".to_owned(), fault_code)
+                .to_owned();
             self.0.lock().map(|mut e| e.push(seen)).ok();
             Ok(Some(resp))
         }
@@ -6124,12 +6172,11 @@ async fn until_end_says_how_a_response_ended_and_changes_nothing() {
     let broken = || {
         let mut broken = fixture::sse(STREAM);
         broken.body_mut().truncate(2);
-        broken.body_mut().push(Err(Fault::upstream("reset")));
+        broken.body_mut().push(Err(Upstream::fault("reset")));
         broken
     };
     let clean = || fixture::sse(STREAM);
-    let cases: [(&dyn Fn() -> fixture::Reply, &str); 2] =
-        [(&clean, "ok"), (&broken, codes::UPSTREAM)];
+    let cases: [(&dyn Fn() -> fixture::Reply, &str); 2] = [(&clean, "ok"), (&broken, "upstream")];
     for (reply, seen) in cases {
         let text = |(status, headers, body): (StatusCode, HeaderMap, Result<_, Fault>)| {
             let body: bytes::Bytes = body.unwrap_or_default();
@@ -6165,7 +6212,7 @@ async fn a_response_dropped_after_until_end_ends_its_call_as_it_ended() {
             let mut response = cx.call("openai").await?;
             let end = response.until_end().await;
             assert_eq!(
-                end.as_ref().err().map(Fault::code),
+                end.as_ref().err().map(fault_code).as_deref(),
                 self.0.then_some("upstream")
             );
             drop(response);
@@ -6176,7 +6223,7 @@ async fn a_response_dropped_after_until_end_ends_its_call_as_it_ended() {
     let broken = || {
         let mut broken = fixture::sse(STREAM);
         broken.body_mut().truncate(2);
-        broken.body_mut().push(Err(Fault::upstream("reset")));
+        broken.body_mut().push(Err(Upstream::fault("reset")));
         broken
     };
     let cases: [(fixture::Reply, &str); 3] = [

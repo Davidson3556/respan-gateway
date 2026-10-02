@@ -2,6 +2,7 @@
 //! edge contract itself, with no bytes and no heads. The ledger reads
 //! neither, so it settles here by the same rules as over HTTP.
 
+use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
 use std::sync::{Arc, Mutex};
 
 use crate::accounting::{Accounting, Quote, Tally};
@@ -83,7 +84,7 @@ impl Format<Io, Reply, Question> for Pipe {
                 .transpose()?
                 .is_some_and(|q| q.0 == "unwritable")
             {
-                return Err(Fault::bad_request("unwritable"));
+                return Err(BadRequest::fault("unwritable"));
             }
             Ok(sink::unfold(
                 Some((send, next)),
@@ -91,9 +92,13 @@ impl Format<Io, Reply, Question> for Pipe {
                     item?;
                     if let Some((send, next)) = state {
                         let (ok, frames) =
-                            next.unwrap_or_else(|| Err(Fault::upstream("no reply")))?;
+                            next.unwrap_or_else(|| Err(Upstream::fault("no reply")))?;
                         let flow = if !ok {
-                            EventStream::refused(Fault::new("busy", "busy").with(Status(429)))
+                            EventStream::refused(
+                                Fault::new("busy")
+                                    .with(ErrorCode("busy".into()))
+                                    .with(Status(429)),
+                            )
                         } else {
                             let replies = frames.into_iter().map(|raw| {
                                 Ok(match raw.split_once(':') {
@@ -145,11 +150,11 @@ async fn accounting_settles_on_a_wire_of_its_own() {
         ("reported", "hi", Ok((true, vec!["hello:4"])), 4),
         ("not reported", "hi", Ok((true, vec!["hello"])), RESERVE),
         ("provider refused", "hi", Ok((false, vec!["busy"])), 0),
-        ("sent, no head", "hi", Err(Fault::upstream("lost")), RESERVE),
+        ("sent, no head", "hi", Err(Upstream::fault("lost")), RESERVE),
         (
             "never sent",
             "unwritable",
-            Err(Fault::upstream("unused")),
+            Err(Upstream::fault("unused")),
             0,
         ),
     ];

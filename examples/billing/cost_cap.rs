@@ -19,6 +19,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example cost_cap`
 
+use respan_gateway_sdk::ErrorCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -102,7 +103,9 @@ impl Plugin for Cap {
             }
             seen.cut.store(true, Ordering::Relaxed);
             let msg = "the answer ran past its cap";
-            Err(Fault::new("cost_cap", msg).with(Status(402)))
+            Err(Fault::new(msg)
+                .with(ErrorCode("cost_cap".into()))
+                .with(Status(402)))
         })
     }
 }

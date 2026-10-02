@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -24,14 +24,14 @@
 //! | Client drops without Close | ends `Err(abandoned)` | dropped, so calls and request end `abandoned` |
 //! | Client sends a binary frame | ends `Err(abandoned)` | the client is sent Close 1003 |
 //! | Provider sends Close 1000, or none | drop | ends clean; the client is sent Close 1000 |
-//! | Provider sends Close with another code | drop | ends `Err(upstream)` with a [`CloseCode`]; the client is sent that code |
+//! | Provider sends Close with another code | drop | ends with an upstream fault with a [`CloseCode`]; the client is sent that code |
 //! | Provider drops without Close | drop | ends `Err(truncated)`; the client is sent Close 1011 |
 //! | Provider sends a binary frame | drop | ends `Err(upstream)`; the client is sent Close 1011 |
 //! | `serve_ws_until`'s future completes | drop | dropped; the client is sent Close 1001 with the future's reason |
-//! | A filter or plugin refuses an input | ends `Err(fault)` | ends with that fault; the client is sent Close 1011 (or its [`CloseCode`]) with its code as reason |
-//! | A fault ends the response | cut, `abandoned` | the client is sent Close 1011 (or the fault's [`CloseCode`]) with the fault's code as reason |
+//! | A filter or plugin refuses an input | ends `Err(fault)` | ends with that fault; the client is sent Close 1011 (or its [`CloseCode`]) with its error code as reason |
+//! | A fault ends the response | cut, abandoned | the client is sent Close 1011 (or the fault's [`CloseCode`]) with the fault's error code as reason |
 //!
-//! A fault's message is never sent to the client, only its code.
+//! A fault's message is never sent to the client, only its error code (`respan_gateway_http::error_code`).
 
 use std::time::Duration;
 
@@ -51,7 +51,7 @@ pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
 /// The WebSocket close code a fault asks for, a hint ([`Fault::with`]) that
 /// the client edge sends as its Close, in place of 1011: a plugin's
-/// `Fault::new("over_limit", msg).with(CloseCode(1008))`, or the provider's
+/// `Fault::new(msg).with(CloseCode(1008))`, or the provider's
 /// own, which [`WsTransport`] puts on the fault of a Close with a code
 /// other than 1000. A code that may not be sent (1004 to 1006, 1015, and
 /// any outside 1000 to 4999) is sent as 1011.

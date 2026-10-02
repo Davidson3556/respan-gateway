@@ -11,7 +11,7 @@ use http::header;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use respan_gateway_http::{Status, http::request::Parts as RequestHead};
-use respan_gateway_sdk::{Fault, Gateway};
+use respan_gateway_sdk::{BadRequest, ErrorCode, Fault, Gateway};
 
 #[cfg(feature = "ws")]
 pub mod ws;
@@ -85,8 +85,9 @@ fn ignore_upgrade(headers: &mut HeaderMap) {
 /// Why a client's body did not arrive whole.
 fn body_fault(e: axum::BoxError) -> Fault {
     match e.is::<http_body_util::LengthLimitError>() {
-        true => Fault::new("too_large", "request body too large")
+        true => Fault::new("request body too large")
+            .with(ErrorCode("too_large".into()))
             .with(Status(StatusCode::PAYLOAD_TOO_LARGE.as_u16())),
-        false => Fault::bad_request("the request body broke off"),
+        false => BadRequest::fault("the request body broke off"),
     }
 }

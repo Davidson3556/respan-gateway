@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +54,7 @@ async fn a_request_whose_body_fails_is_refused_before_any_plugin() {
     let gw = gateway_of(&rec);
     let (tx, req) = whole_upload();
     send(&tx, "half");
-    tx.unbounded_send(Err(Fault::bad_request("the client broke")))
+    tx.unbounded_send(Err(faults::bad_request("the client broke")))
         .unwrap();
     let (res, end) = handle(&gw, req).await;
     assert_eq!(read(res).await, Ok((400, "ERR bad_request".into())));
@@ -287,8 +288,8 @@ async fn an_unregistered_input_is_rejected_before_sending() {
     impl Plugin for TryWrongInput {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             let call = cx.call("a").with_input(WrongInput);
-            assert_eq!(call.clone().await.unwrap_err().code(), "internal");
-            assert_eq!(call.await.unwrap_err().code(), "internal");
+            assert!(call.clone().await.unwrap_err().is::<Internal>());
+            assert!(call.await.unwrap_err().is::<Internal>());
             Ok(Some(Response::stream(
                 futures::stream::empty::<Result<Out>>(),
             )))
@@ -298,7 +299,7 @@ async fn an_unregistered_input_is_rejected_before_sending() {
     let gw = gateway_of(&rec).plugin(TryWrongInput);
     let (response, end) = handle(&gw, req(vec!["q"])).await;
     assert!(read(response).await.is_ok());
-    assert_eq!(end.await, Ok(()));
+    assert!(end.await.is_ok());
     gw.idle().await;
     assert_eq!(rec.log().prov_start, 0);
 }

@@ -30,6 +30,7 @@ use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_providers::OpenAiChat;
+use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -80,7 +81,9 @@ struct PiiInput;
 const UNCOVERED: &str = "pii_uncovered";
 
 fn uncovered() -> Fault {
-    Fault::new(UNCOVERED, "no redaction reads this kind").with(Status(403))
+    Fault::new("no redaction reads this kind")
+        .with(ErrorCode(UNCOVERED.into()))
+        .with(Status(403))
 }
 
 #[async_trait]

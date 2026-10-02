@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,7 +38,7 @@ impl Body {
                 let mut frames = c.body;
                 for _ in 0..read {
                     match frames.next().await {
-                        Some(f) => lock(&body.frames).push(f.map_err(|e| e.code().into())),
+                        Some(f) => lock(&body.frames).push(f.map_err(|e| faults::code(&e).into())),
                         None => break,
                     }
                 }
@@ -106,7 +107,7 @@ impl Plugin for Guard {
                 async move {
                     let verdict: Vec<Out> = check.await?.outputs().try_collect().await?;
                     match verdict.iter().any(|v| v.0 == "FLAG") {
-                        true => Err(Fault::bad_request("the classifier flagged an input")),
+                        true => Err(faults::bad_request("the classifier flagged an input")),
                         false => Ok(input),
                     }
                 }
@@ -204,7 +205,7 @@ async fn a_filters_refusal_of_a_sessions_input_ends_the_call_with_it() {
     impl Plugin for Refuse {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.filter(|input: &mut In| match input.0.as_str() {
-                "evil" => Err(Fault::bad_request("refused")),
+                "evil" => Err(faults::bad_request("refused")),
                 _ => Ok(()),
             })?;
             Ok(None)
@@ -335,7 +336,7 @@ async fn a_stream_that_fails_ends_the_inputs_and_the_call_with_its_fault() {
     impl Plugin for Fails {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|_client: EventStream<In>| {
-                stream::iter([Ok(In("x".into())), Err(Fault::upstream("gone"))])
+                stream::iter([Ok(In("x".into())), Err(faults::upstream("gone"))])
             })?;
             Ok(None)
         }
@@ -461,7 +462,7 @@ fn reads_then_refuses_first(bodies: Arc<Mutex<Vec<Frames>>>) -> Dialer {
     fnt(move |c| {
         let (bodies, n) = (bodies.clone(), n.clone());
         async move {
-            let frames = c.body.map(|f| f.map_err(|e| e.code().to_string()));
+            let frames = c.body.map(|f| f.map_err(|e| faults::code(&e).to_string()));
             let frames: Frames = frames.collect().await;
             lock(&bodies).push(frames);
             match n.fetch_add(1, Ordering::SeqCst) {
@@ -558,7 +559,9 @@ async fn a_cut_with_a_fault_of_its_own_ends_the_call_with_it() {
     impl Plugin for Cut {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             cx.wrap(|outputs: EventStream<Out>| {
-                let over = stream::once(async { Err(Fault::new("max_length", "over")) });
+                let over = stream::once(async {
+                    Err(Fault::new("over").with(faults::Code("max_length")))
+                });
                 outputs.take(1).chain(over)
             })?;
             Ok(None)
@@ -596,7 +599,7 @@ async fn a_refusal_before_the_providers_head_is_the_refusal() {
             cx.wrap(|i: EventStream<In>| {
                 i.and_then(|x| async move {
                     match x.0.as_str() {
-                        "evil" => Err(Fault::bad_request("flagged")),
+                        "evil" => Err(faults::bad_request("flagged")),
                         _ => Ok(x),
                     }
                 })
@@ -623,7 +626,7 @@ async fn a_refusal_before_the_providers_head_is_the_refusal() {
                     read_body.await
                 };
                 if read.is_err() {
-                    return Err(Fault::upstream("error sending request"));
+                    return Err(faults::upstream("error sending request"));
                 }
                 Ok(answer(200, done()))
             }

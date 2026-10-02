@@ -37,9 +37,10 @@ use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::conversation::{Message, Role};
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::relayed::Relayed;
+use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
     ClientContext, Connection, EventStream, Fault, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait, codes,
+    Response, async_trait,
 };
 
 /// A message in: its number in its stream, its text, and the bytes it came
@@ -83,7 +84,7 @@ impl Format<Incoming, In, Out> for Msg {
                         decoder.decode(raw.clone(), &mut out)?;
                         decoder.end(&mut out)?;
                         if out.len() != 1 {
-                            return Err(Fault::bad_request("expected one input"));
+                            return Err(BadRequest::fault("expected one input"));
                         }
                         Ok(out.remove(0))
                     }))
@@ -153,7 +154,7 @@ impl Numbering {
             In(n, text, origin)
         };
         match &*text {
-            "bad" => return Err(Fault::bad_request("not msg")),
+            "bad" => return Err(BadRequest::fault("not msg")),
             "two" => out.extend([kept(0, text.clone()), kept(0, text)]),
             _ => {
                 self.0 += 1;
@@ -236,7 +237,7 @@ impl Echo {
         let echoed = body.map(move |frame| {
             let noted = match &frame {
                 Ok(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-                Err(fault) => format!("Err({})", fault.code()),
+                Err(fault) => format!("Err({})", respan_gateway_http::error_code(fault)),
             };
             seen.lock().map(|mut s| s.push(noted)).ok();
             frame
@@ -363,15 +364,17 @@ async fn r7_a_bad_frame_aborts_the_call() {
 #[tokio::test]
 async fn r8_the_fault_of_content_that_cannot_be_written_is_whose_it_is() {
     let cases = [
-        ("yes", Some(("yes", "no")), codes::CONFIG),
-        ("no", Some(("no", "no!")), codes::CONFIG),
-        ("no", None, codes::BAD_REQUEST),
+        ("yes", Some(("yes", "no")), "config"),
+        ("no", Some(("no", "no!")), "config"),
+        ("no", None, "bad_request"),
     ];
     for (body, edit, code) in cases {
         let echo = Echo::default();
         let gw = msg(&echo, Edit(edit, Arc::default()));
         let (_, ended) = serve(&gw, post("/msg", body)).await;
-        let end = ended.await.map_err(|f| f.code().to_owned());
+        let end = ended
+            .await
+            .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
         assert_eq!(end, Err(code.to_owned()), "{body} {edit:?}");
         assert!(echo.seen().is_empty(), "nothing is sent");
     }
@@ -424,7 +427,7 @@ async fn o11_1_a_head_to_an_endless_plugin_stream_ends_at_its_head() {
 
     assert_eq!((status, body.ok()), (StatusCode::OK, Some(Bytes::new())));
     assert!(idle.is_ok(), "the gateway stays busy");
-    assert_eq!(log.only(), Ok(()));
+    assert!(log.only().is_ok());
 }
 
 const CHAT: &str = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
@@ -835,7 +838,7 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
             let before = px.is_sent();
             self.0.lock().map(|mut s| s.push((before, false))).ok();
             match self.1 {
-                true => Err(Fault::bad_request("refused by a hook")),
+                true => Err(BadRequest::fault("refused by a hook")),
                 false => Ok(()),
             }
         }
@@ -872,7 +875,7 @@ async fn a_call_says_whether_it_was_handed_to_its_transport() {
                             None,
                         ))
                     } else {
-                        Err(Fault::upstream("transport failed after sending"))
+                        Err(Upstream::fault("transport failed after sending"))
                     }
                 }) as SendFuture
             }
@@ -936,7 +939,7 @@ async fn a_call_says_whether_its_response_was_head_only() {
             Some(scripted(
                 StatusCode::OK,
                 "text/event-stream",
-                vec![Err(Fault::upstream("connection reset"))],
+                vec![Err(Upstream::fault("connection reset"))],
             )),
             false,
         ),
@@ -946,7 +949,7 @@ async fn a_call_says_whether_its_response_was_head_only() {
         let transport = move |call| -> SendFuture {
             match &reply {
                 Some(send) => send(call),
-                None => Box::pin(async { Err(Fault::upstream("no response head")) }),
+                None => Box::pin(async { Err(Upstream::fault("no response head")) }),
             }
         };
         let plugin = HeadOnly::default();

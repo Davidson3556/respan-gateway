@@ -84,7 +84,7 @@ pub(crate) fn cut<T: Send + 'static>(
     .boxed()
 }
 
-/// Resolves [`codes::ABANDONED`](crate::codes::ABANDONED) once `ended`
+/// Resolves [`Abandoned`](crate::Abandoned) once `ended`
 /// closes, as when its request or call ended.
 pub(crate) fn on_close(ended: &Latch) -> BoxFuture<'static, Fault> {
     ended.closed().map(|()| Fault::abandoned()).boxed()
@@ -396,6 +396,8 @@ impl Drop for ToClient {
 mod tests {
     use std::sync::Arc;
 
+    use crate::Abandoned;
+
     use futures::StreamExt;
 
     use super::*;
@@ -410,11 +412,8 @@ mod tests {
         let later = Arc::new(Later::new(Some(stream::pending().boxed())));
         later.close(Err(Fault::abandoned()));
         let mut inputs = inputs(later, None, &ended);
-        let first = inputs
-            .next()
-            .await
-            .map(|r| r.err().map(|f| f.code().to_string()));
-        assert_eq!(first, Some(Some("abandoned".to_string())));
+        let first = inputs.next().await.map(|r| r.err());
+        assert!(matches!(first, Some(Some(f)) if f.is::<Abandoned>()));
         assert!(inputs.next().await.is_none());
     }
 }

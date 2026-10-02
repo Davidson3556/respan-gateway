@@ -1,6 +1,9 @@
 //! Cross-direction lifecycle guarantees of the symmetric edge contract.
 #![allow(clippy::unwrap_used)]
 
+mod faults;
+
+use faults::{says, says_all};
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::future::BoxFuture;
 use std::sync::{Arc, Mutex};
@@ -65,7 +68,7 @@ impl Format<Io, Input, Output> for Protocol {
         };
         let outgoing = EventSink::preparing(move |_: &mut EventStream<Output>| {
             if fail_writing {
-                return Err(Fault::new("write_failed", "client delivery failed"));
+                return Err(Fault::new("client delivery failed"));
             }
             Ok(futures::sink::unfold(
                 (),
@@ -101,6 +104,18 @@ struct Record {
     client: Arc<Mutex<Vec<Result<(), Fault>>>>,
     hold: bool,
     sent: Arc<Mutex<Vec<bool>>>,
+}
+
+impl Record {
+    /// The ends the provider saw, faults as messages.
+    fn provider_ends(&self) -> Vec<Result<(), String>> {
+        says_all(self.provider.lock().unwrap().iter().cloned())
+    }
+
+    /// The ends the client saw, faults as messages.
+    fn client_ends(&self) -> Vec<Result<(), String>> {
+        says_all(self.client.lock().unwrap().iter().cloned())
+    }
 }
 
 #[async_trait]
@@ -168,11 +183,12 @@ async fn finishing_provider_input_waits_for_its_outgoing_delivery() {
         handled.as_mut().now_or_never().is_none(),
         "an ended incoming flow must not silently abandon an unfinished outgoing writer"
     );
-    let fault = Fault::new("flush_failed", "provider's last write failed");
-    finish.send(Err(fault.clone())).unwrap();
-    assert_eq!(handled.await, Err(fault.clone()));
+    let fault = Fault::new("provider's last write failed");
+    let flushed = fault.message().to_owned();
+    finish.send(Err(fault)).unwrap();
+    assert_eq!(says(handled.await), Err(flushed.clone()));
     gw.idle().await;
-    assert_eq!(*record.provider.lock().unwrap(), [Err(fault)]);
+    assert_eq!(record.provider_ends(), [Err(flushed)]);
 }
 
 #[tokio::test]
@@ -182,15 +198,15 @@ async fn client_preparation_failure_does_not_settle_buffered_provider_success() 
         ..Record::default()
     };
     let gw = gateway(&record, async { Ok(()) }.boxed());
-    let fault = Fault::new("write_failed", "client delivery failed");
-    assert_eq!(
-        gw.handle(Io::Client { fail_writing: true }, Extensions::new())
-            .await,
-        Err(fault.clone())
-    );
+    let fault = Fault::new("client delivery failed");
+    let failed = Err(fault.message().to_owned());
+    let handled = gw
+        .handle(Io::Client { fail_writing: true }, Extensions::new())
+        .await;
+    assert_eq!(says(handled), failed);
     gw.idle().await;
-    assert_eq!(*record.client.lock().unwrap(), [Err(fault.clone())]);
-    assert_eq!(*record.provider.lock().unwrap(), [Err(fault)]);
+    assert_eq!(record.client_ends(), std::slice::from_ref(&failed));
+    assert_eq!(record.provider_ends(), [failed]);
 }
 
 #[tokio::test]
@@ -198,21 +214,20 @@ async fn provider_refusal_cancels_pending_upload_without_waiting_for_it() {
     let (finish, finished) = oneshot::channel::<Result<(), Fault>>();
     let writing = async move { finished.await.map_err(|_| Fault::abandoned())? }.boxed();
     let record = Record::default();
-    let refusal = Fault::new("refused", "provider declined input");
+    let refusal = Fault::new("provider declined input");
     let gw = gateway_with(&record, writing, EventStream::refused(refusal.clone()));
-    assert_eq!(
-        gw.handle(
+    let handled = gw
+        .handle(
             Io::Client {
-                fail_writing: false
+                fail_writing: false,
             },
-            Extensions::new()
+            Extensions::new(),
         )
-        .await,
-        Err(refusal.clone())
-    );
+        .await;
+    assert_eq!(says(handled), Err(refusal.message().to_owned()));
     assert!(finish.is_canceled());
     gw.idle().await;
-    assert_eq!(*record.provider.lock().unwrap(), [Err(refusal)]);
+    assert_eq!(record.provider_ends(), [Err(refusal.message().to_owned())]);
 }
 
 struct RefusalHeld(Arc<Mutex<oneshot::Sender<Result<(), Fault>>>>);
@@ -235,22 +250,21 @@ async fn refused_opening_releases_upload_before_held_response_is_replayed() {
     let (finish, finished) = oneshot::channel::<Result<(), Fault>>();
     let finish = Arc::new(Mutex::new(finish));
     let writing = async move { finished.await.map_err(|_| Fault::abandoned())? }.boxed();
-    let refusal = Fault::new("refused", "provider declined input");
+    let refusal = Fault::new("provider declined input");
     let record = Record::default();
     let gw = gateway_with(&record, writing, EventStream::refused(refusal.clone()))
         .plugin(RefusalHeld(finish.clone()));
-    assert_eq!(
-        gw.handle(
+    let handled = gw
+        .handle(
             Io::Client {
-                fail_writing: false
+                fail_writing: false,
             },
-            Extensions::new()
+            Extensions::new(),
         )
-        .await,
-        Err(refusal.clone())
-    );
+        .await;
+    assert_eq!(says(handled), Err(refusal.message().to_owned()));
     gw.idle().await;
-    assert_eq!(*record.provider.lock().unwrap(), [Err(refusal)]);
+    assert_eq!(record.provider_ends(), [Err(refusal.message().to_owned())]);
 }
 
 #[tokio::test]
@@ -276,8 +290,8 @@ async fn cancelling_exchange_drops_both_pending_provider_directions() {
     drop(handled);
     assert!(finish.is_canceled());
     gw.idle().await;
-    assert_eq!(*record.provider.lock().unwrap(), [Err(Fault::abandoned())]);
-    assert_eq!(*record.client.lock().unwrap(), [Err(Fault::abandoned())]);
+    assert_eq!(record.provider_ends(), [Err("abandoned".to_owned())]);
+    assert_eq!(record.client_ends(), [Err("abandoned".to_owned())]);
 }
 
 /// Make resource teardown observable after a sink has failed. With no plugins,
@@ -304,7 +318,7 @@ impl Sink<Result<Output, Fault>> for BlockingSink {
         Poll::Ready(Ok(()))
     }
     fn start_send(self: Pin<&mut Self>, _: Result<Output, Fault>) -> Result<(), Fault> {
-        Err(Fault::upstream("delivery failed"))
+        Err(faults::upstream("delivery failed"))
     }
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Fault>> {
         Poll::Ready(Ok(()))
@@ -350,8 +364,8 @@ async fn idle_waits_for_delivery_resources_after_error_hooks_finish() {
         "idle completed while delivery resources were being dropped"
     );
     assert_eq!(
-        handled.await.unwrap(),
-        Err(Fault::upstream("delivery failed"))
+        says(handled.await.unwrap()),
+        Err("delivery failed".to_owned())
     );
     gateway.idle().await;
 }
@@ -417,7 +431,7 @@ async fn synchronous_preparation_controls_sent_status_while_delivery_progresses(
             assert!(submitted.load(Ordering::SeqCst));
             finish.send(Ok(())).unwrap();
         }
-        assert_eq!(handled.await, preparation);
+        assert_eq!(says(handled.await), says(preparation.clone()));
         gw.idle().await;
         assert_eq!(submitted.load(Ordering::SeqCst), preparation.is_ok());
         assert_eq!(*record.sent.lock().unwrap(), [preparation.is_ok()]);

@@ -25,6 +25,7 @@ use respan_gateway_http::formats::opaque::{self, Got, Sent};
 use respan_gateway_http::formats::whole::Relay;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
+use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::future::join_all;
 use respan_gateway_sdk::futures::{TryStreamExt, stream};
 use respan_gateway_sdk::{
@@ -105,12 +106,12 @@ impl Plugin for MergeModels {
                 let frames: Vec<Got<Models>> = call.await?.outputs().try_collect().await?;
                 let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.body().to_vec()).collect();
                 let mut list: Value = serde_json::from_slice(&bytes)
-                    .map_err(|_| Fault::upstream("a provider's models are not JSON"))?;
+                    .map_err(|_| Upstream::fault("a provider's models are not JSON"))?;
                 match list["data"].take() {
                     Value::Array(models) if models.iter().all(|m| m["id"].is_string()) => {
                         Ok(models)
                     }
-                    _ => Err(Fault::upstream("a provider's models are not a list of ids")),
+                    _ => Err(Upstream::fault("a provider's models are not a list of ids")),
                 }
             }))
             .await;
@@ -119,7 +120,7 @@ impl Plugin for MergeModels {
             return Err(failures
                 .into_iter()
                 .find_map(Result::err)
-                .unwrap_or_else(|| Fault::upstream("no provider")));
+                .unwrap_or_else(|| Upstream::fault("no provider")));
         }
         let mut data: Vec<Value> = Vec::new();
         for model in lists.iter().flatten().flatten() {

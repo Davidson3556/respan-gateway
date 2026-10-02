@@ -29,7 +29,7 @@ fn malformed_upstream_is_rejected_before_binding_or_announcing_readiness() {
     let Err(error) = upstream_gateway("not-a-url") else {
         panic!("malformed upstream must fail");
     };
-    assert_eq!(error.code(), "config");
+    assert_eq!(respan_gateway_http::error_code(&error), "config");
 }
 
 #[tokio::test]

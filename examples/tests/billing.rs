@@ -1,4 +1,5 @@
 use super::*;
+use respan_gateway_sdk::BadRequest;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::conversation::units;
 
@@ -47,7 +48,7 @@ struct Refuses;
 impl Plugin for Refuses {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         px.filter(|_: &mut respan_gateway_sdk::conversation::Reply| {
-            Err(Fault::bad_request("refused"))
+            Err(BadRequest::fault("refused"))
         })
     }
 }

@@ -1,5 +1,6 @@
 //! Shared example bookkeeping: one reservation per in-flight turn, no protocol knowledge.
 use crate::ledger::{Amount, HoldId, Ledger, MemoryLedger};
+use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Fault;
 use respan_gateway_ws::CloseCode;
 use serde_json::Value;
@@ -50,9 +51,9 @@ impl Budget {
         {
             let mut active = lock(&self.active);
             if active.contains_key(lane) {
-                return Err(
-                    Fault::new("turn_busy", "this lane already has a turn").with(CloseCode(1008))
-                );
+                return Err(Fault::new("this lane already has a turn")
+                    .with(ErrorCode("turn_busy".into()))
+                    .with(CloseCode(1008)));
             }
             active.insert(lane.to_owned(), (hold, false));
         }

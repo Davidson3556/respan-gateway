@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use http::HeaderMap;
 use http_body_util::BodyExt;
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{Fault, Upstream};
 
 use crate::{
     Body, Completion, Outgoing, credentials, is_connection_header, proxy_call,
@@ -133,9 +133,9 @@ impl HttpClient {
             // The error names the provider's URL, which is for logs only.
             .map_err(|e| match e.is_builder() {
                 true => invalid(e),
-                false => Fault::upstream("the provider could not be reached").with_source(e),
+                false => Upstream::fault("the provider could not be reached").with_source(e),
             })?;
-        let broke = |e| Fault::upstream("the provider's body broke off").with_source(e);
+        let broke = |e| Upstream::fault("the provider's body broke off").with_source(e);
         let mut resp = http::Response::from(resp)
             .map(|body| Body::stream(body.map_err(broke).into_data_stream()));
         strip_origin_headers(resp.headers_mut());

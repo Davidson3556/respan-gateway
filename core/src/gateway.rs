@@ -107,7 +107,7 @@ impl Gateway {
     /// The provider called if every plugin passes and none set a target
     /// ([`ClientContext::set_target`]), replacing any set before; a request
     /// it cannot take fails as [`ClientContext::call`] does. `Err` with
-    /// [`codes::CONFIG`](crate::codes::CONFIG) for an unknown provider.
+    /// [`Config`](crate::Config) for an unknown provider.
     pub fn target(mut self, provider: impl Into<String>) -> Result<Gateway> {
         let target = provider.into();
         if !self.inner.providers.contains_key(&target) {

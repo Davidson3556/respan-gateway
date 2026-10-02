@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -145,7 +146,7 @@ async fn a_call_is_sent_only_once_handed_to_its_transport() {
         let t = fnt(move |_| {
             async move {
                 match transport_fails {
-                    true => Err(Fault::upstream("down")),
+                    true => Err(faults::upstream("down")),
                     false => Ok(ok_resp(vec!["a", "DONE"])),
                 }
             }
@@ -239,7 +240,7 @@ struct Meter(Arc<Mutex<Vec<String>>>);
 impl Plugin for Meter {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         cx.filter(|o: &mut Out| match o.0.as_str() {
-            "bad" => Err(Fault::bad_request("blocked")),
+            "bad" => Err(faults::bad_request("blocked")),
             _ => Ok(()),
         })?;
         Ok(None)

@@ -541,7 +541,7 @@ pub enum Finish {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use respan_gateway_core::codes;
+    use crate::{BadRequest, Config};
     use serde_json::json;
 
     #[test]
@@ -554,16 +554,10 @@ mod tests {
         assert_eq!(decoded.came_in("chat").map(|came| &came.bytes), Some(&raw));
         assert!(decoded.came_in("other").is_none());
         assert_eq!(decoded.said(), Some(&snapshot));
-        assert_eq!(
-            decoded.whose(Fault::internal("invalid")).code(),
-            codes::BAD_REQUEST
-        );
+        assert!(decoded.whose(Fault::internal("invalid")).is::<BadRequest>());
         decoded.messages[0].content = vec!["edited".into()];
         assert_eq!(decoded.said(), Some(&snapshot));
-        assert_eq!(
-            decoded.whose(Fault::internal("invalid")).code(),
-            codes::CONFIG
-        );
+        assert!(decoded.whose(Fault::internal("invalid")).is::<Config>());
     }
 
     #[test]

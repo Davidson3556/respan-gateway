@@ -10,6 +10,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example judge`
 
+use respan_gateway_sdk::ErrorCode;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
@@ -78,7 +79,9 @@ impl Plugin for Egress {
         self.seen().push(px.provider().to_owned());
         let asked = px.extensions().get::<Asked>();
         if asked.is_some_and(|a| a.headers.contains_key("x-blocked")) {
-            return Err(Fault::new("egress", "no calls for you").with(Status(403)));
+            return Err(Fault::new("no calls for you")
+                .with(ErrorCode("egress".into()))
+                .with(Status(403)));
         }
         Ok(())
     }

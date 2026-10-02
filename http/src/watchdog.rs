@@ -3,7 +3,7 @@
 use crate::{Body, Completion};
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{Fault, Upstream};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +33,7 @@ where
         let inner = inner.clone();
         async move {
             let stalled =
-                |d: Duration| Fault::upstream(format!("the provider sent nothing for {d:?}"));
+                |d: Duration| Upstream::fault(format!("the provider sent nothing for {d:?}"));
             let (response, completion) = tokio::time::timeout(head, inner(call))
                 .await
                 .map_err(|_| stalled(head))??;
@@ -56,7 +56,6 @@ where
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use respan_gateway_sdk::codes;
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
     }
@@ -69,7 +68,7 @@ mod tests {
         let send = watchdog(|_| async { std::future::pending().await }, secs(5), secs(1));
         let start = tokio::time::Instant::now();
         let fault = send(request()).await.err().expect("head timeout");
-        assert_eq!(fault.code(), codes::UPSTREAM);
+        assert!(fault.is::<Upstream>());
         assert_eq!(fault.message(), "the provider sent nothing for 5s");
         assert_eq!(start.elapsed(), secs(5));
     }
@@ -104,7 +103,7 @@ mod tests {
             .await
             .expect("expected value")
             .expect_err("expected failure");
-        assert_eq!(fault.code(), codes::UPSTREAM);
+        assert!(fault.is::<Upstream>());
         assert_eq!(fault.message(), "the provider sent nothing for 1s");
         assert_eq!(start.elapsed(), secs(1));
         assert!(resp.body_mut().next().await.is_none());
@@ -144,7 +143,7 @@ mod tests {
                     .insert("x-provider", "there".parse().expect("expected value"));
                 response.extensions_mut().insert(Marker("preserved"));
                 let completion: Completion =
-                    async { Err(Fault::upstream("late write failure")) }.boxed();
+                    async { Err(Upstream::fault("late write failure")) }.boxed();
                 Ok((response, Some(completion)))
             },
             secs(5),

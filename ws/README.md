@@ -39,11 +39,11 @@ tests relay through `formats::opaque` too.
 | Client drops, no Close | ends `Err(abandoned)` | dropped: request and calls end `abandoned` |
 | Client sends a binary frame | ends `Err(abandoned)` | client is sent Close 1003; ends `abandoned` |
 | Provider sends Close 1000 (or no code) | dropped | ends clean; client is sent Close 1000 |
-| Provider sends Close with another code | dropped | `Err(upstream)` with that `CloseCode`; client is sent that code |
+| Provider sends Close with another code | dropped | an `Upstream` fault with that `CloseCode`; client is sent that code |
 | Provider drops, no Close | dropped | `Err(truncated)`; client is sent 1011 `truncated` |
 | Provider sends a binary frame or a message over the limit | dropped | `Err(upstream)`; client is sent 1011 |
 | Provider is unreachable | (no session) | the client's handshake is answered 502, text/plain |
-| A fault ends the response | cut, `abandoned` | client is sent 1011, or its `CloseCode`, with the fault's **code** as the reason, never its message |
+| A fault ends the response | cut, `abandoned` | client is sent 1011, or its `CloseCode`, with the fault's **error code** (`error_code`) as the reason, never its message |
 
 A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
 4999) is sent as 1011. A provider's own close reason text is not relayed.

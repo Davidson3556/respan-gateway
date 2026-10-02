@@ -13,7 +13,7 @@ use respan_gateway_http::{
 };
 use respan_gateway_sdk::futures::{StreamExt, stream::BoxStream};
 use respan_gateway_sdk::relayed::Relayed;
-use respan_gateway_sdk::{Connection, Fault, Format};
+use respan_gateway_sdk::{BadRequest, Connection, Fault, Format, Upstream};
 use serde_json::{self, Value};
 
 /// Whether `head` asks to upgrade to a WebSocket.
@@ -143,7 +143,7 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
             move |request| {
                 h::messages(request, move |_, raw| {
                     let json = serde_json::from_slice(&raw)
-                        .map_err(|_| Fault::bad_request("a client's frame is not a JSON event"))?;
+                        .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
                     Ok(ClientEvent::decoded(&reader_name, raw, json))
                 })
             },
@@ -223,7 +223,7 @@ fn response_events(
         .map(move |raw| {
             let raw = raw?;
             let json = serde_json::from_slice(&raw)
-                .map_err(|_| Fault::upstream("a provider's frame is not a JSON event"))?;
+                .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
             Ok(ProviderEvent::decoded(&name, raw, json))
         })
         .boxed()

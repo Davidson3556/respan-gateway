@@ -104,9 +104,10 @@ impl Record {
                 .as_ref()
                 .err()
                 .map(|f| respan_gateway_http::status(f).as_u16()),
-            end: end
-                .as_ref()
-                .map_or_else(|f| f.code().into(), |()| "ok".into()),
+            end: end.as_ref().map_or_else(
+                |f| respan_gateway_http::error_code(f).into_owned(),
+                |()| "ok".into(),
+            ),
             usage: Usage::default(),
             prompt: None,
             completion: None,

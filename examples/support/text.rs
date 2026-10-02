@@ -13,6 +13,7 @@
 //! - [`Placeholders`]: hide values behind `<LABEL_n>` and restore them, a
 //!   placeholder split across deltas included.
 
+use respan_gateway_sdk::ErrorCode;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -27,7 +28,9 @@ pub const UNREADABLE: &str = "unreadable_content";
 
 fn unreadable(what: &str) -> Fault {
     let message = format!("the gateway cannot read {what}, so it refuses it");
-    Fault::new(UNREADABLE, message).with(Status(StatusCode::UNPROCESSABLE_ENTITY.as_u16()))
+    Fault::new(message)
+        .with(ErrorCode(UNREADABLE.into()))
+        .with(Status(StatusCode::UNPROCESSABLE_ENTITY.as_u16()))
 }
 
 /// An edit of one text.

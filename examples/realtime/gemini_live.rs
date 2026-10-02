@@ -11,6 +11,7 @@ mod budget;
 mod serve;
 use budget::{Budget, OUTPUT};
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
+use respan_gateway_sdk::{BadRequest, ErrorCode};
 use respan_gateway_sdk::{
     ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
 };
@@ -48,7 +49,7 @@ impl Plugin for Sessions {
                 async move {
                     if let Some(setup) = event.json.get_mut("setup") {
                         if !setup.is_object() {
-                            return Err(Fault::bad_request("setup must be an object"));
+                            return Err(BadRequest::fault("setup must be an object"));
                         }
                         for path in [
                             "/generationConfig",
@@ -57,7 +58,7 @@ impl Plugin for Sessions {
                             "/proactivity",
                         ] {
                             if setup.pointer(path).is_some_and(|value| !value.is_object()) {
-                                return Err(Fault::bad_request(
+                                return Err(BadRequest::fault(
                                     "setup configuration must be an object",
                                 ));
                             }
@@ -66,7 +67,7 @@ impl Plugin for Sessions {
                             .get("model")
                             .is_some_and(|v| v.as_str() != Some(&model))
                         {
-                            return Err(Fault::bad_request(
+                            return Err(BadRequest::fault(
                                 "model is outside the configured budget policy",
                             ));
                         }
@@ -85,11 +86,9 @@ impl Plugin for Sessions {
                         session.begin("turn").await?;
                     }
                     if event.json.get("realtimeInput").is_some() && !session.active("turn") {
-                        return Err(Fault::new(
-                            "audio_policy",
-                            "send activityStart before realtime input",
-                        )
-                        .with(CloseCode(1008)));
+                        return Err(Fault::new("send activityStart before realtime input")
+                            .with(ErrorCode("audio_policy".into()))
+                            .with(CloseCode(1008)));
                     }
                     Ok(event)
                 }

@@ -9,6 +9,7 @@ use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::{self, BodyExt};
 use respan_gateway_http::{Asked, Body, CallHeaders, Credential, Outgoing};
 use respan_gateway_providers::OpenAiChat;
+use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -478,7 +479,9 @@ async fn a_plugin_removes_the_gateways_own_credential() {
             let credential = cx.extensions_mut().remove::<Credential>();
             match credential.as_ref().and_then(|c| c.get("x-gateway-auth")) {
                 Some(key) if key == "secret" => Ok(None),
-                _ => Err(Fault::new("unauthorized", "no").with(Status(401))),
+                _ => Err(Fault::new("no")
+                    .with(ErrorCode("unauthorized".into()))
+                    .with(Status(401))),
             }
         }
     }
@@ -524,7 +527,7 @@ async fn a_bodiless_response_ends_as_its_head_goes_out() {
     h.gw.idle().await;
 
     // The request ends complete, its call too, though nothing read on.
-    assert_eq!(h.log.only(), Ok(()));
+    assert!(h.log.only().is_ok());
 }
 
 #[tokio::test]
@@ -601,5 +604,5 @@ async fn a_bodiless_response_ends_its_call_ok_though_the_provider_sent_a_body() 
     let (status, _, _) = h.send(chat()).await;
 
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(h.calls.all()[0], Ok(()));
+    assert!(h.calls.all()[0].is_ok());
 }

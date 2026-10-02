@@ -381,7 +381,7 @@ mod tests {
             move |raw, out: &mut Vec<Bytes>| {
                 seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if event_data(&raw).is_some() {
-                    return Err(Fault::upstream("unreadable"));
+                    return Err(respan_gateway_sdk::Upstream::fault("unreadable"));
                 }
                 out.push(raw);
                 Ok(())

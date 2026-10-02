@@ -2,6 +2,7 @@ use super::*;
 use respan_gateway_examples::Meter;
 use respan_gateway_http::{Status, http};
 use respan_gateway_providers::AnthropicMessages;
+use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{Plugin, ProviderContext, async_trait};
 
@@ -54,7 +55,9 @@ struct Closed;
 impl Plugin for Closed {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         if px.provider() == "local" {
-            return Err(Fault::new("limit", "closed").with(Status(429)));
+            return Err(Fault::new("closed")
+                .with(ErrorCode("limit".into()))
+                .with(Status(429)));
         }
         Ok(())
     }

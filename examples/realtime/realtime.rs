@@ -69,6 +69,7 @@ mod audio;
 #[path = "../support/text.rs"]
 mod text;
 
+use respan_gateway_sdk::ErrorCode;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -229,11 +230,9 @@ impl Plugin for Pii {
         let hide = vault.clone();
         cx.filter(move |event: &mut ClientEvent| {
             if audio::contains_audio(&event.json) {
-                return Err(Fault::new(
-                    "audio_requires_redaction",
-                    "text PII policy cannot inspect audio",
-                )
-                .with(CloseCode(1008)));
+                return Err(Fault::new("text PII policy cannot inspect audio")
+                    .with(ErrorCode("audio_requires_redaction".into()))
+                    .with(CloseCode(1008)));
             }
             edit_texts(&mut event.json, SAID, &mut |text| {
                 *text = hide_emails(text, &hide)
@@ -426,7 +425,9 @@ impl Plugin for Meter {
 
     async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
         if let Some(Metered(session, turns)) = px.extensions().get::<Metered>() {
-            let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
+            let code = end.as_ref().err().map_or("ok".into(), |f| {
+                respan_gateway_http::error_code(f).into_owned()
+            });
             let turns = turns.load(Ordering::SeqCst);
             lock(&self.ended).push(Ended {
                 session: *session,
@@ -456,7 +457,7 @@ fn until(
         let (mut events, mut timer) = state?;
         tokio::select! {
             () = &mut timer => {
-                let over = Fault::new("max_length", "the session reached its maximum length");
+                let over = Fault::new("the session reached its maximum length").with(ErrorCode("max_length".into()));
                 Some((Err(over.with(CloseCode(1000))), None))
             }
             next = events.next() => Some((next?, Some((events, timer)))),
@@ -536,10 +537,9 @@ impl<L: Ledger> Wallet<L> {
             let mut turns = lock(&self.turns);
             turns.bytes = turns.bytes.saturating_add(said);
             if turns.bytes > 128_000 {
-                return Err(
-                    Fault::new("context_limit", "session context exceeds its bound")
-                        .with(CloseCode(1008)),
-                );
+                return Err(Fault::new("session context exceeds its bound")
+                    .with(ErrorCode("context_limit".into()))
+                    .with(CloseCode(1008)));
             }
         }
         if event.json["type"] == "response.create" {
@@ -734,7 +734,11 @@ struct Reserve<L>(L);
 impl<L: Ledger + Clone> Plugin for Reserve<L> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let key = cx.extensions().get::<Credential>().and_then(account);
-        let key = key.ok_or_else(|| Fault::new("no_key", "no key").with(Status(401)))?;
+        let key = key.ok_or_else(|| {
+            Fault::new("no key")
+                .with(ErrorCode("no_key".into()))
+                .with(Status(401))
+        })?;
         let wallet = Arc::new(Wallet {
             ledger: self.0.clone(),
             key,
@@ -765,7 +769,8 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
                 let mine = ours && kind == "session.updated";
                 ours &= !mine;
                 std::future::ready(match (refused, mine) {
-                    (true, _) => Err(Fault::new("cap_refused", "the session cannot be capped")
+                    (true, _) => Err(Fault::new("the session cannot be capped")
+                        .with(ErrorCode("cap_refused".into()))
                         .with(CloseCode(1011))),
                     (_, mine) => Ok((!mine).then_some(event)),
                 })
@@ -788,7 +793,9 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
 async fn classify(event: &ClientEvent) -> Result<(), Fault> {
     tokio::time::sleep(Duration::from_millis(2)).await;
     match event.json.to_string().contains("evil") {
-        true => Err(Fault::new("flagged", "the classifier flagged an input").with(CloseCode(1008))),
+        true => Err(Fault::new("the classifier flagged an input")
+            .with(ErrorCode("flagged".into()))
+            .with(CloseCode(1008))),
         false => Ok(()),
     }
 }

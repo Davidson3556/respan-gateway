@@ -10,6 +10,7 @@
 //!
 //! `batch_split.rs` builds on this kind (it includes this file as a module).
 
+use respan_gateway_sdk::{BadRequest, Upstream};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
@@ -119,7 +120,7 @@ impl Format<Outgoing, Embeddings, EmbedRequest> for OpenAiEmbeddings {
 
 fn read_request(raw: Bytes) -> Result<EmbedRequest, Fault> {
     let name: Arc<str> = Arc::from(NAME);
-    let v: Value = serde_json::from_slice(&raw).map_err(|_| Fault::bad_request("not JSON"))?;
+    let v: Value = serde_json::from_slice(&raw).map_err(|_| BadRequest::fault("not JSON"))?;
     let mut said = EmbedRequest::default();
     said.model = v["model"].as_str().map(Into::into);
     said.input = match &v["input"] {
@@ -133,9 +134,9 @@ fn read_request(raw: Bytes) -> Result<EmbedRequest, Fault> {
 
 fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
     let name: Arc<str> = Arc::from(NAME);
-    let v: Value = serde_json::from_slice(&raw).map_err(|_| Fault::upstream("not JSON"))?;
+    let v: Value = serde_json::from_slice(&raw).map_err(|_| Upstream::fault("not JSON"))?;
     let mut said = Embeddings::default();
-    let malformed = || Fault::upstream("invalid embedding indices or vectors");
+    let malformed = || Upstream::fault("invalid embedding indices or vectors");
     let data = v["data"].as_array().ok_or_else(malformed)?;
     let mut ordered = vec![None; data.len()];
     for item in data {

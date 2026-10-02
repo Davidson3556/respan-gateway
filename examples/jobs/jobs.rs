@@ -27,6 +27,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example jobs`
 
+use respan_gateway_sdk::ErrorCode;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::collections::HashMap;
@@ -199,7 +200,7 @@ impl Running {
     ) -> Result<T, Fault> {
         tokio::select! {
             biased;
-            _ = self.lost() => Err(Fault::new("lease_lost", "the idempotent operation lost its lease")),
+            _ = self.lost() => Err(Fault::new("the idempotent operation lost its lease").with(ErrorCode("lease_lost".into()))),
             result = work => result,
         }
     }

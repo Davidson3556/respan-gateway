@@ -1,9 +1,12 @@
 //! Generic read-ahead preserves replay and lets each caller choose its predicate.
 #![allow(clippy::unwrap_used)]
 
+mod faults;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use faults::{says, says_all};
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{Fault, Response};
 
@@ -33,34 +36,33 @@ async fn different_predicates_recheck_the_buffer_and_replay_every_event() {
         .unwrap();
     assert_eq!(reads.load(Ordering::SeqCst), 4);
     assert_eq!(
-        response.outputs::<u32>().collect::<Vec<_>>().await,
+        says_all(response.outputs::<u32>().collect::<Vec<_>>().await),
         (0..5).map(Ok).collect::<Vec<_>>()
     );
 }
 
 #[tokio::test]
 async fn a_match_before_fault_keeps_the_fault_for_replay() {
-    let failure = Fault::upstream("cut");
-    let mut response = Response::stream(stream::iter([Ok(0u32), Err(failure.clone())]));
-    assert_eq!(response.buffer_until(|_: &u32| true).await, Ok(()));
+    let mut response = Response::stream(stream::iter([Ok(0u32), Err(faults::upstream("cut"))]));
+    assert_eq!(says(response.buffer_until(|_: &u32| true).await), Ok(()));
     assert_eq!(
-        response.outputs::<u32>().collect::<Vec<_>>().await,
-        vec![Ok(0), Err(failure)]
+        says_all(response.outputs::<u32>().collect::<Vec<_>>().await),
+        vec![Ok(0), Err("cut".to_owned())]
     );
 }
 
 #[tokio::test]
 async fn a_fault_before_a_match_retains_values_and_end_after_failure() {
-    let failure = Fault::upstream("cut");
-    let mut response = Response::stream(stream::iter([Ok(0u32), Err(failure.clone())]));
+    let mut response = Response::stream(stream::iter([Ok(0u32), Err(faults::upstream("cut"))]));
+    let cut = Err("cut".to_owned());
     assert_eq!(
-        response.buffer_until(|value: &u32| *value > 0).await,
-        Err(failure.clone())
+        says(response.buffer_until(|value: &u32| *value > 0).await),
+        cut
     );
-    assert_eq!(response.until_end().await, Err(failure.clone()));
+    assert_eq!(says(response.until_end().await), cut);
     assert_eq!(
-        response.outputs::<u32>().collect::<Vec<_>>().await,
-        vec![Ok(0), Err(failure)]
+        says_all(response.outputs::<u32>().collect::<Vec<_>>().await),
+        vec![Ok(0), Err("cut".to_owned())]
     );
 }
 
@@ -69,7 +71,7 @@ async fn a_clean_end_without_a_match_preserves_all_events() {
     let mut response = Response::stream(stream::iter([Ok(0u32), Ok(1)]));
     response.buffer_until(|_: &u32| false).await.unwrap();
     assert_eq!(
-        response.outputs::<u32>().collect::<Vec<_>>().await,
+        says_all(response.outputs::<u32>().collect::<Vec<_>>().await),
         [Ok(0), Ok(1)]
     );
 }
@@ -121,9 +123,9 @@ async fn buffering_checks_each_new_value_once() {
         .await
         .unwrap();
     assert_eq!(checked, 1024, "buffering must not rescan earlier values");
-    assert_eq!(response.buffered_end(), Some(&Ok(())));
+    assert!(matches!(response.buffered_end(), Some(Ok(()))));
     assert_eq!(
-        response.outputs::<u32>().collect::<Vec<_>>().await,
+        says_all(response.outputs::<u32>().collect::<Vec<_>>().await),
         (0..1024).map(Ok).collect::<Vec<_>>()
     );
 }
@@ -142,5 +144,5 @@ async fn buffering_moves_values_without_requiring_clone() {
         .await
         .unwrap();
     assert_eq!(seen, [1, 2]);
-    assert_eq!(response.buffered_end(), Some(&Ok(())));
+    assert!(matches!(response.buffered_end(), Some(Ok(()))));
 }

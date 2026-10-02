@@ -26,7 +26,7 @@ pub use call::Call;
 pub use context::ClientContext;
 pub use events::{EventSink, EventStream};
 pub use extensions::Extensions;
-pub use fault::{Fault, codes};
+pub use fault::{Abandoned, Config, Fault, Internal, NotFound};
 pub use format::{Connection, Format};
 pub use gateway::Gateway;
 pub use plugin::{Filter, Plugin};

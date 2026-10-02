@@ -6,6 +6,11 @@ core contracts (`Plugin`, `ClientContext`, `ProviderContext`, `Filter`, `Fault`,
 LLM vocabulary: `conversation::{Conversation, Reply, Message, …}`, `Usage` and
 `Details`. The reexports are the original core types, not wrappers.
 
+A `Fault` carries typed facts that each edge renders as it knows: `BadRequest`,
+`Upstream` and `Truncated` (each with a `fault` constructor), `RetryAfter` and
+`ErrorCode`. Core adds only its own markers (`Abandoned`, `Internal`, `Config`,
+`NotFound`).
+
 Tools are typed too: a request's `Tool`s and `ToolChoice`, an assistant's
 `Content::ToolCall` and its `Content::ToolResult`, and a response's
 `Piece::ToolCall`, whose arguments stream as JSON text numbered by call.

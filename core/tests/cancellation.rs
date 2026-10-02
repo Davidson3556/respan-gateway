@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::time::Duration;
 
@@ -144,7 +145,7 @@ async fn spawned_calls_end_with_their_request() {
             let ended = ended
                 .unwrap_or_else(|_| panic!("a spawned call hung at {i}"))
                 .unwrap();
-            let code = ended.as_ref().err().map(|f| f.code().to_string());
+            let code = ended.as_ref().err().map(|f| faults::code(f).to_string());
             assert!(
                 matches!(code.as_deref(), Some("abandoned" | "internal")),
                 "at {i}: {ended:?}"

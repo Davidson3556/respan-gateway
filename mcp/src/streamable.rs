@@ -17,12 +17,15 @@ use respan_gateway_http::http::header::{ACCEPT, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{
-    self as h, Body, Incoming, Outgoing, bodiless, http::response::Parts as ResponseHead,
+    self as h, Body, Incoming, Outgoing, bodiless, error_code,
+    http::response::Parts as ResponseHead,
 };
 use respan_gateway_sdk::futures::stream::BoxStream;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::relayed::Relayed;
-use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format, codes};
+use respan_gateway_sdk::{
+    BadRequest, Connection, EventSink, EventStream, Fault, Format, Truncated,
+};
 use serde_json::{Value, json};
 
 use crate::{ToClient, ToServer, body, error, forget_answered, lock, read, requests};
@@ -82,7 +85,7 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
                 h::messages(request, |head, raw| {
                     let mut input = ToServer::new(head.method.clone(), Vec::new());
                     if head.method == Method::POST {
-                        let bad = || Fault::bad_request("not a JSON-RPC message or batch");
+                        let bad = || BadRequest::fault("not a JSON-RPC message or batch");
                         let read = read(&raw).filter(|(m, _)| !m.is_empty());
                         (input.messages, input.batch) = read.ok_or_else(bad)?;
                     }
@@ -195,7 +198,7 @@ fn response_events(
                 }
                 Some(Err(fault)) => Some((Err(fault), (inner, pending, true))),
                 None if !pending.is_empty() => {
-                    Some((Err(Fault::truncated()), (inner, pending, true)))
+                    Some((Err(Truncated::fault()), (inner, pending, true)))
                 }
                 None => None,
             }
@@ -268,7 +271,7 @@ fn whole(outputs: &[ToClient]) -> Bytes {
 
 /// A fault as a JSON-RPC error to each of `pending`, or to `null`.
 fn failure(fault: &Fault, pending: &[Value], stream: bool, batch: bool) -> String {
-    let code = if fault.code() == codes::BAD_REQUEST {
+    let code = if fault.is::<BadRequest>() {
         -32600
     } else {
         -32603
@@ -280,7 +283,7 @@ fn failure(fault: &Fault, pending: &[Value], stream: bool, batch: bool) -> Strin
     };
     let errors = ids.iter().map(|id| {
         let mut e = error(id.clone(), code, fault.message());
-        e["error"]["data"] = json!({ "code": fault.code() });
+        e["error"]["data"] = json!({ "code": error_code(fault) });
         e
     });
     if stream {

@@ -1,6 +1,7 @@
 //! Private example store: nested accounts and expiring reservations.
 //! Not durable billing infrastructure; applications own persistence and recovery.
 
+use respan_gateway_sdk::ErrorCode;
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -167,7 +168,9 @@ impl Books {
             while let Some(name) = at.filter(|n| !chain.contains(n)) {
                 let a = self.accounts.get(name).ok_or_else(|| {
                     let msg = format!("unknown account '{name}'");
-                    Fault::new(UNKNOWN_ACCOUNT, msg).with(Status(401))
+                    Fault::new(msg)
+                        .with(ErrorCode(UNKNOWN_ACCOUNT.into()))
+                        .with(Status(401))
                 })?;
                 chain.push(name.clone());
                 at = a.parent.as_ref();
@@ -211,7 +214,9 @@ impl Ledger for MemoryLedger {
             if available < amount {
                 let msg = format!("account '{name}' cannot cover this call");
                 let details = json!({ "account": name, "available": available });
-                let fault = Fault::new(INSUFFICIENT_FUNDS, msg).with(Status(402));
+                let fault = Fault::new(msg)
+                    .with(ErrorCode(INSUFFICIENT_FUNDS.into()))
+                    .with(Status(402));
                 return Err(fault.with(Details(details)));
             }
         }

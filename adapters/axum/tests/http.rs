@@ -519,7 +519,7 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
 
     let all = log.0.lock().map(|l| l.clone()).unwrap_or_default();
     assert_eq!(all.len(), 1);
-    assert_eq!(all[0], Ok(()));
+    assert!(all[0].is_ok());
 }
 
 #[tokio::test]
@@ -647,7 +647,11 @@ struct L6Ends(Arc<Mutex<Vec<String>>>);
 #[async_trait]
 impl Plugin for L6Ends {
     async fn on_client_end(&self, _cx: &ClientContext, end: &Result<(), Fault>) {
-        let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
+        let code = end
+            .as_ref()
+            .err()
+            .map_or("ok".into(), respan_gateway_http::error_code)
+            .into_owned();
         self.0
             .lock()
             .map(|mut l| l.push(format!("request {code}")))
@@ -658,7 +662,11 @@ impl Plugin for L6Ends {
         _px: &respan_gateway_sdk::ProviderContext,
         end: &Result<(), Fault>,
     ) {
-        let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
+        let code = end
+            .as_ref()
+            .err()
+            .map_or("ok".into(), respan_gateway_http::error_code)
+            .into_owned();
         self.0
             .lock()
             .map(|mut l| l.push(format!("call {code}")))

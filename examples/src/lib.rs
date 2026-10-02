@@ -123,8 +123,8 @@ pub mod chat_bound {
     //! Bounds on what a chat call can cost, before it is sent. Used by
     //! `wallet.rs` and `cost_cap.rs`.
 
-    use respan_gateway_sdk::Fault;
     use respan_gateway_sdk::conversation::{Content, Conversation};
+    use respan_gateway_sdk::{BadRequest, Fault};
     use serde_json::{self, Map, Value};
 
     /// The most input tokens `chat` can be. A token is at least a byte, so
@@ -136,7 +136,7 @@ pub mod chat_bound {
         let mut bytes = json(&chat.unsupported);
         for m in &chat.messages {
             if !m.content.iter().all(|c| matches!(c, Content::Text { .. })) {
-                return Err(Fault::bad_request("no cost bound for non-text input"));
+                return Err(BadRequest::fault("no cost bound for non-text input"));
             }
             bytes += m.text().len() + json(&m.unsupported) + 8;
         }
@@ -147,6 +147,6 @@ pub mod chat_bound {
     pub fn answers(chat: &Conversation) -> Result<u64, Fault> {
         let n = chat.unsupported.get("n").map_or(Some(1), Value::as_u64);
         n.map(|n| n.max(1))
-            .ok_or_else(|| Fault::bad_request("n must be a whole number"))
+            .ok_or_else(|| BadRequest::fault("n must be a whole number"))
     }
 }

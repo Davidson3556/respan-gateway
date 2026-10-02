@@ -4,7 +4,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use respan_gateway_core::{Fault, codes};
+use respan_gateway_core::Fault;
+
+use crate::BadRequest;
 
 /// The bytes a value was decoded from, in `format`, and what they said.
 #[derive(Debug)]
@@ -73,16 +75,17 @@ impl<T: PartialEq> Relayed<T> {
     }
 
     /// `fault`, of `now` that a format cannot write, as whose it is:
-    /// [`codes::BAD_REQUEST`], the client's, if `now` says what its bytes
-    /// said, in whichever format; else [`codes::CONFIG`], a plugin's.
+    /// [`BadRequest`], the client's, if `now` says what its bytes said, in
+    /// whichever format; else [`Config`](crate::Config), a plugin's.
     pub fn whose(&self, now: &T, fault: Fault) -> Fault {
         let clients = self.0.as_ref().is_some_and(|o| o.said == *now);
-        let code = if clients {
-            codes::BAD_REQUEST
+        let message = fault.message().to_owned();
+        let whose = if clients {
+            BadRequest::fault(message)
         } else {
-            codes::CONFIG
+            Fault::config(message)
         };
-        Fault::new(code, fault.message().to_owned()).with_source(fault)
+        whose.with_source(fault)
     }
 }
 
@@ -105,9 +108,10 @@ mod tests {
     fn a_value_that_cannot_be_written_is_the_clients_only_as_decoded() {
         let format: Arc<str> = Arc::from("f");
         let relayed = Relayed::came(&format, Bytes::from_static(b"x"), 1);
-        let whose = |r: &Relayed<i32>, now| r.whose(&now, Fault::internal("no")).code().to_owned();
-        assert_eq!(whose(&relayed, 1), codes::BAD_REQUEST);
-        assert_eq!(whose(&relayed, 2), codes::CONFIG);
-        assert_eq!(whose(&Relayed::default(), 1), codes::CONFIG);
+        let whose = |r: &Relayed<i32>, now| r.whose(&now, Fault::internal("no"));
+        assert!(whose(&relayed, 1).is::<BadRequest>());
+        assert!(whose(&relayed, 2).is::<crate::Config>());
+        assert!(whose(&Relayed::default(), 1).is::<crate::Config>());
+        assert!(!whose(&relayed, 2).is::<BadRequest>());
     }
 }

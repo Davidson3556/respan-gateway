@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -249,7 +250,7 @@ async fn a_retry_after_part_of_a_wrapped_session_was_read() {
             if first {
                 // Reads one input, then refuses.
                 if let Some(f) = body.next().await {
-                    got.push(f.map_err(|e| e.code().to_string()));
+                    got.push(f.map_err(|e| faults::code(&e).to_string()));
                 }
                 lock(&b).push(got);
                 return Ok(answer(503, chunks(vec![])));
@@ -257,7 +258,7 @@ async fn a_retry_after_part_of_a_wrapped_session_was_read() {
             let b2 = b.clone();
             tokio::spawn(async move {
                 while let Some(f) = body.next().await {
-                    got.push(f.map_err(|e| e.code().to_string()));
+                    got.push(f.map_err(|e| faults::code(&e).to_string()));
                 }
                 lock(&b2).push(got);
             });
@@ -312,7 +313,7 @@ async fn fallback_resumes_a_pending_input_check_once() {
                 })
             })?;
             let failed = cx.call("p").await.unwrap_err();
-            assert_eq!(failed.code(), "upstream");
+            assert_eq!(faults::code(&failed), "upstream");
             Ok(Some(cx.call("p").await?))
         }
     }
@@ -341,7 +342,7 @@ async fn fallback_resumes_a_pending_input_check_once() {
                 }
                 assert_eq!(checked.load(Ordering::SeqCst), 1);
                 resume.notify_one();
-                return Err(Fault::upstream("try the next attempt"));
+                return Err(faults::upstream("try the next attempt"));
             }
             let frames = body.try_collect::<Vec<_>>().await?;
             assert_eq!(frames, ["X", "<END>"]);
@@ -360,7 +361,7 @@ async fn fallback_resumes_a_pending_input_check_once() {
     drop(tx);
     let (response, end) = handle(&gateway, request).await;
     assert_eq!(read(response).await, Ok((200, "answer;!".into())));
-    assert_eq!(end.await, Ok(()));
+    assert!(end.await.is_ok());
     gateway.idle().await;
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(checks.load(Ordering::SeqCst), 1);

@@ -43,8 +43,8 @@ async fn a_graceful_client_close_reaches_the_provider() {
             Seen::Close(Some(1000))
         ]
     );
-    assert_eq!(ends.only(), Ok(()));
-    assert_eq!(calls.all(), [Ok(())]);
+    assert_eq!(code(&ends.only()), "ok");
+    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["ok"]);
     eventually("the provider's connection closed", || {
         probe.live.load(Ordering::SeqCst) == 0
     })
@@ -280,7 +280,7 @@ async fn pings_are_answered_by_each_hop_and_carried_by_none() {
     eventually("the provider read it", || probe.texts() == ["still here"]).await;
     close(&mut ws, 1000, "").await;
     idle(&server.gateway).await;
-    assert_eq!(ends.only(), Ok(()));
+    assert_eq!(code(&ends.only()), "ok");
 }
 
 /// A session served with `until` made per session, through a probe provider.
@@ -383,6 +383,6 @@ async fn a_session_that_ends_first_closes_as_it_would() {
         Heard::Closed(_) | Heard::Broken
     ));
     idle(&gateway).await;
-    assert_eq!(ends.only(), Ok(()));
+    assert_eq!(code(&ends.only()), "ok");
     task.abort();
 }

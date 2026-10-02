@@ -1,6 +1,8 @@
 //! One format over multiple transport types and fresh transports per attempt.
 #![allow(clippy::unwrap_used, clippy::type_complexity)]
 
+mod faults;
+
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 
@@ -72,7 +74,7 @@ fn provider(io: Io) -> Result<Connection<Output, Input>, Fault> {
         let value = inputs
             .value()
             .transpose()?
-            .ok_or_else(|| Fault::bad_request("one input"))?
+            .ok_or_else(|| faults::bad_request("one input"))?
             .0;
         trace.sent.lock().unwrap().push((attempt, value));
         Ok(futures::sink::unfold(
@@ -80,7 +82,7 @@ fn provider(io: Io) -> Result<Connection<Output, Input>, Fault> {
             move |mut answer, input: Result<Input, Fault>| async move {
                 let input = input?;
                 if fail {
-                    return Err(Fault::upstream("retry this attempt"));
+                    return Err(faults::upstream("retry this attempt"));
                 }
                 let outputs = EventStream::single(Output(input.0));
                 answer
@@ -375,7 +377,7 @@ async fn a_panicking_transport_factory_is_an_unsent_internal_failure() {
         )
         .await
         .unwrap_err();
-    assert_eq!(fault.code(), respan_gateway_core::codes::INTERNAL);
+    assert_eq!(faults::code(&fault), "internal");
     gateway.idle().await;
     assert_eq!(*trace.ended.lock().unwrap(), [false]);
 }
@@ -392,7 +394,7 @@ fn registration_checks_the_kind_after_assigning_the_edge_role() {
             panic!("registration must not construct I/O")
         })
         .unwrap_err();
-    assert_eq!(fault.code(), "config");
+    assert_eq!(faults::code(&fault), "config");
     assert_eq!(
         fault.message(),
         "two formats named messages are of different kinds"

@@ -12,12 +12,14 @@
 pub use respan_gateway_core::*;
 
 pub mod conversation;
+mod fault;
 pub mod relayed;
 mod usage;
 
 pub use conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role, Start, Tool, ToolChoice, set_model,
 };
+pub use fault::{BadRequest, ErrorCode, RetryAfter, Truncated, Upstream};
 pub use usage::Usage;
 
 use serde_json::Value;

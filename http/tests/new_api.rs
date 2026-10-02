@@ -12,6 +12,7 @@ use h::{
     http::{Request, Response},
 };
 use respan_gateway_http as h;
+use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::{self, FutureExt, Sink, SinkExt, StreamExt, future, stream};
 use respan_gateway_sdk::{EventSink, EventStream, Extensions, Fault};
 
@@ -274,7 +275,7 @@ async fn custom_and_decorated_sink_faults_are_not_hidden_by_transport_completion
                     .expect("expected value")
                     .expect_err("expected failure");
                 assert_eq!(
-                    error.code(),
+                    h::error_code(&error),
                     "config",
                     "wrapped={wrapped} complete={complete} phase={phase}"
                 );
@@ -285,7 +286,7 @@ async fn custom_and_decorated_sink_faults_are_not_hidden_by_transport_completion
 
 #[tokio::test]
 async fn transport_failure_does_not_wait_for_a_pending_custom_sink_close() {
-    let send = h::connect(|_| async { Err(Fault::upstream("transport failed")) });
+    let send = h::connect(|_| async { Err(Upstream::fault("transport failed")) });
     let (_read, mut sink) = send(Extensions::new()).bind(
         |_| {
             Ok((
@@ -420,7 +421,7 @@ async fn refusal_peeking_yields_without_losing_a_late_refusal() {
                 |_, _, _| Ok(()),
                 |_, wire, _| {
                     wire?;
-                    Err(Fault::upstream("late refusal"))
+                    Err(Upstream::fault("late refusal"))
                 },
             )
         },

@@ -12,6 +12,7 @@ use h::http::{HeaderMap, Request, Response};
 use h::http_body::{Body as HttpBody, Frame, SizeHint};
 use h::http_body_util::BodyExt;
 use respan_gateway_http as h;
+use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::{Future, Stream};
 use respan_gateway_sdk::{EventStream, Fault};
 
@@ -112,7 +113,7 @@ impl HttpBody for External {
                 trailers.insert("x-trailer", "discarded".parse().expect("header"));
                 Ok(Frame::trailers(trailers))
             }
-            Step::Error => Err(Fault::upstream("external body broke")),
+            Step::Error => Err(Upstream::fault("external body broke")),
             Step::Wait => panic!("the fixture has only one wait"),
         }))
     }
@@ -195,7 +196,7 @@ fn external_adapter_is_lazy_and_preserves_pending_frames_and_errors() {
     assert_eq!(probe.polls(), 5);
     let error = body.as_mut().poll_next(&mut cx);
     assert!(matches!(error, Poll::Ready(Some(Err(fault)))
-        if fault.code() == "upstream" && fault.message() == "external body broke"));
+        if h::error_code(&fault) == "upstream" && fault.message() == "external body broke"));
     assert_eq!(probe.polls(), 6);
     assert!(matches!(
         body.as_mut().poll_next(&mut cx),
@@ -253,7 +254,7 @@ fn collection_resumes_on_wakeup_and_does_not_decode_a_late_wire_error() {
     assert_eq!(probe.wakes.load(Ordering::SeqCst), 1);
     let result = read.as_mut().poll(&mut cx);
     assert!(matches!(result, Poll::Ready(Err(fault))
-        if fault.code() == "upstream" && fault.message() == "external body broke"));
+        if h::error_code(&fault) == "upstream" && fault.message() == "external body broke"));
     assert_eq!(probe.polls(), 4, "never read past the wire error");
     assert_eq!(probe.drops(), 1);
     assert_eq!(decoded.load(Ordering::SeqCst), 0);

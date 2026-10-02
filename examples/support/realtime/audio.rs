@@ -2,6 +2,7 @@
 //! Rates: https://developers.openai.com/api/docs/guides/voice-latency-cost
 use base64::{Engine, engine::general_purpose::STANDARD};
 use respan_gateway_sdk::futures::{StreamExt, stream};
+use respan_gateway_sdk::{BadRequest, ErrorCode};
 use respan_gateway_sdk::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use respan_gateway_ws::{ClientEvent, CloseCode};
 use serde_json::{Value, json};
@@ -19,7 +20,7 @@ pub(super) fn contains_audio(value: &Value) -> bool {
 pub(super) fn tokens(encoded: &str) -> Result<i64, Fault> {
     let bytes = STANDARD
         .decode(encoded)
-        .map_err(|_| Fault::bad_request("audio must be valid base64").with(CloseCode(1008)))?;
+        .map_err(|_| BadRequest::fault("audio must be valid base64").with(CloseCode(1008)))?;
     // The fastest supported encoding is 8kHz G.711: 400 bytes per output token.
     // PCM24k needs more bytes per token. Using the faster rate bounds both directions.
     Ok(i64::try_from(bytes.len().div_ceil(400)).unwrap_or(i64::MAX))
@@ -46,23 +47,23 @@ impl Plugin for Validate {
             }
             let session = &event.json["session"];
             if !session.is_object() {
-                return Err(Fault::bad_request("session must be an object").with(CloseCode(1008)));
+                return Err(BadRequest::fault("session must be an object").with(CloseCode(1008)));
             }
             for path in ["/audio", "/audio/input", "/audio/output"] {
                 if session
                     .pointer(path)
                     .is_some_and(|value| !value.is_object())
                 {
-                    return Err(Fault::bad_request("audio configuration must be an object")
+                    return Err(BadRequest::fault("audio configuration must be an object")
                         .with(CloseCode(1008)));
                 }
             }
             for path in ["/input_audio_transcription", "/audio/input/transcription"] {
                 if session.pointer(path).is_some_and(|v| !v.is_null()) {
                     return Err(Fault::new(
-                        "audio_policy",
                         "capped sessions disable separately billed transcription",
                     )
+                    .with(ErrorCode("audio_policy".into()))
                     .with(CloseCode(1008)));
                 }
             }
@@ -85,11 +86,9 @@ impl Plugin for Validate {
                     },
                 };
                 if !valid {
-                    return Err(Fault::new(
-                        "audio_policy",
-                        "unsupported audio encoding in capped session",
-                    )
-                    .with(CloseCode(1008)));
+                    return Err(Fault::new("unsupported audio encoding in capped session")
+                        .with(ErrorCode("audio_policy".into()))
+                        .with(CloseCode(1008)));
                 }
             }
             if manual {

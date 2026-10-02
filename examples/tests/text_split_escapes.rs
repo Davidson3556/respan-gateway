@@ -3,6 +3,7 @@
 #[path = "../support/text.rs"]
 mod text;
 
+use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::conversation::{Finish, Piece, Reply};
 #[path = "text_support/mod.rs"]
 mod support;
@@ -176,7 +177,7 @@ impl text::Rewrite for Refuse {
     }
     fn rewrite(&mut self, text: &str) -> Result<String, respan_gateway_sdk::Fault> {
         if text.contains("bomb") {
-            Err(respan_gateway_sdk::Fault::new("blocked", "blocked"))
+            Err(respan_gateway_sdk::Fault::new("blocked").with(ErrorCode("blocked".into())))
         } else {
             Ok(text.to_owned())
         }

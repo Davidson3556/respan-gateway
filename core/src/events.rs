@@ -434,6 +434,22 @@ mod tests {
 
     use super::*;
 
+    /// `r` with a fault as its message, to compare.
+    fn says<T>(r: Result<T>) -> std::result::Result<T, String> {
+        r.map_err(|f| f.message().to_owned())
+    }
+
+    /// What a probe's sink took, faults as messages.
+    fn took(items: &std::sync::Mutex<Vec<Result<u8>>>) -> Vec<std::result::Result<u8, String>> {
+        items
+            .lock()
+            .expect("items")
+            .iter()
+            .cloned()
+            .map(says)
+            .collect()
+    }
+
     #[test]
     fn snapshots_and_mapping_share_one_lazy_decode() {
         let decodes = Arc::new(AtomicUsize::new(0));
@@ -450,9 +466,9 @@ mod tests {
             .into_events()
             .map_values(|value| Ok(u16::from(value)), Clone::clone);
         assert_eq!(decodes.load(Ordering::SeqCst), 0);
-        assert_eq!(single.value(), Ok(&17));
-        assert_eq!(mapped.value(), Some(Ok(&17_u16)));
-        assert_eq!(mapped.value(), Some(Ok(&17_u16)));
+        assert_eq!(says(single.value()), Ok(&17));
+        assert_eq!(mapped.value().map(says), Some(Ok(&17_u16)));
+        assert_eq!(mapped.value().map(says), Some(Ok(&17_u16)));
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }
 
@@ -466,7 +482,7 @@ mod tests {
             };
             let maps = Arc::new(AtomicUsize::new(0));
             let seen = maps.clone();
-            let fault = Fault::bad_request("mapping failed");
+            let fault = Fault::new("mapping failed");
             let failure = fault.clone();
             let mut mapped = events.map_values(
                 move |_| -> Result<u16> {
@@ -479,12 +495,14 @@ mod tests {
             let Some(single) = mapped.take_single() else {
                 panic!("single expected")
             };
-            assert_eq!(single.known_error(), None);
+            assert!(single.known_error().is_none());
             let replay = single.clone().into_events();
-            assert_eq!(single.value(), Err(fault.clone()));
-            assert_eq!(replay.value(), Some(Err(fault.clone())));
+            let failed = Err(fault.message().to_owned());
+            assert_eq!(says(single.value()), failed);
+            assert_eq!(replay.value().map(says), Some(failed));
             assert_eq!(maps.load(Ordering::SeqCst), 1);
-            assert_eq!(single.known_error(), Some(fault));
+            let known = single.known_error();
+            assert_eq!(known.as_ref().map(Fault::message), Some("mapping failed"));
         }
     }
 
@@ -500,7 +518,7 @@ mod tests {
             let Some(Err(fault)) = events.value() else {
                 panic!("fault expected")
             };
-            assert_eq!(fault.code(), crate::codes::INTERNAL);
+            assert!(fault.is::<crate::Internal>());
         }
         assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }
@@ -517,13 +535,13 @@ mod tests {
             Poll::Ready(Some(if read == 0 {
                 Ok(1)
             } else {
-                Err(Fault::truncated())
+                Err(Fault::new("cut"))
             }))
         }));
-        assert_eq!(events.next().await, Some(Ok(1)));
-        assert_eq!(events.next().await, Some(Err(Fault::truncated())));
+        assert_eq!(events.next().await.map(says), Some(Ok(1)));
+        assert_eq!(events.next().await.map(says), Some(Err("cut".into())));
         assert_eq!(Arc::strong_count(&held), 2);
-        assert_eq!(events.next().await, None);
+        assert!(events.next().await.is_none());
         assert_eq!(polls.load(Ordering::SeqCst), 2);
         drop(events);
         assert_eq!(Arc::strong_count(&held), 1);
@@ -534,16 +552,16 @@ mod tests {
         let events =
             EventStream::single(7_u8).map_values(|value| Ok(u16::from(value)), Clone::clone);
         assert!(events.is_single());
-        assert_eq!(events.try_collect::<Vec<_>>().await, Ok(vec![7_u16]));
+        assert_eq!(says(events.try_collect::<Vec<_>>().await), Ok(vec![7_u16]));
     }
 
     #[tokio::test]
     async fn refusal_is_yielded_once() {
-        let fault = Fault::upstream("refused");
-        let mut events = EventStream::<u8>::refused(fault.clone());
-        assert_eq!(events.refusal(), Some(&fault));
-        assert_eq!(events.next().await, Some(Err(fault)));
-        assert_eq!(events.next().await, None);
+        let fault = Fault::new("refused");
+        let mut events = EventStream::<u8>::refused(fault);
+        assert_eq!(events.refusal().map(Fault::message), Some("refused"));
+        assert_eq!(events.next().await.map(says), Some(Err("refused".into())));
+        assert!(events.next().await.is_none());
     }
 
     #[derive(Default)]
@@ -581,14 +599,11 @@ mod tests {
 
     #[test]
     fn preparation_failure_happens_on_submission() {
-        let fault = Fault::bad_request("cannot encode");
-        let expected = fault.clone();
+        let fault = Fault::new("cannot encode");
         let mut sink = EventSink::preparing(move |_: &mut EventStream<u8>| Err::<Probe, _>(fault));
-        assert_eq!(
-            sink.prepare(&mut EventStream::single(1)),
-            Err(expected.clone())
-        );
-        assert_eq!(sink.prepare(&mut EventStream::single(2)), Err(expected));
+        let failed = Err("cannot encode".to_owned());
+        assert_eq!(says(sink.prepare(&mut EventStream::single(1))), failed);
+        assert_eq!(says(sink.prepare(&mut EventStream::single(2))), failed);
     }
 
     #[tokio::test]
@@ -601,9 +616,9 @@ mod tests {
         let items = probe.items.clone();
         let mut delivering = deliver(EventStream::single(1), EventSink::new(probe));
         assert!(delivering.as_mut().now_or_never().is_none());
-        assert_eq!(*items.lock().expect("items"), [Ok(1)]);
-        assert!(finish.send(Err(Fault::truncated())).is_ok());
-        assert_eq!(delivering.await, Err(Fault::truncated()));
+        assert_eq!(took(&items), [Ok(1)]);
+        assert!(finish.send(Err(Fault::new("cut"))).is_ok());
+        assert_eq!(says(delivering.await), Err("cut".to_owned()));
     }
 
     #[test]
@@ -626,13 +641,11 @@ mod tests {
         let items = probe.items.clone();
         let mut sink = EventSink::new(probe);
         sink.send(Ok(3)).await.expect("send value");
-        let fault = Fault::bad_request("source");
-        sink.send(Err(fault.clone()))
-            .await
-            .expect("send fault item");
+        let fault = Fault::new("source");
+        sink.send(Err(fault)).await.expect("send fault item");
         assert!(sink.send(Ok(4)).await.is_err());
         sink.close().await.expect("close delivery");
-        assert_eq!(*items.lock().expect("items"), [Ok(3), Err(fault)]);
+        assert_eq!(took(&items), [Ok(3), Err("source".to_owned())]);
         let mut ordinary = EventSink::new(futures::sink::unfold((), |(), _: Result<u8>| async {
             Ok::<_, Fault>(())
         }));
@@ -647,23 +660,20 @@ mod tests {
     async fn pump_forwards_source_fault_but_returns_sink_fault() {
         let probe = Probe::default();
         let items = probe.items.clone();
-        let source_fault = Fault::bad_request("source");
+        let source_fault = Fault::new("source");
         deliver(
             EventStream::refused(source_fault.clone()),
             EventSink::new(probe),
         )
         .await
         .expect("fault delivered");
-        assert_eq!(*items.lock().expect("items"), [Err(source_fault)]);
-        let sink_fault = Fault::upstream("sink");
-        let expected = sink_fault.clone();
+        assert_eq!(took(&items), [Err("source".to_owned())]);
+        let sink_fault = Fault::new("sink");
         let sink = futures::sink::unfold((), move |(), _: Result<u8>| {
             futures::future::ready(Err::<(), _>(sink_fault.clone()))
         });
-        assert_eq!(
-            deliver(EventStream::single(1), EventSink::new(sink)).await,
-            Err(expected)
-        );
+        let delivered = deliver(EventStream::single(1), EventSink::new(sink)).await;
+        assert_eq!(says(delivered), Err("sink".to_owned()));
     }
 
     #[tokio::test]
@@ -721,7 +731,7 @@ mod tests {
                 ready: Some(futures::future::pending().boxed()),
                 ..Probe::default()
             });
-            assert_eq!(deliver(source, sink).now_or_never(), Some(Ok(())));
+            assert!(matches!(deliver(source, sink).now_or_never(), Some(Ok(()))));
         }
     }
 

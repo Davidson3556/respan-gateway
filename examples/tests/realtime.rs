@@ -203,7 +203,7 @@ async fn each_turn_is_metered_when_it_completes_not_when_the_session_ends() -> R
             turns: 2
         }]
     );
-    assert_eq!(s.ends.only(), Ok(()));
+    assert_eq!(s.ends.only().map_err(|f| f.message().to_owned()), Ok(()));
     Ok(())
 }
 
@@ -370,7 +370,9 @@ async fn a_session_is_closed_at_its_maximum_length() -> Result<(), Fault> {
         }]
     );
     assert_eq!(
-        s.ends.only().map_err(|f| f.code().to_owned()),
+        s.ends
+            .only()
+            .map_err(|f| respan_gateway_http::error_code(&f).into_owned()),
         Err("max_length".into())
     );
     Ok(())
@@ -525,7 +527,9 @@ async fn a_flagged_input_never_reaches_the_provider_and_closes_the_session() -> 
     assert_eq!(read.len(), 1, "{read:?}");
     assert!(!read[0].to_string().contains("evil"));
     assert_eq!(
-        s.ends.only().map_err(|f| f.code().to_owned()),
+        s.ends
+            .only()
+            .map_err(|f| respan_gateway_http::error_code(&f).into_owned()),
         Err("flagged".into())
     );
     Ok(())
@@ -902,7 +906,9 @@ struct EndAt(Arc<Mutex<Vec<(std::time::Instant, String)>>>);
 #[respan_gateway_sdk::async_trait]
 impl Plugin for EndAt {
     async fn on_client_end(&self, _: &ClientContext, end: &Result<(), Fault>) {
-        let code = end.as_ref().err().map_or("ok", Fault::code).to_owned();
+        let code = end.as_ref().err().map_or("ok".into(), |f| {
+            respan_gateway_http::error_code(f).into_owned()
+        });
         lock(&self.0).push((std::time::Instant::now(), code));
     }
 }

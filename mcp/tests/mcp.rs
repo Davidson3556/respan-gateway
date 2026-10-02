@@ -9,7 +9,7 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, Completion, Credential, Incoming, Outgoing, credentials, proxy_call, serve,
+    Body, Completion, Credential, Incoming, Outgoing, credentials, error_code, proxy_call, serve,
     strip_client_origin_headers, strip_origin_headers,
 };
 use respan_gateway_mcp::{
@@ -17,7 +17,7 @@ use respan_gateway_mcp::{
 };
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
-use respan_gateway_sdk::{async_trait, codes};
+use respan_gateway_sdk::{RetryAfter, Truncated, Upstream, async_trait};
 use serde_json::{Value, json};
 
 use respan_gateway_http::relay;
@@ -186,7 +186,7 @@ impl ScriptedMcp {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
-            .ok_or_else(|| Fault::upstream("no MCP test reply"))?;
+            .ok_or_else(|| Upstream::fault("no MCP test reply"))?;
         let (mut head, chunks) = reply.into_parts();
         strip_origin_headers(&mut head.headers);
         Ok((
@@ -322,11 +322,11 @@ async fn a_batch_answer_is_complete_only_once_every_id_is_answered() {
     );
     assert_eq!(
         (&unanswered["id"], &unanswered["error"]["data"]["code"]),
-        (&json!(1), &json!(codes::TRUNCATED))
+        (&json!(1), &json!("truncated"))
     );
     assert_eq!(
-        outcome.map_err(|f| f.code().to_owned()),
-        Err(codes::TRUNCATED.to_owned())
+        outcome.map_err(|f| (error_code(&f).into_owned(), f.is::<Truncated>())),
+        Err(("truncated".to_owned(), true))
     );
 
     let (_, _, body, outcome) = send(&gw, request(Method::POST, batch, &[])).await;
@@ -447,8 +447,13 @@ impl Plugin for RefusalProbe {
             px.provider().to_owned(),
             px.is_sent(),
             px.is_refused(),
-            end.as_ref().err().map_or("ok", Fault::code).to_owned(),
-            end.as_ref().err().and_then(Fault::retry_after),
+            end.as_ref()
+                .err()
+                .map_or("ok".into(), |f| error_code(f).into_owned()),
+            end.as_ref()
+                .err()
+                .and_then(|f| f.get::<RetryAfter>())
+                .map(|r| r.0),
         ));
     }
 }
@@ -483,10 +488,7 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     assert_eq!(headers["retry-after"], "7");
     assert_eq!(body, event);
-    assert_eq!(
-        outcome.expect_err("provider refusal").code(),
-        codes::UPSTREAM
-    );
+    assert!(outcome.expect_err("provider refusal").is::<Upstream>());
     assert_eq!(failed.sent().len(), 1);
     assert_eq!(
         *probe.0.lock().unwrap_or_else(PoisonError::into_inner),
@@ -494,7 +496,7 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
             "mcp".to_owned(),
             true,
             true,
-            codes::UPSTREAM.to_owned(),
+            "upstream".to_owned(),
             Some(Duration::from_secs(7))
         )]
     );
@@ -544,7 +546,7 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
             "first".to_owned(),
             true,
             true,
-            codes::UPSTREAM.to_owned(),
+            "upstream".to_owned(),
             Some(Duration::from_secs(7))
         )),
         "{events:?}"
@@ -907,7 +909,7 @@ async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
     );
     assert_eq!(error["error"]["data"]["code"], TIMED_OUT);
     assert_eq!(
-        outcome.err().map(|f| f.code().to_owned()),
+        outcome.err().map(|f| error_code(&f).into_owned()),
         Some(TIMED_OUT.into())
     );
     // With nothing waiting, the session idles out and a new one fits.
@@ -1010,7 +1012,7 @@ async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request()
         } else {
             assert_eq!(status, StatusCode::BAD_GATEWAY);
             assert_eq!(output[0]["id"], 1, "refusal addresses original caller");
-            assert_eq!(ended.expect_err("unanswered request").code(), "truncated");
+            assert!(ended.expect_err("unanswered request").is::<Truncated>());
         }
     }
 }

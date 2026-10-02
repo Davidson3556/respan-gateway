@@ -100,7 +100,7 @@ async fn both_directions_progress_before_either_is_closed() {
         assert_eq!(output.next().await, Some(Output(2)));
         drop(input);
         assert_eq!(output.next().await, None);
-        assert_eq!(handled.await.unwrap(), Ok(()));
+        assert!(handled.await.unwrap().is_ok());
         gateway.idle().await;
     })
     .await

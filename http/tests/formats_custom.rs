@@ -29,9 +29,10 @@ use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
 use respan_gateway_sdk::relayed::Relayed;
+use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
 use respan_gateway_sdk::{
     ClientContext, Connection, EventSink, EventStream, Fault, Filter, Format, Gateway, Plugin,
-    Response, codes,
+    Response,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -325,7 +326,7 @@ impl JevFormat {
             }
             let v = formats::json(&raw);
             if let Some(message) = v.as_ref().and_then(|v| v["error"]["message"].as_str()) {
-                return Err(Fault::upstream(message).with(
+                return Err(Upstream::fault(message).with(
                     respan_gateway_http::ProviderError::new(
                         name.to_string(),
                         http::Response::new(raw),
@@ -333,7 +334,7 @@ impl JevFormat {
                 ));
             }
             let text = v.as_ref().and_then(|v| v[answer].as_str());
-            let text = text.ok_or_else(|| Fault::upstream("not a jev answer"))?;
+            let text = text.ok_or_else(|| Upstream::fault("not a jev answer"))?;
             out.push(Answer::new(text).came(&name, raw));
             Ok(())
         };
@@ -406,7 +407,7 @@ impl JevFormat {
         let v = v.as_ref().and_then(Value::as_object);
         let prompt = v
             .and_then(|v| v.get(self.prompt)?.as_str())
-            .ok_or_else(|| Fault::bad_request("no prompt"))?;
+            .ok_or_else(|| BadRequest::fault("no prompt"))?;
         let known = [self.prompt, "model"];
         let unknown = v.into_iter().flatten().map(|(k, _)| k);
         Ok(Jev {
@@ -440,7 +441,7 @@ impl JevFormat {
                 }
                 Ok(v)
             }
-            None => Err(Fault::bad_request(format!(
+            None => Err(BadRequest::fault(format!(
                 "'{}' cannot be translated",
                 jev.unknown[0]
             ))),
@@ -565,8 +566,10 @@ async fn a_default_target_of_another_kind_is_not_used() {
 
     // A target exists, so the setup, not the request, is at fault.
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let end = ended.await.map_err(|f| f.code().to_owned());
-    assert_eq!(end, Err(codes::CONFIG.to_owned()));
+    let end = ended
+        .await
+        .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
+    assert_eq!(end, Err("config".to_owned()));
     assert!(sent.all().is_empty());
 }
 
@@ -614,8 +617,10 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
     // Without the plugin, a chat request goes to `v2`, which cannot take it.
     let (resp, ended) = serve(&gw(Vec::new()), chat()).await;
     assert_eq!(read_whole(resp).await.0, StatusCode::INTERNAL_SERVER_ERROR);
-    let end = ended.await.map_err(|f| f.code().to_owned());
-    assert_eq!(end, Err(codes::CONFIG.to_owned()));
+    let end = ended
+        .await
+        .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
+    assert_eq!(end, Err("config".to_owned()));
     assert!(sent.all().is_empty() && fake.requests().is_empty());
 
     let gw = gw(vec![Arc::new(ByFormat)]);
@@ -671,8 +676,10 @@ async fn a_call_to_a_provider_of_another_kind_is_refused_when_made() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.contains("cannot use"), "{body}");
-    let end = ended.await.map_err(|f| f.code().to_owned());
-    assert_eq!(end, Err(respan_gateway_sdk::codes::CONFIG.to_owned()));
+    let end = ended
+        .await
+        .map_err(|f| respan_gateway_http::error_code(&f).into_owned());
+    assert_eq!(end, Err("config".to_owned()));
     assert!(sent.all().is_empty(), "nothing left for the provider");
 }
 
@@ -889,7 +896,9 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     #[async_trait]
     impl Plugin for Limit {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Err(Fault::new("limited", "slow down").with(Status(429)))
+            Err(Fault::new("slow down")
+                .with(ErrorCode("limited".into()))
+                .with(Status(429)))
         }
     }
 
@@ -919,7 +928,7 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
         _ => response(
             StatusCode::OK,
             None,
-            vec![Ok(Bytes::from("half")), Err(Fault::upstream("cut"))],
+            vec![Ok(Bytes::from("half")), Err(Upstream::fault("cut"))],
         ),
     });
     let gw = |plugins: Vec<Arc<dyn Plugin>>| {
@@ -1043,7 +1052,9 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
     #[async_trait]
     impl Plugin for Deny {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Err(Fault::new("denied", "no").with(Status(403)))
+            Err(Fault::new("no")
+                .with(ErrorCode("denied".into()))
+                .with(Status(403)))
         }
     }
 
@@ -1097,7 +1108,7 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(headers["content-type"], "text/plain; charset=utf-8");
     let end = log.only();
-    assert!(matches!(end, Err(f) if f.code() == respan_gateway_sdk::codes::INTERNAL));
+    assert!(matches!(end, Err(f) if respan_gateway_http::error_code(&f) == "internal"));
 }
 
 #[tokio::test]
@@ -1282,7 +1293,12 @@ async fn a_user_formats_failure_keeps_the_providers_words() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body.ok().as_deref(), Some(error.as_bytes()));
     let end = ended.await;
-    let end = end.map_err(|f| (f.code().to_owned(), f.message().to_owned()));
+    let end = end.map_err(|f| {
+        (
+            respan_gateway_http::error_code(&f).into_owned(),
+            f.message().to_owned(),
+        )
+    });
     let said = ("invalid_request_error".to_owned(), "bad prompt".to_owned());
     assert_eq!(end, Err(said));
 }
@@ -1371,7 +1387,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
                             .headers
                             .get("x-prompt")
                             .and_then(|p| p.to_str().ok())
-                            .ok_or_else(|| Fault::bad_request("no prompt"))?;
+                            .ok_or_else(|| BadRequest::fault("no prompt"))?;
                         Ok(Jev {
                             prompt: prompt.to_owned(),
                             model: None,
@@ -1493,7 +1509,9 @@ impl Plugin for NoteFormat {
             .lock()
             .map(|mut n| n.push(cx.format().to_owned()))
             .ok();
-        Err(Fault::new("noted", "noted").with(Status(403)))
+        Err(Fault::new("noted")
+            .with(ErrorCode("noted".into()))
+            .with(Status(403)))
     }
 }
 
@@ -1740,16 +1758,21 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             // Traffic of no kind is a kind of its own, which no plugin for
             // another kind reads.
-            let other = cx.input::<Jev>().err().map(|f| f.code().to_owned());
+            let other = cx
+                .input::<Jev>()
+                .err()
+                .map(|f| respan_gateway_http::error_code(&f).into_owned());
             let jev = cx.is_kind::<Jev>();
-            assert_eq!(other.is_some_and(|c| c == codes::INTERNAL), !jev);
+            assert_eq!(other.is_some_and(|c| c == "internal"), !jev);
             let kinds = (
                 cx.is_kind::<Sent<Anywhere>>(),
                 cx.is_kind::<Jev>(),
                 cx.is_kind::<Answer>(),
             );
             self.0.lock().map(|mut k| k.push(kinds)).ok();
-            Err(Fault::new("noted", "noted").with(Status(403)))
+            Err(Fault::new("noted")
+                .with(ErrorCode("noted".into()))
+                .with(Status(403)))
         }
     }
 
@@ -1781,7 +1804,9 @@ async fn a_refusal_goes_out_with_its_faults_status_even_a_success() {
     #[async_trait]
     impl Plugin for Rpc {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            Err(Fault::new("rpc_error", "no").with(Status(200)))
+            Err(Fault::new("no")
+                .with(ErrorCode("rpc_error".into()))
+                .with(Status(200)))
         }
     }
 
@@ -1961,7 +1986,7 @@ async fn a_keep_alive_reaches_filters_and_goes_where_it_came() {
     let (_, _, body) = read_whole(resp).await;
 
     assert_eq!(body.ok().as_deref(), Some(chunks.concat().as_bytes()));
-    assert_eq!(ended.await, Ok(()));
+    assert!(ended.await.is_ok());
     assert_eq!(counts.0.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 

@@ -29,6 +29,7 @@ use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::retryable;
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
+use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt, stream};
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
@@ -78,7 +79,7 @@ impl Plugin for Split {
                     .try_collect::<Vec<_>>()
                     .await?;
                 if answers.len() != 1 || answers[0].vectors.len() != expected {
-                    return Err(Fault::upstream("the provider omitted embedding vectors"));
+                    return Err(Upstream::fault("the provider omitted embedding vectors"));
                 }
                 Ok(answers)
             })

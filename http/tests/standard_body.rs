@@ -6,6 +6,7 @@ use h::http::{HeaderMap, HeaderValue, Request, Response};
 use h::http_body::Frame;
 use h::http_body_util::{BodyExt, Empty, Full, StreamBody};
 use respan_gateway_http as h;
+use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{EventStream, Fault};
 
@@ -72,7 +73,7 @@ async fn standard_frame_adapter_preserves_data_and_head_but_discards_trailers() 
 async fn standard_body_collection_keeps_wire_failure_out_of_semantic_decoding() {
     let frames = stream::iter([
         Ok(Frame::data(Bytes::from_static(b"partial"))),
-        Err(Fault::upstream("broken native body")),
+        Err(Upstream::fault("broken native body")),
     ]);
     let body = StreamBody::new(frames);
     let decoded = Arc::new(AtomicUsize::new(0));
@@ -82,7 +83,7 @@ async fn standard_body_collection_keeps_wire_failure_out_of_semantic_decoding() 
     )
     .await;
     let fault = result.expect_err("wire failure must fail opening");
-    assert_eq!(fault.code(), "upstream");
+    assert_eq!(h::error_code(&fault), "upstream");
     assert_eq!(fault.message(), "broken native body");
     assert_eq!(decoded.load(Ordering::SeqCst), 0);
 }

@@ -10,7 +10,7 @@ use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_T
 use respan_gateway_http::{
     Status, bodiless, http::request::Parts as RequestHead, http::response::Parts as ResponseHead,
 };
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{BadRequest, ErrorCode, Fault, Truncated, Upstream};
 use serde_json::{self, Map, Value, json};
 
 use crate::Usage;
@@ -80,7 +80,7 @@ pub(crate) fn read_request<W: Wire>(raw: Bytes) -> Result<Conversation, Fault> {
 }
 
 fn not_an_object() -> Fault {
-    Fault::bad_request("request body is not a JSON object")
+    BadRequest::fault("request body is not a JSON object")
 }
 
 /// Make `head` a JSON `POST` to `path`, adding what the format needs
@@ -133,7 +133,7 @@ impl<W: Wire> Encoder<Conversation> for RequestEncoder<W> {
     fn encode(&mut self, chat: &Conversation, out: &mut BytesMut) -> Result<(), Fault> {
         let clients = |said: &&Conversation| request_bytes::<W>(said).is_err();
         let bytes = request_bytes::<W>(chat).map_err(|f| match chat.said().filter(clients) {
-            Some(_) => Fault::bad_request(f.message()).with_source(f),
+            Some(_) => BadRequest::fault(f.message()).with_source(f),
             None => chat.whose(f),
         })?;
         out.extend_from_slice(&bytes);
@@ -380,7 +380,7 @@ pub(crate) fn unary_reply<W: Wire>(status: StatusCode, raw: Bytes) -> Result<Rep
                 W::NAME,
                 http::Response::new(raw),
             )),
-            None => Fault::upstream("the provider's success is not a response of its format"),
+            None => Upstream::fault("the provider's success is not a response of its format"),
         },
     )
 }
@@ -763,7 +763,7 @@ impl<W: Wire> Reading<W> {
     pub(crate) fn ended(&self) -> Result<(), Fault> {
         match self.done {
             true => Ok(()),
-            false => Err(Fault::truncated()),
+            false => Err(Truncated::fault()),
         }
     }
 }
@@ -1141,13 +1141,15 @@ pub(crate) fn unpatchable(what: &str) -> Fault {
 
 /// A request carrying what cannot be sent in another format.
 pub(crate) fn untranslatable(what: &str) -> Fault {
-    Fault::bad_request(format!("{what} cannot be translated to another format yet"))
+    BadRequest::fault(format!("{what} cannot be translated to another format yet"))
 }
 
 /// A 502 for content the client's format cannot write anew, such as a tool call.
 pub(crate) fn unwritable_content() -> Fault {
     let message = "the response holds content that cannot yet be written anew in this format";
-    Fault::new("untranslatable", message).with(Status(502))
+    Fault::new(message)
+        .with(ErrorCode("untranslatable".into()))
+        .with(Status(502))
 }
 
 /// A stream event that is not its format's JSON, as other content, so
@@ -1262,7 +1264,7 @@ mod tests {
         for (provider, (start, error)) in fixtures.into_iter().enumerate() {
             for wire in [false, true] {
                 let ending = if wire {
-                    Err(Fault::upstream("wire"))
+                    Err(Upstream::fault("wire"))
                 } else {
                     Ok(Bytes::from(error))
                 };
@@ -1368,7 +1370,10 @@ mod tests {
                     match (finite, live) {
                         (Ok(finite), Ok(live)) => assert_eq!(finite, live),
                         (Err(finite), Err(live)) => {
-                            assert_eq!(finite.code(), live.code());
+                            assert_eq!(
+                                respan_gateway_http::error_code(&finite),
+                                respan_gateway_http::error_code(&live)
+                            );
                             assert_eq!(finite.message(), live.message());
                         }
                         (finite, live) => panic!("finite/live mismatch: {finite:?} / {live:?}"),
@@ -1584,7 +1589,10 @@ mod tests {
                 .expect_err("non-success must refuse");
                 for fault in [finite, live] {
                     assert_eq!(fault.get::<Status>().map(|s| s.0), Some(429));
-                    assert_eq!(fault.retry_after(), Some(std::time::Duration::from_secs(7)));
+                    assert_eq!(
+                        fault.get::<respan_gateway_sdk::RetryAfter>().map(|r| r.0),
+                        Some(std::time::Duration::from_secs(7))
+                    );
                     assert_eq!(
                         fault
                             .get::<respan_gateway_http::ProviderError>()
@@ -1740,7 +1748,10 @@ mod tests {
         ];
         for shape in shapes {
             let fault = provider_error(StatusCode::BAD_REQUEST, &shape);
-            let words = (json!(fault.code()), json!(fault.message()));
+            let words = (
+                json!(respan_gateway_http::error_code(&fault)),
+                json!(fault.message()),
+            );
             let openai = OpenAiChat::error_body(&fault);
             let anthropic = AnthropicMessages::error_body(&fault);
             assert!(!fault.message().is_empty(), "{shape}");
@@ -1758,7 +1769,7 @@ mod tests {
 
     #[test]
     fn details_that_are_not_an_object_are_ignored() {
-        let fault = Fault::bad_request("m").with(Details(json!([1])));
+        let fault = BadRequest::fault("m").with(Details(json!([1])));
         let body = OpenAiChat::error_body(&fault);
         assert_eq!(
             body["error"],
@@ -1769,7 +1780,7 @@ mod tests {
     #[test]
     fn the_fault_says_message_and_type_the_provider_the_rest() {
         let details = json!({"message": "", "type": "https://x/p", "code": null, "extra": 1});
-        let fault = Fault::bad_request("m").with(Details(details));
+        let fault = BadRequest::fault("m").with(Details(details));
         let body = OpenAiChat::error_body(&fault);
         // The fault's words are the format's; the provider's `code` stays.
         let kept =
@@ -1780,7 +1791,8 @@ mod tests {
     #[test]
     fn a_plugins_fault_takes_one_shape_on_every_path() {
         let details = json!({"message": "x", "type": 5, "code": 7, "param": 3, "category": "pii"});
-        let fault = Fault::new("blocked", "pii")
+        let fault = Fault::new("pii")
+            .with(ErrorCode("blocked".into()))
             .with(Status(403))
             .with(Details(details));
         let body = OpenAiChat::error_body(&fault);
@@ -1789,7 +1801,7 @@ mod tests {
         assert_eq!(body["error"], kept);
         // A string, as OpenAI's own errors give, is kept.
         let details = json!({"param": "messages", "code": "context_length_exceeded"});
-        let fault = Fault::bad_request("too long").with(Details(details));
+        let fault = BadRequest::fault("too long").with(Details(details));
         let error = &OpenAiChat::error_body(&fault)["error"];
         assert_eq!(
             (&error["param"], &error["code"]),

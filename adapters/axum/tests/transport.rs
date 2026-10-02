@@ -10,7 +10,7 @@ use futures::channel::mpsc;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{Body, Completion};
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{ErrorCode, Fault};
 use respan_gateway_ws::WsTransport;
 use std::sync::atomic::Ordering;
 use support::*;
@@ -71,10 +71,12 @@ async fn a_call_that_ends_in_an_err_drops_the_connection_and_the_answer_ends_wit
         .await
         .unwrap();
     tx.unbounded_send(text("a")).unwrap();
-    tx.unbounded_send(Err(Fault::new("policy", "an input was refused")))
-        .unwrap();
+    tx.unbounded_send(Err(
+        Fault::new("an input was refused").with(ErrorCode("policy".into()))
+    ))
+    .unwrap();
     let end = answer.body_mut().next().await.unwrap().unwrap_err();
-    assert_eq!(end.code(), "policy");
+    assert_eq!(respan_gateway_http::error_code(&end), "policy");
     eventually("the connection dropped", || {
         probe.live.load(Ordering::SeqCst) == 0
     })
@@ -116,7 +118,7 @@ async fn a_frame_that_is_not_text_fails_the_call() {
     tx.unbounded_send(Ok(Bytes::from_static(&[0xff, 0xfe])))
         .unwrap();
     let end = answer.body_mut().next().await.unwrap().unwrap_err();
-    assert_eq!(end.code(), "config");
+    assert_eq!(respan_gateway_http::error_code(&end), "config");
     assert!(probe.texts().is_empty());
 }
 
@@ -133,7 +135,7 @@ async fn a_message_over_the_limit_breaks_the_answer() {
     probe.connected(0).await;
     probe.tell(0, Cmd::Send("x".repeat(4096)));
     let end = answer.body_mut().next().await.unwrap().unwrap_err();
-    assert_eq!(end.code(), "upstream");
+    assert_eq!(respan_gateway_http::error_code(&end), "upstream");
     assert!(end.message().contains("too large"), "{end}");
 }
 
@@ -184,7 +186,7 @@ async fn wss_fails_cleanly_against_a_server_that_is_not_tls() {
         .await
         .err()
         .expect("connection failure");
-    assert_eq!(refused.code(), "upstream");
+    assert_eq!(respan_gateway_http::error_code(&refused), "upstream");
     assert!(!refused.message().contains(&addr.to_string()));
 }
 
@@ -256,6 +258,10 @@ async fn a_truncated_or_malformed_refusal_fails_instead_of_relaying_a_partial_bo
             .await
             .err()
             .expect("invalid body");
-        assert_eq!(fault.code(), "truncated", "{headers}");
+        assert_eq!(
+            respan_gateway_http::error_code(&fault),
+            "truncated",
+            "{headers}"
+        );
     }
 }

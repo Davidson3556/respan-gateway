@@ -37,6 +37,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
+use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -95,9 +96,9 @@ async fn extract_pdf_with(converter: &str, encoded: &str, limit: usize) -> Resul
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let bytes = STANDARD
         .decode(encoded)
-        .map_err(|_| Fault::bad_request("invalid PDF base64"))?;
+        .map_err(|_| BadRequest::fault("invalid PDF base64"))?;
     if !bytes.starts_with(b"%PDF-") {
-        return Err(Fault::bad_request("not a PDF"));
+        return Err(BadRequest::fault("not a PDF"));
     }
     let mut child = tokio::process::Command::new(converter)
         .args(["-enc", "UTF-8", "-", "-"])
@@ -121,11 +122,11 @@ async fn extract_pdf_with(converter: &str, encoded: &str, limit: usize) -> Resul
         input
             .write_all(&bytes)
             .await
-            .map_err(|e| Fault::bad_request("the PDF could not be read").with_source(e))?;
+            .map_err(|e| BadRequest::fault("the PDF could not be read").with_source(e))?;
         input
             .shutdown()
             .await
-            .map_err(|e| Fault::bad_request("the PDF could not be read").with_source(e))
+            .map_err(|e| BadRequest::fault("the PDF could not be read").with_source(e))
     };
     let read = async move {
         let mut text = Vec::new();
@@ -137,7 +138,7 @@ async fn extract_pdf_with(converter: &str, encoded: &str, limit: usize) -> Resul
         if text.len() > limit {
             return Err(too_large());
         }
-        String::from_utf8(text).map_err(|_| Fault::bad_request("the PDF text is not UTF-8"))
+        String::from_utf8(text).map_err(|_| BadRequest::fault("the PDF text is not UTF-8"))
     };
     let wait = async {
         let status = child
@@ -147,7 +148,7 @@ async fn extract_pdf_with(converter: &str, encoded: &str, limit: usize) -> Resul
         if status.success() {
             Ok(())
         } else {
-            Err(Fault::bad_request("the PDF is malformed or encrypted"))
+            Err(BadRequest::fault("the PDF is malformed or encrypted"))
         }
     };
     let (_, text, _) = tokio::try_join!(write, read, wait)?;
@@ -176,12 +177,16 @@ fn stored(chat: &Conversation) -> Vec<String> {
 }
 
 fn too_large() -> Fault {
-    Fault::new("too_large", "PDF too large").with(Status(413))
+    Fault::new("PDF too large")
+        .with(ErrorCode("too_large".into()))
+        .with(Status(413))
 }
 
 fn too_slow() -> Fault {
     let slow = "the PDF took too long to read";
-    Fault::new("conversion_timeout", slow).with(Status(504))
+    Fault::new(slow)
+        .with(ErrorCode("conversion_timeout".into()))
+        .with(Status(504))
 }
 
 /// The files endpoint: a provider named `files`, whose paths the plugin sets.
@@ -278,7 +283,7 @@ impl PdfToText {
         let (base64, digest) = tokio::task::spawn_blocking(move || {
             let bytes = STANDARD
                 .decode(&base64)
-                .map_err(|_| Fault::bad_request("invalid PDF base64"))?;
+                .map_err(|_| BadRequest::fault("invalid PDF base64"))?;
             Ok::<_, Fault>((base64, Sha256::digest(bytes).to_vec()))
         })
         .await
@@ -372,7 +377,7 @@ impl PdfToText {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
         {
-            return Err(Fault::bad_request("invalid stored file id"));
+            return Err(BadRequest::fault("invalid stored file id"));
         }
         let key = cx
             .extensions()
@@ -399,7 +404,7 @@ impl PdfToText {
         let fetch = async {
             let metadata = read(format!("/v1/files/{id}"), 16 * 1024).await?;
             let metadata: serde_json::Value = serde_json::from_slice(&metadata)
-                .map_err(|_| Fault::upstream("invalid stored file metadata"))?;
+                .map_err(|_| Upstream::fault("invalid stored file metadata"))?;
             let pdf = metadata["mime_type"].as_str().map_or_else(
                 || {
                     metadata["filename"]
@@ -409,17 +414,15 @@ impl PdfToText {
                 |mime| mime == "application/pdf",
             );
             if !pdf {
-                return Err(
-                    Fault::new("unsupported_file", "only PDF attachments are supported")
-                        .with(Status(415)),
-                );
+                return Err(Fault::new("only PDF attachments are supported")
+                    .with(ErrorCode("unsupported_file".into()))
+                    .with(Status(415)));
             }
             let bytes = read(format!("/v1/files/{id}/content"), self.max / 4 * 3).await?;
             if !bytes.starts_with(b"%PDF-") {
-                return Err(
-                    Fault::new("unsupported_file", "the stored file is not a PDF")
-                        .with(Status(415)),
-                );
+                return Err(Fault::new("the stored file is not a PDF")
+                    .with(ErrorCode("unsupported_file".into()))
+                    .with(Status(415)));
             }
             Ok(bytes)
         };

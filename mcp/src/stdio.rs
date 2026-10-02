@@ -16,7 +16,7 @@ use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Completion, Credential};
-use respan_gateway_sdk::{Extensions, Fault};
+use respan_gateway_sdk::{BadRequest, ErrorCode, Extensions, Fault, Upstream};
 use tokio::process::Command;
 
 use crate::session::Session;
@@ -131,7 +131,7 @@ impl StdioTransport {
             let owned = sessions.keys().filter(|(_, o)| *o == owner).count();
             if owned >= self.max_sessions || sessions.len() >= self.max_total {
                 let full = "too many sessions";
-                let fault = Fault::new(TOO_MANY_SESSIONS, full);
+                let fault = Fault::new(full).with(ErrorCode(TOO_MANY_SESSIONS.into()));
                 return Err(fault.with(Status(503)));
             }
             sessions.insert(key.clone(), None);
@@ -154,7 +154,7 @@ impl StdioTransport {
                     return Err(fault);
                 }
                 // It ended already.
-                (Ok(_), None) => return Err(Fault::upstream("the MCP server stopped")),
+                (Ok(_), None) => return Err(Upstream::fault("the MCP server stopped")),
             }
         };
         let mut resp = session.post(messages).await?;
@@ -174,7 +174,9 @@ pub(crate) fn reply(status: StatusCode) -> Reply {
 
 /// A session that is not there, or not the caller's: 404.
 fn no_session() -> Fault {
-    Fault::new(NO_SESSION, "no such session").with(Status(404))
+    Fault::new("no such session")
+        .with(ErrorCode(NO_SESSION.into()))
+        .with(Status(404))
 }
 
 impl StdioTransport {
@@ -215,7 +217,7 @@ impl StdioTransport {
         let Some(id) = head.headers.get(SESSION) else {
             return match head.method {
                 Method::POST => self.start(owner, &body).await,
-                _ => Err(Fault::bad_request("no session")),
+                _ => Err(BadRequest::fault("no session")),
             };
         };
         let key = (id.to_str().unwrap_or_default().to_owned(), owner);
@@ -226,17 +228,19 @@ impl StdioTransport {
         match head.method {
             Method::POST => match read(&body) {
                 Some((messages, _)) => session.post(messages).await,
-                None => Err(Fault::bad_request("not JSON-RPC")),
+                None => Err(BadRequest::fault("not JSON-RPC")),
             },
             Method::GET => session.listen().ok_or_else(|| {
                 let open = "the stream is already open";
-                Fault::new(BUSY, open).with(Status(409))
+                Fault::new(open)
+                    .with(ErrorCode(BUSY.into()))
+                    .with(Status(409))
             }),
             Method::DELETE => {
                 lock(&self.sessions).remove(&key);
                 Ok(reply(StatusCode::NO_CONTENT))
             }
-            _ => Err(Fault::bad_request("not an MCP method")),
+            _ => Err(BadRequest::fault("not an MCP method")),
         }
     }
 }

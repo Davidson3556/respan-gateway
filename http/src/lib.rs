@@ -43,6 +43,7 @@ mod reqwest_backend;
 mod transport;
 mod watchdog;
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -60,7 +61,10 @@ use http::{
 };
 use http_body_util::BodyExt;
 use respan_gateway_sdk::futures;
-use respan_gateway_sdk::{Extensions, Fault, Gateway, codes};
+use respan_gateway_sdk::{
+    Abandoned, BadRequest, Config, ErrorCode, Extensions, Fault, Gateway, Internal, NotFound,
+    RetryAfter, Truncated, Upstream,
+};
 
 #[cfg(feature = "reqwest")]
 pub use reqwest;
@@ -125,44 +129,62 @@ pub fn built_wrong(e: http::Error) -> Fault {
     Fault::internal("an HTTP request or response was built wrong").with_source(e)
 }
 
-/// The HTTP status a fault asks for, as a hint ([`Fault::with`]): a plugin's
-/// `Fault::new("over_limit", msg).with(Status(429))`, a provider's answer's.
-/// The kernel names codes only; this is where they get numbers.
+/// The HTTP status a fault asks for, as a fact ([`Fault::with`]): a plugin's
+/// `Fault::new(msg).with(Status(429))`, a provider's answer's.
+/// The kernel names no numbers; this is where they get them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status(pub u16);
 
-/// The status of `fault` as HTTP's: its [`Status`] hint, else its code's
-/// default (a 400 for [`codes::BAD_REQUEST`], a 404 for `NOT_FOUND`, a 502
-/// for `UPSTREAM` and `TRUNCATED`, a 499 for `ABANDONED`, a 500 for `CONFIG`,
-/// `INTERNAL` and a code that is none of these), a 500 for a number that is
-/// no status.
+/// The status of `fault` as HTTP's: its [`Status`] fact, else its kind's
+/// default (a 400 for [`BadRequest`], a 404 for [`NotFound`], a 502 for
+/// [`Upstream`] and [`Truncated`], a 499 for [`Abandoned`], a 500 for
+/// [`Config`], [`Internal`] and a fault of none of these), a 500 for a
+/// number that is no status.
 pub fn status(fault: &Fault) -> StatusCode {
     let number = match fault.get::<Status>() {
         Some(Status(number)) => *number,
-        None => match fault.code() {
-            codes::BAD_REQUEST => 400,
-            codes::NOT_FOUND => 404,
-            codes::UPSTREAM | codes::TRUNCATED => 502,
-            codes::ABANDONED => 499,
-            _ => 500,
-        },
+        None if fault.is::<NotFound>() => 404,
+        None if fault.is::<BadRequest>() => 400,
+        None if fault.is::<Upstream>() || fault.is::<Truncated>() => 502,
+        None if fault.is::<Abandoned>() => 499,
+        None => 500,
     };
     StatusCode::from_u16(number).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+/// The code a format writes in a JSON error body for `fault`: its
+/// [`ErrorCode`] fact, else a name for its kind (`not_found`, `bad_request`,
+/// `upstream`, `truncated`, `abandoned`, `config`, `internal`), else `error`.
+pub fn error_code(fault: &Fault) -> Cow<'_, str> {
+    if let Some(ErrorCode(code)) = fault.get() {
+        return Cow::Borrowed(code);
+    }
+    let name = match () {
+        _ if fault.is::<NotFound>() => "not_found",
+        _ if fault.is::<BadRequest>() => "bad_request",
+        _ if fault.is::<Upstream>() => "upstream",
+        _ if fault.is::<Truncated>() => "truncated",
+        _ if fault.is::<Abandoned>() => "abandoned",
+        _ if fault.is::<Config>() => "config",
+        _ if fault.is::<Internal>() => "internal",
+        _ => "error",
+    };
+    Cow::Borrowed(name)
+}
+
 /// HTTP retry eligibility for a failed `first_success` attempt. Before a
-/// response opened, only an [`codes::UPSTREAM`] fault is retryable, regardless
-/// of any status hint. After opening, [`codes::INTERNAL`], [`codes::CONFIG`]
-/// and [`codes::ABANDONED`] are never retryable, even with a retryable status
-/// hint; otherwise statuses 408, 425, 429, 500, 502, 503, 504 and 529 are
-/// retryable (using [`status`] for the fault's explicit hint or default).
+/// response opened, only an [`Upstream`] fault is retryable, regardless of
+/// any status fact. After opening, [`Internal`], [`Config`] and [`Abandoned`]
+/// are never retryable, even with a retryable status fact; otherwise
+/// statuses 408, 425, 429, 500, 502, 503, 504 and 529 are retryable (using
+/// [`status`] for the fault's explicit fact or default).
 /// `response_opened` means the call returned `Ok(Response)` before the
 /// caller's response-selection criterion ran, not that bytes arrived.
 pub fn retryable(fault: &Fault, response_opened: bool) -> bool {
     if !response_opened {
-        return fault.code() == codes::UPSTREAM;
+        return fault.is::<Upstream>();
     }
-    if [codes::INTERNAL, codes::CONFIG, codes::ABANDONED].contains(&fault.code()) {
+    if fault.is::<Internal>() || fault.is::<Config>() || fault.is::<Abandoned>() {
         return false;
     }
     [408, 425, 429, 500, 502, 503, 504, 529].contains(&status(fault).as_u16())
@@ -309,7 +331,7 @@ pub(crate) fn depart(
         Err(fault) => Err(fault),
     };
     match resp {
-        Err(fault) if fault.code() == codes::NOT_FOUND => {
+        Err(fault) if fault.is::<NotFound>() => {
             let text = format!("no format served accepts {} {}", to.method, to.path);
             plain(&Fault::not_found(text))
         }
@@ -471,7 +493,7 @@ pub fn plain(fault: &Fault) -> http::Response<Body> {
 /// `head`: a format's refusal. Fractional seconds round up, saturating at `u64::MAX`.
 pub fn error_head(head: &mut http::response::Parts, fault: &Fault) {
     head.status = status(fault);
-    if let Some(wait) = fault.retry_after() {
+    if let Some(&RetryAfter(wait)) = fault.get() {
         let secs = wait
             .as_secs()
             .saturating_add(u64::from(wait.subsec_nanos() > 0));
@@ -565,9 +587,9 @@ mod tests {
     #[test]
     fn a_fault_writes_its_status_and_retry_after() {
         let (mut head, ()) = http::Response::new(()).into_parts();
-        let fault = Fault::new("slow", "slow down")
+        let fault = Fault::new("slow down")
             .with(Status(429))
-            .with_retry_after(Duration::from_millis(1500));
+            .with(RetryAfter(Duration::from_millis(1500)));
         error_head(&mut head, &fault);
         assert_eq!(head.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(head.headers[RETRY_AFTER], "2");
@@ -575,51 +597,72 @@ mod tests {
     }
 
     #[test]
-    fn a_code_has_a_default_status_and_a_hint_overrides_it() {
+    fn a_kind_has_a_default_status_and_a_status_fact_overrides_it() {
         let of = |f: Fault| status(&f).as_u16();
         for (fault, want) in [
-            (Fault::bad_request("x"), 400),
+            (BadRequest::fault("x"), 400),
             (Fault::not_found("x"), 404),
-            (Fault::upstream("x"), 502),
-            (Fault::truncated(), 502),
-            (Fault::new(codes::ABANDONED, "x"), 499),
+            (Upstream::fault("x"), 502),
+            (Truncated::fault(), 502),
+            (Fault::abandoned(), 499),
             (Fault::config("x"), 500),
             (Fault::internal("x"), 500),
-            (Fault::new("plugin_own", "x"), 500),
+            (Fault::new("x"), 500),
         ] {
-            let code = fault.code().to_owned();
+            let code = error_code(&fault).into_owned();
             assert_eq!(of(fault.clone()), want, "{code}");
             assert_eq!(of(fault.with(Status(429))), 429, "{code}");
         }
     }
 
     #[test]
+    fn an_error_code_is_the_fact_else_a_name_for_the_kind() {
+        for (fault, want) in [
+            (BadRequest::fault("x"), "bad_request"),
+            (Fault::not_found("x"), "not_found"),
+            (Upstream::fault("x"), "upstream"),
+            (Truncated::fault(), "truncated"),
+            (Fault::abandoned(), "abandoned"),
+            (Fault::config("x"), "config"),
+            (Fault::internal("x"), "internal"),
+            (Fault::new("x"), "error"),
+            (
+                Upstream::fault("x").with(ErrorCode("over_limit".into())),
+                "over_limit",
+            ),
+        ] {
+            assert_eq!(error_code(&fault), want);
+        }
+    }
+
+    #[test]
     fn retryable_respects_opening_stage_code_precedence_and_http_status() {
-        let hinted = |code, number| Fault::new(code, "x").with(Status(number));
+        let hinted = |fault: Fault, number| fault.with(Status(number));
+        let custom = || Fault::new("x").with(ErrorCode("custom".into()));
         for (fault, before, after) in [
-            (Fault::upstream("x"), true, true),
-            (hinted(codes::UPSTREAM, 400), true, false),
-            (hinted(codes::CONFIG, 503), false, false),
-            (hinted(codes::INTERNAL, 429), false, false),
-            (hinted(codes::ABANDONED, 502), false, false),
-            (hinted(codes::BAD_REQUEST, 503), false, true),
-            (hinted("custom", 400), false, false),
-            (Fault::new("custom", "x"), false, true),
+            (Upstream::fault("x"), true, true),
+            (hinted(Upstream::fault("x"), 400), true, false),
+            (hinted(Fault::config("x"), 503), false, false),
+            (hinted(Fault::internal("x"), 429), false, false),
+            (hinted(Fault::abandoned(), 502), false, false),
+            (hinted(BadRequest::fault("x"), 503), false, true),
+            (hinted(custom(), 400), false, false),
+            (custom(), false, true),
         ] {
             assert_eq!(retryable(&fault, false), before, "before: {fault:?}");
             assert_eq!(retryable(&fault, true), after, "after: {fault:?}");
         }
         for number in [408, 425, 429, 500, 502, 503, 504, 529] {
-            assert!(retryable(&hinted("custom", number), true), "{number}");
+            assert!(retryable(&hinted(custom(), number), true), "{number}");
         }
         for number in [200, 400, 401, 403, 404, 409, 422, 499, 501, 505, 528, 530] {
-            assert!(!retryable(&hinted("custom", number), true), "{number}");
+            assert!(!retryable(&hinted(custom(), number), true), "{number}");
         }
     }
 
     #[test]
     fn a_number_that_is_no_status_is_a_500() {
-        let fault = Fault::bad_request("x").with(Status(1000));
+        let fault = BadRequest::fault("x").with(Status(1000));
         assert_eq!(status(&fault), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -627,10 +670,10 @@ mod tests {
     fn only_an_explicit_raw_reply_replaces_the_head() {
         let mut answer = http::Response::new(Bytes::from_static(b"busy"));
         *answer.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-        let fault = Fault::new("busy", "busy")
+        let fault = Fault::new("busy")
             .with(Status(429))
             .with(ProviderError::new("f", answer.clone()))
-            .with_retry_after(Duration::from_secs(3));
+            .with(RetryAfter(Duration::from_secs(3)));
         let (mut head, ()) = http::Response::new(()).into_parts();
         assert_eq!(
             answered(&fault.clone().with(RawReply(answer)), &mut head).as_deref(),

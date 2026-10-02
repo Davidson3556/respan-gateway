@@ -32,6 +32,7 @@
 //! `cargo run -p respan-gateway-examples --example jobs_background`
 
 use hmac::{Hmac, Mac};
+use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -340,7 +341,7 @@ impl Jobs {
             return Ok(None);
         }
         let mut body: Value = serde_json::from_slice(got.0.body())
-            .map_err(|_| Fault::upstream("the provider's answer is not JSON"))?;
+            .map_err(|_| Upstream::fault("the provider's answer is not JSON"))?;
         let event = body["type"]
             .as_str()
             .is_some_and(|kind| kind.starts_with("response."));
@@ -469,7 +470,7 @@ impl Jobs {
         id: String,
     ) -> Result<Option<Response>, Fault> {
         if cx.extensions().get::<NoContent>().is_some() {
-            return Err(Fault::bad_request(
+            return Err(BadRequest::fault(
                 "background mode keeps output: not for this tenant",
             ));
         }
@@ -482,9 +483,9 @@ impl Jobs {
             .and_then(|value| value.as_str().map(str::to_owned));
         if let Some(url) = &webhook {
             let url =
-                reqwest::Url::parse(url).map_err(|_| Fault::bad_request("invalid webhook URL"))?;
+                reqwest::Url::parse(url).map_err(|_| BadRequest::fault("invalid webhook URL"))?;
             if !matches!(url.scheme(), "https" | "http") {
-                return Err(Fault::bad_request("webhook must use HTTP"));
+                return Err(BadRequest::fault("webhook must use HTTP"));
             }
         }
         let max = body
@@ -492,7 +493,7 @@ impl Jobs {
             .and_then(Value::as_u64)
             .unwrap_or(1024);
         if max > i64::MAX as u64 {
-            return Err(Fault::bad_request("invalid output cap"));
+            return Err(BadRequest::fault("invalid output cap"));
         }
         body["max_output_tokens"] = max.into();
         let reserve = (body.to_string().len() as i64).saturating_add(max as i64);
@@ -520,7 +521,7 @@ impl Jobs {
         self.db(move |tx| {
             tx.execute("INSERT OR IGNORE INTO job_accounts(tenant,balance) VALUES(?1,?2)", (&home, i64::MAX)).map_err(sql)?;
             let held = tx.execute("UPDATE job_accounts SET held=held+?1 WHERE tenant=?2 AND balance-spent-held>=?1", (reserve, &home)).map_err(sql)?;
-            if held == 0 { return Err(Fault::new("insufficient_funds", "job exceeds available budget").with(respan_gateway_http::Status(402))); }
+            if held == 0 { return Err(Fault::new("job exceeds available budget").with(ErrorCode("insufficient_funds".into())).with(respan_gateway_http::Status(402))); }
             tx.execute("INSERT INTO background_jobs(id,request,uri,headers,tenant,reserve,webhook) VALUES(?1,?2,?3,?4,?5,?6,?7)", (saved_id, saved_body, uri, headers, home, reserve, webhook)).map_err(sql)?;
             Ok(())
         }).await?;
@@ -571,7 +572,7 @@ impl Plugin for Jobs {
             return self.relay(cx, job.id, deployment);
         }
         if streams(cx, &body) {
-            return Err(Fault::bad_request(
+            return Err(BadRequest::fault(
                 "streaming is not supported by this example",
             ));
         }

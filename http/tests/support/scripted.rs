@@ -14,6 +14,7 @@ use respan_gateway_http::{
     Body, Completion, credentials, proxy_call, strip_client_origin_headers, strip_origin_headers,
 };
 use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::stream;
 
 pub type Reply = http::Response<Vec<Result<Bytes, Fault>>>;
@@ -124,7 +125,7 @@ impl ScriptedAt {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
-            .ok_or_else(|| Fault::upstream(format!("no mock response for {url}")))?;
+            .ok_or_else(|| Upstream::fault(format!("no mock response for {url}")))?;
         assert_eq!(
             expected, self.base,
             "provider calls reached the wrong endpoint"

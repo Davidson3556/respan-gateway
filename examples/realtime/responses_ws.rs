@@ -10,6 +10,7 @@ mod budget;
 #[path = "../support/live/serve.rs"]
 mod serve;
 use budget::{Budget, OUTPUT};
+use respan_gateway_sdk::BadRequest;
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
 use respan_gateway_sdk::{
     ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
@@ -53,7 +54,7 @@ impl Plugin for Sessions {
                             .get("model")
                             .is_some_and(|v| v.as_str() != Some(&model))
                         {
-                            return Err(Fault::bad_request(
+                            return Err(BadRequest::fault(
                                 "model is outside the configured budget policy",
                             ));
                         }

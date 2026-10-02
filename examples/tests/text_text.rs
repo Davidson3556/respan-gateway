@@ -17,6 +17,7 @@ use respan_gateway_sdk::conversation::{
     Content, Conversation, Finish, Message, Piece, Reply, Role,
 };
 use respan_gateway_sdk::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
+use respan_gateway_sdk::{ErrorCode, Upstream};
 use serde_json::{self, json};
 use support::run_filter as run;
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
@@ -31,7 +32,9 @@ impl Rewrite for Terms {
 
     fn rewrite(&mut self, text: &str) -> Result<String, Fault> {
         if text.contains("bomb") {
-            return Err(Fault::new("blocked", "blocked").with(Status(400)));
+            return Err(Fault::new("blocked")
+                .with(ErrorCode("blocked".into()))
+                .with(Status(400)));
         }
         Ok(text.to_owned())
     }
@@ -154,7 +157,9 @@ fn a_match_across_deltas_is_seen_whole() {
     let replies = ["a bo", "m", "b!"].map(|d| Reply::text(0, d));
     let out = run(&mut Holdback::new(Terms), replies.into());
     assert_eq!(
-        out.err().map(|f| f.code().to_owned()).as_deref(),
+        out.err()
+            .map(|f| respan_gateway_http::error_code(&f).into_owned())
+            .as_deref(),
         Some("blocked")
     );
 }
@@ -208,7 +213,7 @@ fn content_that_cannot_be_read_is_refused() {
     assert_eq!(
         chat.read_all()
             .err()
-            .map(|f| f.code().to_owned())
+            .map(|f| respan_gateway_http::error_code(&f).into_owned())
             .as_deref(),
         Some(UNREADABLE)
     );
@@ -619,7 +624,11 @@ async fn a_violation_in_the_held_start_is_refused_before_any_byte() -> Result<()
             "{target}: {body}"
         );
         assert_eq!(
-            outcome.await.err().map(|f| f.code().to_owned()).as_deref(),
+            outcome
+                .await
+                .err()
+                .map(|f| respan_gateway_http::error_code(&f).into_owned())
+                .as_deref(),
             Some("blocked")
         );
     }
@@ -722,7 +731,7 @@ async fn a_stream_cut_while_text_is_held_sends_it_then_the_error() -> Result<(),
     let gw = gateway_with(
         local(vec![
             Ok(Bytes::from(chunk("Mail <EMA"))),
-            Err(Fault::upstream("reset")),
+            Err(Upstream::fault("reset")),
         ]),
         http_transport(&anthropic.base_url(), "x-api-key", "sk-ant-test")?,
         "openai",

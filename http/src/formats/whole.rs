@@ -37,7 +37,7 @@ pub fn read<T: Send + 'static>(
 }
 
 /// The fault of a provider's answer in `format` that is no success: its
-/// code, message and fields, an error's status and `Retry-After`, else a
+/// code (an [`ErrorCode`](respan_gateway_sdk::ErrorCode)), message and fields, an error's status and `Retry-After`, else a
 /// 502. Unless informational (an unasked 101), it carries the answer as
 /// `http::Response<Bytes>` ([`crate::ProviderError`]), for `format` to write.
 pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault {
@@ -47,7 +47,7 @@ pub fn answer(format: &str, head: &http::response::Parts, body: Bytes) -> Fault 
         return fault;
     }
     let fault = match respan_gateway_http::retry_after(&head.headers) {
-        Some(wait) => fault.with_retry_after(wait),
+        Some(wait) => fault.with(respan_gateway_sdk::RetryAfter(wait)),
         None => fault,
     };
     fault.with(crate::ProviderError::new(
@@ -199,7 +199,11 @@ mod tests {
         let mut relay = Relay::new(write, fail, true);
         let mut out = BytesMut::new();
         assert!(relay.encode(&1, &mut out).is_ok());
-        assert!(relay.end(&Err(Fault::upstream("x")), &mut out).is_ok());
+        assert!(
+            relay
+                .end(&Err(respan_gateway_sdk::Upstream::fault("x")), &mut out)
+                .is_ok()
+        );
         assert_eq!(&out[..], b"[1]x");
     }
 }

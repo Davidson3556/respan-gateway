@@ -28,7 +28,9 @@ async fn a_provider_failure_is_an_outcome_not_a_panic() -> Result<(), Fault> {
     let gw = gateway(scripted_provider(&openai)?.connect(), Meter::default())?;
     let (_, _, outcome) = ask(&gw, "Say hi").await?;
     assert_eq!(
-        outcome.err().map(|f| f.code().to_owned()),
+        outcome
+            .err()
+            .map(|f| respan_gateway_http::error_code(&f).into_owned()),
         Some("server_error".into())
     );
     assert_eq!(openai.requests().len(), 1);

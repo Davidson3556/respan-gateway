@@ -11,7 +11,7 @@ use respan_gateway_http::{
 };
 use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
-use respan_gateway_sdk::{Connection, EventSink, Fault, Format};
+use respan_gateway_sdk::{BadRequest, Connection, EventSink, Fault, Format};
 use serde_json::{Map, Value, json};
 
 use crate::Usage;
@@ -253,12 +253,12 @@ fn split_system(chat: &Conversation) -> Result<(Vec<Content>, &[Message]), Fault
         .count();
     let (system, rest) = chat.messages.split_at(lead);
     if rest.iter().any(|m| m.role == Role::System) {
-        return Err(Fault::bad_request(
+        return Err(BadRequest::fault(
             "Anthropic has no place for a system message after the conversation starts",
         ));
     }
     if system.iter().any(|m| !m.unsupported.is_empty()) {
-        return Err(Fault::bad_request(
+        return Err(BadRequest::fault(
             "Anthropic's system prompt has no place for a message's other fields",
         ));
     }
@@ -367,12 +367,12 @@ impl Wire for AnthropicMessages {
     fn write(chat: &Conversation) -> Result<Value, Fault> {
         let (system, rest) = split_system(chat)?;
         if rest.is_empty() {
-            return Err(Fault::bad_request(
+            return Err(BadRequest::fault(
                 "Anthropic needs at least one user or assistant message",
             ));
         }
         if chat.temperature.is_some_and(|t| t > 1.0) {
-            return Err(Fault::bad_request(
+            return Err(BadRequest::fault(
                 "Anthropic's temperature is at most 1, so a higher one cannot be translated",
             ));
         }
@@ -617,7 +617,8 @@ impl Wire for AnthropicMessages {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let error = json!({ "type": fault.code(), "message": fault.message() });
+        let error =
+            json!({ "type": respan_gateway_http::error_code(fault), "message": fault.message() });
         json!({ "type": "error", "error": merge_details(error, fault) })
     }
 }

@@ -4,11 +4,13 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use edge::*;
+use faults::says;
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_core::*;
 
@@ -32,7 +34,7 @@ async fn run(
         async move {
             let items: Vec<_> = script
                 .iter()
-                .map(|s| s.map(str::to_string).map_err(|()| Fault::upstream("cut")))
+                .map(|s| s.map(str::to_string).map_err(|()| faults::upstream("cut")))
                 .collect();
             Ok(answer(status, stream::iter(items).boxed()))
         }
@@ -53,7 +55,7 @@ async fn run(
         ends.into_iter()
             .map(|e| {
                 e.as_ref()
-                    .map_err(|f| (f.code().to_string(), edge::number(f)))
+                    .map_err(|f| (faults::code(f).to_string(), edge::number(f)))
                     .map_or_else(|e| format!("{e:?}"), |()| "ok".into())
             })
             .collect()
@@ -193,7 +195,7 @@ async fn buffered_filter_end_is_known_before_hooks_and_replayed_once() {
         fn end(&mut self, _: &Result<()>, out: &mut Vec<Out>) -> Result<()> {
             self.ends.fetch_add(1, Ordering::SeqCst);
             if self.fail {
-                return Err(Fault::upstream("failed-at-end"));
+                return Err(faults::upstream("failed-at-end"));
             }
             out.push(Out("tail".into()));
             Ok(())
@@ -216,19 +218,17 @@ async fn buffered_filter_end_is_known_before_hooks_and_replayed_once() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
             let mut response = cx.call("a").await?;
             let end = response.until_end().await;
-            assert_eq!(
-                end,
-                if self.fail {
-                    Err(Fault::upstream("failed-at-end"))
-                } else {
-                    Ok(())
-                }
-            );
+            let expected = if self.fail {
+                Err("failed-at-end".to_owned())
+            } else {
+                Ok(())
+            };
+            assert_eq!(says(end.clone()), expected);
             assert_eq!(self.ends.load(Ordering::SeqCst), 1);
             assert!(self.rec.log().prov_end.is_empty(), "hooks stay deferred");
             // Repeated buffering must not run Filter::end again or lose its tail.
             let again = response.until_end().await;
-            assert_eq!(again, end);
+            assert_eq!(says(again), expected);
             if self.discard {
                 drop(response);
                 Ok(Some(Response::stream(stream::empty::<Result<Out>>())))

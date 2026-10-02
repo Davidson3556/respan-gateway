@@ -26,7 +26,7 @@ use std::time::Duration;
 use respan_gateway_sdk::futures::future::BoxFuture;
 use respan_gateway_sdk::futures::stream::FuturesUnordered;
 use respan_gateway_sdk::futures::{FutureExt, StreamExt};
-use respan_gateway_sdk::{Call, Fault, Response};
+use respan_gateway_sdk::{Call, Fault, Response, RetryAfter, Upstream};
 
 /// How often to try one call, and how long to wait between tries.
 #[derive(Debug, Clone, Copy)]
@@ -209,11 +209,13 @@ fn failure(answer: &Answer) -> Option<&Fault> {
 fn win(answer: Answer) -> Result<Response, Fault> {
     match answer.response {
         Some(response) => {
+            // A failed inspection replays only a response that holds its own
+            // failed end, which cannot pass for healthy output; a wrong
+            // predicate type or a custom inspection failure on a still-healthy
+            // response is returned as that fault.
             if let Some(fault) = answer.fault
-                && !matches!(response.buffered_end(), Some(Err(held)) if *held == fault)
+                && !matches!(response.buffered_end(), Some(Err(_)))
             {
-                // A wrong predicate type (or a custom inspection failure)
-                // cannot be replayed from a still-healthy response.
                 return Err(fault);
             }
             answer.attempt.won.store(true, Ordering::SeqCst);
@@ -225,7 +227,7 @@ fn win(answer: Answer) -> Result<Response, Fault> {
 
 /// The last answer; with none, `upstream`.
 fn last(answer: Option<Answer>) -> Result<Response, Fault> {
-    win(answer.ok_or_else(|| Fault::upstream("no provider to try"))?)
+    win(answer.ok_or_else(|| Upstream::fault("no provider to try"))?)
 }
 
 /// Prefer an opened candidate over a fallback that never opened. Replacing
@@ -245,7 +247,7 @@ fn keep(previous: &mut Option<Answer>, answer: Answer) {
 /// `Ok(Response)` before applying `until`; it does not mean the request was
 /// sent, a refusal occurred, or bytes were delivered. Returning false skips
 /// retries of that target but still permits the next fallback. Only opened
-/// responses contribute `Fault::retry_after()` to the backoff wait. HTTP
+/// responses contribute their [`RetryAfter`] fact to the backoff wait. HTTP
 /// callers can select `respan_gateway_http::retryable`; other transports can
 /// supply their own policy. Neither policy nor timing makes an input replayable.
 pub async fn first_success(
@@ -265,7 +267,7 @@ pub async fn first_success(
                 None => return win(answer),
                 Some(f) if should_retry(f, answer.response.is_some()) => {
                     let delay = if answer.response.is_some() {
-                        f.retry_after()
+                        f.get::<RetryAfter>().map(|r| r.0)
                     } else {
                         None
                     };

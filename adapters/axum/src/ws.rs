@@ -11,6 +11,7 @@ use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgr
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use respan_gateway_http::bytes::Bytes;
+use respan_gateway_http::error_code;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http_body_util::BodyExt;
@@ -18,6 +19,8 @@ use respan_gateway_http::{http_body, http_body_util};
 use respan_gateway_sdk::futures::channel::{mpsc, oneshot};
 use respan_gateway_sdk::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_sdk::futures::{SinkExt, StreamExt, TryStreamExt};
+#[cfg(test)]
+use respan_gateway_sdk::{ErrorCode, Upstream};
 use respan_gateway_sdk::{Fault, Gateway};
 
 use respan_gateway_http::Frames;
@@ -355,7 +358,7 @@ async fn write(
 /// message.
 fn failure(fault: &Fault) -> (u16, String) {
     let code = fault.get::<CloseCode>().map_or(1011, |c| c.sendable());
-    (code, clipped(fault.code().to_owned()))
+    (code, clipped(error_code(fault).into_owned()))
 }
 
 /// `reason` cut to the 123 bytes a Close's reason takes.
@@ -389,9 +392,11 @@ mod tests {
 
     #[test]
     fn a_fault_closes_with_1011_or_its_code_and_says_only_its_code() {
-        let plain = Fault::upstream("secret provider detail");
+        let plain = Upstream::fault("secret provider detail");
         assert_eq!(failure(&plain), (1011, "upstream".to_owned()));
-        let asked = Fault::new("over_limit", "x").with(CloseCode(1008));
+        let asked = Fault::new("x")
+            .with(ErrorCode("over_limit".into()))
+            .with(CloseCode(1008));
         assert_eq!(failure(&asked), (1008, "over_limit".to_owned()));
         // A code no Close may carry is 1011.
         for bad in [1005, 1006, 1015, 999, 5000] {

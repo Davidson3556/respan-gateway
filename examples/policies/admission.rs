@@ -25,6 +25,7 @@ use respan_gateway_examples::admission::{Slot, Slots};
 use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_sdk::futures::{future::BoxFuture, stream::BoxStream};
+use respan_gateway_sdk::{ErrorCode, RetryAfter};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -66,7 +67,7 @@ async fn guarded<T>(
 ) -> Result<T, Fault> {
     tokio::select! {
         biased;
-        _ = held.lost() => Err(Fault::new("busy", "admission lease expired").with(Status(429))),
+        _ = held.lost() => Err(Fault::new("admission lease expired").with(ErrorCode("busy".into())).with(Status(429))),
         result = work => result,
     }
 }
@@ -155,8 +156,10 @@ impl Plugin for Admission {
         let until = Instant::now() + wait;
         let Some(slot) = self.slots.acquire(priority, &user, until).await? else {
             let busy = "every slot is busy; retry later";
-            let fault = Fault::new("busy", busy).with(Status(429));
-            return Err(fault.with_retry_after(Duration::from_secs(1)));
+            let fault = Fault::new(busy)
+                .with(ErrorCode("busy".into()))
+                .with(Status(429));
+            return Err(fault.with(RetryAfter(Duration::from_secs(1))));
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));
         let monitoring = held.clone();

@@ -1,7 +1,7 @@
 //! Generic provider-error recognition, decoding, and detail preservation.
 
 use respan_gateway_http::{Status, http::StatusCode};
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{ErrorCode, Fault, Upstream};
 use serde_json::Value;
 
 use respan_gateway_sdk::Details;
@@ -43,8 +43,7 @@ pub fn provider_error(status: StatusCode, v: &Value) -> Fault {
     let code = ["type", "error_type", "status", "code"]
         .iter()
         .filter_map(|k| error[*k].as_str())
-        .find(|c| !c.is_empty() && *c != "error" && !c.contains(':'))
-        .unwrap_or(respan_gateway_sdk::codes::UPSTREAM);
+        .find(|c| !c.is_empty() && *c != "error" && !c.contains(':'));
     // Its `message` (Mistral nests one in `detail[0].msg`), the error as
     // a string, a `detail` or its first `msg` (FastAPI), a problem's
     // `title`, or the body as a string; never empty.
@@ -62,7 +61,11 @@ pub fn provider_error(status: StatusCode, v: &Value) -> Fault {
         true => status,
         false => StatusCode::BAD_GATEWAY,
     };
-    let fault = Fault::new(code.to_owned(), message).with(Status(to.as_u16()));
+    let fault = match code {
+        Some(code) => Fault::new(message).with(ErrorCode(code.to_owned().into())),
+        None => Upstream::fault(message),
+    };
+    let fault = fault.with(Status(to.as_u16()));
     let Some(fields) = fields else { return fault };
     let mut details = fields.clone();
     // Fields at the top are the error's, not its null `error`.
@@ -93,6 +96,7 @@ pub fn merge_details(mut error: Value, fault: &Fault) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respan_gateway_http::error_code;
     use serde_json::json;
 
     #[test]
@@ -183,13 +187,17 @@ mod tests {
             (Value::Null, "upstream", answered),
         ] {
             let fault = provider_error(StatusCode::BAD_REQUEST, &body);
-            assert_eq!((fault.code(), fault.message()), (code, message), "{body}");
+            assert_eq!(
+                (error_code(&fault).as_ref(), fault.message()),
+                (code, message),
+                "{body}"
+            );
         }
     }
 
     #[test]
     fn an_envelopes_tag_is_no_error_code() {
-        let code = |v: Value| provider_error(StatusCode::OK, &v).code().to_owned();
+        let code = |v: Value| error_code(&provider_error(StatusCode::OK, &v)).into_owned();
         assert_eq!(
             code(json!({"type": "error", "error": "Overloaded"})),
             "upstream"
@@ -205,13 +213,16 @@ mod tests {
         let cloudflare =
             json!({"errors": [{"code": "rate_limited", "message": "slow"}], "success": false});
         let fault = provider_error(StatusCode::TOO_MANY_REQUESTS, &cloudflare);
-        assert_eq!((fault.code(), fault.message()), ("rate_limited", "slow"));
+        assert_eq!(
+            (error_code(&fault).as_ref(), fault.message()),
+            ("rate_limited", "slow")
+        );
         assert_eq!(fault.get(), Some(&Details(cloudflare["errors"][0].clone())));
         let listed = provider_error(
             StatusCode::OK,
             &json!({"error": [{"type": "t", "message": "m"}]}),
         );
-        assert_eq!((listed.code(), listed.message()), ("t", "m"));
+        assert_eq!((error_code(&listed).as_ref(), listed.message()), ("t", "m"));
         let message = provider_error(StatusCode::OK, &json!({"error": {"message": ""}}));
         assert_eq!(message.message(), "the provider returned 200");
     }

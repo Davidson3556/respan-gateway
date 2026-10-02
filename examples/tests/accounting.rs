@@ -1,6 +1,7 @@
 //! `Accounting` in a gateway: never overspend, settle exactly once, refuse
 //! what has no bound, and release what a cancelled hook held.
 
+use respan_gateway_sdk::{BadRequest, Upstream};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -69,7 +70,7 @@ fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
     let chat = px.input::<Conversation>()?;
     let max = chat
         .max_tokens
-        .ok_or_else(|| Fault::bad_request("no cost bound: set max_tokens"))?;
+        .ok_or_else(|| BadRequest::fault("no cost bound: set max_tokens"))?;
     px.filter(move |reply: &mut Reply| {
         if !reply.usage.is_empty() {
             let output = reply.usage.get(units::OUTPUT_TOKENS).unwrap_or(0.0);
@@ -276,7 +277,7 @@ async fn every_call_settles_exactly_once() {
             (gw, Some(fake))
         } else {
             let transport =
-                respan_gateway_http::connect(|_call| async { Err(Fault::upstream("lost head")) });
+                respan_gateway_http::connect(|_call| async { Err(Upstream::fault("lost head")) });
             (gateway(transport, Nothing, ledger.clone()), None)
         };
         let (gw, _fake) = gw;
@@ -337,7 +338,7 @@ impl Plugin for GivesUp {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         match tokio::time::timeout(Duration::from_millis(20), cx.call("p")).await {
             Ok(resp) => resp.map(Some),
-            Err(_) => Err(Fault::upstream("gave up")),
+            Err(_) => Err(Upstream::fault("gave up")),
         }
     }
 }
@@ -422,7 +423,7 @@ async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     // The call is handed to the transport, but its head never arrives.
     let no_head = respan_gateway_http::connect(|_call| async {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        Err(Fault::upstream("no head within 1s"))
+        Err(Upstream::fault("no head within 1s"))
     });
     let gw = gw.and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, no_head));
     let gw = gw.and_then(|g| g.target("p"));

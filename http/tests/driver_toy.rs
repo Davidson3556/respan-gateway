@@ -19,6 +19,7 @@ use respan_gateway_http::{
 use respan_gateway_sdk::futures::channel::mpsc;
 use respan_gateway_sdk::futures::future::{self, BoxFuture};
 use respan_gateway_sdk::futures::{FutureExt, SinkExt, StreamExt, stream};
+use respan_gateway_sdk::{BadRequest, ErrorCode, Truncated, Upstream};
 use respan_gateway_sdk::{EventSink, EventStream, Extensions, Fault, Gateway, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/hooks.rs"]
@@ -68,7 +69,7 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
                         values
                             .into_iter()
                             .next()
-                            .ok_or_else(|| Fault::bad_request("empty input"))
+                            .ok_or_else(|| BadRequest::fault("empty input"))
                     })
                 } else {
                     Ok(EventStream::stream(respan_gateway_http::formats::read(
@@ -90,7 +91,7 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
             },
             move |fault, _, _| {
                 assert!(!unwritable, "unwritable");
-                Bytes::from(format!("ERR {}", fault.code()))
+                Bytes::from(format!("ERR {}", respan_gateway_http::error_code(fault)))
             },
         ))
     }
@@ -163,7 +164,7 @@ impl ReqDec {
         let s = String::from_utf8_lossy(&bytes).to_string();
         if s == "BAD" {
             out.push(In("before-bad".into()));
-            return Err(Fault::bad_request("bad"));
+            return Err(BadRequest::fault("bad"));
         }
         out.push(In(s));
         Ok(())
@@ -202,14 +203,15 @@ struct RespDec {
 impl RespDec {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<Out>) -> Result<(), Fault> {
         if self.status != 200 {
-            return Err(Fault::new("refused", "refused")
+            return Err(Fault::new("refused")
+                .with(ErrorCode("refused".into()))
                 .with(respan_gateway_http::Status(self.status))
                 .with(()));
         }
         let s = String::from_utf8_lossy(&bytes).to_string();
         match s.as_str() {
             "DONE" => self.done = true,
-            "ERR" => return Err(Fault::upstream("boom")),
+            "ERR" => return Err(Upstream::fault("boom")),
             _ => out.push(Out(s)),
         }
         Ok(())
@@ -218,7 +220,7 @@ impl RespDec {
     fn end(&mut self, _: &mut Vec<Out>) -> Result<(), Fault> {
         match self.done {
             true => Ok(()),
-            false => Err(Fault::truncated()),
+            false => Err(Truncated::fault()),
         }
     }
 }
@@ -238,7 +240,9 @@ impl Encoder<Out> for RespEnc {
     fn end(&mut self, e: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
         match e {
             Ok(()) => out.extend_from_slice(b"!"),
-            Err(f) => out.extend_from_slice(format!("ERR {}", f.code()).as_bytes()),
+            Err(f) => out.extend_from_slice(
+                format!("ERR {}", respan_gateway_http::error_code(f)).as_bytes(),
+            ),
         }
         Ok(())
     }
@@ -318,7 +322,9 @@ impl Seen {
                 let mut body = c.into_body().into_data_stream();
                 let read = tokio::spawn(async move {
                     while let Some(f) = body.next().await {
-                        let f = f.map(|b| text(&b)).map_err(|e| e.code().to_string());
+                        let f = f
+                            .map(|b| text(&b))
+                            .map_err(|e| respan_gateway_http::error_code(&e).to_string());
                         lock(&seen.frames).push(f);
                     }
                     seen.done.store(true, Ordering::SeqCst);
@@ -405,15 +411,30 @@ async fn read(resp: Option<http::Response<Body>>) -> Result<(u16, String), Strin
     while let Some(frame) = body.frame().await {
         match frame {
             Ok(frame) => out.push_str(&text(&frame.into_data().unwrap_or_default())),
-            Err(e) => return Err(format!("{} after {out}", e.code())),
+            Err(e) => {
+                return Err(format!(
+                    "{} after {out}",
+                    respan_gateway_http::error_code(&e)
+                ));
+            }
         }
     }
     Ok((status, out))
 }
 
 fn code(end: &Result<(), Fault>) -> String {
-    end.as_ref()
-        .map_or_else(|f| f.code().to_string(), |()| "ok".into())
+    end.as_ref().map_or_else(
+        |f| respan_gateway_http::error_code(f).to_string(),
+        |()| "ok".into(),
+    )
+}
+
+/// What a client reads of a result: a fault's code and message.
+fn said<T>(result: Result<T, Fault>) -> Result<(), (String, String)> {
+    result.map(|_| ()).map_err(|f| {
+        let code = respan_gateway_http::error_code(&f).into_owned();
+        (code, f.message().to_owned())
+    })
 }
 
 fn codes(ends: Vec<Result<(), Fault>>) -> Vec<String> {
@@ -523,7 +544,7 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     let (gw, _, _) = gateway_of(Toy::default(), seen.transport(true, done));
     let (tx, body) = upload();
     send(&tx, "hello");
-    tx.unbounded_send(Err(Fault::bad_request("client broke")))
+    tx.unbounded_send(Err(BadRequest::fault("client broke")))
         .unwrap();
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
@@ -605,7 +626,7 @@ async fn a_providers_frames_are_read_apart() {
         polls.push(match outputs.poll_next_unpin(&mut cx) {
             Poll::Pending => "pending".to_string(),
             Poll::Ready(Some(Ok(Out(s)))) => s,
-            Poll::Ready(Some(Err(f))) => f.code().to_string(),
+            Poll::Ready(Some(Err(f))) => respan_gateway_http::error_code(&f).to_string(),
             Poll::Ready(None) => "end".to_string(),
         });
     }
@@ -629,7 +650,7 @@ async fn a_slow_refusal_is_known_at_its_head() {
     let transport = fnt(|_| future::ready(Ok(answer(429, late("busy")))).boxed());
     let outputs = dial(&Toy::default(), transport).await.unwrap();
     let fault = outputs.refusal().unwrap();
-    assert_eq!(fault.code(), "refused");
+    assert_eq!(respan_gateway_http::error_code(fault), "refused");
     assert_eq!(fault.get(), Some(&respan_gateway_http::Status(429)));
 
     let transport = fnt(|_| future::ready(Ok(answer(200, late("DONE")))).boxed());
@@ -1243,7 +1264,7 @@ async fn response_opening_does_not_finish_an_outstanding_transport_write() {
             "response EOF settled an unfinished write"
         );
         let end = if failure {
-            Err(Fault::upstream("late write failure"))
+            Err(Upstream::fault("late write failure"))
         } else {
             Ok(())
         };
@@ -1348,8 +1369,8 @@ async fn an_unmatched_owned_incoming_does_not_hold_a_rejection_open() {
     .await
     .unwrap();
     assert_eq!(
-        result.err().unwrap().code(),
-        respan_gateway_sdk::codes::NOT_FOUND
+        respan_gateway_http::error_code(&result.err().unwrap()),
+        "not_found"
     );
 }
 
@@ -1362,10 +1383,10 @@ async fn a_completed_handler_keeps_an_already_ready_reply() {
     let (incoming, outgoing) =
         respan_gateway_sdk::Format::bind(&Toy::default(), transport).unwrap();
     incoming.await.unwrap();
-    let mut writing = deliver(outgoing, EventStream::refused(Fault::upstream("refused"))).unwrap();
+    let mut writing = deliver(outgoing, EventStream::refused(Upstream::fault("refused"))).unwrap();
     // Queue the encoded refusal, leaving its delivery pending.
     assert!(writing.as_mut().now_or_never().is_none());
-    let handled = future::ready(Err(Fault::upstream("handling failed"))).boxed();
+    let handled = future::ready(Err(Upstream::fault("handling failed"))).boxed();
     let (response, _) = respan_gateway_http::drive(handled, answer).await.unwrap();
     assert!(!response.status().is_success());
 }
@@ -1411,7 +1432,7 @@ async fn sink_send_fault_waits_for_its_refusal_bytes() {
         respan_gateway_sdk::Format::bind(&Toy::default(), transport).unwrap();
     incoming.await.unwrap();
     outgoing.prepare(&mut EventStream::empty()).unwrap();
-    let fault = Fault::upstream("failed output");
+    let fault = Upstream::fault("failed output");
     let mut sending = outgoing.send(Err(fault.clone())).boxed();
     assert!(
         sending.as_mut().now_or_never().is_none(),
@@ -1419,8 +1440,8 @@ async fn sink_send_fault_waits_for_its_refusal_bytes() {
     );
     let (response, ended) = answer.await.unwrap();
     assert_eq!(read(Some(response)).await, Ok((502, "ERR upstream".into())));
-    assert_eq!(sending.await, Err(fault.clone()));
-    assert_eq!(ended.await, Err(fault));
+    assert_eq!(said(sending.await), said(Err::<(), _>(fault.clone())));
+    assert_eq!(said(ended.await), said(Err::<(), _>(fault)));
 }
 
 #[tokio::test]
@@ -1433,13 +1454,16 @@ async fn upload_sink_flush_waits_for_its_terminal_body_error() {
         respan_gateway_sdk::Format::bind(&Toy::default(), factory(Extensions::new())).unwrap();
     let mut source = EventStream::stream(stream::pending());
     outgoing.prepare(&mut source).unwrap();
-    let fault = Fault::bad_request("broken upload");
+    let fault = BadRequest::fault("broken upload");
     let mut sending = outgoing.send(Err(fault.clone())).boxed();
     assert!(
         sending.as_mut().now_or_never().is_none(),
         "terminal body error is still unread"
     );
     let mut response = incoming.await.unwrap();
-    assert_eq!(response.next().await, Some(Err(fault.clone())));
-    assert_eq!(sending.await, Err(fault));
+    assert_eq!(
+        said(response.next().await.unwrap()),
+        said(Err::<(), _>(fault.clone()))
+    );
+    assert_eq!(said(sending.await), said(Err::<(), _>(fault)));
 }

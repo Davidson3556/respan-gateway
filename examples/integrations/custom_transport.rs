@@ -10,6 +10,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example custom_transport`
 
+use respan_gateway_sdk::BadRequest;
 use std::sync::Arc;
 
 use respan_gateway_providers::OpenAiChat;
@@ -48,7 +49,7 @@ impl Format<Model, Reply, Conversation> for Local {
             let chat = flow
                 .value()
                 .transpose()?
-                .ok_or_else(|| Fault::bad_request("no conversation"))?;
+                .ok_or_else(|| BadRequest::fault("no conversation"))?;
             let answer = model(chat)?;
 
             // One reply per word, then the finish with usage (a word is a token here).

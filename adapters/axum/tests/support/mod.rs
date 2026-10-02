@@ -598,9 +598,9 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
 }
 
 /// The code of an end: `ok` or the fault's code.
-pub fn code(end: &Result<(), Fault>) -> &str {
+pub fn code(end: &Result<(), Fault>) -> String {
     match end {
-        Ok(()) => "ok",
-        Err(fault) => fault.code(),
+        Ok(()) => "ok".to_owned(),
+        Err(fault) => respan_gateway_http::error_code(fault).into_owned(),
     }
 }

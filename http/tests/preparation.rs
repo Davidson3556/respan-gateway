@@ -4,8 +4,9 @@ use h::bytes::Bytes;
 use h::http::{Request, StatusCode};
 use h::http_body_util::BodyExt;
 use respan_gateway_http as h;
+use respan_gateway_sdk::BadRequest;
 use respan_gateway_sdk::futures::{SinkExt, future};
-use respan_gateway_sdk::{EventSink, EventStream, Fault, codes};
+use respan_gateway_sdk::{EventSink, EventStream};
 
 #[derive(Clone, Copy, Debug)]
 enum Opening {
@@ -30,7 +31,7 @@ async fn preparation_failure(opening: Opening, panic: bool) {
             if panic {
                 panic!("preparation panic after constructing a sink");
             }
-            Err::<EventSink<u8>, _>(Fault::bad_request("preparation failed"))
+            Err::<EventSink<u8>, _>(BadRequest::fault("preparation failed"))
         },
         |fault, _, _| Bytes::from(fault.message().to_owned()),
     );
@@ -53,18 +54,14 @@ async fn preparation_failure(opening: Opening, panic: bool) {
             .await
             .expect("preparation failure must not leave delivery pending");
 
-    let expected = if panic {
-        codes::INTERNAL
-    } else {
-        codes::BAD_REQUEST
-    };
+    let expected = if panic { "internal" } else { "bad_request" };
     assert_eq!(
-        delivery.expect_err("delivery must fail").code(),
+        h::error_code(&delivery.expect_err("delivery must fail")),
         expected,
         "{opening:?}"
     );
     assert_eq!(
-        completion.expect_err("delivery must fail").code(),
+        h::error_code(&completion.expect_err("delivery must fail")),
         expected,
         "{opening:?}"
     );
@@ -122,8 +119,8 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
             .await
             .expect("cancelled response handoff must not hang");
         assert_eq!(
-            result.expect_err("delivery must fail").code(),
-            codes::ABANDONED
+            h::error_code(&result.expect_err("delivery must fail")),
+            "abandoned"
         );
     }
 }

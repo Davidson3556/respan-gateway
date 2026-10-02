@@ -1,5 +1,8 @@
 //! Opening progress and bounded reads, including delivery cancellation.
 #![allow(clippy::unwrap_used)]
+mod faults;
+
+use faults::{says, says_all};
 use futures::channel::oneshot;
 use futures::{FutureExt, Sink, StreamExt, stream};
 use respan_gateway_core::{
@@ -91,7 +94,7 @@ impl Format<Io, Output, Input> for Protocol {
         });
         Ok((
             futures::future::ready(Ok(EventStream::stream(
-                events.chain(stream::iter(self.1.then(Fault::truncated).map(Err))),
+                events.chain(stream::iter(self.1.then(faults::truncated).map(Err))),
             )))
             .boxed(),
             drain(),
@@ -268,15 +271,16 @@ async fn batch_boundaries_preserve_order_filtering_and_the_final_outcome() {
         );
         assert_eq!(observe.filtered.load(Ordering::SeqCst), 10_000);
         let expected = if fail {
-            Err(Fault::truncated())
+            Err(faults::truncated().message().to_owned())
         } else {
             Ok(())
         };
+        let observed = observe.observed_end.lock().unwrap().clone();
+        assert_eq!(observed.map(says), Some(expected.clone()));
         assert_eq!(
-            *observe.observed_end.lock().unwrap(),
-            Some(expected.clone())
+            says_all(observe.provider_ends.lock().unwrap().clone()),
+            [expected]
         );
-        assert_eq!(*observe.provider_ends.lock().unwrap(), [expected]);
     }
 }
 
@@ -416,7 +420,10 @@ async fn preparation_failure_or_panic_after_opening_releases_the_writer() {
             .handle((opening, send), Extensions::new())
             .await
             .unwrap_err();
-        assert_eq!(fault.code(), if panics { "internal" } else { "config" });
+        assert_eq!(
+            faults::code(&fault),
+            if panics { "internal" } else { "config" }
+        );
         assert_eq!(Arc::strong_count(&held), 1);
         gateway.idle().await;
     }
@@ -468,7 +475,7 @@ async fn receiving_can_open_before_delivery_completes() {
         gateway.handle((opening, deliver), Extensions::new()),
     )
     .await;
-    assert_eq!(handled.unwrap(), Ok(()));
+    assert!(handled.unwrap().is_ok());
     gateway.idle().await;
 }
 
@@ -498,7 +505,7 @@ async fn a_completed_opening_is_released_before_delivery() {
         gateway.handle((opening, send), Extensions::new()),
     )
     .await;
-    assert_eq!(handled.unwrap(), Ok(()));
+    assert!(handled.unwrap().is_ok());
     gateway.idle().await;
 }
 
@@ -508,7 +515,7 @@ impl Plugin for FailAtBoundary {
     async fn on_provider(&self, px: &mut respan_gateway_core::ProviderContext) -> Result<()> {
         px.filter(|output: &mut Output| {
             if output.0 == 127 {
-                Err(Fault::upstream("filter failed"))
+                Err(faults::upstream("filter failed"))
             } else {
                 Ok(())
             }
@@ -530,10 +537,10 @@ async fn delivery_failure_keeps_precedence_over_a_full_batch_filter_failure() {
         .plugin(FailAtBoundary(ends.clone()))
         .target("p")
         .unwrap();
-    let expected = Err(Fault::internal("cannot prepare delivery"));
-    assert_eq!(gateway.handle(Io, Extensions::new()).await, expected);
+    let expected = Err("cannot prepare delivery".to_owned());
+    assert_eq!(says(gateway.handle(Io, Extensions::new()).await), expected);
     gateway.idle().await;
-    assert_eq!(*ends.lock().unwrap(), [expected]);
+    assert_eq!(says_all(ends.lock().unwrap().clone()), [expected]);
 }
 
 struct BufferBeforeDelivery;
@@ -542,8 +549,8 @@ impl Plugin for BufferBeforeDelivery {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>> {
         let mut response = cx.call("p").await?;
         assert_eq!(
-            response.until_end().await,
-            Err(Fault::upstream("filter failed"))
+            says(response.until_end().await),
+            Err("filter failed".to_owned())
         );
         Ok(Some(response))
     }
@@ -559,8 +566,8 @@ async fn a_buffered_filter_result_does_not_override_delivery_failure() {
         .unwrap()
         .plugin(FailAtBoundary(ends.clone()))
         .plugin(BufferBeforeDelivery);
-    let expected = Err(Fault::internal("cannot prepare delivery"));
-    assert_eq!(gateway.handle(Io, Extensions::new()).await, expected);
+    let expected = Err("cannot prepare delivery".to_owned());
+    assert_eq!(says(gateway.handle(Io, Extensions::new()).await), expected);
     gateway.idle().await;
-    assert_eq!(*ends.lock().unwrap(), [expected]);
+    assert_eq!(says_all(ends.lock().unwrap().clone()), [expected]);
 }

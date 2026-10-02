@@ -83,7 +83,10 @@ impl Plugin for Log {
             return;
         };
         let (index, role) = (attempt.index(), attempt.role());
-        let end = end.as_ref().err().map_or("ok", |f| f.code());
+        let end = end
+            .as_ref()
+            .err()
+            .map_or("ok".into(), |f| respan_gateway_http::error_code(f));
         let chat = px.input::<Conversation>().ok();
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());

@@ -22,6 +22,7 @@ use respan_gateway_http::formats::opaque::{self, Got, Sent};
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, HttpClient, Incoming, Outgoing, connect};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::conversation::{Conversation, Reply, units};
 use respan_gateway_sdk::futures;
@@ -196,7 +197,7 @@ async fn a_passthrough_of_no_kind_relays_an_event_stream_byte_for_byte() {
         sent.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
         &[Bytes::from_static(b"anything")]
     );
-    assert_eq!(log.only(), Ok(()));
+    assert!(log.only().is_ok());
 }
 
 // Must hold: the same, for a whole body, and a failure's body as it came.
@@ -395,7 +396,9 @@ impl Plugin for Cap {
         px.filter(move |reply: &mut Reply| {
             spent += reply.usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
             match spent > cap {
-                true => Err(Fault::new("cap", "over the cap").with(Status(402))),
+                true => Err(Fault::new("over the cap")
+                    .with(ErrorCode("cap".into()))
+                    .with(Status(402))),
                 false => Ok(()),
             }
         })
@@ -433,7 +436,7 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
         let body = String::from_utf8_lossy(&body.unwrap_or_default()).into_owned();
         assert!(body.contains("\"a\"") && !body.contains("\"b\""), "{body}");
         let call = &calls.all()[0];
-        assert!(matches!(call, Err(f) if f.code() == "cap"));
+        assert!(matches!(call, Err(f) if respan_gateway_http::error_code(f) == "cap"));
         let usage = meter.total();
         assert_eq!(
             usage.get(units::OUTPUT_TOKENS),
@@ -504,7 +507,9 @@ struct Refuses;
 
 impl Filter<Reply> for Refuses {
     fn edit(&mut self, _reply: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
-        Err(Fault::new("blocked", "no").with(Status(403)))
+        Err(Fault::new("no")
+            .with(ErrorCode("blocked".into()))
+            .with(Status(403)))
     }
 }
 

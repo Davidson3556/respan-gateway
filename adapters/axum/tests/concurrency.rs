@@ -13,10 +13,10 @@ use support::*;
 
 const PATH: &str = "/v1/realtime";
 
-fn counts<'a>(ends: impl Iterator<Item = &'a str>) -> BTreeMap<String, usize> {
+fn counts(ends: impl Iterator<Item = String>) -> BTreeMap<String, usize> {
     let mut all = BTreeMap::new();
     for end in ends {
-        *all.entry(end.to_owned()).or_default() += 1;
+        *all.entry(end).or_default() += 1;
     }
     all
 }
@@ -139,7 +139,7 @@ async fn a_sweep_of_cuts_leaks_nothing_and_ends_every_hook_once() {
     })
     .await;
     // Every end hook has run once by the time the gateway is idle.
-    let want = counts(expected.iter().copied());
+    let want = counts(expected.iter().map(|s| s.to_string()));
     assert_eq!(counts(ends.all().iter().map(code)), want);
     assert_eq!(counts(calls.all().iter().map(code)), want);
     assert_eq!(ends.all().len(), SESSIONS);

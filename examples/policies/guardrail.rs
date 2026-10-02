@@ -25,6 +25,7 @@ use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::conversation::{Conversation, Piece, Reply};
 use respan_gateway_sdk::futures::stream;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
@@ -52,7 +53,9 @@ impl Terms {
     fn check(&self, text: &str) -> Result<(), Fault> {
         let text = text.to_lowercase();
         if self.0.iter().any(|term| text.contains(term)) {
-            return Err(Fault::new(BLOCKED, "blocked").with(Status(400)));
+            return Err(Fault::new("blocked")
+                .with(ErrorCode(BLOCKED.into()))
+                .with(Status(400)));
         }
         Ok(())
     }
@@ -75,7 +78,9 @@ struct Guard(Terms);
 struct GuardInput(Terms);
 
 fn uncovered() -> Fault {
-    Fault::new(UNCOVERED, "no guard reads this kind").with(Status(403))
+    Fault::new("no guard reads this kind")
+        .with(ErrorCode(UNCOVERED.into()))
+        .with(Status(403))
 }
 
 #[async_trait]
@@ -96,7 +101,9 @@ impl Plugin for Guard {
                 Ok(())
             } else {
                 let message = "the guard cannot read a tool call in the answer";
-                Err(Fault::new(UNREADABLE, message).with(Status(422)))
+                Err(Fault::new(message)
+                    .with(ErrorCode(UNREADABLE.into()))
+                    .with(Status(422)))
             }
         })?;
         Ok(None)

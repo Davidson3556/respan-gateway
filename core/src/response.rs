@@ -192,7 +192,7 @@ impl Response {
     /// calls' [`outputs`](Response::outputs); the first `Err` fails it, a
     /// refusal before any output. It passes no
     /// provider edge. Outputs of another type fail it with
-    /// [`codes::INTERNAL`](crate::codes::INTERNAL) when sent.
+    /// [`Internal`](crate::Internal) when sent.
     pub fn stream<T, S>(stream: S) -> Self
     where
         T: Any + Send + Sync,
@@ -301,7 +301,7 @@ impl Response {
 
     /// Read it rather than send it, such as a judge's verdict: every output
     /// as `T`, as the provider edge's filters left them, then an `Err` if it
-    /// fails; one `Err` with [`codes::INTERNAL`](crate::codes::INTERNAL)
+    /// fails; one `Err` with [`Internal`](crate::Internal)
     /// for another type. Its call ends with the stream, or abandoned if
     /// dropped first.
     pub fn outputs<T: Any + Clone + Send>(mut self) -> BoxStream<'static, Result<T>> {
@@ -418,7 +418,8 @@ impl Feed {
         let (events, call) = match self {
             Feed::Call { events, call, .. } => (events, call),
             Feed::Made(made) => {
-                let truncated = || Batch::ending(Err(Fault::truncated()));
+                let truncated =
+                    || Batch::ending(Err(Fault::internal("a made feed was read past its end")));
                 let batch = made.next().await.unwrap_or_else(truncated);
                 return batch;
             }

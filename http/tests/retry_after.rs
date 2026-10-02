@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use h::http::{Response, header::RETRY_AFTER};
 use respan_gateway_http as h;
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{RetryAfter, Upstream};
 
 #[test]
 fn retry_after_rounding_handles_maximum_duration() {
@@ -15,7 +15,7 @@ fn retry_after_rounding_handles_maximum_duration() {
         (Duration::from_secs(u64::MAX), u64::MAX),
         (Duration::MAX, u64::MAX),
     ] {
-        let fault = Fault::upstream("retry later").with_retry_after(wait);
+        let fault = Upstream::fault("retry later").with(RetryAfter(wait));
         let mut head = Response::new(()).into_parts().0;
         h::error_head(&mut head, &fault);
         assert_eq!(

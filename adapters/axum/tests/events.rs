@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_sdk::{
-    ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
+    ClientContext, Config, ErrorCode, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
 };
 use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
 use serde_json::{Value, json};
@@ -115,7 +116,7 @@ async fn only_an_edited_event_is_rewritten() {
     assert!(edited >= 1, "the session had deltas");
     close(&mut ws, 1000, "").await;
     idle(&server.gateway).await;
-    assert_eq!(ends.only(), Ok(()));
+    assert_eq!(code(&ends.only()), "ok");
 }
 
 /// A filter that drops the events its `drops` says, in either direction.
@@ -246,8 +247,8 @@ async fn a_provider_edge_plugin_counts_turns() {
     ));
     idle(&server.gateway).await;
     assert_eq!(*turns.settled.lock().unwrap(), [3]);
-    assert_eq!(ends.only(), Ok(()));
-    assert_eq!(calls.all(), [Ok(())]);
+    assert_eq!(code(&ends.only()), "ok");
+    assert_eq!(calls.all().iter().map(code).collect::<Vec<_>>(), ["ok"]);
 }
 
 // A filter that fails ends the session: the client is closed with the
@@ -258,9 +259,9 @@ async fn a_failing_filter_closes_the_client_with_its_code_and_no_message() {
     let policy = OnClient(|cx: &mut ClientContext| {
         cx.filter(
             |e: &mut ProviderEvent| match e.json["type"] == "response.created" {
-                true => {
-                    Err(Fault::new("policy", "the word swordfish was said").with(CloseCode(1008)))
-                }
+                true => Err(Fault::new("the word swordfish was said")
+                    .with(ErrorCode("policy".into()))
+                    .with(CloseCode(1008))),
                 false => Ok(()),
             },
         )
@@ -347,7 +348,7 @@ async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
     )
     .unwrap();
     let mut finite = EventStream::single(ClientEvent::new(json!({"type":"x"})));
-    assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.code() == "config"));
+    assert!(matches!(refusal.prepare(&mut finite), Err(fault) if fault.is::<Config>()));
     let (opening, mut write) = <JsonEvents as Format<Outgoing, ProviderEvent, ClientEvent>>::bind(
         &format,
         factory(Extensions::new()),
@@ -372,7 +373,9 @@ async fn a_plugin_can_refuse_a_session_before_the_upgrade() {
     use respan_gateway_http::Status;
     let probe = Probe::start().await;
     let refuse = OnClient(|_: &mut ClientContext| {
-        Err(Fault::new("over_limit", "too many sessions").with(Status(429)))
+        Err(Fault::new("too many sessions")
+            .with(ErrorCode("over_limit".into()))
+            .with(Status(429)))
     });
     let (gateway, ends, calls) = gateway_of(&probe.base(), vec![Arc::new(refuse)]);
     let server = serve(gateway).await;
@@ -396,7 +399,9 @@ async fn a_filter_refusing_an_input_closes_the_client_with_its_code() {
     let openai = FakeOpenAi::start().await;
     let policy = OnClient(|cx: &mut ClientContext| {
         cx.filter(|e: &mut ClientEvent| match e.json["type"] == "forbidden" {
-            true => Err(Fault::new("policy", "the input is refused").with(CloseCode(1008))),
+            true => Err(Fault::new("the input is refused")
+                .with(ErrorCode("policy".into()))
+                .with(CloseCode(1008))),
             false => Ok(()),
         })
     });

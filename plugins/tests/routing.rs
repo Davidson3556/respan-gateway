@@ -12,7 +12,7 @@ use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode,
     header::{AUTHORIZATION, RETRY_AFTER},
 };
-use respan_gateway_http::{Body, Completion, HttpClient, retryable};
+use respan_gateway_http::{Body, Completion, HttpClient, error_code, retryable};
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_plugins::routing::{Attempt, Backoff, Role, Until, first_success, race};
 use respan_gateway_providers::OpenAiChat;
@@ -20,9 +20,14 @@ use respan_gateway_sdk::futures::channel::oneshot;
 use respan_gateway_sdk::futures::future::BoxFuture;
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, sink, stream};
 use respan_gateway_sdk::{
-    ClientContext, Connection, EventSink, EventStream, Fault, Format, Gateway, Plugin,
-    ProviderContext, Response, async_trait, codes,
+    BadRequest, ClientContext, Connection, ErrorCode, EventSink, EventStream, Fault, Format,
+    Gateway, Internal, Plugin, ProviderContext, Response, Upstream, async_trait,
 };
+/// An end by its message, for comparing: `Fault` has no equality.
+fn ended(end: Result<(), Fault>) -> Result<(), String> {
+    end.map_err(|f| f.message().to_owned())
+}
+
 #[allow(dead_code)] // The shared helper also exposes streamed requests, unused here.
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -123,7 +128,11 @@ impl Plugin for Record {
         let Some(a) = px.extensions().get::<Attempt>() else {
             return;
         };
-        let end = end.as_ref().err().map_or("ok", |f| f.code()).to_owned();
+        let end = end
+            .as_ref()
+            .err()
+            .map_or("ok".into(), |f| error_code(f))
+            .into_owned();
         let entry = (px.provider().to_owned(), a.index(), a.role(), end);
         self.0
             .lock()
@@ -223,7 +232,7 @@ async fn silent(_: http::Request<Body>) -> Answered {
 
 /// Refuses the connection.
 async fn refused(_: http::Request<Body>) -> Answered {
-    Err(Fault::upstream("connection refused"))
+    Err(Upstream::fault("connection refused"))
 }
 
 struct Fakes {
@@ -416,7 +425,7 @@ async fn routed_post(gw: &Gateway, body: &'static str) -> (StatusCode, String) {
     let (resp, outcome) = serve(gw, post("/v1/chat/completions", body)).await;
     let (status, _, bytes) = read_whole(resp).await;
     let text = String::from_utf8_lossy(&bytes.expect("response body")).into_owned();
-    assert_eq!(outcome.await, Ok(()));
+    assert_eq!(ended(outcome.await), Ok(()));
     (status, text)
 }
 
@@ -494,7 +503,7 @@ async fn model_router_passes_other_kinds_without_changing_their_target() {
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(&body.expect("opaque body")[..], b"opaque answer");
-    assert_eq!(outcome.await, Ok(()));
+    assert_eq!(ended(outcome.await), Ok(()));
 }
 
 /// Waits 5 s for a head, 1 s between body frames.
@@ -545,7 +554,7 @@ async fn retry_releases_failed_attempt_before_the_next_one_starts() {
     });
     h.mock.reply(A, too_many("0")).reply(A, ok());
     let (status, _, _, outcome) = h.send().await;
-    assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
+    assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
     assert_eq!(active.load(Ordering::SeqCst), 0);
     assert_eq!(h.sent_to(), ["a.test", "a.test"]);
 }
@@ -648,7 +657,7 @@ async fn a_success_failing_before_content_moves_on() {
 
     let (status, _, body, outcome) = h.send().await;
 
-    assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
+    assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
     assert!(body.contains("Hello") && !body.contains("error"), "{body}");
     assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
@@ -768,19 +777,19 @@ async fn a_false_classifier_suppresses_preopening_upstream_retries_but_allows_fa
         Arc::new(move |fault, opened| {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((fault.code().to_owned(), opened));
+                .push((error_code(fault).into_owned(), opened));
             false
         }),
     ))
     .await;
     h.mock.reply(B, ok());
     let (status, _, body, end) = h.send().await;
-    assert_eq!((status, end), (StatusCode::OK, Ok(())));
+    assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
     assert!(body.contains("Hello"));
     assert_eq!(h.sent_to(), ["b.test"]);
     assert_eq!(
         *observed.lock().unwrap_or_else(PoisonError::into_inner),
-        [(codes::UPSTREAM.to_owned(), false)]
+        [("upstream".to_owned(), false)]
     );
     let attempts = h.record.all();
     assert_eq!(attempts.len(), 2, "no second refused attempt: {attempts:?}");
@@ -803,19 +812,19 @@ async fn classifier_sees_opened_content_and_late_terminal_failures() {
             Arc::new(move |fault, opened| {
                 seen.lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push((fault.code().to_owned(), opened));
+                    .push((error_code(fault).into_owned(), opened));
                 false
             }),
         ))
         .await;
         h.mock.reply(A, first).reply(B, ok());
         let (status, _, body, end) = h.send().await;
-        assert_eq!((status, end), (StatusCode::OK, Ok(())));
+        assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
         assert!(body.contains("Hello"));
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
         assert_eq!(
             *observed.lock().unwrap_or_else(PoisonError::into_inner),
-            [(codes::UPSTREAM.to_owned(), true)]
+            [("upstream".to_owned(), true)]
         );
     }
 }
@@ -838,9 +847,11 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
                 let _ = input
                     .value()
                     .transpose()?
-                    .ok_or_else(|| Fault::bad_request("missing input"))?;
+                    .ok_or_else(|| BadRequest::fault("missing input"))?;
                 if invocations.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Err(Fault::new("model_busy", "local model warming up"));
+                    return Err(
+                        Fault::new("local model warming up").with(ErrorCode("model_busy".into()))
+                    );
                 }
                 Ok(sink::unfold(
                     Some(send),
@@ -868,8 +879,11 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
         Arc::new(move |fault, opened| {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push((fault.code().to_owned(), opened));
-            fault.code() == "model_busy" && !opened
+                .push((error_code(fault).into_owned(), opened));
+            fault
+                .get::<ErrorCode>()
+                .is_some_and(|c| c.0 == "model_busy")
+                && !opened
         }),
     );
     let gw = Gateway::new()
@@ -885,7 +899,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
     let (status, _, body) = read_whole(resp).await;
     assert_eq!(status, StatusCode::OK);
     assert!(String::from_utf8_lossy(&body.expect("response body")).contains("Local answer"));
-    assert_eq!(outcome.await, Ok(()));
+    assert_eq!(ended(outcome.await), Ok(()));
     assert_eq!(invocations.load(Ordering::SeqCst), 2);
     assert_eq!(
         *observed.lock().unwrap_or_else(PoisonError::into_inner),
@@ -911,12 +925,7 @@ async fn a_race_drops_its_losers_which_end_abandoned() {
     let mut record = h.record.all();
     record.sort_by_key(|r| r.1);
     let b = ("b".to_owned(), 1, Role::Winner, "ok".to_owned());
-    let slow = (
-        "slow".to_owned(),
-        0,
-        Role::Loser,
-        codes::ABANDONED.to_owned(),
-    );
+    let slow = ("slow".to_owned(), 0, Role::Loser, "abandoned".to_owned());
     assert_eq!(record, [slow, b]);
 }
 
@@ -972,7 +981,7 @@ async fn the_watchdog_fails_a_stalled_body_and_first_success_moves_on() {
     assert!(body.contains("Hello"), "{body}");
     let record = h.record.all();
     assert_eq!(record[0].0, "stalled");
-    assert_eq!(record[0].3, codes::UPSTREAM);
+    assert_eq!(record[0].3, "upstream");
 }
 
 #[tokio::test]
@@ -996,7 +1005,7 @@ async fn the_watchdog_bounds_the_wait_for_the_head_too() {
     let record = h.record.all();
     assert_eq!(
         (record[0].0.as_str(), record[0].3.as_str()),
-        ("silent", codes::UPSTREAM)
+        ("silent", "upstream")
     );
 }
 
@@ -1017,7 +1026,7 @@ async fn the_watchdog_does_not_cut_a_slow_whole_answer() {
 
     let (status, _, body, outcome) = h.post(WHOLE).await;
 
-    assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
+    assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
     assert!(body.contains("an essay"), "{body}");
     assert_eq!(h.sent_to(), ["a.test"]);
     let record = h.record.all();
@@ -1068,12 +1077,7 @@ async fn a_call_failing_before_its_head_ends_a_loser() {
         assert_eq!(status, StatusCode::OK);
         let mut record = h.record.all();
         record.sort_by_key(|r| r.1);
-        let refused = (
-            "refused".to_owned(),
-            0,
-            Role::Loser,
-            codes::UPSTREAM.to_owned(),
-        );
+        let refused = ("refused".to_owned(), 0, Role::Loser, "upstream".to_owned());
         let b = ("b".to_owned(), 1, Role::Winner, "ok".to_owned());
         assert_eq!(record, [refused, b]);
     }
@@ -1115,8 +1119,8 @@ async fn until_head_commits_on_a_success_status_however_its_body_goes() {
         // Committed on its head, so its failure before any bytes is refused.
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
         assert_eq!(h.sent_to(), ["a.test"]);
-        assert!(matches!(outcome, Err(f) if f.code() == codes::UPSTREAM));
-        let a = ("a".to_owned(), 0, Role::Winner, codes::UPSTREAM.to_owned());
+        assert!(matches!(outcome, Err(f) if f.is::<Upstream>()));
+        let a = ("a".to_owned(), 0, Role::Winner, "upstream".to_owned());
         assert_eq!(h.record.all(), [a]);
     }
 }
@@ -1137,7 +1141,7 @@ async fn until_content_moves_on_from_a_success_failing_before_content() {
 
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
+        assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     }
@@ -1155,7 +1159,7 @@ async fn until_end_sends_the_whole_answer_as_it_came_and_moves_on_before_content
 
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
+        assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
         let mut roles: Vec<_> = h
@@ -1169,7 +1173,7 @@ async fn until_end_sends_the_whole_answer_as_it_came_and_moves_on_before_content
         assert_eq!(
             roles,
             [
-                (0, Role::Loser, codes::UPSTREAM.to_owned()),
+                (0, Role::Loser, "upstream".to_owned()),
                 (1, Role::Winner, ok)
             ]
         );
@@ -1195,7 +1199,11 @@ async fn a_race_until_end_picks_the_call_that_finishes_first() {
         let start = Instant::now();
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome), (StatusCode::OK, Ok(())), "{until:?}");
+        assert_eq!(
+            (status, ended(outcome)),
+            (StatusCode::OK, Ok(())),
+            "{until:?}"
+        );
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat(), "{until:?}");
         let mut record = h.record.all();
         record.sort_by_key(|r| r.2 == Role::Loser);
@@ -1205,7 +1213,7 @@ async fn a_race_until_end_picks_the_call_that_finishes_first() {
             .collect();
         assert_eq!(got[0], (winner, Role::Winner, "ok"), "{until:?}");
         // A loser dropped before it was polled never started.
-        let lost = (loser, Role::Loser, codes::ABANDONED);
+        let lost = (loser, Role::Loser, "abandoned");
         assert!(got[1..].iter().all(|r| *r == lost), "{until:?}: {got:?}");
         if matches!(until, Until::End) {
             assert_eq!(got.len(), 2);
@@ -1232,7 +1240,7 @@ async fn until_end_a_stream_failing_after_content_is_not_a_winner() {
 
         let (status, _, body, outcome) = h.send().await;
 
-        assert_eq!((status, outcome), (StatusCode::OK, Ok(())));
+        assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())));
         assert_eq!(body, [ROLE, HELLO, STOP, DONE].concat());
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
         let mut roles: Vec<_> = h
@@ -1244,7 +1252,7 @@ async fn until_end_a_stream_failing_after_content_is_not_a_winner() {
         roles.sort_by(|x, y| x.0.cmp(&y.0));
         let (a, b) = ("a".to_owned(), "b".to_owned());
         let expected = [
-            (a, Role::Loser, codes::UPSTREAM.to_owned()),
+            (a, Role::Loser, "upstream".to_owned()),
             (b, Role::Winner, "ok".to_owned()),
         ];
         assert_eq!(roles, expected);
@@ -1264,7 +1272,7 @@ async fn until_end_retries_a_stream_failing_after_content_and_returns_the_last()
     assert_eq!(status, StatusCode::OK);
     assert!(body.starts_with(&[ROLE, HELLO].concat()), "{body}");
     assert!(body.contains("\"code\":\"upstream\""), "{body}");
-    assert!(matches!(outcome, Err(f) if f.code() == codes::UPSTREAM));
+    assert!(matches!(outcome, Err(f) if f.is::<Upstream>()));
     assert_eq!(h.sent_to(), ["a.test", "a.test"]);
     let roles: Vec<_> = h.record.all().into_iter().map(|r| (r.1, r.2)).collect();
     assert_eq!(roles, [(0, Role::Loser), (1, Role::Winner)]);
@@ -1282,7 +1290,7 @@ async fn a_wrong_content_type_does_not_replay_a_healthy_final_response() {
     let (status, _, body, outcome) = h.send().await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert!(!body.contains("Hello"), "{body}");
-    assert!(matches!(outcome, Err(fault) if fault.code() == codes::INTERNAL));
+    assert!(matches!(outcome, Err(fault) if fault.is::<Internal>()));
     assert_eq!(h.sent_to(), ["a.test"]);
     assert_eq!(h.record.all()[0].2, Role::Loser);
 }
@@ -1293,7 +1301,7 @@ async fn content_policy_accepts_custom_events_and_captured_configuration() {
     let Until::Content(read) = Until::content(move |event: &u32| *event >= threshold) else {
         panic!("expected the supplied policy");
     };
-    let make = || Response::stream(stream::iter([Ok(0u32), Err(Fault::upstream("cut"))]));
+    let make = || Response::stream(stream::iter([Ok(0u32), Err(Upstream::fault("cut"))]));
     assert!(read(make()).await.1.is_err());
     let Until::Content(read) = Until::content(|_: &u32| true) else {
         panic!("expected the supplied policy");
@@ -1310,7 +1318,7 @@ async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
             Ok(())
         }
         fn end(&mut self, _: &Result<(), Fault>, _: &mut Vec<Reply>) -> Result<(), Fault> {
-            Err(Fault::upstream("failed-at-end"))
+            Err(Upstream::fault("failed-at-end"))
         }
     }
     struct FailFirst;
@@ -1331,7 +1339,7 @@ async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
         h.gw = h.gw.plugin(FailFirst);
         h.mock.reply(A, ok()).reply(B, ok());
         let (status, _, _, end) = h.send().await;
-        assert_eq!((status, end), (StatusCode::OK, Ok(())));
+        assert_eq!((status, ended(end)), (StatusCode::OK, Ok(())));
         assert_eq!(h.sent_to(), ["a.test", "b.test"]);
     }
 }

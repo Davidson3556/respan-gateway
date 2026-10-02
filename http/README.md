@@ -24,7 +24,7 @@ use respan_gateway_http as h;
 use h::bytes::Bytes;
 use h::formats::{self, whole};
 use h::http::{Method, Uri};
-use respan_gateway_sdk::{Connection, Fault, Format, Result};
+use respan_gateway_sdk::{BadRequest, Connection, Fault, Format, Result};
 
 #[derive(Clone, Copy)]
 struct Echo;
@@ -41,7 +41,7 @@ impl Format<h::Incoming, String, Vec<u8>> for Echo {
         Ok(io.bind(
             |request| h::messages(request, |_, bytes| {
                 String::from_utf8(bytes.to_vec())
-                    .map_err(|_| Fault::bad_request("expected UTF-8"))
+                    .map_err(|_| BadRequest::fault("expected UTF-8"))
             }),
             |reply, source| {
                 let head = reply.head();

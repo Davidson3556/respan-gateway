@@ -308,7 +308,11 @@ mod tests {
         .await
         .expect("expected value")
         .err();
-        assert_eq!(fault.as_ref().map(Fault::code), Some("upstream"));
+        assert!(
+            fault
+                .as_ref()
+                .is_some_and(|f| f.is::<respan_gateway_sdk::Upstream>())
+        );
         let answer = fault.and_then(|f| {
             f.get::<respan_gateway_http::ProviderError>()
                 .map(|e| &e.response)

@@ -508,7 +508,7 @@ impl Wire for OpenAiChat {
     }
 
     fn error_body(fault: &Fault) -> Value {
-        let code = fault.code();
+        let code = respan_gateway_http::error_code(fault);
         let error =
             json!({ "message": fault.message(), "type": code, "param": null, "code": code });
         json!({ "error": merge_details(error, fault) })
@@ -1355,7 +1355,9 @@ mod tests {
         assert!(out.is_empty() && end.is_ok());
         let (_, end) = decode_all(&["data: {\"choices\":[]}\n\n"]);
         assert_eq!(
-            end.err().map(|f| f.code().to_owned()).as_deref(),
+            end.err()
+                .map(|f| respan_gateway_http::error_code(&f).into_owned())
+                .as_deref(),
             Some("truncated")
         );
     }
@@ -1367,7 +1369,7 @@ mod tests {
         ]);
         assert!(matches!(
             end,
-            Err(f) if f.code() == "server_error" && f.message() == "overloaded"
+            Err(f) if respan_gateway_http::error_code(&f) == "server_error" && f.message() == "overloaded"
         ));
     }
 

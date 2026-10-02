@@ -17,6 +17,8 @@ use respan_gateway_core::futures::stream::BoxStream;
 use respan_gateway_core::futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, stream};
 use respan_gateway_core::*;
 
+use crate::faults;
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct In(pub String);
 #[derive(Clone, PartialEq, Debug)]
@@ -29,7 +31,7 @@ pub struct Wire(pub u16);
 /// The number the toy writes for `fault`: its hint, else its code's.
 pub fn number(fault: &Fault) -> u16 {
     fault.get::<Wire>().map_or_else(
-        || match fault.code() {
+        || match faults::code(fault) {
             "bad_request" => 400,
             "not_found" => 404,
             "upstream" | "truncated" => 502,
@@ -137,7 +139,7 @@ impl Format<Io, Out, In> for Toy {
             let result = answered.await.map_err(|_| Fault::abandoned())?.await?;
             let status = result.status;
             Ok(if status != 200 {
-                EventStream::refused(Fault::new("x", "x").with(Wire(status)))
+                EventStream::refused(Fault::new("x").with(faults::Code("x")).with(Wire(status)))
             } else {
                 EventStream::stream(events(result.body))
             })
@@ -254,7 +256,7 @@ pub fn accept_toy(io: Io, decodes: Option<Arc<AtomicUsize>>) -> Result<Connectio
                 decodes.fetch_add(1, Ordering::SeqCst);
             }
             match body.as_str() {
-                "BAD" => Err(Fault::bad_request("bad")),
+                "BAD" => Err(faults::bad_request("bad")),
                 _ => Ok(In(body.clone())),
             }
         }))
@@ -321,7 +323,7 @@ fn inputs(frames: Text) -> BoxStream<'static, Result<In>> {
             boom(1);
             stream::iter(match frame {
                 Ok(text) if text == "BAD" => {
-                    vec![Ok(In("before-bad".into())), Err(Fault::bad_request("bad"))]
+                    vec![Ok(In("before-bad".into())), Err(faults::bad_request("bad"))]
                 }
                 Ok(text) => vec![Ok(In(text))],
                 Err(fault) => vec![Err(fault)],
@@ -456,13 +458,13 @@ fn events(body: Text) -> BoxStream<'static, Result<Out>> {
                         done = true;
                         continue;
                     }
-                    "ERR" => Some((Err(Fault::upstream("boom")), None)),
+                    "ERR" => Some((Err(faults::upstream("boom")), None)),
                     "PANIC" => panic!("provider stream panic"),
                     _ => Some((Ok(Out(text)), Some((body, done)))),
                 },
                 Some(Err(fault)) => Some((Err(fault), None)),
                 None if done => None,
-                None => Some((Err(Fault::truncated()), None)),
+                None => Some((Err(faults::truncated()), None)),
             };
         }
     })
@@ -601,7 +603,7 @@ impl Sink<Result<Out>> for ReplySink {
             Err(fault) => {
                 self.ending = true;
                 ReplyFrame {
-                    text: format!("ERR {}", fault.code()),
+                    text: format!("ERR {}", faults::code(&fault)),
                     end: Some(Err(fault)),
                 }
             }
@@ -873,7 +875,7 @@ impl Seen {
                 let mut body = c.body;
                 let read = tokio::spawn(async move {
                     while let Some(f) = body.next().await {
-                        let f = f.map_err(|e| e.code().to_string());
+                        let f = f.map_err(|e| faults::code(&e).to_string());
                         lock(&seen.frames).push(f);
                     }
                     seen.done.store(true, Ordering::SeqCst);
@@ -931,13 +933,13 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// What a client got: the reply's status and frames as text, or the
 /// failure it broke with.
 pub async fn read(res: Result<ToyReply>) -> std::result::Result<(u16, String), String> {
-    let reply = res.map_err(|f| format!("adapter: {}", f.code()))?;
+    let reply = res.map_err(|f| format!("adapter: {}", faults::code(&f)))?;
     let mut body = reply.body;
     let mut out = String::new();
     while let Some(x) = body.next().await {
         match x {
             Ok(text) => out.push_str(&text),
-            Err(e) => return Err(format!("{} after {out}", e.code())),
+            Err(e) => return Err(format!("{} after {out}", faults::code(&e))),
         }
     }
     Ok((reply.status, out))
@@ -946,7 +948,7 @@ pub async fn read(res: Result<ToyReply>) -> std::result::Result<(u16, String), S
 /// The code of an end, or "ok".
 pub fn code(end: &Result<()>) -> String {
     end.as_ref()
-        .map_or_else(|f| f.code().to_string(), |()| "ok".into())
+        .map_or_else(|f| faults::code(f).to_string(), |()| "ok".into())
 }
 
 #[derive(Default, Debug)]
@@ -1109,7 +1111,8 @@ impl Plugin for Mode {
             }
             _ => {
                 if let Err(fault) = resp.until_end().await {
-                    assert_eq!(resp.buffered_end(), Some(&Err(fault)));
+                    let end = resp.buffered_end().and_then(|end| end.as_ref().err());
+                    assert_eq!(end.map(Fault::message), Some(fault.message()));
                 }
             }
         }

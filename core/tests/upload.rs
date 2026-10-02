@@ -7,6 +7,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::{Arc, Mutex};
 
@@ -57,7 +58,7 @@ async fn a_broken_upload_ends_the_providers_body_with_the_err() {
     let gw = gateway_of(&seen, true, done).plugin(rec.clone());
     let (tx, req) = upload();
     send(&tx, "hello");
-    tx.unbounded_send(Err(Fault::bad_request("client broke")))
+    tx.unbounded_send(Err(faults::bad_request("client broke")))
         .unwrap();
     let (res, _) = handle(&gw, req).await;
     let _ = read(res).await;
@@ -88,7 +89,7 @@ impl Plugin for Tap {
         let task = tokio::spawn(async move {
             let mut got = vec![];
             while let Some(x) = inputs.next().await {
-                got.push(x.map(|i| i.0).map_err(|e| e.code().to_string()));
+                got.push(x.map(|i| i.0).map_err(|e| faults::code(&e).to_string()));
             }
             got
         });
@@ -129,7 +130,7 @@ impl Plugin for Collect {
         let got: Vec<_> = cx.take_inputs::<In>().collect().await;
         let got = got
             .into_iter()
-            .map(|x| x.map(|i| i.0).map_err(|e| e.code().to_string()));
+            .map(|x| x.map(|i| i.0).map_err(|e| faults::code(&e).to_string()));
         lock(&self.0).extend(got);
         Ok(None)
     }
@@ -187,7 +188,7 @@ fn reads_then_refuses_first(bodies: Arc<Mutex<Vec<Frames>>>) -> Dialer {
     fnt(move |c| {
         let (bodies, n) = (bodies.clone(), n.clone());
         async move {
-            let frames = c.body.map(|f| f.map_err(|e| e.code().to_string()));
+            let frames = c.body.map(|f| f.map_err(|e| faults::code(&e).to_string()));
             let frames: Frames = frames.collect().await;
             lock(&bodies).push(frames);
             match n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {

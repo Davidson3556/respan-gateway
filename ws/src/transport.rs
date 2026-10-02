@@ -15,10 +15,10 @@ use respan_gateway_http::{
     credentials, is_connection_header, proxy_call, strip_client_origin_headers,
     strip_origin_headers,
 };
-use respan_gateway_sdk::Fault;
 use respan_gateway_sdk::futures::channel::oneshot;
 use respan_gateway_sdk::futures::stream::{SplitSink, SplitStream};
 use respan_gateway_sdk::futures::{FutureExt, SinkExt, StreamExt, stream};
+use respan_gateway_sdk::{Fault, Truncated, Upstream};
 use tokio::sync::mpsc::{self, Sender};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -72,7 +72,7 @@ fn is_handshake(name: &HeaderName) -> bool {
 ///   with that fault, so what the client is told is the fault's own (an
 ///   edge that reports its client's leaving says `abandoned`).
 /// - The provider sends Close with no code or 1000: the answer ends clean.
-///   With another code: `Err(upstream)` with that [`CloseCode`].
+///   With another code: an `Upstream` fault with that [`CloseCode`].
 /// - The provider's connection breaks with no Close: `Err(truncated)`.
 /// - A binary frame, from the provider or in the call, is a fault
 ///   (`upstream`, `config`): text only.
@@ -225,7 +225,7 @@ fn validate_upgrade(sent: &HeaderMap, received: &HeaderMap) -> Result<(), Fault>
     {
         Ok(())
     } else {
-        Err(Fault::upstream(
+        Err(Upstream::fault(
             "the provider returned an invalid WebSocket handshake",
         ))
     }
@@ -278,7 +278,7 @@ impl WsTransport {
                 .headers(expected.clone())
                 .send()
                 .await
-                .map_err(|e| Fault::upstream("the provider could not be reached").with_source(e))?;
+                .map_err(|e| Upstream::fault("the provider could not be reached").with_source(e))?;
             let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
             head.status = resp.status();
             head.version = resp.version();
@@ -293,10 +293,10 @@ impl WsTransport {
                     .await
                     .map_err(|error| {
                         if error.is::<LengthLimitError>() {
-                            Fault::upstream("the provider's WebSocket refusal body is too large")
+                            Upstream::fault("the provider's WebSocket refusal body is too large")
                                 .with_source(error)
                         } else {
-                            Fault::truncated().with_source(error)
+                            Truncated::fault().with_source(error)
                         }
                     })?
                     .to_bytes();
@@ -304,7 +304,7 @@ impl WsTransport {
             }
             validate_upgrade(&expected, &head.headers)?;
             let upgraded = resp.upgrade().await.map_err(|e| {
-                Fault::upstream("the provider did not upgrade the connection").with_source(e)
+                Upstream::fault("the provider did not upgrade the connection").with_source(e)
             })?;
             let socket =
                 WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(config)).await;
@@ -332,7 +332,7 @@ impl WsTransport {
         };
         tokio::time::timeout(CONNECT_TIMEOUT, connect)
             .await
-            .map_err(|_| Fault::upstream("the provider took too long to accept"))?
+            .map_err(|_| Upstream::fault("the provider took too long to accept"))?
     }
 }
 
@@ -445,14 +445,14 @@ async fn read_frames(
             }
             Some(Ok(Message::Binary(_))) => {
                 let text = "the provider sent a binary frame: only text frames are carried";
-                break Fault::upstream(text);
+                break Upstream::fault(text);
             }
             Some(Ok(Message::Close(frame))) => {
                 let code = frame.map(|f| u16::from(f.code));
                 let clean =
                     closing.load(Ordering::SeqCst) || matches!(code, None | Some(1000 | 1005));
                 if let (false, Some(code)) = (clean, code) {
-                    let fault = Fault::upstream("the provider closed the session");
+                    let fault = Upstream::fault("the provider closed the session");
                     let _ = frames.send(Err(fault.with(CloseCode(code)))).await;
                 }
                 // The answer ends; the library sends its reply to the Close
@@ -465,9 +465,9 @@ async fn read_frames(
             // No Close came. After ours, that is how a provider may end.
             Some(Err(_)) | None if closing.load(Ordering::SeqCst) => return,
             Some(Err(Error::Capacity(_))) => {
-                break Fault::upstream("the provider sent a message that is too large");
+                break Upstream::fault("the provider sent a message that is too large");
             }
-            Some(Err(_)) | None => break Fault::truncated(),
+            Some(Err(_)) | None => break Truncated::fault(),
         }
     };
     let _ = frames.send(Err(fault)).await;
@@ -713,7 +713,7 @@ mod tests {
         .expect("incomplete refusal must stop at the connection deadline")
         .err()
         .expect("incomplete refusal must fail before handoff");
-        assert_eq!(fault.code(), "upstream");
+        assert!(fault.is::<Upstream>());
         release.send(()).expect("release server");
         server.join().expect("handshake server");
     }
@@ -779,7 +779,7 @@ mod tests {
                 let fault = answer
                     .err()
                     .expect("oversize body must fail before handoff");
-                assert_eq!(fault.code(), "upstream");
+                assert!(fault.is::<Upstream>());
                 assert!(fault.message().contains("too large"));
                 release.send(()).expect("release server");
             } else {

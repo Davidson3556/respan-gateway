@@ -358,7 +358,7 @@ fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
         assert_eq!(
             chat.read_all()
                 .err()
-                .map(|f| f.code().to_owned())
+                .map(|f| respan_gateway_http::error_code(&f).into_owned())
                 .as_deref(),
             Some(UNREADABLE)
         );
@@ -369,7 +369,10 @@ fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
             Ok(())
         });
         assert_eq!(
-            result.err().map(|f| f.code().to_owned()).as_deref(),
+            result
+                .err()
+                .map(|f| respan_gateway_http::error_code(&f).into_owned())
+                .as_deref(),
             Some(UNREADABLE)
         );
         assert_eq!(calls, 0, "no text before an opaque sibling may be edited");
@@ -522,7 +525,10 @@ fn unreadable_reply_content_refuses_before_editing_any_text() {
             Ok(())
         });
         assert_eq!(
-            result.err().map(|f| f.code().to_owned()).as_deref(),
+            result
+                .err()
+                .map(|f| respan_gateway_http::error_code(&f).into_owned())
+                .as_deref(),
             Some(UNREADABLE)
         );
         assert_eq!(calls, 0, "the callback must not see partial content");
@@ -564,7 +570,10 @@ fn holdback_refuses_unreadable_reply_before_rewriting_or_emitting_text() {
         let mut out = Vec::new();
         let result = filter.edit(reply, &mut out);
         assert_eq!(
-            result.err().map(|f| f.code().to_owned()).as_deref(),
+            result
+                .err()
+                .map(|f| respan_gateway_http::error_code(&f).into_owned())
+                .as_deref(),
             Some(UNREADABLE)
         );
         assert!(out.is_empty(), "nothing from the rejected reply is emitted");

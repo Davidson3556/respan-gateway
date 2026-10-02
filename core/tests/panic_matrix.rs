@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod edge;
+mod faults;
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -97,8 +98,8 @@ async fn a_panic_anywhere_still_ends_everything_once() {
                         // A panic while incoming opens is `internal`, not
                         // `abandoned`, as `Gateway::handle` says.
                         Ok(Ok(Some(end))) if n == 19 => {
-                            let code = end.as_ref().err().map(Fault::code);
-                            if code != Some(codes::INTERNAL) {
+                            let code = end.as_ref().err().map(faults::code);
+                            if code != Some("internal") {
                                 bad.push(format!("{label}: ended {code:?}, not internal"));
                             }
                         }
