@@ -1,6 +1,6 @@
 #![cfg(feature = "ws")]
-//! What a session shows of the kernel and the HTTP adapter, pinned, and the
-//! bug it exposed (target/review/BUGS.md, W1, fixed).
+//! What a session shows of the kernel and the HTTP adapter, pinned: a
+//! provider's refusal of the upgrade is a complete answer.
 #![allow(clippy::unwrap_used)]
 
 mod support;
@@ -46,7 +46,7 @@ fn upgrade() -> respan_gateway_http::http::Request<respan_gateway_http::Body> {
 // A provider that refuses the upgrade answers with its status and a body.
 // The call is refused at its head, so the client gets that head with the
 // body it goes with, not a head and then a body that fails, which an HTTP
-// server writes as a broken response (W1, fixed).
+// server writes as a broken response.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_upgrade_is_a_complete_answer() {
     let refusing = refusing().await;
@@ -58,9 +58,9 @@ async fn a_refused_upgrade_is_a_complete_answer() {
     assert!(body.is_ok(), "the body failed: {body:?}");
 }
 
-// What W1 was, inverted: the provider's refusal goes as it came, head and
-// body, not as a head and then a body that ends `Err` with its fault; the
-// request ends once, with that fault.
+// The provider's refusal goes as it came, head and body, not as a head and
+// then a body that ends `Err` with its fault; the request ends once, with
+// that fault.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_upgrade_is_the_providers_answer_as_it_came() {
     let refusing = refusing().await;

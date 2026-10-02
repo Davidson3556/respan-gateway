@@ -398,7 +398,8 @@ async fn a_plugin_can_refuse_a_session_before_the_upgrade() {
         panic!("expected an HTTP answer")
     };
     assert_eq!(resp.status(), 429);
-    assert_eq!(resp.body().clone().unwrap(), b"too many sessions");
+    // Its error code, never its message.
+    assert_eq!(resp.body().clone().unwrap(), b"over_limit");
     idle(&server.gateway).await;
     assert_eq!(code(&ends.only()), "over_limit");
     assert!(calls.all().is_empty());

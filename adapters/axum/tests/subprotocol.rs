@@ -8,7 +8,7 @@ mod support;
 
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_sdk::Gateway;
-use respan_gateway_ws::WsTransport;
+use respan_gateway_ws::{ClientEvent, JsonEvents, WsTransport};
 use support::*;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{Error, ProtocolError};
@@ -86,4 +86,77 @@ async fn a_key_offered_as_the_only_subprotocol_is_never_echoed() {
     probe.connected(0).await;
     let upgrade = &probe.upgrades()[0];
     assert!(upgrade.headers.get("sec-websocket-protocol").is_none());
+}
+
+/// A typed gateway whose JSON events speak the subprotocol `realtime`.
+fn speaking(probe: &Probe) -> Gateway {
+    let events = JsonEvents::new("realtime", "/v1/realtime")
+        .protocol("realtime")
+        .unwrap();
+    Gateway::new()
+        .client::<ClientEvent, _, _>(events.clone())
+        .unwrap()
+        .provider::<ClientEvent, _, _>(
+            "p",
+            events,
+            WsTransport::new(probe.base()).unwrap().connect(),
+        )
+        .unwrap()
+        .target("p")
+        .unwrap()
+}
+
+// A format's subprotocol is offered to the provider, and given back to a
+// client that offered it, its key never.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_formats_subprotocol_is_offered_and_given_back_to_a_client_that_offered_it() {
+    let probe = Probe::start().await;
+    let server = serve_typed(speaking(&probe)).await;
+    let mut req = format!("ws://{}/v1/realtime", server.addr)
+        .into_client_request()
+        .unwrap();
+    let offered = HeaderValue::from_static("realtime, openai-insecure-api-key.k");
+    req.headers_mut().insert("sec-websocket-protocol", offered);
+    let (_ws, resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+    assert_eq!(resp.headers()["sec-websocket-protocol"], "realtime");
+    probe.connected(0).await;
+    let upgrade = &probe.upgrades()[0];
+    assert_eq!(upgrade.headers["sec-websocket-protocol"], "realtime");
+}
+
+// A client that offered none gets none, though the provider is offered it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_offered_no_subprotocol_gets_none() {
+    let probe = Probe::start().await;
+    let server = serve_typed(speaking(&probe)).await;
+    let ws = format!("ws://{}/v1/realtime", server.addr);
+    let (_ws, resp) = tokio_tungstenite::connect_async(ws).await.unwrap();
+    assert!(resp.headers().get("sec-websocket-protocol").is_none());
+    probe.connected(0).await;
+    let upgrade = &probe.upgrades()[0];
+    assert_eq!(upgrade.headers["sec-websocket-protocol"], "realtime");
+}
+
+// A relay passes the provider's head on, but a key the provider picked as
+// its subprotocol (here the client's own, relayed) is never sent back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_the_provider_picks_is_never_echoed() {
+    let probe = Probe::start().await;
+    let (gateway, ..) = relay(&probe.base());
+    let server = serve(gateway).await;
+    let mut req = format!("ws://{}/v1/realtime", server.addr)
+        .into_client_request()
+        .unwrap();
+    let offered = HeaderValue::from_static("openai-insecure-api-key.k");
+    req.headers_mut().insert("sec-websocket-protocol", offered);
+    let refused = tokio_tungstenite::connect_async(req).await;
+    let Err(Error::Protocol(ProtocolError::SecWebSocketSubProtocolError(_))) = refused else {
+        panic!("a subprotocol was echoed: {refused:?}")
+    };
+    probe.connected(0).await;
+    let upgrade = &probe.upgrades()[0];
+    assert_eq!(
+        upgrade.headers["sec-websocket-protocol"],
+        "openai-insecure-api-key.k"
+    );
 }

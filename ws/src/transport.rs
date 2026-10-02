@@ -8,32 +8,27 @@ use std::time::Duration;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
-use respan_gateway_http::http_body::Frame;
-use respan_gateway_http::http_body_util::{BodyExt, LengthLimitError, Limited, StreamBody};
-use respan_gateway_http::{Body, Completion};
-use respan_gateway_http::{
-    credentials, is_connection_header, proxy_call, strip_client_origin_headers,
-    strip_origin_headers,
-};
+use respan_gateway_http::{Body, Completion, Frames, RawErrors};
+use respan_gateway_http::{is_connection_header, prepare_call, strip_origin_headers};
 use respan_gateway_sdk::futures::channel::oneshot;
 use respan_gateway_sdk::futures::stream::{SplitSink, SplitStream};
-use respan_gateway_sdk::futures::{FutureExt, SinkExt, StreamExt, stream};
-use respan_gateway_sdk::{Fault, Truncated, Upstream};
+use respan_gateway_sdk::futures::{FutureExt, SinkExt, Stream, StreamExt, stream};
+use respan_gateway_sdk::{Abandoned, Extensions, Fault, Truncated, Upstream};
 use tokio::sync::mpsc::{self, Sender};
+use tokio::time::Instant;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode as Code;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::{Error, Message};
 
-use crate::{CLOSE_WAIT, CloseCode, MAX_MESSAGE};
-use respan_gateway_http::Frames;
+use crate::{CloseCode, Limits, ProviderClose};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-// A non-upgrade answer must be complete before handoff so malformed wire
-// responses fail the call; cap that eager read independently of refusal parsing.
-const MAX_REFUSAL_BODY: usize = 1 << 20;
+/// How long a provider has to answer the upgrade by default: connecting
+/// takes well under a second to a reachable host, and 10 s spans TCP's
+/// first retransmits of a lost handshake (RFC 6298: after 1 s, then 2 s
+/// more, then 4 s more), as `HttpClient`'s connect timeout does.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Socket = WebSocketStream<reqwest::Upgraded>;
 
@@ -53,41 +48,51 @@ fn is_handshake(name: &HeaderName) -> bool {
 /// Reaches one provider over WebSocket at a base URL (`ws` or `wss`), which
 /// each call's path and query extend, as [`HttpClient`] does for HTTP.
 ///
-/// A call's head is stripped and given keys as [`HttpClient`] does
-/// ([`proxy_call`], [`strip_client_origin_headers`], [`credentials`]), so a
-/// client's key passes only on a relay; the handshake's own headers are the
-/// WebSocket library's. The answer is the provider's `101` (its origin
-/// headers, `Sec-WebSocket-Accept` and extensions removed), or the
-/// provider's refusal of the upgrade, a non-`101` answer with its body,
-/// which the format reads as any error answer. A provider that cannot be
-/// reached fails the call `upstream`.
+/// A call is prepared as [`HttpClient`] prepares one ([`prepare_call`]):
+/// stripped, and given keys, so a client's key passes only where a plugin
+/// put it back; the handshake's own headers are the WebSocket library's.
+/// The answer is the provider's `101` (its origin headers,
+/// `Sec-WebSocket-Accept` and extensions removed), or the provider's
+/// refusal of the upgrade, a non-`101` answer with its body, which the
+/// format reads as any error answer. A provider that cannot be reached, or
+/// does not answer the upgrade, its refusal's body included, within the
+/// handshake timeout ([`with_handshake_timeout`](Self::with_handshake_timeout)),
+/// fails the call `upstream`.
 ///
 /// The body of the call is the session's frames to send, each one text
 /// message; the answer's body is the provider's, each one text message.
 ///
 /// - The call's body ends clean: Close 1000 is sent, and the provider's
-///   end, however it comes within [`CLOSE_WAIT`], ends the answer clean.
+///   end, however it comes within [`Limits::close_wait`], ends the answer
+///   clean.
 /// - It ends `Err` (the client broke or left, or a filter or plugin refused
-///   an input): the connection is dropped with no Close, and the answer ends
-///   with that fault, so what the client is told is the fault's own (an
-///   edge that reports its client's leaving says `abandoned`).
+///   an input): the provider is sent Close (1001 for a client that left
+///   ([`Abandoned`]), else the fault's [`CloseCode`] or 1011) within
+///   [`Limits::close_send`], the connection is dropped, and the answer ends
+///   with that fault.
+/// - The answer's body is dropped: the provider is sent Close 1001 within
+///   [`Limits::close_send`], and the connection is dropped.
 /// - The provider sends Close with no code or 1000: the answer ends clean.
-///   With another code: an `Upstream` fault with that [`CloseCode`].
+///   With another code: an `Upstream` fault with that [`ProviderClose`],
+///   and, on a call with [`RawErrors`] (the
+///   [`Relay`](respan_gateway_http::relay::Relay)'s permission to pass the
+///   provider's errors on), that [`CloseCode`] too.
 /// - The provider's connection breaks with no Close: `Err(truncated)`.
 /// - A binary frame, from the provider or in the call, is a fault
 ///   (`upstream`, `config`): text only.
 ///
-/// Dropping the answer's body drops the connection. The transport reads
-/// the provider no faster than the answer is read (one frame in flight),
-/// and sends no faster than the provider takes.
+/// The transport reads the provider no faster than the answer is read (one
+/// frame in flight), and sends no faster than the provider takes.
 ///
-/// [`HttpClient`]: https://docs.rs/respan-gateway-http/latest/respan_gateway_http/struct.HttpClient.html
+/// [`HttpClient`]: respan_gateway_http::HttpClient
 #[derive(Clone)]
 pub struct WsTransport {
+    client: reqwest::Client,
     /// The base URL, without a trailing `/`.
     base: String,
     headers: HeaderMap,
-    max_message: usize,
+    limits: Limits,
+    handshake_timeout: Duration,
 }
 
 impl std::fmt::Debug for WsTransport {
@@ -96,41 +101,31 @@ impl std::fmt::Debug for WsTransport {
         f.debug_struct("WsTransport")
             .field("base", &self.base)
             .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .field("limits", &self.limits)
+            .field("handshake_timeout", &self.handshake_timeout)
             .finish_non_exhaustive()
     }
 }
 
 impl WsTransport {
-    /// A transport to `base_url`: `ws` or `wss`, a host, an optional path
-    /// prefix, and no query, fragment or credentials, else `Err` with
-    /// `config`.
+    /// A transport to `base_url`: `ws` or `wss`
+    /// ([`base_url`](respan_gateway_http::base_url)), else `Err` with
+    /// `config`. It takes [`Limits::default`], gives the provider 10 s to
+    /// answer the upgrade, and shares one client, until told otherwise.
     pub fn new(base_url: impl Into<String>) -> Result<Self, Fault> {
-        // The URL may contain a key, so the error does not echo it.
-        let raw: String = base_url.into();
-        let url = raw.parse::<http::Uri>().ok().filter(|u| {
-            let authority = u.authority().map(|a| a.as_str()).unwrap_or_default();
-            matches!(u.scheme_str(), Some("ws" | "wss"))
-                && !authority.is_empty()
-                && !authority.contains('@')
-                && u.query().is_none()
-                && !raw.contains('#')
-        });
-        let Some(url) = url else {
-            return Err(Fault::config(
-                "bad base URL: a ws or wss one with a host, and no query, \
-                 fragment or credentials (those go in its headers)",
-            ));
-        };
         Ok(Self {
-            base: url.to_string().trim_end_matches('/').to_owned(),
+            client: shared_client()?,
+            base: respan_gateway_http::base_url(&base_url.into(), &["ws", "wss"])?,
             headers: HeaderMap::new(),
-            max_message: MAX_MESSAGE,
+            limits: Limits::default(),
+            handshake_timeout: HANDSHAKE_TIMEOUT,
         })
     }
 
     /// Send `headers`, such as the API key, with every call, replacing any
-    /// set before, in place of the client's ([`credentials`]). `Err` with
-    /// `config` for a connection header.
+    /// set before, in place of the client's
+    /// ([`credentials`](respan_gateway_http::credentials)). `Err` with
+    /// `config` for a header of the connection or the handshake.
     pub fn with_headers(mut self, headers: HeaderMap) -> Result<Self, Fault> {
         if let Some(name) = headers.keys().find(|k| is_handshake(k)) {
             let name = name.as_str();
@@ -142,17 +137,36 @@ impl WsTransport {
         Ok(self)
     }
 
-    /// Accept messages up to `bytes` (default [`MAX_MESSAGE`]); a larger one
-    /// breaks the connection, so the answer ends `Err(upstream)`.
-    pub fn max_message(mut self, bytes: usize) -> Self {
-        self.max_message = bytes;
+    /// Use `client` instead of the shared one: it must speak HTTP/1.1, as
+    /// only HTTP/1.1 upgrades, and should not follow redirects, which are
+    /// the client's to follow.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    /// Take `limits` ([`Limits`]): a message, or a refusal's body, over
+    /// `max_message` breaks the answer `Err(upstream)`.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Give the provider `timeout` to answer the upgrade: to be reached, to
+    /// answer the handshake, and to send a refusal's body whole.
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
         self
     }
 }
 
-/// HTTP owns refusal framing; tungstenite receives only validated upgrades.
-/// Keep system roots and an explicit TLS provider even in builds enabling both providers.
-fn client() -> Result<reqwest::Client, Fault> {
+/// The client every transport shares: HTTP/1.1, as only HTTP/1.1 upgrades;
+/// no redirects, as they are the client's to follow; and the system's root
+/// certificates with an explicit TLS provider, `aws-lc-rs`, because the
+/// workspace's dependencies enable both `ring` and `aws-lc-rs`, which makes
+/// rustls's own choice panic. Proxies are the environment's, as for
+/// `HttpClient`.
+fn shared_client() -> Result<reqwest::Client, Fault> {
     static CLIENT: OnceLock<Result<reqwest::Client, Fault>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -167,13 +181,7 @@ fn client() -> Result<reqwest::Client, Fault> {
             .with_no_client_auth();
             reqwest::Client::builder()
                 .http1_only()
-                .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
-                .retry(reqwest::retry::never())
-                .no_gzip()
-                .no_brotli()
-                .no_deflate()
-                .no_zstd()
                 .tls_backend_preconfigured(tls)
                 .build()
                 .map_err(|e| {
@@ -235,14 +243,31 @@ fn invalid(e: impl std::error::Error + Send + Sync + 'static) -> Fault {
     Fault::config("the provider request is not valid").with_source(e)
 }
 
+/// The fault of a provider that did not answer the upgrade in time.
+fn too_slow() -> Fault {
+    Upstream::fault("the provider took too long to accept")
+}
+
+/// `body`, failing [`too_slow`] once `deadline` passes.
+fn until(deadline: Instant, body: Frames) -> impl Stream<Item = Result<Bytes, Fault>> + Send {
+    stream::unfold(Some(body), move |body| async move {
+        let mut body = body?;
+        match tokio::time::timeout_at(deadline, body.next()).await {
+            Ok(item) => Some((item?, Some(body))),
+            Err(_) => Some((Err(too_slow()), None)),
+        }
+    })
+}
+
 impl WsTransport {
     /// Create fresh outgoing I/O for each call using this backend.
     pub fn connect(
         self,
     ) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Clone + Send + Sync
     {
-        // One message is what a reader holds of the provider's answer.
-        let limit = self.max_message;
+        // One message, or a refusal's body, is what a reader holds of the
+        // provider's answer.
+        let limit = self.limits.max_message;
         let backend = Arc::new(self);
         respan_gateway_http::connect(
             move |request| {
@@ -258,54 +283,50 @@ impl WsTransport {
         &self,
         mut call: http::Request<Body>,
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
-        let (mut head, body) = call.into_parts();
-        proxy_call(&mut head);
-        strip_client_origin_headers(&mut head.headers);
-        call = http::Request::from_parts(head, body);
-        credentials(&mut call, &self.headers);
+        let relayed = call
+            .extensions()
+            .get::<Extensions>()
+            .is_some_and(|e| e.get::<RawErrors>().is_some());
+        prepare_call(&mut call, &self.base, &self.headers)?;
         let (head, body) = call.into_parts();
-        let body = body.into_data_stream().boxed();
-        let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
-        let mut req = format!("{}{path}", self.base)
+        let body = body.boxed();
+        let mut req = head
+            .uri
+            .to_string()
             .into_client_request()
             .map_err(invalid)?;
         for (name, value) in head.headers.iter().filter(|(n, _)| !is_handshake(n)) {
             req.headers_mut().append(name, value.clone());
         }
+        let limits = self.limits;
         let config = WebSocketConfig::default()
-            .max_message_size(Some(self.max_message))
-            .max_frame_size(Some(self.max_message));
+            .max_message_size(Some(limits.max_message))
+            .max_frame_size(Some(limits.max_message));
+        let deadline = Instant::now() + self.handshake_timeout;
         let connect = async {
             let expected = req.headers().clone();
             let url = req.uri().to_string().replacen("ws", "http", 1);
-            let resp = client()?
+            let resp = self
+                .client
                 .get(url)
                 .headers(expected.clone())
                 .send()
                 .await
                 .map_err(|e| Upstream::fault("the provider could not be reached").with_source(e))?;
-            let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
+            let mut head = http::Response::new(()).into_parts().0;
             head.status = resp.status();
             head.version = resp.version();
             head.headers = resp.headers().clone();
+            strip_origin_headers(&mut head.headers);
             if head.status != StatusCode::SWITCHING_PROTOCOLS {
+                // The body is read whole by the format, as framed here.
                 head.headers.remove(header::TRANSFER_ENCODING);
                 head.headers.remove(header::CONTENT_LENGTH);
-                strip_origin_headers(&mut head.headers);
-                let body = StreamBody::new(resp.bytes_stream().map(|chunk| chunk.map(Frame::data)));
-                let bytes = Limited::new(body, MAX_REFUSAL_BODY)
-                    .collect()
-                    .await
-                    .map_err(|error| {
-                        if error.is::<LengthLimitError>() {
-                            Upstream::fault("the provider's WebSocket refusal body is too large")
-                                .with_source(error)
-                        } else {
-                            Truncated::fault().with_source(error)
-                        }
-                    })?
-                    .to_bytes();
-                return Ok((http::Response::from_parts(head, Body::full(bytes)), None));
+                let broke = |e| Truncated::fault().with_source(e);
+                let body = resp.bytes_stream().map(move |chunk| chunk.map_err(broke));
+                let body = body.boxed();
+                let body = Body::stream(until(deadline, body));
+                return Ok((http::Response::from_parts(head, body), None));
             }
             validate_upgrade(&expected, &head.headers)?;
             let upgraded = resp.upgrade().await.map_err(|e| {
@@ -313,12 +334,11 @@ impl WsTransport {
             })?;
             let socket =
                 WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(config)).await;
-            strip_origin_headers(&mut head.headers);
             head.headers.remove(header::SEC_WEBSOCKET_ACCEPT);
             head.headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
             // One frame in flight: a reader that stops reading stops the connection's.
             let (frames, frames_in) = mpsc::channel(1);
-            let writing = tokio::spawn(session(socket, body, frames));
+            let writing = tokio::spawn(session(socket, body, frames, limits, relayed));
             let frames_in = stream::unfold(frames_in, |mut rx| async {
                 rx.recv().await.map(|f| (f, rx))
             });
@@ -335,9 +355,9 @@ impl WsTransport {
             .boxed();
             Ok((answer, Some(completion)))
         };
-        tokio::time::timeout(CONNECT_TIMEOUT, connect)
+        tokio::time::timeout_at(deadline, connect)
             .await
-            .map_err(|_| Upstream::fault("the provider took too long to accept"))?
+            .map_err(|_| too_slow())?
     }
 }
 
@@ -345,13 +365,19 @@ impl WsTransport {
 enum Sent {
     /// The call's body ended clean, and Close was sent.
     Closed,
-    /// The body ended `Err`: the session is over, and the answer ends with
-    /// its fault.
-    Gone(Fault),
+    /// The body ended `Err`, or held a frame that cannot be sent: the
+    /// session is over, and the answer ends with the fault.
+    Failed(Fault),
     /// The connection broke while sending; the reader says how.
     Lost,
-    /// A frame that cannot be sent.
-    Failed(Fault),
+}
+
+/// How the provider's frames ended.
+enum Read {
+    /// The provider's side ended, and the answer with it.
+    Ended,
+    /// The answer was dropped: no one reads the provider.
+    Dropped,
 }
 
 /// Pump `body`'s frames to the provider and the provider's to `frames`,
@@ -362,50 +388,76 @@ async fn session(
     socket: Socket,
     body: Frames,
     frames: Sender<Result<Bytes, Fault>>,
+    limits: Limits,
+    relayed: bool,
 ) -> Result<(), Fault> {
-    let (sink, stream) = socket.split();
-    let closing = Arc::new(AtomicBool::new(false));
+    let (mut sink, stream) = socket.split();
+    let closing = AtomicBool::new(false);
     // Only the reader holds the answer's sender, so the answer ends when it
     // says so; a fault of the sending side goes to it to say.
     let (abort, aborted) = oneshot::channel();
-    let mut read = pin!(read_frames(stream, frames, closing.clone(), aborted));
-    let sent = send_frames(sink, body, closing);
-    tokio::select! {
-        // The provider is done or the answer is dropped, so the frames
-        // still to send are dropped too, with the call's body.
-        () = &mut read => Ok(()),
-        sent = sent => match sent {
-            // Close is sent; the provider's part of it may take a while.
-            Sent::Closed => {
-                let _ = tokio::time::timeout(CLOSE_WAIT, read).await;
-                Ok(())
-            }
-            Sent::Gone(fault) | Sent::Failed(fault) => {
-                let _ = abort.send(fault.clone());
-                read.await;
-                Err(fault)
-            }
-            Sent::Lost => {
-                // The reader classifies the socket failure on the incoming
-                // flow, preserving its precise close code or truncation.
-                read.await;
-                Ok(())
-            },
-        },
+    let reader = read_frames(stream, frames, &closing, aborted, limits, relayed);
+    let mut read = pin!(reader);
+    let sent = tokio::select! {
+        // An input's failure, which ends the call's answer too, says why.
+        biased;
+        sent = send_frames(&mut sink, body, &closing) => Ok(sent),
+        read = &mut read => Err(read),
+    };
+    match sent {
+        Err(Read::Ended) => Ok(()),
+        // No one reads the session any more: the gateway goes away.
+        Err(Read::Dropped) => {
+            close(&mut sink, 1001, limits.close_send).await;
+            Ok(())
+        }
+        // Close is sent; the provider's part of it may take a while.
+        Ok(Sent::Closed) => {
+            let _ = tokio::time::timeout(limits.close_wait, read).await;
+            Ok(())
+        }
+        Ok(Sent::Failed(fault)) => {
+            // The reader ends the answer with the fault before the
+            // provider's answer to this Close could end it clean.
+            let _ = abort.send(fault.clone());
+            let code = match fault.is::<Abandoned>() {
+                true => 1001,
+                false => fault.get::<CloseCode>().map_or(1011, |c| c.sendable()),
+            };
+            close(&mut sink, code, limits.close_send).await;
+            read.await;
+            Err(fault)
+        }
+        Ok(Sent::Lost) => {
+            // The reader classifies the socket failure on the incoming
+            // flow, preserving its precise close code or truncation.
+            read.await;
+            Ok(())
+        }
     }
+}
+
+/// Send Close `code` within `wait`, as a peer that has not taken it by then
+/// has stopped reading.
+async fn close(sink: &mut SplitSink<Socket, Message>, code: u16, wait: Duration) {
+    let frame = CloseFrame {
+        code: code.into(),
+        reason: "".into(),
+    };
+    let _ = tokio::time::timeout(wait, sink.send(Message::Close(Some(frame)))).await;
 }
 
 /// The call's frames as text messages, then Close 1000 if the body ended
 /// clean.
 async fn send_frames(
-    mut sink: SplitSink<Socket, Message>,
+    sink: &mut SplitSink<Socket, Message>,
     mut body: Frames,
-    closing: Arc<AtomicBool>,
+    closing: &AtomicBool,
 ) -> Sent {
     while let Some(frame) = body.next().await {
         let bytes = match frame {
             Ok(bytes) => bytes,
-            Err(fault) => return Sent::Gone(fault),
+            Err(fault) => return Sent::Failed(fault),
         };
         let Ok(text) = String::from_utf8(bytes.into()) else {
             let text = "a frame of a call is not text: only text frames are carried";
@@ -417,7 +469,7 @@ async fn send_frames(
     }
     closing.store(true, Ordering::SeqCst);
     let frame = CloseFrame {
-        code: Code::Normal,
+        code: 1000.into(),
         reason: "".into(),
     };
     let _ = sink.send(Message::Close(Some(frame))).await;
@@ -425,27 +477,30 @@ async fn send_frames(
 }
 
 /// The provider's text messages into `frames`, then how it ended: `frames`
-/// ends clean, or with the fault.
+/// ends clean, or with the fault. A provider's Close with a code other than
+/// 1000 is a [`ProviderClose`], and a [`CloseCode`] too if `relayed`.
 async fn read_frames(
     mut stream: SplitStream<Socket>,
     frames: Sender<Result<Bytes, Fault>>,
-    closing: Arc<AtomicBool>,
+    closing: &AtomicBool,
     mut aborted: oneshot::Receiver<Fault>,
-) {
+    limits: Limits,
+    relayed: bool,
+) -> Read {
     let fault = loop {
         let next = tokio::select! {
-            next = stream.next() => next,
+            biased;
             // The sending side failed: its fault ends the answer.
             Ok(fault) = &mut aborted => break fault,
             // The answer was dropped, quiet connection or not.
-            () = frames.closed() => return,
+            () = frames.closed() => return Read::Dropped,
+            next = stream.next() => next,
         };
         match next {
             Some(Ok(Message::Text(text))) => {
                 let frame = Bytes::copy_from_slice(text.as_bytes());
                 if frames.send(Ok(frame)).await.is_err() {
-                    // The answer was dropped.
-                    return;
+                    return Read::Dropped;
                 }
             }
             Some(Ok(Message::Binary(_))) => {
@@ -454,21 +509,24 @@ async fn read_frames(
             }
             Some(Ok(Message::Close(frame))) => {
                 let code = frame.map(|f| u16::from(f.code));
-                let clean =
-                    closing.load(Ordering::SeqCst) || matches!(code, None | Some(1000 | 1005));
+                let clean = closing.load(Ordering::SeqCst) || matches!(code, None | Some(1000));
                 if let (false, Some(code)) = (clean, code) {
-                    let fault = Upstream::fault("the provider closed the session");
-                    let _ = frames.send(Err(fault.with(CloseCode(code)))).await;
+                    let mut fault = Upstream::fault("the provider closed the session")
+                        .with(ProviderClose(code));
+                    if relayed {
+                        fault = fault.with(CloseCode(code));
+                    }
+                    let _ = frames.send(Err(fault)).await;
                 }
                 // The answer ends; the library sends its reply to the Close
                 // as the stream is read on.
                 drop(frames);
-                let _ = tokio::time::timeout(Duration::from_secs(1), stream.next()).await;
-                return;
+                let _ = tokio::time::timeout(limits.close_send, stream.next()).await;
+                return Read::Ended;
             }
             Some(Ok(_)) => {}
             // No Close came. After ours, that is how a provider may end.
-            Some(Err(_)) | None if closing.load(Ordering::SeqCst) => return,
+            Some(Err(_)) | None if closing.load(Ordering::SeqCst) => return Read::Ended,
             Some(Err(Error::Capacity(_))) => {
                 break Upstream::fault("the provider sent a message that is too large");
             }
@@ -476,11 +534,22 @@ async fn read_frames(
         }
     };
     let _ = frames.send(Err(fault)).await;
+    Read::Ended
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::Mutex;
+
+    use respan_gateway_http::ProviderError;
+    use respan_gateway_http::http_body_util::BodyExt;
+    use respan_gateway_sdk::{Gateway, Plugin, ProviderContext, async_trait};
+
+    use crate::{ClientEvent, JsonEvents};
 
     #[test]
     fn upgrades_require_the_key_and_only_negotiated_protocols() {
@@ -536,26 +605,69 @@ mod tests {
         assert!(validate_upgrade(&sent, &received).is_err());
     }
 
-    #[tokio::test]
-    async fn non_upgrade_200_and_204_are_original_refusals_without_waiting_for_upload() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::pin::Pin;
-        use std::sync::Mutex;
-        use std::task::{Context, Poll};
+    /// A server that reads one handshake, to `GET /events`, and writes
+    /// `head` then `body`, then holds the connection until the test ends.
+    fn answering(head: String, body: Vec<u8>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local handshake server");
+        let address = listener.local_addr().expect("local address");
+        std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("receive handshake");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("read timeout");
+            let mut headers = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let n = socket.read(&mut chunk).expect("read handshake");
+                assert!(
+                    n > 0 && headers.len() + n < 16 * 1024,
+                    "incomplete handshake"
+                );
+                headers.extend_from_slice(&chunk[..n]);
+            }
+            assert!(String::from_utf8_lossy(&headers).contains("GET /events HTTP/1.1"));
+            let _ = socket.write_all(head.as_bytes());
+            let _ = socket.write_all(&body);
+            // Hold the connection open: its end is the test's.
+            let _ = socket.read(&mut chunk);
+        });
+        address
+    }
 
+    type EndRecord = (bool, Result<(), Fault>);
+
+    /// How each provider call ended, and whether it was refused.
+    #[derive(Clone, Default)]
+    struct Ended(Arc<Mutex<Vec<EndRecord>>>);
+
+    #[async_trait]
+    impl Plugin for Ended {
+        async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
+            self.0
+                .lock()
+                .expect("record end")
+                .push((px.is_refused(), end.clone()));
+        }
+    }
+
+    /// A session through `transport` whose client never sends a frame, with
+    /// the client's answer, read whole, how its one call ended, and whether
+    /// its upload was dropped.
+    async fn session_through(
+        transport: WsTransport,
+    ) -> (http::Response<Bytes>, EndRecord, Arc<AtomicBool>) {
         use respan_gateway_http::http_body::Frame;
-        use respan_gateway_http::http_body_util::{BodyExt, StreamBody};
-        use respan_gateway_sdk::futures::Stream;
-        use respan_gateway_sdk::{Gateway, Plugin, ProviderContext, async_trait};
+        use respan_gateway_http::http_body_util::StreamBody;
 
-        use crate::JsonEvents;
-
+        /// An upload that never sends, and says when it was dropped.
         struct NeverUpload(Arc<AtomicBool>);
         impl Stream for NeverUpload {
             type Item = Result<Frame<Bytes>, Fault>;
-            fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-                Poll::Pending
+            fn poll_next(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Self::Item>> {
+                std::task::Poll::Pending
             }
         }
         impl Drop for NeverUpload {
@@ -564,97 +676,67 @@ mod tests {
             }
         }
 
-        type EndRecord = (bool, Result<(), Fault>);
-        #[derive(Clone, Default)]
-        struct Ended(Arc<Mutex<Vec<EndRecord>>>);
-        #[async_trait]
-        impl Plugin for Ended {
-            async fn on_provider_end(&self, px: &ProviderContext, end: &Result<(), Fault>) {
-                self.0
-                    .lock()
-                    .expect("record end")
-                    .push((px.is_refused(), end.clone()));
-            }
-        }
-
-        for (status, body) in [
-            (StatusCode::OK, "not upgraded"),
-            (StatusCode::NO_CONTENT, ""),
-        ] {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local handshake server");
-            let address = listener.local_addr().expect("local address");
-            let server = std::thread::spawn(move || {
-                let (mut socket, _) = listener.accept().expect("receive handshake");
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .expect("read timeout");
-                let mut headers = Vec::new();
-                let mut one = [0u8; 1024];
-                while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                    let n = socket.read(&mut one).expect("read handshake");
-                    assert!(
-                        n > 0 && headers.len() + n < 16 * 1024,
-                        "incomplete handshake"
-                    );
-                    headers.extend_from_slice(&one[..n]);
-                }
-                assert!(String::from_utf8_lossy(&headers).contains("GET /events HTTP/1.1"));
-                let reply = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nX-Provider: original\r\nConnection: close\r\n\r\n{}",
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or(""),
-                    body.len(),
-                    body,
-                );
-                socket
-                    .write_all(reply.as_bytes())
-                    .expect("write non-upgrade answer");
-            });
-            let ended = Ended::default();
-            let format = JsonEvents::new("json-ws", "/events");
-            let transport = WsTransport::new(format!("ws://{address}")).expect("transport");
-            let gateway = Gateway::new()
-                .provider::<crate::ClientEvent, _, _>("ws", format.clone(), transport.connect())
-                .and_then(|g| g.client::<crate::ClientEvent, _, _>(format))
-                .map(|g| g.plugin(ended.clone()))
-                .and_then(|g| g.target("ws"))
-                .expect("gateway");
-            let dropped = Arc::new(AtomicBool::new(false));
-            let body_stream = StreamBody::new(NeverUpload(dropped.clone()));
-            let request = http::Request::builder()
-                .uri("/events")
-                .header(header::UPGRADE, "websocket")
-                .header(header::CONNECTION, "upgrade")
-                .body(body_stream)
-                .expect("request");
-            let (response, completion) = tokio::time::timeout(
-                Duration::from_secs(3),
-                respan_gateway_http::handle(&gateway, request, true, MAX_MESSAGE),
-            )
-            .await
-            .expect("refusal must not wait for an upload frame");
-            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-            assert!(!response.headers().contains_key("x-provider"));
-            let bytes = tokio::time::timeout(
-                Duration::from_secs(3),
-                BodyExt::collect(response.into_body()),
-            )
+        let ended = Ended::default();
+        let format = JsonEvents::new("json-ws", "/events");
+        let limit = transport.limits.max_message;
+        let gateway = Gateway::new()
+            .provider::<ClientEvent, _, _>("ws", format.clone(), transport.connect())
+            .and_then(|g| g.client::<ClientEvent, _, _>(format))
+            .map(|g| g.plugin(ended.clone()))
+            .and_then(|g| g.target("ws"))
+            .expect("gateway");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let request = http::Request::builder()
+            .uri("/events")
+            .header(header::UPGRADE, "websocket")
+            .header(header::CONNECTION, "upgrade")
+            .body(StreamBody::new(NeverUpload(dropped.clone())))
+            .expect("request");
+        let (response, completion) = tokio::time::timeout(
+            Duration::from_secs(3),
+            respan_gateway_http::handle(&gateway, request, true, limit),
+        )
+        .await
+        .expect("refusal must not wait for an upload frame");
+        let (head, body) = response.into_parts();
+        let bytes = tokio::time::timeout(Duration::from_secs(3), BodyExt::collect(body))
             .await
             .expect("complete refusal body")
             .expect("read refusal body")
             .to_bytes();
-            assert!(!bytes.is_empty());
-            assert_ne!(bytes, body.as_bytes());
-            let _ = tokio::time::timeout(Duration::from_secs(3), completion)
-                .await
-                .expect("finish refused call");
-            gateway.idle().await;
-            let records = ended.0.lock().expect("recorded provider end");
-            assert_eq!(records.len(), 1);
-            assert!(records[0].0, "provider refused before opening");
-            let fault = records[0].1.as_ref().expect_err("refused call");
+        let _ = tokio::time::timeout(Duration::from_secs(3), completion)
+            .await
+            .expect("finish refused call");
+        gateway.idle().await;
+        let mut records = ended.0.lock().expect("recorded provider end").clone();
+        assert_eq!(records.len(), 1);
+        let response = http::Response::from_parts(head, bytes);
+        (response, records.remove(0), dropped)
+    }
+
+    #[tokio::test]
+    async fn non_upgrade_200_and_204_are_original_refusals_without_waiting_for_upload() {
+        for (status, body) in [
+            (StatusCode::OK, "not upgraded"),
+            (StatusCode::NO_CONTENT, ""),
+        ] {
+            let head = format!(
+                "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nX-Provider: original\r\nConnection: close\r\n\r\n",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or(""),
+                body.len(),
+            );
+            let address = answering(head, body.as_bytes().to_vec());
+            let transport = WsTransport::new(format!("ws://{address}")).expect("transport");
+            let (response, (refused, end), dropped) = session_through(transport).await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert!(!response.headers().contains_key("x-provider"));
+            // The client's format answers with the error code alone.
+            assert_eq!(response.body(), "upstream");
+            assert!(refused, "provider refused before opening");
+            let fault = end.expect_err("refused call");
             let original = fault
-                .get::<respan_gateway_http::ProviderError>()
+                .get::<ProviderError>()
                 .map(|e| &e.response)
                 .expect("fault retains original answer");
             assert_eq!(
@@ -673,131 +755,59 @@ mod tests {
                 dropped.load(Ordering::SeqCst),
                 "unread upload was cancelled"
             );
-            server.join().expect("handshake server");
         }
     }
 
     #[tokio::test]
-    async fn incomplete_non_upgrade_answer_times_out_before_handoff() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::mpsc;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local handshake server");
-        let address = listener.local_addr().expect("local address");
-        let (release, released) = mpsc::channel();
-        let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("receive handshake");
-            socket
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .expect("read timeout");
-            let mut headers = Vec::new();
-            let mut chunk = [0u8; 1024];
-            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                let n = socket.read(&mut chunk).expect("read handshake");
-                assert!(n > 0 && headers.len() + n < 16 * 1024);
-                headers.extend_from_slice(&chunk[..n]);
-            }
-            socket
-                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 1000000\r\nX-Provider: original\r\n\r\npartial")
-                .expect("write partial refusal");
-            // Keep the advertised body incomplete even through the deadline.
-            released
-                .recv_timeout(CONNECT_TIMEOUT + Duration::from_secs(3))
-                .expect("release server");
-        });
-        let transport = WsTransport::new(format!("ws://{address}")).expect("transport");
+    async fn an_incomplete_refusal_body_fails_at_the_handshake_deadline() {
+        let head = "HTTP/1.1 403 Forbidden\r\nContent-Length: 1000000\r\n\r\n".to_owned();
+        let address = answering(head, b"partial".to_vec());
+        let deadline = Duration::from_millis(300);
+        let transport = WsTransport::new(format!("ws://{address}"))
+            .expect("transport")
+            .with_handshake_timeout(deadline);
         let request = http::Request::get("/events")
             .body(Body::full(Bytes::new()))
             .expect("request");
-        let fault = tokio::time::timeout(
-            CONNECT_TIMEOUT + Duration::from_secs(2),
-            transport.send(request),
-        )
-        .await
-        .expect("incomplete refusal must stop at the connection deadline")
-        .err()
-        .expect("incomplete refusal must fail before handoff");
-        assert!(fault.is::<Upstream>());
-        release.send(()).expect("release server");
-        server.join().expect("handshake server");
+        let start = Instant::now();
+        let (answer, completion) = transport.send(request).await.expect("the refusal's head");
+        assert!(completion.is_none());
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let read = tokio::time::timeout(deadline * 10, BodyExt::collect(answer.into_body()))
+            .await
+            .expect("an incomplete refusal stops at the handshake's deadline");
+        let fault = read.expect_err("the body is incomplete");
+        assert!(fault.is::<Upstream>(), "{fault}");
+        assert!(start.elapsed() >= deadline);
     }
 
     #[tokio::test]
-    async fn refusal_body_accepts_exact_limit_and_rejects_oversize_before_handoff() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::mpsc;
-
-        for (chunks, advertised) in [(32, MAX_REFUSAL_BODY), (34, 10_000_000)] {
-            let too_large = chunks > 32;
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local handshake server");
-            let address = listener.local_addr().expect("local address");
-            let (release, released) = mpsc::channel();
-            let server = std::thread::spawn(move || {
-                let (mut socket, _) = listener.accept().expect("receive handshake");
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .expect("read timeout");
-                let mut headers = Vec::new();
-                let mut chunk = [0u8; 1024];
-                while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                    let n = socket.read(&mut chunk).expect("read handshake");
-                    assert!(n > 0 && headers.len() + n < 16 * 1024);
-                    headers.extend_from_slice(&chunk[..n]);
+    async fn a_refusal_body_is_read_up_to_the_message_limit() {
+        let limits = Limits {
+            max_message: 1024,
+            ..Limits::default()
+        };
+        for size in [1024, 1025] {
+            let head = format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {size}\r\n\r\n");
+            let address = answering(head, vec![b'x'; size]);
+            let transport = WsTransport::new(format!("ws://{address}"))
+                .expect("transport")
+                .with_limits(limits);
+            let (_, (refused, end), _) = session_through(transport).await;
+            assert!(refused);
+            let fault = end.expect_err("refused call");
+            match fault.get::<ProviderError>() {
+                Some(original) => {
+                    assert_eq!(size, 1024);
+                    assert_eq!(original.response.status(), StatusCode::FORBIDDEN);
+                    assert_eq!(original.response.body().len(), 1024);
                 }
-                let head = format!(
-                    "HTTP/1.1 403 Forbidden\r\nContent-Length: {advertised}\r\nX-Provider: original\r\n\r\n"
-                );
-                socket
-                    .write_all(head.as_bytes())
-                    .expect("write refusal head");
-                for _ in 0..chunks {
-                    if let Err(error) = socket.write_all(&[b'x'; 32 * 1024]) {
-                        assert!(
-                            too_large
-                                && matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::BrokenPipe
-                                        | std::io::ErrorKind::ConnectionReset
-                                ),
-                            "unexpected refusal write error: {error}"
-                        );
-                        break;
-                    }
+                None => {
+                    assert_eq!(size, 1025);
+                    assert!(fault.is::<Upstream>());
+                    assert!(fault.message().contains("over the limit"), "{fault}");
                 }
-                if too_large {
-                    // Neither the advertised 10 MB nor the response EOF is sent.
-                    released
-                        .recv_timeout(Duration::from_secs(3))
-                        .expect("release server");
-                }
-            });
-            let transport = WsTransport::new(format!("ws://{address}")).expect("transport");
-            let request = http::Request::get("/events")
-                .body(Body::full(Bytes::new()))
-                .expect("request");
-            let answer = tokio::time::timeout(Duration::from_secs(2), transport.send(request))
-                .await
-                .expect("refusal must settle without an unbounded read");
-            if too_large {
-                let fault = answer
-                    .err()
-                    .expect("oversize body must fail before handoff");
-                assert!(fault.is::<Upstream>());
-                assert!(fault.message().contains("too large"));
-                release.send(()).expect("release server");
-            } else {
-                let (response, completion) = answer.expect("exact-limit body is accepted");
-                assert!(completion.is_none());
-                assert_eq!(response.status(), StatusCode::FORBIDDEN);
-                assert_eq!(response.headers()["x-provider"], "original");
-                let body = response.into_body();
-                let bytes = body.full_bytes().expect("complete response is finite");
-                assert_eq!(bytes.len(), MAX_REFUSAL_BODY);
-                assert!(bytes.iter().all(|b| *b == b'x'));
             }
-            server.join().expect("handshake server");
         }
     }
 }

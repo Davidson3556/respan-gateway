@@ -28,7 +28,7 @@ pub fn json(raw: impl AsRef<[u8]>) -> Option<Value> {
 /// Whether a request is a `POST` to a path ending in `suffix`: the usual
 /// incoming format recognition.
 pub fn posts_to(head: &RequestHead, suffix: &str) -> bool {
-    head.method == http::Method::POST && path_ends_with(head, suffix)
+    head.method == http::Method::POST && path_ends_with(&head.uri, suffix)
 }
 
 /// A path as every front end reads it for matching: percent escapes
@@ -112,10 +112,10 @@ pub(crate) fn reads_one_way(path: &str) -> bool {
         && decoded.split('/').all(|s| !s.ends_with('.'))
 }
 
-/// Whether a request's path ends in `suffix`, however it is spelled (see
-/// [`clean_path`]).
-pub fn path_ends_with(head: &RequestHead, suffix: &str) -> bool {
-    let (path, suffix) = (clean_path(head.uri.path()), clean_path(suffix));
+/// Whether a request's path, in `uri`, ends in `suffix`, however it is
+/// spelled (see [`clean_path`]).
+pub fn path_ends_with(uri: &http::Uri, suffix: &str) -> bool {
+    let (path, suffix) = (clean_path(uri.path()), clean_path(suffix));
     // Suffix-pattern routers (Spring MVC's `useSuffixPatternMatch`, Rails'
     // `(.:format)`) read `/chat/completions.json` as `/chat/completions`.
     let (dir, last) = path.rsplit_once('/').unwrap_or_default();

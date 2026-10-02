@@ -131,7 +131,7 @@ async fn a_gemini_live_session_is_byte_exact_both_ways() {
 // passthrough reads no body's words, so the call's fault is `upstream`. The gateway
 // sends a streaming request's head at once, so the refusal as the provider's
 // format would write it arrives as a head followed by a failing body; the
-// adapter writes the failure whole instead (BUGS.md, W1).
+// adapter writes the failure whole instead.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_provider_that_refuses_the_upgrade_is_refused_under_its_status() {
     let openai = FakeOpenAi::start().await;

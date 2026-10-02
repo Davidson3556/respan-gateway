@@ -3,6 +3,9 @@ use crate::{self as h, ClientHead, Credential, ProviderHead, RawErrors, SendRaw,
 use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response, async_trait};
 
 /// Opt into raw request, credentials, response head and error body forwarding.
+/// Its [`RawErrors`] are the permission a transport reads too: on a
+/// WebSocket one (`respan_gateway_ws::WsTransport`), the provider's close
+/// code goes to the client as a `CloseCode`.
 ///
 /// It sends the target call itself: it is the routing for the requests it
 /// handles, answering each with its call to the target, so register no

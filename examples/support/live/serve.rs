@@ -27,7 +27,8 @@ pub async fn serve_until(
             move |State(gw): State<Gateway>, ws: WebSocketUpgrade, req: Request| {
                 let mut stopped = stopped.clone();
                 async move {
-                    respan_gateway_axum::ws::serve_ws_until(&gw, ws, req, async move {
+                    let limits = respan_gateway_ws::Limits::default();
+                    respan_gateway_axum::ws::serve_ws_until(&gw, ws, req, limits, async move {
                         while !*stopped.borrow_and_update() {
                             if stopped.changed().await.is_err() {
                                 break;

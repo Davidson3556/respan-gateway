@@ -10,6 +10,7 @@ use std::time::Duration;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Request, State};
 use respan_gateway_sdk::Gateway;
+use respan_gateway_ws::Limits;
 use support::*;
 
 const PATH: &str = "/v1/realtime";
@@ -23,10 +24,16 @@ async fn served_until(
     let app = axum::Router::new()
         .fallback(
             move |State(gw): State<Gateway>, ws: WebSocketUpgrade, req: Request| async move {
-                respan_gateway_axum::ws::serve_ws_until(&gw, ws, req, async move {
-                    tokio::time::sleep(after).await;
-                    "session_too_long"
-                })
+                respan_gateway_axum::ws::serve_ws_until(
+                    &gw,
+                    ws,
+                    req,
+                    Limits::default(),
+                    async move {
+                        tokio::time::sleep(after).await;
+                        "session_too_long"
+                    },
+                )
                 .await
             },
         )

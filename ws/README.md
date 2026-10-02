@@ -8,97 +8,99 @@ events; OpenAI Realtime and Gemini Live run through the same code.
 
 ## API
 
-- `WsTransport::new(base_url)`: an outbound native HTTP sender to a `ws://` or `wss://`
-  provider. It strips and keys a call as `HttpClient` does (`proxy_call`,
-  `strip_client_origin_headers`, `credentials`, `CallHeaders`), so a client's
-  key passes only when a plugin explicitly supplies it. `.with_headers(map)` sets the
-  transport's own keys; `.max_message(bytes)` (default 16 MiB).
-- Axum hosting is in the separate `respan-gateway-axum` adapter, behind its
-  optional `ws` feature: `respan_gateway_axum::ws::{router, serve_ws,
-  serve_ws_until}`. It accepts a client's upgrade, calls
-  `respan_gateway_http::handle(.., true)`, and pumps frames both ways. A refused
-  request is answered before the upgrade. To mix sessions with plain HTTP,
-  route `serve_ws` on top of `respan_gateway_axum::router`.
-- `JsonEvents::new(name, path)`: direct incoming/outgoing `Format` bindings whose kind is one JSON event per
-  frame, `ClientEvent` in and `ProviderEvent` out (each has `json: Value`).
-  Every event is written from its JSON, so a relay to a format of the same
-  name keeps what an event says, not its exact bytes. Plugins filter events with
+- `WsTransport::new(base_url)`: an outbound native HTTP sender to a `ws://` or
+  `wss://` provider. It prepares a call as `HttpClient` does
+  (`respan_gateway_http::prepare_call`), so a client's key passes only where
+  a plugin put it back. `.with_headers(map)` sets the transport's own keys,
+  `.with_limits(limits)` its `Limits`, `.with_handshake_timeout(d)` how long
+  the provider has to answer the upgrade (default 10 s), and
+  `.with_client(client)` a client in place of the shared one.
+- `JsonEvents::new(name, path)`: incoming and outgoing `Format` bindings
+  whose kind is one JSON event per frame, `ClientEvent` in and
+  `ProviderEvent` out (each has `json: Value`). Every event is written from
+  its JSON, so a relay to a format of the same name keeps what an event says,
+  not its exact bytes. Plugins filter events with
   `cx.filter(|e: &mut ProviderEvent| ..)` (client edge) or `px.filter(..)`
   (provider edge), and drop one with a `Filter` that does not push it.
-- `CloseCode(u16)`: a hint on a `Fault` that picks the code the client is
-  closed with.
+  `.protocol(name)` makes it speak a subprotocol: offered to the provider,
+  and given back to a client that offered it. A handshake it refuses is
+  answered with the fault's error code, never its message.
+- `CloseCode(u16)`: a fact on a `Fault` that picks the code the client is
+  closed with, in place of 1011. A code no Close may carry (1004 to 1006,
+  1015, outside 1000 to 4999) is sent as 1011 (`CloseCode::sendable`).
+- `ProviderClose(u16)`: the code a provider closed with, other than 1000, on
+  the `upstream` fault the transport ends the answer with. The client is told
+  it only as a `CloseCode`, which the transport adds on a call relayed with
+  `RawErrors` (`relay::Relay`), or a plugin sets.
+- `Limits { max_message, close_wait, close_send }`: what an edge takes, with
+  defaults and their reasons on the type: 16 MiB messages, 5 s for the other
+  side's part of a close, 1 s for a Close to leave.
 
-Any other format on the HTTP wire works with the transport and the adapter: the
-tests relay through `formats::opaque` too.
+Hosting a client's session is the `respan-gateway-axum` adapter's, behind its
+optional `ws` feature (`respan_gateway_axum::ws::{router, serve_ws,
+serve_ws_until}`); its module documents how each end of a session reaches the
+client and the provider. Any other format on the HTTP wire works with the
+transport and the adapter: the tests relay through `formats::opaque` too.
 
-## How a session ends
+## The transport
 
-| The end | Input (client to provider) | Output (provider to client) |
-|---|---|---|
-| Client sends Close | ends clean | provider is sent Close 1000; its end, however it comes within 5 s, is clean |
-| Client drops, no Close | ends `Err(abandoned)` | dropped: request and calls end `abandoned` |
-| Client sends a binary frame | ends `Err(abandoned)` | client is sent Close 1003; ends `abandoned` |
-| Provider sends Close 1000 (or no code) | dropped | ends clean; client is sent Close 1000 |
-| Provider sends Close with another code | dropped | an `Upstream` fault with that `CloseCode`; client is sent that code |
-| Provider drops, no Close | dropped | `Err(truncated)`; client is sent 1011 `truncated` |
-| Provider sends a binary frame or a message over the limit | dropped | `Err(upstream)`; client is sent 1011 |
-| Provider is unreachable | (no session) | the client's handshake is answered 502, text/plain |
-| A fault ends the response | cut, `abandoned` | client is sent 1011, or its `CloseCode`, with the fault's **error code** (`error_code`) as the reason, never its message |
-
-A `CloseCode` that no Close may carry (1004 to 1006, 1015, outside 1000 to
-4999) is sent as 1011. A provider's own close reason text is not relayed.
+- The call's body ends clean: the provider is sent Close 1000, and its end,
+  however it comes within `close_wait`, ends the answer clean.
+- The call's body ends `Err`: the provider is sent Close (1001 for a client
+  that left, else the fault's `CloseCode` or 1011) within `close_send`, and
+  the answer ends with the fault. The answer's body dropped: Close 1001.
+- The provider's Close 1000 (or no code) ends the answer clean; another code
+  is an `upstream` fault with its `ProviderClose`. Its reason text is not
+  carried.
+- The provider dropping with no Close is `truncated`; a binary frame, or a
+  message over `max_message`, is `upstream`.
+- A provider that cannot be reached, or does not answer the upgrade within
+  the handshake timeout (a refusal's body included), is `upstream`. A refusal
+  of the upgrade is an answer with its body, which the format reads whole,
+  up to `max_message`, as any error answer; a body that breaks off or is
+  malformed is `truncated`.
 
 ## Limits
 
-- **Text frames only.** A binary frame is a fault (table above). Both OpenAI
-  Realtime and Gemini Live use JSON text frames. Ping and pong are answered by
-  each hop's library and never reach a plugin.
+- **Text frames only.** A binary frame is a fault. Both OpenAI Realtime and
+  Gemini Live use JSON text frames. Ping and pong are answered by each hop's
+  library and never reach a plugin.
 - **HTTP/1.1 upgrades only** (no WebSockets over HTTP/2), no
   `permessage-deflate` (the extension header is not passed on or negotiated).
-- **Messages up to 16 MiB** (`MAX_MESSAGE`), each way.
 - **Backpressure holds.** A frame moves from a socket to the next only as the
   next side takes it: one frame in flight per hop, plus the sockets' own
   buffers. A client that does not read stalls the provider after about 6 MiB,
   and a provider that does not read stalls the client after about 7 MiB
-  (`adapters/axum/tests/backpressure.rs`). The kernel buffers nothing beyond its one batch.
+  (`adapters/axum/tests/backpressure.rs`).
 - **No timeouts on a live session**: no idle limit, no keep-alive pings, no
-  maximum length. The bounds are 10 s for the handshake (including a refusal body) and 5 s (`CLOSE_WAIT`) for
-  the other side's part of a close. A limit on long sessions is a plugin's.
+  maximum length. A limit on long sessions is a plugin's, or `serve_ws_until`'s.
 - **`wss` uses the system's root certificates** and the `aws-lc-rs` provider,
   named in the code because the workspace's dependencies enable both `ring`
-  and `aws-lc-rs`, which makes rustls's own choice panic. It is tested for
-  building and failing cleanly, not against a real TLS server.
-- A provider's refusal of the upgrade (a 401) is a complete answer: the
-  provider edge reads its body before the gateway answers. A plugin can opt into
-  its original status and body with `RawReply`; otherwise the client format
-  writes its own error. An incomplete or malformed
-  refusal body fails as `truncated`. Refusal bodies have a hard **1 MiB** limit,
-  enforced during collection with `http-body-util::Limited`; exceeding it fails
-  as `upstream`, never as a successful partial answer. The handshake's 10 s
-  deadline includes collection. `serve_ws` writes accepted refusals whole and
-  sized, not chunked.
+  and `aws-lc-rs`, which makes rustls's own choice panic. Proxies are the
+  environment's, as for `HttpClient`. It is tested for building and failing
+  cleanly, not against a real TLS server.
 - No reconnection or session resumption.
 
 ## Design notes
 
-The kernel routes events; this integration binds owned `Incoming` and `Outgoing`
-values to native `Request<Body>` and `Response<Body>`, so a frame is a body item.
-`WsTransport::connect()` supplies the per-call provider factory. Its `send` returns
-a separate optional completion future: response EOF alone cannot establish outgoing
-delivery success. Incoming sessions explicitly select live input; a streamed HTTP
-body alone does not turn a finite request into a session. Where that shows:
+The kernel routes events; this integration binds owned `Incoming` and
+`Outgoing` values to native `Request<Body>` and `Response<Body>`, so a frame
+is a body item. `WsTransport::connect()` supplies the per-call provider
+factory. Its `send` returns a separate completion future: response EOF alone
+cannot establish outgoing delivery success. Incoming sessions explicitly
+select live input; a streamed HTTP body alone does not turn a finite request
+into a session. Where that shows:
 
-- **Frame kinds.** A body item is bytes, so its frame kind is lost: text only
-  in v1, a binary frame is a fault. A codec that carried a kind on each event
-  (text, binary) could pass audio.
-- **Close mapping.** A close is only a clean end, or an `Err` with a typed
-  `CloseCode` hint on the fault. The client's close code and reason, and the
-  provider's reason text, cannot cross.
-- **The Upgrade dance.** The adapter keeps `Upgrade`, `proxy_call` sets
-  `Connection: upgrade`, the transport strips `Sec-WebSocket-*`, `serve_ws`
-  copies back the subprotocol and the provider's other headers.
-- **End of input versus end of session.** A client's Close ends the input
-  clean, then the response is read to its end and dropped unsent, because a
-  connection that is closing cannot send.
+- **Frame kinds.** A body item is bytes, so its frame kind is lost: text only,
+  a binary frame is a fault. A codec that carried a kind on each event (text,
+  binary) could pass audio.
+- **Close mapping.** A close is only a clean end, or an `Err` with typed facts
+  (`ProviderClose`, `CloseCode`) on the fault. The client's close code and
+  reason, and the provider's reason text, cannot cross.
+- **The Upgrade dance.** A call keeps `Upgrade`, `prepare_call` gives it
+  `Connection: upgrade`, and the transport leaves the handshake's own
+  `Sec-WebSocket-Key`, `-Version` and `-Extensions` to the WebSocket library.
+  The adapter answers with the `101`'s other headers, and its subprotocol if
+  the client offered it and it is no key.
 
 Used by: [realtime](../examples/realtime/realtime.rs).

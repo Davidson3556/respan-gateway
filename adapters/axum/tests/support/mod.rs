@@ -578,7 +578,7 @@ async fn tap(
 #[path = "../../../../tests/support/hooks.rs"]
 mod hooks;
 pub use hooks::{Calls, Outcomes};
-use respan_gateway_ws::WsTransport;
+use respan_gateway_ws::{ClientEvent, JsonEvents, WsTransport};
 
 /// A gateway that relays every session to the provider at `base` in format
 /// `Raw`, with the recorders of how requests and calls end registered first.
@@ -595,6 +595,45 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
         .target("p")
         .unwrap();
     (gateway, ends, calls)
+}
+
+/// How a test's sessions reach the provider: relayed unread, as `Raw`
+/// with [`Relay::RAW`], or typed, as JSON events ([`JsonEvents`]) with no
+/// relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Via {
+    Relay,
+    Typed,
+}
+
+impl Via {
+    pub const ALL: [Via; 2] = [Via::Relay, Via::Typed];
+
+    /// A gateway to the provider at `base`, sent this way, with the
+    /// recorders of how requests and calls end registered first.
+    pub fn gateway(self, base: &str) -> (Gateway, Outcomes, Calls) {
+        match self {
+            Via::Relay => {
+                let (gateway, ends, calls) = relay(base);
+                (gateway.plugin(Relay::RAW), ends, calls)
+            }
+            Via::Typed => {
+                let (ends, calls) = (Outcomes::default(), Calls::default());
+                let events = JsonEvents::new("realtime", "/v1/realtime");
+                let transport = WsTransport::new(base).unwrap();
+                let gateway = Gateway::new()
+                    .client::<ClientEvent, _, _>(events.clone())
+                    .unwrap()
+                    .provider::<ClientEvent, _, _>("p", events, transport.connect())
+                    .unwrap()
+                    .plugin(ends.clone())
+                    .plugin(calls.clone())
+                    .target("p")
+                    .unwrap();
+                (gateway, ends, calls)
+            }
+        }
+    }
 }
 
 /// The code of an end: `ok` or the fault's code.

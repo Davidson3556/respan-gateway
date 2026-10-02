@@ -1333,6 +1333,7 @@ dependencies = [
 name = "respan-gateway-mcp"
 version = "0.0.0"
 dependencies = [
+ "getrandom 0.3.4",
  "respan-gateway-http",
  "respan-gateway-sdk",
  "serde_json",

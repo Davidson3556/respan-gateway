@@ -5,13 +5,13 @@
 
 mod support;
 
-use futures::StreamExt;
 use futures::channel::mpsc;
+use futures::{StreamExt, TryStreamExt};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{Body, Completion};
 use respan_gateway_sdk::{ErrorCode, Fault};
-use respan_gateway_ws::WsTransport;
+use respan_gateway_ws::{CloseCode, Limits, WsTransport};
 use std::sync::atomic::Ordering;
 use support::*;
 
@@ -61,35 +61,44 @@ async fn a_101_answer_carries_the_providers_frames_in_order() {
     assert_eq!(probe.seen().last(), Some(&Seen::Close(Some(1000))));
 }
 
+// A call that ends `Err` closes the provider's connection with the fault's
+// `CloseCode`, or 1011, and the answer ends with the fault.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_call_that_ends_in_an_err_drops_the_connection_and_the_answer_ends_with_it() {
-    let probe = Probe::start().await;
-    let (tx, call) = call("/x");
-    let (mut answer, _completion) = WsTransport::new(probe.base())
-        .unwrap()
-        .send(call)
-        .await
-        .unwrap();
-    tx.unbounded_send(text("a")).unwrap();
-    tx.unbounded_send(Err(
-        Fault::new("an input was refused").with(ErrorCode("policy".into()))
-    ))
-    .unwrap();
-    let end = answer.body_mut().next().await.unwrap().unwrap_err();
-    assert_eq!(respan_gateway_http::error_code(&end), "policy");
-    eventually("the connection dropped", || {
-        probe.live.load(Ordering::SeqCst) == 0
-    })
-    .await;
-    assert_eq!(
-        probe.seen(),
-        [Seen::Text("a".into()), Seen::Ended],
-        "no Close"
-    );
+async fn a_call_that_ends_in_an_err_closes_the_connection_and_the_answer_ends_with_it() {
+    for (fault, sent) in [
+        (Fault::new("an input was refused"), 1011),
+        (
+            Fault::new("an input was refused").with(CloseCode(4001)),
+            4001,
+        ),
+        (Fault::abandoned(), 1001),
+    ] {
+        let probe = Probe::start().await;
+        let (tx, call) = call("/x");
+        let (mut answer, _completion) = WsTransport::new(probe.base())
+            .unwrap()
+            .send(call)
+            .await
+            .unwrap();
+        tx.unbounded_send(text("a")).unwrap();
+        let fault = fault.with(ErrorCode("policy".into()));
+        tx.unbounded_send(Err(fault)).unwrap();
+        let end = answer.body_mut().next().await.unwrap().unwrap_err();
+        assert_eq!(respan_gateway_http::error_code(&end), "policy");
+        eventually("the connection closed", || {
+            probe.live.load(Ordering::SeqCst) == 0
+        })
+        .await;
+        assert_eq!(
+            probe.seen(),
+            [Seen::Text("a".into()), Seen::Close(Some(sent))]
+        );
+    }
 }
 
+// Dropping the answer closes the provider's connection going away.
 #[tokio::test(flavor = "multi_thread")]
-async fn dropping_the_answer_drops_the_connection() {
+async fn dropping_the_answer_closes_the_connection_going_away() {
     let probe = Probe::start().await;
     let (_tx, call) = call("/x");
     let answer = WsTransport::new(probe.base())
@@ -100,10 +109,11 @@ async fn dropping_the_answer_drops_the_connection() {
     probe.connected(0).await;
     assert_eq!(probe.live.load(Ordering::SeqCst), 1);
     drop(answer);
-    eventually("the connection dropped", || {
+    eventually("the connection closed", || {
         probe.live.load(Ordering::SeqCst) == 0
     })
     .await;
+    assert_eq!(probe.seen(), [Seen::Close(Some(1001))]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -128,7 +138,10 @@ async fn a_message_over_the_limit_breaks_the_answer() {
     let (_tx, call) = call("/x");
     let (mut answer, _completion) = WsTransport::new(probe.base())
         .unwrap()
-        .max_message(1024)
+        .with_limits(Limits {
+            max_message: 1024,
+            ..Limits::default()
+        })
         .send(call)
         .await
         .unwrap();
@@ -244,8 +257,10 @@ async fn a_refused_upgrade_reads_the_body_after_the_headers() {
     }
 }
 
+// A refusal's body that breaks off or is malformed fails its reading
+// `truncated`, never a partial body that ends clean.
 #[tokio::test]
-async fn a_truncated_or_malformed_refusal_fails_instead_of_relaying_a_partial_body() {
+async fn a_truncated_or_malformed_refusal_body_fails_instead_of_ending_partial() {
     for (headers, fragments) in [
         ("Content-Length: 20\r\n", vec!["no room"]),
         ("Transfer-Encoding: chunked\r\n", vec!["7\r\nno room\r\n"]),
@@ -254,10 +269,11 @@ async fn a_truncated_or_malformed_refusal_fails_instead_of_relaying_a_partial_bo
             vec!["not-a-size\r\nno room"],
         ),
     ] {
-        let fault = delayed_refusal(headers, &fragments)
-            .await
-            .err()
-            .expect("invalid body");
+        let (answer, completion) = delayed_refusal(headers, &fragments).await.unwrap();
+        assert!(completion.is_none());
+        assert_eq!(answer.status(), 403);
+        let read: Result<Vec<Bytes>, Fault> = answer.into_body().try_collect().await;
+        let fault = read.expect_err("invalid body");
         assert_eq!(
             respan_gateway_http::error_code(&fault),
             "truncated",

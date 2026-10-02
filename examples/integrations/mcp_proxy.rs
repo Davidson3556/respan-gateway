@@ -7,6 +7,10 @@
 //! instead, such as
 //! `-- --stdio npx -y @modelcontextprotocol/server-everything`.
 //!
+//! Nothing is relayed: the session the server assigns, and every header MCP
+//! carries, travel in the kind ([`ToServer`], [`ToClient`]), so the
+//! allow-list's filters see and edit every call.
+//!
 //! Not built: realtime WebSocket sessions and per-turn billing (use case 7).
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -51,7 +55,7 @@ impl Plugin for ToolAllowList {
             // server never sees it.
             let message = format!("tool {tool} is not allowed");
             let invalid_params = |id: &Value| mcp::error(id.clone(), -32602, &message);
-            let answer = ToClient::new(input.requests().map(invalid_params).collect());
+            let answer = ToClient::new(input.request_ids().map(invalid_params).collect());
             return Ok(Some(Response::stream(stream::iter([Ok(answer)]))));
         }
         let allowed = self.0.clone();
@@ -78,7 +82,6 @@ fn gateway(
         .client::<ToServer, _, _>(StreamableHttp::default())?
         .plugin(ToolAllowList(Arc::from(["echo"])))
         .target("tools")
-        .map(|g| g.plugin(respan_gateway_http::relay::Relay::RAW))
 }
 
 /// A small real MCP HTTP server for this example's three methods. Unlike a

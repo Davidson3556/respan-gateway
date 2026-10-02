@@ -17,9 +17,7 @@ use respan_gateway_http::{
     Body, Completion, Credential, Incoming, Outgoing, credentials, error_code, proxy_call,
     strip_client_origin_headers, strip_origin_headers,
 };
-use respan_gateway_mcp::{
-    Owner, SESSION, StdioTransport, StreamableHttp, TIMED_OUT, ToClient, ToServer,
-};
+use respan_gateway_mcp::{Owner, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer};
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
 use respan_gateway_sdk::{RetryAfter, Truncated, Upstream, async_trait};
@@ -35,7 +33,8 @@ const ECHO: &str = r#"while IFS= read -r line; do
   [ -n "$id" ] && printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
 done"#;
 
-fn typed_gateway(
+/// A gateway to an MCP provider: typed, with no relay.
+fn gateway(
     transport: impl Fn(Extensions) -> Outgoing + Send + Sync + 'static,
     plugin: Option<Touch>,
 ) -> Gateway {
@@ -49,11 +48,13 @@ fn typed_gateway(
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn gateway(
+/// [`gateway`], relaying the client's request, head and errors as they
+/// came.
+fn relayed(
     transport: impl Fn(Extensions) -> Outgoing + Send + Sync + 'static,
     plugin: Option<Touch>,
 ) -> Gateway {
-    typed_gateway(transport, plugin).plugin(relay::Relay::RAW)
+    gateway(transport, plugin).plugin(relay::Relay::RAW)
 }
 
 /// Filters every input and output, changing them only if `edit`.
@@ -220,7 +221,7 @@ fn events_json(sse: &str) -> Vec<serde_json::Value> {
 }
 
 #[tokio::test]
-async fn an_unedited_message_relays_what_it_said_and_an_edited_one_is_written_in_its_event() {
+async fn an_answer_is_written_from_its_messages_typed_or_relayed() {
     let body = r#"{ "jsonrpc":"2.0",  "id":1, "method":"tools/list" }"#;
     let events = [
         ": hi\n\nid: 7\n",
@@ -229,26 +230,39 @@ async fn an_unedited_message_relays_what_it_said_and_an_edited_one_is_written_in
     let json = r#"{"jsonrpc":"2.0" , "id":1,"result":{}}"#;
     let result = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": {} });
     let parse = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).ok();
-    for plugin in [None, Some(false)] {
-        let mock = ScriptedMcp::new();
-        mock.reply(sse(&events));
-        mock.reply(json_reply(StatusCode::OK, json));
-        let gw = gateway(mock.clone().connect(), plugin.map(|edit| Touch { edit }));
-        let posted = || request(Method::POST, body, &[(SESSION, "s1")]);
-        let (status, headers, sse, outcome) = send(&gw, posted()).await;
-        // The event is written from the message: its `id:` is kept, the
-        // provider's comment and its spacing are not.
-        assert_eq!(status, StatusCode::OK);
-        assert!(sse.starts_with("id: 7\ndata: {"), "{sse}");
-        assert_eq!(events_json(&sse), std::slice::from_ref(&result));
-        assert_eq!(headers["content-type"], "text/event-stream");
-        assert!(outcome.is_ok());
-        let (_, _, whole, _) = send(&gw, posted()).await;
-        assert_eq!(parse(whole.as_bytes()), Some(result.clone()));
-        let sent = &mock.sent()[0];
-        assert_eq!(sent.uri().to_string(), format!("{AT}/mcp?x=1"));
-        assert_eq!(parse(sent.body()), parse(body.as_bytes()));
-        assert_eq!(sent.headers()[SESSION], "s1");
+    for raw in [false, true] {
+        for plugin in [None, Some(false)] {
+            let mock = ScriptedMcp::new();
+            mock.reply(sse(&events));
+            mock.reply(json_reply(StatusCode::OK, json));
+            let plugin = plugin.map(|edit| Touch { edit });
+            let gw = match raw {
+                true => relayed(mock.clone().connect(), plugin),
+                false => gateway(mock.clone().connect(), plugin),
+            };
+            let posted = |accept| {
+                let with = [(SESSION, "s1"), ("accept", accept)];
+                request(Method::POST, body, &with)
+            };
+            let (status, headers, sse, outcome) = send(&gw, posted("*/*")).await;
+            // The event is written from the message: its `id:` is kept, the
+            // provider's comment and its spacing are not.
+            assert_eq!(status, StatusCode::OK);
+            assert!(sse.starts_with("id: 7\ndata: {"), "{sse}");
+            assert_eq!(events_json(&sse), std::slice::from_ref(&result));
+            assert_eq!(headers["content-type"], "text/event-stream");
+            assert!(outcome.is_ok());
+            let (_, headers, whole, _) = send(&gw, posted("application/json")).await;
+            assert_eq!(headers["content-type"], "application/json");
+            assert_eq!(parse(whole.as_bytes()), Some(result.clone()));
+            let sent = &mock.sent()[0];
+            // A relay sends the client's path and query; a typed call, the
+            // format's path.
+            let path = if raw { "/mcp?x=1" } else { "/mcp" };
+            assert_eq!(sent.uri().to_string(), format!("{AT}{path}"));
+            assert_eq!(parse(sent.body()), parse(body.as_bytes()));
+            assert_eq!(sent.headers()[SESSION], "s1");
+        }
     }
     let mock = ScriptedMcp::new();
     mock.reply(sse(&events));
@@ -257,6 +271,60 @@ async fn an_unedited_message_relays_what_it_said_and_an_edited_one_is_written_in
     let edited = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": { "edited": true } });
     assert_eq!(events_json(&sse), [edited]);
     assert!(sse.starts_with("id: 7\ndata: {"), "{sse}");
+}
+
+/// Moves a client's session to the provider's name for it, and back.
+struct Rename;
+
+#[async_trait]
+impl Plugin for Rename {
+    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+        cx.filter(|input: &mut ToServer| {
+            if input.session.as_deref() == Some("public") {
+                input.session = Some("private".into());
+            }
+            Ok(())
+        })?;
+        cx.filter(|output: &mut ToClient| {
+            if output.session.as_deref() == Some("private") {
+                output.session = Some("public".into());
+            }
+            Ok(())
+        })?;
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn the_session_version_and_last_event_travel_in_the_kind_through_filters() {
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&[]));
+    let mut assigned = json_reply(StatusCode::OK, r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+    let private = http::HeaderValue::from_static("private");
+    assigned.headers_mut().insert(SESSION, private);
+    mock.reply(assigned);
+    let gw = gateway(mock.clone().connect(), None).plugin(Rename);
+    let resumed = [
+        (SESSION, "public"),
+        ("mcp-protocol-version", "2025-06-18"),
+        ("last-event-id", "41"),
+    ];
+    drop(send(&gw, request(Method::GET, "", &resumed)).await);
+    let (status, headers, _, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(outcome.is_ok());
+    // The session the server named, renamed by the filter, heads the answer.
+    assert_eq!(headers[SESSION], "public");
+    let sent = mock.sent();
+    let get = sent[0].headers();
+    for (name, value) in [
+        (SESSION, "private"),
+        ("mcp-protocol-version", "2025-06-18"),
+        ("last-event-id", "41"),
+    ] {
+        assert_eq!(get[name], value, "{name}");
+    }
+    assert!(!sent[1].headers().contains_key(SESSION));
 }
 
 /// Reads the ids of events and sets one.
@@ -289,7 +357,7 @@ async fn an_sse_event_id_and_name_round_trip_and_a_plugin_may_edit_them() {
     let mock = ScriptedMcp::new();
     mock.reply(sse(&events));
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let gw = typed_gateway(mock.connect(), None).plugin(Resume(seen.clone()));
+    let gw = gateway(mock.connect(), None).plugin(Resume(seen.clone()));
     let (_, headers, body, _) = send(&gw, request(Method::GET, "", &[])).await;
     assert_eq!(headers[CONTENT_TYPE], "text/event-stream");
     // The priming event, a named one with its id edited, and one with none.
@@ -326,7 +394,7 @@ async fn an_event_id_that_would_break_its_line_is_refused_not_written() {
     mock.reply(sse(&[
         "id: 2\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n\n",
     ]));
-    let gw = typed_gateway(mock.connect(), None).plugin(Inject);
+    let gw = gateway(mock.connect(), None).plugin(Inject);
     let (_, _, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
     assert!(!body.contains("injected"), "{body}");
     assert!(outcome.is_err_and(|f| f.is::<respan_gateway_sdk::Internal>()));
@@ -350,20 +418,33 @@ impl Plugin for Rebuild {
 }
 
 #[tokio::test]
-async fn a_rebuilt_sse_answer_is_json_when_posted() {
-    let mock = ScriptedMcp::new();
+async fn a_posted_answer_is_framed_as_the_clients_accept_asks() {
     let event = "id: 7\ndata: {\"jsonrpc\":\"2.0\", \"id\":1,\"result\":{}}\n\n";
-    mock.reply(sse(&[event]));
-    let gw = typed_gateway(mock.connect(), None).plugin(Rebuild);
-    let (status, headers, body, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers[CONTENT_TYPE], "application/json");
-    assert_eq!(
-        messages(&body),
-        [json!({"jsonrpc":"2.0","id":1,"result":{}})]
-    );
-    assert!(!body.contains("data:"), "{body}");
-    assert!(outcome.is_ok());
+    for (accept, framing) in [
+        (None, "text/event-stream"),
+        (
+            Some("application/json, text/event-stream"),
+            "text/event-stream",
+        ),
+        (Some("text/*;q=0.5"), "text/event-stream"),
+        (Some("application/json"), "application/json"),
+        (Some("text/event-stream;q=0, */*"), "application/json"),
+    ] {
+        let mock = ScriptedMcp::new();
+        mock.reply(sse(&[event]));
+        let gw = gateway(mock.connect(), None).plugin(Rebuild);
+        let headers: Vec<_> = accept.map(|a| ("accept", a)).into_iter().collect();
+        let (status, headers, body, outcome) =
+            send(&gw, request(Method::POST, INIT, &headers)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[CONTENT_TYPE], framing, "{accept:?}");
+        assert_eq!(
+            messages(&body),
+            [json!({"jsonrpc":"2.0","id":1,"result":{}})]
+        );
+        assert_eq!(body.contains("data:"), framing == "text/event-stream");
+        assert!(outcome.is_ok());
+    }
 }
 
 #[tokio::test]
@@ -373,7 +454,7 @@ async fn a_rebuilt_json_answer_is_framed_for_get() {
         StatusCode::OK,
         r#"{"jsonrpc":"2.0", "method":"notifications/message"}"#,
     ));
-    let gw = typed_gateway(mock.connect(), None).plugin(Rebuild);
+    let gw = gateway(mock.connect(), None).plugin(Rebuild);
     let (status, headers, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[CONTENT_TYPE], "text/event-stream");
@@ -428,13 +509,15 @@ async fn delete_and_202_are_handled() {
     let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     for plugin in [None, Some(false)] {
         let mock = ScriptedMcp::new();
-        mock.reply(bare(StatusCode::NO_CONTENT));
+        // A server's 200 to a `DELETE`: the client's answer is still 204.
+        mock.reply(bare(StatusCode::OK));
         mock.reply(bare(StatusCode::ACCEPTED));
         let gw = gateway(mock.clone().connect(), plugin.map(|edit| Touch { edit }));
 
-        let (status, _, body, outcome) =
+        let (status, headers, body, outcome) =
             send(&gw, request(Method::DELETE, "", &[(SESSION, "s1")])).await;
         assert_eq!((status, &body[..]), (StatusCode::NO_CONTENT, ""));
+        assert!(!headers.contains_key("content-type"));
         assert!(outcome.is_ok());
         let (status, headers, body, outcome) =
             send(&gw, request(Method::POST, note, &[(SESSION, "s1")])).await;
@@ -508,15 +591,30 @@ async fn an_mcp_servers_error_is_written_as_a_json_rpc_error() {
             "{body}"
         );
     }
-    // A server's own error body goes as it came.
+    // A server's own error body goes as it came if relayed; else its
+    // status goes with the client format's error.
     let own = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"boom"}}"#;
     let mock = ScriptedMcp::new();
     mock.reply(json_reply(StatusCode::INTERNAL_SERVER_ERROR, own));
-    let gw = gateway(mock.clone().connect(), None);
-    let (status, _, body, _) = send(&gw, request(Method::POST, init, &[])).await;
+    mock.reply(json_reply(StatusCode::INTERNAL_SERVER_ERROR, own));
+    let (status, _, body, _) = send(
+        &relayed(mock.clone().connect(), None),
+        request(Method::POST, init, &[]),
+    )
+    .await;
     assert_eq!(
         (status, &body[..]),
         (StatusCode::INTERNAL_SERVER_ERROR, own)
+    );
+    let (status, _, body, _) = send(
+        &gateway(mock.connect(), None),
+        request(Method::POST, init, &[]),
+    )
+    .await;
+    let error: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(
+        (status, &error["id"], &error["error"]["code"]),
+        (StatusCode::INTERNAL_SERVER_ERROR, &json!(1), &json!(-32603))
     );
 }
 
@@ -576,7 +674,11 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
     gw.idle().await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     assert_eq!(headers["retry-after"], "7");
-    assert_eq!(body, event);
+    let error: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(
+        (&error["id"], &error["error"]["code"]),
+        (&json!(1), &json!(-32603))
+    );
     assert!(outcome.expect_err("provider refusal").is::<Upstream>());
     assert_eq!(failed.sent().len(), 1);
     assert_eq!(
@@ -869,7 +971,6 @@ async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
         )?
         .client::<ToServer, _, _>(StreamableHttp::default())?
         .plugin(Authenticates)
-        .plugin(relay::Relay::RAW)
         .target("mcp")?;
     let session = init(&gw, &[("authorization", "Bearer alice")]).await;
     for (key, status) in [
@@ -999,10 +1100,13 @@ async fn a_post_the_server_never_answers_times_out_and_frees_its_session() {
         (status, &error["id"]),
         (StatusCode::GATEWAY_TIMEOUT, &json!(2))
     );
-    assert_eq!(error["error"]["data"]["code"], TIMED_OUT);
+    assert_eq!(
+        (&error["error"]["code"], &error["error"]["data"]["code"]),
+        (&json!(-32001), &json!("timed_out"))
+    );
     assert_eq!(
         outcome.err().map(|f| error_code(&f).to_owned()),
-        Some(TIMED_OUT.into())
+        Some("timed_out".into())
     );
     // With nothing waiting, the session idles out and a new one fits.
     tokio::time::sleep(Duration::from_secs(600)).await;
@@ -1091,7 +1195,7 @@ async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request()
             ""
         };
         mock.reply(json_reply(StatusCode::OK, answer));
-        let gw = typed_gateway(mock.clone().connect(), None).plugin(Rewrite);
+        let gw = gateway(mock.clone().connect(), None).plugin(Rewrite);
         let (status, _, body, ended) = send(&gw, request(Method::POST, INIT, &[])).await;
         let sent: Value = serde_json::from_slice(mock.sent()[0].body()).expect("sent JSON");
         assert_eq!(sent["id"], 9);
@@ -1107,4 +1211,182 @@ async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request()
             assert!(ended.expect_err("unanswered request").is::<Truncated>());
         }
     }
+}
+
+#[tokio::test]
+async fn a_failed_get_stream_writes_no_json_rpc_answer() {
+    let mock = ScriptedMcp::new();
+    let mut broken = sse(&["data: {\"jsonrpc\":\"2.0\",\"method\":\"n\"}\n\n"]);
+    broken.body_mut().push(Err(Upstream::fault("cut")));
+    mock.reply(broken);
+    let gw = gateway(mock.connect(), None);
+    let (status, _, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        messages(&body),
+        [json!({"jsonrpc":"2.0","method":"n"})],
+        "{body}"
+    );
+    assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+}
+
+#[tokio::test]
+async fn a_json_answer_that_fails_midway_keeps_its_answers_and_errs_the_rest() {
+    let batch = r#"[{"jsonrpc":"2.0","id":1,"method":"a"},{"jsonrpc":"2.0","id":2,"method":"b"}]"#;
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&[
+        "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
+    ]));
+    let gw = gateway(mock.connect(), None);
+    let json = [("accept", "application/json")];
+    let (status, headers, body, outcome) = send(&gw, request(Method::POST, batch, &json)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(headers[CONTENT_TYPE], "application/json");
+    let all: Value = serde_json::from_str(&body).unwrap_or_default();
+    assert_eq!(
+        all[0],
+        json!({"jsonrpc":"2.0","id":2,"result":{}}),
+        "{body}"
+    );
+    assert_eq!(
+        (&all[1]["id"], &all[1]["error"]["data"]["code"], &all[2]),
+        (&json!(1), &json!("truncated"), &Value::Null),
+        "{body}"
+    );
+    assert!(outcome.is_err_and(|f| f.is::<Truncated>()));
+}
+
+#[tokio::test]
+async fn a_body_that_is_no_json_is_a_parse_error_and_no_message_an_invalid_request() {
+    let gw = gateway(ScriptedMcp::new().connect(), None);
+    for (body, code) in [("{", -32700), ("data: {}", -32700), ("[1]", -32600)] {
+        let (status, _, answer, _) = send(&gw, request(Method::POST, body, &[])).await;
+        let error: Value = serde_json::from_str(&answer).unwrap_or_default();
+        assert_eq!(
+            (status, &error["id"], &error["error"]["code"]),
+            (StatusCode::BAD_REQUEST, &Value::Null, &json!(code)),
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_request_naming_no_session_but_initialize_is_a_400() {
+    let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
+    for (method, body) in [
+        (Method::POST, LIST),
+        (Method::GET, ""),
+        (Method::DELETE, ""),
+    ] {
+        let (status, _, answer, _) = send(&gw, request(method.clone(), body, &[])).await;
+        let error = messages(&answer).pop().unwrap_or_default();
+        assert_eq!(
+            (
+                status,
+                &error["error"]["code"],
+                &error["error"]["data"]["code"]
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                &json!(-32003),
+                &json!("no_session")
+            ),
+            "{method}"
+        );
+    }
+    let (status, _, answer, _) = send(&gw, request(Method::POST, LIST, &[(SESSION, "x")])).await;
+    let error = messages(&answer).pop().unwrap_or_default();
+    assert_eq!(
+        (status, &error["id"], &error["error"]["code"]),
+        (StatusCode::NOT_FOUND, &json!(2), &json!(-32003))
+    );
+}
+
+#[tokio::test]
+async fn session_ids_are_128_random_bits() {
+    let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
+    let (a, b) = (init(&gw, &[]).await, init(&gw, &[]).await);
+    assert_ne!(a, b);
+    for id in [a, b] {
+        assert!(
+            id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_open_get_stream_keeps_its_session_from_idling() {
+    let transport = StdioTransport::new("sh", ["-c", ECHO]).idle(Duration::from_millis(200));
+    let gw = gateway(transport.connect(), None);
+    let session = init(&gw, &[]).await;
+    let (listen, _) = serve(&gw, request(Method::GET, "", &[(SESSION, &session)])).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(list(&gw, &session).await, StatusCode::OK);
+    drop(listen);
+}
+
+/// Opens `session`'s `GET` stream and returns what it says, until `until`
+/// is in it or 3 s pass, while `then` runs.
+async fn heard(gw: &Gateway, session: &str, until: &str, then: impl Future) -> String {
+    let (listen, _) = serve(gw, request(Method::GET, "", &[(SESSION, session)])).await;
+    then.await;
+    let mut body = listen.into_body();
+    let mut seen = String::new();
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(Ok(frame)) = body.frame().await {
+            seen.push_str(&String::from_utf8_lossy(
+                &frame.into_data().unwrap_or_default(),
+            ));
+            if seen.contains(until) {
+                return;
+            }
+        }
+    })
+    .await;
+    seen
+}
+
+#[tokio::test]
+async fn progress_goes_to_its_post_and_the_servers_own_messages_to_the_get_stream() {
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
+echo '{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}'
+echo '{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"p","progress":1}}'
+echo '{"jsonrpc":"2.0","id":2,"result":{}}'; exec sleep 100"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]).connect(), None);
+    let session = init(&gw, &[]).await;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"progressToken":"p"}}}"#;
+    let posted = std::sync::OnceLock::new();
+    let seen = heard(&gw, &session, "notifications/message", async {
+        let answer = send(&gw, request(Method::POST, call, &[(SESSION, &session)])).await;
+        let _ = posted.set(answer.2);
+    })
+    .await;
+    let posted = posted.get().cloned().unwrap_or_default();
+    let methods: Vec<Value> = messages(&posted)
+        .iter()
+        .map(|m| m["method"].clone())
+        .collect();
+    assert_eq!(
+        methods,
+        [json!("notifications/progress"), Value::Null],
+        "{posted}"
+    );
+    assert!(seen.contains("notifications/message"), "{seen}");
+}
+
+#[tokio::test]
+async fn a_timed_out_post_cancels_its_requests() {
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b; read c
+case "$c" in *'"method":"notifications/cancelled","params":{"requestId":2'*)
+  echo '{"jsonrpc":"2.0","method":"notifications/message","params":{"saw":"cancelled"}}';; esac
+exec sleep 100"#;
+    let transport = StdioTransport::new("sh", ["-c", script]).timeout(Duration::from_millis(300));
+    let gw = gateway(transport.connect(), None);
+    let session = init(&gw, &[]).await;
+    let seen = heard(&gw, &session, "saw", async {
+        assert_eq!(list(&gw, &session).await, StatusCode::GATEWAY_TIMEOUT);
+    })
+    .await;
+    assert!(seen.contains("\"saw\":\"cancelled\""), "{seen}");
 }
