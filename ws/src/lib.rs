@@ -17,8 +17,9 @@
 //!   and the one a provider closed with.
 //! - [`Limits`]: what either edge takes of a session, in bytes and time.
 //!
-//! Frames are text only; a binary frame is a fault. Nothing here knows a
-//! provider's events.
+//! Frames carry text. [`WsTransport::with_binary_text`] can normalize a
+//! provider's binary UTF-8 messages into text; other binary frames are faults.
+//! Nothing here knows a provider's events.
 
 use std::time::Duration;
 

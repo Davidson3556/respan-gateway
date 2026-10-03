@@ -19,6 +19,9 @@ stream; SSE comments are dropped.
   with no request gets 202 and no body, one with requests an event stream
   (one JSON body if its `Accept` takes no event stream), a `GET` the
   server's own event stream, a `DELETE` 204.
+  JSON-only answers contain responses; notifications are omitted, and
+  server requests requiring bidirectional interaction are refused. Accept
+  `text/event-stream` to receive those independent server messages.
 - `StdioTransport::new(program, args)`: an MCP server run as a child
   process per session. `send(Request<Body>)` returns a native response and
   optional write completion; `.connect()` supplies the provider factory.
@@ -42,3 +45,38 @@ stream; SSE comments are dropped.
 - `error(id, code, message)`: a JSON-RPC error.
 
 Used by: [mcp_proxy](../examples/integrations/mcp_proxy.rs).
+
+Messages are validated as JSON-RPC envelopes before they can settle a
+request. Invalid HTTP provider messages fail `upstream`; stray or malformed
+stdio messages are ignored. A 202/204/205 cannot settle a posted request
+that still needs a response. Request IDs must be strings or integers;
+null IDs are reserved for error responses. An HTTP refusal may omit its
+ID and still preserve its JSON-RPC error code and message.
+Duplicate request IDs in a batch, and overlapping IDs in a stdio session,
+are rejected before forwarding. A stdio backlog of zero is a configuration
+fault rather than a channel panic.
+Clients must still use unique request IDs across the entire session,
+including completed requests; the gateway does not retain an unbounded
+history of completed IDs.
+Session IDs must contain visible ASCII, and scalar metadata headers must
+appear once. Unicode resume cursors are preserved as UTF-8 in
+`Last-Event-ID`; SSE ID resets and ignored NUL-containing ID fields follow
+the SSE rules.
+POST replies are matched to the IDs actually sent, including plugin
+rewrites. A POST completes after its last reply without waiting for the
+server to close SSE. Unexpected or duplicate replies before completion
+fail upstream. GET resumption can receive replies from earlier POSTs.
+
+JSON-only clients and JSON-RPC batches remain supported for compatibility.
+MCP 2025-06-18 clients send one message per POST and advertise both JSON
+and SSE; batch support is an extension for earlier clients.
+
+The opt-in tests use the pinned official MCP server over stdio and HTTP:
+
+```bash
+cargo test -p respan-gateway-mcp --test real_server -- --ignored
+```
+
+They require Node.js/npm and download `@modelcontextprotocol/server-everything`.
+The HTTP check launches the resolved Node entry point directly, then kills
+and reaps it after the test.

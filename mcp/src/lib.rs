@@ -138,9 +138,48 @@ fn body(messages: &[Value], batch: bool) -> Value {
 /// whether it was an array.
 fn messages(value: Value) -> Option<(Vec<Value>, bool)> {
     match value {
-        Value::Array(all) if all.iter().all(Value::is_object) => Some((all, true)),
-        one @ Value::Object(_) => Some((vec![one], false)),
+        Value::Array(all) if !all.is_empty() && all.iter().all(valid_message) => {
+            // Keep numeric and string IDs distinct while rejecting ambiguous
+            // batches; a response cannot identify two requests at once.
+            let mut ids = std::collections::HashSet::new();
+            let unique = request_ids(&all).all(|id| ids.insert(id.to_string()));
+            unique.then_some((all, true))
+        }
+        one @ Value::Object(_) if valid_message(&one) => Some((vec![one], false)),
         _ => None,
+    }
+}
+
+/// Validate the JSON-RPC envelope without constraining MCP's extension fields.
+/// An id alone is not a response and must never settle an outstanding request.
+fn valid_message(message: &Value) -> bool {
+    if message["jsonrpc"] != "2.0" {
+        return false;
+    }
+    let id = message.get("id");
+    if id.is_some_and(|id| {
+        !id.is_null() && !id.is_string() && id.as_i64().is_none() && id.as_u64().is_none()
+    }) {
+        return false;
+    }
+    if let Some(method) = message.get("method") {
+        return method.is_string()
+            && id.is_none_or(|id| !id.is_null())
+            && message.get("result").is_none()
+            && message.get("error").is_none()
+            && message
+                .get("params")
+                .is_none_or(|p| p.is_object() || p.is_array());
+    }
+    if id.is_none() {
+        return false;
+    }
+    match (message.get("result"), message.get("error")) {
+        (Some(_), None) => id.is_some_and(|id| !id.is_null()),
+        (None, Some(error)) => {
+            error.is_object() && error["code"].as_i64().is_some() && error["message"].is_string()
+        }
+        _ => false,
     }
 }
 

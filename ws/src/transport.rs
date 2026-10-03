@@ -78,8 +78,9 @@ fn is_handshake(name: &HeaderName) -> bool {
 ///   [`Relay`](respan_gateway_http::relay::Relay)'s permission to pass the
 ///   provider's errors on), that [`CloseCode`] too.
 /// - The provider's connection breaks with no Close: `Err(truncated)`.
-/// - A binary frame, from the provider or in the call, is a fault
-///   (`upstream`, `config`): text only.
+/// - A binary frame in the call is a `config` fault. A provider's binary
+///   frame is an `upstream` fault unless [`Self::with_binary_text`] enables
+///   UTF-8 normalization; invalid UTF-8 remains a fault.
 ///
 /// The transport reads the provider no faster than the answer is read (one
 /// frame in flight), and sends no faster than the provider takes.
@@ -92,6 +93,7 @@ pub struct WsTransport {
     base: String,
     headers: HeaderMap,
     limits: Limits,
+    binary_text: bool,
     handshake_timeout: Duration,
 }
 
@@ -102,6 +104,7 @@ impl std::fmt::Debug for WsTransport {
             .field("base", &self.base)
             .field("headers", &self.headers.keys().collect::<Vec<_>>())
             .field("limits", &self.limits)
+            .field("binary_text", &self.binary_text)
             .field("handshake_timeout", &self.handshake_timeout)
             .finish_non_exhaustive()
     }
@@ -118,6 +121,7 @@ impl WsTransport {
             base: respan_gateway_http::base_url(&base_url.into(), &["ws", "wss"])?,
             headers: HeaderMap::new(),
             limits: Limits::default(),
+            binary_text: false,
             handshake_timeout: HANDSHAKE_TIMEOUT,
         })
     }
@@ -149,6 +153,15 @@ impl WsTransport {
     /// `max_message` breaks the answer `Err(upstream)`.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Accept the provider's binary messages as UTF-8 text. Some JSON
+    /// protocols, including Gemini Live, use binary frames for their JSON.
+    /// Disabled by default; invalid UTF-8 still fails `upstream`. Outbound
+    /// messages and the normalized response body remain text.
+    pub fn with_binary_text(mut self, enabled: bool) -> Self {
+        self.binary_text = enabled;
         self
     }
 
@@ -210,19 +223,31 @@ fn validate_upgrade(sent: &HeaderMap, received: &HeaderMap) -> Result<(), Fault>
         .map(|key| derive_accept_key(key.as_bytes()));
     let key_matches = accept.as_ref().is_some_and(|key| {
         received
-            .get(header::SEC_WEBSOCKET_ACCEPT)
-            .is_some_and(|v| v == key)
+            .get_all(header::SEC_WEBSOCKET_ACCEPT)
+            .iter()
+            .count()
+            == 1
+            && received
+                .get(header::SEC_WEBSOCKET_ACCEPT)
+                .is_some_and(|v| v == key)
     });
-    let protocol = match (
-        sent.get(header::SEC_WEBSOCKET_PROTOCOL),
-        received.get(header::SEC_WEBSOCKET_PROTOCOL),
-    ) {
+    let mut chosen = received.get_all(header::SEC_WEBSOCKET_PROTOCOL).iter();
+    let protocol = match (chosen.next(), chosen.next()) {
+        // RFC 6455 4.2.2: a server may decline every offered subprotocol.
         (None, None) => true,
-        (Some(offered), Some(chosen)) => offered.to_str().ok().is_some_and(|offers| {
-            offers
-                .split(',')
+        (Some(chosen), None)
+            if !chosen.is_empty()
+                && chosen
+                    .as_bytes()
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b)) =>
+        {
+            sent.get_all(header::SEC_WEBSOCKET_PROTOCOL)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|offers| offers.split(','))
                 .any(|p| p.trim().as_bytes() == chosen.as_bytes())
-        }),
+        }
         _ => false,
     };
     if equals(header::UPGRADE, "websocket")
@@ -338,7 +363,14 @@ impl WsTransport {
             head.headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
             // One frame in flight: a reader that stops reading stops the connection's.
             let (frames, frames_in) = mpsc::channel(1);
-            let writing = tokio::spawn(session(socket, body, frames, limits, relayed));
+            let writing = tokio::spawn(session(
+                socket,
+                body,
+                frames,
+                limits,
+                relayed,
+                self.binary_text,
+            ));
             let frames_in = stream::unfold(frames_in, |mut rx| async {
                 rx.recv().await.map(|f| (f, rx))
             });
@@ -390,18 +422,27 @@ async fn session(
     frames: Sender<Result<Bytes, Fault>>,
     limits: Limits,
     relayed: bool,
+    binary_text: bool,
 ) -> Result<(), Fault> {
     let (mut sink, stream) = socket.split();
     let closing = AtomicBool::new(false);
     // Only the reader holds the answer's sender, so the answer ends when it
     // says so; a fault of the sending side goes to it to say.
     let (abort, aborted) = oneshot::channel();
-    let reader = read_frames(stream, frames, &closing, aborted, limits, relayed);
+    let reader = read_frames(
+        stream,
+        frames,
+        &closing,
+        aborted,
+        limits,
+        relayed,
+        binary_text,
+    );
     let mut read = pin!(reader);
     let sent = tokio::select! {
         // An input's failure, which ends the call's answer too, says why.
         biased;
-        sent = send_frames(&mut sink, body, &closing) => Ok(sent),
+        sent = send_frames(&mut sink, body, &closing, limits.close_send) => Ok(sent),
         read = &mut read => Err(read),
     };
     match sent {
@@ -453,6 +494,7 @@ async fn send_frames(
     sink: &mut SplitSink<Socket, Message>,
     mut body: Frames,
     closing: &AtomicBool,
+    close_send: Duration,
 ) -> Sent {
     while let Some(frame) = body.next().await {
         let bytes = match frame {
@@ -468,11 +510,7 @@ async fn send_frames(
         }
     }
     closing.store(true, Ordering::SeqCst);
-    let frame = CloseFrame {
-        code: 1000.into(),
-        reason: "".into(),
-    };
-    let _ = sink.send(Message::Close(Some(frame))).await;
+    close(sink, 1000, close_send).await;
     Sent::Closed
 }
 
@@ -486,6 +524,7 @@ async fn read_frames(
     mut aborted: oneshot::Receiver<Fault>,
     limits: Limits,
     relayed: bool,
+    binary_text: bool,
 ) -> Read {
     let fault = loop {
         let next = tokio::select! {
@@ -500,6 +539,16 @@ async fn read_frames(
             Some(Ok(Message::Text(text))) => {
                 let frame = Bytes::copy_from_slice(text.as_bytes());
                 if frames.send(Ok(frame)).await.is_err() {
+                    return Read::Dropped;
+                }
+            }
+            Some(Ok(Message::Binary(bytes))) if binary_text => {
+                if std::str::from_utf8(&bytes).is_err() {
+                    break Upstream::fault(
+                        "the provider sent a binary message that is not UTF-8 text",
+                    );
+                }
+                if frames.send(Ok(bytes)).await.is_err() {
                     return Read::Dropped;
                 }
             }
@@ -569,6 +618,12 @@ mod tests {
             "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".parse().expect("header"),
         );
         assert!(validate_upgrade(&sent, &received).is_ok());
+        let mut duplicate = received.clone();
+        duplicate.append(
+            header::SEC_WEBSOCKET_ACCEPT,
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".parse().expect("header"),
+        );
+        assert!(validate_upgrade(&sent, &duplicate).is_err());
         for name in [
             header::UPGRADE,
             header::CONNECTION,
@@ -592,7 +647,7 @@ mod tests {
             header::SEC_WEBSOCKET_PROTOCOL,
             "chat, realtime".parse().expect("header"),
         );
-        assert!(validate_upgrade(&sent, &received).is_err());
+        assert!(validate_upgrade(&sent, &received).is_ok());
         received.insert(
             header::SEC_WEBSOCKET_PROTOCOL,
             "realtime".parse().expect("header"),
@@ -603,6 +658,162 @@ mod tests {
             "other".parse().expect("header"),
         );
         assert!(validate_upgrade(&sent, &received).is_err());
+        sent.append(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            "other".parse().expect("header"),
+        );
+        assert!(validate_upgrade(&sent, &received).is_ok());
+        received.append(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            "realtime".parse().expect("header"),
+        );
+        assert!(validate_upgrade(&sent, &received).is_err());
+        for invalid in ["bad protocol", "bad/protocol", "", " "] {
+            sent.insert(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                invalid.parse().expect("header"),
+            );
+            received.insert(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                invalid.parse().expect("header"),
+            );
+            assert!(validate_upgrade(&sent, &received).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fragmented_unicode_with_interleaved_ping_and_no_selected_subprotocol() {
+        use tokio_tungstenite::tungstenite::protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        };
+        let text = "雪😀";
+        for max_message in [text.len(), text.len() - 1] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listen");
+            let base = format!("ws://{}", listener.local_addr().expect("address"));
+            let provider = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.expect("accept");
+                // No selected subprotocol, despite the client's offer.
+                let mut socket = tokio_tungstenite::accept_async(socket)
+                    .await
+                    .expect("handshake");
+                let bytes = text.as_bytes();
+                socket
+                    .send(Message::Frame(Frame::message(
+                        bytes[..2].to_vec(),
+                        OpCode::Data(Data::Text),
+                        false,
+                    )))
+                    .await
+                    .expect("first fragment");
+                socket
+                    .send(Message::Ping(Bytes::from_static(b"ping")))
+                    .await
+                    .expect("ping");
+                socket
+                    .send(Message::Frame(Frame::message(
+                        bytes[2..].to_vec(),
+                        OpCode::Data(Data::Continue),
+                        true,
+                    )))
+                    .await
+                    .expect("continuation");
+                socket.send(Message::Close(None)).await.expect("close");
+                while let Some(Ok(_)) = socket.next().await {}
+            });
+            let transport = WsTransport::new(base)
+                .expect("transport")
+                .with_limits(Limits {
+                    max_message,
+                    ..Limits::default()
+                });
+            let request = http::Request::get("/events")
+                .header(header::SEC_WEBSOCKET_PROTOCOL, "optional")
+                .body(Body::stream(stream::pending()))
+                .expect("request");
+            let (answer, completion) = transport.send(request).await.expect("valid upgrade");
+            assert_eq!(answer.status(), StatusCode::SWITCHING_PROTOCOLS);
+            assert!(
+                !answer
+                    .headers()
+                    .contains_key(header::SEC_WEBSOCKET_PROTOCOL)
+            );
+            let mut body = answer.into_body();
+            let first = tokio::time::timeout(Duration::from_secs(3), body.next())
+                .await
+                .expect("message deadline")
+                .expect("message");
+            if max_message == text.len() {
+                assert_eq!(first.expect("complete Unicode message"), text);
+                assert!(body.next().await.is_none());
+            } else {
+                assert!(first.is_err_and(|f| f.is::<Upstream>()));
+            }
+            drop(body);
+            tokio::time::timeout(Duration::from_secs(3), completion.expect("completion"))
+                .await
+                .expect("session deadline")
+                .expect("upload ended");
+            tokio::time::timeout(Duration::from_secs(3), provider)
+                .await
+                .expect("server deadline")
+                .expect("server task");
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_text_is_opt_in_and_rejects_invalid_utf8() {
+        for (enabled, bytes, accepted) in [
+            (false, "雪😀".as_bytes(), false),
+            (true, "雪😀".as_bytes(), true),
+            (true, &[0xff, 0xfe][..], false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listen");
+            let base = format!("ws://{}", listener.local_addr().expect("address"));
+            let provider = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.expect("accept");
+                let mut socket = tokio_tungstenite::accept_async(socket)
+                    .await
+                    .expect("handshake");
+                socket
+                    .send(Message::Binary(Bytes::copy_from_slice(bytes)))
+                    .await
+                    .expect("binary");
+                socket.send(Message::Close(None)).await.expect("close");
+                while let Some(Ok(_)) = socket.next().await {}
+            });
+            let transport = WsTransport::new(base)
+                .expect("transport")
+                .with_binary_text(enabled);
+            let request = http::Request::get("/events")
+                .body(Body::stream(stream::pending()))
+                .expect("request");
+            let (answer, completion) = transport.send(request).await.expect("upgrade");
+            let mut body = answer.into_body();
+            let frame = tokio::time::timeout(Duration::from_secs(3), body.next())
+                .await
+                .expect("message deadline")
+                .expect("message");
+            if accepted {
+                assert_eq!(frame.expect("UTF-8 text"), bytes);
+                assert!(body.next().await.is_none());
+            } else {
+                assert!(frame.is_err_and(|f| f.is::<Upstream>()));
+            }
+            drop(body);
+            tokio::time::timeout(Duration::from_secs(3), completion.expect("completion"))
+                .await
+                .expect("session deadline")
+                .expect("upload ended");
+            tokio::time::timeout(Duration::from_secs(3), provider)
+                .await
+                .expect("server deadline")
+                .expect("server task");
+        }
     }
 
     /// A server that reads one handshake, to `GET /events`, and writes

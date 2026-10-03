@@ -155,7 +155,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut headers = respan_gateway_http::http::HeaderMap::new();
     headers.insert("x-goog-api-key", key.parse()?);
     let gw = gateway(
-        WsTransport::new("wss://generativelanguage.googleapis.com")?.with_headers(headers)?,
+        WsTransport::new("wss://generativelanguage.googleapis.com")?
+            .with_binary_text(true)
+            .with_headers(headers)?,
         sessions,
     )?;
     serve::run(gw, "127.0.0.1:8082").await?;

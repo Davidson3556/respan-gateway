@@ -335,6 +335,85 @@ async fn the_session_version_and_last_event_travel_in_the_kind_through_filters()
     assert!(!sent[1].headers().contains_key(SESSION));
 }
 
+#[tokio::test]
+async fn a_unicode_resume_cursor_returns_in_last_event_id() {
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&[]));
+    let gw = gateway(mock.clone().connect(), None);
+    let cursor = "resume-雪😀";
+    let (status, _, _, outcome) =
+        send(&gw, request(Method::GET, "", &[("last-event-id", cursor)])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(outcome.is_ok());
+    assert_eq!(
+        mock.sent()[0].headers()["last-event-id"].as_bytes(),
+        cursor.as_bytes()
+    );
+}
+
+#[tokio::test]
+async fn invalid_or_ambiguous_session_headers_are_refused_before_forwarding() {
+    let mock = ScriptedMcp::new();
+    let gw = gateway(mock.clone().connect(), None);
+    for session in ["", " ", "has space", "雪", "tab\tid"] {
+        let (status, _, _, outcome) =
+            send(&gw, request(Method::POST, LIST, &[(SESSION, session)])).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{session:?}");
+        assert!(outcome.is_err());
+    }
+    for name in [SESSION, "mcp-protocol-version", "last-event-id"] {
+        let mut req = request(Method::POST, LIST, &[(name, "one")]);
+        req.headers_mut()
+            .append(name, http::HeaderValue::from_static("two"));
+        let (status, _, _, outcome) = send(&gw, req).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+        assert!(outcome.is_err());
+    }
+    assert!(mock.sent().is_empty());
+}
+
+#[tokio::test]
+async fn an_invalid_provider_session_is_an_upstream_fault() {
+    for session in ["", " ", "has space", "雪", "tab\tid", "duplicate"] {
+        let mock = ScriptedMcp::new();
+        let mut reply = json_reply(StatusCode::OK, r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+        reply
+            .headers_mut()
+            .insert(SESSION, session.parse().expect("HTTP header"));
+        if session == "duplicate" {
+            reply
+                .headers_mut()
+                .append(SESSION, http::HeaderValue::from_static("other"));
+        }
+        mock.reply(reply);
+        let gw = gateway(mock.connect(), None);
+        let (status, headers, _, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{session:?}");
+        assert!(!headers.contains_key(SESSION));
+        assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+    }
+}
+
+#[tokio::test]
+async fn sse_id_resets_and_ignored_nul_values_preserve_valid_messages() {
+    for (fields, expected) in [
+        ("id: old\nid\n", "id: \n"),
+        ("id: old\nid: bad\0cursor\n", "id: old\n"),
+        ("event: custom\0name\n", "event: custom\0name\n"),
+    ] {
+        let mock = ScriptedMcp::new();
+        let wire = format!(
+            "{fields}data: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}}\n\n"
+        );
+        mock.reply(sse(&[&wire]));
+        let gw = gateway(mock.connect(), None);
+        let (_, _, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
+        assert!(outcome.is_ok(), "{body}");
+        assert!(body.contains(expected), "{body:?}");
+        assert_eq!(messages(&body).len(), 1);
+    }
+}
+
 /// Reads the ids of events and sets one.
 struct Resume(Arc<Mutex<Vec<Option<String>>>>);
 
@@ -1279,6 +1358,345 @@ async fn a_body_that_is_no_json_is_a_parse_error_and_no_message_an_invalid_reque
 }
 
 #[tokio::test]
+async fn invalid_rpc_envelopes_are_refused_before_contacting_the_server() {
+    let mock = ScriptedMcp::new();
+    let gw = gateway(mock.clone().connect(), None);
+    for body in [
+        "{}",
+        "[]",
+        r#"{"jsonrpc":"1.0","id":1,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":{},"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":null,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":1.5,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":false}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":true}"#,
+        r#"{"jsonrpc":"2.0","id":1}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{},"error":{"code":-1,"message":"bad"}}"#,
+        r#"[{"jsonrpc":"2.0","id":1,"method":"a"},{"jsonrpc":"2.0","id":1,"method":"b"}]"#,
+    ] {
+        let (status, _, answer, outcome) = send(&gw, request(Method::POST, body, &[])).await;
+        let answer: Value = serde_json::from_str(&answer).expect("error response");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(answer["error"]["code"], -32600, "{body}");
+        assert!(outcome.is_err());
+    }
+    assert!(mock.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_zero_stdio_backlog_is_a_configuration_fault() {
+    let gw = gateway(
+        StdioTransport::new("sh", ["-c", ECHO]).backlog(0).connect(),
+        None,
+    );
+    let (status, _, _, outcome) = send(&gw, request(Method::POST, INIT, &[])).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error_code(&outcome.expect_err("invalid backlog")), "config");
+}
+
+#[tokio::test]
+async fn overlapping_request_ids_are_refused_without_disrupting_the_first_post() {
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
+echo '{"jsonrpc":"2.0","method":"notifications/message","params":{"waiting":true}}'
+read c; echo '{"jsonrpc":"2.0","id":2,"result":{}}'
+echo '{"jsonrpc":"2.0","id":3,"result":{}}'; exec sleep 100"#;
+    let transport = StdioTransport::new("sh", ["-c", script]).timeout(Duration::from_secs(1));
+    let gw = gateway(transport.connect(), None);
+    let session = init(&gw, &[]).await;
+    let (first, finished) = serve(&gw, request(Method::POST, LIST, &[(SESSION, &session)])).await;
+    let (status, _, _, _) = send(&gw, request(Method::POST, LIST, &[(SESSION, &session)])).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let third = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#;
+    let (status, _, _, outcome) =
+        send(&gw, request(Method::POST, third, &[(SESSION, &session)])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(outcome.is_ok());
+    let bytes = BodyExt::collect(first.into_body())
+        .await
+        .expect("first response")
+        .to_bytes();
+    assert_eq!(
+        messages(std::str::from_utf8(&bytes).expect("UTF-8"))[1]["id"],
+        2
+    );
+    assert!(finished.await.is_ok());
+}
+
+#[tokio::test]
+async fn a_bodiless_success_cannot_settle_an_unanswered_request() {
+    for status in [
+        StatusCode::ACCEPTED,
+        StatusCode::NO_CONTENT,
+        StatusCode::RESET_CONTENT,
+    ] {
+        let mock = ScriptedMcp::new();
+        mock.reply(bare(status));
+        let gw = gateway(mock.connect(), None);
+        let (status, _, body, outcome) = send(&gw, request(Method::POST, LIST, &[])).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let answer = messages(&body).pop().expect("unanswered request error");
+        assert_eq!(answer["id"], 2);
+        assert_eq!(answer["error"]["data"]["code"], "truncated");
+        assert!(outcome.is_err_and(|f| f.is::<Truncated>()));
+    }
+}
+
+#[tokio::test]
+async fn malformed_provider_messages_never_count_as_answers_in_json_or_sse() {
+    for bad in [
+        "not json",
+        "null",
+        "[]",
+        "{}",
+        r#"{"jsonrpc":"2.0","id":2}"#,
+        r#"{"jsonrpc":"2.0","id":null,"result":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2.5,"result":{}}"#,
+        r#"{"jsonrpc":"1.0","id":2,"result":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"error":{"code":"bad","message":"oops"}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"result":{},"error":{"code":-1,"message":"oops"}}"#,
+    ] {
+        for events in [false, true] {
+            let mock = ScriptedMcp::new();
+            mock.reply(if events {
+                sse(&[&format!("data: {bad}\n\n")])
+            } else {
+                json_reply(StatusCode::OK, bad)
+            });
+            let gw = gateway(mock.connect(), None);
+            let (status, _, body, outcome) = send(&gw, request(Method::POST, LIST, &[])).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{bad}: {body}");
+            let answer = messages(&body).pop().expect("protocol error");
+            assert_eq!(answer["id"], 2, "{bad}: {body}");
+            assert_eq!(answer["error"]["data"]["code"], "upstream", "{bad}: {body}");
+            assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_foreign_reply_cannot_turn_one_request_into_a_response_batch() {
+    for events in [false, true] {
+        let mock = ScriptedMcp::new();
+        let foreign = r#"{"jsonrpc":"2.0","id":99,"result":{}}"#;
+        let matching = r#"{"jsonrpc":"2.0","id":2,"result":{}}"#;
+        mock.reply(if events {
+            sse(&[
+                &format!("data: {foreign}\n\n"),
+                &format!("data: {matching}\n\n"),
+            ])
+        } else {
+            json_reply(StatusCode::OK, &format!("[{foreign},{matching}]"))
+        });
+        let gw = gateway(mock.connect(), None);
+        let (status, _, body, outcome) = send(
+            &gw,
+            request(Method::POST, LIST, &[("accept", "application/json")]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let reply: Value = serde_json::from_str(&body).expect("single refusal");
+        assert_eq!(reply["id"], 2);
+        assert_eq!(reply["error"]["data"]["code"], "upstream");
+        assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+    }
+}
+
+#[tokio::test]
+async fn a_post_finishes_after_its_last_reply_even_if_the_server_keeps_sse_open() {
+    let connect = respan_gateway_http::connect(
+        |_| async {
+            let frame =
+                Bytes::from_static(b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n");
+            let frames = stream::once(async { Ok(frame) }).chain(stream::pending());
+            let reply = http::Response::builder()
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::stream(frames))
+                .expect("SSE response");
+            Ok((reply, None))
+        },
+        LIMIT,
+    );
+    let gw = gateway(connect, None);
+    let (status, _, body, outcome) = tokio::time::timeout(
+        Duration::from_secs(3),
+        send(
+            &gw,
+            request(Method::POST, LIST, &[("accept", "application/json")]),
+        ),
+    )
+    .await
+    .expect("answered POST must finish without waiting for socket EOF");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("single reply")["id"],
+        2
+    );
+    assert!(outcome.is_ok());
+    tokio::time::timeout(Duration::from_secs(3), gw.idle())
+        .await
+        .expect("gateway settled");
+}
+
+#[tokio::test]
+async fn a_duplicate_reply_cannot_settle_a_different_pending_request() {
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&[
+        "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
+        "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
+    ]));
+    let gw = gateway(mock.connect(), None);
+    let batch = r#"[{"jsonrpc":"2.0","id":1,"method":"a"},{"jsonrpc":"2.0","id":2,"method":"b"}]"#;
+    let (status, _, body, outcome) = send(
+        &gw,
+        request(Method::POST, batch, &[("accept", "application/json")]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let replies = messages(&body);
+    assert_eq!(replies.len(), 2, "{body}");
+    assert_eq!(replies[0]["id"], 2);
+    assert_eq!(replies[1]["id"], 1);
+    assert_eq!(replies[1]["error"]["data"]["code"], "upstream");
+    assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+}
+
+#[tokio::test]
+async fn a_resumed_get_can_receive_replies_from_earlier_posts() {
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&[
+        "id: old-2\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
+        "id: old-3\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n\n",
+    ]));
+    let gw = gateway(mock.connect(), None);
+    let (status, _, body, outcome) =
+        send(&gw, request(Method::GET, "", &[("last-event-id", "old-1")])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        messages(&body)
+            .iter()
+            .map(|m| m["id"].clone())
+            .collect::<Vec<_>>(),
+        [json!(2), json!(3)]
+    );
+    assert!(body.contains("id: old-2\n") && body.contains("id: old-3\n"));
+    assert!(outcome.is_ok());
+}
+
+#[tokio::test]
+async fn split_unicode_multiline_events_and_typed_ids_survive_out_of_order_answers() {
+    let ask = json!([
+        {"jsonrpc":"2.0","id":7,"method":"tools/call"},
+        {"jsonrpc":"2.0","id":"7","method":"tools/call"}
+    ])
+    .to_string();
+    let text = concat!(
+        ": keepalive\r\n\r\n",
+        "id: resume-α\r\nevent: message\r\n",
+        "data: {\"jsonrpc\":\"2.0\",\"id\":\"7\",\r\n",
+        "data: \"result\":{\"text\":\"雪😀\",\"future\":true}}\r\n\r\n",
+        "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":0,\"progress\":1}}\n\n",
+        "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":null}\n\n"
+    );
+    for cut in 0..=text.len() {
+        let mut reply = typed(StatusCode::OK, Some("text/event-stream"), &[]);
+        *reply.body_mut() = [&text.as_bytes()[..cut], &text.as_bytes()[cut..]]
+            .into_iter()
+            .map(|b| Ok(Bytes::copy_from_slice(b)))
+            .collect();
+        let mock = ScriptedMcp::new();
+        mock.reply(reply);
+        let gw = gateway(mock.connect(), None);
+        let (_, _, body, outcome) = send(&gw, request(Method::POST, &ask, &[])).await;
+        assert!(outcome.is_ok(), "cut {cut}: {body}");
+        let all = messages(&body);
+        assert_eq!(all.len(), 3, "cut {cut}: {body}");
+        assert_eq!(all[0]["id"], "7");
+        assert_eq!(all[0]["result"]["text"], "雪😀");
+        assert_eq!(all[2]["id"], 7);
+        assert!(body.contains("id: resume-α\n"));
+    }
+}
+
+#[tokio::test]
+async fn stray_json_on_stdio_cannot_complete_a_post() {
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; read b
+echo 'null'; echo '42'; echo '{"id":2}'; echo '{"jsonrpc":"2.0","id":2}'
+echo '{"jsonrpc":"2.0","id":null,"result":{}}'
+echo '{"jsonrpc":"2.0","error":{"code":-32700,"message":"not a stdio response"}}'
+echo '{"jsonrpc":"2.0","id":2,"result":{"text":"valid"}}'; exec sleep 100"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]).connect(), None);
+    let session = init(&gw, &[]).await;
+    let (_, _, body, outcome) =
+        send(&gw, request(Method::POST, LIST, &[(SESSION, &session)])).await;
+    assert!(outcome.is_ok(), "{body}");
+    assert_eq!(
+        messages(&body),
+        [json!({"jsonrpc":"2.0","id":2,"result":{"text":"valid"}})]
+    );
+}
+
+#[tokio::test]
+async fn json_answers_do_not_become_batches_when_a_server_notifies_before_replying() {
+    for events in [false, true] {
+        let mock = ScriptedMcp::new();
+        mock.reply(sse(&[
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
+        ]));
+        let gw = gateway(mock.connect(), None);
+        let accept = if events {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let (_, _, body, outcome) =
+            send(&gw, request(Method::POST, LIST, &[("accept", accept)])).await;
+        assert!(outcome.is_ok(), "{body}");
+        if events {
+            assert_eq!(messages(&body).len(), 2);
+            assert_eq!(
+                messages(&body)[0]["method"],
+                "notifications/tools/list_changed"
+            );
+        } else {
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).expect("single response"),
+                json!({"jsonrpc":"2.0","id":2,"result":{}})
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_requests_are_refused_in_json_framing_and_preserved_in_sse() {
+    for events in [false, true] {
+        let mock = ScriptedMcp::new();
+        mock.reply(sse(&[
+            "data: {\"jsonrpc\":\"2.0\",\"id\":\"server\",\"method\":\"sampling/createMessage\",\"params\":{}}\n\n",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n",
+        ]));
+        let gw = gateway(mock.connect(), None);
+        let accept = if events {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let (status, _, body, outcome) =
+            send(&gw, request(Method::POST, LIST, &[("accept", accept)])).await;
+        if events {
+            assert_eq!(status, StatusCode::OK);
+            assert!(outcome.is_ok());
+            assert_eq!(messages(&body)[0]["id"], "server");
+        } else {
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert!(outcome.is_err_and(|f| f.is::<Upstream>()));
+            assert_eq!(messages(&body)[0]["id"], 2);
+            assert_eq!(messages(&body)[0]["error"]["data"]["code"], "upstream");
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_request_naming_no_session_but_initialize_is_a_400() {
     let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
     for (method, body) in [
@@ -1458,6 +1876,8 @@ async fn the_query_travels_in_the_kind_without_the_keys_the_adapter_lifted() {
 async fn a_servers_json_rpc_refusal_keeps_its_code_message_and_status() {
     let refusals = [
         r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad params","data":{"field":"a"}}}"#,
+        r#"{"jsonrpc":"2.0","error":{"code":-32602,"message":"bad params","data":{"field":"a"}}}"#,
+        r#"[{"jsonrpc":"2.0","error":{"code":-32602,"message":"bad params","data":{"field":"a"}}}]"#,
         r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad params","data":{"field":"a"}}}]"#,
     ];
     for body in refusals {

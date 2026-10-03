@@ -15,6 +15,9 @@ events; OpenAI Realtime and Gemini Live run through the same code.
   `.with_limits(limits)` its `Limits`, `.with_handshake_timeout(d)` how long
   the provider has to answer the upgrade (default 10 s), and
   `.with_client(client)` a client in place of the shared one.
+- `.with_binary_text(true)` accepts a provider's binary messages containing
+  UTF-8 text, such as Gemini Live's JSON. These become text messages toward
+  the client; invalid UTF-8 is a fault. Disabled by default.
 - `JsonEvents::new(name, path)`: incoming and outgoing `Format` bindings
   whose kind is one JSON event per frame, `ClientEvent` in and
   `ProviderEvent` out (each has `json: Value`). Every event is written from
@@ -52,8 +55,8 @@ transport and the adapter: the tests relay through `formats::opaque` too.
 - The provider's Close 1000 (or no code) ends the answer clean; another code
   is an `upstream` fault with its `ProviderClose`. Its reason text is not
   carried.
-- The provider dropping with no Close is `truncated`; a binary frame, or a
-  message over `max_message`, is `upstream`.
+- The provider dropping with no Close is `truncated`; a rejected binary
+  frame or a message over `max_message` is `upstream`.
 - A provider that cannot be reached, or does not answer the upgrade within
   the handshake timeout (a refusal's body included), is `upstream`. A refusal
   of the upgrade is an answer with its body, which the format reads whole,
@@ -62,9 +65,11 @@ transport and the adapter: the tests relay through `formats::opaque` too.
 
 ## Limits
 
-- **Text frames only.** A binary frame is a fault. Both OpenAI Realtime and
-  Gemini Live use JSON text frames. Ping and pong are answered by each hop's
-  library and never reach a plugin.
+- **Text messages by default.** A provider's binary frame is a fault unless
+  `with_binary_text(true)` enables UTF-8 normalization. Gemini Live sends
+  JSON in binary frames; its example enables this. Client binary frames
+  remain unsupported. Ping and pong are answered by each hop's library
+  and never reach a plugin.
 - **HTTP/1.1 upgrades only** (no WebSockets over HTTP/2), no
   `permessage-deflate` (the extension header is not passed on or negotiated).
 - **Backpressure holds.** A frame moves from a socket to the next only as the
@@ -77,8 +82,9 @@ transport and the adapter: the tests relay through `formats::opaque` too.
 - **`wss` uses the system's root certificates** and the `aws-lc-rs` provider,
   named in the code because the workspace's dependencies enable both `ring`
   and `aws-lc-rs`, which makes rustls's own choice panic. Proxies are the
-  environment's, as for `HttpClient`. It is tested for building and failing
-  cleanly, not against a real TLS server.
+  environment's, as for `HttpClient`. The opt-in
+  `adapters/axum/tests/real_ws.rs` checks TLS sessions against Gemini Live
+  and OpenAI Realtime; each requires a valid key with model access.
 - No reconnection or session resumption.
 
 ## Design notes
@@ -91,9 +97,9 @@ cannot establish outgoing delivery success. Incoming sessions explicitly
 select live input; a streamed HTTP body alone does not turn a finite request
 into a session. Where that shows:
 
-- **Frame kinds.** A body item is bytes, so its frame kind is lost: text only,
-  a binary frame is a fault. A codec that carried a kind on each event (text,
-  binary) could pass audio.
+- **Frame kinds.** A body item carries text bytes, so its original frame kind
+  is lost. Opt-in binary UTF-8 normalization supports JSON protocols; raw
+  binary audio would require a codec that carried each event's frame kind.
 - **Close mapping.** A close is only a clean end, or an `Err` with typed facts
   (`ProviderClose`, `CloseCode`) on the fault. The client's close code and
   reason, and the provider's reason text, cannot cross.

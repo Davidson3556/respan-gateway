@@ -189,10 +189,14 @@ provider refuses:
 
 ```bash
 cargo test -p respan-gateway --test e2e
-# A couple of cheap calls to real providers, skipped for a missing key:
+# Explicit live tests; small requests can incur provider charges:
 OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-... \
   cargo test -p respan-gateway --test real_providers -- --ignored
+# Use env vars or the named key files in your home directory:
+python3 scripts/test_live.py anthropic gemini typesafe respan mcp
 ```
+
+See [validation coverage and live-provider limitations](docs/TESTING.md).
 
 ## License
 

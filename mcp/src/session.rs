@@ -10,7 +10,7 @@ use respan_gateway_http::formats::sse;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_sdk::futures::stream;
-use respan_gateway_sdk::{Fault, Upstream};
+use respan_gateway_sdk::{BadRequest, Fault, Upstream};
 use serde_json::{self, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -95,6 +95,11 @@ impl Session {
         limits: Limits,
         ended: impl FnOnce() + Send + 'static,
     ) -> Result<Self, Fault> {
+        if limits.backlog == 0 {
+            return Err(Fault::config(
+                "an MCP stdio backlog must be greater than zero",
+            ));
+        }
         let command = command.stdin(Stdio::piped()).stdout(Stdio::piped());
         let mut child = command
             .kill_on_drop(true)
@@ -129,7 +134,9 @@ impl Session {
                     line = lines.next() => match line {
                         // Not JSON, such as a stray log line or one over
                         // the limit: not a message.
-                        Ok(Some(line)) => if let Ok(v) = serde_json::from_slice(&line) {
+                        Ok(Some(line)) => if let Ok(v) = serde_json::from_slice(&line)
+                            && crate::valid_message(&v)
+                        {
                             route(&mut lock(&reader), v);
                         },
                         _ => break,
@@ -210,6 +217,13 @@ impl Session {
         // Registered before writing, so no answer is missed.
         let number = {
             let mut routes = lock(&self.routes);
+            routes.posts.retain(|p| !p.tx.is_closed());
+            if ids
+                .iter()
+                .any(|id| routes.posts.iter().any(|post| post.ids.contains(id)))
+            {
+                return Err(BadRequest::fault("an MCP request ID is already pending"));
+            }
             let number = routes.next;
             routes.next += 1;
             let asked = Vec::new();

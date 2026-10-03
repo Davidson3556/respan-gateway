@@ -116,28 +116,48 @@ fn decode(head: &RequestHead, raw: Bytes) -> Result<ToServer, Fault> {
             let fault = BadRequest::fault("the body is not JSON");
             fault.with(PARSE_ERROR).with_source(e)
         })?;
-        let read = messages(json).filter(|(m, _)| !m.is_empty());
+        let read = messages(json);
         let bad = || BadRequest::fault("not a JSON-RPC message or batch");
         (input.messages, input.batch) = read.ok_or_else(bad)?;
     }
-    input.session = header(head, SESSION)?;
-    input.protocol_version = header(head, PROTOCOL_VERSION)?;
-    input.last_event_id = header(head, LAST_EVENT_ID)?;
+    input.session = header(&head.headers, SESSION)?;
+    input.protocol_version = header(&head.headers, PROTOCOL_VERSION)?;
+    input.last_event_id = header(&head.headers, LAST_EVENT_ID)?;
     input.query = head.uri.query().map(str::to_owned);
     Ok(input)
 }
 
-/// The value of the client's header `name`, if it sent one; `Err` with
-/// `bad_request` if it is not text, as no MCP header may be.
-fn header(head: &RequestHead, name: &str) -> Result<Option<String>, Fault> {
-    let value = head.headers.get(name).map(HeaderValue::to_str).transpose();
-    let value = value.map_err(|_| BadRequest::fault(format!("the {name} header is not text")))?;
-    Ok(value.map(str::to_owned))
+/// One scalar MCP header. A resume cursor is UTF-8; session IDs are
+/// nonempty visible ASCII, as required by MCP's session management.
+fn header(headers: &HeaderMap, name: &str) -> Result<Option<String>, Fault> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(BadRequest::fault(format!("the {name} header is repeated")));
+    }
+    let value = match name {
+        LAST_EVENT_ID => std::str::from_utf8(value.as_bytes()).ok(),
+        _ => value.to_str().ok(),
+    }
+    .ok_or_else(|| BadRequest::fault(format!("the {name} header is not text")))?;
+    if name == SESSION && !valid_session(value) {
+        return Err(BadRequest::fault("the MCP session ID is not visible ASCII"));
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn valid_session(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| (0x21..=0x7e).contains(&b))
 }
 
 /// Set header `name` to `value`; `Err` with `internal` if it cannot be one,
 /// as when a plugin edited it so.
 fn put(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), Fault> {
+    if name == SESSION && !valid_session(value) {
+        return Err(Fault::internal("the MCP session ID is not visible ASCII"));
+    }
     let value = HeaderValue::from_str(value).map_err(|e| {
         Fault::internal(format!("the {name} header cannot hold {value:?}")).with_source(e)
     })?;
@@ -205,12 +225,35 @@ fn response_events(
     answer: Response<Body>,
     sent: Request<Bytes>,
 ) -> BoxStream<'static, Result<ToClient, Fault>> {
-    if answer.status().is_success() && bodiless(sent.method(), answer.status()) {
+    let posted = read(sent.body()).unwrap_or_default().0;
+    let pending: Vec<Value> = request_ids(&posted).cloned().collect();
+    // GET may resume replies from previous POSTs; only a POST's replies
+    // are correlated against the requests actually sent in this call.
+    let correlate = sent.method() == Method::POST && !pending.is_empty();
+    if answer.status().is_success()
+        && (bodiless(sent.method(), answer.status()) || answer.status() == StatusCode::ACCEPTED)
+    {
+        if !pending.is_empty() {
+            return stream::once(async { Err(Truncated::fault()) }).boxed();
+        }
         return stream::empty().boxed();
     }
     let (head, body) = answer.into_parts();
-    let session = head.headers.get(SESSION).and_then(|v| v.to_str().ok());
-    let session = session.map(str::to_owned);
+    let session = if head.status.is_success() {
+        match header(&head.headers, SESSION) {
+            Ok(session) => session,
+            Err(_) => {
+                return stream::once(async {
+                    Err(Upstream::fault(
+                        "the MCP server sent an invalid session header",
+                    ))
+                })
+                .boxed();
+            }
+        }
+    } else {
+        None
+    };
     let output = move |read: Option<(Vec<Value>, bool)>| ToClient {
         messages: read.map(|(messages, _)| messages).unwrap_or_default(),
         session: session.clone(),
@@ -219,7 +262,13 @@ fn response_events(
     let inner = if sse::is_stream(&head) {
         let on_event = move |_: &mut (), raw: Bytes, out: &mut Vec<ToClient>| {
             let data = sse::event_data(&raw);
-            let mut output = output(data.and_then(|d| read(d.as_bytes())));
+            let messages = match data.filter(|d| !d.is_empty()) {
+                Some(data) => Some(read(data.as_bytes()).ok_or_else(|| {
+                    Upstream::fault("the MCP server sent an invalid JSON-RPC message")
+                })?),
+                None => None,
+            };
+            let mut output = output(messages);
             output.event_id = field(&raw, "id");
             output.event = field(&raw, "event");
             out.push(output);
@@ -229,25 +278,37 @@ fn response_events(
     } else {
         let on_body = move |raw: Bytes, out: &mut Vec<ToClient>| {
             if !raw.is_empty() {
-                out.push(output(read(&raw)));
+                let messages = read(&raw).ok_or_else(|| {
+                    Upstream::fault("the MCP server sent an invalid JSON-RPC message")
+                })?;
+                out.push(output(Some(messages)));
             }
             Ok(())
         };
         let read = whole::read(NAME, Response::from_parts(head, body), on_body);
         read.map(|read| read.map_err(rpc_refusal)).boxed()
     };
-    let posted = read(sent.body()).unwrap_or_default().0;
-    let pending: Vec<Value> = request_ids(&posted).cloned().collect();
     stream::unfold(
         (inner, pending, false),
-        |(mut inner, mut pending, done)| async move {
+        move |(mut inner, mut pending, done)| async move {
             if done {
                 return None;
             }
             match inner.next().await {
                 Some(Ok(output)) => {
-                    forget(&mut pending, &output);
-                    Some((Ok(output), (inner, pending, false)))
+                    if correlate {
+                        for id in output.answers() {
+                            let Some(at) = pending.iter().position(|p| p == id) else {
+                                let fault = Upstream::fault(
+                                    "the MCP server replied to an ID that is not pending",
+                                );
+                                return Some((Err(fault), (inner, pending, true)));
+                            };
+                            pending.remove(at);
+                        }
+                    }
+                    let done = correlate && pending.is_empty();
+                    Some((Ok(output), (inner, pending, done)))
                 }
                 Some(Err(fault)) => Some((Err(fault), (inner, pending, true))),
                 None if !pending.is_empty() => {
@@ -269,10 +330,23 @@ fn rpc_refusal(fault: Fault) -> Fault {
     let Some(error) = fault.get::<ProviderError>().cloned() else {
         return fault;
     };
-    let said = read(error.response.body()).and_then(|(all, _)| {
-        all.into_iter()
-            .find_map(|mut m| Some(m.get_mut("error")?.take()))
-    });
+    let said = serde_json::from_slice(error.response.body())
+        .ok()
+        .and_then(|value| {
+            let all = match value {
+                Value::Array(all) => all,
+                one => vec![one],
+            };
+            all.into_iter().find_map(|mut m| {
+                // MCP permits an ID-less error in an HTTP refusal. Normalize
+                // only here; an ordinary stream message still needs its ID.
+                m.as_object_mut()?.entry("id").or_insert(Value::Null);
+                if !crate::valid_message(&m) {
+                    return None;
+                }
+                Some(m.get_mut("error")?.take())
+            })
+        });
     let (Some(said), Some(Status(status))) = (said, fault.get::<Status>().copied()) else {
         return fault;
     };
@@ -423,10 +497,29 @@ struct Answer {
 impl h::Encoder<ToClient> for Answer {
     fn encode(&mut self, output: &ToClient, out: &mut BytesMut) -> Result<(), Fault> {
         let mut answered = lock(&self.answered);
+        if !self.events
+            && output
+                .messages
+                .iter()
+                .any(|m| m.get("method").is_some() && m.get("id").is_some_and(|id| !id.is_null()))
+        {
+            return Err(Upstream::fault(
+                "a server request requires an MCP event stream",
+            ));
+        }
         forget(&mut answered.pending, output);
         match self.events {
             true => out.extend_from_slice(&event(output)?),
-            false => answered.messages.extend_from_slice(&output.messages),
+            // A JSON response contains the posted requests' responses, not
+            // notifications mixed into an invented response batch. SSE is
+            // needed to receive the server's independent messages.
+            false => answered.messages.extend(
+                output
+                    .messages
+                    .iter()
+                    .filter(|m| m.get("method").is_none())
+                    .cloned(),
+            ),
         }
         Ok(())
     }
@@ -534,10 +627,12 @@ impl Drop for Headed {
 fn field(raw: &[u8], name: &str) -> Option<String> {
     let text = String::from_utf8_lossy(raw);
     let lines = text.split(['\n', '\r']);
-    let mut values = lines.filter_map(|l| l.strip_prefix(name)?.strip_prefix(':'));
-    values
-        .next_back()
-        .map(|v| v.strip_prefix(' ').unwrap_or(v).to_owned())
+    let mut values = lines.filter_map(|line| {
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        (field == name && (name != "id" || !value.contains('\0'))).then_some(value)
+    });
+    values.next_back().map(str::to_owned)
 }
 
 /// An output as an event: its messages as `data:`, with its `id:` and
@@ -551,9 +646,9 @@ fn event(output: &ToClient) -> Result<Bytes, Fault> {
     let mut out = String::new();
     for (name, value) in [("id", &output.event_id), ("event", &output.event)] {
         if let Some(value) = value {
-            if value.contains(['\r', '\n', '\0']) {
+            if value.contains(['\r', '\n']) || (name == "id" && value.contains('\0')) {
                 return Err(Fault::internal(format!(
-                    "an SSE {name} cannot hold a line break or NUL"
+                    "an SSE {name} contains invalid characters"
                 )));
             }
             out.push_str(&format!("{name}: {value}\n"));

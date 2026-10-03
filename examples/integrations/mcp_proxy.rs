@@ -29,6 +29,8 @@ use respan_gateway_mcp::{
 mod http_support;
 use http_support::{post, read_whole, serve};
 
+const PROTOCOL_VERSION: &str = "2025-06-18";
+
 /// Lets clients see and call only these tools.
 struct ToolAllowList(Arc<[&'static str]>);
 
@@ -118,17 +120,21 @@ impl McpServer {
                         .unwrap_or_default();
                     let body: Value = serde_json::from_slice(&raw).unwrap_or_default();
                     let method = body["method"].as_str().unwrap_or_default();
+                    requests.lock().unwrap_or_else(PoisonError::into_inner).push((body.clone(), session.clone()));
+                    if method == "notifications/initialized" && session.as_deref() == Some("s1") && body.get("id").is_none() {
+                        return (StatusCode::ACCEPTED, [("content-type", "application/json"), ("mcp-session-id", "s1")], String::new());
+                    }
                     let result = match method {
-                        "initialize" if session.is_none() => json!({ "protocolVersion": "2025-06-18", "capabilities": { "tools": {} } }),
+                        "initialize" if session.is_none() && body["params"]["protocolVersion"] == PROTOCOL_VERSION && body["params"]["clientInfo"]["name"].is_string() && body["params"]["capabilities"].is_object() =>
+                            json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": { "tools": {} }, "serverInfo": {"name":"gateway-example", "version":"1"} }),
                         "tools/list" if session.as_deref() == Some("s1") => json!({ "tools": [
-                            { "name": "echo", "inputSchema": {} },
-                            { "name": "wipe", "inputSchema": {} }
+                            { "name": "echo", "inputSchema": {"type":"object", "properties":{"message":{"type":"string"}}, "required":["message"]} },
+                            { "name": "wipe", "inputSchema": {"type":"object"} }
                         ] }),
                         "tools/call" if session.as_deref() == Some("s1") && body["params"]["name"] == "echo" =>
-                            json!({ "content": [{ "type": "text", "text": "hi" }] }),
+                            json!({ "content": [{ "type": "text", "text": body["params"]["arguments"]["message"] }] }),
                         _ => return (StatusCode::BAD_REQUEST, [("content-type", "application/json"), ("mcp-session-id", "s1")], "invalid method or session".to_owned()),
                     };
-                    requests.lock().unwrap_or_else(PoisonError::into_inner).push((body.clone(), session));
                     let answer = json!({ "jsonrpc": "2.0", "id": body["id"], "result": result });
                     (StatusCode::OK, [("content-type", "application/json"), ("mcp-session-id", "s1")], answer.to_string())
                 }
@@ -156,20 +162,33 @@ impl Drop for McpServer {
 }
 
 /// An MCP client's request, in `session` if given: the status, the session
-/// and the first message answered.
+/// and the matching response. Interleaved notifications are skipped.
 async fn send(
     gw: &Gateway,
     session: Option<&str>,
-    id: u64,
+    id: Option<u64>,
     method: &str,
     params: Value,
 ) -> Result<(StatusCode, Option<String>, Value), Fault> {
-    let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+    let mut body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+    if let Some(id) = id {
+        body["id"] = json!(id);
+    }
     let mut req = post("/mcp", body.to_string());
+    req.headers_mut().insert(
+        "accept",
+        HeaderValue::from_static("application/json, text/event-stream"),
+    );
+    req.headers_mut().insert(
+        "mcp-protocol-version",
+        HeaderValue::from_static(PROTOCOL_VERSION),
+    );
     if let Some(session) = session.and_then(|s| HeaderValue::from_str(s).ok()) {
         req.headers_mut().insert(SESSION, session);
     }
-    let (status, headers, body) = read_whole(serve(gw, req).await.0).await;
+    let (reply, finished) = serve(gw, req).await;
+    let (status, headers, body) = read_whole(reply).await;
+    finished.await?;
     let session = headers
         .get(SESSION)
         .and_then(|s| s.to_str().ok())
@@ -177,22 +196,60 @@ async fn send(
     let body = String::from_utf8_lossy(&body?).into_owned();
     let first = body
         .split_inclusive("\n\n")
-        .find_map(respan_gateway_http::formats::json);
+        .filter_map(respan_gateway_http::formats::json)
+        .find(|message| {
+            id.is_some_and(|id| message["id"] == id) && message.get("method").is_none()
+        });
     Ok((status, session, first.unwrap_or_default()))
+}
+
+/// The full MCP initialization sequence, before any tool requests.
+async fn initialize(gw: &Gateway) -> Result<(StatusCode, Option<String>, Value), Fault> {
+    let initialized = send(
+        gw,
+        None,
+        Some(1),
+        "initialize",
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name":"gateway-example-client", "version":"1"}
+        }),
+    )
+    .await?;
+    if initialized.2["result"]["protocolVersion"] != PROTOCOL_VERSION {
+        return Err(respan_gateway_sdk::Upstream::fault(
+            "the MCP server did not negotiate the requested protocol",
+        ));
+    }
+    let (status, _, _) = send(
+        gw,
+        initialized.1.as_deref(),
+        None,
+        "notifications/initialized",
+        json!({}),
+    )
+    .await?;
+    if status != StatusCode::ACCEPTED {
+        return Err(respan_gateway_sdk::Upstream::fault(
+            "the MCP server did not accept initialization",
+        ));
+    }
+    Ok(initialized)
 }
 
 /// A client's session: it starts one, lists the tools, calls the allowed
 /// tool and then one that is not; each answer, in order.
 async fn session(gw: &Gateway) -> Result<Vec<(StatusCode, Value)>, Fault> {
-    let (status, session, init) = send(gw, None, 1, "initialize", json!({})).await?;
+    let (status, session, init) = initialize(gw).await?;
     let mut answers = vec![(status, init)];
-    let echo = json!({ "name": "echo", "arguments": { "text": "hi" } });
+    let echo = json!({ "name": "echo", "arguments": { "message": "hi" } });
     for (id, method, params) in [
         (2, "tools/list", json!({})),
         (3, "tools/call", echo),
         (4, "tools/call", json!({ "name": "wipe" })),
     ] {
-        let (status, _, answer) = send(gw, session.as_deref(), id, method, params).await?;
+        let (status, _, answer) = send(gw, session.as_deref(), Some(id), method, params).await?;
         answers.push((status, answer));
     }
     Ok(answers)

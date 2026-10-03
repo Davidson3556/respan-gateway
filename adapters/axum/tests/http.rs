@@ -756,11 +756,20 @@ async fn l6_bodiless(with_304: bool) {
         .and_then(|g| g.target("any"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     let base = spawn(router(gateway.clone())).await;
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("bounded client");
     let mut tasks = Vec::new();
+    // Each request opens four local sockets across the client, gateway and
+    // provider. Keep the 300-request sweep below a typical 1024-fd limit,
+    // including the other test running in this process.
+    let slots = Arc::new(tokio::sync::Semaphore::new(64));
     for i in 0..300 {
         let (client, base) = (client.clone(), base.clone());
+        let slots = slots.clone();
         tasks.push(tokio::spawn(async move {
+            let _slot = slots.acquire_owned().await.expect("request slot");
             let resp = match i % 3 {
                 0 => client.head(format!("{base}/x")).send().await,
                 1 if with_304 => client.get(format!("{base}/nm")).send().await,
@@ -776,7 +785,9 @@ async fn l6_bodiless(with_304: bool) {
         let status = t.await.unwrap_or_default();
         assert!([200, 304, 204].contains(&status), "{status}");
     }
-    gateway.idle().await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), gateway.idle())
+        .await
+        .expect("bodiless requests must settle without polling their response bodies");
     let all = ends.0.lock().map(|l| l.clone()).unwrap_or_default();
     let bad: Vec<_> = all.iter().filter(|e| !e.ends_with(" ok")).collect();
     assert_eq!(all.len(), 600);
@@ -794,10 +805,8 @@ async fn l6_real_heads_and_204s_end_ok() {
     l6_bodiless(false).await;
 }
 
-/// A 304 to a conditional GET is non-2xx, so HTTP's provider edge takes it
-/// for a refusal: the client gets its 304 as it came, but the request and
-/// call end `upstream` ("the provider returned 304"), and a fallback would
-/// try the next provider. Shown as a design question, not claimed a bug.
+/// Passthrough accepts ordinary redirects, including a bodiless 304, so
+/// both the request and its provider call settle successfully.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn l6_a_real_304_ends_ok() {
     l6_bodiless(true).await;
