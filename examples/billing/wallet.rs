@@ -28,7 +28,7 @@ use respan_gateway_providers::OpenAiChat;
 #[path = "../../tests/support/http.rs"]
 mod http_support;
 #[allow(dead_code)]
-#[path = "../tests/support.rs"]
+#[path = "../support/http.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
 
@@ -165,17 +165,17 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/wallet.rs"]
+#[path = "../tests/cases/billing/wallet.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "../tests/ledger.rs"]
+#[path = "../tests/cases/billing/ledger.rs"]
 mod ledger_tests;
 
 #[cfg(test)]
-#[path = "../tests/accounting.rs"]
+#[path = "../tests/cases/billing/accounting.rs"]
 mod accounting_tests;
 
 #[cfg(test)]
-#[path = "../tests/accounting_wire.rs"]
+#[path = "../tests/cases/billing/accounting_wire.rs"]
 mod accounting_wire_tests;

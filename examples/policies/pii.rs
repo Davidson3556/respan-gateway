@@ -41,7 +41,7 @@ use respan_gateway_sdk::{
 #[path = "../../tests/support/http.rs"]
 mod http_support;
 #[allow(dead_code)]
-#[path = "../tests/support.rs"]
+#[path = "../support/http.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
 use serde_json::{self, json};
@@ -219,5 +219,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/pii.rs"]
+#[path = "../tests/cases/policies/pii.rs"]
 mod tests;

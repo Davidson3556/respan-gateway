@@ -7,7 +7,7 @@ mod text;
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Fault;
 use respan_gateway_sdk::conversation::Reply;
-#[path = "text_support/mod.rs"]
+#[path = "support/text.rs"]
 mod support;
 
 use serde_json::Value;

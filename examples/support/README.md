@@ -1,13 +1,16 @@
 # Private example support
 
+`attachments/pdf.rs` holds the bounded PDF converter, also used by the separate
+Poppler validation test.
+
 These are source modules included by the runnable examples, not library or SDK
 APIs: `billing/` holds accounting and ledger policies, `jobs/` holds worker and
 store implementations, `live/` holds WebSocket serving, budget and test
-helpers, and `realtime/` holds audio handling. See the
+helpers, `http.rs` holds local provider helpers, and `realtime/` holds audio handling. See the
 [example index](../README.md) for their runnable entrypoints.
 
 `text.rs` is shared by the guardrail, PII and realtime examples. Its four
-regression suites are explicit `respan-gateway-examples` test targets
+regression suites are automatically discovered `respan-gateway-examples` test targets
 (`text_*`).
 
 Read and rewrite the chat kind's text safely across stream deltas, and

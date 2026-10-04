@@ -286,5 +286,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/mcp_proxy.rs"]
+#[path = "../tests/cases/integrations/mcp_proxy.rs"]
 mod tests;

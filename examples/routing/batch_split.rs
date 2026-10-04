@@ -37,7 +37,7 @@ use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
-#[path = "../tests/support.rs"]
+#[path = "../support/http.rs"]
 mod provider_support;
 use std::time::Duration;
 
@@ -149,5 +149,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/batch_split.rs"]
+#[path = "../tests/cases/routing/batch_split.rs"]
 mod tests;

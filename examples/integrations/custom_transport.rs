@@ -105,5 +105,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/custom_transport.rs"]
+#[path = "../tests/cases/integrations/custom_transport.rs"]
 mod tests;

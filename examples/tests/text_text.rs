@@ -1,7 +1,7 @@
 #[allow(dead_code)] // The shared helper also has request shapes these tests do not use.
 #[path = "../../tests/support/http.rs"]
 mod http_support;
-#[path = "text_support/mod.rs"]
+#[path = "support/text.rs"]
 mod support;
 
 #[path = "../support/text.rs"]

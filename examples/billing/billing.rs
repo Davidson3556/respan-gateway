@@ -31,7 +31,7 @@ use respan_gateway_sdk::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
-#[path = "../tests/support.rs"]
+#[path = "../support/http.rs"]
 mod provider_support;
 
 /// One billed call.
@@ -203,5 +203,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/billing.rs"]
+#[path = "../tests/cases/billing/billing.rs"]
 mod tests;

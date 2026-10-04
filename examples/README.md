@@ -1,8 +1,10 @@
 # Examples
 
 Runnable examples are grouped by topic below. Each is an explicit Cargo target
-with tests in [`tests/`](tests/); private source modules live in
-[`support/`](support/) and shared library helpers remain in [`src/`](src/).
+with its test modules in [`tests/cases/`](tests/cases), grouped by the same topics.
+Cargo discovers the four `tests/text_*.rs` integration suites automatically.
+Private source modules live in
+[`support/`](support) and shared library helpers remain in [`src/`](src).
 Use case numbers refer to [the use-case guide](../docs/use-cases.md).
 
 Run from the repository root (replace `wallet` with any target name below):
@@ -72,7 +74,7 @@ speech; its text-PII mode refuses opaque audio.
 Live-provider interoperability is not established by the local protocol tests.
 
 Private [text support](support/text.rs) is shared by guardrail, PII and
-realtime; the four explicit `text_*` test targets cover its reader, tool JSON
+realtime; the four `text_*` integration test targets cover its reader, tool JSON
 and split-escape behavior.
 
 ## Remaining gaps

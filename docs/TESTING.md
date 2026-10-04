@@ -1,22 +1,115 @@
-# Validation
+# Testing
 
-The core and its public interfaces are unchanged by this protocol audit.
-Run the offline checks with:
+Run these checks from the repository root. They match CI and exercise all
+Rust targets and optional features. The default suite uses local fixtures and
+requires no provider credentials; fetching build dependencies may need network
+access:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
-cargo test --workspace --doc
-python3 -m unittest discover -s scripts/tests
+cargo test --workspace --doc --all-features
 ```
+
+## Test categories
+
+Classify tests by purpose and execution requirements independently. A test's
+Cargo target describes how it is compiled, not whether it uses sockets,
+processes or several components.
+
+### Purpose
+
+| Category | What it establishes | Main suites |
+| --- | --- | --- |
+| Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
+| Shared data contracts | Conversation assembly, text access and message representation | SDK unit tests |
+| HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/http/tests/`, HTTP unit tests |
+| Provider compatibility | Native relay, OpenAI/Anthropic translation, tools, errors and usage | `crates/providers/tests/{relay,translate}/`, provider unit tests |
+| Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/axum/tests/`, WS unit tests |
+| MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/mcp/tests/`, MCP unit tests |
+| Routing policy | Attempts, retries, fallback, races and explicit retry classification | `crates/plugins/tests/routing.rs`, routing unit tests |
+| Application behavior | Configuration, CLI/proxy modes, path matching, redirects, error limits and graceful shutdown of the built executable | `apps/gateway/tests/`, gateway configuration tests |
+| Use cases | Billing, guardrails, PII, admission, durable jobs, attachments, routing and realtime policies composed through public APIs | `examples/tests/cases/`, `examples/tests/text_*.rs`, example library tests |
+| Performance | Timing of whole and streamed in-process relay | `crates/providers/benches/relay.rs` |
+| Documentation examples | Compilation or execution of Rust examples in API documentation | Rust doctests |
+
+Security and resilience are cross-cutting concerns. Credential isolation and
+path bypass tests belong with their owning HTTP, adapter or application suite;
+cancellation, backpressure, resource cleanup and panic tests likewise span
+several layers. Local mock-provider tests establish behavior against fixtures;
+live tests establish interoperability with the selected remote service.
+
+### Execution requirements
+
+The main workspace contains **1,357 local test instances** and one opt-in local
+benchmark, excluding doctests. Even `--workspace --all-targets --all-features`
+does not include the separate [`validation/`](../validation/README.md) package.
+
+| Run category | Count | Location and requirements |
+| --- | ---: | --- |
+| Default local tests | 1,357 | Main workspace: in-process fixtures, localhost HTTP/WebSocket servers, local child processes and temporary storage; no provider credentials or external services |
+| Timing benchmark | 1 | Main workspace: explicitly run optimized in-process relay benchmark |
+| Live provider tests | 9 | Separate validation package: provider credentials and network access |
+| External-tool tests | 3 | Separate validation package: 2 MCP tests using Node/npx and network access; 1 PDF extraction test using Poppler |
+
+The local suite uses `mockllm` for scripted OpenAI, Anthropic, Realtime and
+Gemini Live behavior. These mocks run locally; they do not call real providers.
+Other suites use smaller in-process transports, handcrafted socket fixtures and
+scripted stdio children. Standard local utilities such as `sh`, `sleep` and
+`kill` are needed by process tests. Building from a cold cache may fetch Cargo
+dependencies, including the pinned `mockllm` Git dependency.
+
+Doctests are a separate local run: 9 runnable doctests and 5 ignored examples.
+By Cargo harness, the workspace contains 241 tests in library or binary source
+targets, 898 integration-target tests, 218 tests in runnable example targets,
+and 1 benchmark-harness test. These are test instances rather than unique source
+declarations: included modules can run in multiple targets. Source-target and
+example-target tests can contain integration scenarios.
+
+To refresh the inventory without executing test bodies:
+
+```bash
+cargo test --workspace --all-targets --all-features -- --list
+```
+
+## Suite ownership
+
+| Location | Coverage |
+| --- | --- |
+| `crates/*/src/` | Unit tests for private implementation details |
+| `crates/*/tests/` | Public contracts and protocol integration tests |
+| `crates/providers/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fixtures remain in each parent test target |
+| `apps/gateway/tests/` | Executable integration tests, redirects and bounded error bodies |
+| `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fixture |
+| `examples/tests/cases/<topic>/` | Test modules included by the corresponding example or private support module |
+| `examples/tests/text_*.rs` | Automatically discovered text and tool-argument integration suites |
+| `tests/support/` | Source-only HTTP and lifecycle helpers shared across packages |
+| `crates/providers/benches/` | Opt-in relay timing benchmark |
+
+`examples/Cargo.toml` registers runnable examples with `test = true`. Their
+included case modules run under those example targets. Keeping these files in
+subdirectories prevents Cargo from compiling them as standalone integration
+crates. The four top-level `text_*` files use normal Cargo test discovery.
+
+Focused commands:
+
+```bash
+cargo test -p respan-gateway --test paths
+cargo test -p respan-gateway-providers --test relay usage::
+cargo test -p respan-gateway-providers --test translate tools::
+cargo test -p respan-gateway-examples --example wallet
+cargo test -p respan-gateway-examples --test text_tool_json
+```
+
+## Protocol coverage
 
 The shipped binary is tested against mockllm over real HTTP. WebSocket
 tests also use mockllm's OpenAI Realtime and Gemini Live servers over real
 sockets. MCP uses scripted HTTP responses, real stdio children, and an
 LLM tool cycle through the MCP example.
 
-Added scenarios include:
+Coverage includes:
 
 - WebSocket optional subprotocols, repeated protocol headers, duplicate
   accept headers, invalid subprotocol tokens, fragmented
@@ -46,63 +139,54 @@ The 300-request HTTP bodyless sweeps cap concurrent requests at 64 and
 bound their waits, so a typical 1024-file-descriptor limit does not hang
 the suite.
 
-## Live tests
+## Live provider tests
 
-Live tests are ignored by Cargo by default. Explicit runs make small,
-charge-incurring requests:
+These targets live in the separate validation package and are also ignored
+until explicitly selected. Explicit runs make small requests that
+can incur provider charges. Tests skip when their required key is absent, so
+an explicit run without credentials does not prove live coverage.
 
 ```bash
-python3 scripts/test_live.py anthropic gemini typesafe respan mcp
-python3 scripts/test_live.py openai
+cargo test --manifest-path validation/Cargo.toml --test live_providers -- --ignored
+cargo test --manifest-path validation/Cargo.toml --test live_ws -- --ignored
 ```
 
-The runner reads environment variables first, then `ant_key`, `gemini_key`,
-`typesafe_key`, `openai_key`, or `respan_key` in `--keys-dir` (default: the
-home directory). It passes keys through child environments, redacts keys
-from output, and fails for missing keys rather than silently skipping.
-Each invocation selects one exact test and fails if Cargo selects none.
-`respan_key` can contain `OPENAI API KEY = ...` and `OPENAI BASE = ...`.
-Keys and generated configs containing keys are not saved in the repository.
+The gateway suite uses `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`
+and `TYPESAFE_API_KEY` for its corresponding providers. The WebSocket suite
+uses `OPENAI_API_KEY` and `GEMINI_API_KEY`. Set only the credentials needed for
+the tests you select; individual test names can be used as Cargo filters.
+Provider endpoint/model overrides are documented in the test sources.
 
-Model overrides are `ANTHROPIC_MODEL`, `GEMINI_MODEL`, `GEMINI_LIVE_MODEL`,
-`OPENAI_MODEL`, `OPENAI_REALTIME_MODEL`, and `RESPAN_MODEL`. The HTTP
-OpenAI-compatible tests accept `OPENAI_BASE_URL`; Respan uses
-`RESPAN_BASE_URL`. Anthropic's tool-stream test accepts `ANTHROPIC_BASE_URL`.
-The MCP check requires Node.js/npm and downloads the pinned official
-`@modelcontextprotocol/server-everything@2026.8.31` reference server.
+## External tools
 
-Observed on 2026-10-03 with the supplied credentials:
+The MCP reference-server tests download and run Node-based reference servers;
+they require `node`, `npx` and network access:
 
-| Provider | Verified behavior |
-| --- | --- |
-| Anthropic | Text streaming and forced Unicode tool arguments translated into OpenAI chunks |
-| Gemini | Native HTTP SSE, plus Live audio and transcription through the WebSocket gateway over TLS |
-| TypeSafe | Native System One decision response through passthrough, including answer and usage fields |
-| Respan | Whole chat and native streamed Unicode tool calls through passthrough |
-| Official MCP reference server | Initialize, initialized notification, list tools, Unicode echo, delete session over stdio and real HTTP |
-| Direct OpenAI | Supplied key rejected with HTTP 401; direct Chat/Realtime interoperability remains unverified |
+```bash
+cargo test --manifest-path validation/Cargo.toml --test reference_server -- --ignored
+```
 
-Gemini Live's real server sends binary JSON, so its transport must enable
-`WsTransport::with_binary_text(true)`. Outgoing and client-facing messages
-remain text; the existing text-only default remains available.
+The separate PDF extraction validation test requires Poppler's
+`pdftotext` executable:
 
-Gemini HTTP intermittently returned provider HTTP 503 across repeat runs;
-both HTTP and Live passed on a separate rerun. The latest combined run
-passed every other selected case, including Gemini Live, and reported
-the HTTP failure. The live checks do not silently retry provider failures.
-Separate direct HTTP/1.1 and HTTP/2 requests both succeeded; a persistent
-HTTP/2 failure was not reproduced.
+```bash
+cargo test --manifest-path validation/Cargo.toml --test pdf -- --ignored
+```
 
-The Respan OpenRouter stream checked here ended with a finish reason and
-usage but no `[DONE]`, confirmed by a direct call. The OpenAI chat codec
-therefore reports `truncated`, as its protocol requires. Passthrough
-preserves that vendor's native stream and was verified successfully; do
-not treat the native pass as verification of OpenAI framing. No completion
-sentinel is synthesized to conceal an incomplete provider stream.
+## Benchmarks
 
-Protocol sources: [WebSocket handshake negotiation](https://www.rfc-editor.org/rfc/rfc6455#section-4.2.2),
-[JSON-RPC envelopes](https://www.jsonrpc.org/specification),
-[MCP transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
-[OpenAI Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations#text-inputs-and-outputs),
-[Gemini Live messages](https://ai.google.dev/gemini-api/docs/live-api/get-started-websocket),
-and [TypeSafe's API](https://docs.typesafe.ai/api).
+The relay timing benchmark is an ignored test harness in `benches/`, using
+local in-process responses. Run it explicitly with optimized code:
+
+```bash
+cargo bench -p respan-gateway-providers --bench relay -- --ignored --nocapture
+```
+
+## Adding tests
+
+Use behavior names for suites and modules. Keep tests with their owning crate,
+share local fixtures through its support modules, and split large suites into
+topic modules under one integration target. Only local tests belong in the main
+workspace. Put tests requiring live services or optional system tools in the
+separate validation package, document their requirements, and keep them ignored
+until explicitly selected.

@@ -272,5 +272,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/models_merge.rs"]
+#[path = "../tests/cases/routing/models_merge.rs"]
 mod tests;

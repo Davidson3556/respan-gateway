@@ -69,7 +69,7 @@ use respan_gateway_sdk::{
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
-#[path = "../tests/support.rs"]
+#[path = "../support/http.rs"]
 mod provider_support;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -85,75 +85,9 @@ fn fake_pdf_to_text(base64: &str) -> Result<String, Fault> {
     Ok(format!("[text of a {}-byte PDF]", base64.len() * 3 / 4))
 }
 
-/// Poppler runs outside the gateway process and is killed on timeout or
-/// cancellation. Input and extracted text are bounded independently.
-async fn extract_pdf(encoded: &str, limit: usize) -> Result<String, Fault> {
-    extract_pdf_with("pdftotext", encoded, limit).await
-}
-
-async fn extract_pdf_with(converter: &str, encoded: &str, limit: usize) -> Result<String, Fault> {
-    use std::process::Stdio;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let bytes = STANDARD
-        .decode(encoded)
-        .map_err(|_| BadRequest::fault("invalid PDF base64"))?;
-    if !bytes.starts_with(b"%PDF-") {
-        return Err(BadRequest::fault("not a PDF"));
-    }
-    let mut child = tokio::process::Command::new(converter)
-        .args(["-enc", "UTF-8", "-", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            Fault::config("install Poppler pdftotext for PDF conversion").with_source(e)
-        })?;
-    let mut input = child
-        .stdin
-        .take()
-        .ok_or_else(|| Fault::internal("PDF stdin"))?;
-    let output = child
-        .stdout
-        .take()
-        .ok_or_else(|| Fault::internal("PDF stdout"))?;
-    let write = async move {
-        input
-            .write_all(&bytes)
-            .await
-            .map_err(|e| BadRequest::fault("the PDF could not be read").with_source(e))?;
-        input
-            .shutdown()
-            .await
-            .map_err(|e| BadRequest::fault("the PDF could not be read").with_source(e))
-    };
-    let read = async move {
-        let mut text = Vec::new();
-        output
-            .take(limit as u64 + 1)
-            .read_to_end(&mut text)
-            .await
-            .map_err(|e| Fault::internal("the PDF text could not be read").with_source(e))?;
-        if text.len() > limit {
-            return Err(too_large());
-        }
-        String::from_utf8(text).map_err(|_| BadRequest::fault("the PDF text is not UTF-8"))
-    };
-    let wait = async {
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| Fault::internal("PDF process failed").with_source(e))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(BadRequest::fault("the PDF is malformed or encrypted"))
-        }
-    };
-    let (_, text, _) = tokio::try_join!(write, read, wait)?;
-    Ok(text)
-}
+#[path = "../support/attachments/pdf.rs"]
+mod pdf_converter;
+use pdf_converter::{extract_pdf_with, too_large};
 
 /// The `file` of `part` if it is a file part.
 fn file(part: &Content) -> Option<&serde_json::Value> {
@@ -174,12 +108,6 @@ fn stored(chat: &Conversation) -> Vec<String> {
     let parts = chat.messages.iter().flat_map(|m| &m.content);
     let ids = parts.filter_map(|part| file(part)?["file_id"].as_str());
     ids.map(str::to_owned).collect()
-}
-
-fn too_large() -> Fault {
-    Fault::new("PDF too large")
-        .with(ErrorCode("too_large".into()))
-        .with(Status(StatusCode::PAYLOAD_TOO_LARGE))
 }
 
 fn too_slow() -> Fault {
@@ -330,7 +258,7 @@ impl PdfToText {
             }
             #[cfg(not(test))]
             {
-                extract_pdf(&base64, self.max).await
+                extract_pdf_with("pdftotext", &base64, self.max).await
             }
         };
         let text: Arc<str> = tokio::time::timeout_at(until, work)
@@ -761,5 +689,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/attachments.rs"]
+#[path = "../tests/cases/integrations/attachments.rs"]
 mod tests;

@@ -1025,5 +1025,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/realtime.rs"]
+#[path = "../tests/cases/realtime/realtime.rs"]
 mod tests;

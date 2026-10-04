@@ -136,16 +136,18 @@ the gateway, and the binary chooses what to compose. See the
 
 | Path | What it is |
 |---|---|
-| `core/` | The neutral kernel: typed streams, plugins and lifecycle; no HTTP or message kinds. |
-| `sdk/` | One plugin-author facade: core contracts, conversation/usage types and basic typed text accessors; no HTTP dependency. |
-| `http/` | Owned HTTP edges, native request/response bodies, stream/sink helpers, credentials, retry classification and optional Reqwest backend; framing/error helpers in `formats`. |
-| `plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
-| `{mcp,ws}/` | Optional MCP and WebSocket protocol/transport integrations. |
-| `providers/` | First-party OpenAI Chat and Anthropic Messages codecs, reusable on both edges. |
-| `adapters/axum/` | Axum HTTP ingress and optional WebSocket hosting. |
-| `gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
+| `crates/core/` | The neutral kernel: typed streams, plugins and lifecycle; no HTTP or message kinds. |
+| `crates/sdk/` | One plugin-author facade: core contracts, conversation/usage types and basic typed text accessors; no HTTP dependency. |
+| `crates/http/` | Owned HTTP edges, native request/response bodies, stream/sink helpers, credentials, retry classification and optional Reqwest backend; framing/error helpers in `formats`. |
+| `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
+| `crates/{mcp,ws}/` | Optional MCP and WebSocket protocol/transport integrations. |
+| `crates/providers/` | First-party OpenAI Chat and Anthropic Messages codecs, reusable on both edges. |
+| `crates/axum/` | Axum HTTP ingress and optional WebSocket hosting. |
+| `apps/gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
+| `validation/` | Separate opt-in live-provider and external-tool checks, excluded from workspace tests. |
+| `python/` | Reserved for PyO3 bindings and the Python package intended for PyPI. |
 
 The SDK exposes contracts and shared types, not production `Plugin` implementations.
 It does not depend on protocol infrastructure, providers, plugins or adapters.
@@ -155,8 +157,8 @@ Billing policies, priced tallies, reservations and settlement live in private
 [example support](examples/README.md#billing-policies), not in a ledger SDK or
 public accounting plugin. Generic `Usage` remains in the SDK; applications own
 prices, accounts and durable billing stores. Routing takes an explicit retry classifier, with HTTP classification
-available from the HTTP protocol module. A future first-party PyO3 embedding adapter will
-live at `adapters/python/`; it is not implemented yet.
+available from the HTTP protocol module. The future PyO3 bindings and PyPI package will live together in
+[`python/`](python/README.md); they are not implemented yet.
 
 The HTTP protocol module's `reqwest` feature enables `HttpClient`. The Axum adapter's
 `ws` feature enables its `ws` hosting module. Both are opt-in, so codec authors
@@ -179,21 +181,18 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### End-to-end tests
 
-`gateway/tests/e2e.rs` starts the built binary on a free
+`apps/gateway/tests/e2e.rs` starts the built binary on a free
 port with a temp config, and talks real HTTP to it and to fake providers
 on localhost from [mockllm](https://github.com/lihe07/mockllm), which
 check each call by the real provider's rules and answer in its exact
-framing, streams and breaks included. They run with the rest, in about a
-second. The ignored ones are known calls the gateway makes that the
-provider refuses:
+framing, streams and breaks included. They run with the default test suite. Live provider tests are in a separate
+validation package outside the workspace:
 
 ```bash
 cargo test -p respan-gateway --test e2e
 # Explicit live tests; small requests can incur provider charges:
 OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-... \
-  cargo test -p respan-gateway --test real_providers -- --ignored
-# Use env vars or the named key files in your home directory:
-python3 scripts/test_live.py anthropic gemini typesafe respan mcp
+  cargo test --manifest-path validation/Cargo.toml --test live_providers -- --ignored
 ```
 
 See [validation coverage and live-provider limitations](docs/TESTING.md).

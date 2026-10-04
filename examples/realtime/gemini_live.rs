@@ -164,5 +164,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #[cfg(test)]
-#[path = "../tests/gemini_live.rs"]
+#[path = "../tests/cases/realtime/gemini_live.rs"]
 mod tests;

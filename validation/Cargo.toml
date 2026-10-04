@@ -1,0 +1,39 @@
+[package]
+name = "respan-gateway-validation"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+resolver = "3"
+
+# Build the same gateway source for process-based live validation.
+[[bin]]
+name = "respan-gateway"
+path = "../apps/gateway/src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+respan-gateway-sdk = { path = "../crates/sdk" }
+respan-gateway-http = { path = "../crates/http", features = ["reqwest"] }
+respan-gateway-providers = { path = "../crates/providers" }
+respan-gateway-plugins = { path = "../crates/plugins" }
+respan-gateway-axum = { path = "../crates/axum", features = ["ws"] }
+respan-gateway-mcp = { path = "../crates/mcp" }
+respan-gateway-ws = { path = "../crates/ws" }
+axum = "0.8"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_norway = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[dev-dependencies]
+base64 = "0.22"
+bytes = "1"
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }

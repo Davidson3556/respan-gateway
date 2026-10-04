@@ -10,7 +10,11 @@ update that document and the relevant tests together.
 Every change must pass:
 
 ```bash
-cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
+cargo test --workspace --doc --all-features
 ```
+
+See [testing](docs/TESTING.md) for suite ownership, focused commands, benchmarks,
+and optional tests that require external services or tools.

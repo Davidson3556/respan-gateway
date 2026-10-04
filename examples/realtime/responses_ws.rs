@@ -138,5 +138,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #[cfg(test)]
-#[path = "../tests/responses_ws.rs"]
+#[path = "../tests/cases/realtime/responses_ws.rs"]
 mod tests;

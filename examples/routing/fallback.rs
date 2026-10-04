@@ -26,7 +26,7 @@ use respan_gateway_sdk::{
 mod http_support;
 use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
-#[path = "../tests/support.rs"]
+#[path = "../support/http.rs"]
 mod provider_support;
 
 /// Falls back from the target to Anthropic, or hedges it with `openai-eu`.
@@ -258,5 +258,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/fallback.rs"]
+#[path = "../tests/cases/routing/fallback.rs"]
 mod tests;

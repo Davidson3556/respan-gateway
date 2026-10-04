@@ -768,9 +768,9 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/jobs_background.rs"]
+#[path = "../tests/cases/jobs/jobs_background.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "../tests/background_durable.rs"]
+#[path = "../tests/cases/jobs/background_durable.rs"]
 mod durable_tests;

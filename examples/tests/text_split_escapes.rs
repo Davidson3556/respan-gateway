@@ -1,11 +1,11 @@
-//! Loop 2 adversarial tests (fork B).
+//! Escapes and partial matches across streamed tool arguments.
 
 #[path = "../support/text.rs"]
 mod text;
 
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::conversation::{Block, Finish, Reply};
-#[path = "text_support/mod.rs"]
+#[path = "support/text.rs"]
 mod support;
 
 use serde_json::{Value, json};

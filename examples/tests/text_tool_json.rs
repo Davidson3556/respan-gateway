@@ -7,7 +7,7 @@ use respan_gateway_sdk::conversation::{
     Block, Content, Conversation, Delta, Message, Reply, Role, Tool,
 };
 use respan_gateway_sdk::{Fault, Filter};
-#[path = "text_support/mod.rs"]
+#[path = "support/text.rs"]
 mod support;
 
 use serde_json::{self, Value, json};

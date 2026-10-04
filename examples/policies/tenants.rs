@@ -172,5 +172,5 @@ async fn main() -> Result<(), Fault> {
 }
 
 #[cfg(test)]
-#[path = "../tests/tenants.rs"]
+#[path = "../tests/cases/policies/tenants.rs"]
 mod tests;

@@ -7,8 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-# tests/<name>.rs are the examples' own tests, included by each example.
-autotests = false
 
 [lints]
 workspace = true
@@ -160,19 +158,3 @@ test = true
 name = "jobs_background"
 path = "jobs/jobs_background.rs"
 test = true
-
-[[test]]
-name = "text_streamed_arguments"
-path = "tests/text_streamed_arguments.rs"
-
-[[test]]
-name = "text_split_escapes"
-path = "tests/text_split_escapes.rs"
-
-[[test]]
-name = "text_text"
-path = "tests/text_text.rs"
-
-[[test]]
-name = "text_tool_json"
-path = "tests/text_tool_json.rs"

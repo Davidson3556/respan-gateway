@@ -170,7 +170,7 @@ const STREAM: &[&str] = &[
 ];
 
 #[cfg(test)]
-#[path = "../tests/local_proxy.rs"]
+#[path = "../tests/cases/hosting/local_proxy.rs"]
 mod tests;
 
 use respan_gateway_http::relay::Relay;
