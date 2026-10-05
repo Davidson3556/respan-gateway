@@ -36,15 +36,16 @@ use respan_gateway_http::{
 };
 use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
+use respan_gateway_sdk::{Assembled, ReplyItem};
 use respan_gateway_sdk::{BadRequest, Connection, EventSink, Fault, Format};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 use crate::Usage;
 use crate::common::{
-    Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
-    extra_of, fits, is_inert, merge_fields, post_json, read_content, read_message, refusal, set,
-    stop_json, supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
+    Gate, Names, Reader, ReplyParser, Totals, UnaryEncoder, Wire, ended, error_event, extra_of,
+    fits, is_inert, merge_fields, post_json, read_content, read_message, refusal, set, stop_json,
+    supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
     unwritable_usage, usage_extra, write_content, write_message,
 };
 use crate::conversation::{
@@ -429,7 +430,7 @@ impl Wire for AnthropicMessages {
     }
 
     /// The blocks in the order they came, empty text left out.
-    fn render(whole: &Whole) -> Result<Value, Fault> {
+    fn render(whole: &Assembled) -> Result<Value, Fault> {
         check_usage(&whole.usage)?;
         let mut content: Vec<Value> = Vec::new();
         // Where each block, by number, is in `content`, and the JSON text of
@@ -439,9 +440,9 @@ impl Wire for AnthropicMessages {
         // The fields of blocks that come next.
         let mut fields: Vec<(u32, Map<String, Value>)> = Vec::new();
         let mut stop = StopFields::default();
-        for item in &whole.items {
+        for item in whole.items() {
             match item {
-                Item::Block(part) => {
+                ReplyItem::Block(part) => {
                     let block = match &part.kind {
                         Block::Text if part.text.is_empty() => continue,
                         Block::Text => json!({ "type": "text", "text": part.text }),
@@ -460,10 +461,12 @@ impl Wire for AnthropicMessages {
                     at.push((part.block, content.len()));
                     content.push(block);
                 }
-                Item::Other(format, raw) if **format == *ANTHROPIC && fields_of(raw).is_some() => {
+                ReplyItem::Other(format, raw)
+                    if **format == *ANTHROPIC && fields_of(raw).is_some() =>
+                {
                     fields.extend(fields_of(raw).map(|(b, f)| (b, f.clone())));
                 }
-                Item::Other(format, raw) if **format == *ANTHROPIC => {
+                ReplyItem::Other(format, raw) if **format == *ANTHROPIC => {
                     let place = raw["index"]
                         .as_u64()
                         .and_then(|i| u32::try_from(i).ok())
@@ -505,8 +508,8 @@ impl Wire for AnthropicMessages {
                         _ => return Err(unwritable_content()),
                     }
                 }
-                Item::Other(format, raw) if is_inert(format, raw) => {}
-                Item::Other(..) => return Err(unwritable_content()),
+                ReplyItem::Other(format, raw) if is_inert(format, raw) => {}
+                ReplyItem::Other(..) => return Err(unwritable_content()),
             }
         }
         for (place, text) in input {
@@ -1261,8 +1264,8 @@ mod tests {
 
     /// `replies` as a whole body.
     fn body_of(replies: &[Reply]) -> Result<Value, Fault> {
-        let mut whole = Whole::default();
-        replies.iter().try_for_each(|r| whole.add(r))?;
+        let mut whole = Assembled::default();
+        replies.iter().try_for_each(|r| whole.push(r))?;
         AnthropicMessages::render(&whole)
     }
 

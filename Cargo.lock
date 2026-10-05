@@ -1371,7 +1371,6 @@ dependencies = [
 name = "respan-gateway-sdk"
 version = "0.0.0"
 dependencies = [
- "bytes",
  "respan-gateway-core",
  "serde_json",
 ]

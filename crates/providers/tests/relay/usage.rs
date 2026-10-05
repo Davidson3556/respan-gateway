@@ -9,7 +9,7 @@ async fn a_stream_is_relayed_with_usage() {
 
     let body = h.body(chat()).await;
     let (said, sent) = (gist(&body), gist(&STREAM.concat()));
-    assert_eq!(said.message, sent.message);
+    assert_eq!(said.items(), sent.items());
     assert_eq!((said.usage, said.start), (sent.usage, sent.start));
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     assert_eq!(says(h.log.only()), Ok(()));
@@ -64,7 +64,7 @@ async fn a_client_that_did_not_ask_for_usage_does_not_get_the_usage_chunk() {
     let body = h.body(call(CHAT, request)).await;
 
     assert!(!body.contains("usage"), "{body}");
-    assert_eq!(gist(&body).message.text(), "Hello world");
+    assert_eq!(gist(&body).text(), "Hello world");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
     assert_eq!(h.usage.total().get(units::OUTPUT_TOKENS), Some(2));
     let sent: serde_json::Value =
@@ -88,7 +88,7 @@ async fn the_null_usage_the_gateway_asked_for_does_not_reach_the_client() {
     let body = h.body(call(CHAT, request)).await;
 
     assert!(!body.contains("usage"), "{body}");
-    assert_eq!(gist(&body).message.text(), "hi");
+    assert_eq!(gist(&body).text(), "hi");
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
 }
 
@@ -120,7 +120,7 @@ async fn a_chunk_that_says_more_than_null_usage_is_kept() {
         first["prompt_filter_results"],
         json!([{ "prompt_index": 0 }])
     );
-    assert_eq!(gist(&body).message.text(), "hi");
+    assert_eq!(gist(&body).text(), "hi");
 }
 
 #[tokio::test]

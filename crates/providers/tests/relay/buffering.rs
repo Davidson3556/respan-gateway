@@ -56,7 +56,7 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
 
     assert_eq!(status, StatusCode::OK);
     let said = gist(&body);
-    assert_eq!(said.message.text(), "hi");
+    assert_eq!(said.text(), "hi");
     assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(4));
     let order = returns.0.lock().map(|v| v.clone()).unwrap_or_default();
     assert_eq!(order, ["filter ended", "returned", "call ended"]);
@@ -311,8 +311,8 @@ async fn until_content_commits_on_neither_a_keep_alive_nor_usage_alone() {
     h.sites.backup.reply(fixture::sse(STREAM));
 
     assert_eq!(
-        gist(&h.body(chat()).await).message,
-        gist(&STREAM.concat()).message
+        gist(&h.body(chat()).await).items(),
+        gist(&STREAM.concat()).items()
     );
     let calls = metered(&h);
     let calls: Vec<_> = calls.iter().map(|(c, n)| (c.as_str(), *n)).collect();
@@ -331,8 +331,8 @@ async fn until_end_replays_a_stream_and_a_whole_body_alike() {
         assert_eq!(read.0, StatusCode::OK);
         assert_eq!(read.3, ["openai ok", "client"]);
     }
-    assert_eq!(gist(&stream[1].2).message, gist(&STREAM.concat()).message);
-    assert_eq!(gist(&whole[1].2).message, gist(UNARY).message);
+    assert_eq!(gist(&stream[1].2).items(), gist(&STREAM.concat()).items());
+    assert_eq!(gist(&whole[1].2).items(), gist(UNARY).items());
 }
 
 #[tokio::test]
@@ -467,7 +467,7 @@ async fn a_response_dropped_after_until_end_ends_its_call_as_it_ended() {
         h.sites.backup.reply(fixture::sse(STREAM));
 
         let body = h.body(chat()).await;
-        assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
+        assert_eq!(gist(&body).items(), gist(&STREAM.concat()).items());
         // Its end was held: dropped, the call ends so, before `backup` starts.
         assert_eq!(ends.all(), [openai, "backup ok", "client"]);
     }

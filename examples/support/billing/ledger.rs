@@ -213,7 +213,10 @@ impl Ledger for MemoryLedger {
             let available = a.limit.saturating_sub(a.spent).saturating_sub(a.held);
             if available < amount {
                 let msg = format!("account '{name}' cannot cover this call");
-                let details = json!({ "account": name, "available": available });
+                let details = serde_json::Map::from_iter([
+                    ("account".into(), json!(name)),
+                    ("available".into(), json!(available)),
+                ]);
                 let fault = Fault::new(msg)
                     .with(ErrorCode(INSUFFICIENT_FUNDS.into()))
                     .with(Status(

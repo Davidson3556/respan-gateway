@@ -51,6 +51,10 @@ their filesystem locations.
   the same public contracts available to external plugin authors.
 - Protocol crates own wire framing and transport behavior. Provider codecs
   translate through typed conversation events.
+- The SDK's only built-in kind is `Conversation` / `Reply`. Other kinds use
+  their own input/output types; no `Format` implementation lives in the SDK.
+  Plugins and whole-body conversation encoders share the SDK's ordered
+  `Assembled` fold instead of maintaining separate reply representations.
 - Applications own policy choices, configuration, prices, billing stores and
   durable jobs. The examples demonstrate those choices without making them
   supported SDK APIs.

@@ -27,7 +27,7 @@ async fn a_plugin_can_answer_by_calling_providers() {
     h.sites.backup.reply(fixture::sse(STREAM));
 
     let said = gist(&h.body(chat()).await);
-    assert_eq!(said.message, gist(&STREAM.concat()).message);
+    assert_eq!(said.items(), gist(&STREAM.concat()).items());
     assert_eq!(h.sites.sent.sent().len(), 2);
     assert_eq!(says(h.log.only()), Ok(()));
 }
@@ -443,7 +443,7 @@ async fn a_providers_trailers_are_not_passed_on() {
     let collected = collected.unwrap_or_else(|e| panic!("{e}"));
     assert!(collected.trailers().is_none());
     let body = String::from_utf8_lossy(&collected.to_bytes()).into_owned();
-    assert_eq!(gist(&body).message.text(), "hi");
+    assert_eq!(gist(&body).text(), "hi");
     assert_eq!(says(log.only()), Ok(()));
 }
 

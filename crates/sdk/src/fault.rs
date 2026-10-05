@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::Fault;
 
@@ -54,4 +54,4 @@ pub struct ErrorCode(pub Cow<'static, str>);
 /// ([`Fault::with`](crate::Fault::with)). Formats write these into their
 /// error bodies; the kernel never reads them.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Details(pub Value);
+pub struct Details(pub Map<String, Value>);

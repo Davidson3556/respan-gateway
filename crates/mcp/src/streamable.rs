@@ -357,7 +357,10 @@ fn rpc_refusal(fault: Fault) -> Fault {
         .with(Status(status))
         .with(RpcCode(code));
     if let Some(data) = said.get("data") {
-        read = read.with(Details(json!({ "data": data })));
+        read = read.with(Details(serde_json::Map::from_iter([(
+            "data".into(),
+            data.clone(),
+        )])));
     }
     if let Some(&wait) = fault.get::<RetryAfter>() {
         read = read.with(wait);
@@ -673,7 +676,7 @@ fn failure(id: &Value, fault: &Fault) -> Value {
     };
     let mut e = error(id.clone(), code, fault.message());
     let mut data = json!({ "code": error_code(fault) });
-    if let Some(Details(Value::Object(details))) = fault.get() {
+    if let Some(Details(details)) = fault.get() {
         data.as_object_mut()
             .into_iter()
             .for_each(|d| d.extend(details.clone()));

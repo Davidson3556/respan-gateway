@@ -31,7 +31,7 @@ async fn a_filter_re_encodes_only_what_changed() {
     h.sites.openai.reply(fixture::sse(STREAM));
 
     let said = gist(&h.body(chat()).await);
-    assert_eq!(said.message.text(), "HELLO WORLD");
+    assert_eq!(said.text(), "HELLO WORLD");
     assert_eq!(said.usage.get(units::OUTPUT_TOKENS), Some(2));
     assert_eq!(said.usage.get(units::INPUT_TOKENS), Some(5));
     assert_eq!(said.start.map(|s| s.id), Some("c1".to_owned()));
@@ -189,7 +189,7 @@ async fn a_filter_that_changes_nothing_keeps_what_was_said() {
         .openai
         .reply(fixture::sse(&[spaced, "data: [DONE]\n\n"]));
 
-    assert_eq!(gist(&h.body(chat()).await).message.text(), "café");
+    assert_eq!(gist(&h.body(chat()).await).text(), "café");
 }
 
 #[tokio::test]
@@ -246,7 +246,7 @@ async fn a_filter_edits_several_events_of_one_chunk_in_its_shape() {
 
     let body = h.body(chat()).await;
     let said = gist(&body);
-    assert_eq!(said.message.text(), "HI");
+    assert_eq!(said.text(), "HI");
     assert_eq!(said.finish, Some(Finish::Length));
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
 }
@@ -369,7 +369,7 @@ async fn a_delta_a_filter_splits_in_two_is_written_as_two_and_reads_back_whole()
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
     assert!(body.contains("\"content\":\"H\""), "{body}");
     assert!(body.contains("\"content\":\"ello\""), "{body}");
-    assert_eq!(gist(&body).message.text(), "Hello world");
+    assert_eq!(gist(&body).text(), "Hello world");
 }
 
 #[tokio::test]
@@ -430,7 +430,7 @@ async fn a_whole_message_a_filter_took_the_start_of_is_sent() {
 
     assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert_eq!(gist(&body).message.text(), "hi");
+    assert_eq!(gist(&body).text(), "hi");
     assert_eq!(gist(&body).usage.get(units::INPUT_TOKENS), Some(4));
 }
 

@@ -60,7 +60,7 @@ impl Plugin for Judge {
             .await?;
         let mut answer = Assembled::default();
         replies.iter().try_for_each(|reply| answer.push(reply))?;
-        cx.set_target(if answer.message.text().contains("HARD") {
+        cx.set_target(if answer.text().contains("HARD") {
             "strong"
         } else {
             "cheap"

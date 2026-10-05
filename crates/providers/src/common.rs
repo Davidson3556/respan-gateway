@@ -16,13 +16,13 @@ use respan_gateway_http::{
     Status, bodiless, http::request::Parts as RequestHead, http::response::Parts as ResponseHead,
 };
 use respan_gateway_sdk::futures::TryStreamExt;
-use respan_gateway_sdk::{BadRequest, ErrorCode, Fault, Truncated, Upstream};
+use respan_gateway_sdk::{Assembled, BadRequest, ErrorCode, Fault, Truncated, Upstream};
 use serde_json::{self, Map, Value};
 
 use crate::Usage;
 use crate::anthropic::ANTHROPIC;
 use crate::conversation::{
-    Block, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role, Start,
+    Block, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role,
 };
 use crate::errors::{failure_json, provider_error, says, says_error};
 use crate::formats::sse::{content_type, event_data};
@@ -47,7 +47,7 @@ pub(crate) trait Wire: Send + Sync + 'static {
     /// Whether a successful body is a whole response of this format.
     fn is_response(v: &Value) -> bool;
     /// The events of a response, collected, as one whole body.
-    fn render(whole: &Whole) -> Result<Value, Fault>;
+    fn render(whole: &Assembled) -> Result<Value, Fault>;
     /// The error body for `fault`, its details merged by [`merge_details`].
     ///
     /// [`merge_details`]: crate::errors::merge_details
@@ -382,89 +382,6 @@ pub(crate) fn unary_reply<W: Wire>(status: StatusCode, raw: Bytes) -> Result<Vec
     })
 }
 
-/// One part of a response collected whole: a block, or an event the kind has
-/// no form for, in the order they came.
-#[derive(Debug)]
-pub(crate) enum Item {
-    /// A content block: the text, arguments or reasoning of its deltas.
-    Block(Part),
-    /// An [`Reply::Other`] event.
-    Other(Arc<str>, Arc<Value>),
-}
-
-/// A content block collected whole.
-#[derive(Debug)]
-pub(crate) struct Part {
-    pub(crate) block: u32,
-    pub(crate) kind: Block,
-    pub(crate) text: String,
-    ended: bool,
-}
-
-/// The events of a response collected into what one whole body says; an
-/// encoder of a unary response writes it.
-#[derive(Debug, Default)]
-pub(crate) struct Whole {
-    /// The response's id, model and fields, from its first start.
-    pub(crate) start: Option<Start>,
-    /// What it says, in order.
-    pub(crate) items: Vec<Item>,
-    pub(crate) finish: Option<Finish>,
-    pub(crate) usage: Usage,
-}
-
-impl Whole {
-    /// Add an event; a delta or an end of a block that is not open, or a
-    /// block opened as another kind, is an `Err`.
-    pub(crate) fn add(&mut self, reply: &Reply) -> Result<(), Fault> {
-        match reply {
-            Reply::Start(start) => _ = self.start.get_or_insert_with(|| start.clone()),
-            Reply::BlockStart { block, kind } => match self.part(*block) {
-                Some(had) if had.kind == *kind && !had.ended => {}
-                Some(_) => return Err(unwritable_content()),
-                None => self.items.push(Item::Block(Part {
-                    block: *block,
-                    kind: kind.clone(),
-                    text: String::new(),
-                    ended: false,
-                })),
-            },
-            Reply::Delta { block, delta } => match self.part(*block) {
-                Some(part) if !part.ended && fits(delta, &part.kind) => {
-                    part.text.push_str(delta.as_str())
-                }
-                _ => return Err(unwritable_content()),
-            },
-            Reply::BlockEnd { block } => match self.part(*block) {
-                Some(part) => part.ended = true,
-                None => return Err(unwritable_content()),
-            },
-            Reply::Usage(usage) => self.usage += usage,
-            Reply::Finish(finish) => self.finish = Some(finish.clone()),
-            Reply::Other { format, raw } => {
-                self.items.push(Item::Other(format.clone(), raw.clone()))
-            }
-            _ => return Err(unwritable_content()),
-        }
-        Ok(())
-    }
-
-    fn part(&mut self, block: u32) -> Option<&mut Part> {
-        self.items.iter_mut().find_map(|item| match item {
-            Item::Block(part) if part.block == block => Some(part),
-            _ => None,
-        })
-    }
-
-    /// The parts, in order.
-    pub(crate) fn parts(&self) -> impl Iterator<Item = &Part> {
-        self.items.iter().filter_map(|item| match item {
-            Item::Block(part) => Some(part),
-            Item::Other(..) => None,
-        })
-    }
-}
-
 /// What an encoder of a stream has written but keeps back until a reply shows
 /// content ([`shows`]), so that a failure before it leaves nothing written
 /// and the response is refused, as the decoder holds a start for.
@@ -495,20 +412,20 @@ impl Gate {
 /// Writes one message at its end: the events collected into a whole body. A
 /// failure, before any byte, is refused.
 pub(crate) struct UnaryEncoder<W> {
-    whole: Whole,
+    whole: Assembled,
     wire: PhantomData<W>,
 }
 
 impl<W: Wire> UnaryEncoder<W> {
     pub(crate) fn new() -> Self {
-        let (whole, wire) = (Whole::default(), PhantomData);
+        let (whole, wire) = (Assembled::default(), PhantomData);
         Self { whole, wire }
     }
 }
 
 impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
     fn encode(&mut self, reply: &Reply, _out: &mut BytesMut) -> Result<(), Fault> {
-        self.whole.add(reply)
+        self.whole.push(reply).map_err(|_| unwritable_content())
     }
 
     fn end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
@@ -1527,19 +1444,10 @@ mod tests {
     }
 
     #[test]
-    fn details_that_are_not_an_object_are_ignored() {
-        let fault = BadRequest::fault("m").with(Details(json!([1])));
-        let body = OpenAiChat::error_body(&fault);
-        assert_eq!(
-            body["error"],
-            json!({"message": "m", "type": "bad_request", "param": null, "code": "bad_request"})
-        );
-    }
-
-    #[test]
     fn the_fault_says_message_and_type_the_provider_the_rest() {
         let details = json!({"message": "", "type": "https://x/p", "code": null, "extra": 1});
-        let fault = BadRequest::fault("m").with(Details(details));
+        let fault = BadRequest::fault("m")
+            .with(Details(details.as_object().expect("error fields").clone()));
         let body = OpenAiChat::error_body(&fault);
         // The fault's words are the format's; the provider's `code` stays.
         let kept =
@@ -1553,14 +1461,15 @@ mod tests {
         let fault = Fault::new("pii")
             .with(ErrorCode("blocked".into()))
             .with(Status(StatusCode::FORBIDDEN))
-            .with(Details(details));
+            .with(Details(details.as_object().expect("error fields").clone()));
         let body = OpenAiChat::error_body(&fault);
         // OpenAI's `code` and `param` are strings: a number is not kept.
         let kept = json!({"message": "pii", "type": "blocked", "param": null, "code": "blocked", "category": "pii"});
         assert_eq!(body["error"], kept);
         // A string, as OpenAI's own errors give, is kept.
         let details = json!({"param": "messages", "code": "context_length_exceeded"});
-        let fault = BadRequest::fault("too long").with(Details(details));
+        let fault = BadRequest::fault("too long")
+            .with(Details(details.as_object().expect("error fields").clone()));
         let error = &OpenAiChat::error_body(&fault)["error"];
         assert_eq!(
             (&error["param"], &error["code"]),
@@ -1580,33 +1489,5 @@ mod tests {
         assert_eq!(totals.increment(&total(3)).get("out"), Some(2));
         assert!(totals.increment(&total(3)).is_empty());
         assert!(totals.increment(&total(2)).is_empty(), "never negative");
-    }
-
-    #[test]
-    fn a_whole_body_collects_blocks_in_order_and_refuses_orphans() {
-        let mut whole = Whole::default();
-        for reply in [
-            Reply::start("r", "m"),
-            Reply::block_start(3, Block::Text),
-            Reply::text(3, "a"),
-            Reply::block_start(3, Block::Text),
-            Reply::text(3, "b"),
-            Reply::block_end(3),
-            Reply::other("f", json!(1)),
-            Reply::finished(Finish::Stop),
-        ] {
-            whole.add(&reply).expect("a response");
-        }
-        let texts: Vec<_> = whole.parts().map(|p| p.text.as_str()).collect();
-        assert_eq!(texts, ["ab"]);
-        assert!(matches!(whole.items[1], Item::Other(..)));
-        assert!(whole.add(&Reply::text(3, "c")).is_err(), "ended");
-        assert!(whole.add(&Reply::text(9, "c")).is_err(), "never opened");
-        assert!(whole.add(&Reply::block_end(9)).is_err());
-        let call = Block::ToolCall {
-            id: "t".into(),
-            name: "f".into(),
-        };
-        assert!(whole.add(&Reply::block_start(3, call)).is_err(), "kind");
     }
 }

@@ -40,16 +40,17 @@ use respan_gateway_http::{
 use respan_gateway_http::{bytes, http};
 use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
+use respan_gateway_sdk::{Assembled, ReplyItem};
 use respan_gateway_sdk::{BadRequest, Connection, EventSink, Fault, Format, Upstream};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 use crate::Usage;
 use crate::common::{
-    Gate, Item, Names, Reader, ReplyParser, Totals, UnaryEncoder, Whole, Wire, ended, error_event,
-    extra_of, fits, is_inert, merge_fields, post_json, probe, read_message, refusal, set,
-    stop_json, supported_usage, tag, unix_now, unreadable_event, unsupported_fields,
-    unwritable_content, unwritable_usage, usage_extra,
+    Gate, Names, Reader, ReplyParser, Totals, UnaryEncoder, Wire, ended, error_event, extra_of,
+    fits, is_inert, merge_fields, post_json, probe, read_message, refusal, set, stop_json,
+    supported_usage, tag, unix_now, unreadable_event, unsupported_fields, unwritable_content,
+    unwritable_usage, usage_extra,
 };
 use crate::conversation::{Block, Conversation, Delta, Finish, Reply, Role, Start, units};
 use crate::errors::{merge_details, says, says_error};
@@ -359,27 +360,27 @@ impl Wire for OpenAiChat {
 
     /// One text of every block, then the tool calls, as one choice; other
     /// events as the choices they came in.
-    fn render(whole: &Whole) -> Result<Value, Fault> {
+    fn render(whole: &Assembled) -> Result<Value, Fault> {
         check_usage(&whole.usage)?;
         let join = |kind: Block| -> String {
-            let same = |p: &&crate::common::Part| p.kind == kind;
+            let same = |p: &&respan_gateway_sdk::ReplyBlock| p.kind == kind;
             whole
-                .parts()
+                .blocks()
                 .filter(same)
                 .map(|p| p.text.as_str())
                 .collect()
         };
         let (text, reasoning) = (join(Block::Text), join(Block::Reasoning));
         let fields: Vec<_> = whole
-            .items
+            .items()
             .iter()
             .filter_map(|item| match item {
-                Item::Other(f, raw) if **f == *OPENAI => call_fields_of(raw),
+                ReplyItem::Other(f, raw) if **f == *OPENAI => call_fields_of(raw),
                 _ => None,
             })
             .collect();
         let calls: Vec<Value> = whole
-            .parts()
+            .blocks()
             .filter_map(|p| match &p.kind {
                 Block::ToolCall { id, name } => {
                     let arguments = if p.text.is_empty() { "{}" } else { &p.text };
@@ -409,8 +410,8 @@ impl Wire for OpenAiChat {
             "message": message,
             "finish_reason": FINISH.reason(finish)?,
         })];
-        for item in &whole.items {
-            let Item::Other(format, raw) = item else {
+        for item in whole.items() {
+            let ReplyItem::Other(format, raw) = item else {
                 continue;
             };
             if &**format == OPENAI && call_fields_of(raw).is_some() {
@@ -1317,8 +1318,8 @@ mod tests {
 
     /// `replies` as a whole body.
     fn body_of(replies: &[Reply]) -> Result<Value, Fault> {
-        let mut whole = Whole::default();
-        replies.iter().try_for_each(|r| whole.add(r))?;
+        let mut whole = Assembled::default();
+        replies.iter().try_for_each(|r| whole.push(r))?;
         OpenAiChat::render(&whole)
     }
 

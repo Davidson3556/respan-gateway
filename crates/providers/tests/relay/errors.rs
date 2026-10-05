@@ -26,7 +26,10 @@ async fn a_refusal_is_an_error_in_the_client_format() {
     let fault = Fault::new("balance too low")
         .with(ErrorCode("insufficient_credits".into()))
         .with(Status(StatusCode::PAYMENT_REQUIRED))
-        .with(Details(json!({ "balance": 0.12 })));
+        .with(Details(serde_json::Map::from_iter([(
+            "balance".into(),
+            json!(0.12),
+        )])));
     let h = Harness::new(vec![Arc::new(Refuse(fault.clone()))], Some("openai"));
 
     let (status, headers, body) = h.send(chat()).await;

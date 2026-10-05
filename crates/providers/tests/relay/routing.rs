@@ -89,7 +89,7 @@ async fn a_plugin_races_two_calls_and_keeps_the_first() {
 
     assert_eq!(status, StatusCode::OK);
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert_eq!(gist(&body).message.text(), "hi");
+    assert_eq!(gist(&body).text(), "hi");
 }
 
 #[tokio::test]
@@ -185,7 +185,7 @@ async fn a_judge_asks_whole_while_its_client_streams() {
     assert_ne!(judge["stream"], true, "{judge}");
     assert!(judge.get("stream_options").is_none(), "{judge}");
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
+    assert_eq!(gist(&body).items(), gist(&STREAM.concat()).items());
     assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
 }
 
@@ -246,7 +246,7 @@ async fn each_attempt_of_a_fallback_gets_the_provider_edge() {
     h.sites.backup.reply(fixture::sse(STREAM));
 
     let said = gist(&h.body(chat()).await);
-    assert_eq!(said.message, gist(&STREAM.concat()).message);
+    assert_eq!(said.items(), gist(&STREAM.concat()).items());
 
     // The fallback gave the answer, so the plugin after it had no client edge,
     // yet saw both calls.
@@ -301,7 +301,7 @@ async fn a_fallback_reads_a_call_to_its_first_content() {
     let body = h.body(chat()).await;
 
     // What `until_content` read is sent, with the rest of the answer.
-    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
+    assert_eq!(gist(&body).items(), gist(&STREAM.concat()).items());
     assert_eq!(ends.all(), ["openai overloaded", "backup ok", "client"]);
 }
 
@@ -316,7 +316,7 @@ async fn a_fallback_skips_a_success_that_fails_after_only_its_start() {
 
     let body = h.body(chat()).await;
 
-    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
+    assert_eq!(gist(&body).items(), gist(&STREAM.concat()).items());
     assert_eq!(ends.all(), ["openai overloaded", "backup ok", "client"]);
 }
 
@@ -334,8 +334,8 @@ async fn r11_2_the_documented_fallback_keeps_the_last_429() {
     h.sites.openai.reply(limited());
     h.sites.backup.reply(fixture::sse(STREAM));
     assert_eq!(
-        gist(&h.body(chat()).await).message,
-        gist(&STREAM.concat()).message
+        gist(&h.body(chat()).await).items(),
+        gist(&STREAM.concat()).items()
     );
 }
 
@@ -347,8 +347,8 @@ async fn r11_plugin_fallback_moves_on_and_keeps_the_last_error_as_sent() {
         .reply(fixture::json(StatusCode::INTERNAL_SERVER_ERROR, "{}"));
     h.sites.backup.reply(fixture::sse(STREAM));
     assert_eq!(
-        gist(&h.body(chat()).await).message,
-        gist(&STREAM.concat()).message
+        gist(&h.body(chat()).await).items(),
+        gist(&STREAM.concat()).items()
     );
 
     h.sites.openai.reply(limited());
@@ -420,7 +420,7 @@ async fn a_race_by_completion_picks_the_provider_that_finishes_first() {
             FAST_REPLY
         };
         let (said, sent) = (gist(&body), gist(&expected.concat()));
-        assert_eq!(said.message, sent.message, "to its end: {to_end}");
+        assert_eq!(said.items(), sent.items(), "to its end: {to_end}");
         assert_eq!(said.start, sent.start, "to its end: {to_end}");
         let mut ends = ends.all();
         assert_eq!(ends.pop().as_deref(), Some("client"));

@@ -75,11 +75,15 @@ pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
         None => Upstream::fault(message),
     };
     let fault = fault.with(Status(to));
-    let Some(fields) = fields else { return fault };
-    let mut details = fields.clone();
+    let Some((fields, object)) =
+        fields.and_then(|fields| fields.as_object().map(|object| (fields, object)))
+    else {
+        return fault;
+    };
+    let mut details = object.clone();
     // Fields at the top are the error's, not its null `error`.
-    if let Some(top) = details.as_object_mut().filter(|_| std::ptr::eq(fields, v)) {
-        top.remove("error");
+    if std::ptr::eq(fields, v) {
+        details.remove("error");
     }
     fault.with(Details(details))
 }
@@ -88,7 +92,7 @@ pub(crate) fn provider_error(status: StatusCode, v: &Value) -> Fault {
 /// if missing, and a string or null replaces the format's but for
 /// `message` and `type`.
 pub(crate) fn merge_details(mut error: Value, fault: &Fault) -> Value {
-    let (Some(merged), Some(Value::Object(details))) =
+    let (Some(merged), Some(details)) =
         (error.as_object_mut(), fault.get::<Details>().map(|d| &d.0))
     else {
         return error;
@@ -300,7 +304,12 @@ mod tests {
             (error_code(&fault), fault.message()),
             ("rate_limited", "slow")
         );
-        assert_eq!(fault.get(), Some(&Details(cloudflare["errors"][0].clone())));
+        assert_eq!(
+            fault.get(),
+            Some(&Details(
+                cloudflare["errors"][0].as_object().expect("fields").clone()
+            ))
+        );
         let listed = provider_error(
             StatusCode::OK,
             &json!({"error": [{"type": "t", "message": "m"}]}),

@@ -290,7 +290,7 @@ async fn a_gateway_dropped_mid_response_serves_what_it_began() {
     let (_, _, body) = read_whole(resp).await;
 
     let body = String::from_utf8(body.unwrap_or_default().to_vec()).unwrap_or_default();
-    assert_eq!(gist(&body).message, gist(&STREAM.concat()).message);
+    assert_eq!(gist(&body).items(), gist(&STREAM.concat()).items());
     assert_eq!(says(ended.await), Ok(()));
 }
 
@@ -833,7 +833,7 @@ async fn a_response_whose_last_bytes_were_read_ends_complete() {
     let data = data
         .map(|d| String::from_utf8_lossy(&d).into_owned())
         .unwrap_or_default();
-    assert_eq!(gist(&data).message.text(), "hi");
+    assert_eq!(gist(&data).text(), "hi");
     // The host stops at the last bytes, without polling for the end.
     drop(body);
     h.gw.idle().await;

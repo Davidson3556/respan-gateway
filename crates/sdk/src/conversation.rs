@@ -572,152 +572,120 @@ impl Finish {
     }
 }
 
-/// The events of a response folded into the whole answer, for plugins that
-/// need it (a judge, a cache, a job store). Unary and streamed responses
-/// fold alike.
+/// A response block with its deltas joined. Its text is ordinary text,
+/// JSON argument text, or reasoning, according to `kind`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Assembled {
-    /// The response's start, if one came.
-    pub start: Option<Start>,
-    /// The answer: the assistant's text and tool calls, one part per block,
-    /// in the order the blocks opened.
-    pub message: Message,
-    /// The reasoning of each reasoning block, in the order they opened.
-    pub reasoning: Vec<String>,
-    /// Why the model stopped, if it said.
-    pub finish: Option<Finish>,
-    /// All the usage reported.
-    pub usage: Usage,
-    /// The [`Reply::Other`] events, in order.
-    pub other: Vec<Reply>,
-    blocks: Vec<Folding>,
-}
-
-/// A block being folded: where its content goes.
-#[derive(Debug, Clone, PartialEq)]
-struct Folding {
-    block: u32,
-    place: Place,
+pub struct ReplyBlock {
+    /// The block's identifier in the event stream.
+    pub block: u32,
+    /// What the block holds.
+    pub kind: Block,
+    /// The concatenated deltas, without parsing or rewriting them.
+    pub text: String,
     ended: bool,
 }
 
+/// A block or opaque event in an assembled response. Blocks occupy the
+/// position of their first start; opaque events retain their arrival order.
 #[derive(Debug, Clone, PartialEq)]
-enum Place {
-    /// An index in the message's content.
-    Content(usize),
-    /// An index in the reasoning.
-    Reasoning(usize),
+pub enum ReplyItem {
+    /// An assembled content block.
+    Block(ReplyBlock),
+    /// A format-specific event, kept without interpretation.
+    Other(Arc<str>, Arc<Value>),
 }
 
-/// An empty answer: an assistant's message with no content yet.
-impl Default for Assembled {
-    fn default() -> Self {
-        Self {
-            start: None,
-            message: Message {
-                role: Role::Assistant,
-                content: Vec::new(),
-                extra: Extra::default(),
-            },
-            reasoning: Vec::new(),
-            finish: None,
-            usage: Usage::default(),
-            other: Vec::new(),
-            blocks: Vec::new(),
-        }
-    }
+/// Response events collected for inspection or whole-body encoding.
+/// Text, tool calls, reasoning and opaque events stay in one ordered list.
+/// This is a fold, not a conversion to conversation history or a check that
+/// the source completed: stream termination and truncation belong to its reader.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Assembled {
+    /// The response's start, if one came.
+    pub start: Option<Start>,
+    /// Why the model stopped, if it said.
+    pub finish: Option<Finish>,
+    /// All reported usage increments, summed.
+    pub usage: Usage,
+    items: Vec<ReplyItem>,
 }
 
 impl Assembled {
-    /// Fold the next event of the response in. A sequence that cannot be a
-    /// response is an `Err`: a start twice, a block that opens as another
-    /// kind, a delta of another kind than its block, a delta or an end for a block that is not open.
+    /// The blocks and opaque events, in order. Read-only while assembling
+    /// so callers cannot invalidate the state used by subsequent deltas.
+    pub fn items(&self) -> &[ReplyItem] {
+        &self.items
+    }
+
+    /// The content blocks, in the order they opened.
+    pub fn blocks(&self) -> impl Iterator<Item = &ReplyBlock> {
+        self.items.iter().filter_map(|item| match item {
+            ReplyItem::Block(part) => Some(part),
+            ReplyItem::Other(..) => None,
+        })
+    }
+
+    /// Join text blocks, skipping tool arguments, reasoning and opaque events.
+    pub fn text(&self) -> String {
+        self.blocks()
+            .filter(|part| part.kind == Block::Text)
+            .map(|part| part.text.as_str())
+            .collect()
+    }
+
+    /// Fold the next event. Reject duplicate response starts, conflicting
+    /// block starts, mismatched deltas, and events for unopened or closed
+    /// blocks. Repeating the same start of an open block is allowed, so a
+    /// filter can append to it without opening another block.
     pub fn push(&mut self, reply: &Reply) -> Result<(), Fault> {
         match reply {
             Reply::Start(start) => match self.start {
                 Some(_) => return Err(malformed("the response starts twice")),
                 None => self.start = Some(start.clone()),
             },
-            Reply::BlockStart { block, kind } => self.open(*block, kind)?,
+            Reply::BlockStart { block, kind } => match self.part(*block) {
+                Some(part) if part.kind == *kind && !part.ended => {}
+                Some(_) => return Err(malformed("a block opens twice")),
+                None => self.items.push(ReplyItem::Block(ReplyBlock {
+                    block: *block,
+                    kind: kind.clone(),
+                    text: String::new(),
+                    ended: false,
+                })),
+            },
             Reply::Delta { block, delta } => {
-                let place = self.open_place(*block)?;
-                let (held, part) = match (place, delta) {
-                    (Place::Reasoning(at), Delta::Reasoning(part)) => {
-                        (&mut self.reasoning[at], part)
-                    }
-                    (Place::Content(at), delta) => match (&mut self.message.content[at], delta) {
-                        (Content::Text { text, .. }, Delta::Text(part)) => (text, part),
-                        (Content::ToolCall { arguments, .. }, Delta::Arguments(part)) => {
-                            (arguments, part)
-                        }
-                        _ => return Err(malformed("a delta is not of its block's kind")),
-                    },
-                    _ => return Err(malformed("a delta is not of its block's kind")),
-                };
-                held.push_str(part);
-            }
-            Reply::BlockEnd { block } => {
-                self.open_place(*block)?;
-                if let Some(folding) = self.blocks.iter_mut().find(|f| f.block == *block) {
-                    folding.ended = true;
+                let part = self.open_part(*block)?;
+                if !matches!(
+                    (&part.kind, delta),
+                    (Block::Text, Delta::Text(_))
+                        | (Block::ToolCall { .. }, Delta::Arguments(_))
+                        | (Block::Reasoning, Delta::Reasoning(_))
+                ) {
+                    return Err(malformed("a delta is not of its block's kind"));
                 }
+                part.text.push_str(delta.as_str());
             }
+            Reply::BlockEnd { block } => self.open_part(*block)?.ended = true,
             Reply::Usage(usage) => self.usage += usage,
             Reply::Finish(finish) => self.finish = Some(finish.clone()),
-            Reply::Other { .. } => self.other.push(reply.clone()),
+            Reply::Other { format, raw } => {
+                self.items
+                    .push(ReplyItem::Other(format.clone(), raw.clone()));
+            }
         }
         Ok(())
     }
 
-    fn open(&mut self, block: u32, kind: &Block) -> Result<(), Fault> {
-        if let Some(had) = self.blocks.iter().find(|f| f.block == block) {
-            // A start repeated for a block, as a filter that adds to it may
-            // write, opens nothing more.
-            let same = match (&had.place, kind) {
-                (Place::Reasoning(_), Block::Reasoning) => true,
-                (Place::Content(at), kind) => match (&self.message.content[*at], kind) {
-                    (Content::Text { .. }, Block::Text) => true,
-                    (Content::ToolCall { id, name, .. }, Block::ToolCall { id: i, name: n }) => {
-                        id == i && name == n
-                    }
-                    _ => false,
-                },
-                _ => false,
-            };
-            return match (same, had.ended) {
-                (true, false) => Ok(()),
-                _ => Err(malformed("a block opens twice")),
-            };
-        }
-        let place = match kind {
-            Block::Text => {
-                self.message.content.push(Content::from(String::new()));
-                Place::Content(self.message.content.len() - 1)
-            }
-            Block::ToolCall { id, name } => {
-                self.message.content.push(Content::tool_call(id, name, ""));
-                Place::Content(self.message.content.len() - 1)
-            }
-            Block::Reasoning => {
-                self.reasoning.push(String::new());
-                Place::Reasoning(self.reasoning.len() - 1)
-            }
-        };
-        self.blocks.push(Folding {
-            block,
-            place,
-            ended: false,
-        });
-        Ok(())
+    fn part(&mut self, block: u32) -> Option<&mut ReplyBlock> {
+        self.items.iter_mut().find_map(|item| match item {
+            ReplyItem::Block(part) if part.block == block => Some(part),
+            _ => None,
+        })
     }
 
-    fn open_place(&self, block: u32) -> Result<Place, Fault> {
-        match self.blocks.iter().find(|f| f.block == block) {
-            Some(Folding {
-                place,
-                ended: false,
-                ..
-            }) => Ok(place.clone()),
+    fn open_part(&mut self, block: u32) -> Result<&mut ReplyBlock, Fault> {
+        match self.part(block) {
+            Some(part) if !part.ended => Ok(part),
             Some(_) => Err(malformed("an event names a block that has ended")),
             None => Err(malformed("an event names a block that never opened")),
         }
@@ -812,18 +780,26 @@ mod tests {
         ])
         .expect("a response");
         assert_eq!(all.start.as_ref().map(|s| s.id.as_str()), Some("r1"));
-        assert_eq!(all.reasoning, ["hm"]);
+        let blocks: Vec<_> = all.blocks().map(|p| (&p.kind, p.text.as_str())).collect();
         assert_eq!(
-            all.message.content,
+            blocks,
             [
-                Content::from("Hello"),
-                Content::tool_call("t", "f", "{\"a\":1}")
+                (&Block::Reasoning, "hm"),
+                (&Block::Text, "Hello"),
+                (
+                    &Block::ToolCall {
+                        id: "t".into(),
+                        name: "f".into()
+                    },
+                    "{\"a\":1}"
+                ),
             ]
         );
-        assert_eq!(all.message.role, Role::Assistant);
+        assert_eq!(all.text(), "Hello");
         assert_eq!(all.finish, Some(Finish::ToolUse));
         assert_eq!(all.usage.get(units::INPUT_TOKENS), Some(6));
-        assert_eq!(all.other, [Reply::other("chat", json!({"type": "ping"}))]);
+        assert!(matches!(all.items().last(), Some(ReplyItem::Other(f, raw))
+            if &**f == "chat" && **raw == json!({"type": "ping"})));
     }
 
     #[test]
@@ -833,6 +809,8 @@ mod tests {
             vec![Reply::text(0, "x")],
             vec![Reply::block_end(0)],
             vec![text(), Reply::block_end(0), Reply::text(0, "x")],
+            vec![text(), Reply::block_end(0), Reply::block_end(0)],
+            vec![text(), Reply::block_end(0), text()],
             vec![text(), Reply::block_start(0, Block::Reasoning)],
             vec![text(), Reply::reasoning(0, "x")],
             vec![text(), Reply::arguments(0, "{}")],
@@ -844,6 +822,36 @@ mod tests {
         }
         // A start repeated for an open block, as a filter adding to it writes.
         assert!(fold(&[text(), Reply::text(0, "a"), text(), Reply::text(0, "b")]).is_ok());
+    }
+
+    #[test]
+    fn interleaved_blocks_keep_their_place_beside_opaque_events() {
+        let signature = json!({"index": 9, "signature": "signed"});
+        let mut all = fold(&[
+            Reply::block_start(9, Block::Reasoning),
+            Reply::reasoning(9, "think"),
+            Reply::other("native", signature.clone()),
+            Reply::block_start(2, Block::Text),
+            Reply::text(2, "ans"),
+            Reply::reasoning(9, "ing"),
+            Reply::block_end(9),
+            Reply::text(2, "wer"),
+        ])
+        .expect("interleaved response");
+        assert!(matches!(&all.items()[0], ReplyItem::Block(p)
+            if p.block == 9 && p.kind == Block::Reasoning && p.text == "thinking"));
+        assert!(matches!(&all.items()[1], ReplyItem::Other(f, raw)
+            if &**f == "native" && **raw == signature));
+        assert!(matches!(&all.items()[2], ReplyItem::Block(p)
+            if p.block == 2 && p.kind == Block::Text && p.text == "answer"));
+        assert_eq!(all.text(), "answer");
+
+        let before = all.clone();
+        assert!(all.push(&Reply::arguments(2, "wrong kind")).is_err());
+        assert_eq!(all, before, "a rejected delta changes nothing");
+        all.push(&Reply::text(2, "!")).expect("still open");
+        all.push(&Reply::block_end(2)).expect("closes");
+        assert_eq!(all.text(), "answer!");
     }
 
     #[test]
@@ -870,7 +878,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn only_usage_and_other_events_are_no_content() {
         assert!(Reply::start("a", "m").is_content());

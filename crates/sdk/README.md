@@ -13,7 +13,14 @@ original types, not wrappers, and provides:
 - fault facts: `BadRequest`, `Upstream`, `Truncated`, `RetryAfter`,
   `ErrorCode` and `Details`.
 
-HTTP bindings live in `respan_gateway_http`.
+The SDK defines no `Format` implementations. `Conversation` / `Reply` is its
+only request/event kind; `Usage` and fault facts are kind-neutral. There are no
+shared image-generation, video-generation or live-session event types here.
+The core accepts any distinct input/output types through `Format<T, R, W>`.
+OpenAI Chat and Anthropic Messages formats live in `respan_gateway_providers`;
+HTTP bindings live in `respan_gateway_http`. WebSocket JSON events
+(`ClientEvent` / `ProviderEvent`) live in `respan_gateway_ws`, and MCP messages
+(`ToServer` / `ToClient`) live in `respan_gateway_mcp`.
 
 A `Fault` carries typed facts that each edge renders as it knows: `BadRequest`,
 `Upstream` and `Truncated` (each with a `fault` constructor), `RetryAfter`,
@@ -27,16 +34,21 @@ has no form for, in its format's own JSON) among them. A `Delta` is a
 `Delta::Text`, `Delta::Arguments` or `Delta::Reasoning`, of its block's own
 kind, so a plugin need not track what a block holds. An encoder collects the
 events into one body or writes them as a stream, so a plugin handles one shape;
-`Assembled` is the whole reply, folded from its events, for plugins that need it (a
-judge, a cache). `Reply::is_content` is true of a start, a block event or a
-finish, not of usage or `Other`.
+`Assembled` folds events for both plugins and whole-body encoders. Its `items()`
+keeps text, reasoning, tool blocks and opaque events together; `blocks()` reads
+just the blocks, and `text()` joins only text blocks. Blocks occupy their opening
+position, with deltas concatenated; opaque events retain their arrival order.
+This is not the original event stream or an automatic conversion to conversation
+history. Assembly checks block consistency; the reader checks stream completion.
+`Reply::is_content` selects starts, block events and finishes; usage and opaque
+events are excluded. Policies may instead select specific variants.
 
 Tools are typed too: a request's `Tool`s and `ToolChoice`, an assistant's
 `Content::ToolCall` and its `Content::ToolResult`, and a response's
 `Block::ToolCall`, whose arguments stream as `Delta::Arguments` of JSON text.
 `Message::text` exposes typed text, explicitly skipping tool calls and other
-content; `Message::is_plain` checks whether all content is known text and the
-message has no `Extra`. Holdback, JSON-text rewriting and placeholders remain
+content; `Message::is_plain` checks for a known role, text parts and no message
+extras. Text-part extras are allowed. Holdback, JSON-text rewriting and placeholders remain
 private example support, not SDK promises.
 
 What the kind has no form for stays as the format that decoded it has it, in an
@@ -49,7 +61,11 @@ decoded from, and compare by what they say. Only an explicit raw relay
 (`respan_gateway_http::relay::Relay::RAW`) sends a request's own bytes, and a
 response is always written again from its events.
 
-The SDK depends on core, `bytes` and `serde_json`, not HTTP.
+The SDK depends only on core and `serde_json`.
+
+The simplification changes the pre-alpha API: `Assembled.message`, `.reasoning`
+and `.other` are replaced by `items()`, `blocks()` and `text()`. `Details` holds
+a JSON object map, so every accepted value is a set of error fields.
 
 Protocol authors use `respan_gateway_http::http` for codecs and transports
 and `respan_gateway_http::formats` for JSON/SSE framing, error encoding and
