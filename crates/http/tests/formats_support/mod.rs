@@ -28,7 +28,7 @@ pub fn providers(list: impl IntoIterator<Item = AddProvider>) -> Result<Gateway,
     list.into_iter().try_fold(Gateway::new(), |gw, add| add(gw))
 }
 
-use respan_gateway_sdk::conversation::{Conversation, Reply};
+use respan_gateway_conversation::{Input, Output};
 
 pub fn with_plugins(
     gateway: Gateway,
@@ -54,12 +54,12 @@ impl Metered {
 #[async_trait]
 impl Plugin for Metered {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if !px.is_kind::<Conversation>() {
+        if !px.is_kind::<Input>() {
             return Ok(());
         }
         let usage = self.0.clone();
-        px.filter(move |reply: &mut Reply| {
-            if let Reply::Usage(more) = reply {
+        px.filter(move |reply: &mut Output| {
+            if let Output::Usage(more) = reply {
                 *usage.lock().unwrap_or_else(PoisonError::into_inner) += &*more;
             }
             Ok(())

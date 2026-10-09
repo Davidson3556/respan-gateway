@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-sdk"
-description = "Plugin-author facade: core contracts and transport-neutral LLM messages and usage."
+description = "General plugin-author facade: core contracts, usage and fault facts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

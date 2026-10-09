@@ -15,6 +15,8 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+respan-gateway-realtime.workspace = true
+respan-gateway-conversation.workspace = true
 respan-gateway-plugins.workspace = true
 respan-gateway-sdk.workspace = true
 respan-gateway-http.workspace = true

@@ -23,13 +23,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::FakeOpenAi;
+use respan_gateway_conversation::{Delta, Input, Message, Output};
 use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::Extensions;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Conversation, Delta, Message, Reply};
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -120,15 +120,15 @@ impl<S: Sink> Plugin for Log<S> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let id = RequestId(self.next.fetch_add(1, Ordering::Relaxed));
         cx.extensions_mut().insert(id);
-        if cx.extensions().get::<NoContent>().is_some() || !cx.is_kind::<Conversation>() {
+        if cx.extensions().get::<NoContent>().is_some() || !cx.is_kind::<Input>() {
             return Ok(None);
         }
         let captured = Captured::default();
         let into = captured.0.clone();
         // The completion is the text deltas, so reasoning and tool-call
         // arguments stay out of it.
-        cx.filter(move |reply: &mut Reply| {
-            if let Reply::Delta {
+        cx.filter(move |reply: &mut Output| {
+            if let Output::Delta {
                 delta: Delta::Text(text),
                 ..
             } = reply
@@ -161,8 +161,8 @@ impl<S: Sink> Plugin for Log<S> {
             .get::<Captured>()
             .filter(|_| ext.get::<NoContent>().is_none());
         if let Some(captured) = captured {
-            let chat = cx.input::<Conversation>().ok();
-            let text = |c: &Conversation| c.messages.iter().map(Message::text).collect::<Vec<_>>();
+            let chat = cx.input::<Input>().ok();
+            let text = |c: &Input| c.messages.iter().map(Message::text).collect::<Vec<_>>();
             record.prompt = chat.map(|c| text(c).join("\n"));
             let completion = captured.0.lock().unwrap_or_else(PoisonError::into_inner);
             record.completion = Some(completion.clone());
@@ -200,8 +200,8 @@ fn gateway(
         next: AtomicU64::new(1),
     };
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Tenancy(&["zdr-bank"]))
         .plugin(log)
         .target("openai")

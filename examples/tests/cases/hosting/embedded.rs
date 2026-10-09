@@ -1,5 +1,5 @@
 use super::*;
-use respan_gateway_sdk::conversation::units;
+use respan_gateway_conversation::units;
 
 #[tokio::test]
 async fn handle_returns_the_response_and_its_outcome_with_no_server() -> Result<(), Fault> {

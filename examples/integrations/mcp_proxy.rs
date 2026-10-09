@@ -8,7 +8,7 @@
 //! `-- --stdio npx -y @modelcontextprotocol/server-everything`.
 //!
 //! Nothing is relayed: the session the server assigns, and every header MCP
-//! carries, travel in the kind ([`ToServer`], [`ToClient`]), so the
+//! carries, travel in the kind ([`Input`], [`Output`]), so the
 //! allow-list's filters see and edit every call.
 //!
 //! Not built: realtime WebSocket sessions and per-turn billing (use case 7).
@@ -21,9 +21,8 @@ use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_
 use serde_json::{Value, json};
 
 use respan_gateway_http::HttpClient;
-use respan_gateway_mcp::{
-    self as mcp, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer,
-};
+use respan_gateway_mcp::{self as mcp, SESSION, StdioTransport, StreamableHttp};
+use respan_gateway_mcp::{HttpInput as Input, HttpOutput as Output};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -41,29 +40,33 @@ fn allows(allowed: &[&str], tool: &Value) -> bool {
 #[async_trait]
 impl Plugin for ToolAllowList {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if !cx.is_kind::<ToServer>() {
+        if !cx.is_kind::<Input>() {
             return Ok(None);
         }
-        let input = cx.input::<ToServer>()?;
+        let input = cx.input::<Input>()?;
         let calls = input
             .messages
             .iter()
-            .filter(|m| m["method"] == "tools/call");
+            .filter(|m| m.method() == Some("tools/call"));
         let refused = calls
-            .map(|m| &m["params"]["name"])
+            .filter_map(|m| m.params().map(|p| &p["name"]))
             .find(|t| !allows(&self.0, t));
         if let Some(tool) = refused {
             // Every request it posts is answered with a JSON-RPC error; the
             // server never sees it.
             let message = format!("tool {tool} is not allowed");
-            let invalid_params = |id: &Value| mcp::error(id.clone(), -32602, &message);
-            let answer = ToClient::new(input.request_ids().map(invalid_params).collect());
+            let invalid_params = |id: Value| {
+                mcp::error(id, -32602, &message)
+                    .try_into()
+                    .expect("valid RPC error")
+            };
+            let answer = Output::new(input.request_ids().map(invalid_params).collect());
             return Ok(Some(Response::stream(stream::iter([Ok(answer)]))));
         }
         let allowed = self.0.clone();
-        cx.filter(move |out: &mut ToClient| {
+        cx.filter(move |out: &mut Output| {
             let lists = out.messages.iter_mut();
-            let lists = lists.filter_map(|m| m.pointer_mut("/result/tools")?.as_array_mut());
+            let lists = lists.filter_map(|m| m.result_mut()?.get_mut("tools")?.as_array_mut());
             for tools in lists {
                 tools.retain(|t| allows(&allowed, &t["name"]));
             }
@@ -80,8 +83,8 @@ fn gateway(
     + 'static,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<ToServer, _, _>("tools", StreamableHttp::default(), server)?
-        .client::<ToServer, _, _>(StreamableHttp::default())?
+        .provider::<Input, _, _>("tools", StreamableHttp::default(), server)?
+        .client::<Input, _, _>(StreamableHttp::default())?
         .plugin(ToolAllowList(Arc::from(["echo"])))
         .target("tools")
 }

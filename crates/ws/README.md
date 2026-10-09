@@ -6,6 +6,10 @@ request, the answer's head is the `101`, and the two bodies are streams of
 frames, **one body item per text frame**. Nothing here knows a provider's
 events; OpenAI Realtime and Gemini Live run through the same code.
 
+The `Input` / `Output` pair lives in
+[`respan-gateway-realtime`](../realtime/README.md). Import models from
+that crate and codecs/transports from this one.
+
 ## API
 
 - `WsTransport::new(base_url)`: an outbound native HTTP sender to a `ws://` or
@@ -19,11 +23,11 @@ events; OpenAI Realtime and Gemini Live run through the same code.
   UTF-8 text, such as Gemini Live's JSON. These become text messages toward
   the client; invalid UTF-8 is a fault. Disabled by default.
 - `JsonEvents::new(name, path)`: incoming and outgoing `Format` bindings
-  whose kind is one JSON event per frame, `ClientEvent` in and
-  `ProviderEvent` out (each has `json: Value`). Every event is written from
+  whose kind is one JSON event per frame, `Input` in and
+  `Output` out (each has `json: Value`). Every event is written from
   its JSON, so a relay to a format of the same name keeps what an event says,
   not its exact bytes. Plugins filter events with
-  `cx.filter(|e: &mut ProviderEvent| ..)` (client edge) or `px.filter(..)`
+  `cx.filter(|e: &mut Output| ..)` (client edge) or `px.filter(..)`
   (provider edge), and drop one with a `Filter` that does not push it.
   `.protocol(name)` makes it speak a subprotocol: offered to the provider,
   and given back to a client that offered it. A handshake it refuses is

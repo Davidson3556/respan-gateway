@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use http::{HeaderValue, StatusCode};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi, Request};
+use respan_gateway_conversation::{Block, Delta, Finish, Input, NativeFields, Output, units};
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::async_trait;
-use respan_gateway_sdk::conversation::{Block, Conversation, Delta, Extra, Finish, Reply, units};
 use respan_gateway_sdk::{ClientContext, Fault, Plugin, ProviderContext, Response, Upstream};
 #[allow(dead_code)] // Shared hooks also expose a call log not used by this suite.
 #[path = "../../../tests/support/hooks.rs"]
@@ -130,11 +130,11 @@ impl Plugin for Cross {
 }
 
 impl Harness {
-    /// Plugins, in order: the log, [`Cross`], `extra`, and a router sending
+    /// Plugins, in order: the log, [`Cross`], `native`, and a router sending
     /// Claude models to Anthropic, as gateway.example.yaml does.
-    async fn new(extra: Vec<Arc<dyn Plugin>>) -> Self {
+    async fn new(native: Vec<Arc<dyn Plugin>>) -> Self {
         let mut chain: Vec<Arc<dyn Plugin>> = vec![Arc::new(Cross)];
-        chain.extend(extra);
+        chain.extend(native);
         Self::with(chain).await
     }
 
@@ -160,7 +160,7 @@ impl Harness {
         let mut plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(log.clone())];
         plugins.extend(chain);
         plugins.push(Arc::new(
-            ModelRouter::new(|c: &Conversation| c.model.as_deref()).route("claude", "anthropic"),
+            ModelRouter::new(|c: &Input| c.model.as_deref()).route("claude", "anthropic"),
         ));
         let usage = Metered::default();
         plugins.push(Arc::new(usage.clone()));
@@ -169,8 +169,8 @@ impl Harness {
             add_provider("anthropic", AnthropicMessages, anthropic_http),
         ])
         .and_then(|gw| {
-            gw.client::<Conversation, _, _>(OpenAiChat)?
-                .client::<Conversation, _, _>(AnthropicMessages)
+            gw.client::<Input, _, _>(OpenAiChat)?
+                .client::<Input, _, _>(AnthropicMessages)
         })
         .map(|gw| with_plugins(gw, plugins))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
@@ -411,9 +411,9 @@ struct Canned;
 #[async_trait]
 impl Plugin for Canned {
     async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let mut events = vec![Reply::start("cached_1", "claude-x")];
+        let mut events = vec![Output::start("cached_1", "claude-x")];
         events.extend(text(0, "Hi"));
-        events.push(Reply::finished(Finish::Stop));
+        events.push(Output::finished(Finish::Stop));
         let events = futures::stream::iter(events.into_iter().map(Ok));
         Ok(Some(Response::stream(events)))
     }
@@ -468,13 +468,13 @@ fn assert_well_formed(names: &[String], out: &str) {
 /// Fails the end of a response that failed, as an audit might.
 struct Audit;
 
-impl Filter<Reply> for Audit {
-    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for Audit {
+    fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         out.push(event);
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
         match end {
             Ok(()) => Ok(()),
             _ => Err(Upstream::fault("audit: failed response")),
@@ -507,19 +507,22 @@ async fn anthropic_messages(stream: &[String]) -> (Harness, String) {
 /// Puts a note before the answer, as soon as the response starts.
 struct Note(bool);
 
-impl Filter<Reply> for Note {
-    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        let first = matches!(event, Reply::Start(_)) && !std::mem::replace(&mut self.0, true);
+impl Filter<Output> for Note {
+    fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        let first = matches!(event, Output::Start(_)) && !std::mem::replace(&mut self.0, true);
         out.push(event);
         if first {
             // Into the answer's first block, which opens as it comes.
-            out.extend([Reply::block_start(0, Block::Text), Reply::text(0, "Note: ")]);
+            out.extend([
+                Output::block_start(0, Block::Text),
+                Output::text(0, "Note: "),
+            ]);
         }
         Ok(())
     }
 }
 
-async fn filtered<F: Filter<Reply> + Clone + Sync>(filter: F) -> Harness {
+async fn filtered<F: Filter<Output> + Clone + Sync>(filter: F) -> Harness {
     Harness::new(vec![Arc::new(Adds(filter))]).await
 }
 
@@ -532,19 +535,19 @@ impl Clone for Note {
 /// Keeps text back to the end, with the end of its block, letting everything
 /// else through.
 #[derive(Clone, Default)]
-struct HoldText(Vec<Reply>, TextBlocks);
+struct HoldText(Vec<Output>, TextBlocks);
 
-impl Filter<Reply> for HoldText {
-    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for HoldText {
+    fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.1.note(&event);
-        match self.1.is_text(&event) && !matches!(event, Reply::BlockStart { .. }) {
+        match self.1.is_text(&event) && !matches!(event, Output::BlockStart { .. }) {
             true => self.0.push(event),
             false => out.push(event),
         }
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
         out.append(&mut self.0);
         Ok(())
     }
@@ -553,13 +556,13 @@ impl Filter<Reply> for HoldText {
 /// Keeps each text back, with the end of its block, until the next one
 /// comes, releasing the last at the end.
 #[derive(Clone, Default)]
-struct LagByOne(Vec<Reply>, TextBlocks);
+struct LagByOne(Vec<Output>, TextBlocks);
 
-impl Filter<Reply> for LagByOne {
-    fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for LagByOne {
+    fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.1.note(&event);
         let text = text_of(&event).is_some();
-        let ends = matches!(&event, Reply::BlockEnd { block } if self.1.contains(*block));
+        let ends = matches!(&event, Output::BlockEnd { block } if self.1.contains(*block));
         match (text, ends) {
             (true, _) => {
                 out.append(&mut self.0);
@@ -571,7 +574,7 @@ impl Filter<Reply> for LagByOne {
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
         out.append(&mut self.0);
         Ok(())
     }
@@ -607,7 +610,7 @@ fn two_text_blocks(a: &str, b: &str) -> Vec<String> {
     stream
 }
 
-async fn anthropic_through<F: Filter<Reply> + Clone + Sync>(
+async fn anthropic_through<F: Filter<Output> + Clone + Sync>(
     filter: F,
     stream: &[String],
 ) -> String {
@@ -640,7 +643,7 @@ struct Alias;
 #[async_trait]
 impl Plugin for Alias {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|chat: &mut Conversation| {
+        cx.filter(|chat: &mut Input| {
             chat.model = Some("claude-sonnet-x".into());
             Ok(())
         })?;
@@ -667,7 +670,7 @@ struct L4Own(&'static str);
 #[async_trait]
 impl Plugin for L4Own {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let chat = cx.input::<Conversation>()?.clone();
+        let chat = cx.input::<Input>()?.clone();
         Ok(Some(cx.call(self.0).with_input(chat).await?))
     }
 }
@@ -696,9 +699,9 @@ fn l4_openai_calls(out: &str) -> Vec<(String, String)> {
 #[derive(Clone, Default)]
 struct RestoreArguments;
 
-impl Filter<Reply> for RestoreArguments {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if let Reply::Delta {
+impl Filter<Output> for RestoreArguments {
+    fn edit(&mut self, mut reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        if let Output::Delta {
             delta: Delta::Arguments(arguments),
             ..
         } = &mut reply

@@ -1,7 +1,7 @@
 //! Timing of a plain relay, unchanged, whole and streamed. Run with
 //! `cargo bench -p respan-gateway-providers --bench relay -- --ignored --nocapture`.
 
-use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_conversation::Input;
 use std::time::Instant;
 
 use respan_gateway_http::Body;
@@ -40,12 +40,12 @@ async fn time(name: &str, stream: bool, reply: &str, content_type: &'static str)
         }
     };
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "p",
             OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("p"))
         .unwrap_or_else(|f| panic!("{f}"));
     let body = request(stream);

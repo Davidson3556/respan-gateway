@@ -49,9 +49,9 @@ async fn only_a_relay_is_marked_and_carries_the_clients_key() {
             Marks(anthropic_http, Arc::clone(&marks)),
         ),
     ])
-    .and_then(|gw| gw.client::<Conversation, _, _>(OpenAiChat))
+    .and_then(|gw| gw.client::<Input, _, _>(OpenAiChat))
     .map(|gw| {
-        let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
+        let router = ModelRouter::new(|c: &Input| c.model.as_deref());
         let plugins: Vec<Arc<dyn Plugin>> = vec![
             Arc::new(Forges),
             Arc::new(router.route("claude", "anthropic")),
@@ -153,8 +153,8 @@ async fn a_provider_edge_edit_is_encoded_for_its_translated_target() {
     impl Plugin for Cool {
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
             assert_eq!(px.format(), "anthropic-messages");
-            px.filter(|chat: &mut Conversation| {
-                chat.temperature = Some(0.0);
+            px.filter(|chat: &mut Input| {
+                chat.options.temperature = Some(0.0);
                 Ok(())
             })
         }

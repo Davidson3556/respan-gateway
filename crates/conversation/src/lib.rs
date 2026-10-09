@@ -1,14 +1,15 @@
+#![warn(missing_docs)]
 //! The conversation kind: chats with a language model. Formats translate
 //! through these types, and plugins read any conversation through them:
-//! `cx.filter(|c: &mut Conversation| ..)` for the input and
-//! `cx.filter(|r: &mut Reply| ..)` for the output, one [`Reply`] per event of
-//! the reply: a `Reply` is one event, not a whole reply.
+//! `cx.filter(|c: &mut Input| ..)` for the input and
+//! `cx.filter(|r: &mut Output| ..)` for the output, one [`Output`] per event of
+//! the reply: an `Output` is one event, not a whole reply.
 //!
 //! A reply is a sequence of events that follows the lifecycle of a
-//! stream: [`Reply::Start`], then for each content block a
-//! [`Reply::BlockStart`], its [`Reply::Delta`]s (each a [`Delta`] of its
-//! block's own kind) and a [`Reply::BlockEnd`],
-//! with [`Reply::Usage`], [`Reply::Finish`] and [`Reply::Other`] among them.
+//! stream: [`Output::Start`], then for each content block a
+//! [`Output::BlockStart`], its [`Output::Delta`]s (each a [`Delta`] of its
+//! block's own kind) and an [`Output::BlockEnd`],
+//! with [`Output::Usage`], [`Output::Finish`] and [`Output::Native`] among them.
 //! A response that was not streamed decodes into the same sequence, and an
 //! encoder collects the events into one body or writes them as a stream, so a
 //! plugin handles one shape. [`Assembled`] folds the events into the whole
@@ -20,18 +21,19 @@
 //! response makes ([`Block::ToolCall`]), whose arguments stream as JSON text.
 //!
 //! What the kind has no form for stays as the format that decoded it has it
-//! ([`Extra`], [`Content::Other`], [`Reply::Other`]); it is sent only in that
+//! ([`NativeFields`], [`Content::Native`], [`Output::Native`]); it is sent only in that
 //! format, and translating it is refused if it can change the answer.
 //!
 //! Values are plain data: they say what they hold and compare by it. They
 //! keep nothing of the bytes they were decoded from.
+//!
+//! Direction is gateway-wide: [`Input`] travels from client to provider;
+//! [`Output`] travels from provider to client, on either transport edge.
 
-use respan_gateway_core::Fault;
+use respan_gateway_sdk::{Fault, Upstream, Usage};
 use std::sync::Arc;
 
-use serde_json::{Map, Value};
-
-use crate::{Upstream, Usage};
+use serde_json::Value;
 
 /// The conversation kind's [`Usage`] unit names, which every conversation
 /// format reports alike.
@@ -48,75 +50,71 @@ pub mod units {
     pub const REASONING_TOKENS: &str = "reasoning_tokens";
 }
 
-/// Fields a format keeps that the kind has no place for, in that format's
-/// terms. An encoder writes them only when `format` is its own name;
-/// translating to another format drops them unless doing so could change the
-/// answer, in which case it is refused. A format that decodes a value sets
-/// `format` whenever `fields` says something, or the value needs it, as a
-/// [`Role::Other`] does.
-///
-/// `fields` may also hold a field's own spelling, such as the key a limit
-/// was written under: the format that decoded it honours it when it writes
-/// the value again, and any other format writes its own spelling and drops
-/// it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Extra {
-    /// The name of the format `fields` are in.
-    pub format: Option<Arc<str>>,
-    /// The fields, as that format has them.
-    pub fields: Map<String, Value>,
+pub use respan_gateway_sdk::{FormatId, NativeFields, NativeValue};
+
+mod media;
+pub use media::{Media, MediaSource};
+
+/// Provider-neutral generation settings, independent of response framing.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct GenerationOptions {
+    /// Maximum generated tokens.
+    pub max_output_tokens: Option<u64>,
+    /// Sampling temperature.
+    pub temperature: Option<f64>,
+    /// Nucleus sampling cutoff.
+    pub top_p: Option<f64>,
+    /// Stop sequences.
+    pub stop: Vec<String>,
+    /// Tool selection policy.
+    pub tool_choice: Option<ToolChoice>,
+    /// Whether parallel tool calls are allowed.
+    pub parallel_tool_calls: Option<bool>,
+    /// Required shape of the generated answer.
+    pub response_format: Option<ResponseFormat>,
 }
 
-impl Extra {
-    /// These `fields` of `format`.
-    pub fn new(format: impl Into<Arc<str>>, fields: Map<String, Value>) -> Self {
-        Self {
-            format: Some(format.into()),
-            fields,
-        }
-    }
-
-    /// Whether it holds no field.
-    pub fn is_empty(&self) -> bool {
-        self.fields.is_empty()
-    }
+/// A common structured-output requirement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseFormat {
+    /// Ordinary text.
+    Text,
+    /// A JSON object, without a supplied schema.
+    JsonObject,
+    /// JSON matching a named schema.
+    JsonSchema {
+        /// Schema name.
+        name: String,
+        /// Optional schema description.
+        description: Option<String>,
+        /// JSON Schema definition.
+        schema: Value,
+        /// Whether the provider must enforce the schema strictly.
+        strict: Option<bool>,
+    },
 }
 
 /// The kind's input: a conversation request.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
-pub struct Conversation {
+pub struct Input {
     /// The model asked for, if any.
     pub model: Option<String>,
     /// The messages, in order.
     pub messages: Vec<Message>,
-    /// Whether the request asks for a stream: the framing the client asked
-    /// for, which the value carries so that a translated call asks the
-    /// provider for the same.
-    pub stream: bool,
-    /// The most tokens the answer may have.
-    pub max_tokens: Option<u64>,
-    /// The sampling temperature.
-    pub temperature: Option<f64>,
-    /// The nucleus sampling cutoff.
-    pub top_p: Option<f64>,
-    /// Sequences that stop the answer.
-    pub stop: Vec<String>,
+    /// Generation behavior, independent of transport framing.
+    pub options: GenerationOptions,
     /// The end user's id, as the client names them to the provider.
     pub user: Option<String>,
     /// The tools the model may call.
     pub tools: Vec<Tool>,
-    /// Whether, or which, tool the model must call, if the request says.
-    pub tool_choice: Option<ToolChoice>,
-    /// Whether the model may call several tools at once, if the request
-    /// says.
-    pub parallel_tool_calls: Option<bool>,
     /// The request's fields the kind has no place for, such as tools a
     /// provider runs itself.
-    pub extra: Extra,
+    pub native: Option<NativeFields>,
 }
 
-impl Conversation {
+impl Input {
     /// A request of these `messages` alone, such as a judge's own prompt.
     pub fn new(messages: impl IntoIterator<Item = Message>) -> Self {
         Self {
@@ -129,9 +127,9 @@ impl Conversation {
 /// A filter that asks for `model`, such as `cx.filter(set_model(m))`.
 pub fn set_model(
     model: impl Into<String>,
-) -> impl FnMut(&mut Conversation) -> Result<(), Fault> + Clone + Send + 'static {
+) -> impl FnMut(&mut Input) -> Result<(), Fault> + Clone + Send + 'static {
     let model = model.into();
-    move |chat: &mut Conversation| {
+    move |chat: &mut Input| {
         chat.model = Some(model.clone());
         Ok(())
     }
@@ -146,8 +144,8 @@ pub struct Message {
     /// What it says, part by part.
     pub content: Vec<Content>,
     /// The message's fields the kind has no place for, such as a name. A
-    /// [`Role::Other`] is in the format of `extra`.
-    pub extra: Extra,
+    /// [`Role::Other`] is in the format of `native`.
+    pub native: Option<NativeFields>,
 }
 
 impl Message {
@@ -156,7 +154,7 @@ impl Message {
         Self {
             role,
             content: vec![content.into()],
-            extra: Extra::default(),
+            native: None,
         }
     }
 
@@ -172,13 +170,13 @@ impl Message {
             .collect()
     }
 
-    /// Whether the kind has a place for all of it: a known role, no extra
-    /// fields on the message, and text parts (whose own extra fields, such as
+    /// Whether the kind has a place for all of it: a known role, no native
+    /// fields on the message, and text parts (whose own native fields, such as
     /// a cache marker, do not change what they say).
     pub fn is_plain(&self) -> bool {
         let text = |c: &Content| matches!(c, Content::Text { .. });
         !matches!(self.role, Role::Other { .. })
-            && self.extra.is_empty()
+            && self.native.as_ref().is_none_or(NativeFields::is_empty)
             && self.content.iter().all(text)
     }
 }
@@ -222,6 +220,19 @@ impl Role {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Content {
+    /// Reasoning retained in conversation history.
+    Reasoning {
+        /// Reasoning text.
+        text: String,
+        /// Native fields such as a provider signature.
+        native: Option<NativeFields>,
+    },
+    /// An image with a typed source and MIME type.
+    Image(Media),
+    /// Audio with a typed source and MIME type.
+    Audio(Media),
+    /// A document with a typed source and MIME type.
+    Document(Media),
     /// Text.
     #[non_exhaustive]
     Text {
@@ -229,7 +240,7 @@ pub enum Content {
         text: String,
         /// The part's fields the kind has no place for, such as a cache
         /// marker.
-        extra: Extra,
+        native: Option<NativeFields>,
     },
     /// A tool call an assistant made.
     #[non_exhaustive]
@@ -241,7 +252,7 @@ pub enum Content {
         /// Its arguments, as JSON text.
         arguments: String,
         /// The part's fields the kind has no place for.
-        extra: Extra,
+        native: Option<NativeFields>,
     },
     /// What a tool answered a call.
     #[non_exhaustive]
@@ -253,17 +264,11 @@ pub enum Content {
         /// Whether the call failed.
         is_error: bool,
         /// The part's fields the kind has no place for.
-        extra: Extra,
+        native: Option<NativeFields>,
     },
     /// A part the kind has no form for, such as an image or a file, as
     /// `format` has it; only a call in that format can send it.
-    #[non_exhaustive]
-    Other {
-        /// The name of the format `raw` is in.
-        format: Arc<str>,
-        /// The part as that format has it.
-        raw: Arc<Value>,
-    },
+    Native(NativeValue),
 }
 
 impl Content {
@@ -277,7 +282,7 @@ impl Content {
             id: id.into(),
             name: name.into(),
             arguments: arguments.into(),
-            extra: Extra::default(),
+            native: None,
         }
     }
 
@@ -287,16 +292,16 @@ impl Content {
             id: id.into(),
             content,
             is_error,
-            extra: Extra::default(),
+            native: None,
         }
     }
 
     /// A part of `format` the kind has no form for.
-    pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
-        Content::Other {
+    pub fn native(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
+        Content::Native(respan_gateway_sdk::NativeValue {
             format: format.into(),
-            raw: Arc::new(raw.into()),
-        }
+            value: Arc::new(raw.into()),
+        })
     }
 }
 
@@ -311,7 +316,7 @@ pub struct Tool {
     /// The JSON schema of its arguments.
     pub parameters: Value,
     /// Its fields the kind has no place for, such as a cache marker.
-    pub extra: Extra,
+    pub native: Option<NativeFields>,
 }
 
 impl Tool {
@@ -321,7 +326,7 @@ impl Tool {
             name: name.into(),
             description: None,
             parameters,
-            extra: Extra::default(),
+            native: None,
         }
     }
 }
@@ -344,30 +349,27 @@ impl From<&str> for Content {
     fn from(text: &str) -> Self {
         Content::Text {
             text: text.into(),
-            extra: Extra::default(),
+            native: None,
         }
     }
 }
 
 impl From<String> for Content {
     fn from(text: String) -> Self {
-        Content::Text {
-            text,
-            extra: Extra::default(),
-        }
+        Content::Text { text, native: None }
     }
 }
 
-/// The kind's output: one event of a reply, streamed or not (a `Reply` is
+/// The kind's output: one event of a reply, streamed or not (an `Output` is
 /// not a whole reply; [`Assembled`] is the whole reply, folded from its
-/// events). Filters see every event, those that are no content ([`Reply::is_content`]) included,
+/// events). Filters see every event, those that are no content ([`Output::is_content`]) included,
 /// such as a usage report.
 ///
 /// Blocks are numbered by the format that decodes them, and may be open
 /// together; an event names its block.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub enum Reply {
+pub enum Output {
     /// The response begins: its id and model.
     Start(Start),
     /// Content block `block` opens.
@@ -396,12 +398,7 @@ pub enum Reply {
     Finish(Finish),
     /// An event the kind has no form for, as `format` has it (pings,
     /// signatures, provider-specific events). Sent only in that format.
-    Other {
-        /// The name of the format `raw` is in.
-        format: Arc<str>,
-        /// The event as that format has it.
-        raw: Arc<Value>,
-    },
+    Native(NativeValue),
 }
 
 /// Which response the events belong to.
@@ -414,7 +411,7 @@ pub struct Start {
     pub model: String,
     /// The response's fields the kind has no place for, such as a
     /// fingerprint.
-    pub extra: Extra,
+    pub native: Option<NativeFields>,
 }
 
 /// What a content block holds.
@@ -469,25 +466,25 @@ impl Start {
         Self {
             id: id.into(),
             model: model.into(),
-            extra: Extra::default(),
+            native: None,
         }
     }
 }
 
-impl Reply {
+impl Output {
     /// The start of a response of this `id` and `model`.
     pub fn start(id: impl Into<String>, model: impl Into<String>) -> Self {
-        Reply::Start(Start::new(id, model))
+        Output::Start(Start::new(id, model))
     }
 
     /// Block `block` opens as `kind`.
     pub fn block_start(block: u32, kind: Block) -> Self {
-        Reply::BlockStart { block, kind }
+        Output::BlockStart { block, kind }
     }
 
     /// The next text of the [`Block::Text`] `block`.
     pub fn text(block: u32, text: impl Into<String>) -> Self {
-        Reply::Delta {
+        Output::Delta {
             block,
             delta: Delta::Text(text.into()),
         }
@@ -495,7 +492,7 @@ impl Reply {
 
     /// The next part of the arguments of the [`Block::ToolCall`] `block`.
     pub fn arguments(block: u32, json: impl Into<String>) -> Self {
-        Reply::Delta {
+        Output::Delta {
             block,
             delta: Delta::Arguments(json.into()),
         }
@@ -503,7 +500,7 @@ impl Reply {
 
     /// The next reasoning of the [`Block::Reasoning`] `block`.
     pub fn reasoning(block: u32, text: impl Into<String>) -> Self {
-        Reply::Delta {
+        Output::Delta {
             block,
             delta: Delta::Reasoning(text.into()),
         }
@@ -511,31 +508,34 @@ impl Reply {
 
     /// Block `block` is complete.
     pub fn block_end(block: u32) -> Self {
-        Reply::BlockEnd { block }
+        Output::BlockEnd { block }
     }
 
     /// Usage the provider reports, as an increment.
     pub fn usage(usage: Usage) -> Self {
-        Reply::Usage(usage)
+        Output::Usage(usage)
     }
 
     /// The model stopped for this reason.
     pub fn finished(finish: Finish) -> Self {
-        Reply::Finish(finish)
+        Output::Finish(finish)
     }
 
     /// An event of `format` the kind has no form for.
-    pub fn other(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
-        Reply::Other {
+    pub fn native(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
+        Output::Native(respan_gateway_sdk::NativeValue {
             format: format.into(),
-            raw: Arc::new(raw.into()),
-        }
+            value: Arc::new(raw.into()),
+        })
     }
 
     /// Whether it is content: a start, a block event or a finish. Usage and
-    /// [`Reply::Other`] are not.
+    /// [`Output::Native`] are not.
     pub fn is_content(&self) -> bool {
-        !matches!(self, Reply::Usage(_) | Reply::Other { .. })
+        !matches!(
+            self,
+            Output::Usage(_) | Output::Native(respan_gateway_sdk::NativeValue { .. })
+        )
     }
 }
 
@@ -592,7 +592,7 @@ pub enum ReplyItem {
     /// An assembled content block.
     Block(ReplyBlock),
     /// A format-specific event, kept without interpretation.
-    Other(Arc<str>, Arc<Value>),
+    Native(NativeValue),
 }
 
 /// Response events collected for inspection or whole-body encoding.
@@ -621,7 +621,7 @@ impl Assembled {
     pub fn blocks(&self) -> impl Iterator<Item = &ReplyBlock> {
         self.items.iter().filter_map(|item| match item {
             ReplyItem::Block(part) => Some(part),
-            ReplyItem::Other(..) => None,
+            ReplyItem::Native(..) => None,
         })
     }
 
@@ -637,13 +637,13 @@ impl Assembled {
     /// block starts, mismatched deltas, and events for unopened or closed
     /// blocks. Repeating the same start of an open block is allowed, so a
     /// filter can append to it without opening another block.
-    pub fn push(&mut self, reply: &Reply) -> Result<(), Fault> {
+    pub fn push(&mut self, reply: &Output) -> Result<(), Fault> {
         match reply {
-            Reply::Start(start) => match self.start {
+            Output::Start(start) => match self.start {
                 Some(_) => return Err(malformed("the response starts twice")),
                 None => self.start = Some(start.clone()),
             },
-            Reply::BlockStart { block, kind } => match self.part(*block) {
+            Output::BlockStart { block, kind } => match self.part(*block) {
                 Some(part) if part.kind == *kind && !part.ended => {}
                 Some(_) => return Err(malformed("a block opens twice")),
                 None => self.items.push(ReplyItem::Block(ReplyBlock {
@@ -653,7 +653,7 @@ impl Assembled {
                     ended: false,
                 })),
             },
-            Reply::Delta { block, delta } => {
+            Output::Delta { block, delta } => {
                 let part = self.open_part(*block)?;
                 if !matches!(
                     (&part.kind, delta),
@@ -665,12 +665,14 @@ impl Assembled {
                 }
                 part.text.push_str(delta.as_str());
             }
-            Reply::BlockEnd { block } => self.open_part(*block)?.ended = true,
-            Reply::Usage(usage) => self.usage += usage,
-            Reply::Finish(finish) => self.finish = Some(finish.clone()),
-            Reply::Other { format, raw } => {
-                self.items
-                    .push(ReplyItem::Other(format.clone(), raw.clone()));
+            Output::BlockEnd { block } => self.open_part(*block)?.ended = true,
+            Output::Usage(usage) => self.usage += usage,
+            Output::Finish(finish) => self.finish = Some(finish.clone()),
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw }) => {
+                self.items.push(ReplyItem::Native(NativeValue {
+                    format: format.clone(),
+                    value: raw.clone(),
+                }));
             }
         }
         Ok(())
@@ -702,7 +704,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn fold(events: &[Reply]) -> Result<Assembled, Fault> {
+    fn fold(events: &[Output]) -> Result<Assembled, Fault> {
         let mut all = Assembled::default();
         events.iter().try_for_each(|e| all.push(e))?;
         Ok(all)
@@ -713,13 +715,13 @@ mod tests {
         let a = Message::new(Role::User, "hi");
         let mut b = a.clone();
         assert_eq!(a, b);
-        b.extra = Extra::new(
+        b.native = Some(NativeFields::new(
             "chat",
             json!({"name": "x"})
                 .as_object()
                 .cloned()
                 .unwrap_or_default(),
-        );
+        ));
         assert_ne!(a, b);
         assert!(a.is_plain() && !b.is_plain());
         let tagged = Message::new(Role::other("chat", "tool"), "x");
@@ -728,7 +730,7 @@ mod tests {
 
     #[test]
     fn parts_roles_and_finishes_carry_their_format_and_extra() {
-        let marker = Extra::new(
+        let marker = NativeFields::new(
             "chat",
             json!({"cache_control": 1})
                 .as_object()
@@ -736,10 +738,10 @@ mod tests {
                 .unwrap_or_default(),
         );
         let mut cached = Message::new(Role::User, "hi");
-        if let Content::Text { extra, .. } = &mut cached.content[0] {
-            *extra = marker;
+        if let Content::Text { native, .. } = &mut cached.content[0] {
+            *native = Some(marker);
         }
-        // A part's extra does not change what it says.
+        // A part's native does not change what it says.
         assert!(cached.is_plain());
         assert_ne!(cached, Message::new(Role::User, "hi"));
         assert_eq!(Role::other("chat", "critic"), Role::other("chat", "critic"));
@@ -755,28 +757,28 @@ mod tests {
         let mut usage = Usage::default();
         usage.add(units::INPUT_TOKENS, 3);
         let all = fold(&[
-            Reply::start("r1", "m"),
-            Reply::block_start(0, Block::Reasoning),
-            Reply::reasoning(0, "hm"),
-            Reply::block_end(0),
-            Reply::block_start(1, Block::Text),
-            Reply::text(1, "Hel"),
-            Reply::text(1, "lo"),
-            Reply::block_end(1),
-            Reply::block_start(
+            Output::start("r1", "m"),
+            Output::block_start(0, Block::Reasoning),
+            Output::reasoning(0, "hm"),
+            Output::block_end(0),
+            Output::block_start(1, Block::Text),
+            Output::text(1, "Hel"),
+            Output::text(1, "lo"),
+            Output::block_end(1),
+            Output::block_start(
                 2,
                 Block::ToolCall {
                     id: "t".into(),
                     name: "f".into(),
                 },
             ),
-            Reply::arguments(2, "{\"a\":"),
-            Reply::arguments(2, "1}"),
-            Reply::block_end(2),
-            Reply::other("chat", json!({"type": "ping"})),
-            Reply::usage(usage.clone()),
-            Reply::usage(usage.clone()),
-            Reply::finished(Finish::ToolUse),
+            Output::arguments(2, "{\"a\":"),
+            Output::arguments(2, "1}"),
+            Output::block_end(2),
+            Output::native("chat", json!({"type": "ping"})),
+            Output::usage(usage.clone()),
+            Output::usage(usage.clone()),
+            Output::finished(Finish::ToolUse),
         ])
         .expect("a response");
         assert_eq!(all.start.as_ref().map(|s| s.id.as_str()), Some("r1"));
@@ -798,59 +800,66 @@ mod tests {
         assert_eq!(all.text(), "Hello");
         assert_eq!(all.finish, Some(Finish::ToolUse));
         assert_eq!(all.usage.get(units::INPUT_TOKENS), Some(6));
-        assert!(matches!(all.items().last(), Some(ReplyItem::Other(f, raw))
-            if &**f == "chat" && **raw == json!({"type": "ping"})));
+        assert!(
+            matches!(all.items().last(), Some(ReplyItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw }))
+            if &**f == "chat" && **raw == json!({"type": "ping"}))
+        );
     }
 
     #[test]
     fn a_sequence_that_is_no_response_is_refused() {
-        let text = || Reply::block_start(0, Block::Text);
+        let text = || Output::block_start(0, Block::Text);
         for events in [
-            vec![Reply::text(0, "x")],
-            vec![Reply::block_end(0)],
-            vec![text(), Reply::block_end(0), Reply::text(0, "x")],
-            vec![text(), Reply::block_end(0), Reply::block_end(0)],
-            vec![text(), Reply::block_end(0), text()],
-            vec![text(), Reply::block_start(0, Block::Reasoning)],
-            vec![text(), Reply::reasoning(0, "x")],
-            vec![text(), Reply::arguments(0, "{}")],
-            vec![Reply::block_start(0, Block::Reasoning), Reply::text(0, "x")],
-            vec![Reply::start("a", "m"), Reply::start("b", "m")],
+            vec![Output::text(0, "x")],
+            vec![Output::block_end(0)],
+            vec![text(), Output::block_end(0), Output::text(0, "x")],
+            vec![text(), Output::block_end(0), Output::block_end(0)],
+            vec![text(), Output::block_end(0), text()],
+            vec![text(), Output::block_start(0, Block::Reasoning)],
+            vec![text(), Output::reasoning(0, "x")],
+            vec![text(), Output::arguments(0, "{}")],
+            vec![
+                Output::block_start(0, Block::Reasoning),
+                Output::text(0, "x"),
+            ],
+            vec![Output::start("a", "m"), Output::start("b", "m")],
         ] {
             let end = fold(&events).err();
             assert!(end.is_some_and(|f| f.is::<Upstream>()), "{events:?}");
         }
         // A start repeated for an open block, as a filter adding to it writes.
-        assert!(fold(&[text(), Reply::text(0, "a"), text(), Reply::text(0, "b")]).is_ok());
+        assert!(fold(&[text(), Output::text(0, "a"), text(), Output::text(0, "b")]).is_ok());
     }
 
     #[test]
     fn interleaved_blocks_keep_their_place_beside_opaque_events() {
         let signature = json!({"index": 9, "signature": "signed"});
         let mut all = fold(&[
-            Reply::block_start(9, Block::Reasoning),
-            Reply::reasoning(9, "think"),
-            Reply::other("native", signature.clone()),
-            Reply::block_start(2, Block::Text),
-            Reply::text(2, "ans"),
-            Reply::reasoning(9, "ing"),
-            Reply::block_end(9),
-            Reply::text(2, "wer"),
+            Output::block_start(9, Block::Reasoning),
+            Output::reasoning(9, "think"),
+            Output::native("native", signature.clone()),
+            Output::block_start(2, Block::Text),
+            Output::text(2, "ans"),
+            Output::reasoning(9, "ing"),
+            Output::block_end(9),
+            Output::text(2, "wer"),
         ])
         .expect("interleaved response");
         assert!(matches!(&all.items()[0], ReplyItem::Block(p)
             if p.block == 9 && p.kind == Block::Reasoning && p.text == "thinking"));
-        assert!(matches!(&all.items()[1], ReplyItem::Other(f, raw)
-            if &**f == "native" && **raw == signature));
+        assert!(
+            matches!(&all.items()[1], ReplyItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw })
+            if &**f == "native" && **raw == signature)
+        );
         assert!(matches!(&all.items()[2], ReplyItem::Block(p)
             if p.block == 2 && p.kind == Block::Text && p.text == "answer"));
         assert_eq!(all.text(), "answer");
 
         let before = all.clone();
-        assert!(all.push(&Reply::arguments(2, "wrong kind")).is_err());
+        assert!(all.push(&Output::arguments(2, "wrong kind")).is_err());
         assert_eq!(all, before, "a rejected delta changes nothing");
-        all.push(&Reply::text(2, "!")).expect("still open");
-        all.push(&Reply::block_end(2)).expect("closes");
+        all.push(&Output::text(2, "!")).expect("still open");
+        all.push(&Output::block_end(2)).expect("closes");
         assert_eq!(all.text(), "answer!");
     }
 
@@ -861,15 +870,15 @@ mod tests {
             name: "f".into(),
         };
         for (kind, wrong) in [
-            (Block::Text, Reply::arguments(0, "{}")),
-            (Block::Text, Reply::reasoning(0, "x")),
-            (call.clone(), Reply::text(0, "x")),
-            (call, Reply::reasoning(0, "x")),
-            (Block::Reasoning, Reply::text(0, "x")),
-            (Block::Reasoning, Reply::arguments(0, "{}")),
+            (Block::Text, Output::arguments(0, "{}")),
+            (Block::Text, Output::reasoning(0, "x")),
+            (call.clone(), Output::text(0, "x")),
+            (call, Output::reasoning(0, "x")),
+            (Block::Reasoning, Output::text(0, "x")),
+            (Block::Reasoning, Output::arguments(0, "{}")),
         ] {
             let mut all = Assembled::default();
-            all.push(&Reply::block_start(0, kind.clone()))
+            all.push(&Output::block_start(0, kind.clone()))
                 .expect("opens");
             let end = all.push(&wrong).err();
             assert!(
@@ -880,10 +889,10 @@ mod tests {
     }
     #[test]
     fn only_usage_and_other_events_are_no_content() {
-        assert!(Reply::start("a", "m").is_content());
-        assert!(Reply::text(0, "x").is_content());
-        assert!(Reply::finished(Finish::Stop).is_content());
-        assert!(!Reply::usage(Usage::default()).is_content());
-        assert!(!Reply::other("f", json!(1)).is_content());
+        assert!(Output::start("a", "m").is_content());
+        assert!(Output::text(0, "x").is_content());
+        assert!(Output::finished(Finish::Stop).is_content());
+        assert!(!Output::usage(Usage::default()).is_content());
+        assert!(!Output::native("f", json!(1)).is_content());
     }
 }

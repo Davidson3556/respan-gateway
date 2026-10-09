@@ -15,9 +15,9 @@
 //!
 //! A head a plugin chose ([`ClientHead`](respan_gateway_http::ClientHead))
 //! gives the status and headers instead, but never the framing. What MCP
-//! carries in headers is the kind's: [`ToServer`]'s session, protocol
+//! carries in headers is the kind's: [`Input`]'s session, protocol
 //! version and last event id are read from the client's request and written
-//! into the call, and a session the server names ([`ToClient::session`]) is
+//! into the call, and a session the server names ([`Output::session`]) is
 //! written into the head of the client's answer.
 
 use std::pin::Pin;
@@ -42,9 +42,7 @@ use respan_gateway_sdk::{
 };
 use serde_json::{Value, json};
 
-use crate::{
-    PARSE_ERROR, RpcCode, ToClient, ToServer, body, error, lock, messages, read, request_ids,
-};
+use crate::{Input, Output, PARSE_ERROR, RpcCode, body, error, lock, messages, read, request_ids};
 
 /// The header naming an MCP session (`Mcp-Session-Id`).
 pub const SESSION: &str = "mcp-session-id";
@@ -78,7 +76,7 @@ impl Default for StreamableHttp {
     }
 }
 
-impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
+impl Format<Incoming, Input, Output> for StreamableHttp {
     fn name(&self) -> &str {
         NAME
     }
@@ -89,7 +87,7 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
             && formats::clean_path(head.uri().path()) == formats::clean_path(self.path)
     }
 
-    fn bind(&self, io: Incoming) -> Result<Connection<ToServer, ToClient>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         let started = Started::default();
         let refused = started.clone();
         Ok(io.bind(
@@ -108,8 +106,8 @@ impl Format<Incoming, ToServer, ToClient> for StreamableHttp {
 }
 
 /// A client's request as the kind's input.
-fn decode(head: &RequestHead, raw: Bytes) -> Result<ToServer, Fault> {
-    let mut input = ToServer::new(head.method.clone(), Vec::new());
+fn decode(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
+    let mut input = Input::new(head.method.clone(), Vec::new());
     if head.method == Method::POST {
         // JSON-RPC 2.0 (5.1): a body that is no JSON is a parse error.
         let json = serde_json::from_slice(&raw).map_err(|e| {
@@ -118,7 +116,13 @@ fn decode(head: &RequestHead, raw: Bytes) -> Result<ToServer, Fault> {
         })?;
         let read = messages(json);
         let bad = || BadRequest::fault("not a JSON-RPC message or batch");
-        (input.messages, input.batch) = read.ok_or_else(bad)?;
+        let (messages, batch) = read.ok_or_else(bad)?;
+        input.messages = messages
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<_, _>>()
+            .map_err(|_| bad())?;
+        input.batch = batch;
     }
     input.session = header(&head.headers, SESSION)?;
     input.protocol_version = header(&head.headers, PROTOCOL_VERSION)?;
@@ -165,23 +169,33 @@ fn put(headers: &mut HeaderMap, name: &'static str, value: &str) -> Result<(), F
     Ok(())
 }
 
-impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
+impl Format<Outgoing, Output, Input> for StreamableHttp {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn bind(&self, io: Outgoing) -> Result<Connection<ToClient, ToServer>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
         let path = self.path;
         Ok(io.bind(
-            move |source: &mut EventStream<ToServer>| {
+            move |source: &mut EventStream<Input>| {
                 let Some(input) = source.value() else {
                     let streamed = "a call in mcp carries one body, not streamed inputs";
                     return Err(Fault::config(streamed));
                 };
                 let head = call_head(input?, path)?;
-                let write = |input: &ToServer| {
+                let write = |input: &Input| {
                     Ok(match input.method {
-                        Method::POST => body(&input.messages, input.batch).to_string().into(),
+                        Method::POST => body(
+                            &input
+                                .messages
+                                .iter()
+                                .cloned()
+                                .map(Value::from)
+                                .collect::<Vec<_>>(),
+                            input.batch,
+                        )
+                        .to_string()
+                        .into(),
                         _ => Bytes::new(),
                     })
                 };
@@ -195,7 +209,7 @@ impl Format<Outgoing, ToClient, ToServer> for StreamableHttp {
 }
 
 /// The head of a call of `input` to `path`.
-fn call_head(input: &ToServer, path: &str) -> Result<RequestHead, Fault> {
+fn call_head(input: &Input, path: &str) -> Result<RequestHead, Fault> {
     let mut head = Request::new(()).into_parts().0;
     head.method = input.method.clone();
     match &input.query {
@@ -224,7 +238,7 @@ fn call_head(input: &ToServer, path: &str) -> Result<RequestHead, Fault> {
 fn response_events(
     answer: Response<Body>,
     sent: Request<Bytes>,
-) -> BoxStream<'static, Result<ToClient, Fault>> {
+) -> BoxStream<'static, Result<Output, Fault>> {
     let posted = read(sent.body()).unwrap_or_default().0;
     let pending: Vec<Value> = request_ids(&posted).cloned().collect();
     // GET may resume replies from previous POSTs; only a POST's replies
@@ -254,13 +268,20 @@ fn response_events(
     } else {
         None
     };
-    let output = move |read: Option<(Vec<Value>, bool)>| ToClient {
-        messages: read.map(|(messages, _)| messages).unwrap_or_default(),
+    let output = move |read: Option<(Vec<Value>, bool)>| Output {
+        messages: read
+            .map(|(messages, _)| {
+                messages
+                    .into_iter()
+                    .map(|m| m.try_into().expect("validated RPC message"))
+                    .collect()
+            })
+            .unwrap_or_default(),
         session: session.clone(),
-        ..ToClient::default()
+        ..Output::default()
     };
     let inner = if sse::is_stream(&head) {
-        let on_event = move |_: &mut (), raw: Bytes, out: &mut Vec<ToClient>| {
+        let on_event = move |_: &mut (), raw: Bytes, out: &mut Vec<Output>| {
             let data = sse::event_data(&raw);
             let messages = match data.filter(|d| !d.is_empty()) {
                 Some(data) => Some(read(data.as_bytes()).ok_or_else(|| {
@@ -276,7 +297,7 @@ fn response_events(
         };
         sse::read(body, (), on_event, |_, end, _| end)
     } else {
-        let on_body = move |raw: Bytes, out: &mut Vec<ToClient>| {
+        let on_body = move |raw: Bytes, out: &mut Vec<Output>| {
             if !raw.is_empty() {
                 let messages = read(&raw).ok_or_else(|| {
                     Upstream::fault("the MCP server sent an invalid JSON-RPC message")
@@ -298,7 +319,7 @@ fn response_events(
                 Some(Ok(output)) => {
                     if correlate {
                         for id in output.answers() {
-                            let Some(at) = pending.iter().position(|p| p == id) else {
+                            let Some(at) = pending.iter().position(|p| *p == id) else {
                                 let fault = Upstream::fault(
                                     "the MCP server replied to an ID that is not pending",
                                 );
@@ -369,9 +390,9 @@ fn rpc_refusal(fault: Fault) -> Fault {
 }
 
 /// Drops from `pending` the requests `output` answers.
-fn forget(pending: &mut Vec<Value>, output: &ToClient) {
+fn forget(pending: &mut Vec<Value>, output: &Output) {
     for id in output.answers() {
-        pending.retain(|p| p != id);
+        pending.retain(|p| *p != id);
     }
 }
 
@@ -418,9 +439,9 @@ impl Answered {
 /// The client's answer, shaped by its request.
 fn answer(
     reply: h::Reply,
-    source: &mut EventStream<ToClient>,
+    source: &mut EventStream<Output>,
     started: &Started,
-) -> EventSink<ToClient> {
+) -> EventSink<Output> {
     let ask = reply.request();
     let answered = Arc::new(Mutex::new(Answered::of(ask.body())));
     let asks = !lock(&answered).pending.is_empty();
@@ -497,15 +518,10 @@ struct Answer {
     events: bool,
 }
 
-impl h::Encoder<ToClient> for Answer {
-    fn encode(&mut self, output: &ToClient, out: &mut BytesMut) -> Result<(), Fault> {
+impl h::Encoder<Output> for Answer {
+    fn encode(&mut self, output: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         let mut answered = lock(&self.answered);
-        if !self.events
-            && output
-                .messages
-                .iter()
-                .any(|m| m.get("method").is_some() && m.get("id").is_some_and(|id| !id.is_null()))
-        {
+        if !self.events && output.messages.iter().any(|m| m.request_id().is_some()) {
             return Err(Upstream::fault(
                 "a server request requires an MCP event stream",
             ));
@@ -520,8 +536,9 @@ impl h::Encoder<ToClient> for Answer {
                 output
                     .messages
                     .iter()
-                    .filter(|m| m.get("method").is_none())
-                    .cloned(),
+                    .filter(|m| m.method().is_none())
+                    .cloned()
+                    .map(Value::from),
             ),
         }
         Ok(())
@@ -546,16 +563,16 @@ impl h::Encoder<ToClient> for Answer {
 }
 
 /// One step of a sink's work, such as `poll_flush`.
-type SinkStep = fn(&mut EventSink<ToClient>, &mut Context<'_>) -> Poll<Result<(), Fault>>;
+type SinkStep = fn(&mut EventSink<Output>, &mut Context<'_>) -> Poll<Result<(), Fault>>;
 
 /// A `POST`'s answer, its head held until the first output, whose session
 /// the head names: a server assigns a session in the head of its answer to
 /// `initialize` (MCP, "Session Management").
 struct Headed {
-    start: Option<(h::Reply, ResponseHead, Box<dyn h::Encoder<ToClient>>)>,
-    sink: Option<EventSink<ToClient>>,
+    start: Option<(h::Reply, ResponseHead, Box<dyn h::Encoder<Output>>)>,
+    sink: Option<EventSink<Output>>,
     /// The first output, sent once `sink` is ready.
-    first: Option<Result<ToClient, Fault>>,
+    first: Option<Result<Output, Fault>>,
 }
 
 impl Headed {
@@ -585,7 +602,7 @@ impl Headed {
     }
 }
 
-impl Sink<Result<ToClient, Fault>> for Headed {
+impl Sink<Result<Output, Fault>> for Headed {
     type Error = Fault;
 
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
@@ -593,7 +610,7 @@ impl Sink<Result<ToClient, Fault>> for Headed {
             .drive(cx, |sink, cx| sink.poll_ready_unpin(cx))
     }
 
-    fn start_send(self: Pin<&mut Self>, item: Result<ToClient, Fault>) -> Result<(), Fault> {
+    fn start_send(self: Pin<&mut Self>, item: Result<Output, Fault>) -> Result<(), Fault> {
         let this = self.get_mut();
         match &mut this.sink {
             Some(sink) => sink.start_send_unpin(item),
@@ -642,7 +659,7 @@ fn field(raw: &[u8], name: &str) -> Option<String> {
 /// `event:` if it has them. An event with an id and no messages stays, as the
 /// event that primes a client's `Last-Event-ID`. An id or name that would
 /// break its line (a plugin's edit) is refused rather than written.
-fn event(output: &ToClient) -> Result<Bytes, Fault> {
+fn event(output: &Output) -> Result<Bytes, Fault> {
     if output.messages.is_empty() && output.event_id.is_none() {
         return Ok(Bytes::new());
     }
@@ -659,7 +676,16 @@ fn event(output: &ToClient) -> Result<Bytes, Fault> {
     }
     let data = match output.messages.is_empty() {
         true => String::new(),
-        false => body(&output.messages, false).to_string(),
+        false => body(
+            &output
+                .messages
+                .iter()
+                .cloned()
+                .map(Value::from)
+                .collect::<Vec<_>>(),
+            false,
+        )
+        .to_string(),
     };
     out.push_str(&sse::event(None, data));
     Ok(out.into())

@@ -14,13 +14,13 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
         }
     }
 
-    impl Filter<Reply> for Returns {
-        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Returns {
+        fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             out.push(reply);
             Ok(())
         }
 
-        fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             self.note("filter ended");
             Ok(())
         }
@@ -30,7 +30,7 @@ async fn a_whole_body_call_ends_only_once_its_until_content_response_is_read() {
     impl Plugin for Returns {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut resp = cx.call("openai").await?;
-            resp.buffer_until(Reply::is_content).await?;
+            resp.buffer_until(Output::is_content).await?;
             self.note("returned");
             Ok(Some(resp))
         }
@@ -68,8 +68,8 @@ async fn buffer_until_judges_provider_outputs_after_filters() {
     /// Takes every output of `openai`'s response.
     struct Mute;
 
-    impl Filter<Reply> for Mute {
-        fn edit(&mut self, _output: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Mute {
+        fn edit(&mut self, _output: Output, _out: &mut Vec<Output>) -> Result<(), Fault> {
             Ok(())
         }
     }
@@ -102,9 +102,9 @@ async fn buffer_until_rechecks_filtered_values_with_a_new_predicate() {
     /// Replaces every output with a non-content event.
     struct Mute;
 
-    impl Filter<Reply> for Mute {
-        fn edit(&mut self, _output: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            out.push(Reply::usage(Usage::default()));
+    impl Filter<Output> for Mute {
+        fn edit(&mut self, _output: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+            out.push(Output::usage(Usage::default()));
             Ok(())
         }
     }
@@ -116,8 +116,8 @@ async fn buffer_until_rechecks_filtered_values_with_a_new_predicate() {
     impl Plugin for UntilContentTwice {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut first = cx.call("openai").await?;
-            first.buffer_until(|_: &Reply| true).await?;
-            match first.buffer_until(Reply::is_content).await {
+            first.buffer_until(|_: &Output| true).await?;
+            match first.buffer_until(Output::is_content).await {
                 Ok(()) => Ok(Some(first)),
                 Err(_) => {
                     drop(first);
@@ -210,17 +210,17 @@ async fn synthetic_outputs_use_the_callers_predicate() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut one = Usage::default();
             one.add(units::INPUT_TOKENS, 1);
-            let quiet = Reply::usage(one);
+            let quiet = Output::usage(one);
             // A policy accepting any event commits to the quiet reply.
             let made = [Ok(quiet.clone()), Err(Upstream::fault("gone"))];
             let mut unfiltered = Response::stream(futures::stream::iter(made));
-            assert!(unfiltered.buffer_until(|_: &Reply| true).await.is_ok());
+            assert!(unfiltered.buffer_until(|_: &Output| true).await.is_ok());
             drop(unfiltered);
             let made = [Ok(quiet), Err(Upstream::fault("gone"))];
-            let content = |r: &Reply| std::future::ready(r.is_content());
+            let content = |r: &Output| std::future::ready(r.is_content());
             let made = futures::stream::iter(made).try_filter(content);
             let mut made = Response::stream(made);
-            match made.buffer_until(Reply::is_content).await {
+            match made.buffer_until(Output::is_content).await {
                 Ok(()) => Ok(Some(made)),
                 Err(_) => {
                     drop(made);
@@ -255,13 +255,13 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     #[async_trait]
     impl Plugin for Reads {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let read: Vec<Reply> = cx.call("openai").await?.outputs().try_collect().await?;
+            let read: Vec<Output> = cx.call("openai").await?.outputs().try_collect().await?;
             let noted = read.iter().map(|r| match r {
-                Reply::Usage(u) => (false, u.get(units::INPUT_TOKENS)),
+                Output::Usage(u) => (false, u.get(units::INPUT_TOKENS)),
                 r => (r.is_content(), None),
             });
             self.0.lock().map(|mut n| n.extend(noted)).ok();
-            let said = read.into_iter().filter(Reply::is_content).map(Ok);
+            let said = read.into_iter().filter(Output::is_content).map(Ok);
             Ok(Some(Response::stream(futures::stream::iter(said))))
         }
     }
@@ -280,7 +280,7 @@ async fn outputs_yields_values_that_are_no_content_such_as_a_keep_alive() {
     assert!(noted.contains(&(false, Some(5))), "{noted:?}");
 }
 
-// Filters see every value, yet `buffer_until(Reply::is_content)` matches neither
+// Filters see every value, yet `buffer_until(Output::is_content)` matches neither
 // a keep-alive nor usage alone: a stream that sends both, then fails, reaches
 // no content, and fallback moves on. The meter still saw the failed call's usage.
 #[tokio::test]
@@ -291,7 +291,7 @@ async fn until_content_commits_on_neither_a_keep_alive_nor_usage_alone() {
     impl Plugin for ContentOrBackup {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut resp = cx.call("openai").await?;
-            match resp.buffer_until(Reply::is_content).await {
+            match resp.buffer_until(Output::is_content).await {
                 Ok(()) => Ok(Some(resp)),
                 Err(_) => {
                     drop(resp);

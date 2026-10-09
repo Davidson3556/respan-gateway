@@ -28,6 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+respan-gateway-conversation.workspace = true
 respan-gateway-plugins.workspace = true
 respan-gateway-providers.workspace = true
 respan-gateway-sdk.workspace = true

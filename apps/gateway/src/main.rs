@@ -3,11 +3,12 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use respan_gateway_axum::router_with_limit;
-use respan_gateway_http::formats::opaque::{Got, Passthrough, Sent};
+use respan_gateway_conversation::{Input, Output};
+use respan_gateway_http::formats::opaque::Passthrough;
+use respan_gateway_http::formats::opaque::{Got, Sent};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::{HttpClient, Outgoing};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::{Extensions, Fault};
 
 mod config;
@@ -35,8 +36,8 @@ const BODY_LIMIT: usize = 32 << 20;
 /// `Gateway` in its own `main.rs`.
 fn formats() -> [KnownFormat; 3] {
     [
-        KnownFormat::of::<OpenAiChat, Conversation, Reply>(),
-        KnownFormat::of::<AnthropicMessages, Conversation, Reply>(),
+        KnownFormat::of::<OpenAiChat, Input, Output>(),
+        KnownFormat::of::<AnthropicMessages, Input, Output>(),
         KnownFormat::of::<Passthrough, Sent<Passthrough>, Got<Passthrough>>(),
     ]
 }

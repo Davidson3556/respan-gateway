@@ -234,8 +234,8 @@ async fn a_lost_lease_cancels_provider_opening_and_retries_with_the_same_upstrea
         }
     };
     let gw = Gateway::new()
-        .client::<Conversation, _, _>(OpenAiChat)?
-        .provider::<Conversation, _, _>(
+        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(supervised(transport), LIMIT),
@@ -313,9 +313,9 @@ async fn an_expired_claim_cannot_renew_or_publish_a_result() -> Result<(), Fault
     tokio::time::sleep(Duration::from_millis(350)).await;
     assert!(store.renew(&key, owner).await.is_err());
     let stale = vec![
-        Reply::block_start(0, respan_gateway_sdk::conversation::Block::Text),
-        Reply::text(0, "stale"),
-        Reply::block_end(0),
+        Output::block_start(0, respan_gateway_conversation::Block::Text),
+        Output::text(0, "stale"),
+        Output::block_end(0),
     ];
     store.finish(&key, owner, Some(Arc::new(stale))).await?;
     assert!(

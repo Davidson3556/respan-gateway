@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 /// An open map of usage units to additive amounts, as a provider reports
 /// them. `Usage` is kind-neutral: each kind names its own units (the
-/// conversation kind's are in [`conversation::units`](crate::conversation::units)).
+/// conversation kind's are in `respan_gateway_conversation::units`).
 /// Amounts are integer counts of the unit's smallest measure (tokens,
 /// characters, milliseconds); money belongs in the application's own decimal
 /// type. Addition saturates, so it never overflows.

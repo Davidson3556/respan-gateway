@@ -13,11 +13,11 @@ use crate::{ClientContext, Fault, ProviderContext, Response, Result};
 /// format; one for one kind lets other traffic pass, or refuses it:
 ///
 /// ```ignore
-/// if !cx.is_kind::<Conversation>() {
+/// if !cx.is_kind::<Input>() {
 ///     return Ok(None);
 /// }
-/// cx.filter(|chat: &mut Conversation| {
-///     chat.temperature = Some(0.0);
+/// cx.filter(|chat: &mut Input| {
+///     chat.options.temperature = Some(0.0);
 ///     Ok(())
 /// })?;
 /// ```
@@ -35,7 +35,7 @@ use crate::{ClientContext, Fault, ProviderContext, Response, Result};
 ///     let call = cx.call(provider).with_extension(won.clone());
 ///     Box::pin(async move {
 ///         let mut resp = call.await?;
-///         resp.buffer_until(|_: &Reply| true).await?;
+///         resp.buffer_until(|_: &Output| true).await?;
 ///         won.0.store(true, Ordering::Relaxed);
 ///         Ok::<_, Fault>(resp)
 ///     })

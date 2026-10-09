@@ -9,8 +9,8 @@ use crate::http_support::LIMIT;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use respan_gateway_conversation::{Block, Delta, Finish, Input, Output};
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Block, Conversation, Delta, Finish, Reply};
 use respan_gateway_sdk::{
     ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -30,7 +30,7 @@ pub type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 /// Provider `name`, speaking `format` over `transport`.
 pub fn add_provider<F, T>(name: &str, format: F, send: T) -> AddProvider
 where
-    F: respan_gateway_sdk::Format<respan_gateway_http::Outgoing, Reply, Conversation>,
+    F: respan_gateway_sdk::Format<respan_gateway_http::Outgoing, Output, Input>,
     T: Into<SendRequest>,
 {
     let send = send.into();
@@ -132,13 +132,13 @@ impl Metered {
 #[async_trait]
 impl Plugin for Metered {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if !px.is_kind::<Conversation>() {
+        if !px.is_kind::<Input>() {
             return Ok(());
         }
         let usage = CallUsage::default();
         px.extensions_mut().insert(usage.clone());
-        px.filter(move |reply: &mut Reply| {
-            if let Reply::Usage(more) = reply {
+        px.filter(move |reply: &mut Output| {
+            if let Output::Usage(more) = reply {
                 *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &*more;
             }
             Ok(())
@@ -148,10 +148,7 @@ impl Plugin for Metered {
     async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         if let Some(CallUsage(usage)) = px.extensions().get::<CallUsage>() {
             let usage = usage.lock().unwrap_or_else(PoisonError::into_inner).clone();
-            let model = px
-                .input::<Conversation>()
-                .ok()
-                .and_then(|c| c.model.clone());
+            let model = px.input::<Input>().ok().and_then(|c| c.model.clone());
             let call = format!("{}/{}", px.provider(), model.unwrap_or_default());
             self.0
                 .lock()
@@ -165,7 +162,7 @@ impl Plugin for Metered {
 pub struct Adds<F>(pub F);
 
 #[async_trait]
-impl<F: Filter<Reply> + Clone + Sync> Plugin for Adds<F> {
+impl<F: Filter<Output> + Clone + Sync> Plugin for Adds<F> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         cx.filter(self.0.clone())?;
         Ok(None)
@@ -178,27 +175,32 @@ pub struct Flip;
 #[async_trait]
 impl Plugin for Flip {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|chat: &mut Conversation| {
-            chat.stream = !chat.stream;
-            Ok(())
-        })?;
+        let streaming = cx
+            .extensions()
+            .get::<respan_gateway_http::Wire>()
+            .and_then(|w| w.get())
+            .and_then(|r| serde_json::from_slice::<serde_json::Value>(r.body()).ok())
+            .and_then(|v| v["stream"].as_bool())
+            .unwrap_or(false);
+        cx.extensions_mut()
+            .insert(respan_gateway_providers::StreamResponse(!streaming));
         Ok(None)
     }
 }
 
 /// The events of text `text` in block `block`: it opens, says it and ends.
-pub fn text(block: u32, text: &str) -> Vec<Reply> {
+pub fn text(block: u32, text: &str) -> Vec<Output> {
     vec![
-        Reply::block_start(block, Block::Text),
-        Reply::text(block, text),
-        Reply::block_end(block),
+        Output::block_start(block, Block::Text),
+        Output::text(block, text),
+        Output::block_end(block),
     ]
 }
 
 /// The text `reply` adds to a text block.
-pub fn text_of(reply: &Reply) -> Option<&str> {
+pub fn text_of(reply: &Output) -> Option<&str> {
     match reply {
-        Reply::Delta {
+        Output::Delta {
             delta: Delta::Text(text),
             ..
         } => Some(text),
@@ -207,9 +209,9 @@ pub fn text_of(reply: &Reply) -> Option<&str> {
 }
 
 /// The text `reply` adds to a text block, to change.
-pub fn text_of_mut(reply: &mut Reply) -> Option<&mut String> {
+pub fn text_of_mut(reply: &mut Output) -> Option<&mut String> {
     match reply {
-        Reply::Delta {
+        Output::Delta {
             delta: Delta::Text(text),
             ..
         } => Some(text),
@@ -225,8 +227,8 @@ pub struct TextBlocks(Vec<u32>);
 
 impl TextBlocks {
     /// Note what `reply` opens.
-    pub fn note(&mut self, reply: &Reply) {
-        if let Reply::BlockStart { block, kind } = reply
+    pub fn note(&mut self, reply: &Output) {
+        if let Output::BlockStart { block, kind } = reply
             && *kind == Block::Text
             && !self.0.contains(block)
         {
@@ -240,11 +242,11 @@ impl TextBlocks {
     }
 
     /// Whether `reply` is an event of a text block's content.
-    pub fn is_text(&self, reply: &Reply) -> bool {
+    pub fn is_text(&self, reply: &Output) -> bool {
         match reply {
-            Reply::BlockStart { block, .. }
-            | Reply::Delta { block, .. }
-            | Reply::BlockEnd { block } => self.0.contains(block),
+            Output::BlockStart { block, .. }
+            | Output::Delta { block, .. }
+            | Output::BlockEnd { block } => self.0.contains(block),
             _ => false,
         }
     }
@@ -265,8 +267,8 @@ impl Plugin for Shout {
 #[derive(Clone, Default)]
 struct Shouting;
 
-impl Filter<Reply> for Shouting {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for Shouting {
+    fn edit(&mut self, mut reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         if let Some(text) = text_of_mut(&mut reply) {
             *text = text.to_uppercase();
         }
@@ -294,19 +296,19 @@ struct Restore {
     block: u32,
 }
 
-impl Filter<Reply> for Restore {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for Restore {
+    fn edit(&mut self, mut reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         // Nothing follows a finish, and text kept back goes before any
         // other content: hold nothing past them.
         let text = matches!(
             &reply,
-            Reply::Delta {
+            Output::Delta {
                 delta: Delta::Text(_),
                 ..
             }
         );
         let last = !text && reply.is_content();
-        if let Reply::Delta {
+        if let Output::Delta {
             block,
             delta: Delta::Text(delta),
         } = &mut reply
@@ -327,31 +329,31 @@ impl Filter<Reply> for Restore {
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.release(out);
         Ok(())
     }
 }
 
 impl Restore {
-    fn release(&mut self, out: &mut Vec<Reply>) {
+    fn release(&mut self, out: &mut Vec<Output>) {
         if !self.held.is_empty() {
-            out.push(Reply::text(self.block, std::mem::take(&mut self.held)));
+            out.push(Output::text(self.block, std::mem::take(&mut self.held)));
         }
     }
 }
 
 /// Keeps back every reply and releases them all at the end.
 #[derive(Clone)]
-pub struct HoldAll(pub Vec<Reply>);
+pub struct HoldAll(pub Vec<Output>);
 
-impl Filter<Reply> for HoldAll {
-    fn edit(&mut self, reply: Reply, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for HoldAll {
+    fn edit(&mut self, reply: Output, _out: &mut Vec<Output>) -> Result<(), Fault> {
         self.0.push(reply);
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
         out.append(&mut self.0);
         Ok(())
     }
@@ -361,9 +363,9 @@ impl Filter<Reply> for HoldAll {
 #[derive(Clone)]
 pub struct Disclaimer;
 
-impl Filter<Reply> for Disclaimer {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if matches!(reply, Reply::Start(_)) {
+impl Filter<Output> for Disclaimer {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        if matches!(reply, Output::Start(_)) {
             out.extend(text(u32::MAX, "NOTE: "));
         }
         out.push(reply);
@@ -375,9 +377,9 @@ impl Filter<Reply> for Disclaimer {
 #[derive(Clone)]
 pub struct Nameless;
 
-impl Filter<Reply> for Nameless {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if !matches!(reply, Reply::Start(_)) {
+impl Filter<Output> for Nameless {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        if !matches!(reply, Output::Start(_)) {
             out.push(reply);
         }
         Ok(())
@@ -388,8 +390,8 @@ impl Filter<Reply> for Nameless {
 #[derive(Clone, Default)]
 pub struct Silence(TextBlocks);
 
-impl Filter<Reply> for Silence {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for Silence {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.0.note(&reply);
         if !self.0.is_text(&reply) {
             out.push(reply);
@@ -403,24 +405,24 @@ impl Filter<Reply> for Silence {
 #[derive(Clone)]
 pub struct Footer(pub u32, pub Option<Finish>);
 
-impl Filter<Reply> for Footer {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for Footer {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         match reply {
-            Reply::Finish(finish) => self.1 = Some(finish),
-            Reply::BlockEnd { block } if block == self.0 => {}
+            Output::Finish(finish) => self.1 = Some(finish),
+            Output::BlockEnd { block } if block == self.0 => {}
             reply => out.push(reply),
         }
         Ok(())
     }
 
-    fn end(&mut self, end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        out.push(Reply::block_start(self.0, Block::Text));
-        out.push(Reply::text(self.0, " [footer]"));
-        out.push(Reply::block_end(self.0));
+    fn end(&mut self, end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
+        out.push(Output::block_start(self.0, Block::Text));
+        out.push(Output::text(self.0, " [footer]"));
+        out.push(Output::block_end(self.0));
         // A finish kept back past a failed end is not written, as it would
         // claim the answer complete.
         let finish = self.1.take().filter(|_| end.is_ok());
-        out.extend(finish.map(Reply::finished));
+        out.extend(finish.map(Output::finished));
         Ok(())
     }
 }

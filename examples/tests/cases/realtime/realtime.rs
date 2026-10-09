@@ -1,6 +1,6 @@
 use super::*;
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_ws::ClientEvent;
+use respan_gateway_realtime::Input;
 
 /// A session against a scripted provider: the gateway's address, the
 /// provider, and what the plugins recorded.
@@ -836,8 +836,8 @@ async fn remote_session(
         lag: Duration::from_millis(lag),
     };
     let gw = Gateway::new()
-        .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>(
+        .client::<Input, _, _>(realtime())?
+        .provider::<Input, _, _>(
             "openai",
             realtime(),
             WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
@@ -922,7 +922,7 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
     #[respan_gateway_sdk::async_trait]
     impl Plugin for Slow {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.wrap(|events: EventStream<ClientEvent>| {
+            cx.wrap(|events: EventStream<Input>| {
                 events.and_then(|e| async move {
                     tokio::time::sleep(Duration::from_millis(400)).await;
                     Ok(e)
@@ -935,8 +935,8 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>(
+        .client::<Input, _, _>(realtime())?
+        .provider::<Input, _, _>(
             "openai",
             realtime(),
             WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
@@ -1167,8 +1167,8 @@ async fn l6_a_refused_turn_being_released_as_the_client_left_is_settled() -> Res
         lag: Duration::from_millis(300),
     };
     let gw = Gateway::new()
-        .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>(
+        .client::<Input, _, _>(realtime())?
+        .provider::<Input, _, _>(
             "openai",
             realtime(),
             WsTransport::new(format!("ws://{at}"))?.connect(),
@@ -1235,7 +1235,7 @@ async fn l6_leave_during_a_wrap(
     #[respan_gateway_sdk::async_trait]
     impl Plugin for Slow {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.wrap(|events: EventStream<ClientEvent>| {
+            cx.wrap(|events: EventStream<Input>| {
                 events.and_then(|e| async move {
                     tokio::time::sleep(Duration::from_millis(400)).await;
                     Ok(e)
@@ -1248,8 +1248,8 @@ async fn l6_leave_during_a_wrap(
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>(
+        .client::<Input, _, _>(realtime())?
+        .provider::<Input, _, _>(
             "openai",
             realtime(),
             WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
@@ -1500,8 +1500,8 @@ async fn l7_a_turn_the_provider_starts_during_a_reserve_is_still_held() -> Resul
         lag: Duration::from_millis(0),
     };
     let gw = Gateway::new()
-        .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>(
+        .client::<Input, _, _>(realtime())?
+        .provider::<Input, _, _>(
             "openai",
             realtime(),
             WsTransport::new(format!("ws://{at}"))?.connect(),
@@ -1548,8 +1548,8 @@ async fn l7_a_client_that_leaves_at_any_moment_leaves_no_hold() -> Result<(), Fa
                 lag: Duration::from_millis(60),
             };
             let gw = Gateway::new()
-                .client::<ClientEvent, _, _>(realtime())?
-                .provider::<ClientEvent, _, _>(
+                .client::<Input, _, _>(realtime())?
+                .provider::<Input, _, _>(
                     "openai",
                     realtime(),
                     WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
@@ -1705,8 +1705,8 @@ async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<
         first: Arc::new(AtomicUsize::new(0)),
     };
     let gw = Gateway::new()
-        .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>(
+        .client::<Input, _, _>(realtime())?
+        .provider::<Input, _, _>(
             "openai",
             realtime(),
             WsTransport::new(format!("ws://{at}"))?.connect(),
@@ -1833,8 +1833,8 @@ async fn l9_provider_turns_and_a_client_that_leaves_at_any_moment_leave_no_hold(
             lag: Duration::from_millis(40),
         };
         let gw = Gateway::new()
-            .client::<ClientEvent, _, _>(realtime())?
-            .provider::<ClientEvent, _, _>(
+            .client::<Input, _, _>(realtime())?
+            .provider::<Input, _, _>(
                 "openai",
                 realtime(),
                 WsTransport::new(format!("ws://{at}"))?.connect(),

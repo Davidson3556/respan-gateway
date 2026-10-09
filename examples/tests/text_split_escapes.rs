@@ -3,8 +3,8 @@
 #[path = "../support/text.rs"]
 mod text;
 
+use respan_gateway_conversation::{Block, Finish, Output};
 use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::conversation::{Block, Finish, Reply};
 #[path = "support/text.rs"]
 mod support;
 
@@ -12,11 +12,11 @@ use serde_json::{Value, json};
 use support::{arguments_of, run_filter as run};
 use text::{Holdback, Placeholders};
 
-fn call_at(index: u32, arguments: &str) -> Reply {
-    Reply::arguments(index, arguments)
+fn call_at(index: u32, arguments: &str) -> Output {
+    Output::arguments(index, arguments)
 }
 
-fn args_of(out: &[Reply], index: u32) -> String {
+fn args_of(out: &[Output], index: u32) -> String {
     arguments_of(out, index)
 }
 
@@ -120,7 +120,7 @@ fn a_tail_at_a_finish_is_released_with_its_index() {
         vec![
             call_at(2, &format!("{{\"to\":\"{p1}")),
             call_at(2, p2),
-            Reply::finished(Finish::ToolUse),
+            Output::finished(Finish::ToolUse),
         ],
     )
     .unwrap_or_default();
@@ -128,7 +128,7 @@ fn a_tail_at_a_finish_is_released_with_its_index() {
     assert_eq!(joined, "{\"to\":\"a@x.io", "{out:?}");
     assert_eq!(
         out.last(),
-        Some(&Reply::finished(Finish::ToolUse)),
+        Some(&Output::finished(Finish::ToolUse)),
         "{out:?}"
     );
 }
@@ -146,9 +146,9 @@ fn a_restore_into_malformed_whole_arguments_stays_escaped() {
         name: "f".into(),
     };
     let whole = vec![
-        Reply::block_start(0, kind),
-        Reply::arguments(0, args),
-        Reply::block_end(0),
+        Output::block_start(0, kind),
+        Output::arguments(0, args),
+        Output::block_end(0),
     ];
     let out = run(&mut Holdback::new(vault), whole).unwrap_or_default();
     let text = args_of(&out, 0);

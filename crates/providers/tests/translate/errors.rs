@@ -23,7 +23,7 @@ async fn a_provider_error_reaches_the_client_in_its_format() {
 #[tokio::test]
 async fn a_request_that_cannot_be_translated_is_refused() {
     let h = Harness::new(Vec::new()).await;
-    let format = json!({ "type": "json_object" });
+    let format = json!({ "type": "unknown_format" });
     let body = json!({ "model": "claude-x", "messages": [], "response_format": format });
 
     let (status, body) = h.text(call(CHAT, body.to_string())).await;
@@ -46,8 +46,8 @@ async fn an_edit_that_does_not_cause_the_failure_leaves_it_the_clients_fault() {
     #[async_trait]
     impl Plugin for Edit {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|chat: &mut Conversation| {
-                chat.temperature = Some(0.5);
+            cx.filter(|chat: &mut Input| {
+                chat.options.temperature = Some(0.5);
                 Ok(())
             })?;
             Ok(None)
@@ -55,7 +55,7 @@ async fn an_edit_that_does_not_cause_the_failure_leaves_it_the_clients_fault() {
     }
 
     let h = Harness::new(vec![Arc::new(Edit)]).await;
-    let format = json!({ "type": "json_object" });
+    let format = json!({ "type": "unknown_format" });
     let body = json!({ "model": "claude-x", "messages": [], "response_format": format });
 
     let (status, _) = h.text(call(CHAT, body.to_string())).await;
@@ -74,10 +74,10 @@ async fn an_edit_that_causes_the_failure_is_refused_as_a_bad_request() {
     #[async_trait]
     impl Plugin for Break {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|chat: &mut Conversation| {
+            cx.filter(|chat: &mut Input| {
                 let format = json!({ "response_format": { "type": "json_object" } });
                 let fields = format.as_object().cloned().unwrap_or_default();
-                chat.extra = Extra::new("openai-chat", fields);
+                chat.native = Some(NativeFields::new("openai-chat", fields));
                 Ok(())
             })?;
             Ok(None)
@@ -502,8 +502,9 @@ async fn an_anthropic_error_event_goes_as_it_came_only_to_its_format() {
 #[tokio::test]
 async fn an_openai_error_event_reaches_an_anthropic_client_in_its_words() {
     let mut stream = OPENAI_STREAM[..2].to_vec();
-    stream
-        .push("data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"extra\":1}}\n\n");
+    stream.push(
+        "data: {\"error\":{\"message\":\"boom\",\"type\":\"server_error\",\"native\":1}}\n\n",
+    );
     let h = Harness::new(Vec::new()).await;
     h.openai.answer(sse(&stream));
 
@@ -520,7 +521,7 @@ async fn an_openai_error_event_reaches_an_anthropic_client_in_its_words() {
 #[tokio::test]
 async fn an_error_in_a_success_goes_as_it_came_only_to_its_format() {
     let anthropic = r#"{"type": "error", "error": {"type": "overloaded_error", "message": "busy", "retry": true}}"#;
-    let openai = r#"{"error": {"message": "boom", "type": "server_error", "extra": 1}}"#;
+    let openai = r#"{"error": {"message": "boom", "type": "server_error", "native": 1}}"#;
     let messages = json!({
         "model": "claude-x", "max_tokens": 10,
         "messages": [{ "role": "user", "content": "hi" }],

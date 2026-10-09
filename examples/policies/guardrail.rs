@@ -20,13 +20,13 @@
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_conversation::{Block, Input, Output};
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::conversation::{Block, Conversation, Reply};
 use respan_gateway_sdk::futures::stream;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
 use respan_gateway_sdk::{Response, async_trait};
@@ -86,16 +86,16 @@ fn uncovered() -> Fault {
 #[async_trait]
 impl Plugin for Guard {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if !cx.is_kind::<Conversation>() {
+        if !cx.is_kind::<Input>() {
             return Err(uncovered());
         }
         cx.filter(Holdback::new(self.0.clone()))?;
         // This example allows text-only answers. Holdback can inspect
         // tool arguments, but this policy refuses tool calls outright.
-        cx.filter(|reply: &mut Reply| {
+        cx.filter(|reply: &mut Output| {
             let calls_a_tool = matches!(
                 reply,
-                Reply::BlockStart {
+                Output::BlockStart {
                     kind: Block::ToolCall { .. },
                     ..
                 }
@@ -117,11 +117,11 @@ impl Plugin for Guard {
 impl Plugin for GuardInput {
     /// Every call's input, a judge's own included, after every other edit.
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if !px.is_kind::<Conversation>() {
+        if !px.is_kind::<Input>() {
             return Err(uncovered());
         }
         let terms = self.0.clone();
-        px.filter(move |chat: &mut Conversation| terms.check(&chat.read_all()?))
+        px.filter(move |chat: &mut Input| terms.check(&chat.read_all()?))
     }
 }
 
@@ -132,14 +132,14 @@ struct Cache;
 #[async_trait]
 impl Plugin for Cache {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if cx.input::<Conversation>()?.model.as_deref() != Some("cached") {
+        if cx.input::<Input>()?.model.as_deref() != Some("cached") {
             return Ok(None);
         }
         let reply = [
-            Reply::start("c0", "cached"),
-            Reply::block_start(0, Block::Text),
-            Reply::text(0, "a bomb"),
-            Reply::block_end(0),
+            Output::start("c0", "cached"),
+            Output::block_start(0, Block::Text),
+            Output::text(0, "a bomb"),
+            Output::block_end(0),
         ];
         Ok(Some(Response::stream(stream::iter(reply.map(Ok)))))
     }
@@ -155,9 +155,9 @@ fn base(
     + 'static,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
-        .client::<Conversation, _, _>(OpenAiChat)?
-        .client::<Conversation, _, _>(AnthropicMessages)
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(AnthropicMessages)
 }
 
 /// `guard` first, `guard-input` last, and `middle` between them.

@@ -12,12 +12,12 @@ pub fn run_filter<T>(filter: &mut impl Filter<T>, values: Vec<T>) -> Result<Vec<
 
 /// The arguments of tool call `block` in `events`: its deltas, joined.
 #[allow(dead_code)]
-pub fn arguments_of(events: &[respan_gateway_sdk::conversation::Reply], block: u32) -> String {
-    use respan_gateway_sdk::conversation::{Delta, Reply};
+pub fn arguments_of(events: &[respan_gateway_conversation::Output], block: u32) -> String {
+    use respan_gateway_conversation::{Delta, Output};
     events
         .iter()
         .filter_map(|e| match e {
-            Reply::Delta {
+            Output::Delta {
                 block: b,
                 delta: Delta::Arguments(arguments),
             } if *b == block => Some(arguments.as_str()),

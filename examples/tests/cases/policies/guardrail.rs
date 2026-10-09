@@ -1,7 +1,8 @@
 use super::*;
-use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_conversation::{Message, Role};
+use respan_gateway_http::formats::opaque::{self};
+use respan_gateway_http::formats::opaque::{Got, Sent};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
-use respan_gateway_sdk::conversation::{Message, Role};
 use respan_gateway_sdk::{Connection, Format};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
@@ -140,7 +141,7 @@ struct Rag;
 #[async_trait]
 impl Plugin for Rag {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        px.filter(|chat: &mut Conversation| {
+        px.filter(|chat: &mut Input| {
             let context = "the launch code is 0000";
             chat.messages.push(Message::new(Role::User, context));
             Ok(())

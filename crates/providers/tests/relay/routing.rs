@@ -10,18 +10,18 @@ async fn a_plugin_asks_a_model_its_own_question_and_reads_the_answer() {
     #[async_trait]
     impl Plugin for Judge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let mut prompt = cx.input::<Conversation>()?.clone();
+            let mut prompt = cx.input::<Input>()?.clone();
             let rule = Message::new(Role::System, "Answer SAFE or UNSAFE.");
             prompt.messages.insert(0, rule);
             prompt.model = Some("judge-1".into());
             let call = cx.call("openai").with_input(prompt);
             let verdict = call
                 .await?
-                .outputs::<Reply>()
+                .outputs::<Output>()
                 .try_collect::<Vec<_>>()
                 .await?;
             let unsafe_ =
-                |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "UNSAFE");
+                |e: &Output| matches!(e, Output::Delta { delta, .. } if delta.as_str() == "UNSAFE");
             match verdict.iter().any(unsafe_) {
                 true => Err(Fault::new("the judge refused")
                     .with(ErrorCode("unsafe".into()))
@@ -99,8 +99,8 @@ async fn a_judges_own_prompt_carries_nothing_of_the_clients() {
     #[async_trait]
     impl Plugin for Judge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let said = cx.input::<Conversation>()?.messages[0].text();
-            let prompt = Conversation::new([
+            let said = cx.input::<Input>()?.messages[0].text();
+            let prompt = Input::new([
                 Message::new(Role::System, "Answer SAFE or UNSAFE."),
                 Message::new(Role::User, said),
             ]);
@@ -108,7 +108,7 @@ async fn a_judges_own_prompt_carries_nothing_of_the_clients() {
                 .call("openai")
                 .with_input(judged(prompt, "judge-1"))
                 .await?
-                .outputs::<Reply>()
+                .outputs::<Output>()
                 .try_collect::<Vec<_>>()
                 .await?;
             Ok(None)
@@ -157,15 +157,17 @@ async fn a_judge_asks_whole_while_its_client_streams() {
     #[async_trait]
     impl Plugin for Judge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let prompt = Conversation::new([Message::new(Role::User, "safe?")]);
+            let prompt = Input::new([Message::new(Role::User, "safe?")]);
             let verdict = cx
                 .call("openai")
                 .with_input(prompt)
+                .with_extension(respan_gateway_providers::StreamResponse(false))
                 .await?
-                .outputs::<Reply>()
+                .outputs::<Output>()
                 .try_collect::<Vec<_>>()
                 .await?;
-            let hi = |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "hi");
+            let hi =
+                |e: &Output| matches!(e, Output::Delta { delta, .. } if delta.as_str() == "hi");
             assert!(verdict.iter().any(hi));
             Ok(None)
         }
@@ -199,7 +201,7 @@ async fn a_judge_reads_a_redirect_as_a_failure() {
             let verdict = cx
                 .call("openai")
                 .await?
-                .outputs::<Reply>()
+                .outputs::<Output>()
                 .try_collect::<Vec<_>>()
                 .await;
             // A 502 fault carrying the provider's 302.
@@ -281,12 +283,12 @@ async fn a_fallback_reads_a_call_to_its_first_content() {
     impl Plugin for Fallback {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut first = cx.call("openai").await?;
-            if first.buffer_until(Reply::is_content).await.is_ok() {
+            if first.buffer_until(Output::is_content).await.is_ok() {
                 return Ok(Some(first));
             }
             drop(first);
             let mut backup = cx.call("backup").await?;
-            backup.buffer_until(Reply::is_content).await?;
+            backup.buffer_until(Output::is_content).await?;
             Ok(Some(backup))
         }
     }
@@ -375,7 +377,7 @@ async fn a_race_by_completion_picks_the_provider_that_finishes_first() {
                     if to_end {
                         resp.until_end().await?;
                     } else {
-                        resp.buffer_until(Reply::is_content).await?;
+                        resp.buffer_until(Output::is_content).await?;
                     }
                     Ok::<Response, Fault>(resp)
                 })

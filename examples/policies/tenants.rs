@@ -12,8 +12,8 @@
 //!
 //! `cargo run -p respan-gateway-examples --example tenants`
 
+use respan_gateway_conversation::Input;
 use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::conversation::Conversation;
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -115,9 +115,9 @@ fn gateway(
     tenants: Tenants,
 ) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, openai)?
-        .provider::<Conversation, _, _>("azure", OpenAiChat, azure)?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
+        .provider::<Input, _, _>("azure", OpenAiChat, azure)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(tenants))
 }
 

@@ -19,9 +19,9 @@ async fn only_the_text_only_attempt_gets_text_and_the_fallback_the_original() ->
     assert!(converted.contains("[text of a 24-byte PDF]"), "{converted}");
     assert!(!converted.contains("file_data"), "{converted}");
     assert_eq!(
-        &pdf[0].raw[..],
-        REQUEST.as_bytes(),
-        "the fallback, the original"
+        serde_json::from_slice::<serde_json::Value>(&pdf[0].raw).expect("provider JSON"),
+        serde_json::from_str::<serde_json::Value>(REQUEST).expect("client JSON"),
+        "the fallback keeps the original document bytes and name"
     );
     Ok(())
 }
@@ -56,12 +56,12 @@ async fn a_fallback_in_another_format_gets_the_pdf_in_its_own_shape() -> Result<
 #[tokio::test]
 async fn a_part_in_neither_shape_is_never_sent_to_the_other_format() -> Result<(), Fault> {
     let fixture = Fixture::start().await;
-    // The text-only target fails, and no plugin rewrites the image for Claude.
+    // The text-only target fails; the image detail hint has no shared mapping.
     fixture
         .text
         .answer(Answer::error(503).message("unavailable"));
     let gw = gateway_claude(&fixture, Arc::new(PdfToText::new(&["text-only"]).await?))?;
-    let image = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/y.png"}}]}]}"#;
+    let image = r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://x/y.png","detail":"high"}}]}]}"#;
     // The client gets the provider's answer, not the fallback's refusal.
     assert_eq!(
         send(&gw, "acme", image).await,

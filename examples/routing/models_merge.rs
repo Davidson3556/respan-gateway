@@ -21,7 +21,8 @@
 
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::formats;
-use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_http::formats::opaque::{self};
+use respan_gateway_http::formats::opaque::{Got, Sent};
 use respan_gateway_http::formats::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{self as h, Incoming, Outgoing};

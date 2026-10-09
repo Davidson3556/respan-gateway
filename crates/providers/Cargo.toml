@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
+respan-gateway-conversation.workspace = true
 respan-gateway-sdk.workspace = true
 respan-gateway-http.workspace = true
 serde.workspace = true

@@ -4,9 +4,9 @@
 #[path = "../support/text.rs"]
 mod text;
 
+use respan_gateway_conversation::Output;
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Fault;
-use respan_gateway_sdk::conversation::Reply;
 #[path = "support/text.rs"]
 mod support;
 
@@ -16,11 +16,11 @@ use text::{Holdback, Placeholders, Rewrite, partial_match};
 
 /// One Anthropic `input_json_delta` of a streamed tool call, as the format
 /// decodes it: the next part of the arguments of the call in block 1.
-fn partial(json_text: &str) -> Reply {
-    Reply::arguments(1, json_text)
+fn partial(json_text: &str) -> Output {
+    Output::arguments(1, json_text)
 }
 
-fn joined_partial(out: &[Reply]) -> String {
+fn joined_partial(out: &[Output]) -> String {
     arguments_of(out, 1)
 }
 

@@ -11,7 +11,7 @@
 //! - [`WsTransport`]: an outbound native HTTP sender
 //!   that connects to a `ws://` or `wss://` provider.
 //! - [`JsonEvents`]: a [`Format`](respan_gateway_sdk::Format) whose kind is
-//!   one JSON event per frame ([`ClientEvent`] in, [`ProviderEvent`] out),
+//!   one JSON event per frame ([`Input`](respan_gateway_realtime::Input) in, [`Output`](respan_gateway_realtime::Output) out),
 //!   for plugins that filter a session's events.
 //! - [`CloseCode`] and [`ProviderClose`]: the code a client is closed with,
 //!   and the one a provider closed with.
@@ -26,7 +26,7 @@ use std::time::Duration;
 mod events;
 mod transport;
 
-pub use events::{ClientEvent, JsonEvents, ProviderEvent};
+pub use events::JsonEvents;
 pub use transport::WsTransport;
 
 /// What an edge of a session takes: the provider edge's ([`WsTransport`])

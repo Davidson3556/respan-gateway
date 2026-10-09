@@ -10,19 +10,20 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use respan_gateway_conversation::Assembled;
 use respan_gateway_http::bytes::{BufMut, Bytes, BytesMut};
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{
     Status, bodiless, http::request::Parts as RequestHead, http::response::Parts as ResponseHead,
 };
 use respan_gateway_sdk::futures::TryStreamExt;
-use respan_gateway_sdk::{Assembled, BadRequest, ErrorCode, Fault, Truncated, Upstream};
+use respan_gateway_sdk::{BadRequest, ErrorCode, Fault, Truncated, Upstream};
 use serde_json::{self, Map, Value};
 
 use crate::Usage;
 use crate::anthropic::ANTHROPIC;
 use crate::conversation::{
-    Block, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role,
+    Block, Content, Delta, Finish, Input, Message, NativeFields, Output, Role,
 };
 use crate::errors::{failure_json, provider_error, says, says_error};
 use crate::formats::sse::{content_type, event_data};
@@ -34,16 +35,16 @@ use respan_gateway_sdk::{EventSink, EventStream};
 pub(crate) trait Wire: Send + Sync + 'static {
     /// The format's name.
     const NAME: &'static str;
-    /// The keys of a conversation's `extra` this format writes itself, from
-    /// the conversation and the extra together.
+    /// The keys of a conversation's `native` this format writes itself, from
+    /// the conversation and the native together.
     const OWN: &'static [&'static str] = &[];
     /// Decodes a response, whole or streamed, into events.
     type Reading: Reader;
     /// A JSON request as a conversation, noting what it has no place for.
-    fn read(v: &Value) -> Conversation;
-    /// A conversation as a request, but for its own `extra` fields and the
+    fn read(v: &Value) -> Input;
+    /// A conversation as a request, but for its own `native` fields and the
     /// model, refusing what this format cannot say.
-    fn write(chat: &Conversation) -> Result<Map<String, Value>, Fault>;
+    fn write(chat: &Input) -> Result<Map<String, Value>, Fault>;
     /// Whether a successful body is a whole response of this format.
     fn is_response(v: &Value) -> bool;
     /// The events of a response, collected, as one whole body.
@@ -69,19 +70,20 @@ pub(crate) trait Wire: Send + Sync + 'static {
 /// between the events of one body.
 pub(crate) trait Reader: Default + Send + 'static {
     /// The events of one stream event, `raw`.
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault>;
+    fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault>;
     /// The events of a stream that has ended, or an error if it was cut.
-    fn end(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault>;
+    fn end(&mut self, out: &mut Vec<Output>) -> Result<(), Fault>;
     /// The events of one whole response body `v`.
-    fn body(&mut self, v: &Value, out: &mut Vec<Reply>) -> Result<(), Fault>;
+    fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault>;
 }
 
 /// Reads a finite JSON request.
-pub(crate) fn read_request<W: Wire>(raw: Bytes) -> Result<Conversation, Fault> {
+pub(crate) fn read_request<W: Wire>(raw: Bytes) -> Result<Input, Fault> {
     match serde_json::from_slice::<Value>(&raw) {
         Ok(v) if v.is_object() => {
             let mut chat = W::read(&v);
             chat.model = v["model"].as_str().map(Into::into);
+            crate::options::read(W::NAME, &v, &mut chat);
             Ok(chat)
         }
         _ => Err(not_an_object()),
@@ -95,9 +97,9 @@ fn not_an_object() -> Fault {
 /// Make `head` a JSON `POST` to `path`, adding what the format needs
 /// without decoding an unread relay into a conversation.
 pub(crate) fn post_json<W: Wire>(
-    source: &mut EventStream<Conversation>,
+    source: &mut EventStream<Input>,
     path: &str,
-) -> Result<(http::Request<Body>, EventSink<Conversation>), Fault> {
+) -> Result<(http::Request<Body>, EventSink<Input>), Fault> {
     if !source.is_single() {
         return Err(Fault::config(format!(
             "{} does not accept streaming inputs",
@@ -137,8 +139,8 @@ pub(crate) fn finish_raw<W: Wire>(body: Bytes) -> Bytes {
 /// the bytes it came as, the gateway cannot tell an edit from the request.
 struct RequestEncoder<W>(PhantomData<W>);
 
-impl<W: Wire> Encoder<Conversation> for RequestEncoder<W> {
-    fn encode(&mut self, chat: &Conversation, out: &mut BytesMut) -> Result<(), Fault> {
+impl<W: Wire> Encoder<Input> for RequestEncoder<W> {
+    fn encode(&mut self, chat: &Input, out: &mut BytesMut) -> Result<(), Fault> {
         let mut v = write_request::<W>(chat).map_err(|f| match f.is::<BadRequest>() {
             true => f,
             false => BadRequest::fault(f.message()).with_source(f),
@@ -171,22 +173,23 @@ fn object(raw: &[u8]) -> Result<Map<String, Value>, Fault> {
 
 /// A conversation as a new request, if nothing is lost: its fields
 /// the kind has no place for are written only if they are this format's.
-pub(crate) fn write_request<W: Wire>(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
-    let mut extra = Map::new();
+pub(crate) fn write_request<W: Wire>(chat: &Input) -> Result<Map<String, Value>, Fault> {
+    let mut native = Map::new();
     let in_the_request = |key: &str| format!("'{key}' in the request");
     let keep = Keep {
         own: W::OWN,
-        droppable: &["max_tokens", "max_completion_tokens"],
+        droppable: &[],
     };
-    write_extra(W::NAME, &chat.extra, &mut extra, in_the_request, keep)?;
+    write_native(W::NAME, &chat.native, &mut native, in_the_request, keep)?;
     let mut v = Map::new();
     set(&mut v, "model", chat.model.clone().map(Into::into));
     v.extend(W::write(chat)?);
-    v.extend(extra);
+    v.extend(native);
+    crate::options::write(W::NAME, chat, &mut v)?;
     Ok(v)
 }
 
-/// What a format does with the fields of an `extra` it writes: `own` keys it
+/// What a format does with the fields of an `native` it writes: `own` keys it
 /// writes itself, which are left out, and `droppable` keys, a field's own
 /// spelling or a hint, which another format drops instead of refusing.
 #[derive(Clone, Copy, Default)]
@@ -195,18 +198,18 @@ pub(crate) struct Keep {
     pub(crate) droppable: &'static [&'static str],
 }
 
-/// The fields of `extra` to write in `format`: all but the `own` keys if they
+/// The fields of `native` to write in `format`: all but the `own` keys if they
 /// are in `format`; if they are another's, none if each is droppable, else
 /// an `Err` naming the first that is not, by `what`.
 pub(crate) fn kept_fields(
     format: &str,
-    extra: &Extra,
+    native: &Option<NativeFields>,
     what: impl FnOnce(&str) -> String,
     keep: Keep,
 ) -> Result<Map<String, Value>, Fault> {
-    let own = extra.format.as_deref() == Some(format);
+    let own = native.format() == Some(format);
     let mut fields = Map::new();
-    for (key, value) in &extra.fields {
+    for (key, value) in native.fields() {
         match (own, keep.droppable.contains(&key.as_str())) {
             (true, _) if keep.own.contains(&key.as_str()) => {}
             (true, _) => _ = fields.insert(key.clone(), value.clone()),
@@ -217,23 +220,23 @@ pub(crate) fn kept_fields(
     Ok(fields)
 }
 
-/// Write the fields of `extra` into `v` as [`kept_fields`] says.
-pub(crate) fn write_extra(
+/// Write the fields of `native` into `v` as [`kept_fields`] says.
+pub(crate) fn write_native(
     format: &str,
-    extra: &Extra,
+    native: &Option<NativeFields>,
     v: &mut Map<String, Value>,
     what: impl FnOnce(&str) -> String,
     keep: Keep,
 ) -> Result<(), Fault> {
-    v.extend(kept_fields(format, extra, what, keep)?);
+    v.extend(kept_fields(format, native, what, keep)?);
     Ok(())
 }
 
-/// `fields` as the extra of a value decoded by `format`: none if empty.
-pub(crate) fn extra_of(format: &str, fields: Map<String, Value>) -> Extra {
+/// `fields` as the native of a value decoded by `format`: none if empty.
+pub(crate) fn native_fields(format: &str, fields: Map<String, Value>) -> Option<NativeFields> {
     match fields.is_empty() {
-        true => Extra::default(),
-        false => Extra::new(format, fields),
+        true => None,
+        false => Some(NativeFields::new(format, fields)),
     }
 }
 
@@ -286,9 +289,11 @@ pub(crate) fn read_response<W: Wire>(
     call: &RequestHead,
     stream: impl FnOnce(
         Body,
-    )
-        -> respan_gateway_sdk::futures::stream::BoxStream<'static, Result<Reply, Fault>>,
-) -> respan_gateway_sdk::futures::stream::BoxStream<'static, Result<Reply, Fault>> {
+    ) -> respan_gateway_sdk::futures::stream::BoxStream<
+        'static,
+        Result<Output, Fault>,
+    >,
+) -> respan_gateway_sdk::futures::stream::BoxStream<'static, Result<Output, Fault>> {
     let (mut head, body) = response.into_parts();
     if head.status.is_success() && bodiless(&call.method, head.status) {
         return Box::pin(respan_gateway_sdk::futures::stream::empty());
@@ -319,8 +324,8 @@ pub(crate) fn read_response<W: Wire>(
 pub(crate) fn response_encoder(
     head: &mut ResponseHead,
     request: &http::Request<Bytes>,
-    encoder: impl FnOnce(&ResponseHead, Asked) -> Box<dyn Encoder<Reply>>,
-) -> Option<Box<dyn Encoder<Reply>>> {
+    encoder: impl FnOnce(&ResponseHead, Asked) -> Box<dyn Encoder<Output>>,
+) -> Option<Box<dyn Encoder<Output>>> {
     if bodiless(request.method(), head.status) {
         return None;
     }
@@ -332,8 +337,8 @@ pub(crate) fn response_encoder(
 /// Finite response encoding uses the exact same encoder as HTTP delivery.
 pub(crate) fn encode_response(
     head: ResponseHead,
-    encoder: Option<Box<dyn Encoder<Reply>>>,
-    replies: &[Reply],
+    encoder: Option<Box<dyn Encoder<Output>>>,
+    replies: &[Output],
 ) -> Result<http::Response<Bytes>, Fault> {
     let bytes = match encoder {
         Some(encoder) => respan_gateway_http::encode_all(encoder, replies)?,
@@ -366,7 +371,7 @@ pub(crate) fn refusal<W: Wire>(fault: &Fault, head: &mut ResponseHead) -> Bytes 
 
 /// One JSON message, decoded whole: the events of a success, else the
 /// provider's error.
-pub(crate) fn unary_reply<W: Wire>(status: StatusCode, raw: Bytes) -> Result<Vec<Reply>, Fault> {
+pub(crate) fn unary_reply<W: Wire>(status: StatusCode, raw: Bytes) -> Result<Vec<Output>, Fault> {
     let v = serde_json::from_slice::<Value>(&raw).ok();
     if let Some(v) = v.as_ref().filter(|v| W::is_response(v)) {
         let mut out = Vec::new();
@@ -394,7 +399,7 @@ pub(crate) struct Gate {
 impl Gate {
     /// Let through, with what came before, what `reply` made, if it or any
     /// before it shows content.
-    pub(crate) fn pass(&mut self, reply: &Reply, made: &[u8], out: &mut BytesMut) {
+    pub(crate) fn pass(&mut self, reply: &Output, made: &[u8], out: &mut BytesMut) {
         self.held.extend_from_slice(made);
         if self.shown || shows(reply) {
             self.release(out);
@@ -423,8 +428,8 @@ impl<W: Wire> UnaryEncoder<W> {
     }
 }
 
-impl<W: Wire> Encoder<Reply> for UnaryEncoder<W> {
-    fn encode(&mut self, reply: &Reply, _out: &mut BytesMut) -> Result<(), Fault> {
+impl<W: Wire> Encoder<Output> for UnaryEncoder<W> {
+    fn encode(&mut self, reply: &Output, _out: &mut BytesMut) -> Result<(), Fault> {
         self.whole.push(reply).map_err(|_| unwritable_content())
     }
 
@@ -451,13 +456,13 @@ pub(crate) fn is_inert(format: &str, raw: &Value) -> bool {
             ) || raw["delta"]["type"] == "signature_delta")
 }
 
-/// Merge the fields of `extra` into `target`, an object, objects among them
+/// Merge the fields of `native` into `target`, an object, objects among them
 /// field by field.
-pub(crate) fn merge_fields(target: &mut Value, extra: &Map<String, Value>) {
+pub(crate) fn merge_fields(target: &mut Value, native: &Map<String, Value>) {
     let Some(target) = target.as_object_mut() else {
         return;
     };
-    for (key, value) in extra {
+    for (key, value) in native {
         match (target.get_mut(key), value) {
             (Some(had), Value::Object(more)) if had.is_object() => merge_fields(had, more),
             _ => _ = target.insert(key.clone(), value.clone()),
@@ -489,7 +494,7 @@ pub(crate) fn usage_extra(
     known: &[&str],
     details: &[(&str, &[&str])],
 ) -> Map<String, Value> {
-    let mut extra = Map::new();
+    let mut native = Map::new();
     for (key, value) in u.as_object().into_iter().flatten() {
         match details.iter().find(|(name, _)| name == key) {
             Some((_, counters)) => {
@@ -499,14 +504,14 @@ pub(crate) fn usage_extra(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 if !rest.is_empty() {
-                    extra.insert(key.clone(), rest.into());
+                    native.insert(key.clone(), rest.into());
                 }
             }
             None if known.contains(&key.as_str()) || value.is_null() => {}
-            None => _ = extra.insert(key.clone(), value.clone()),
+            None => _ = native.insert(key.clone(), value.clone()),
         }
     }
-    extra
+    native
 }
 
 /// Whether `object` says nothing but in the fields `these`.
@@ -530,11 +535,11 @@ pub(crate) fn fits(delta: &Delta, block: &Block) -> bool {
 
 /// Whether a reply shows the client something: not a start, usage, or the
 /// opening or end of a text block, which says nothing yet.
-pub(crate) fn shows(reply: &Reply) -> bool {
+pub(crate) fn shows(reply: &Output) -> bool {
     match reply {
-        Reply::Delta { delta, .. } => !delta.as_str().is_empty(),
-        Reply::BlockStart { kind, .. } => *kind != Block::Text,
-        Reply::Finish(_) => true,
+        Output::Delta { delta, .. } => !delta.as_str().is_empty(),
+        Output::BlockStart { kind, .. } => *kind != Block::Text,
+        Output::Finish(_) => true,
         _ => false,
     }
 }
@@ -544,7 +549,7 @@ pub(crate) fn shows(reply: &Reply) -> bool {
 pub(crate) struct ReplyParser<R> {
     frames: crate::formats::sse::Parser,
     reading: R,
-    held: Vec<Reply>,
+    held: Vec<Output>,
     through: bool,
 }
 
@@ -562,7 +567,7 @@ impl<R: Reader> ReplyParser<R> {
         }
     }
 
-    pub(crate) fn push(&mut self, bytes: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    pub(crate) fn push(&mut self, bytes: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         let from = out.len();
         let result = self.frames.push(bytes).and_then(|events| {
             events
@@ -573,7 +578,7 @@ impl<R: Reader> ReplyParser<R> {
         result
     }
 
-    pub(crate) fn finish(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    pub(crate) fn finish(&mut self, out: &mut Vec<Output>) -> Result<(), Fault> {
         let from = out.len();
         let result = self
             .frames
@@ -586,7 +591,7 @@ impl<R: Reader> ReplyParser<R> {
         result
     }
 
-    fn hold(&mut self, out: &mut Vec<Reply>, from: usize, failed: bool) {
+    fn hold(&mut self, out: &mut Vec<Output>, from: usize, failed: bool) {
         for reply in out.split_off(from) {
             match reply {
                 _ if self.through => out.push(reply),
@@ -602,23 +607,23 @@ impl<R: Reader> ReplyParser<R> {
         if failed && !self.through {
             let mut usage = Usage::default();
             for held in self.held.drain(..) {
-                if let Reply::Usage(u) = held {
+                if let Output::Usage(u) = held {
                     usage += &u;
                 }
             }
             if !usage.is_empty() {
-                out.push(Reply::Usage(usage));
+                out.push(Output::Usage(usage));
             }
         }
     }
 }
 
 /// The events of a stream event that is not its format's JSON, as an
-/// [`Reply::Other`] so filters read it; one with no data, such as a comment,
+/// [`Output::Native`] so filters read it; one with no data, such as a comment,
 /// says nothing.
-pub(crate) fn unreadable_event(name: &Arc<str>, raw: &Bytes, out: &mut Vec<Reply>) {
+pub(crate) fn unreadable_event(name: &Arc<str>, raw: &Bytes, out: &mut Vec<Output>) {
     if let Some(data) = event_data(raw) {
-        out.push(Reply::other(name.clone(), data));
+        out.push(Output::native(name.clone(), data));
     }
 }
 
@@ -637,7 +642,7 @@ pub(crate) fn error_event(name: &Arc<str>, raw: &[u8], v: &Value) -> Fault {
 pub(crate) fn write_content(format: &str, content: &[Content]) -> Result<Value, Fault> {
     Ok(match content {
         [] => "".into(),
-        [Content::Text { text, extra, .. }] if kept_text_fields(format, extra)?.is_empty() => {
+        [Content::Text { text, native, .. }] if kept_text_fields(format, native)?.is_empty() => {
             text.as_str().into()
         }
         parts => parts
@@ -653,44 +658,60 @@ pub(crate) fn read_content(format: &str, v: &Value) -> Vec<Content> {
         Value::String(text) => vec![Content::from(text.as_str())],
         Value::Array(parts) => parts.iter().map(|p| read_part(format, p)).collect(),
         Value::Null => Vec::new(),
-        other => vec![Content::other(format, other.clone())],
+        other => vec![Content::native(format, other.clone())],
     }
 }
 
-/// The fields of a text part's `extra` to write in `format`: a cache marker
+/// The fields of a text part's `native` to write in `format`: a cache marker
 /// is dropped by another format, any other field refused.
-fn kept_text_fields(format: &str, extra: &Extra) -> Result<Map<String, Value>, Fault> {
+fn kept_text_fields(
+    format: &str,
+    native: &Option<NativeFields>,
+) -> Result<Map<String, Value>, Fault> {
     let keep = Keep {
         own: &[],
         droppable: &["cache_control"],
     };
-    kept_fields(format, extra, |key| format!("a text part's '{key}'"), keep)
+    kept_fields(format, native, |key| format!("a text part's '{key}'"), keep)
 }
 
 /// A part as `format` has it: text, an Anthropic tool block, or a part in
 /// that format only.
 fn write_part(format: &str, c: &Content) -> Result<Value, Fault> {
     match c {
-        Content::Text { text, extra, .. } => {
+        Content::Image(_)
+        | Content::Audio(_)
+        | Content::Document(_)
+        | Content::Reasoning { .. } => crate::media::write(format, c),
+        Content::Text { text, native, .. } => {
             let mut part = Map::new();
             part.insert("type".into(), "text".into());
             part.insert("text".into(), text.as_str().into());
-            part.extend(kept_text_fields(format, extra)?);
+            part.extend(kept_text_fields(format, native)?);
             Ok(part.into())
         }
         Content::ToolCall { .. } | Content::ToolResult { .. } if format == ANTHROPIC => {
             anthropic_block(c)
         }
-        Content::Other { format: f, raw, .. } if **f == *format => Ok(Value::clone(raw)),
-        Content::Other { format: f, .. } => Err(untranslatable(&format!("a part in {f}'s shape"))),
+        Content::Native(respan_gateway_sdk::NativeValue {
+            format: f,
+            value: raw,
+            ..
+        }) if **f == *format => Ok(Value::clone(raw)),
+        Content::Native(respan_gateway_sdk::NativeValue { format: f, .. }) => {
+            Err(untranslatable(&format!("a part in {f}'s shape")))
+        }
         _ => Err(untranslatable("an unsupported kind of part")),
     }
 }
 
-/// A text part, whose other fields, such as a cache marker, are its `extra`;
+/// A text part, whose other fields, such as a cache marker, are its `native`;
 /// an Anthropic tool block; or other content, which only a call in the
 /// format it is in can send.
 fn read_part(format: &str, p: &Value) -> Content {
+    if let Some(part) = crate::media::read(format, p) {
+        return part;
+    }
     let tool = || anthropic_part(p).filter(|_| format == ANTHROPIC);
     match (p["type"].as_str(), p["text"].as_str()) {
         (Some("text"), Some(text)) => {
@@ -698,16 +719,16 @@ fn read_part(format: &str, p: &Value) -> Content {
             let fields = fields.filter(|(k, v)| *k != "type" && *k != "text" && says(v));
             let fields = fields.map(|(k, v)| (k.clone(), v.clone())).collect();
             let mut part = Content::from(text);
-            if let Content::Text { extra, .. } = &mut part {
-                *extra = extra_of(format, fields);
+            if let Content::Text { native, .. } = &mut part {
+                *native = native_fields(format, fields);
             }
             part
         }
-        _ => tool().unwrap_or_else(|| Content::other(format, p.clone())),
+        _ => tool().unwrap_or_else(|| Content::native(format, p.clone())),
     }
 }
 
-/// A message as a conversation keeps it: its other fields in its `extra`.
+/// A message as a conversation keeps it: its other fields in its `native`.
 pub(crate) fn read_message(format: &str, m: &Value, roles: &Names<Role>) -> Message {
     let name = m["role"].as_str().unwrap_or_default();
     let role = roles
@@ -717,15 +738,21 @@ pub(crate) fn read_message(format: &str, m: &Value, roles: &Names<Role>) -> Mess
     let fields = fields.filter(|(k, v)| *k != "role" && *k != "content" && says(v));
     let mut message = Message::new(role, "");
     message.content = read_content(format, &m["content"]);
-    message.extra.fields = fields.map(|(k, v)| (k.clone(), v.clone())).collect();
+    message.native = native_fields(
+        format,
+        fields.map(|(k, v)| (k.clone(), v.clone())).collect(),
+    );
     tag(&mut message, format);
     message
 }
 
-/// Note that what a message's `extra` says is in `format`, if it says
+/// Note that what a message's `native` says is in `format`, if it says
 /// anything the kind has no form for.
 pub(crate) fn tag(message: &mut Message, format: &str) {
-    message.extra.format = (!message.extra.is_empty()).then(|| Arc::from(format));
+    if message.native.is_empty() {
+        message.native = None;
+    }
+    let _ = format;
 }
 
 /// A message written anew: role, content and its other fields.
@@ -738,7 +765,7 @@ pub(crate) fn write_message(
     v.insert("role".into(), role_of(format, m, roles)?);
     v.insert("content".into(), write_content(format, &m.content)?);
     let fields = |_: &str| "messages with fields the kind has no place for".to_owned();
-    write_extra(format, &m.extra, &mut v, fields, Keep::default())?;
+    write_native(format, &m.native, &mut v, fields, Keep::default())?;
     Ok(v.into())
 }
 
@@ -888,6 +915,71 @@ pub(crate) fn set(v: &mut Map<String, Value>, key: &str, value: Option<Value>) {
     };
 }
 
+/// Internal conveniences for optional format-tagged semantic fields.
+pub(crate) trait NativeFieldsExt {
+    fn fields(&self) -> &Map<String, Value>;
+    fn fields_mut(&mut self, format: &str) -> &mut Map<String, Value>;
+    fn format(&self) -> Option<&str>;
+    fn is_empty(&self) -> bool;
+}
+impl NativeFieldsExt for Option<NativeFields> {
+    fn fields(&self) -> &Map<String, Value> {
+        static EMPTY: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
+        self.as_ref()
+            .map(|n| &n.fields)
+            .unwrap_or_else(|| EMPTY.get_or_init(Map::new))
+    }
+    fn fields_mut(&mut self, format: &str) -> &mut Map<String, Value> {
+        &mut self
+            .get_or_insert_with(|| NativeFields::new(format, Map::new()))
+            .fields
+    }
+    fn format(&self) -> Option<&str> {
+        self.as_ref().map(|n| n.format.as_ref())
+    }
+    fn is_empty(&self) -> bool {
+        self.as_ref().is_none_or(NativeFields::is_empty)
+    }
+}
+
+/// Preserve a client's delivery preference and same-format field spellings in
+/// the HTTP adapter, independently of the semantic request value.
+pub(crate) fn post_json_with_wire<W: Wire>(
+    source: &mut EventStream<Input>,
+    path: &str,
+    wire: Option<&respan_gateway_http::Wire>,
+    stream: Option<crate::StreamResponse>,
+) -> Result<(http::Request<Body>, EventSink<Input>), Fault> {
+    let (mut request, sink) = post_json::<W>(source, path)?;
+    if let Some(raw) = request.body_mut().full_bytes_mut() {
+        let mut v = object(raw)?;
+        let original = wire.and_then(|w| w.get());
+        let stream = stream
+            .map(|s| s.0)
+            .unwrap_or_else(|| original.map(|r| probe(r.body()).stream).unwrap_or(true));
+        if stream {
+            v.insert("stream".into(), true.into());
+        }
+        if W::NAME == "openai-chat"
+            && let Some(original) =
+                original.filter(|r| r.uri().path().ends_with("/chat/completions"))
+        {
+            let original: Value = serde_json::from_slice(original.body()).unwrap_or(Value::Null);
+            if original.get("max_tokens").is_some()
+                && let Some(limit) = v.get("max_completion_tokens").cloned()
+            {
+                v.insert("max_tokens".into(), limit);
+                if original.get("max_completion_tokens").is_none() {
+                    v.remove("max_completion_tokens");
+                }
+            }
+        }
+        W::finish(&mut v);
+        *raw = to_bytes(&v)?;
+    }
+    Ok((request, sink))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,9 +987,9 @@ mod tests {
     use respan_gateway_sdk::Details;
     use serde_json::json;
 
-    fn usage_of(reply: &Reply) -> Option<u64> {
+    fn usage_of(reply: &Output) -> Option<u64> {
         match reply {
-            Reply::Usage(u) => u.get(crate::conversation::units::INPUT_TOKENS),
+            Output::Usage(u) => u.get(crate::conversation::units::INPUT_TOKENS),
             _ => None,
         }
     }
@@ -974,11 +1066,11 @@ mod tests {
                     .to_string(),
                 ));
                 let replies = [
-                    Reply::start("r", "m"),
-                    Reply::block_start(0, Block::Text),
-                    Reply::text(0, "hello"),
-                    Reply::block_end(0),
-                    Reply::finished(Finish::Stop),
+                    Output::start("r", "m"),
+                    Output::block_start(0, Block::Text),
+                    Output::text(0, "hello"),
+                    Output::block_end(0),
+                    Output::finished(Finish::Stop),
                 ];
                 let response = if anthropic {
                     AnthropicMessages.encode_response(&request, &replies)
@@ -1094,7 +1186,7 @@ mod tests {
                 .is_err()
         );
 
-        let unknown = Reply::finished(Finish::other("openai-chat", "unrecognized_native_finish"));
+        let unknown = Output::finished(Finish::other("openai-chat", "unrecognized_native_finish"));
         assert!(
             AnthropicMessages
                 .encode_response(&request(false), &[unknown])
@@ -1264,7 +1356,7 @@ mod tests {
     #[test]
     fn orphan_tool_arguments_fail_in_unary_and_streaming_responses() {
         // Arguments of a call that never started, in either format's words.
-        let orphan = [Reply::arguments(0, "{}")];
+        let orphan = [Output::arguments(0, "{}")];
         let ask = http::Request::new(()).into_parts().0;
         for stream in [false, true] {
             let body: Bytes = json!({"stream": stream, "stream_options": {"include_usage": true}})
@@ -1288,7 +1380,7 @@ mod tests {
     fn interleaved_calls_and_repeated_starts_remain_writable() {
         // As OpenAI streams parallel calls: interleaved, a start repeated.
         let call = |block: u32, id: &str, name: &str| {
-            Reply::block_start(
+            Output::block_start(
                 block,
                 Block::ToolCall {
                     id: id.into(),
@@ -1298,14 +1390,14 @@ mod tests {
         };
         let replies = [
             call(0, "a", "alpha"),
-            Reply::arguments(0, "{\"a\":"),
+            Output::arguments(0, "{\"a\":"),
             call(1, "b", "beta"),
-            Reply::arguments(1, "{\"b\":"),
-            Reply::arguments(0, "1}"),
+            Output::arguments(1, "{\"b\":"),
+            Output::arguments(0, "1}"),
             call(1, "b", "beta"),
-            Reply::arguments(1, "2}"),
-            Reply::block_end(0),
-            Reply::block_end(1),
+            Output::arguments(1, "2}"),
+            Output::block_end(0),
+            Output::block_end(1),
         ];
         let ask = http::Request::new(()).into_parts().0;
         for stream in [false, true] {
@@ -1361,9 +1453,9 @@ mod tests {
             { "type": "text", "text": "A" },
         ]);
         let mut content = read_content("anthropic-messages", &old);
-        // A part that says more is text with its own extra, and so equal text
+        // A part that says more is text with its own native, and so equal text
         // beside it is a part of its own.
-        assert!(matches!(&content[0], Content::Text { extra, .. } if !extra.is_empty()));
+        assert!(matches!(&content[0], Content::Text { native, .. } if !native.is_empty()));
         assert_eq!(content[1], Content::from("A"));
         content.insert(0, Content::from("B"));
         content.push(Content::from("A"));
@@ -1445,13 +1537,12 @@ mod tests {
 
     #[test]
     fn the_fault_says_message_and_type_the_provider_the_rest() {
-        let details = json!({"message": "", "type": "https://x/p", "code": null, "extra": 1});
+        let details = json!({"message": "", "type": "https://x/p", "code": null, "native": 1});
         let fault = BadRequest::fault("m")
             .with(Details(details.as_object().expect("error fields").clone()));
         let body = OpenAiChat::error_body(&fault);
         // The fault's words are the format's; the provider's `code` stays.
-        let kept =
-            json!({"message": "m", "type": "bad_request", "param": null, "code": null, "extra": 1});
+        let kept = json!({"message": "m", "type": "bad_request", "param": null, "code": null, "native": 1});
         assert_eq!(body["error"], kept);
     }
 

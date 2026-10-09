@@ -23,7 +23,7 @@ processes or several components.
 | Category | What it establishes | Main suites |
 | --- | --- | --- |
 | Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
-| Shared data contracts | Conversation assembly, text access and message representation | SDK unit tests |
+| Shared data contracts | Input assembly, text access and message representation | Input unit tests |
 | HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/http/tests/`, HTTP unit tests |
 | Provider compatibility | Native relay, OpenAI/Anthropic translation, tools, errors and usage | `crates/providers/tests/{relay,translate}/`, provider unit tests |
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/axum/tests/`, WS unit tests |

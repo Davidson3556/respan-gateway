@@ -3,7 +3,7 @@
 //! no usage: [`Meter`], registered last, sums what lines report through a
 //! provider-edge filter, so these tests show what such a filter sees.
 
-use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_conversation::Input;
 use respan_gateway_sdk::{BadRequest, ErrorCode, Truncated, Upstream};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -476,12 +476,12 @@ async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
         ))
     };
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "anthropic",
             AnthropicMessages,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("anthropic"))
         .unwrap_or_else(|e| panic!("{e}"));
     let r = http_helpers::post(

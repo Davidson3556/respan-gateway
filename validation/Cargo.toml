@@ -17,6 +17,8 @@ test = false
 bench = false
 
 [dependencies]
+respan-gateway-realtime = { path = "../crates/realtime" }
+respan-gateway-conversation = { path = "../crates/conversation" }
 respan-gateway-sdk = { path = "../crates/sdk" }
 respan-gateway-http = { path = "../crates/http", features = ["reqwest"] }
 respan-gateway-providers = { path = "../crates/providers" }

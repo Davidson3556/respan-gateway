@@ -1,9 +1,9 @@
 use super::*;
+use respan_gateway_conversation::Input;
 use respan_gateway_examples::Meter;
 use respan_gateway_http::{Status, http};
 use respan_gateway_providers::AnthropicMessages;
 use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{Plugin, ProviderContext, async_trait};
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
@@ -35,8 +35,8 @@ async fn answers_json_or_sse_as_asked() -> Result<(), Fault> {
 async fn the_same_model_answers_in_anthropics_format() -> Result<(), Fault> {
     let model: Model = Arc::new(echo);
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>("local", Local, move |_| model.clone())?
-        .client::<Conversation, _, _>(AnthropicMessages)?
+        .provider::<Input, _, _>("local", Local, move |_| model.clone())?
+        .client::<Input, _, _>(AnthropicMessages)?
         .target("local")?;
     let req = r#"{"model":"echo","max_tokens":9,"stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
     let (_, _, body) = read_whole(serve(&gw, post("/v1/messages", req)).await.0).await;

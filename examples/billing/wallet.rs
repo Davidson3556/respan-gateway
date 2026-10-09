@@ -19,7 +19,7 @@ use respan_gateway_sdk::{Fault, Gateway, ProviderContext, futures};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
-use respan_gateway_sdk::conversation::{Conversation, Reply};
+use respan_gateway_conversation::{Input, Output};
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
@@ -56,13 +56,14 @@ fn quote(
             .with(ErrorCode("no_key".into()))
             .with(Status(StatusCode::UNAUTHORIZED))
     })?;
-    let chat = px.input::<Conversation>()?;
+    let chat = px.input::<Input>()?;
     let model = chat.model.as_deref().unwrap_or_default();
     let Some(&price) = prices.get(model) else {
         return Err(BadRequest::fault(format!("no price for model '{model}'")));
     };
     let max_output = chat
-        .max_tokens
+        .options
+        .max_output_tokens
         .ok_or_else(|| BadRequest::fault("set max_tokens"))?;
     let reserve = price.cost(
         input_bound(chat)?,
@@ -70,8 +71,8 @@ fn quote(
     );
     let key = key.to_owned();
     // Accounting runs last, so this filter sees each reply first.
-    px.filter(move |reply: &mut Reply| {
-        if let Reply::Usage(usage) = reply {
+    px.filter(move |reply: &mut Output| {
+        if let Output::Usage(usage) = reply {
             tally.add(price.of(usage));
         }
         Ok(())
@@ -103,8 +104,8 @@ fn gateway(
     let prices = prices();
     let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
         // Register it last, so it prices the call as other plugins left it.
         .plugin(accounting)
         .target("openai")

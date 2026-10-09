@@ -1,7 +1,7 @@
 use super::*;
+use respan_gateway_conversation::Input;
+use respan_gateway_conversation::units;
 use respan_gateway_sdk::BadRequest;
-use respan_gateway_sdk::conversation::Conversation;
-use respan_gateway_sdk::conversation::units;
 
 #[tokio::test]
 async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
@@ -48,10 +48,8 @@ struct Refuses;
 impl Plugin for Refuses {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         px.filter(
-            |reply: &mut respan_gateway_sdk::conversation::Reply| match reply {
-                respan_gateway_sdk::conversation::Reply::Usage(_) => {
-                    Err(BadRequest::fault("refused"))
-                }
+            |reply: &mut respan_gateway_conversation::Output| match reply {
+                respan_gateway_conversation::Output::Usage(_) => Err(BadRequest::fault("refused")),
                 _ => Ok(()),
             },
         )
@@ -65,12 +63,12 @@ async fn a_filter_registered_earlier_cannot_hide_usage_from_billing() -> Result<
     let (openai, store) = (FakeOpenAi::start().await, Memory::default());
     let prices = HashMap::from([(SMALL, Price::new(150_000, 600_000))]);
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             provider_support::openai(&openai.base_url())?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Refuses)
         .plugin(Billing {
             prices,

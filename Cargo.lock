@@ -1239,6 +1239,7 @@ dependencies = [
  "mockllm",
  "reqwest",
  "respan-gateway-axum",
+ "respan-gateway-conversation",
  "respan-gateway-http",
  "respan-gateway-plugins",
  "respan-gateway-providers",
@@ -1261,14 +1262,25 @@ dependencies = [
  "http-body-util",
  "mockllm",
  "reqwest",
+ "respan-gateway-conversation",
  "respan-gateway-http",
  "respan-gateway-providers",
+ "respan-gateway-realtime",
  "respan-gateway-sdk",
  "respan-gateway-ws",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
  "tower",
+]
+
+[[package]]
+name = "respan-gateway-conversation"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "respan-gateway-sdk",
+ "serde_json",
 ]
 
 [[package]]
@@ -1295,10 +1307,12 @@ dependencies = [
  "mockllm",
  "reqwest",
  "respan-gateway-axum",
+ "respan-gateway-conversation",
  "respan-gateway-http",
  "respan-gateway-mcp",
  "respan-gateway-plugins",
  "respan-gateway-providers",
+ "respan-gateway-realtime",
  "respan-gateway-sdk",
  "respan-gateway-ws",
  "rusqlite",
@@ -1321,6 +1335,7 @@ dependencies = [
  "http-body-util",
  "mockllm",
  "reqwest",
+ "respan-gateway-conversation",
  "respan-gateway-plugins",
  "respan-gateway-providers",
  "respan-gateway-sdk",
@@ -1335,9 +1350,18 @@ version = "0.0.0"
 dependencies = [
  "getrandom 0.3.4",
  "respan-gateway-http",
+ "respan-gateway-mcp-messages",
  "respan-gateway-sdk",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "respan-gateway-mcp-messages"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1346,6 +1370,7 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "mockllm",
+ "respan-gateway-conversation",
  "respan-gateway-http",
  "respan-gateway-providers",
  "respan-gateway-sdk",
@@ -1357,14 +1382,24 @@ dependencies = [
 name = "respan-gateway-providers"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "mockllm",
+ "respan-gateway-conversation",
  "respan-gateway-http",
  "respan-gateway-plugins",
  "respan-gateway-sdk",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "respan-gateway-realtime"
+version = "0.0.0"
+dependencies = [
+ "respan-gateway-sdk",
+ "serde_json",
 ]
 
 [[package]]
@@ -1381,6 +1416,7 @@ version = "0.0.0"
 dependencies = [
  "reqwest",
  "respan-gateway-http",
+ "respan-gateway-realtime",
  "respan-gateway-sdk",
  "rustls",
  "rustls-native-certs",

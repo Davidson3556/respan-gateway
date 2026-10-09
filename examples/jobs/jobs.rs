@@ -37,11 +37,11 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::FakeOpenAi;
+use respan_gateway_conversation::{Input, Output};
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Credential, Wire};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
@@ -100,7 +100,7 @@ fn tenant(cx: &ClientContext) -> String {
 struct NoContent;
 
 /// A run's result: the replies its client got.
-type Replies = Arc<Vec<Reply>>;
+type Replies = Arc<Vec<Output>>;
 
 /// What a request with a key does.
 enum Claim {
@@ -174,7 +174,7 @@ impl Store for Memory {
 #[derive(Clone)]
 struct Running {
     key: Key,
-    sent: Arc<Mutex<Vec<Reply>>>,
+    sent: Arc<Mutex<Vec<Output>>>,
     owner: u64,
     stop: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     deadline: Option<watch::Receiver<Instant>>,
@@ -290,7 +290,7 @@ impl<S: Store> Plugin for Idempotent<S> {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let asked = cx.extensions().get::<Wire>().and_then(Wire::get);
         let header = asked.and_then(|a| a.headers().get("idempotency-key")?.to_str().ok());
-        let stores = cx.is_kind::<Conversation>() && cx.extensions().get::<NoContent>().is_none();
+        let stores = cx.is_kind::<Input>() && cx.extensions().get::<NoContent>().is_none();
         let Some(key) = header.filter(|_| stores) else {
             return Ok(None);
         };
@@ -320,7 +320,7 @@ impl<S: Store> Plugin for Idempotent<S> {
             deadline: lease.as_ref().map(|(_, receiver)| receiver.clone()),
         };
         cx.extensions_mut().insert(running.clone());
-        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Reply>| {
+        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Output>| {
             running.bounded(outputs.boxed())
         })?;
         if let (Some(interval), Some((renewed, _))) = (self.0.heartbeat(), lease) {
@@ -344,7 +344,7 @@ impl<S: Store> Plugin for Idempotent<S> {
                 renewed.send_replace(Instant::now());
             });
         }
-        cx.filter(move |reply: &mut Reply| {
+        cx.filter(move |reply: &mut Output| {
             locked(&sent).push(reply.clone());
             Ok(())
         })?;
@@ -370,7 +370,7 @@ fn gateway<S: Store>(
     store: &Arc<S>,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
@@ -381,7 +381,7 @@ fn gateway<S: Store>(
                 LIMIT,
             ),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Idempotent(store.clone()))
         .target("openai")
 }

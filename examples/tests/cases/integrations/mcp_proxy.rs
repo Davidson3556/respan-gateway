@@ -32,8 +32,8 @@ async fn clients_see_and_call_only_the_allowed_tools() -> Result<(), Fault> {
 #[tokio::test]
 async fn a_mock_llm_tool_round_trip_uses_mcp_and_keeps_the_provider_call_id() -> Result<(), Fault> {
     use mockllm::{Answer, FakeAnthropic};
+    use respan_gateway_conversation::Input;
     use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-    use respan_gateway_sdk::conversation::Conversation;
     let mcp = McpServer::start().await;
     let tools = gateway(HttpClient::new(&mcp.url)?.connect())?;
     let (_, session, _) = initialize(&tools).await?;
@@ -48,8 +48,8 @@ async fn a_mock_llm_tool_round_trip_uses_mcp_and_keeps_the_provider_call_id() ->
     let mut headers = respan_gateway_http::http::HeaderMap::new();
     headers.insert("x-api-key", HeaderValue::from_static("sk-ant-test"));
     let chat = Gateway::new()
-        .client::<Conversation, _, _>(OpenAiChat)?
-        .provider::<Conversation, _, _>(
+        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>(
             "llm",
             AnthropicMessages,
             HttpClient::new(llm.base_url())?

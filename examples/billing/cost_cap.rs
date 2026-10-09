@@ -1,9 +1,9 @@
 //! A cost cap without a meter. Providers report output usage at a stream's
 //! end, too late to stop it, so the cap works in three steps:
 //!
-//! 1. a `Conversation` filter asks every call for at most `CAP` tokens an
+//! 1. a `Input` filter asks every call for at most `CAP` tokens an
 //!    answer, which bounds its cost, and `Accounting` holds that bound;
-//! 2. a `Reply` filter on the provider edge estimates output from its text
+//! 2. an `Output` filter on the provider edge estimates output from its text
 //!    and tool calls, and cuts a stream that runs past the bound, for a
 //!    provider that ignores `max_tokens`;
 //! 3. the call settles from its reported usage, or, cut before the usage
@@ -31,8 +31,8 @@ use respan_gateway_sdk::{Fault, Filter, Gateway, Plugin, ProviderContext, async_
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
+use respan_gateway_conversation::{Block, Input, Output, units};
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Block, Conversation, Reply, units};
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
@@ -71,31 +71,33 @@ struct Cap;
 #[async_trait]
 impl Plugin for Cap {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if !px.is_kind::<Conversation>() {
+        if !px.is_kind::<Input>() {
             return Ok(()); // no quote: Accounting refuses it
         }
-        let chat = px.input::<Conversation>()?;
-        let limit = chat.max_tokens.map_or(CAP, |n| n.min(CAP));
+        let chat = px.input::<Input>()?;
+        let limit = chat.options.max_output_tokens.map_or(CAP, |n| n.min(CAP));
         let seen = Seen {
             cap: CAP.saturating_mul(answers(chat)?),
             ..Seen::default()
         };
         px.extensions_mut().insert(seen.clone());
-        px.filter(move |chat: &mut Conversation| {
-            chat.max_tokens = Some(limit);
+        px.filter(move |chat: &mut Input| {
+            chat.options.max_output_tokens = Some(limit);
             Ok(())
         })?;
-        px.filter(move |reply: &mut Reply| {
+        px.filter(move |reply: &mut Output| {
             // A delta counts its text or arguments, a tool call its name;
             // other events their whole JSON, an overestimate, which errs
             // toward cutting.
             let chars = match reply {
-                Reply::Delta { delta, .. } => delta.as_str().len(),
-                Reply::BlockStart {
+                Output::Delta { delta, .. } => delta.as_str().len(),
+                Output::BlockStart {
                     kind: Block::ToolCall { name, .. },
                     ..
                 } => name.len(),
-                Reply::Other { raw, .. } => raw.to_string().len(),
+                Output::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) => {
+                    raw.to_string().len()
+                }
                 _ => 0,
             };
             seen.chars.fetch_add(chars, Ordering::Relaxed);
@@ -126,16 +128,16 @@ struct Settle {
     tally: Tally,
 }
 
-impl Filter<Reply> for Settle {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if let Reply::Usage(usage) = &reply {
+impl Filter<Output> for Settle {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        if let Output::Usage(usage) = &reply {
             self.usage += usage;
         }
         out.push(reply);
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
         let cut = self.seen.cut.load(Ordering::Relaxed);
         if self.usage.is_empty() && !cut {
             return Ok(());
@@ -156,7 +158,7 @@ impl Filter<Reply> for Settle {
 fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
     let seen = px.extensions().get::<Seen>().cloned();
     let seen = seen.ok_or_else(|| Fault::internal("register Cap before Accounting"))?;
-    let input = input_bound(px.input::<Conversation>()?)?;
+    let input = input_bound(px.input::<Input>()?)?;
     let reserve = PRICE.cost(input, seen.cap);
     let usage = Usage::default();
     px.filter(Settle {
@@ -177,8 +179,8 @@ fn gateway(
 ) -> Result<Gateway, Fault> {
     let accounting = Accounting::new(ledger, quote);
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Cap) // before accounting
         .plugin(accounting)
         .target("openai")

@@ -6,7 +6,7 @@ use http_support::LIMIT;
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
-use respan_gateway_sdk::conversation::{Conversation, Reply};
+use respan_gateway_conversation::{Input, Output};
 use std::sync::{Arc, Mutex};
 
 use respan_gateway_axum::router;
@@ -51,12 +51,12 @@ fn http(base: impl Into<String>) -> HttpClient {
 /// `format` over `transport`, its target.
 fn gateway_to<F, T>(format: F, transport: T) -> Gateway
 where
-    F: Format<Outgoing, Reply, Conversation>,
+    F: Format<Outgoing, Output, Input>,
     T: Fn(Extensions) -> Outgoing + Send + Sync + 'static,
 {
     Gateway::new()
         .provider("local", format, transport)
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -403,7 +403,8 @@ fn exchange(
 // which the transport puts back when it has no keys of its own.
 #[tokio::test]
 async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
-    use respan_gateway_http::formats::opaque::{Passthrough, Sent};
+    use respan_gateway_http::formats::opaque::Passthrough;
+    use respan_gateway_http::formats::opaque::Sent;
     use respan_gateway_http::http_body_util::BodyExt;
     let head = call_head("/v1/chat?key=k&beta=1", &CLIENT);
     let before = head.headers.clone();
@@ -538,12 +539,12 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     .await;
     let log = Log::default();
     let gateway = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "local",
             OpenAiChat,
             http(format!("{provider}/v1")).connect(),
         )
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(log.clone()).plugin(relay::Relay::HEADS))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));

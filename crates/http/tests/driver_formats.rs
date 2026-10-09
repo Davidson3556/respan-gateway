@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
+use respan_gateway_conversation::Input;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, Completion, http::response::Parts as ResponseHead};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -91,11 +91,7 @@ struct Route;
 #[async_trait]
 impl Plugin for Route {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let model = cx
-            .input::<Conversation>()?
-            .model
-            .clone()
-            .unwrap_or_default();
+        let model = cx.input::<Input>()?.model.clone().unwrap_or_default();
         cx.set_target(match model.starts_with("claude") {
             true => "anthropic",
             false => "openai",
@@ -133,21 +129,21 @@ impl Harness {
         let openai = marking(mock.at(OPENAI), marks.clone());
         let anthropic = marking(mock.at(ANTHROPIC), marks.clone());
         let gw = Gateway::new()
-            .provider::<Conversation, _, _>(
+            .provider::<Input, _, _>(
                 "openai",
                 OpenAiChat,
                 respan_gateway_http::connect(openai, LIMIT),
             )
             .and_then(|g| {
-                g.provider::<Conversation, _, _>(
+                g.provider::<Input, _, _>(
                     "anthropic",
                     AnthropicMessages,
                     respan_gateway_http::connect(anthropic, LIMIT),
                 )
             })
             .and_then(|g| {
-                g.client::<Conversation, _, _>(OpenAiChat)?
-                    .client::<Conversation, _, _>(AnthropicMessages)
+                g.client::<Input, _, _>(OpenAiChat)?
+                    .client::<Input, _, _>(AnthropicMessages)
             });
         let gw = gw
             .map(|g| g.plugin(outcomes.clone()))
@@ -383,7 +379,7 @@ fn scenarios() -> Vec<Scenario> {
         (
             "a request that cannot be translated",
             || {
-                let body = r#"{"model":"claude-x","messages":[],"response_format":{"type":"json_object"}}"#;
+                let body = r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}"#;
                 post_keyed(CHAT, body)
             },
             |_| {},
@@ -579,7 +575,7 @@ impl SlowRefusal {
 async fn a_slow_refusal_is_refused() {
     let head_only = HeadOnly::default();
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
@@ -587,7 +583,7 @@ async fn a_slow_refusal_is_refused() {
                 LIMIT,
             ),
         )
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(head_only.clone()).plugin(explicit::Relay::RAW))
         .and_then(|g| g.target("openai"))
         .unwrap();
@@ -631,7 +627,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let head_only = HeadOnly::default();
         let outcomes = Outcomes::default();
         let gw = Gateway::new()
-            .provider::<Conversation, _, _>(
+            .provider::<Input, _, _>(
                 "openai",
                 OpenAiChat,
                 respan_gateway_http::connect(
@@ -639,7 +635,7 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
                     LIMIT,
                 ),
             )
-            .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
+            .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
             .map(|g| g.plugin(outcomes.clone()))
             .map(|g| g.plugin(head_only.clone()))
             .and_then(|g| g.target("openai"))

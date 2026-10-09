@@ -7,8 +7,9 @@
 mod support;
 
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
+use respan_gateway_realtime::Input;
 use respan_gateway_sdk::Gateway;
-use respan_gateway_ws::{ClientEvent, JsonEvents, WsTransport};
+use respan_gateway_ws::{JsonEvents, WsTransport};
 use support::*;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::{Error, ProtocolError};
@@ -94,9 +95,9 @@ fn speaking(probe: &Probe) -> Gateway {
         .protocol("realtime")
         .unwrap();
     Gateway::new()
-        .client::<ClientEvent, _, _>(events.clone())
+        .client::<Input, _, _>(events.clone())
         .unwrap()
-        .provider::<ClientEvent, _, _>(
+        .provider::<Input, _, _>(
             "p",
             events,
             WsTransport::new(probe.base()).unwrap().connect(),

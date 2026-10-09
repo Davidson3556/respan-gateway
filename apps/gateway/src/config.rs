@@ -8,9 +8,9 @@ use std::sync::Arc;
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
+use respan_gateway_conversation::{Input, Output};
 use respan_gateway_http::{Incoming, Outgoing};
 use respan_gateway_plugins::ModelRouter;
-use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::{
     ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
@@ -160,14 +160,14 @@ impl Config {
                     ))));
                 };
                 let kind = format(&provider.format, &format!("provider '{}'", m.provider))?.kind;
-                if kind != (TypeId::of::<Conversation>(), TypeId::of::<Reply>()) {
+                if kind != (TypeId::of::<Input>(), TypeId::of::<Output>()) {
                     return Err(bad(Fault::config(format!(
                         "provider '{}' uses format '{}', incompatible with conversation models routes",
                         m.provider, provider.format
                     ))));
                 }
             }
-            let router = ModelRouter::new(|c: &Conversation| c.model.as_deref());
+            let router = ModelRouter::new(|c: &Input| c.model.as_deref());
             let router = models.iter().fold(router, |router, m| {
                 router.route(m.prefix.clone(), m.provider.clone())
             });

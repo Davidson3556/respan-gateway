@@ -1,18 +1,19 @@
 //! Tools in both conversation formats, as the kind has them: the tools a
 //! request offers and its choice, and an assistant's calls and their
 //! results. What a format says of tools that the kind has no form for, such
-//! as a tool the provider runs, stays in the `extra` of the request or the
+//! as a tool the provider runs, stays in the `native` of the request or the
 //! tool.
 
+use crate::common::NativeFieldsExt;
 use respan_gateway_sdk::{BadRequest, Fault};
 use serde_json::{Map, Value, json};
 
 use crate::anthropic::ANTHROPIC;
 use crate::common::{
-    Keep, Names, extra_of, kept_fields, only, read_content, untranslatable, write_content,
-    write_extra, write_message,
+    Keep, Names, kept_fields, native_fields, only, read_content, untranslatable, write_content,
+    write_message, write_native,
 };
-use crate::conversation::{Content, Conversation, Extra, Message, Role, Tool, ToolChoice};
+use crate::conversation::{Content, Input, Message, NativeFields, Role, Tool, ToolChoice};
 use crate::openai::OPENAI;
 
 /// A tool call's arguments as JSON: an object, `{}` for none.
@@ -40,9 +41,9 @@ fn set(v: &mut Map<String, Value>, key: &str, value: Option<Value>) {
 }
 
 /// Read `tools`, `tool_choice` and whether calls may be parallel with
-/// `read` each, taking each the kind can say out of `chat.extra`.
+/// `read` each, taking each the kind can say out of `chat.native`.
 fn read_tools(
-    chat: &mut Conversation,
+    chat: &mut Input,
     tools: Option<Vec<Tool>>,
     choice: Option<Option<ToolChoice>>,
     parallel: Option<Option<bool>>,
@@ -50,16 +51,22 @@ fn read_tools(
 ) {
     if let Some(tools) = tools {
         chat.tools = tools;
-        chat.extra.fields.shift_remove(keys[0]);
+        if let Some(native) = &mut chat.native {
+            native.fields.shift_remove(keys[0]);
+        }
     }
     if let Some(choice) = choice {
-        chat.tool_choice = choice;
-        chat.extra.fields.shift_remove(keys[1]);
+        chat.options.tool_choice = choice;
+        if let Some(native) = &mut chat.native {
+            native.fields.shift_remove(keys[1]);
+        }
     }
     if let Some(parallel) = parallel {
-        chat.parallel_tool_calls = parallel;
-        if !keys[2].is_empty() {
-            chat.extra.fields.shift_remove(keys[2]);
+        chat.options.parallel_tool_calls = parallel;
+        if !keys[2].is_empty()
+            && let Some(native) = &mut chat.native
+        {
+            native.fields.shift_remove(keys[2]);
         }
     }
 }
@@ -74,7 +81,7 @@ fn each_tool(v: &Value, tool: fn(&Value) -> Option<Tool>) -> Option<Vec<Tool>> {
 }
 
 /// OpenAI's function tools, choice and `parallel_tool_calls`, as the kind's.
-pub(crate) fn read_openai_tools(v: &Value, chat: &mut Conversation) {
+pub(crate) fn read_openai_tools(v: &Value, chat: &mut Input) {
     let tools = each_tool(&v["tools"], openai_tool);
     let choice = match &v["tool_choice"] {
         Value::Null => Some(None),
@@ -99,7 +106,7 @@ fn openai_tool(tool: &Value) -> Option<Tool> {
     };
     let mut kind = Tool::new(function["name"].as_str()?, function["parameters"].clone());
     kind.description = description;
-    kind.extra = extra_of(
+    kind.native = native_fields(
         OPENAI,
         rest_of(function, &["name", "description", "parameters"]),
     );
@@ -135,10 +142,7 @@ fn tool_field(key: &str) -> String {
 }
 
 /// The kind's tools as OpenAI's fields of a request `v`.
-pub(crate) fn write_openai_tools(
-    chat: &Conversation,
-    v: &mut Map<String, Value>,
-) -> Result<(), Fault> {
+pub(crate) fn write_openai_tools(chat: &Input, v: &mut Map<String, Value>) -> Result<(), Fault> {
     let tool = |t: &Tool| -> Result<Value, Fault> {
         let mut function = Map::new();
         function.insert("name".into(), t.name.as_str().into());
@@ -148,12 +152,18 @@ pub(crate) fn write_openai_tools(
         if !t.parameters.is_null() {
             function.insert("parameters".into(), t.parameters.clone());
         }
-        write_extra(OPENAI, &t.extra, &mut function, tool_field, Keep::default())?;
+        write_native(
+            OPENAI,
+            &t.native,
+            &mut function,
+            tool_field,
+            Keep::default(),
+        )?;
         Ok(json!({ "type": "function", "function": function }))
     };
     let tools: Vec<Value> = chat.tools.iter().map(tool).collect::<Result<_, Fault>>()?;
     set(v, "tools", (!tools.is_empty()).then(|| tools.into()));
-    let choice = match &chat.tool_choice {
+    let choice = match &chat.options.tool_choice {
         None => None,
         Some(ToolChoice::Auto) => Some("auto".into()),
         Some(ToolChoice::None) => Some("none".into()),
@@ -167,14 +177,14 @@ pub(crate) fn write_openai_tools(
     set(
         v,
         "parallel_tool_calls",
-        chat.parallel_tool_calls.map(Into::into),
+        chat.options.parallel_tool_calls.map(Into::into),
     );
     Ok(())
 }
 
 /// Anthropic's custom tools and choice, with whether calls may be
 /// parallel, as the kind's.
-pub(crate) fn read_anthropic_tools(v: &Value, chat: &mut Conversation) {
+pub(crate) fn read_anthropic_tools(v: &Value, chat: &mut Input) {
     let tools = each_tool(&v["tools"], anthropic_tool);
     let choice = match &v["tool_choice"] {
         Value::Null => Some((None, None)),
@@ -196,7 +206,7 @@ fn anthropic_tool(tool: &Value) -> Option<Tool> {
     let mut kind = Tool::new(tool["name"].as_str()?, tool["input_schema"].clone());
     kind.description = description;
     let rest = rest_of(tool, &["type", "name", "description", "input_schema"]);
-    kind.extra = extra_of(ANTHROPIC, rest);
+    kind.native = native_fields(ANTHROPIC, rest);
     Some(kind)
 }
 
@@ -221,10 +231,7 @@ fn anthropic_choice(choice: &Value) -> Option<(Option<ToolChoice>, Option<bool>)
 
 /// The kind's tools as Anthropic's fields of a request `v`. Calls one at a
 /// time are said inside `tool_choice`.
-pub(crate) fn write_anthropic_tools(
-    chat: &Conversation,
-    v: &mut Map<String, Value>,
-) -> Result<(), Fault> {
+pub(crate) fn write_anthropic_tools(chat: &Input, v: &mut Map<String, Value>) -> Result<(), Fault> {
     let tool = |t: &Tool| -> Result<Value, Fault> {
         let mut tool = Map::new();
         tool.insert("name".into(), t.name.as_str().into());
@@ -236,13 +243,13 @@ pub(crate) fn write_anthropic_tools(
             false => json!({ "type": "object" }),
         };
         tool.insert("input_schema".into(), schema);
-        write_extra(ANTHROPIC, &t.extra, &mut tool, tool_field, Keep::default())?;
+        write_native(ANTHROPIC, &t.native, &mut tool, tool_field, Keep::default())?;
         Ok(Value::Object(tool))
     };
     let tools: Vec<Value> = chat.tools.iter().map(tool).collect::<Result<_, Fault>>()?;
     set(v, "tools", (!tools.is_empty()).then(|| tools.into()));
-    let one_at_a_time = chat.parallel_tool_calls == Some(false);
-    let mut choice = match &chat.tool_choice {
+    let one_at_a_time = chat.options.parallel_tool_calls == Some(false);
+    let mut choice = match &chat.options.tool_choice {
         Some(ToolChoice::Auto) => Some(json!({ "type": "auto" })),
         Some(ToolChoice::None) => Some(json!({ "type": "none" })),
         Some(ToolChoice::Required) => Some(json!({ "type": "any" })),
@@ -271,9 +278,9 @@ pub(crate) fn anthropic_part(block: &Value) -> Option<Content> {
             let arguments = Value::Object(input.clone()).to_string();
             let (id, name) = (block["id"].as_str()?, block["name"].as_str()?);
             let mut part = Content::tool_call(id, name, arguments);
-            if let Content::ToolCall { extra, .. } = &mut part {
+            if let Content::ToolCall { native, .. } = &mut part {
                 let rest = rest_of(block, &["type", "id", "name", "input"]);
-                *extra = extra_of(ANTHROPIC, rest);
+                *native = native_fields(ANTHROPIC, rest);
             }
             Some(part)
         }
@@ -290,9 +297,9 @@ pub(crate) fn anthropic_part(block: &Value) -> Option<Content> {
             let content = read_content(ANTHROPIC, &block["content"]);
             let id = block["tool_use_id"].as_str()?;
             let mut part = Content::tool_result(id, content, is_error);
-            if let Content::ToolResult { extra, .. } = &mut part {
+            if let Content::ToolResult { native, .. } = &mut part {
                 let rest = rest_of(block, &["type", "tool_use_id", "content", "is_error"]);
-                *extra = extra_of(ANTHROPIC, rest);
+                *native = native_fields(ANTHROPIC, rest);
             }
             Some(part)
         }
@@ -300,11 +307,11 @@ pub(crate) fn anthropic_part(block: &Value) -> Option<Content> {
     }
 }
 
-/// Write the fields of a tool part's `extra` into its Anthropic `block`:
+/// Write the fields of a tool part's `native` into its Anthropic `block`:
 /// another format's are refused.
-fn block_fields(block: &mut Value, extra: &Extra) -> Result<(), Fault> {
+fn block_fields(block: &mut Value, native: &Option<NativeFields>) -> Result<(), Fault> {
     let what = |key: &str| format!("a tool part's '{key}'");
-    let fields = kept_fields(ANTHROPIC, extra, what, Keep::default())?;
+    let fields = kept_fields(ANTHROPIC, native, what, Keep::default())?;
     if let Some(block) = block.as_object_mut() {
         block.extend(fields);
     }
@@ -318,23 +325,23 @@ pub(crate) fn anthropic_block(part: &Content) -> Result<Value, Fault> {
             id,
             name,
             arguments,
-            extra,
+            native,
             ..
         } => {
             let input = arguments_json(arguments)?;
             let mut block = json!({ "type": "tool_use", "id": id, "name": name, "input": input });
-            block_fields(&mut block, extra)?;
+            block_fields(&mut block, native)?;
             Ok(block)
         }
         Content::ToolResult {
             id,
             content,
             is_error,
-            extra,
+            native,
             ..
         } => {
             let mut block = json!({ "type": "tool_result", "tool_use_id": id });
-            block_fields(&mut block, extra)?;
+            block_fields(&mut block, native)?;
             if !content.is_empty() {
                 block["content"] = write_content(ANTHROPIC, content)?;
             }
@@ -349,8 +356,20 @@ pub(crate) fn anthropic_block(part: &Content) -> Result<Value, Fault> {
 
 /// An OpenAI message read as the kind's ([`read_message`](crate::common::read_message)) with its tools: a tool message as a user
 /// message of one result, an assistant's `tool_calls` as calls after its
-/// content. What the kind cannot say of them stays in the message's `extra`.
+/// content. What the kind cannot say of them stays in the message's `native`.
 pub(crate) fn read_openai_message(m: &Value, message: &mut Message) {
+    if let Some(text) = m["reasoning_content"].as_str() {
+        message.content.insert(
+            0,
+            Content::Reasoning {
+                text: text.into(),
+                native: None,
+            },
+        );
+        if let Some(native) = &mut message.native {
+            native.fields.remove("reasoning_content");
+        }
+    }
     if matches!(&message.role, Role::Other { name, .. } if name == "tool") {
         let Some(id) = m["tool_call_id"].as_str() else {
             return;
@@ -358,14 +377,18 @@ pub(crate) fn read_openai_message(m: &Value, message: &mut Message) {
         let content = std::mem::take(&mut message.content);
         message.content = vec![Content::tool_result(id, content, false)];
         message.role = Role::User;
-        message.extra.fields.shift_remove("tool_call_id");
+        if let Some(native) = &mut message.native {
+            native.fields.shift_remove("tool_call_id");
+        }
         return;
     }
     let calls = m["tool_calls"].as_array().into_iter().flatten();
     let calls: Option<Vec<Content>> = calls.map(openai_call).collect();
     if let Some(calls) = calls.filter(|calls| !calls.is_empty()) {
         message.content.extend(calls);
-        message.extra.fields.shift_remove("tool_calls");
+        if let Some(native) = &mut message.native {
+            native.fields.shift_remove("tool_calls");
+        }
     }
 }
 
@@ -392,11 +415,11 @@ fn openai_calls(calls: &[&Content]) -> Result<Vec<Value>, Fault> {
             id,
             name,
             arguments,
-            extra,
+            native,
             ..
         } = c
         {
-            refuse_part_fields(extra)?;
+            refuse_part_fields(native)?;
             let function = json!({ "name": name, "arguments": arguments });
             out.push(json!({ "id": id, "type": "function", "function": function }));
         }
@@ -405,8 +428,8 @@ fn openai_calls(calls: &[&Content]) -> Result<Vec<Value>, Fault> {
 }
 
 /// OpenAI has no place for the fields of a tool part.
-fn refuse_part_fields(extra: &Extra) -> Result<(), Fault> {
-    match extra.fields.keys().next() {
+fn refuse_part_fields(native: &Option<NativeFields>) -> Result<(), Fault> {
+    match native.fields().keys().next() {
         Some(key) => Err(untranslatable(&format!("a tool part's '{key}'"))),
         None => Ok(()),
     }
@@ -417,9 +440,9 @@ fn openai_result(
     id: &str,
     content: &[Content],
     is_error: bool,
-    extra: &Extra,
+    native: &Option<NativeFields>,
 ) -> Result<Map<String, Value>, Fault> {
-    refuse_part_fields(extra)?;
+    refuse_part_fields(native)?;
     // OpenAI's tool messages cannot say the call failed.
     if is_error {
         return Err(untranslatable("a tool result that is an error"));
@@ -443,25 +466,44 @@ pub(crate) fn write_openai_message(m: &Message, roles: &Names<Role>) -> Result<V
             id,
             content,
             is_error,
-            extra,
+            native,
             ..
         } = result
         {
-            out.push(openai_result(id, content, *is_error, extra)?);
+            out.push(openai_result(id, content, *is_error, native)?);
         }
     }
     // A message of one result keeps its other fields, such as a name.
     if let ([only], true) = (&mut out[..], rest.is_empty()) {
-        write_extra(OPENAI, &m.extra, only, message_fields, Keep::default())?;
+        write_native(OPENAI, &m.native, only, message_fields, Keep::default())?;
         return Ok(out.into_iter().map(Value::Object).collect());
     }
     let mut out: Vec<Value> = out.into_iter().map(Value::Object).collect();
-    if !rest.is_empty() || results.is_empty() || !m.extra.is_empty() {
+    if !rest.is_empty() || results.is_empty() || !m.native.is_empty() {
         let call = |p: &&Content| matches!(p, Content::ToolCall { .. });
         let calls: Vec<&Content> = rest.iter().copied().filter(call).collect();
         let mut said = m.clone();
         said.content = rest.into_iter().filter(|p| !call(p)).cloned().collect();
+        let mut reasoning = String::new();
+        let mut native_reasoning = None;
+        for part in &said.content {
+            if let Content::Reasoning { text, native } = part {
+                reasoning.push_str(text);
+                if native.as_ref().is_some_and(|n| !n.is_empty()) {
+                    native_reasoning = native.clone();
+                }
+            }
+        }
+        if native_reasoning.is_some() {
+            return Err(untranslatable("native reasoning fields in OpenAI Chat"));
+        }
+        said.content
+            .retain(|p| !matches!(p, Content::Reasoning { .. }));
         let mut v = write_message(OPENAI, &said, roles)?;
+        if !reasoning.is_empty() {
+            v["reasoning_content"] = reasoning.into();
+        }
+
         if !calls.is_empty() {
             v["tool_calls"] = openai_calls(&calls)?.into();
             if said.content.is_empty() {

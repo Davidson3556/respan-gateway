@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! Reusable HTTP-aware wire-format helpers. Concrete provider codecs, and
 //! how they read a vendor's error body, live in `respan-gateway-providers`;
-//! shared conversation, usage and fault-detail types live in
-//! `respan-gateway-sdk`. Traffic of no kind relays through
+//! shared conversation types live in `respan-gateway-conversation`, and usage
+//! and fault facts live in `respan-gateway-sdk`. Traffic of no kind relays through
 //! [`opaque`](crate::formats::opaque).
 
 pub mod opaque;

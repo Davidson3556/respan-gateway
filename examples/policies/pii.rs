@@ -28,12 +28,12 @@
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_conversation::Input;
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -67,7 +67,7 @@ fn hide_emails(text: &str, vault: &Placeholders) -> String {
 
 /// Every text of `chat` with its e-mail addresses hidden in `vault`; `Err`
 /// for what it cannot read.
-fn redact(chat: &mut Conversation, vault: &Placeholders) -> Result<(), Fault> {
+fn redact(chat: &mut Input, vault: &Placeholders) -> Result<(), Fault> {
     chat.edit_all(|text| {
         *text = hide_emails(text, vault);
         Ok(())
@@ -91,7 +91,7 @@ fn uncovered() -> Fault {
 #[async_trait]
 impl Plugin for Pii {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if !cx.is_kind::<Conversation>() {
+        if !cx.is_kind::<Input>() {
             return Err(uncovered());
         }
         let vault = Placeholders::default();
@@ -104,7 +104,7 @@ impl Plugin for Pii {
 #[async_trait]
 impl Plugin for PiiInput {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if !px.is_kind::<Conversation>() {
+        if !px.is_kind::<Input>() {
             return Err(uncovered());
         }
         let vault = match px.extensions().get::<Placeholders>() {
@@ -116,7 +116,7 @@ impl Plugin for PiiInput {
                 vault
             }
         };
-        px.filter(move |chat: &mut Conversation| redact(chat, &vault))
+        px.filter(move |chat: &mut Input| redact(chat, &vault))
     }
 }
 
@@ -131,8 +131,8 @@ fn gateway_with(
     middle: impl FnOnce(Gateway) -> Gateway,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, transport)?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Pii);
     middle(gw).plugin(PiiInput).target("openai")
 }

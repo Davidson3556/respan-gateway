@@ -178,19 +178,19 @@ async fn a_filter_fills_a_cache_with_the_answer_and_its_usage() {
     /// filter sees every reply, the usage alone at the stream's end too.
     struct Fill(String, u64, Entry);
 
-    impl Filter<Reply> for Fill {
-        fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Fill {
+        fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             if let Some(text) = text_of(&event) {
                 self.0.push_str(text);
             }
-            if let Reply::Usage(usage) = &event {
+            if let Output::Usage(usage) = &event {
                 self.1 += usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
             }
             out.push(event);
             Ok(())
         }
 
-        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             if let (Ok(()), Ok(mut entry)) = (end, self.2.lock()) {
                 *entry = Some((std::mem::take(&mut self.0), self.1));
             }
@@ -331,15 +331,15 @@ async fn every_call_a_smart_router_makes_is_billed_once_on_the_provider_edge() {
     #[async_trait]
     impl Plugin for SmartRouter {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let ask = Conversation::new([Message::new(Role::User, "openai or backup?")]);
+            let ask = Input::new([Message::new(Role::User, "openai or backup?")]);
             let judge = cx.call("openai").with_input(judged(ask, "judge-1"));
             let verdict = judge
                 .await?
-                .outputs::<Reply>()
+                .outputs::<Output>()
                 .try_collect::<Vec<_>>()
                 .await?;
             let pick = verdict.iter().find_map(|e| match e {
-                Reply::Delta { delta, .. } => Some(delta.as_str().to_owned()),
+                Output::Delta { delta, .. } => Some(delta.as_str().to_owned()),
                 _ => None,
             });
             cx.set_target(pick.unwrap_or_else(|| "openai".into()));
@@ -380,7 +380,7 @@ async fn each_call_a_request_makes_is_metered_once() {
     #[async_trait]
     impl Plugin for Twice {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let first = cx.call("openai").await?.outputs::<Reply>();
+            let first = cx.call("openai").await?.outputs::<Output>();
             first.try_collect::<Vec<_>>().await?;
             Ok(Some(cx.call("openai").await?))
         }
@@ -410,7 +410,7 @@ async fn a_call_read_in_on_client_is_metered_like_the_targets() {
     impl Plugin for Read {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let read = cx.call("openai").await?;
-            let fault = read.outputs::<Reply>().try_collect::<Vec<_>>().await.err();
+            let fault = read.outputs::<Output>().try_collect::<Vec<_>>().await.err();
             self.0.lock().map(|mut f| *f = fault).ok();
             Ok(None)
         }
@@ -481,14 +481,14 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
     #[derive(Clone, Default)]
     struct Tally(Arc<Mutex<Usage>>);
 
-    impl Format<Incoming, Conversation, Reply> for Tally {
+    impl Format<Incoming, Input, Output> for Tally {
         fn name(&self) -> &str {
             OpenAiChat.name()
         }
         fn matches(&self, io: &Incoming) -> bool {
-            <OpenAiChat as Format<Incoming, Conversation, Reply>>::matches(&OpenAiChat, io)
+            <OpenAiChat as Format<Incoming, Input, Output>>::matches(&OpenAiChat, io)
         }
-        fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+        fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
             let tally = self.0.clone();
             Ok(io.bind(
                 |request| OpenAiChat.read_request(request),
@@ -506,11 +506,11 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
         }
     }
 
-    struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Reply>>);
+    struct Tallying(Arc<Mutex<Usage>>, Box<dyn Encoder<Output>>);
 
-    impl Encoder<Reply> for Tallying {
-        fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
-            if let Reply::Usage(usage) = reply {
+    impl Encoder<Output> for Tallying {
+        fn encode(&mut self, reply: &Output, out: &mut bytes::BytesMut) -> Result<(), Fault> {
+            if let Output::Usage(usage) = reply {
                 self.0.lock().map(|mut t| *t += usage).ok();
             }
             self.1.encode(reply, out)
@@ -529,7 +529,7 @@ async fn usage_a_filter_fails_on_is_metered_not_written() {
         Arc::new(meter.clone()),
     ];
     let gw = providers([provider(&sites.openai, "openai", None)])
-        .and_then(|g| g.client::<Conversation, _, _>(tally.clone()))
+        .and_then(|g| g.client::<Input, _, _>(tally.clone()))
         .map(|g| with_plugins(g, chain))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));

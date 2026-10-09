@@ -1,5 +1,5 @@
-//! A WebSocket session as JSON events: the kind ([`ClientEvent`] in,
-//! [`ProviderEvent`] out) and its format on the HTTP wire ([`JsonEvents`]).
+//! A WebSocket session as JSON events: the kind ([`Input`] in,
+//! [`Output`] out) and its format on the HTTP wire ([`JsonEvents`]).
 
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::{self, whole};
@@ -8,9 +8,9 @@ use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{self as h, Body, Incoming, Outgoing};
+use respan_gateway_realtime::{Input, Output};
 use respan_gateway_sdk::futures::{StreamExt, stream::BoxStream};
 use respan_gateway_sdk::{BadRequest, Connection, Fault, Format, Upstream};
-use serde_json::{self, Value};
 
 /// Whether `headers` ask to upgrade to a WebSocket.
 fn upgrades(headers: &HeaderMap) -> bool {
@@ -29,35 +29,14 @@ fn offers(headers: &HeaderMap, protocol: &HeaderValue) -> bool {
         .any(|v| v.trim().as_bytes() == protocol.as_bytes())
 }
 
-macro_rules! event {
-    ($(#[$doc:meta])* $name:ident) => {
-        $(#[$doc])*
-        #[derive(Debug, Clone, PartialEq)]
-        pub struct $name {
-            /// The event, written as this JSON.
-            pub json: Value,
-        }
-
-        impl $name {
-            /// An event of `json`.
-            pub fn new(json: Value) -> Self {
-                Self { json }
-            }
-        }
-    };
-}
-
-event!(
-    /// The kind's input: one JSON event a client sent, to the provider.
-    ClientEvent
-);
-event!(
-    /// The kind's output: one JSON event the provider sent, to the client.
-    ProviderEvent
-);
-
 /// An event's `json` as its frame.
-fn written(json: &Value) -> Result<Bytes, Fault> {
+fn written(format: &str, event: &respan_gateway_sdk::NativeValue) -> Result<Bytes, Fault> {
+    if event.format.as_ref() != format {
+        return Err(BadRequest::fault(
+            "a realtime event requires explicit translation to another format",
+        ));
+    }
+    let json = &*event.value;
     serde_json::to_vec(json)
         .map(Bytes::from)
         .map_err(|e| Fault::internal("an event could not be written").with_source(e))
@@ -125,7 +104,7 @@ impl JsonEvents {
     }
 }
 
-impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
+impl Format<Incoming, Input, Output> for JsonEvents {
     fn name(&self) -> &str {
         &self.name
     }
@@ -137,14 +116,16 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
             && formats::path_ends_with(head.uri(), &self.path)
     }
 
-    fn bind(&self, io: Incoming) -> Result<Connection<ClientEvent, ProviderEvent>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         let protocol = self.protocol.clone();
+        let input_format = self.name.clone();
+        let output_format = self.name.clone();
         Ok(io.bind(
-            |request| {
-                Ok(h::messages(request, |_, raw| {
+            move |request| {
+                Ok(h::messages(request, move |_, raw| {
                     let json = serde_json::from_slice(&raw)
                         .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
-                    Ok(ClientEvent::new(json))
+                    Ok(Input::new(input_format.clone(), json))
                 }))
             },
             move |reply, _source| {
@@ -160,7 +141,8 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
                         head.headers.insert(SEC_WEBSOCKET_PROTOCOL, protocol);
                     }
                 }
-                let write = formats::each(|event: &ProviderEvent| written(&event.json));
+                let write =
+                    formats::each(move |event: &Output| written(&output_format, &event.event));
                 Ok(reply.open(head, Bytes::new(), write))
             },
             refusal,
@@ -168,13 +150,14 @@ impl Format<Incoming, ClientEvent, ProviderEvent> for JsonEvents {
     }
 }
 
-impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
+impl Format<Outgoing, Output, Input> for JsonEvents {
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn bind(&self, io: Outgoing) -> Result<Connection<ProviderEvent, ClientEvent>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
         let name = self.name.clone();
+        let input_format = self.name.clone();
         let path = self.path.clone();
         let protocol = self.protocol.clone();
         Ok(io.bind(
@@ -192,7 +175,8 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
                 if let Some(protocol) = protocol {
                     head.headers.insert(SEC_WEBSOCKET_PROTOCOL, protocol);
                 }
-                let write = formats::each(|event: &ClientEvent| written(&event.json));
+                let write =
+                    formats::each(move |event: &Input| written(&input_format, &event.event));
                 let (request, sink) = h::request(source, write)?;
                 Ok((Request::from_parts(head, request.into_body()), sink))
             },
@@ -208,17 +192,18 @@ impl Format<Outgoing, ProviderEvent, ClientEvent> for JsonEvents {
 fn response_events(
     name: &str,
     answer: Response<Body>,
-) -> BoxStream<'static, Result<ProviderEvent, Fault>> {
+) -> BoxStream<'static, Result<Output, Fault>> {
     if answer.status() != StatusCode::SWITCHING_PROTOCOLS {
         return whole::refusal(name, answer);
     }
+    let name = name.to_owned();
     answer
         .into_body()
         .map(move |raw| {
             let raw = raw?;
             let json = serde_json::from_slice(&raw)
                 .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
-            Ok(ProviderEvent::new(json))
+            Ok(Output::new(name.clone(), json))
         })
         .boxed()
 }
@@ -260,6 +245,23 @@ mod tests {
             );
             assert!(events.next().await.is_none());
         }
+    }
+
+    #[test]
+    fn native_events_require_the_target_format_and_edits_do_not_mutate_clones() {
+        let original = Input::new("one", serde_json::json!({"text":"original"}));
+        let mut edited = original.clone();
+        edited.json_mut()["text"] = "edited".into();
+        assert_eq!(original.json()["text"], "original");
+        assert_eq!(
+            written("one", &edited.event).expect("same format"),
+            Bytes::from_static(br#"{"text":"edited"}"#)
+        );
+        assert!(
+            written("two", &edited.event)
+                .expect_err("foreign event")
+                .is::<BadRequest>()
+        );
     }
 
     #[test]

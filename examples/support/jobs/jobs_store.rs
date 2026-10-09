@@ -47,7 +47,7 @@ fn key(key: &Key) -> Result<String, Fault> {
 
 // Persist the format's encoding rather than teaching canonical events a
 // second serialization schema. Replay uses the same format to decode it.
-fn encode(replies: &[Reply]) -> Result<Vec<u8>, Fault> {
+fn encode(replies: &[Output]) -> Result<Vec<u8>, Fault> {
     let head = respan_gateway_http::http::Request::new(()).into_parts().0;
     let request = Bytes::from_static(br#"{"stream":true}"#);
     let request = http::Request::from_parts(head, request);

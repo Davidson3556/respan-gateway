@@ -6,8 +6,8 @@
 //! A chunk of a stream and a whole body decode into the same events, by
 //! these rules, which are deterministic:
 //!
-//! - [`Reply::Start`] comes once, with the first chunk that names an `id`. Its
-//!   `extra` holds the response's other fields (`created`, `system_fingerprint`,
+//! - [`Output::Start`] comes once, with the first chunk that names an `id`. Its
+//!   `native` holds the response's other fields (`created`, `system_fingerprint`,
 //!   `service_tier`, ...) in this format's terms.
 //! - Blocks are numbered in the order they open. The first choice's
 //!   `reasoning_content`, `content` and each `tool_calls` entry (by its
@@ -17,14 +17,14 @@
 //!   Opening any block ends the text and reasoning blocks that are open;
 //!   tool calls stay open, as they interleave.
 //! - A `finish_reason`, or the end of the stream, ends every block still
-//!   open, in the order they opened, and a finish gives a [`Reply::Finish`].
-//! - `usage` (or Groq's `x_groq.usage`) gives a [`Reply::Usage`] of what it
+//!   open, in the order they opened, and a finish gives a [`Output::Finish`].
+//! - `usage` (or Groq's `x_groq.usage`) gives a [`Output::Usage`] of what it
 //!   adds to the totals reported so far.
 //! - What a chunk says that the kind has no form for (another choice,
-//!   `logprobs`, `refusal`, content in parts) is one [`Reply::Other`] of this
+//!   `logprobs`, `refusal`, content in parts) is one [`Output::Native`] of this
 //!   format, `{"choices": [..]}` with the first choice's body under `delta`,
 //!   which comes before the chunk's blocks. A data line that is no chunk is
-//!   an `Other` of its text. `[DONE]` ends the stream.
+//!   a `Native` of its text. `[DONE]` ends the stream.
 //!
 //! Encoders do the reverse. A stream is written as chunks: the opening
 //! `role` chunk, a chunk per delta, and, at the end, the finish, the usage
@@ -32,7 +32,9 @@
 //! from the events collected: all text joined into the message `content`.
 //! Reasoning is written as `reasoning_content`.
 
+use crate::common::NativeFieldsExt;
 use bytes::Bytes;
+use respan_gateway_conversation::{Assembled, ReplyItem};
 use respan_gateway_http::{
     Body, Incoming, Outgoing, http::request::Parts as RequestHead,
     http::response::Parts as ResponseHead,
@@ -40,19 +42,18 @@ use respan_gateway_http::{
 use respan_gateway_http::{bytes, http};
 use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
-use respan_gateway_sdk::{Assembled, ReplyItem};
 use respan_gateway_sdk::{BadRequest, Connection, EventSink, Fault, Format, Upstream};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 use crate::Usage;
 use crate::common::{
-    Gate, Names, Reader, ReplyParser, Totals, UnaryEncoder, Wire, ended, error_event, extra_of,
-    fits, is_inert, merge_fields, post_json, probe, read_message, refusal, set, stop_json,
+    Gate, Names, Reader, ReplyParser, Totals, UnaryEncoder, Wire, ended, error_event, fits,
+    is_inert, merge_fields, native_fields, post_json, probe, read_message, refusal, set, stop_json,
     supported_usage, tag, unix_now, unreadable_event, unsupported_fields, unwritable_content,
     unwritable_usage, usage_extra,
 };
-use crate::conversation::{Block, Conversation, Delta, Finish, Reply, Role, Start, units};
+use crate::conversation::{Block, Delta, Finish, Input, Output, Role, Start, units};
 use crate::errors::{merge_details, says, says_error};
 use crate::formats::sse::{event, event_data, is_stream};
 use crate::tools::{
@@ -92,25 +93,22 @@ impl OpenAiChat {
     }
 
     /// Read a request lazily.
-    pub fn read_request(
-        &self,
-        request: http::Request<Body>,
-    ) -> Result<TypedStream<Conversation>, Fault> {
+    pub fn read_request(&self, request: http::Request<Body>) -> Result<TypedStream<Input>, Fault> {
         Ok(respan_gateway_http::messages(request, |_, raw| {
             Self.decode_request(raw)
         }))
     }
 
     /// Decode a finite request synchronously.
-    pub fn decode_request(&self, bytes: Bytes) -> Result<Conversation, Fault> {
+    pub fn decode_request(&self, bytes: Bytes) -> Result<Input, Fault> {
         crate::common::read_request::<Self>(bytes)
     }
 
     /// Prepare a finite provider request before any transport I/O.
     pub fn write_request(
         &self,
-        source: &mut TypedStream<Conversation>,
-    ) -> Result<(http::Request<Body>, EventSink<Conversation>), Fault> {
+        source: &mut TypedStream<Input>,
+    ) -> Result<(http::Request<Body>, EventSink<Input>), Fault> {
         post_json::<Self>(source, "/chat/completions")
     }
 
@@ -123,7 +121,7 @@ impl OpenAiChat {
         &self,
         response: http::Response<Body>,
         call: http::Request<Bytes>,
-    ) -> BoxStream<'static, Result<Reply, Fault>> {
+    ) -> BoxStream<'static, Result<Output, Fault>> {
         crate::common::read_response::<Self>(response, &call.into_parts().0, |body| {
             let parser = Self.parser(true, body.limit());
             crate::formats::read(
@@ -143,7 +141,7 @@ impl OpenAiChat {
         &self,
         head: &mut ResponseHead,
         request: &http::Request<Bytes>,
-    ) -> Option<Box<dyn Encoder<Reply>>> {
+    ) -> Option<Box<dyn Encoder<Output>>> {
         crate::common::response_encoder(head, request, |head, asked| match is_stream(head) {
             false => Box::new(UnaryEncoder::<Self>::new()),
             true => Box::new(Chunks::new(asked.usage)),
@@ -154,8 +152,8 @@ impl OpenAiChat {
     pub fn write_response(
         &self,
         reply: respan_gateway_http::Reply,
-        source: &mut TypedStream<Reply>,
-    ) -> Result<EventSink<Reply>, Fault> {
+        source: &mut TypedStream<Output>,
+    ) -> Result<EventSink<Output>, Fault> {
         let mut head = reply.head();
         Ok(match self.response_encoder(&mut head, reply.request()) {
             Some(encoder) => reply.write(head, encoder),
@@ -177,7 +175,7 @@ impl OpenAiChat {
     pub fn encode_response(
         &self,
         request: &http::Request<Bytes>,
-        replies: &[Reply],
+        replies: &[Output],
     ) -> Result<http::Response<Bytes>, Fault> {
         let mut head = http::Response::new(()).into_parts().0;
         let encoder = self.response_encoder(&mut head, request);
@@ -189,7 +187,7 @@ impl OpenAiChat {
         &self,
         response: http::Response<Bytes>,
         call: &RequestHead,
-    ) -> Result<Vec<Reply>, Fault> {
+    ) -> Result<Vec<Output>, Fault> {
         let (mut head, bytes) = response.into_parts();
         if head.status.is_success() && respan_gateway_http::bodiless(&call.method, head.status) {
             return Ok(Vec::new());
@@ -209,7 +207,7 @@ impl OpenAiChat {
     }
 }
 
-impl Format<Incoming, Conversation, Reply> for OpenAiChat {
+impl Format<Incoming, Input, Output> for OpenAiChat {
     fn name(&self) -> &str {
         OPENAI
     }
@@ -219,7 +217,7 @@ impl Format<Incoming, Conversation, Reply> for OpenAiChat {
         head.uri = io.request().uri().clone();
         self.accepts(&head)
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         Ok(io.bind(
             |request| Self.read_request(request),
             |reply, source| Self.write_response(reply, source),
@@ -228,13 +226,22 @@ impl Format<Incoming, Conversation, Reply> for OpenAiChat {
     }
 }
 
-impl Format<Outgoing, Reply, Conversation> for OpenAiChat {
+impl Format<Outgoing, Output, Input> for OpenAiChat {
     fn name(&self) -> &str {
         OPENAI
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Reply, Conversation>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
+        let stream = io.extensions().get::<crate::StreamResponse>().copied();
+        let wire = io.extensions().get::<respan_gateway_http::Wire>().cloned();
         Ok(io.bind(
-            |source| Self.write_request(source),
+            move |source| {
+                crate::common::post_json_with_wire::<Self>(
+                    source,
+                    "/chat/completions",
+                    wire.as_ref(),
+                    stream,
+                )
+            },
             |response, call| Self.read_response(response, call),
             respan_gateway_http::success,
         ))
@@ -281,17 +288,16 @@ impl Wire for OpenAiChat {
     const OWN: &'static [&'static str] = LIMITS;
     type Reading = OpenAiReader;
 
-    fn read(v: &Value) -> Conversation {
-        let mut chat = Conversation::default();
-        chat.stream = v["stream"] == true;
+    fn read(v: &Value) -> Input {
+        let mut chat = Input::default();
         // The larger of both spellings, so the limit read bounds what any
         // provider enforces.
-        chat.max_tokens = v["max_completion_tokens"]
+        chat.options.max_output_tokens = v["max_completion_tokens"]
             .as_u64()
             .max(v["max_tokens"].as_u64());
-        chat.temperature = v["temperature"].as_f64();
-        chat.top_p = v["top_p"].as_f64();
-        chat.stop = match &v["stop"] {
+        chat.options.temperature = v["temperature"].as_f64();
+        chat.options.top_p = v["top_p"].as_f64();
+        chat.options.stop = match &v["stop"] {
             Value::String(s) => vec![s.clone()],
             Value::Array(a) => a
                 .iter()
@@ -300,13 +306,9 @@ impl Wire for OpenAiChat {
             _ => Vec::new(),
         };
         chat.user = v["user"].as_str().map(Into::into);
-        chat.extra.fields = unsupported_fields(v, KNOWN, INERT);
-        // The spelling of the limit is kept for this format to write again.
-        for key in LIMITS.iter().filter(|key| says(&v[**key])) {
-            chat.extra.fields.insert((*key).into(), v[*key].clone());
-        }
+        chat.native = native_fields(OPENAI, unsupported_fields(v, KNOWN, INERT));
         if chat.user.is_some() {
-            chat.extra.fields.shift_remove("user");
+            chat.native.fields_mut(OPENAI).shift_remove("user");
         }
         for m in v["messages"].as_array().into_iter().flatten() {
             let mut message = read_message(OPENAI, m, &ROLES);
@@ -315,15 +317,15 @@ impl Wire for OpenAiChat {
             chat.messages.push(message);
         }
         read_openai_tools(v, &mut chat);
-        chat.extra = extra_of(OPENAI, std::mem::take(&mut chat.extra.fields));
+        chat.native = native_fields(OPENAI, std::mem::take(chat.native.fields_mut(OPENAI)));
         chat
     }
 
-    fn write(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
+    fn write(chat: &Input) -> Result<Map<String, Value>, Fault> {
         // Several choices cannot be represented as events.
         let several = |n: &Value| n.as_u64().is_some_and(|n| n > 1);
-        if chat.extra.format.as_deref() == Some(OPENAI)
-            && chat.extra.fields.get("n").is_some_and(several)
+        if chat.native.format() == Some(OPENAI)
+            && chat.native.fields().get("n").is_some_and(several)
         {
             return Err(BadRequest::fault(
                 "several choices (n > 1) cannot be represented; a raw relay can send them",
@@ -336,20 +338,18 @@ impl Wire for OpenAiChat {
         }
         v.insert("messages".into(), messages.into());
         write_openai_tools(chat, &mut v)?;
-        set(&mut v, "stream", chat.stream.then_some(true.into()));
-        // Under the key the client used, or the current spelling.
-        let own = chat.extra.format.as_deref() == Some(OPENAI);
-        let used = |key: &str| own && chat.extra.fields.contains_key(key);
-        let limit = chat.max_tokens.map(Value::from);
-        if used("max_tokens") {
-            set(&mut v, "max_tokens", limit.clone());
-        }
-        if used("max_completion_tokens") || !used("max_tokens") {
-            set(&mut v, "max_completion_tokens", limit);
-        }
-        set(&mut v, "temperature", chat.temperature.map(Into::into));
-        set(&mut v, "top_p", chat.top_p.map(Into::into));
-        set(&mut v, "stop", stop_json(&chat.stop));
+        set(
+            &mut v,
+            "max_completion_tokens",
+            chat.options.max_output_tokens.map(Into::into),
+        );
+        set(
+            &mut v,
+            "temperature",
+            chat.options.temperature.map(Into::into),
+        );
+        set(&mut v, "top_p", chat.options.top_p.map(Into::into));
+        set(&mut v, "stop", stop_json(&chat.options.stop));
         set(&mut v, "user", chat.user.clone().map(Into::into));
         Ok(v)
     }
@@ -363,7 +363,7 @@ impl Wire for OpenAiChat {
     fn render(whole: &Assembled) -> Result<Value, Fault> {
         check_usage(&whole.usage)?;
         let join = |kind: Block| -> String {
-            let same = |p: &&respan_gateway_sdk::ReplyBlock| p.kind == kind;
+            let same = |p: &&respan_gateway_conversation::ReplyBlock| p.kind == kind;
             whole
                 .blocks()
                 .filter(same)
@@ -375,7 +375,10 @@ impl Wire for OpenAiChat {
             .items()
             .iter()
             .filter_map(|item| match item {
-                ReplyItem::Other(f, raw) if **f == *OPENAI => call_fields_of(raw),
+                ReplyItem::Native(respan_gateway_sdk::NativeValue {
+                    format: f,
+                    value: raw,
+                }) if **f == *OPENAI => call_fields_of(raw),
                 _ => None,
             })
             .collect();
@@ -411,7 +414,8 @@ impl Wire for OpenAiChat {
             "finish_reason": FINISH.reason(finish)?,
         })];
         for item in whole.items() {
-            let ReplyItem::Other(format, raw) = item else {
+            let ReplyItem::Native(respan_gateway_sdk::NativeValue { format, value: raw }) = item
+            else {
                 continue;
             };
             if &**format == OPENAI && call_fields_of(raw).is_some() {
@@ -504,7 +508,7 @@ fn extra_usage(v: &Value) -> Map<String, Value> {
 }
 
 /// Usage as this format reports it.
-fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
+fn usage_body(u: &Usage, native: &Map<String, Value>) -> Value {
     let get = |unit| u.get(unit).unwrap_or_default();
     let (input, output) = (get(units::INPUT_TOKENS), get(units::OUTPUT_TOKENS));
     let mut body = json!({
@@ -520,11 +524,11 @@ fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
     if reasoning > 0 {
         body["completion_tokens_details"] = json!({ "reasoning_tokens": reasoning });
     }
-    merge_fields(&mut body, extra);
+    merge_fields(&mut body, native);
     body
 }
 
-/// The usage fields an [`Reply::Other`] says, if it says only those.
+/// The usage fields an [`Output::Native`] says, if it says only those.
 fn usage_fields(raw: &Value) -> Option<&Map<String, Value>> {
     let only = raw.as_object().filter(|o| o.len() == 1)?;
     only.get("usage")?.as_object()
@@ -553,13 +557,13 @@ fn check_usage(usage: &Usage) -> Result<(), Fault> {
 
 /// The fields every chunk or body of a response has: id, `object`, `created`
 /// (the response's, if it kept one), model and the fields of the start's own
-/// `extra` if it is in this format.
+/// `native` if it is in this format.
 fn envelope(start: Option<&Start>, object: &str, now: u64) -> Map<String, Value> {
     let (id, model) = start
         .map(|s| (s.id.as_str(), s.model.as_str()))
         .unwrap_or_default();
-    let fields = start.filter(|s| s.extra.format.as_deref() == Some(OPENAI));
-    let fields = fields.map(|s| &s.extra.fields);
+    let fields = start.filter(|s| s.native.format() == Some(OPENAI));
+    let fields = fields.map(|s| s.native.fields());
     let created = fields.and_then(|f| f.get("created")).cloned();
     let mut v = Map::new();
     v.insert("id".into(), id.into());
@@ -605,7 +609,7 @@ fn rekey(choice: &Value, key: &str) -> Value {
     choice
 }
 
-/// Put `more`, a choice of an [`Reply::Other`], among a whole body's
+/// Put `more`, a choice of an [`Output::Native`], among a whole body's
 /// `choices`: the first choice's fields join it, another is added.
 fn merge_choice(choices: &mut Vec<Value>, more: &Value) {
     let more = rekey(more, "message");
@@ -698,7 +702,7 @@ struct Call {
 }
 
 /// The fields of tool call `block` the kind has no place for, as the
-/// [`Reply::Other`] that carries them: before the call's block opens.
+/// [`Output::Native`] that carries them: before the call's block opens.
 fn call_fields(block: u32, call: &Call) -> Option<Value> {
     if call.entry.is_empty() && call.function.is_empty() {
         return None;
@@ -738,40 +742,40 @@ impl OpenAiReader {
     }
 
     /// Open a block of `key` as `kind`, ending the open text and reasoning.
-    fn open(&mut self, key: Key, kind: Block, out: &mut Vec<Reply>) -> u32 {
+    fn open(&mut self, key: Key, kind: Block, out: &mut Vec<Output>) -> u32 {
         for (n, block) in self.blocks.iter_mut().enumerate() {
             if block.open && matches!(block.key, Key::Text | Key::Reasoning) {
                 block.open = false;
-                out.push(Reply::block_end(u32::try_from(n).unwrap_or(u32::MAX)));
+                out.push(Output::block_end(u32::try_from(n).unwrap_or(u32::MAX)));
             }
         }
         let block = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
         self.blocks.push(Opened { key, open: true });
-        out.push(Reply::block_start(block, kind));
+        out.push(Output::block_start(block, kind));
         block
     }
 
     /// Delta `delta` of the block of `key`, opened as `kind` if it is not.
-    fn say(&mut self, key: Key, kind: Block, delta: Delta, out: &mut Vec<Reply>) {
+    fn say(&mut self, key: Key, kind: Block, delta: Delta, out: &mut Vec<Output>) {
         let block = match self.open_block(&key) {
             Some(block) => block,
             None => self.open(key, kind, out),
         };
-        out.push(Reply::Delta { block, delta });
+        out.push(Output::Delta { block, delta });
     }
 
     /// End every open block, in the order they opened.
-    fn close(&mut self, out: &mut Vec<Reply>) {
+    fn close(&mut self, out: &mut Vec<Output>) {
         for (n, block) in self.blocks.iter_mut().enumerate() {
             if std::mem::take(&mut block.open) {
-                out.push(Reply::block_end(u32::try_from(n).unwrap_or(u32::MAX)));
+                out.push(Output::block_end(u32::try_from(n).unwrap_or(u32::MAX)));
             }
         }
     }
 
     /// The events of one chunk, whose first choice's body is under `key`
     /// (`delta`, or `message` in a whole body).
-    fn chunk(&mut self, v: &Value, key: &str, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn chunk(&mut self, v: &Value, key: &str, out: &mut Vec<Output>) -> Result<(), Fault> {
         let id = v["id"].as_str().filter(|id| !id.is_empty());
         if !self.started {
             self.early.extend(response_fields(v));
@@ -780,23 +784,26 @@ impl OpenAiReader {
             self.started = true;
             let model = v["model"].as_str().unwrap_or_default();
             let mut start = Start::new(id, model);
-            start.extra = extra_of(OPENAI, std::mem::take(&mut self.early));
-            out.push(Reply::Start(start));
+            start.native = native_fields(OPENAI, std::mem::take(&mut self.early));
+            out.push(Output::Start(start));
         }
         let usage = self.totals.increment(&usage_of(v)?);
         if !usage.is_empty() {
-            out.push(Reply::Usage(usage));
+            out.push(Output::Usage(usage));
         }
-        let extra = extra_usage(v);
-        if !extra.is_empty() && extra != self.usage_extra {
-            out.push(Reply::other(self.name.clone(), json!({ "usage": extra })));
-            self.usage_extra = extra;
+        let native = extra_usage(v);
+        if !native.is_empty() && native != self.usage_extra {
+            out.push(Output::native(
+                self.name.clone(),
+                json!({ "usage": native }),
+            ));
+            self.usage_extra = native;
         }
         // What the kind has no form for goes first, so a chunk that cannot be
         // translated fails before any of it is written.
         for choice in v["choices"].as_array().into_iter().flatten() {
             if choice_index(choice) != 0 {
-                out.push(Reply::other(
+                out.push(Output::native(
                     self.name.clone(),
                     json!({ "choices": [rekey(choice, "delta")] }),
                 ));
@@ -808,7 +815,7 @@ impl OpenAiReader {
         let body = &first[key];
         let calls = tool_calls(body);
         if let Some(rest) = rest_of(first, key, calls.is_some()) {
-            out.push(Reply::other(
+            out.push(Output::native(
                 self.name.clone(),
                 json!({ "choices": [rest] }),
             ));
@@ -837,7 +844,7 @@ impl OpenAiReader {
                 (Some((id, name)), None) => {
                     let next = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
                     if let Some(fields) = call_fields(next, &call_fields_source) {
-                        out.push(Reply::other(self.name.clone(), fields));
+                        out.push(Output::native(self.name.clone(), fields));
                     }
                     self.open(key, Block::ToolCall { id, name }, out)
                 }
@@ -849,19 +856,19 @@ impl OpenAiReader {
                 }
             };
             if !call.arguments.is_empty() {
-                out.push(Reply::arguments(block, call.arguments));
+                out.push(Output::arguments(block, call.arguments));
             }
         }
         if let Some(reason) = first["finish_reason"].as_str() {
             self.close(out);
-            out.push(Reply::finished(FINISH.finish(reason)));
+            out.push(Output::finished(FINISH.finish(reason)));
         }
         Ok(())
     }
 }
 
 impl Reader for OpenAiReader {
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         if self.done {
             return Ok(());
         }
@@ -885,11 +892,11 @@ impl Reader for OpenAiReader {
         self.chunk(&v, "delta", out)
     }
 
-    fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
         ended(self.done)
     }
 
-    fn body(&mut self, v: &Value, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.chunk(v, "message", out)?;
         self.close(out);
         self.done = true;
@@ -1164,8 +1171,8 @@ impl Chunks {
     }
 }
 
-impl Encoder<Reply> for Chunks {
-    fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<Output> for Chunks {
+    fn encode(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         let mut made = BytesMut::new();
         self.write(reply, &mut made)?;
         self.gate.pass(reply, &made, out);
@@ -1181,27 +1188,29 @@ impl Encoder<Reply> for Chunks {
 }
 
 impl Chunks {
-    fn write(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+    fn write(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         match reply {
-            Reply::Start(start) => _ = self.start.get_or_insert_with(|| start.clone()),
-            Reply::BlockStart { block, kind } => self.open(*block, kind, out)?,
-            Reply::Delta { block, delta } => self.say(*block, delta, out)?,
-            Reply::BlockEnd { block } => self.close(*block, out)?,
-            Reply::Usage(usage) => {
+            Output::Start(start) => _ = self.start.get_or_insert_with(|| start.clone()),
+            Output::BlockStart { block, kind } => self.open(*block, kind, out)?,
+            Output::Delta { block, delta } => self.say(*block, delta, out)?,
+            Output::BlockEnd { block } => self.close(*block, out)?,
+            Output::Usage(usage) => {
                 self.usage += usage;
                 check_usage(&self.usage)?;
             }
-            Reply::Finish(finish) => {
+            Output::Finish(finish) => {
                 FINISH.reason(finish)?;
                 self.finish = Some(finish.clone());
                 self.begin(out);
             }
-            Reply::Other { format, raw } if **format == *OPENAI && usage_fields(raw).is_some() => {
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                if **format == *OPENAI && usage_fields(raw).is_some() =>
+            {
                 if let Some(fields) = usage_fields(raw) {
                     self.usage_extra.extend(fields.clone());
                 }
             }
-            Reply::Other { format, raw }
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
                 if **format == *OPENAI && call_fields_of(raw).is_some() =>
             {
                 if let Some((block, entry, function)) = call_fields_of(raw) {
@@ -1209,19 +1218,26 @@ impl Chunks {
                         .push((block, entry.clone(), function.clone()));
                 }
             }
-            Reply::Other { format, raw } if **format == *OPENAI => match &**raw {
-                // An event that could not be read, as it came.
-                Value::String(data) => out.extend_from_slice(event(None, data).as_bytes()),
-                v if v["choices"].is_array() => {
-                    self.begin(out);
-                    let choices = v["choices"].as_array().into_iter().flatten();
-                    let choices: Vec<Value> = choices.map(|c| rekey(c, "delta")).collect();
-                    self.chunk(out, choices.into(), None);
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                if **format == *OPENAI =>
+            {
+                match &**raw {
+                    // An event that could not be read, as it came.
+                    Value::String(data) => out.extend_from_slice(event(None, data).as_bytes()),
+                    v if v["choices"].is_array() => {
+                        self.begin(out);
+                        let choices = v["choices"].as_array().into_iter().flatten();
+                        let choices: Vec<Value> = choices.map(|c| rekey(c, "delta")).collect();
+                        self.chunk(out, choices.into(), None);
+                    }
+                    other => out.extend_from_slice(event(None, other).as_bytes()),
                 }
-                other => out.extend_from_slice(event(None, other).as_bytes()),
-            },
-            Reply::Other { format, raw } if is_inert(format, raw) => {}
-            Reply::Other { .. } => return Err(unwritable_content()),
+            }
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                if is_inert(format, raw) => {}
+            Output::Native(respan_gateway_sdk::NativeValue { .. }) => {
+                return Err(unwritable_content());
+            }
             _ => return Err(unwritable_content()),
         }
         Ok(())
@@ -1280,10 +1296,10 @@ mod tests {
     use super::*;
 
     use crate::common::{finish_raw, write_request};
-    use crate::conversation::{Content, Extra, Message, Tool, ToolChoice};
+    use crate::conversation::{Content, Message, NativeFields, Tool, ToolChoice};
 
     /// The events of `chunks`, and how the stream ended.
-    fn decode_all(chunks: &[&str]) -> (Vec<Reply>, Result<(), Fault>) {
+    fn decode_all(chunks: &[&str]) -> (Vec<Output>, Result<(), Fault>) {
         let mut d = OpenAiChat.parser(false, None);
         let mut out = Vec::new();
         for c in chunks {
@@ -1296,7 +1312,7 @@ mod tests {
     }
 
     /// The events of one whole body.
-    fn decode_body(v: &Value) -> Vec<Reply> {
+    fn decode_body(v: &Value) -> Vec<Output> {
         let mut out = Vec::new();
         OpenAiReader::default()
             .body(v, &mut out)
@@ -1306,7 +1322,7 @@ mod tests {
 
     /// `replies` as a stream a client that asked for usage as `usage` gets,
     /// whole, and how it ended.
-    fn stream_of(replies: &[Reply], usage: bool) -> Result<String, Fault> {
+    fn stream_of(replies: &[Output], usage: bool) -> Result<String, Fault> {
         let mut enc = Chunks::new(usage);
         let mut out = BytesMut::new();
         for reply in replies {
@@ -1317,7 +1333,7 @@ mod tests {
     }
 
     /// `replies` as a whole body.
-    fn body_of(replies: &[Reply]) -> Result<Value, Fault> {
+    fn body_of(replies: &[Output]) -> Result<Value, Fault> {
         let mut whole = Assembled::default();
         replies.iter().try_for_each(|r| whole.push(r))?;
         OpenAiChat::render(&whole)
@@ -1331,11 +1347,11 @@ mod tests {
         data.filter_map(|d| serde_json::from_str(d).ok()).collect()
     }
 
-    fn text_events(block: u32, text: &str) -> Vec<Reply> {
+    fn text_events(block: u32, text: &str) -> Vec<Output> {
         vec![
-            Reply::block_start(block, Block::Text),
-            Reply::text(block, text),
-            Reply::block_end(block),
+            Output::block_start(block, Block::Text),
+            Output::text(block, text),
+            Output::block_end(block),
         ]
     }
 
@@ -1346,10 +1362,10 @@ mod tests {
         }
     }
 
-    fn usage(unit: &'static str, n: u64) -> Reply {
+    fn usage(unit: &'static str, n: u64) -> Output {
         let mut u = Usage::default();
         u.add(unit, n);
-        Reply::usage(u)
+        Output::usage(u)
     }
 
     #[test]
@@ -1360,7 +1376,7 @@ mod tests {
         let error = "data: {\"error\":{\"message\":\"Overloaded\"}}\n\n";
         let batches = |events: &[&str]| {
             let mut d = OpenAiChat.parser(true, None);
-            let batches: Vec<(Vec<Reply>, bool)> = events
+            let batches: Vec<(Vec<Output>, bool)> = events
                 .iter()
                 .map(|e| {
                     let mut out = Vec::new();
@@ -1373,16 +1389,16 @@ mod tests {
         let content = batches(&[role, ": ping\n\n", text]);
         assert!(content[0].0.is_empty() && content[1].0.is_empty());
         // The start, the usage held behind it, and the text, in order.
-        let kinds: Vec<bool> = content[2].0.iter().map(Reply::is_content).collect();
+        let kinds: Vec<bool> = content[2].0.iter().map(Output::is_content).collect();
         assert_eq!(kinds, [true, false, true, true]);
-        assert!(matches!(&content[2].0[0], Reply::Start(s) if s.id == "c1"));
+        assert!(matches!(&content[2].0[0], Output::Start(s) if s.id == "c1"));
         // A failure first leaves only the usage held, saying nothing.
         let failed = batches(&[role, error]);
         assert!(failed[1].1);
         assert_eq!(failed[1].0.len(), 1);
         let held = &failed[1].0[0];
         assert!(
-            matches!(held, Reply::Usage(u) if u.get(units::INPUT_TOKENS) == Some(2)),
+            matches!(held, Output::Usage(u) if u.get(units::INPUT_TOKENS) == Some(2)),
             "{held:?}"
         );
     }
@@ -1397,19 +1413,19 @@ mod tests {
         ]);
         assert!(end.is_ok());
         let mut first = usage(units::INPUT_TOKENS, 3);
-        if let Reply::Usage(u) = &mut first {
+        if let Output::Usage(u) = &mut first {
             u.add(units::OUTPUT_TOKENS, 1);
         }
         assert_eq!(
             out,
             [
-                Reply::start("x", "m"),
-                Reply::block_start(0, Block::Text),
-                Reply::text(0, "Hello"),
+                Output::start("x", "m"),
+                Output::block_start(0, Block::Text),
+                Output::text(0, "Hello"),
                 // Totals repeated in a later chunk add only what changed.
                 first,
-                Reply::block_end(0),
-                Reply::finished(Finish::Stop),
+                Output::block_end(0),
+                Output::finished(Finish::Stop),
                 usage(units::OUTPUT_TOKENS, 1),
             ]
         );
@@ -1425,24 +1441,24 @@ mod tests {
             "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n",
         ]);
-        let mut start = Reply::start("c1", "gpt");
-        if let Reply::Start(s) = &mut start {
+        let mut start = Output::start("c1", "gpt");
+        if let Output::Start(s) = &mut start {
             let fields = json!({ "created": 1, "system_fingerprint": "fp" });
             let fields = fields.as_object().cloned().unwrap_or_default();
-            s.extra = Extra::new(OPENAI, fields);
+            s.native = Some(NativeFields::new(OPENAI, fields));
         }
         assert_eq!(
             out,
             [
                 start,
                 // An empty text opens no block.
-                Reply::block_start(0, Block::Text),
-                Reply::text(0, "Hi"),
+                Output::block_start(0, Block::Text),
+                Output::text(0, "Hi"),
                 // A tool call ends the text before it, and starts its own.
-                Reply::block_end(0),
-                Reply::block_start(1, call("call_1", "f")),
-                Reply::block_end(1),
-                Reply::finished(Finish::ToolUse),
+                Output::block_end(0),
+                Output::block_start(1, call("call_1", "f")),
+                Output::block_end(1),
+                Output::finished(Finish::ToolUse),
             ]
         );
     }
@@ -1459,20 +1475,20 @@ mod tests {
         assert_eq!(
             out[1..],
             [
-                Reply::block_start(0, Block::Reasoning),
-                Reply::reasoning(0, "hm"),
-                Reply::block_end(0),
-                Reply::block_start(1, Block::Text),
-                Reply::text(1, "Hi"),
-                Reply::block_end(1),
+                Output::block_start(0, Block::Reasoning),
+                Output::reasoning(0, "hm"),
+                Output::block_end(0),
+                Output::block_start(1, Block::Text),
+                Output::text(1, "Hi"),
+                Output::block_end(1),
                 // Each call, by its `index`, is a block, as it opens.
-                Reply::block_start(2, call("a", "f")),
-                Reply::arguments(2, "{"),
-                Reply::block_start(3, call("b", "g")),
-                Reply::arguments(2, "}"),
-                Reply::block_end(2),
-                Reply::block_end(3),
-                Reply::finished(Finish::ToolUse),
+                Output::block_start(2, call("a", "f")),
+                Output::arguments(2, "{"),
+                Output::block_start(3, call("b", "g")),
+                Output::arguments(2, "}"),
+                Output::block_end(2),
+                Output::block_end(3),
+                Output::finished(Finish::ToolUse),
             ]
         );
     }
@@ -1488,9 +1504,9 @@ mod tests {
         assert_eq!(
             out[1..],
             [
-                Reply::other(OPENAI, rest),
-                Reply::block_start(0, Block::Text),
-                Reply::text(0, "Hi"),
+                Output::native(OPENAI, rest),
+                Output::block_start(0, Block::Text),
+                Output::text(0, "Hi"),
             ]
         );
     }
@@ -1500,7 +1516,7 @@ mod tests {
         let (out, _) = decode_all(&[
             "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\",\"native_finish_reason\":\"stop\",\"stop_reason\":null}]}\n\n",
         ]);
-        assert_eq!(out[1..], [Reply::finished(Finish::Stop)]);
+        assert_eq!(out[1..], [Output::finished(Finish::Stop)]);
     }
 
     #[test]
@@ -1508,9 +1524,11 @@ mod tests {
         let (out, _) = decode_all(&[
             "data: {\"id\":\"x\",\"choices\":[{\"index\":1,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
         ]);
-        assert!(!out.iter().any(|r| matches!(r, Reply::Finish(_))));
+        assert!(!out.iter().any(|r| matches!(r, Output::Finish(_))));
         // The other choice is kept, in this format's words.
-        assert!(matches!(&out[1..], [Reply::Other { format, .. }] if &**format == OPENAI));
+        assert!(
+            matches!(&out[1..], [Output::Native(respan_gateway_sdk::NativeValue { format, .. })] if &**format == OPENAI)
+        );
     }
 
     #[test]
@@ -1519,7 +1537,7 @@ mod tests {
             "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"no\"}}]}\n\n",
         ]);
         let refusal = json!({ "choices": [{ "index": 0, "delta": { "refusal": "no" } }] });
-        assert_eq!(out[1..], [Reply::other(OPENAI, refusal)]);
+        assert_eq!(out[1..], [Output::native(OPENAI, refusal)]);
     }
 
     #[test]
@@ -1530,12 +1548,12 @@ mod tests {
         assert_eq!(
             out,
             [
-                Reply::start("x", ""),
+                Output::start("x", ""),
                 usage(units::OUTPUT_TOKENS, 1),
-                Reply::block_start(0, Block::Text),
-                Reply::text(0, "hi"),
-                Reply::block_end(0),
-                Reply::finished(Finish::Stop),
+                Output::block_start(0, Block::Text),
+                Output::text(0, "hi"),
+                Output::block_end(0),
+                Output::finished(Finish::Stop),
             ]
         );
     }
@@ -1580,7 +1598,7 @@ mod tests {
 
     #[test]
     fn an_edited_start_is_written_in_every_chunk() {
-        let mut replies = vec![Reply::start("y", "alias")];
+        let mut replies = vec![Output::start("y", "alias")];
         replies.extend(text_events(0, "HI"));
         let stream = stream_of(&replies, false).expect("a stream");
         let chunks = chunks_of(&stream);
@@ -1595,7 +1613,7 @@ mod tests {
             .collect();
         assert_eq!(text, "HI");
         // Text a filter replaced with a finish is the finish.
-        let length = [Reply::start("y", "m"), Reply::finished(Finish::Length)];
+        let length = [Output::start("y", "m"), Output::finished(Finish::Length)];
         let stream = stream_of(&length, false).expect("a stream");
         assert!(stream.contains("\"finish_reason\":\"length\""), "{stream}");
     }
@@ -1603,9 +1621,9 @@ mod tests {
     #[test]
     fn a_finish_edited_beside_a_tool_call_is_written() {
         let replies = [
-            Reply::block_start(0, call("t", "f")),
-            Reply::block_end(0),
-            Reply::finished(Finish::Stop),
+            Output::block_start(0, call("t", "f")),
+            Output::block_end(0),
+            Output::finished(Finish::Stop),
         ];
         let stream = stream_of(&replies, false).expect("a stream");
         assert!(stream.contains("\"finish_reason\":\"stop\""), "{stream}");
@@ -1616,7 +1634,7 @@ mod tests {
     #[test]
     fn a_tool_call_emptied_in_a_stream_fails_rather_than_leave_a_shell() {
         // Arguments for a call that never started.
-        let replies = [Reply::arguments(0, "{}")];
+        let replies = [Output::arguments(0, "{}")];
         assert!(stream_of(&replies, false).is_err());
         assert!(body_of(&replies).is_err());
         // A call that is a shell, with no id or name, cannot be decoded.
@@ -1631,9 +1649,9 @@ mod tests {
         let (out, _) = decode_all(&[
             "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"SECRET\"}}]}\n\n",
         ]);
-        let kept: Vec<Reply> = out
+        let kept: Vec<Output> = out
             .into_iter()
-            .filter(|r| !matches!(r, Reply::Delta { .. }))
+            .filter(|r| !matches!(r, Output::Delta { .. }))
             .collect();
         let stream = stream_of(&kept, false).expect("a stream");
         assert!(!stream.contains("SECRET"), "{stream}");
@@ -1641,13 +1659,13 @@ mod tests {
 
     #[test]
     fn a_tool_call_a_filter_replaces_with_text_is_gone() {
-        let mut replies = vec![Reply::start("x", "m")];
+        let mut replies = vec![Output::start("x", "m")];
         replies.extend(text_events(0, "[removed]"));
         let stream = stream_of(&replies, false).expect("a stream");
         assert!(stream.contains("\"content\":\"[removed]\""), "{stream}");
         assert!(!stream.contains("tool_calls"), "{stream}");
         // What it cannot write fails the response.
-        let foreign = [Reply::other("anthropic-messages", json!({ "type": "x" }))];
+        let foreign = [Output::native("anthropic-messages", json!({ "type": "x" }))];
         assert!(body_of(&foreign).is_err());
     }
 
@@ -1661,13 +1679,16 @@ mod tests {
             }}],
             "usage": { "prompt_tokens": 2, "completion_tokens": 1 },
         });
-        let mut start = Reply::start("c1", "gpt");
-        if let Reply::Start(s) = &mut start {
+        let mut start = Output::start("c1", "gpt");
+        if let Output::Start(s) = &mut start {
             let fields = json!({ "created": 7 });
-            s.extra = Extra::new(OPENAI, fields.as_object().cloned().unwrap_or_default());
+            s.native = Some(NativeFields::new(
+                OPENAI,
+                fields.as_object().cloned().unwrap_or_default(),
+            ));
         }
         let mut totals = usage(units::INPUT_TOKENS, 2);
-        if let Reply::Usage(u) = &mut totals {
+        if let Output::Usage(u) = &mut totals {
             u.add(units::OUTPUT_TOKENS, 1);
         }
         assert_eq!(
@@ -1675,13 +1696,13 @@ mod tests {
             [
                 start,
                 totals,
-                Reply::block_start(0, Block::Text),
-                Reply::text(0, "ok"),
-                Reply::block_end(0),
-                Reply::block_start(1, call("t", "f")),
-                Reply::arguments(1, "{}"),
-                Reply::block_end(1),
-                Reply::finished(Finish::ToolUse),
+                Output::block_start(0, Block::Text),
+                Output::text(0, "ok"),
+                Output::block_end(0),
+                Output::block_start(1, call("t", "f")),
+                Output::arguments(1, "{}"),
+                Output::block_end(1),
+                Output::finished(Finish::ToolUse),
             ]
         );
         // Logprobs and content that is not text are other content too.
@@ -1689,13 +1710,13 @@ mod tests {
             "message": { "role": "assistant", "content": "ok" } }] });
         assert!(matches!(
             decode_body(&logprobs).first(),
-            Some(Reply::Other { .. })
+            Some(Output::Native(respan_gateway_sdk::NativeValue { .. }))
         ));
         let parts = json!({ "choices": [{ "index": 0,
             "message": { "role": "assistant", "content": [{ "type": "text", "text": "ok" }] } }] });
         assert!(matches!(
             decode_body(&parts).first(),
-            Some(Reply::Other { .. })
+            Some(Output::Native(respan_gateway_sdk::NativeValue { .. }))
         ));
         // A whole body collects what the events say, and keeps its other fields.
         let again = body_of(&decode_body(&v)).expect("a body");
@@ -1709,7 +1730,7 @@ mod tests {
 
     #[test]
     fn unsupported_usage_edits_fail_instead_of_disappearing() {
-        let mut synthetic = vec![Reply::start("x", "m")];
+        let mut synthetic = vec![Output::start("x", "m")];
         synthetic.extend(text_events(0, "ok"));
         synthetic.push(usage("credits", 3));
         assert!(stream_of(&synthetic, true).is_err());
@@ -1730,15 +1751,18 @@ mod tests {
         let sums: Vec<_> = out
             .iter()
             .filter_map(|r| match r {
-                Reply::Usage(u) => u.get(units::OUTPUT_TOKENS),
+                Output::Usage(u) => u.get(units::OUTPUT_TOKENS),
                 _ => None,
             })
             .collect();
         assert_eq!(sums, [1, 6]);
-        let Some(Reply::Start(start)) = out.first() else {
+        let Some(Output::Start(start)) = out.first() else {
             panic!("{out:?}");
         };
-        assert_eq!(start.extra.fields["x_groq"], json!({ "queue_time": 0.2 }));
+        assert_eq!(
+            start.native.fields()["x_groq"],
+            json!({ "queue_time": 0.2 })
+        );
         let stream = stream_of(&out, true).expect("a stream");
         let last = chunks_of(&stream).pop().unwrap_or_default();
         assert_eq!(last["usage"]["completion_tokens"], 7);
@@ -1761,7 +1785,7 @@ mod tests {
             }
             let events = decode_body(&v);
             let total = events.iter().fold(Usage::default(), |mut all, r| {
-                if let Reply::Usage(u) = r {
+                if let Output::Usage(u) = r {
                     all += u;
                 }
                 all
@@ -1804,7 +1828,7 @@ mod tests {
         let counted: Vec<_> = replies
             .iter()
             .filter_map(|r| match r {
-                Reply::Usage(u) => u.get(units::INPUT_TOKENS),
+                Output::Usage(u) => u.get(units::INPUT_TOKENS),
                 _ => None,
             })
             .collect();
@@ -1847,12 +1871,12 @@ mod tests {
         let outputs: Vec<_> = replies
             .iter()
             .filter_map(|r| match r {
-                Reply::Usage(u) => u.get(units::OUTPUT_TOKENS),
+                Output::Usage(u) => u.get(units::OUTPUT_TOKENS),
                 _ => None,
             })
             .collect();
         assert_eq!(outputs, [1, 6]);
-        replies.retain(|r| matches!(r, Reply::Usage(_)));
+        replies.retain(|r| matches!(r, Output::Usage(_)));
         // A plugin lowers the second increment: the total follows it.
         replies[1] = usage(units::OUTPUT_TOKENS, 2);
         let stream = stream_of(&replies, true).expect("a stream");
@@ -1878,14 +1902,14 @@ mod tests {
                 decode_all(&[&events[0], &events[1], &events[2], "data: [DONE]\n\n"]);
             // The second report, which adds 6, is dropped.
             replies.retain(
-                |r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6)),
+                |r| !matches!(r, Output::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6)),
             );
             let stream = stream_of(&replies, true).expect("a stream");
             let again = decode_all(&[&stream]).0;
             let total: u64 = again
                 .iter()
                 .filter_map(|r| match r {
-                    Reply::Usage(u) => u.get(units::OUTPUT_TOKENS),
+                    Output::Usage(u) => u.get(units::OUTPUT_TOKENS),
                     _ => None,
                 })
                 .sum();
@@ -1950,7 +1974,7 @@ mod tests {
 
     /// The client's `body` as the conversation it says, with `edit` made,
     /// written as a request.
-    fn written(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
+    fn written(body: Value, edit: impl FnOnce(&mut Input)) -> Result<Value, Fault> {
         let mut chat = OpenAiChat.decode_request(Bytes::from(body.to_string()))?;
         edit(&mut chat);
         Ok(write_request::<OpenAiChat>(&chat)?.into())
@@ -1978,14 +2002,14 @@ mod tests {
                     { "role": "user", "content": "hi" },
                     { "role": "developer", "content": "and kind" },
                 ],
-                "max_tokens": 5,
+                "max_completion_tokens": 5,
                 "stop": ["x"],
             }))
         );
     }
 
     /// Hides an email in tool calls and results, as a PII plugin does.
-    fn hide_email(chat: &mut Conversation) {
+    fn hide_email(chat: &mut Input) {
         for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
             match part {
                 Content::ToolCall { arguments, .. } => {
@@ -2020,10 +2044,13 @@ mod tests {
                 "{\"email\":\"bob@x.io\"}"
             )]
         );
-        assert_eq!(chat.tool_choice, Some(ToolChoice::Required));
-        assert_eq!(chat.tools[0].extra.fields.get("strict"), Some(&json!(true)));
-        assert_eq!(chat.tools[0].extra.format.as_deref(), Some(OPENAI));
-        assert!(chat.extra.is_empty());
+        assert_eq!(chat.options.tool_choice, Some(ToolChoice::Required));
+        assert_eq!(
+            chat.tools[0].native.fields().get("strict"),
+            Some(&json!(true))
+        );
+        assert_eq!(chat.tools[0].native.format(), Some(OPENAI));
+        assert!(chat.native.is_empty());
         assert_eq!(written(body.clone(), |_| {}).ok(), Some(body.clone()));
         let mut expected = body.clone();
         expected["messages"][1]["tool_calls"][0]["function"]["arguments"] =
@@ -2039,7 +2066,7 @@ mod tests {
             .insert(0, Content::tool_result("c1", vec!["42".into()], false));
         let mut asked = Message::new(Role::Assistant, "");
         asked.content = vec![Content::tool_call("c1", "f", "{}")];
-        let chat = Conversation::new([asked, both]);
+        let chat = Input::new([asked, both]);
         let v = write_request::<OpenAiChat>(&chat).map(Value::Object);
         assert_eq!(
             v.ok().map(|v| v["messages"].clone()),
@@ -2054,7 +2081,7 @@ mod tests {
         // OpenAI cannot say a call failed.
         let mut failed = Message::new(Role::User, "");
         failed.content = vec![Content::tool_result("c1", vec!["no".into()], true)];
-        assert!(write_request::<OpenAiChat>(&Conversation::new([failed])).is_err());
+        assert!(write_request::<OpenAiChat>(&Input::new([failed])).is_err());
     }
 
     #[test]
@@ -2063,13 +2090,13 @@ mod tests {
             { "role": "user", "name": "alice", "content": "hi" },
         ], "tools": [{ "type": "function", "function": { "name": "f" } }], "seed": 7 });
         let chat = OpenAiChat::read(&body);
-        assert_eq!(chat.extra.fields.get("seed"), Some(&json!(7)));
-        assert_eq!(chat.extra.format.as_deref(), Some(OPENAI));
+        assert_eq!(chat.native.fields().get("seed"), Some(&json!(7)));
+        assert_eq!(chat.native.format(), Some(OPENAI));
         // A function tool is the kind's.
         assert_eq!(chat.tools, [Tool::new("f", Value::Null)]);
         assert_eq!(chat.messages[0].text(), "hi");
         assert_eq!(
-            chat.messages[0].extra.fields.get("name"),
+            chat.messages[0].native.fields().get("name"),
             Some(&json!("alice"))
         );
         // To another format it is refused; to OpenAI it is kept.
@@ -2079,9 +2106,9 @@ mod tests {
             Some(400)
         );
         assert_eq!(written(body.clone(), |_| {}).ok(), Some(body));
-        // With the extra fields cleared and only plain messages, it is sent.
+        // With the native fields cleared and only plain messages, it is sent.
         let mut chat = chat;
-        chat.extra = Extra::default();
+        chat.native = None;
         chat.messages = vec![Message::new(Role::User, "hi")];
         assert!(write_request::<crate::anthropic::AnthropicMessages>(&chat).is_ok());
     }
@@ -2090,12 +2117,12 @@ mod tests {
     fn several_choices_are_refused_as_a_bad_request() {
         let body = json!({ "model": "m", "messages": [], "n": 2 });
         let chat = OpenAiChat::read(&body);
-        assert_eq!(chat.extra.fields.get("n"), Some(&json!(2)));
+        assert_eq!(chat.native.fields().get("n"), Some(&json!(2)));
         let refused = write_request::<OpenAiChat>(&chat).err();
         assert!(refused.is_some_and(|f| f.is::<respan_gateway_sdk::BadRequest>()));
         // One choice is the default, and says nothing.
         let one = OpenAiChat::read(&json!({ "model": "m", "messages": [], "n": 1 }));
-        assert!(one.extra.is_empty());
+        assert!(one.native.is_empty());
     }
 
     #[test]
@@ -2105,7 +2132,7 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }] });
         let chat = OpenAiChat::read(&body);
         assert_eq!(chat.user.as_deref(), Some("bob@x.io"));
-        assert!(chat.extra.is_empty());
+        assert!(chat.native.is_empty());
         // Kept as it came, or changed or removed by a plugin.
         assert_eq!(written(body.clone(), |_| {}).ok(), Some(body.clone()));
         let redacted = written(body.clone(), |c| c.user = Some("[x]".into()));
@@ -2124,10 +2151,10 @@ mod tests {
             back.ok().map(|v| v["user"].clone()),
             Some(json!("bob@x.io"))
         );
-        // A user that is not a string is not the kind's: it stays in `extra`.
+        // A user that is not a string is not the kind's: it stays in `native`.
         let odd = OpenAiChat::read(&json!({ "user": 7, "messages": [] }));
         assert_eq!(
-            (odd.user, odd.extra.fields.get("user")),
+            (odd.user, odd.native.fields().get("user")),
             (None, Some(&json!(7)))
         );
     }
@@ -2136,8 +2163,8 @@ mod tests {
     fn a_plugin_that_removes_tools_sends_the_request_without_them() {
         let body = json!({ "model": "m", "messages": [], "tools": [{ "type": "function" }] });
         let edited = written(body, |c| {
-            c.extra.fields.shift_remove("tools");
-            c.extra.fields.insert("seed".into(), 7.into());
+            c.native.fields_mut(OPENAI).shift_remove("tools");
+            c.native.fields_mut(OPENAI).insert("seed".into(), 7.into());
         });
         assert_eq!(
             edited.ok(),
@@ -2146,18 +2173,24 @@ mod tests {
     }
 
     #[test]
-    fn the_limit_is_read_as_the_larger_spelling_and_written_under_the_clients_key() {
+    fn the_limit_is_read_as_the_larger_spelling_and_written_canonically() {
         let v = json!({ "max_tokens": 100_000, "max_completion_tokens": 10, "messages": [] });
-        assert_eq!(OpenAiChat::read(&v).max_tokens, Some(100_000));
+        assert_eq!(
+            OpenAiChat::read(&v).options.max_output_tokens,
+            Some(100_000)
+        );
         for (limits, want) in [
-            (json!({ "max_tokens": 4000 }), json!({ "max_tokens": 10 })),
+            (
+                json!({ "max_tokens": 4000 }),
+                json!({ "max_completion_tokens": 10 }),
+            ),
             (
                 json!({ "max_completion_tokens": 4000 }),
                 json!({ "max_completion_tokens": 10 }),
             ),
             (
                 json!({ "max_tokens": 4000, "max_completion_tokens": 4000 }),
-                json!({ "max_tokens": 10, "max_completion_tokens": 10 }),
+                json!({ "max_completion_tokens": 10 }),
             ),
             (json!({}), json!({ "max_completion_tokens": 10 })),
         ] {
@@ -2165,12 +2198,13 @@ mod tests {
             if let Some(fields) = body.as_object_mut() {
                 fields.extend(limits.as_object().cloned().unwrap_or_default());
             }
-            let edited = written(body.clone(), |c| c.max_tokens = Some(10)).unwrap_or_default();
+            let edited = written(body.clone(), |c| c.options.max_output_tokens = Some(10))
+                .unwrap_or_default();
             for key in ["max_tokens", "max_completion_tokens"] {
                 assert_eq!(edited.get(key), want.get(key), "{body}: {edited}");
             }
             // Removed, it is gone under every spelling.
-            let none = written(body, |c| c.max_tokens = None).unwrap_or_default();
+            let none = written(body, |c| c.options.max_output_tokens = None).unwrap_or_default();
             assert!(
                 none.get("max_tokens").is_none() && none.get("max_completion_tokens").is_none()
             );
@@ -2187,7 +2221,7 @@ mod tests {
     fn whether_it_streams_is_written_with_its_options() {
         let body = json!({ "model": "m", "stream": true, "stream_options": { "include_usage": true },
             "messages": [{ "role": "user", "content": "hi" }] });
-        let out = written(body, |c| c.stream = false).unwrap_or_default();
+        let out = written(body, |_| {}).unwrap_or_default();
         assert!(out.get("stream").is_none());
         assert!(out.get("stream_options").is_none());
     }
@@ -2196,7 +2230,7 @@ mod tests {
     fn a_removed_field_is_not_written_and_the_others_are() {
         let body =
             json!({ "model": "m", "temperature": 0.5, "messages": [], "top_p": 0.9, "seed": 1 });
-        let out = written(body, |c| c.temperature = None).unwrap_or_default();
+        let out = written(body, |c| c.options.temperature = None).unwrap_or_default();
         assert_eq!(
             out,
             json!({ "model": "m", "messages": [], "top_p": 0.9, "seed": 1 })
@@ -2210,7 +2244,7 @@ mod tests {
             { "role": "assistant", "content": "yo", "refusal": null },
         ]});
         let chat = OpenAiChat::read(&body);
-        assert!(chat.extra.is_empty(), "{:?}", chat.extra);
+        assert!(chat.native.is_empty(), "{:?}", chat.native);
         assert_eq!(chat.messages.len(), 2);
         assert!(chat.messages.iter().all(Message::is_plain));
     }
@@ -2265,7 +2299,7 @@ mod tests {
             chat.messages[1].content,
             [Content::tool_result("t", vec!["42".into()], false)]
         );
-        assert!(chat.messages[1].extra.is_empty());
+        assert!(chat.messages[1].native.is_empty());
         // The text is edited in its part, beside the image and tool result.
         let edited = written(body, |c| {
             c.messages[0].content[0] = "WHAT IS THIS?".into();
@@ -2374,7 +2408,7 @@ mod tests {
 
     #[test]
     fn an_edit_keeps_messages_a_conversation_cannot_hold() {
-        let image = json!({ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": "u" } }] });
+        let image = json!({ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": "u", "detail": "high" } }] });
         let body = json!({ "model": "m", "messages": [
             { "role": "user", "content": "hi" }, image.clone(),
         ]});
@@ -2407,7 +2441,7 @@ mod tests {
         // A part in OpenAI's shape does not reach Anthropic.
         assert!(write_request::<AnthropicMessages>(&chat).is_err());
         // One rewritten into Anthropic's does, as it is.
-        chat.messages[0].content[1] = Content::other("anthropic-messages", pdf.clone());
+        chat.messages[0].content[1] = Content::native("anthropic-messages", pdf.clone());
         let sent = write_request::<AnthropicMessages>(&chat).map(Value::from);
         assert_eq!(
             sent.map(|v| v["messages"][0]["content"][1].clone()).ok(),
@@ -2416,9 +2450,9 @@ mod tests {
         // The same holds for the fields of a request.
         let thinking = json!({ "thinking": { "type": "enabled" } });
         let fields = thinking.as_object().cloned().unwrap_or_default();
-        chat.extra = Extra::new(OPENAI, fields.clone());
+        chat.native = Some(NativeFields::new(OPENAI, fields.clone()));
         assert!(write_request::<AnthropicMessages>(&chat).is_err());
-        chat.extra = Extra::new("anthropic-messages", fields);
+        chat.native = Some(NativeFields::new("anthropic-messages", fields));
         let sent = write_request::<AnthropicMessages>(&chat).map(Value::from);
         assert_eq!(
             sent.map(|v| v["thinking"].clone()).ok(),
@@ -2436,11 +2470,11 @@ mod tests {
         let thinking = json!({ "thinking": { "type": "enabled" } });
         let fields = thinking.as_object().cloned().unwrap_or_default();
         let mut foreign = chat.clone();
-        foreign.extra = Extra::new("anthropic-messages", fields.clone());
+        foreign.native = Some(NativeFields::new("anthropic-messages", fields.clone()));
         let mut message = chat.clone();
-        message.messages[0].extra = Extra::new("anthropic-messages", fields.clone());
+        message.messages[0].native = Some(NativeFields::new("anthropic-messages", fields.clone()));
         let mut tool = chat.clone();
-        tool.tools[0].extra = Extra::new("anthropic-messages", fields.clone());
+        tool.tools[0].native = Some(NativeFields::new("anthropic-messages", fields.clone()));
         let mut role = chat.clone();
         role.messages[0].role = Role::other("anthropic-messages", "critic");
         for chat in [foreign, message, tool, role] {
@@ -2449,7 +2483,7 @@ mod tests {
         }
         // Tagged for this format, the same is written.
         let mut own = chat;
-        own.extra = Extra::new(OPENAI, fields);
+        own.native = Some(NativeFields::new(OPENAI, fields));
         let sent = write_request::<OpenAiChat>(&own).map(Value::from);
         assert_eq!(
             sent.map(|v| v["thinking"].clone()).ok(),
@@ -2459,7 +2493,7 @@ mod tests {
 
     #[test]
     fn a_stream_made_from_events_always_finishes() {
-        let mut replies = vec![Reply::start("x", "m")];
+        let mut replies = vec![Output::start("x", "m")];
         replies.extend(text_events(0, "hi"));
         let out = stream_of(&replies, false).expect("a stream");
         assert!(out.contains("\"finish_reason\":\"stop\""), "{out}");
@@ -2469,13 +2503,13 @@ mod tests {
     #[test]
     fn a_translated_tool_call_is_refused() {
         // An event another format has no form in this one for is refused...
-        let other = Reply::other(
+        let other = Output::native(
             "anthropic-messages",
             json!({ "type": "content_block_start" }),
         );
         assert!(stream_of(&[other], false).is_err());
         // ... but a keep-alive changes no answer, and is dropped.
-        let ping = Reply::other("anthropic-messages", json!({ "type": "ping" }));
+        let ping = Output::native("anthropic-messages", json!({ "type": "ping" }));
         assert!(stream_of(&[ping], false).is_ok());
     }
 
@@ -2497,18 +2531,18 @@ mod tests {
     #[test]
     fn a_whole_body_joins_every_text_and_keeps_reasoning_and_calls() {
         let replies = [
-            Reply::start("x", "m"),
-            Reply::block_start(0, Block::Reasoning),
-            Reply::reasoning(0, "hm"),
-            Reply::block_end(0),
-            Reply::block_start(1, Block::Text),
-            Reply::text(1, "one "),
-            Reply::block_end(1),
-            Reply::block_start(2, Block::Text),
-            Reply::text(2, "two"),
-            Reply::block_end(2),
-            Reply::block_start(3, call("t", "f")),
-            Reply::block_end(3),
+            Output::start("x", "m"),
+            Output::block_start(0, Block::Reasoning),
+            Output::reasoning(0, "hm"),
+            Output::block_end(0),
+            Output::block_start(1, Block::Text),
+            Output::text(1, "one "),
+            Output::block_end(1),
+            Output::block_start(2, Block::Text),
+            Output::text(2, "two"),
+            Output::block_end(2),
+            Output::block_start(3, call("t", "f")),
+            Output::block_end(3),
         ];
         let body = body_of(&replies).expect("a body");
         let message = &body["choices"][0]["message"];

@@ -128,7 +128,7 @@ async fn a_panic_in_a_filter_is_refused_as_internal() {
     #[async_trait]
     impl Plugin for Explode {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|_: &mut Reply| panic!("a buggy filter"))?;
+            cx.filter(|_: &mut Output| panic!("a buggy filter"))?;
             Ok(None)
         }
     }
@@ -443,7 +443,7 @@ async fn a_panic_in_on_provider_ends_the_call_and_refuses_the_request() {
 #[tokio::test]
 async fn a_panic_in_a_provider_filter_ends_the_call_as_internal() {
     let bill = Bill::default();
-    let panics = OnProvider(|px| px.filter(|_: &mut Reply| panic!("a buggy filter")));
+    let panics = OnProvider(|px| px.filter(|_: &mut Output| panic!("a buggy filter")));
     let h = Harness::new(
         vec![Arc::new(bill.clone()), Arc::new(panics)],
         Some("openai"),
@@ -683,7 +683,7 @@ async fn a_response_kept_past_its_request_ends_abandoned_and_reads_so() {
     let read = kept
         .take()
         .expect("kept")
-        .outputs::<Reply>()
+        .outputs::<Output>()
         .try_collect::<Vec<_>>()
         .await;
     assert_eq!(read.err().map(|f| fault_code(&f)), Some("abandoned".into()));
@@ -693,7 +693,7 @@ async fn a_response_kept_past_its_request_ends_abandoned_and_reads_so() {
 async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
     let bill = Bill::default();
     let guard =
-        Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world")));
+        Guard(|e| matches!(e, Output::Delta { delta, .. } if delta.as_str().contains("world")));
     let h = Harness::new(
         vec![Arc::new(bill.clone()), Arc::new(guard)],
         Some("openai"),
@@ -723,7 +723,7 @@ async fn a_client_edge_failure_ends_the_call_whose_response_was_sent() {
 
 #[tokio::test]
 async fn a_reader_waiting_on_a_kept_response_wakes_as_its_request_closes() {
-    type Reading = tokio::task::JoinHandle<Result<Vec<Reply>, Fault>>;
+    type Reading = tokio::task::JoinHandle<Result<Vec<Output>, Fault>>;
 
     /// Reads a call whose body never ends, in a task of its own.
     struct Watch(Arc<Mutex<Option<Reading>>>);
@@ -734,7 +734,7 @@ async fn a_reader_waiting_on_a_kept_response_wakes_as_its_request_closes() {
             let reading = tokio::spawn(
                 cx.call("slow")
                     .await?
-                    .outputs::<Reply>()
+                    .outputs::<Output>()
                     .try_collect::<Vec<_>>(),
             );
             *self.0.lock().map_err(|_| Fault::internal("poisoned"))? = Some(reading);
@@ -786,13 +786,13 @@ async fn filters_of_a_call_abandoned_at_close_get_their_end() {
 
     struct Noted(Arc<Mutex<Vec<String>>>);
 
-    impl Filter<Reply> for Noted {
-        fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Noted {
+        fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             out.push(event);
             Ok(())
         }
 
-        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             let end = end.as_ref().err().map_or("ok".to_owned(), fault_code);
             self.0.lock().map(|mut n| n.push(end.to_owned())).ok();
             Ok(())
@@ -865,7 +865,7 @@ async fn a_panic_before_any_bytes_is_refused() {
     #[async_trait]
     impl Plugin for Busy {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|_: &mut Reply| -> Result<(), Fault> { panic!("a buggy filter") })?;
+            cx.filter(|_: &mut Output| -> Result<(), Fault> { panic!("a buggy filter") })?;
             Ok(None)
         }
     }
@@ -884,7 +884,7 @@ async fn a_panic_before_any_bytes_is_refused() {
 async fn a_panic_after_bytes_went_out_keeps_those_written_before_it() {
     let h = Harness::new(
         vec![Arc::new(Guard(|e| {
-            if matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "boom") {
+            if matches!(e, Output::Delta { delta, .. } if delta.as_str() == "boom") {
                 panic!("a buggy guard");
             }
             false
@@ -923,7 +923,7 @@ async fn a_client_edge_failure_ends_the_call_however_its_bytes_were_split() {
     for (chunks, want) in each {
         let bill = Bill::default();
         let guard =
-            Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world")));
+            Guard(|e| matches!(e, Output::Delta { delta, .. } if delta.as_str().contains("world")));
         let h = Harness::new(
             vec![Arc::new(bill.clone()), Arc::new(guard)],
             Some("openai"),
@@ -1066,13 +1066,13 @@ async fn a_client_leaving_mid_stream_ends_the_call_and_its_filters() {
 
     struct Noted(Arc<Mutex<Vec<String>>>);
 
-    impl Filter<Reply> for Noted {
-        fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Noted {
+        fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             out.push(event);
             Ok(())
         }
 
-        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             let end = code(end).to_owned();
             self.0.lock().map(|mut n| n.push(end)).ok();
             Ok(())
@@ -1115,13 +1115,13 @@ async fn a_panic_reading_a_calls_events_ends_the_call_internal() {
     impl Plugin for Judge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let verdict = cx.call("backup").await?;
-            verdict.outputs::<Reply>().try_collect::<Vec<_>>().await?;
+            verdict.outputs::<Output>().try_collect::<Vec<_>>().await?;
             Ok(None)
         }
     }
 
     let buggy = OnProvider(|px| {
-        px.filter(|_: &mut Reply| -> Result<(), Fault> { panic!("a buggy filter") })
+        px.filter(|_: &mut Output| -> Result<(), Fault> { panic!("a buggy filter") })
     });
     let ends = Ends::default();
     let plugins: Vec<Arc<dyn Plugin>> =
@@ -1143,13 +1143,13 @@ async fn a_dropped_response_runs_its_provider_filters_end() {
 
     struct NoteEnd(FilterEnds, String);
 
-    impl Filter<Reply> for NoteEnd {
-        fn edit(&mut self, output: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for NoteEnd {
+        fn edit(&mut self, output: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             out.push(output);
             Ok(())
         }
 
-        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             let end = format!("{} {}", self.1, code(end));
             self.0.0.lock().map(|mut e| e.push(end)).ok();
             Ok(())
@@ -1171,7 +1171,7 @@ async fn a_dropped_response_runs_its_provider_filters_end() {
     impl Plugin for Hedge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut first = cx.call("openai").await?;
-            first.buffer_until(Reply::is_content).await?;
+            first.buffer_until(Output::is_content).await?;
             drop(first);
             Ok(Some(cx.call("backup").await?))
         }
@@ -1198,7 +1198,7 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
     impl Plugin for Waiting {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let opens = self.0.then(|| text(0, "Hi")).into_iter().flatten().map(Ok);
-            let pending = futures::stream::pending::<Result<Reply, Fault>>();
+            let pending = futures::stream::pending::<Result<Output, Fault>>();
             let quiet = futures::StreamExt::chain(futures::stream::iter(opens), pending);
             Ok(Some(Response::stream(quiet)))
         }
@@ -1210,7 +1210,7 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
     #[async_trait]
     impl Plugin for Failing {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let fails = [Err::<Reply, _>(
+            let fails = [Err::<Output, _>(
                 Fault::new("no")
                     .with(ErrorCode("no".into()))
                     .with(Status(StatusCode::FORBIDDEN)),
@@ -1240,14 +1240,14 @@ async fn a_plugins_own_response_sends_its_head_at_its_first_byte() {
     impl Plugin for Cached {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             // Its first output, which the guard sees before anything is written.
-            let cached = [Ok(Reply::text(0, "world"))];
+            let cached = [Ok(Output::text(0, "world"))];
             Ok(Some(Response::stream(futures::stream::iter(cached))))
         }
     }
 
     // So a guard refuses a cached answer as it refuses a provider's.
     let guard =
-        Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world")));
+        Guard(|e| matches!(e, Output::Delta { delta, .. } if delta.as_str().contains("world")));
     let h = Harness::new(vec![Arc::new(guard), Arc::new(Cached)], None);
     let (status, body) = h.text(chat()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1263,7 +1263,7 @@ async fn a_calls_response_read_to_its_end_then_dropped_ends_ok() {
     impl Plugin for ContentThenDrop {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut response = cx.call("openai").await?;
-            response.buffer_until(Reply::is_content).await?;
+            response.buffer_until(Output::is_content).await?;
             drop(response);
             Err(Fault::not_found("done"))
         }
@@ -1286,13 +1286,13 @@ async fn a_refusal_before_the_head_ends_a_plugins_response_filters() {
     #[derive(Clone, Default)]
     struct Ends(Arc<Mutex<Vec<String>>>);
 
-    impl Filter<Reply> for Ends {
-        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Ends {
+        fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             out.push(reply);
             Ok(())
         }
 
-        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+        fn end(&mut self, end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
             let end = end
                 .as_ref()
                 .err()
@@ -1334,7 +1334,7 @@ async fn a_refusal_before_the_head_ends_a_plugins_response_filters() {
 async fn r6_a_calls_outcome_does_not_depend_on_how_its_bytes_were_split() {
     let guard = || -> Vec<Arc<dyn Plugin>> {
         vec![Arc::new(Guard(
-            |e| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == " world"),
+            |e| matches!(e, Output::Delta { delta, .. } if delta.as_str() == " world"),
         ))]
     };
     let end = |h: &Harness| {

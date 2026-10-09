@@ -8,8 +8,10 @@ mod support;
 
 use respan_gateway_http::CallHeaders;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
-use respan_gateway_sdk::{Config, Fault, Gateway, Plugin, ProviderContext, async_trait};
-use respan_gateway_ws::ClientEvent;
+use respan_gateway_realtime::Input;
+use respan_gateway_sdk::{
+    ClientContext, Config, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
 use respan_gateway_ws::{JsonEvents, WsTransport};
 use support::*;
 
@@ -112,13 +114,29 @@ async fn a_transport_with_its_own_key_hides_the_clients() {
 // none of its own: the key is for its own protocol's provider.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_translated_call_carries_none_of_the_clients_keys() {
+    // These test formats share a schema; authorize that translation explicitly.
+    struct Translate;
+    #[async_trait]
+    impl Plugin for Translate {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(|event: &mut Input| {
+                event.event.format = "another-name".into();
+                Ok(())
+            })?;
+            cx.filter(|event: &mut respan_gateway_realtime::Output| {
+                event.event.format = "one-name".into();
+                Ok(())
+            })?;
+            Ok(None)
+        }
+    }
     let probe = Probe::start().await;
     let client_side = JsonEvents::new("one-name", "/v1/realtime");
     let provider_side = JsonEvents::new("another-name", "/other");
     let gateway = Gateway::new()
-        .client::<ClientEvent, _, _>(client_side)
+        .client::<Input, _, _>(client_side)
         .unwrap()
-        .provider::<ClientEvent, _, _>(
+        .provider::<Input, _, _>(
             "p",
             provider_side,
             WsTransport::new(probe.base()).unwrap().connect(),
@@ -126,7 +144,7 @@ async fn a_translated_call_carries_none_of_the_clients_keys() {
         .unwrap()
         .target("p")
         .unwrap();
-    let server = serve_typed(gateway).await;
+    let server = serve_typed(gateway.plugin(Translate)).await;
     let mut ws = connect(server.addr, PATH, CLIENT).await.unwrap();
     // The session works, translated, and its head is the provider's own.
     say(&mut ws, r#"{"hello":1}"#).await;

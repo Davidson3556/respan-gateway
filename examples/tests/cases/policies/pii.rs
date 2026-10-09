@@ -1,7 +1,7 @@
 use super::*;
+use respan_gateway_conversation::Input;
+use respan_gateway_conversation::{Message, Role};
 use respan_gateway_providers::AnthropicMessages;
-use respan_gateway_sdk::conversation::Conversation;
-use respan_gateway_sdk::conversation::{Message, Role};
 
 #[test]
 fn hides_addresses_only() {
@@ -59,7 +59,7 @@ struct Rag;
 #[async_trait]
 impl Plugin for Rag {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        px.filter(|chat: &mut Conversation| {
+        px.filter(|chat: &mut Input| {
             let context = "the user is carol@z.io";
             chat.messages.push(Message::new(Role::User, context));
             Ok(())
@@ -411,12 +411,12 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
         &chunks.iter().map(String::as_str).collect::<Vec<_>>(),
     ));
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "anthropic",
             AnthropicMessages,
             provider_support::anthropic(&fake.base_url())?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Pii)
         .plugin(PiiInput)
         .target("anthropic")?;
@@ -434,8 +434,8 @@ async fn anthropic_tool_history_is_redacted_and_its_reply_restored() -> Result<(
     let fake = mockllm::FakeAnthropic::start().await;
     fake.answer(Answer::raw(r#"{"id":"m","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"<EMAIL_1>"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#));
     let gateway = Gateway::new()
-        .client::<Conversation, _, _>(AnthropicMessages)?
-        .provider::<Conversation, _, _>(
+        .client::<Input, _, _>(AnthropicMessages)?
+        .provider::<Input, _, _>(
             "p",
             AnthropicMessages,
             provider_support::anthropic(&fake.base_url())?.connect(),

@@ -18,7 +18,8 @@ use respan_gateway_sdk::{
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
-use respan_gateway_ws::{ClientEvent, JsonEvents, ProviderEvent, WsTransport};
+use respan_gateway_realtime::{Input, Output};
+use respan_gateway_ws::{JsonEvents, WsTransport};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -43,14 +44,14 @@ impl Plugin for Sessions {
         )?);
         let incoming = session.clone();
         let model = self.model.clone();
-        cx.wrap(move |events: EventStream<ClientEvent>| {
+        cx.wrap(move |events: EventStream<Input>| {
             events.and_then(move |mut event| {
                 let session = incoming.clone();
                 let model = model.clone();
                 async move {
-                    if event.json["type"] == "response.create" {
+                    if event.json()["type"] == "response.create" {
                         if event
-                            .json
+                            .json()
                             .get("model")
                             .is_some_and(|v| v.as_str() != Some(&model))
                         {
@@ -58,14 +59,16 @@ impl Plugin for Sessions {
                                 "model is outside the configured budget policy",
                             ));
                         }
-                        event.json["model"] = model.clone().into();
+                        event.json_mut()["model"] = model.clone().into();
                     }
-                    if event.json["type"] == "response.create" && event.json["generate"] != false {
-                        let cap = &mut event.json["max_output_tokens"];
+                    if event.json()["type"] == "response.create"
+                        && event.json()["generate"] != false
+                    {
+                        let cap = &mut event.json_mut()["max_output_tokens"];
                         if cap.as_i64().is_none_or(|n| !(1..=OUTPUT).contains(&n)) {
                             *cap = OUTPUT.into();
                         }
-                        let lane = event.json["stream_id"].as_str().unwrap_or("default");
+                        let lane = event.json()["stream_id"].as_str().unwrap_or("default");
                         session.begin(lane).await?;
                     }
                     Ok(event)
@@ -73,17 +76,17 @@ impl Plugin for Sessions {
             })
         })?;
         let outgoing = session.clone();
-        cx.wrap(move |events: EventStream<ProviderEvent>| {
+        cx.wrap(move |events: EventStream<Output>| {
             events.and_then(move |event| {
                 let session = outgoing.clone();
                 async move {
-                    let kind = event.json["type"].as_str().unwrap_or_default();
+                    let kind = event.json()["type"].as_str().unwrap_or_default();
                     if matches!(
                         kind,
                         "response.completed" | "response.failed" | "response.incomplete"
                     ) {
-                        let lane = event.json["stream_id"].as_str().unwrap_or("default");
-                        let response = &event.json["response"];
+                        let lane = event.json()["stream_id"].as_str().unwrap_or("default");
+                        let response = &event.json()["response"];
                         let usage = response["usage"]["total_tokens"].as_i64();
                         let record = json!({
                             "lane": lane, "id": response["id"],
@@ -97,7 +100,7 @@ impl Plugin for Sessions {
                 }
             })
         })?;
-        cx.wrap(|events: EventStream<ProviderEvent>| {
+        cx.wrap(|events: EventStream<Output>| {
             events.take_until(tokio::time::sleep(budget::SESSION_MAX))
         })?;
         cx.extensions_mut().insert(session);
@@ -112,8 +115,8 @@ impl Plugin for Sessions {
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
     let format = || JsonEvents::new("responses-ws", PATH);
     Gateway::new()
-        .client::<ClientEvent, _, _>(format())?
-        .provider::<ClientEvent, _, _>("responses", format(), transport.connect())?
+        .client::<Input, _, _>(format())?
+        .provider::<Input, _, _>("responses", format(), transport.connect())?
         .plugin(sessions)
         .target("responses")
 }

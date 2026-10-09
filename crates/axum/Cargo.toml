@@ -25,6 +25,8 @@ http.workspace = true
 http-body-util.workspace = true
 
 [dev-dependencies]
+respan-gateway-realtime.workspace = true
+respan-gateway-conversation.workspace = true
 respan-gateway-providers.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-sdk.workspace = true

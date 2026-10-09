@@ -16,15 +16,16 @@ use std::sync::{Arc, Mutex};
 use hooks::{Calls, Outcomes};
 use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_conversation::{Block, Input, Output, units};
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_http::formats::opaque::{self};
+use respan_gateway_http::formats::opaque::{Got, Sent};
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, HttpClient, Incoming, Outgoing, connect};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Block, Conversation, Reply, units};
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{
@@ -230,7 +231,7 @@ async fn a_passthrough_of_no_kind_relays_a_whole_body_and_a_failure_as_they_came
 
 /// Notes every reply its filter sees, on the client edge.
 #[derive(Clone, Default)]
-struct Seen(Arc<Mutex<Vec<Reply>>>);
+struct Seen(Arc<Mutex<Vec<Output>>>);
 
 impl Seen {
     /// How many were no content.
@@ -248,7 +249,7 @@ impl Seen {
 impl Plugin for Seen {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let seen = self.0.clone();
-        cx.filter(move |r: &mut Reply| {
+        cx.filter(move |r: &mut Output| {
             seen.lock().map(|mut s| s.push(r.clone())).ok();
             Ok(())
         })?;
@@ -326,14 +327,14 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
 #[derive(Clone, Default)]
 struct Counted(Arc<AtomicUsize>);
 
-impl Format<Incoming, Conversation, Reply> for Counted {
+impl Format<Incoming, Input, Output> for Counted {
     fn name(&self) -> &str {
         OpenAiChat.name()
     }
     fn matches(&self, io: &Incoming) -> bool {
         OpenAiChat.matches(io)
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         let count = self.0.clone();
         Ok(io.bind(
             move |request| {
@@ -347,11 +348,11 @@ impl Format<Incoming, Conversation, Reply> for Counted {
         ))
     }
 }
-impl Format<Outgoing, Reply, Conversation> for Counted {
+impl Format<Outgoing, Output, Input> for Counted {
     fn name(&self) -> &str {
         OpenAiChat.name()
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Reply, Conversation>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
         OpenAiChat.bind(io)
     }
 }
@@ -362,7 +363,7 @@ struct Reads;
 #[async_trait]
 impl Plugin for Reads {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.input::<Conversation>()?;
+        cx.input::<Input>()?;
         Ok(None)
     }
 }
@@ -410,8 +411,8 @@ struct Cap(u64);
 impl Plugin for Cap {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
         let (cap, mut spent) = (self.0, 0);
-        px.filter(move |reply: &mut Reply| {
-            if let Reply::Usage(usage) = reply {
+        px.filter(move |reply: &mut Output| {
+            if let Output::Usage(usage) = reply {
                 spent += usage.get(units::OUTPUT_TOKENS).unwrap_or_default();
             }
             match spent > cap {
@@ -483,11 +484,11 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
             cached.add(units::INPUT_TOKENS, 3);
             cx.extensions_mut().insert(CachedUsage(cached));
             let hi = [
-                Reply::start("own", "m"),
-                Reply::block_start(0, Block::Text),
-                Reply::text(0, "hi"),
-                Reply::block_end(0),
-                Reply::usage(shown),
+                Output::start("own", "m"),
+                Output::block_start(0, Block::Text),
+                Output::text(0, "hi"),
+                Output::block_end(0),
+                Output::usage(shown),
             ];
             let answer = futures::stream::iter(hi.map(Ok));
             Ok(Some(Response::stream(answer)))
@@ -529,9 +530,9 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
 /// Fails on the usage it sees.
 struct Refuses;
 
-impl Filter<Reply> for Refuses {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-        if matches!(reply, Reply::Usage(_)) {
+impl Filter<Output> for Refuses {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        if matches!(reply, Output::Usage(_)) {
             return Err(Fault::new("no")
                 .with(ErrorCode("blocked".into()))
                 .with(Status(StatusCode::FORBIDDEN)));

@@ -1,6 +1,6 @@
 use super::*;
+use respan_gateway_conversation::Input;
 use respan_gateway_examples::LIMIT;
-use respan_gateway_sdk::conversation::Conversation;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn fifty_parallel_requests_never_overspend_a_one_dollar_wallet() -> Result<(), Fault> {
@@ -101,12 +101,12 @@ async fn n_answers_cannot_overspend_the_wallet() -> Result<(), Fault> {
     let base = fake.base_url();
     let origin = base.trim_end_matches("/v1");
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             provider_support::openai(origin)?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(accounting)
         .plugin(respan_gateway_http::relay::Relay::RAW)
         .target("openai")?;
@@ -165,7 +165,7 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
             race(
                 calls,
                 stagger,
-                Until::content(respan_gateway_sdk::conversation::Reply::is_content),
+                Until::content(respan_gateway_conversation::Output::is_content),
             )
             .await
             .map(Some)
@@ -185,17 +185,17 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
         }
     };
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(slow, LIMIT),
         )?
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai-eu",
             OpenAiChat,
             provider_support::openai(&eu_fake.base_url())?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Hedge)
         .plugin(accounting);
     eu_fake.answer(answer());

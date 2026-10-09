@@ -14,11 +14,11 @@ pub const LIMIT: usize = 32 << 20;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use respan_gateway_conversation::{Input, Output, units};
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Conversation, Reply, units};
 use respan_gateway_sdk::{Fault, Plugin, ProviderContext, async_trait};
 
-/// A chat call's usage: every [`Reply::usage`] increment its provider
+/// A chat call's usage: every [`Output::usage`] increment its provider
 /// reported, summed by the filter [`meter`] adds. Clones share it.
 #[derive(Debug, Clone, Default)]
 pub struct CallUsage(Arc<Mutex<Usage>>);
@@ -51,13 +51,13 @@ impl CallUsage {
 /// added first, so meter from the plugin that runs last: register it after
 /// every plugin that filters outputs.
 pub fn meter(px: &mut ProviderContext) -> Result<(), Fault> {
-    if !px.is_kind::<Conversation>() || px.extensions().get::<CallUsage>().is_some() {
+    if !px.is_kind::<Input>() || px.extensions().get::<CallUsage>().is_some() {
         return Ok(());
     }
     let usage = CallUsage::default();
     px.extensions_mut().insert(usage.clone());
-    px.filter(move |reply: &mut Reply| {
-        if let Reply::Usage(reported) = reply {
+    px.filter(move |reply: &mut Output| {
+        if let Output::Usage(reported) = reply {
             *usage.0.lock().unwrap_or_else(PoisonError::into_inner) += &*reported;
         }
         Ok(())
@@ -128,16 +128,16 @@ pub mod chat_bound {
     //! Bounds on what a chat call can cost, before it is sent. Used by
     //! `wallet.rs` and `cost_cap.rs`.
 
-    use respan_gateway_sdk::conversation::{Content, Conversation};
+    use respan_gateway_conversation::{Content, Input, ResponseFormat};
     use respan_gateway_sdk::{BadRequest, Fault};
     use serde_json::{self, Map, Value};
 
     /// The most input tokens `chat` can be. A token is at least a byte, so
     /// bytes bound them: its text, tool calls and results, tools, the JSON
-    /// of what the kind has no place for (`extra`), and 8 a message for
-    /// framing. A format's own spelling of a field the kind has (the key a
-    /// token limit was written under) is no input and is not counted. Content with no byte bound, such as an image, is refused.
-    pub fn input_bound(chat: &Conversation) -> Result<u64, Fault> {
+    /// of what the kind has no place for (`native`), and 8 a message for
+    /// framing. Structured-output schemas and descriptions also count.
+    /// Content with no byte bound, such as an image, is refused.
+    pub fn input_bound(chat: &Input) -> Result<u64, Fault> {
         let json = |m: &Map<_, _>, spellings: &[&str]| {
             let kept: Map<_, _> = m
                 .iter()
@@ -146,14 +146,30 @@ pub mod chat_bound {
                 .collect();
             serde_json::to_string(&kept).map_or(0, |s| s.len())
         };
-        let mut bytes = json(&chat.extra.fields, &["max_tokens", "max_completion_tokens"]);
+        let mut bytes = chat.native.as_ref().map_or(0, |n| json(&n.fields, &[]));
+        if let Some(ResponseFormat::JsonSchema {
+            name,
+            description,
+            schema,
+            ..
+        }) = &chat.options.response_format
+        {
+            bytes += name.len()
+                + description.as_deref().map_or(0, str::len)
+                + serde_json::to_string(schema).map_or(0, |s| s.len());
+        }
         for tool in &chat.tools {
             let description = tool.description.as_deref().map_or(0, str::len);
             let parameters = serde_json::to_string(&tool.parameters).map_or(0, |s| s.len());
-            bytes += tool.name.len() + description + parameters + json(&tool.extra.fields, &[]);
+            bytes += tool.name.len()
+                + description
+                + parameters
+                + tool.native.as_ref().map_or(0, |n| json(&n.fields, &[]));
         }
         for m in &chat.messages {
-            bytes += content_bytes(&m.content)? + json(&m.extra.fields, &[]) + 8;
+            bytes += content_bytes(&m.content)?
+                + m.native.as_ref().map_or(0, |n| json(&n.fields, &[]))
+                + 8;
         }
         Ok(bytes as u64)
     }
@@ -178,9 +194,36 @@ pub mod chat_bound {
     }
 
     /// How many answers `chat` asks for: its `n`, 1 if unset.
-    pub fn answers(chat: &Conversation) -> Result<u64, Fault> {
-        let n = chat.extra.fields.get("n").map_or(Some(1), Value::as_u64);
+    pub fn answers(chat: &Input) -> Result<u64, Fault> {
+        let n = chat
+            .native
+            .as_ref()
+            .and_then(|n| n.fields.get("n"))
+            .map_or(Some(1), Value::as_u64);
         n.map(|n| n.max(1))
             .ok_or_else(|| BadRequest::fault("n must be a whole number"))
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::chat_bound;
+    use respan_gateway_conversation::{Input, ResponseFormat};
+    use serde_json::json;
+
+    #[test]
+    fn structured_output_schema_still_contributes_to_the_cost_bound() {
+        let mut input = Input::default();
+        let schema = json!({"type":"object","description":"x".repeat(4096)});
+        input.options.response_format = Some(ResponseFormat::JsonSchema {
+            name: "result".into(),
+            description: None,
+            schema: schema.clone(),
+            strict: Some(true),
+        });
+        assert!(
+            chat_bound::input_bound(&input).expect("bounded schema")
+                >= schema.to_string().len() as u64
+        );
     }
 }

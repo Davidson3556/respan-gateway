@@ -23,14 +23,14 @@ use std::time::Duration;
 use hooks::{Calls, Outcomes};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_support::{post, read_whole, serve};
+use respan_gateway_conversation::{
+    Assembled, Content, Delta, Finish, Input, Message, Output, Role, set_model, units,
+};
 use respan_gateway_http::Body;
 use respan_gateway_http::Wire;
 use respan_gateway_http::{Completion, Encoder, HttpClient, Incoming};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::async_trait;
-use respan_gateway_sdk::conversation::{
-    Assembled, Content, Conversation, Delta, Extra, Finish, Message, Reply, Role, set_model, units,
-};
 use respan_gateway_sdk::{
     BadRequest, ClientContext, Connection, ErrorCode, Fault, Filter, Format, Gateway, Plugin,
     ProviderContext, Response, Upstream,
@@ -63,7 +63,7 @@ fn call(path: &str, body: impl Into<bytes::Bytes>) -> Call {
 }
 
 /// The events of a complete OpenAI body, streamed or whole.
-fn events_of(body: &str) -> Vec<Reply> {
+fn events_of(body: &str) -> Vec<Output> {
     let kind = match body.starts_with("data:") {
         true => "text/event-stream",
         false => "application/json",
@@ -87,7 +87,7 @@ fn gist(body: &str) -> Assembled {
         all.push(&event).unwrap_or_else(|f| panic!("{f}: {body}"));
     }
     if let Some(start) = &mut all.start {
-        start.extra = Extra::default();
+        start.native = None;
     }
     all
 }
@@ -286,10 +286,7 @@ fn gateway(
     plugins: Vec<Arc<dyn Plugin>>,
     target: Option<&str>,
 ) -> Result<Gateway, Fault> {
-    let gw = with_plugins(
-        providers(list)?.client::<Conversation, _, _>(OpenAiChat)?,
-        plugins,
-    );
+    let gw = with_plugins(providers(list)?.client::<Input, _, _>(OpenAiChat)?, plugins);
     match target {
         Some(target) => gw.target(target),
         None => Ok(gw),
@@ -357,8 +354,8 @@ struct Cool;
 #[async_trait]
 impl Plugin for Cool {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|chat: &mut Conversation| {
-            chat.temperature = Some(0.0);
+        cx.filter(|chat: &mut Input| {
+            chat.options.temperature = Some(0.0);
             Ok(())
         })?;
         Ok(None)
@@ -377,13 +374,13 @@ const TRUNCATED: &str = "data: {\"error\":{\"message\":\"stream ended before com
 
 /// An output guardrail: fails the response with 403 `blocked` at the first
 /// output it catches.
-struct Guard(fn(&Reply) -> bool);
+struct Guard(fn(&Output) -> bool);
 
 #[async_trait]
 impl Plugin for Guard {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let catches = self.0;
-        cx.filter(move |e: &mut Reply| {
+        cx.filter(move |e: &mut Output| {
             if catches(e) {
                 return Err(Fault::new("not allowed")
                     .with(ErrorCode("blocked".into()))
@@ -409,7 +406,7 @@ impl Transcript {
 impl Plugin for Transcript {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let text = self.0.clone();
-        cx.filter(move |e: &mut Reply| {
+        cx.filter(move |e: &mut Output| {
             if let (Ok(mut t), Some(event)) = (text.lock(), text_of(e)) {
                 t.push_str(event);
             }
@@ -462,7 +459,7 @@ impl Plugin for Fallback {
         for name in &self.0 {
             match cx.call(*name).await {
                 Ok(mut resp) => {
-                    let held = resp.buffer_until(Reply::is_content).await;
+                    let held = resp.buffer_until(Output::is_content).await;
                     if held.is_ok() {
                         return Ok(Some(resp));
                     }
@@ -486,9 +483,9 @@ impl Plugin for Cached {
         let mut cost = Usage::default();
         cost.add(units::OUTPUT_TOKENS, 1);
         // Shown in its reply; no provider edge, so no meter, sees it.
-        let mut answer = vec![Reply::start("cached", "gpt-x")];
+        let mut answer = vec![Output::start("cached", "gpt-x")];
         answer.extend(text(0, "hi"));
-        answer.push(Reply::usage(cost));
+        answer.push(Output::usage(cost));
         let answer = futures::stream::iter(answer.into_iter().map(Ok));
         Ok(Some(Response::stream(answer)))
     }
@@ -510,7 +507,7 @@ impl Plugin for Named {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         self.note("client");
         let name = self.0;
-        cx.filter(move |r: &mut Reply| {
+        cx.filter(move |r: &mut Output| {
             if let Some(text) = text_of_mut(r) {
                 *text = format!("{name}({text})");
             }
@@ -578,7 +575,7 @@ fn said(chunks: &[serde_json::Value]) -> (String, Option<&str>, Option<u64>) {
     (text, finish, usage)
 }
 
-fn filtered<F: Filter<Reply> + Clone + Sync>(filter: F) -> Harness {
+fn filtered<F: Filter<Output> + Clone + Sync>(filter: F) -> Harness {
     Harness::new(vec![Arc::new(Adds(filter))], Some("openai"))
 }
 
@@ -616,10 +613,7 @@ impl Bill {
 }
 
 fn call_name(px: &ProviderContext) -> String {
-    let model = px
-        .input::<Conversation>()
-        .ok()
-        .and_then(|c| c.model.clone());
+    let model = px.input::<Input>().ok().and_then(|c| c.model.clone());
     format!("{}/{}", px.provider(), model.unwrap_or_default())
 }
 
@@ -812,14 +806,14 @@ fn text_chunk(text: &str) -> String {
 #[derive(Clone)]
 struct Fragile;
 
-impl Format<Incoming, Conversation, Reply> for Fragile {
+impl Format<Incoming, Input, Output> for Fragile {
     fn name(&self) -> &str {
         OpenAiChat.name()
     }
     fn matches(&self, io: &Incoming) -> bool {
-        <OpenAiChat as Format<Incoming, Conversation, Reply>>::matches(&OpenAiChat, io)
+        <OpenAiChat as Format<Incoming, Input, Output>>::matches(&OpenAiChat, io)
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         Ok(io.bind(
             |request| OpenAiChat.read_request(request),
             move |reply, source| {
@@ -834,11 +828,11 @@ impl Format<Incoming, Conversation, Reply> for Fragile {
     }
 }
 
-struct Garbling(Box<dyn Encoder<Reply>>);
+struct Garbling(Box<dyn Encoder<Output>>);
 
-impl Encoder<Reply> for Garbling {
-    fn encode(&mut self, reply: &Reply, out: &mut bytes::BytesMut) -> Result<(), Fault> {
-        if matches!(reply, Reply::Delta { delta, .. } if delta.as_str() == "bad") {
+impl Encoder<Output> for Garbling {
+    fn encode(&mut self, reply: &Output, out: &mut bytes::BytesMut) -> Result<(), Fault> {
+        if matches!(reply, Output::Delta { delta, .. } if delta.as_str() == "bad") {
             out.extend_from_slice(b"GARBAGE");
             return Err(Fault::new("cannot write it")
                 .with(ErrorCode("unwritable".into()))
@@ -856,7 +850,7 @@ impl Encoder<Reply> for Garbling {
 /// through `openai`.
 fn fragile(sites: &Sites, plugins: Vec<Arc<dyn Plugin>>) -> Gateway {
     let list = [provider(&sites.openai, "openai", None)];
-    let gw = providers(list).and_then(|g| g.client::<Conversation, _, _>(Fragile));
+    let gw = providers(list).and_then(|g| g.client::<Input, _, _>(Fragile));
     let gw = gw.and_then(|g| with_plugins(g, plugins).target("openai"));
     gw.unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -867,7 +861,7 @@ struct PanicFilter;
 #[async_trait]
 impl Plugin for PanicFilter {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|_: &mut Reply| -> Result<(), Fault> { panic!("a buggy filter") })?;
+        cx.filter(|_: &mut Output| -> Result<(), Fault> { panic!("a buggy filter") })?;
         Ok(None)
     }
 }
@@ -877,7 +871,7 @@ impl Plugin for PanicFilter {
 fn translating(sites: &Sites, relay: explicit::Relay) -> Gateway {
     let p = add_provider("anthropic", AnthropicMessages, sites.claude.plain());
     let gw = providers([p]).and_then(|g| {
-        g.client::<Conversation, _, _>(OpenAiChat)?
+        g.client::<Input, _, _>(OpenAiChat)?
             .plugin(relay)
             .target("anthropic")
     });
@@ -909,7 +903,7 @@ struct FirstContent;
 impl Plugin for FirstContent {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let mut first = cx.call("openai").await?;
-        if first.buffer_until(Reply::is_content).await.is_ok() {
+        if first.buffer_until(Output::is_content).await.is_ok() {
             return Ok(Some(first));
         }
         drop(first);
@@ -920,20 +914,20 @@ impl Plugin for FirstContent {
 /// Passes every reply; fails at its end.
 struct FailsAtEnd;
 
-impl Filter<Reply> for FailsAtEnd {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for FailsAtEnd {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         out.push(reply);
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
         Err(Fault::internal("fails at end"))
     }
 }
 
-fn over_the_cap(reply: &mut Reply) -> Result<(), Fault> {
+fn over_the_cap(reply: &mut Output) -> Result<(), Fault> {
     match reply {
-        Reply::Usage(_) => Err(Fault::new("over the cap")
+        Output::Usage(_) => Err(Fault::new("over the cap")
             .with(ErrorCode("cap".into()))
             .with(Status(StatusCode::PAYMENT_REQUIRED))),
         _ => Ok(()),
@@ -955,7 +949,7 @@ impl Plugin for ProviderCap {
 // ---- r6 fix pass ----
 
 /// `chat` asking for `model`.
-fn judged(mut chat: Conversation, model: &str) -> Conversation {
+fn judged(mut chat: Input, model: &str) -> Input {
     chat.model = Some(model.into());
     chat
 }
@@ -977,7 +971,7 @@ impl Plugin for Answers {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let mut resp = cx.call("openai").await?;
         if self.0 {
-            resp.buffer_until(Reply::is_content).await?;
+            resp.buffer_until(Output::is_content).await?;
         }
         Ok(Some(resp))
     }
@@ -993,7 +987,7 @@ impl Plugin for ArchFallback {
         for name in &self.0 {
             match cx.call(*name).await {
                 Ok(mut resp) => {
-                    let held = resp.buffer_until(Reply::is_content).await;
+                    let held = resp.buffer_until(Output::is_content).await;
                     if held.is_ok() {
                         return Ok(Some(resp));
                     }
@@ -1042,19 +1036,19 @@ struct Restore {
     block: u32,
 }
 
-impl Filter<Reply> for Restore {
-    fn edit(&mut self, mut reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl Filter<Output> for Restore {
+    fn edit(&mut self, mut reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         // Nothing follows a finish, and text kept back goes before other
         // content: hold nothing past them.
         let text = matches!(
             &reply,
-            Reply::Delta {
+            Output::Delta {
                 delta: Delta::Text(_),
                 ..
             }
         );
         let last = !text && reply.is_content();
-        if let Reply::Delta {
+        if let Output::Delta {
             block,
             delta: Delta::Text(delta),
         } = &mut reply
@@ -1075,10 +1069,10 @@ impl Filter<Reply> for Restore {
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
         if !self.held.is_empty() {
             let held = std::mem::take(&mut self.held);
-            out.push(Reply::text(self.block, self.vault.restore(held)));
+            out.push(Output::text(self.block, self.vault.restore(held)));
         }
         Ok(())
     }
@@ -1089,12 +1083,12 @@ struct Pii;
 #[async_trait]
 impl Plugin for Pii {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if !px.is_kind::<Conversation>() {
+        if !px.is_kind::<Input>() {
             return Ok(());
         }
         let vault = Arc::new(Vault::default());
         let redact = vault.clone();
-        px.filter(move |chat: &mut Conversation| {
+        px.filter(move |chat: &mut Input| {
             for message in &mut chat.messages {
                 if !message.is_plain() {
                     return Err(BadRequest::fault("content PII redaction cannot read"));
@@ -1136,7 +1130,7 @@ impl Plugin for Fallback11 {
                 }
             };
             let mut resp = resp;
-            match resp.buffer_until(Reply::is_content).await {
+            match resp.buffer_until(Output::is_content).await {
                 Ok(()) => return Ok(Some(resp)),
                 Err(fault) => {
                     drop(resp);
@@ -1154,8 +1148,8 @@ struct Markup;
 #[async_trait]
 impl Plugin for Markup {
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        px.filter(|r: &mut Reply| {
-            if let Reply::Usage(usage) = r
+        px.filter(|r: &mut Output| {
+            if let Output::Usage(usage) = r
                 && usage.get(units::INPUT_TOKENS).is_some()
             {
                 let mut marked = Usage::default();

@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+respan-gateway-conversation.workspace = true
 respan-gateway-sdk.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-providers.workspace = true

@@ -15,11 +15,9 @@
 //! (marked `NoContent`, as in `logging.rs`) deletes that tenant's cached
 //! content and converts without reading or writing cached text.
 //!
-//! A fallback in another format gets the PDF too: for an Anthropic target the
-//! filter rewrites the file part into Anthropic's own `document` part
-//! (`Content::other("anthropic-messages", ..)`), which the format sends as it
-//! is. A part in neither the target's shape nor the client's is refused, not
-//! guessed at.
+//! A fallback in another format gets the original typed document. The
+//! provider codec writes that document in the target format. Provider-specific
+//! file references remain native until the resolver turns them into bytes.
 //!
 //! A `file_id` (a file uploaded earlier) is resolved before any call, in
 //! `on_client`: the files endpoint is asked as a subrequest
@@ -46,6 +44,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_conversation::{Content, Input, Media, MediaSource, Output};
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_examples::store::{
     Database,
@@ -59,7 +58,6 @@ use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential, Wire, retryable};
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_sdk::conversation::{Content, Conversation, Reply};
 use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -71,7 +69,6 @@ use http_support::{post, read_whole, serve};
 #[allow(dead_code)]
 #[path = "../support/http.rs"]
 mod provider_support;
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
@@ -92,19 +89,32 @@ use pdf_converter::{extract_pdf_with, too_large};
 /// The `file` of `part` if it is a file part.
 fn file(part: &Content) -> Option<&serde_json::Value> {
     match part {
-        Content::Other { raw, .. } if raw["type"] == "file" => Some(&raw["file"]),
+        Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. })
+            if raw["type"] == "file" =>
+        {
+            Some(&raw["file"])
+        }
         _ => None,
     }
 }
 
-/// The base64 of `part` if it is an inline PDF.
-fn pdf(part: &Content) -> Option<&str> {
-    let data = file(part)?["file_data"].as_str()?;
-    data.strip_prefix("data:application/pdf;base64,")
+/// PDF bytes encoded for the bounded converter.
+fn pdf(part: &Content) -> Option<String> {
+    match part {
+        Content::Document(media) if media.mime_type == "application/pdf" => match &media.source {
+            MediaSource::Bytes(bytes) => Some(STANDARD.encode(bytes)),
+            _ => None,
+        },
+        _ => {
+            let data = file(part)?["file_data"].as_str()?;
+            data.strip_prefix("data:application/pdf;base64,")
+                .map(str::to_owned)
+        }
+    }
 }
 
 /// The ids of the stored files `chat` refers to.
-fn stored(chat: &Conversation) -> Vec<String> {
+fn stored(chat: &Input) -> Vec<String> {
     let parts = chat.messages.iter().flat_map(|m| &m.content);
     let ids = parts.filter_map(|part| file(part)?["file_id"].as_str());
     ids.map(str::to_owned).collect()
@@ -380,7 +390,7 @@ impl Plugin for PdfToText {
                 .map_err(|_| too_slow())??;
         }
         cx.extensions_mut().insert(Deadline(deadline));
-        let ids = cx.input::<Conversation>().map(stored).unwrap_or_default();
+        let ids = cx.input::<Input>().map(stored).unwrap_or_default();
         if ids.is_empty() {
             return Ok(None);
         }
@@ -390,14 +400,22 @@ impl Plugin for PdfToText {
             let data = self.fetch(cx, &id, deadline).await?;
             inline.insert(id, data);
         }
-        cx.filter(move |chat: &mut Conversation| {
+        cx.filter(move |chat: &mut Input| {
             for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
                 let data = file(part).and_then(|f| f["file_id"].as_str());
                 let Some(data) = data.and_then(|id| inline.get(id)) else {
                     continue;
                 };
-                let file = json!({ "file_data": data });
-                *part = Content::other("openai-chat", json!({ "type": "file", "file": file }));
+                let encoded = data
+                    .strip_prefix("data:application/pdf;base64,")
+                    .ok_or_else(|| BadRequest::fault("invalid inline PDF"))?;
+                let bytes = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| BadRequest::fault("invalid PDF base64"))?;
+                *part = Content::Document(Media::new(
+                    "application/pdf",
+                    MediaSource::Bytes(bytes.into()),
+                ));
             }
             Ok(())
         })?;
@@ -405,10 +423,7 @@ impl Plugin for PdfToText {
     }
 
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if px.format() == "anthropic-messages" && px.is_kind::<Conversation>() {
-            return px.filter(pdf_as_document);
-        }
-        if !self.text_only.contains(&px.provider()) || !px.is_kind::<Conversation>() {
+        if !self.text_only.contains(&px.provider()) || !px.is_kind::<Input>() {
             return Ok(());
         }
         // Named by `x-tenant` here; in practice, by your auth plugin.
@@ -419,10 +434,10 @@ impl Plugin for PdfToText {
         let tenant = asked.and_then(|a| a.headers().get("x-tenant")?.to_str().ok());
         let tenant = tenant.unwrap_or_default().to_owned();
         let keep = ext.get::<NoContent>().is_none();
-        let chat = px.input::<Conversation>()?;
+        let chat = px.input::<Input>()?;
         let mut pdfs = Vec::new();
         for part in chat.messages.iter().flat_map(|m| &m.content) {
-            pdfs.extend(pdf(part).map(str::to_owned));
+            pdfs.extend(pdf(part));
         }
         // Filters are synchronous: convert here, then swap the parts in.
         let mut texts = Vec::with_capacity(pdfs.len());
@@ -435,7 +450,7 @@ impl Plugin for PdfToText {
         }
         px.extensions_mut().insert(Converted(texts.len()));
         let mut texts = texts.into_iter();
-        px.filter(move |chat: &mut Conversation| {
+        px.filter(move |chat: &mut Input| {
             for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
                 if pdf(part).is_some()
                     && let Some(text) = texts.next()
@@ -448,21 +463,6 @@ impl Plugin for PdfToText {
     }
 }
 
-/// A PDF part as Anthropic's `document` part, in the call to an Anthropic
-/// target only: the part is in the target's own shape, so it is sent as is.
-fn pdf_as_document(chat: &mut Conversation) -> Result<(), Fault> {
-    for part in chat.messages.iter_mut().flat_map(|m| &mut m.content) {
-        if let Some(data) = pdf(part) {
-            let source = json!({ "type": "base64", "media_type": "application/pdf", "data": data });
-            *part = Content::other(
-                "anthropic-messages",
-                json!({ "type": "document", "source": source }),
-            );
-        }
-    }
-    Ok(())
-}
-
 /// The text-only model, then the one that reads PDFs.
 struct Fallback;
 
@@ -473,7 +473,7 @@ impl Plugin for Fallback {
         first_success(
             calls,
             &Backoff::once(),
-            Until::content(Reply::is_content),
+            Until::content(Output::is_content),
             retryable,
         )
         .await
@@ -588,12 +588,12 @@ impl Fixture {
 
 fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "text-only",
             OpenAiChat,
             provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "reads-pdf",
             OpenAiChat,
             provider_support::openai(&fixture.pdf.base_url())?.connect(),
@@ -603,7 +603,7 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
             FILES,
             HttpClient::new(&fixture.files.url)?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(pdfs)
         .plugin(Fallback))
 }
@@ -625,12 +625,12 @@ async fn send(gw: &Gateway, tenant: &'static str, body: &str) -> StatusCode {
 /// As `gateway`, with the PDF reader an Anthropic model.
 fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "text-only",
             OpenAiChat,
             provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "reads-pdf",
             AnthropicMessages,
             provider_support::anthropic(&fixture.claude.base_url())?.connect(),
@@ -640,7 +640,7 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
             FILES,
             HttpClient::new(&fixture.files.url)?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(pdfs)
         .plugin(Fallback))
 }

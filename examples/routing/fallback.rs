@@ -13,11 +13,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_conversation::{Input, Output, set_model};
 use respan_gateway_http::http::{self, HeaderValue};
 use respan_gateway_http::{Body, Wire, retryable, watchdog};
 use respan_gateway_plugins::routing::{Attempt, Backoff, Until, first_success, race};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_sdk::conversation::{Conversation, Reply, set_model};
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -36,7 +36,7 @@ struct Resilient;
 impl Plugin for Resilient {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let target = cx.target().map(str::to_owned);
-        let Some(target) = target.filter(|_| cx.is_kind::<Conversation>()) else {
+        let Some(target) = target.filter(|_| cx.is_kind::<Input>()) else {
             return Ok(None);
         };
         // Each answer is judged at its first content; `Until::End` would
@@ -45,7 +45,7 @@ impl Plugin for Resilient {
         if asked.is_some_and(|a| a.headers().contains_key("x-hedge")) {
             let calls = [cx.call(target), cx.call("openai-eu")];
             let stagger = Duration::from_millis(200);
-            return race(calls, stagger, Until::content(Reply::is_content))
+            return race(calls, stagger, Until::content(Output::is_content))
                 .await
                 .map(Some);
         }
@@ -54,7 +54,7 @@ impl Plugin for Resilient {
         first_success(
             calls,
             &backoff,
-            Until::content(Reply::is_content),
+            Until::content(Output::is_content),
             retryable,
         )
         .await
@@ -64,7 +64,7 @@ impl Plugin for Resilient {
     /// Anthropic names its models its own way: a change for one provider's
     /// calls goes here, keyed on the provider.
     async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-        if px.provider() == "anthropic" && px.is_kind::<Conversation>() {
+        if px.provider() == "anthropic" && px.is_kind::<Input>() {
             px.filter(set_model("claude-sonnet-4-5"))?;
         }
         Ok(())
@@ -88,7 +88,7 @@ impl Plugin for Log {
             .as_ref()
             .err()
             .map_or("ok", respan_gateway_http::error_code);
-        let chat = px.input::<Conversation>().ok();
+        let chat = px.input::<Input>().ok();
         let model = chat.and_then(|c| c.model.as_deref()).unwrap_or("-");
         let line = format!("{} {model} #{index} {role:?} {end}", px.provider());
         println!("  attempt {line}");
@@ -147,18 +147,18 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
         idle,
     );
     let gw = Gateway::new()
-        .client::<Conversation, _, _>(OpenAiChat)?
-        .provider::<Conversation, _, _>(
+        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(primary, LIMIT),
         )?
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai-eu",
             OpenAiChat,
             provider_support::openai(&europe.base_url())?.connect(),
         )?
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "anthropic",
             AnthropicMessages,
             provider_support::anthropic(&claude.base_url())?.connect(),

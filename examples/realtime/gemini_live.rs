@@ -18,7 +18,8 @@ use respan_gateway_sdk::{
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
-use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
+use respan_gateway_realtime::{Input, Output};
+use respan_gateway_ws::{CloseCode, JsonEvents, WsTransport};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 const PATH: &str = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
@@ -42,12 +43,12 @@ impl Plugin for Sessions {
         )?);
         let incoming = session.clone();
         let model = self.model.clone();
-        cx.wrap(move |events: EventStream<ClientEvent>| {
+        cx.wrap(move |events: EventStream<Input>| {
             events.and_then(move |mut event| {
                 let session = incoming.clone();
                 let model = model.clone();
                 async move {
-                    if let Some(setup) = event.json.get_mut("setup") {
+                    if let Some(setup) = event.json_mut().get_mut("setup") {
                         if !setup.is_object() {
                             return Err(BadRequest::fault("setup must be an object"));
                         }
@@ -77,15 +78,15 @@ impl Plugin for Sessions {
                             true.into();
                         setup["proactivity"]["proactiveAudio"] = false.into();
                     }
-                    if event.json["clientContent"]["turnComplete"] == true
-                        || event.json["realtimeInput"].get("activityStart").is_some()
+                    if event.json()["clientContent"]["turnComplete"] == true
+                        || event.json()["realtimeInput"].get("activityStart").is_some()
                     {
                         session.begin("turn").await?;
                     }
-                    if event.json.get("toolResponse").is_some() && !session.active("turn") {
+                    if event.json().get("toolResponse").is_some() && !session.active("turn") {
                         session.begin("turn").await?;
                     }
-                    if event.json.get("realtimeInput").is_some() && !session.active("turn") {
+                    if event.json().get("realtimeInput").is_some() && !session.active("turn") {
                         return Err(Fault::new("send activityStart before realtime input")
                             .with(ErrorCode("audio_policy".into()))
                             .with(CloseCode(1008)));
@@ -96,18 +97,18 @@ impl Plugin for Sessions {
         })?;
         let outgoing = session.clone();
         let usage = Arc::new(Mutex::new((Value::Null, false)));
-        cx.wrap(move |events: EventStream<ProviderEvent>| {
+        cx.wrap(move |events: EventStream<Output>| {
             events.and_then(move |event| {
                 let session = outgoing.clone();
                 let usage = usage.clone();
                 async move {
-                    if let Some(value) = event.json.get("usageMetadata") {
+                    if let Some(value) = event.json().get("usageMetadata") {
                         budget::lock(&usage).0 = value.clone();
                     }
-                    if event.json["serverContent"]["interrupted"] == true {
+                    if event.json()["serverContent"]["interrupted"] == true {
                         budget::lock(&usage).1 = true;
                     }
-                    if event.json["serverContent"]["turnComplete"] == true {
+                    if event.json()["serverContent"]["turnComplete"] == true {
                         let (used, interrupted) = std::mem::take(&mut *budget::lock(&usage));
                         session
                             .finish(
@@ -121,7 +122,7 @@ impl Plugin for Sessions {
                 }
             })
         })?;
-        cx.wrap(|events: EventStream<ProviderEvent>| {
+        cx.wrap(|events: EventStream<Output>| {
             events.take_until(tokio::time::sleep(budget::SESSION_MAX))
         })?;
         cx.extensions_mut().insert(session);
@@ -136,8 +137,8 @@ impl Plugin for Sessions {
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
     let format = || JsonEvents::new("gemini-live", PATH);
     Gateway::new()
-        .client::<ClientEvent, _, _>(format())?
-        .provider::<ClientEvent, _, _>("gemini", format(), transport.connect())?
+        .client::<Input, _, _>(format())?
+        .provider::<Input, _, _>("gemini", format(), transport.connect())?
         .plugin(sessions)
         .target("gemini")
 }

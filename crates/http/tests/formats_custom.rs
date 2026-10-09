@@ -13,8 +13,10 @@ mod support;
 use hooks::Outcomes;
 use http_support::{post, read_whole, serve};
 use mockllm::{Answer as FakeAnswer, FakeOpenAi};
+use respan_gateway_conversation::Input;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_http::formats::opaque::{self};
+use respan_gateway_http::formats::opaque::{Got, Sent};
 use respan_gateway_http::formats::whole;
 use respan_gateway_http::formats::{self as formats, default_content_type, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
@@ -25,7 +27,6 @@ use respan_gateway_http::{
 };
 use respan_gateway_http::{Encoder, credentials, proxy_call, strip_client_origin_headers};
 use respan_gateway_sdk::async_trait;
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
 use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
@@ -611,7 +612,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
         providers([openai, add_provider("v2", V2, v2.clone())])
             .and_then(|gw| {
                 gw.client::<Jev, _, _>(V1)?
-                    .client::<Conversation, _, _>(respan_gateway_providers::OpenAiChat)
+                    .client::<Input, _, _>(respan_gateway_providers::OpenAiChat)
             })
             .map(|gw| plugins.into_iter().fold(gw, Gateway::plugin))
             .and_then(|gw| gw.target("openai")?.target("v2"))
@@ -700,7 +701,7 @@ async fn a_plugin_for_another_kind_is_refused_not_ignored() {
     #[async_trait]
     impl Plugin for Redact {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|_: &mut respan_gateway_sdk::conversation::Reply| Ok(()))?;
+            cx.filter(|_: &mut respan_gateway_conversation::Output| Ok(()))?;
             Ok(None)
         }
     }
@@ -728,7 +729,7 @@ async fn a_plugin_made_response_of_another_kind_fails_loudly() {
     #[async_trait]
     impl Plugin for Wrong {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let wrong = [Ok(respan_gateway_sdk::conversation::Reply::text(0, "hi"))];
+            let wrong = [Ok(respan_gateway_conversation::Output::text(0, "hi"))];
             Ok(Some(Response::stream(futures::stream::iter(wrong))))
         }
     }
@@ -748,7 +749,7 @@ async fn a_plugin_asking_for_another_kind_is_told_so_before_decoding() {
     #[async_trait]
     impl Plugin for Chatty {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            type Chat = respan_gateway_sdk::conversation::Conversation;
+            type Chat = respan_gateway_conversation::Input;
             // `is_kind` sets it apart from an undecodable body.
             assert!(!cx.is_kind::<Chat>());
             cx.input::<Chat>()?;

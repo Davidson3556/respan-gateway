@@ -61,7 +61,7 @@ async fn plugins_run_in_registration_order_on_both_edges() {
     let sites = Sites::default();
     // Registered d, b, a, c, and they run in that order.
     let gw = providers([provider(&sites.openai, "openai", None)])
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat)?.target("openai"))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("openai"))
         .map(|g| {
             let g = g.plugin(named("d")).plugin(named("b"));
             g.plugin(named("a")).plugin(named("c"))
@@ -330,7 +330,7 @@ async fn collecting_the_wrong_type_fails_even_with_nothing_said() {
             let got = cx
                 .call("openai")
                 .await?
-                .outputs::<Reply>()
+                .outputs::<Output>()
                 .try_collect::<Vec<_>>()
                 .await;
             assert!(got.is_ok_and(|events| events.is_empty()));
@@ -476,21 +476,21 @@ async fn a_plugin_answers_with_its_calls_events_read_as_they_are_sent() {
     #[async_trait]
     impl Plugin for Merge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let first = cx.call("openai").await?.outputs::<Reply>();
+            let first = cx.call("openai").await?.outputs::<Output>();
             // The second answer's blocks follow the first's, as one response.
-            let second = cx.call("backup").await?.outputs::<Reply>();
-            let after = |reply: Reply| {
+            let second = cx.call("backup").await?.outputs::<Output>();
+            let after = |reply: Output| {
                 let block = |block: u32| block + 1;
                 futures::future::ready(Ok(match reply {
-                    Reply::Start(_) => None,
-                    Reply::BlockStart { block: b, kind } => {
-                        Some(Reply::block_start(block(b), kind))
+                    Output::Start(_) => None,
+                    Output::BlockStart { block: b, kind } => {
+                        Some(Output::block_start(block(b), kind))
                     }
-                    Reply::Delta { block: b, delta } => Some(Reply::Delta {
+                    Output::Delta { block: b, delta } => Some(Output::Delta {
                         block: block(b),
                         delta,
                     }),
-                    Reply::BlockEnd { block: b } => Some(Reply::block_end(block(b))),
+                    Output::BlockEnd { block: b } => Some(Output::block_end(block(b))),
                     other => Some(other),
                 }))
             };

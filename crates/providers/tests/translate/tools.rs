@@ -441,10 +441,8 @@ async fn parallel_openai_tool_calls_keep_their_arguments_in_a_whole_anthropic_an
     #[async_trait]
     impl Plugin for Streamed {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|chat: &mut Conversation| {
-                chat.stream = true;
-                Ok(())
-            })?;
+            cx.extensions_mut()
+                .insert(respan_gateway_providers::StreamResponse(true));
             Ok(None)
         }
     }
@@ -488,7 +486,7 @@ async fn a_failed_tool_result_is_not_silently_turned_into_a_success() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
 }
 
-/// Extra fields on Anthropic's tool, call and result have no place in
+/// NativeFields fields on Anthropic's tool, call and result have no place in
 /// OpenAI's: refused, never dropped.
 #[tokio::test]
 async fn an_extra_tool_field_is_refused_not_dropped() {

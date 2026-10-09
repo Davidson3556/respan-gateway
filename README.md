@@ -137,7 +137,10 @@ the gateway, and the binary chooses what to compose. See the
 | Path | What it is |
 |---|---|
 | `crates/core/` | The neutral kernel: typed streams, plugins and lifecycle; no HTTP or message kinds. |
-| `crates/sdk/` | One plugin-author facade: core contracts, conversation/usage types and basic typed text accessors; no HTTP dependency. |
+| `crates/sdk/` | General plugin-author facade: core contracts, usage and fault facts; no HTTP dependency. |
+| `crates/conversation/` | Input requests, reply events, assembly and typed text accessors. |
+| `crates/realtime/` | Client/provider JSON event pair. |
+| `crates/mcp-messages/` | MCP client-request/server-message pair and session metadata. |
 | `crates/http/` | Owned HTTP edges, native request/response bodies, stream/sink helpers, credentials, retry classification and optional Reqwest backend; framing/error helpers in `formats`. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
 | `crates/{mcp,ws}/` | Optional MCP and WebSocket protocol/transport integrations. |

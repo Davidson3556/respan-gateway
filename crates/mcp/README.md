@@ -1,20 +1,19 @@
 # respan-gateway-mcp
 
-The Model Context Protocol on the gateway. Messages stay JSON-RPC values
-(every field survives), and output is always written from them, in the
-framing the client's request asks for. What MCP carries in HTTP headers is
-part of the kind, so a call carries it with no relay and plugins' filters
-see and edit it: a `ToServer` holds the client's `session`,
-`protocol_version`, `last_event_id` and `query` (the request's query, less
-the credential parameters the adapter lifted, sent on to the server), and a `ToClient` the `session` the
-server named (as on its answer to `initialize`) and its SSE `event_id` and
-`event` name (for `Last-Event-ID` resumption), written only in an event
-stream; SSE comments are dropped.
+The MCP HTTP adapter carries typed JSON-RPC messages from
+[`respan-gateway-mcp-messages`](../mcp-messages/README.md).
 
-- `ToServer` / `ToClient`: the kind, a client's request and a server's
-  message.
+`HttpInput` wraps input messages with HTTP method, batch flag, session,
+protocol version, resume cursor and query. `HttpOutput` wraps output messages
+with session, SSE event ID and event name. Keeping those fields on the same
+envelope preserves their association when a plugin buffers, edits or drops an
+event. SSE comments are dropped; ID-only events retain their cursor.
+
+Import `HttpInput` / `HttpOutput` from this crate for HTTP gateway registration
+and filtering. Inspect each envelope's `messages` as typed JSON-RPC messages.
+
 - `StreamableHttp::new(path)`: MCP over streamable HTTP as direct
-  `Format<Incoming, ToServer, ToClient>` and reversed `Format<Outgoing, ToClient, ToServer>` bindings;
+  `Format<Incoming, HttpInput, HttpOutput>` and reversed `Format<Outgoing, HttpOutput, HttpInput>` bindings;
   `SESSION` is its session header. The request shapes the answer: a `POST`
   with no request gets 202 and no body, one with requests an event stream
   (one JSON body if its `Accept` takes no event stream), a `GET` the

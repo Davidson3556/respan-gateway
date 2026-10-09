@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-mcp"
-description = "The Model Context Protocol: its kind, a streamable-HTTP format, and a stdio transport."
+description = "MCP streamable-HTTP format and stdio transport."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+respan-gateway-mcp-messages.workspace = true
 respan-gateway-sdk.workspace = true
 serde_json.workspace = true
 getrandom = { workspace = true, features = ["std"] }

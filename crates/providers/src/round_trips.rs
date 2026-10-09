@@ -2,12 +2,13 @@
 //! same format, and another format drops it if that is harmless, else
 //! refuses it.
 
+use crate::common::NativeFieldsExt;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderValue, header::CONTENT_TYPE};
 use serde_json::{Value, json};
 
 use crate::common::{Wire, read_request, write_request};
-use crate::conversation::{Content, Finish, Reply, Role};
+use crate::conversation::{Content, Finish, Output, Role};
 use crate::{AnthropicMessages, OpenAiChat};
 
 /// `body` as a request of format `R`, written as a request of format `W`.
@@ -74,10 +75,10 @@ fn tool_part_fields_survive_the_same_format_and_are_refused_by_another() {
     assert_eq!(same::<AnthropicMessages>(&body), body);
     let chat = read_request::<AnthropicMessages>(Bytes::from(body.to_string())).expect("chat");
     assert!(
-        matches!(&chat.messages[1].content[0], Content::ToolCall { extra, .. } if !extra.is_empty())
+        matches!(&chat.messages[1].content[0], Content::ToolCall { native, .. } if !native.is_empty())
     );
     assert!(
-        matches!(&chat.messages[2].content[0], Content::ToolResult { extra, .. } if !extra.is_empty())
+        matches!(&chat.messages[2].content[0], Content::ToolResult { native, .. } if !native.is_empty())
     );
     assert!(refused::<AnthropicMessages, OpenAiChat>(&body));
 }
@@ -101,7 +102,7 @@ fn a_role_and_a_finish_of_a_format_are_written_by_that_format_alone() {
     let replies = OpenAiChat
         .decode_response(http::Response::from_parts(head, Bytes::from(stream)), &call)
         .expect("decoded");
-    assert!(replies.contains(&Reply::finished(Finish::other(
+    assert!(replies.contains(&Output::finished(Finish::other(
         "openai-chat",
         "insufficient_system_resource"
     ))));
@@ -158,11 +159,17 @@ fn the_developer_role_is_a_role_of_its_own_that_anthropic_writes_as_system() {
 }
 
 #[test]
-fn the_key_a_limit_was_written_under_is_the_key_it_is_written_under() {
+fn semantic_limits_are_written_with_each_formats_canonical_key() {
     for key in ["max_tokens", "max_completion_tokens"] {
         let mut body = openai(json!([{ "role": "user", "content": "hi" }]));
         body[key] = 9.into();
-        assert_eq!(same::<OpenAiChat>(&body), body);
+        let mut canonical = body.clone();
+        canonical
+            .as_object_mut()
+            .expect("request object")
+            .remove("max_tokens");
+        canonical["max_completion_tokens"] = json!(9);
+        assert_eq!(same::<OpenAiChat>(&body), canonical);
         let to_anthropic = sent::<OpenAiChat, AnthropicMessages>(&body).expect("translated");
         assert_eq!(to_anthropic["max_tokens"], 9);
         assert!(to_anthropic.get("max_completion_tokens").is_none());
@@ -195,10 +202,10 @@ fn request_of(stream: bool) -> http::Request<Bytes> {
 }
 
 fn decoded<W: Wire>(
-    decode: impl Fn(http::Response<Bytes>) -> Vec<Reply>,
+    decode: impl Fn(http::Response<Bytes>) -> Vec<Output>,
     stream: bool,
     body: &str,
-) -> Vec<Reply> {
+) -> Vec<Output> {
     let mut head = http::Response::new(()).into_parts().0;
     let kind = if stream {
         "text/event-stream"
@@ -343,14 +350,14 @@ fn unknown_fields_of_an_anthropic_block_survive_its_format_and_are_dropped_by_an
             json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 1 } }),
             json!({ "type": "message_stop" }),
         );
-        let extra: Vec<(String, Value)> = block
+        let native: Vec<(String, Value)> = block
             .as_object()
             .into_iter()
             .flatten()
             .filter(|(k, _)| ["citations_v9", "caller", "display"].contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        assert_eq!(extra.len(), 1);
+        assert_eq!(native.len(), 1);
         for (is_stream, text) in [(false, whole.to_string()), (true, stream)] {
             let replies = decoded::<AnthropicMessages>(decode, is_stream, &text);
             let out = AnthropicMessages
@@ -371,14 +378,14 @@ fn unknown_fields_of_an_anthropic_block_survive_its_format_and_are_dropped_by_an
                     .map(|e| e["content_block"].clone())
                     .unwrap_or_default(),
             };
-            for (key, value) in &extra {
+            for (key, value) in &native {
                 assert_eq!(&found[key.as_str()], value, "stream {is_stream}: {body}");
             }
             // Another format drops them, and does not refuse.
             let to_openai = OpenAiChat.encode_response(&request_of(is_stream), &replies);
             let to_openai = to_openai.expect("translated");
             let words = String::from_utf8_lossy(to_openai.body());
-            for (key, _) in &extra {
+            for (key, _) in &native {
                 assert!(!words.contains(key.as_str()), "{words}");
             }
         }
@@ -419,7 +426,7 @@ fn unknown_fields_of_an_openai_tool_call_survive_its_format_and_are_dropped_by_a
         assert!(
             replies
                 .iter()
-                .any(|r| matches!(r, Reply::BlockStart { .. })),
+                .any(|r| matches!(r, Output::BlockStart { .. })),
             "stream {is_stream}"
         );
         let out = OpenAiChat
@@ -446,5 +453,122 @@ fn unknown_fields_of_an_openai_tool_call_survive_its_format_and_are_dropped_by_a
         let to_anthropic = AnthropicMessages.encode_response(&request_of(is_stream), &replies);
         let to_anthropic = to_anthropic.expect("translated");
         assert!(!String::from_utf8_lossy(to_anthropic.body()).contains("extra_content"));
+    }
+}
+
+#[test]
+fn common_media_is_typed_and_translated_without_fetching_urls() {
+    use respan_gateway_conversation::{MediaSource, ResponseFormat};
+    let image = json!({"type":"image_url","image_url":{"url":"data:image/png;base64,aGk="}});
+    let body = openai(json!([{"role":"user","content":[image]}]));
+    let chat =
+        read_request::<OpenAiChat>(Bytes::from(body.to_string())).expect("supported request");
+    assert!(matches!(&chat.messages[0].content[0], Content::Image(media)
+        if media.mime_type == "image/png" && media.source == MediaSource::Bytes(Bytes::from_static(b"hi"))));
+    let translated = sent::<OpenAiChat, AnthropicMessages>(&body).expect("supported request");
+    assert_eq!(
+        translated["messages"][0]["content"][0],
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}})
+    );
+    assert_eq!(
+        sent::<AnthropicMessages, OpenAiChat>(&translated).expect("supported request")["messages"],
+        body["messages"]
+    );
+
+    let mut structured = body.clone();
+    structured["response_format"] = json!({"type":"json_schema","json_schema":{
+        "name":"answer","strict":true,"schema":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}
+    }});
+    let typed =
+        read_request::<OpenAiChat>(Bytes::from(structured.to_string())).expect("supported request");
+    assert!(matches!(
+        typed.options.response_format,
+        Some(ResponseFormat::JsonSchema { .. })
+    ));
+    assert!(typed.native.is_none());
+    assert_eq!(same::<OpenAiChat>(&structured), structured);
+    let translated = sent::<OpenAiChat, AnthropicMessages>(&structured).expect("supported request");
+    assert_eq!(
+        translated["output_config"]["format"]["schema"],
+        structured["response_format"]["json_schema"]["schema"]
+    );
+    let reverse = sent::<AnthropicMessages, OpenAiChat>(&translated).expect("supported request");
+    assert_eq!(reverse["response_format"]["json_schema"]["strict"], true);
+}
+
+#[test]
+fn media_native_fields_survive_locally_and_prevent_lossy_translation() {
+    for part in [
+        json!({"type":"image_url","image_url":{"url":"https://example.test/image.png","detail":"high"},"vendor":null}),
+        json!({"type":"input_audio","input_audio":{"data":"aGk=","format":"wav","vendor":1}}),
+        json!({"type":"file","file":{"file_data":"data:application/pdf;base64,aGk=","filename":"doc.pdf","vendor":null}}),
+        json!({"type":"file","file":{"file_id":"file_1"}}),
+    ] {
+        let body = openai(json!([{"role":"user","content":[part]}]));
+        assert_eq!(same::<OpenAiChat>(&body), body);
+        assert!(refused::<OpenAiChat, AnthropicMessages>(&body));
+    }
+    let document = anthropic(json!([{"role":"user","content":[{
+        "type":"document","title":"doc.pdf","source":{"type":"base64","media_type":"application/pdf","data":"aGk="}
+    }]}]));
+    let translated = sent::<AnthropicMessages, OpenAiChat>(&document).expect("supported request");
+    assert_eq!(
+        translated["messages"][0]["content"][0]["file"]["filename"],
+        "doc.pdf"
+    );
+    assert_eq!(
+        sent::<OpenAiChat, AnthropicMessages>(&translated).expect("supported request")["messages"],
+        document["messages"]
+    );
+}
+
+#[test]
+fn reasoning_is_typed_but_signatures_remain_format_specific() {
+    let body =
+        openai(json!([{"role":"assistant","reasoning_content":"consider","content":"answer"}]));
+    let chat =
+        read_request::<OpenAiChat>(Bytes::from(body.to_string())).expect("supported request");
+    assert!(
+        chat.messages[0]
+            .content
+            .iter()
+            .any(|p| matches!(p, Content::Reasoning {text,..} if text=="consider"))
+    );
+    assert_eq!(same::<OpenAiChat>(&body), body);
+    let signed = anthropic(
+        json!([{"role":"assistant","content":[{"type":"thinking","thinking":"consider","signature":"sig"}]}]),
+    );
+    assert_eq!(same::<AnthropicMessages>(&signed), signed);
+    assert!(refused::<AnthropicMessages, OpenAiChat>(&signed));
+}
+
+#[test]
+fn unknown_structured_output_options_stay_native() {
+    let mut body = openai(json!([{"role":"user","content":"hi"}]));
+    body["response_format"] =
+        json!({"type":"json_schema","json_schema":{"name":"answer","schema":{},"future_option":1}});
+    assert_eq!(same::<OpenAiChat>(&body), body);
+    assert!(refused::<OpenAiChat, AnthropicMessages>(&body));
+    let mut body = anthropic(json!([{"role":"user","content":"hi"}]));
+    body["output_config"] =
+        json!({"format":{"type":"json_schema","schema":{"type":"object"}},"effort":"high"});
+    assert_eq!(same::<AnthropicMessages>(&body), body);
+    assert!(refused::<AnthropicMessages, OpenAiChat>(&body));
+}
+
+#[test]
+fn structured_output_translation_does_not_drop_wrapper_instructions() {
+    for extra in [
+        json!({"description":"answer in French"}),
+        json!({"strict":false}),
+    ] {
+        let mut body = openai(json!([{"role":"user","content":"hi"}]));
+        let mut spec = json!({"name":"answer","schema":{"type":"object"}});
+        spec.as_object_mut()
+            .expect("schema object")
+            .extend(extra.as_object().expect("options").clone());
+        body["response_format"] = json!({"type":"json_schema","json_schema":spec});
+        assert_eq!(same::<OpenAiChat>(&body), body);
+        assert!(refused::<OpenAiChat, AnthropicMessages>(&body));
     }
 }

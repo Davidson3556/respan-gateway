@@ -3,9 +3,7 @@
 #[path = "../support/text.rs"]
 mod text;
 
-use respan_gateway_sdk::conversation::{
-    Block, Content, Conversation, Delta, Message, Reply, Role, Tool,
-};
+use respan_gateway_conversation::{Block, Content, Delta, Input, Message, Output, Role, Tool};
 use respan_gateway_sdk::{Fault, Filter};
 #[path = "support/text.rs"]
 mod support;
@@ -15,25 +13,25 @@ use support::{arguments_of, run_filter as run};
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE};
 
 /// The next part of the arguments of the tool call in block 0.
-fn call(arguments: &str) -> Reply {
-    Reply::arguments(0, arguments)
+fn call(arguments: &str) -> Output {
+    Output::arguments(0, arguments)
 }
 
-fn args(out: &[Reply]) -> String {
+fn args(out: &[Output]) -> String {
     arguments_of(out, 0)
 }
 
 /// A tool call whose arguments come whole, as a body that was not streamed
 /// decodes.
-fn whole_call(arguments: &str) -> Vec<Reply> {
+fn whole_call(arguments: &str) -> Vec<Output> {
     let kind = Block::ToolCall {
         id: "t".into(),
         name: "f".into(),
     };
     vec![
-        Reply::block_start(0, kind),
-        Reply::arguments(0, arguments),
-        Reply::block_end(0),
+        Output::block_start(0, kind),
+        Output::arguments(0, arguments),
+        Output::block_end(0),
     ]
 }
 
@@ -70,7 +68,7 @@ fn a_fragment_that_is_only_a_placeholder_is_escaped() {
 #[test]
 fn a_tool_description_with_two_quoted_values_is_edited() {
     let vault = Placeholders::default();
-    let mut chat = Conversation::new([Message::new(Role::User, "hi")]);
+    let mut chat = Input::new([Message::new(Role::User, "hi")]);
     let mut tool = Tool::new("mail", json!({ "type": "object" }));
     tool.description = Some("Send to \"a@b.io\" or \"c@d.io\"".into());
     chat.tools.push(tool);
@@ -98,10 +96,12 @@ fn a_whole_tool_call_with_two_quoted_placeholders_is_restored() {
 }
 
 /// The first event the kind has no form for in `out`, as `raw`.
-fn first_other(out: &[Reply]) -> Value {
+fn first_other(out: &[Output]) -> Value {
     out.iter()
         .find_map(|r| match r {
-            Reply::Other { raw, .. } => Some((**raw).clone()),
+            Output::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) => {
+                Some((**raw).clone())
+            }
             _ => None,
         })
         .unwrap_or(Value::Null)
@@ -110,7 +110,7 @@ fn first_other(out: &[Reply]) -> Value {
 fn restored(raw_json: Value, vault: Placeholders) -> Value {
     let out = run(
         &mut Holdback::new(vault),
-        vec![Reply::other("openai-chat", raw_json)],
+        vec![Output::native("openai-chat", raw_json)],
     )
     .unwrap_or_default();
     first_other(&out)
@@ -119,14 +119,14 @@ fn restored(raw_json: Value, vault: Placeholders) -> Value {
 /// The text a reasoning block says, restored.
 fn reasoning(text: &str, vault: Placeholders) -> String {
     let events = vec![
-        Reply::block_start(0, Block::Reasoning),
-        Reply::reasoning(0, text),
-        Reply::block_end(0),
+        Output::block_start(0, Block::Reasoning),
+        Output::reasoning(0, text),
+        Output::block_end(0),
     ];
     let out = run(&mut Holdback::new(vault), events).unwrap_or_default();
     out.iter()
         .filter_map(|e| match e {
-            Reply::Delta {
+            Output::Delta {
                 delta: Delta::Reasoning(text),
                 ..
             } => Some(text.as_str()),
@@ -173,14 +173,16 @@ fn a_parameter_named_arguments_is_restored_once() {
     let name = vault.hide("NAME", "Robert \"Bob\" Smith");
     let block =
         json!({ "type": "tool_use", "id": "t", "name": "run", "input": { "arguments": name } });
-    let mut chat = Conversation::new([Message::new(Role::Assistant, "")]);
-    chat.messages[0].content = vec![Content::other("anthropic-messages", block)];
+    let mut chat = Input::new([Message::new(Role::Assistant, "")]);
+    chat.messages[0].content = vec![Content::native("anthropic-messages", block)];
     let edited = chat.edit_all(|t| {
         *t = vault.clone().rewrite(t)?;
         Ok(())
     });
     assert!(edited.is_ok());
-    let Content::Other { raw, .. } = &chat.messages[0].content[0] else {
+    let Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) =
+        &chat.messages[0].content[0]
+    else {
         panic!("tool input")
     };
     assert_eq!(raw["input"]["arguments"], "Robert \"Bob\" Smith");
@@ -192,7 +194,7 @@ fn text_after_a_backslash_in_a_tool_call_is_read() {
     let args = json!({ "arguments": "C:\\dir\\bob@x.io" }).to_string();
     let mut call = Message::new(Role::Assistant, "");
     call.content = vec![Content::tool_call("t", "run", args)];
-    let mut chat = Conversation::new([Message::new(Role::User, "hi"), call]);
+    let mut chat = Input::new([Message::new(Role::User, "hi"), call]);
     let mut seen = Vec::new();
     let read = chat.edit_all(|t| {
         seen.push(t.clone());
@@ -230,7 +232,7 @@ fn a_streamed_piece_that_parses_is_edited_as_text() {
             Ok(())
         });
         assert!(edited.is_ok());
-        if let Reply::Delta { delta, .. } = &reply {
+        if let Output::Delta { delta, .. } = &reply {
             joined.push_str(delta.as_str());
         }
     }
@@ -320,15 +322,15 @@ fn a_unicode_escape_in_streamed_arguments_is_kept_whole() {
 
 #[test]
 fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Result<(), Fault> {
-    use respan_gateway_sdk::conversation::Content;
-    let mut chat = Conversation::default();
+    use respan_gateway_conversation::Content;
+    let mut chat = Input::default();
     let mut message = Message::new(Role::Assistant, "");
     message.content = vec![
-        Content::other(
+        Content::native(
             "anthropic-messages",
             json!({"type":"tool_use","id":"tool-1","name":"lookup","input":{"email":"alice@example.com","nested":[{"note":"alice@example.com"}]}}),
         ),
-        Content::other(
+        Content::native(
             "anthropic-messages",
             json!({"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"alice@example.com"}]}),
         ),
@@ -338,13 +340,17 @@ fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Re
         *text = text.replace("alice@example.com", "<EMAIL_1>");
         Ok(())
     })?;
-    let Content::Other { raw, .. } = &chat.messages[0].content[0] else {
+    let Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) =
+        &chat.messages[0].content[0]
+    else {
         panic!("tool input")
     };
     assert_eq!(raw["input"]["email"], "<EMAIL_1>");
     assert_eq!(raw["input"]["nested"][0]["note"], "<EMAIL_1>");
     assert_eq!(raw["id"], "tool-1");
-    let Content::Other { raw, .. } = &chat.messages[0].content[1] else {
+    let Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) =
+        &chat.messages[0].content[1]
+    else {
         panic!("tool result")
     };
     assert_eq!(raw["content"][0]["text"], "<EMAIL_1>");
@@ -354,10 +360,10 @@ fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Re
 
 #[test]
 fn an_image_inside_a_tool_result_is_refused_before_any_edit() {
-    use respan_gateway_sdk::conversation::Content;
-    let mut chat = Conversation::default();
+    use respan_gateway_conversation::Content;
+    let mut chat = Input::default();
     let mut message = Message::new(Role::User, "keep this");
-    message.content.push(Content::other("anthropic-messages", json!({
+    message.content.push(Content::native("anthropic-messages", json!({
         "type":"tool_result","tool_use_id":"tool-1","content":[{"type":"image","source":{"type":"base64","data":"opaque"}}]
     })));
     chat.messages.push(message);
@@ -372,7 +378,7 @@ fn an_image_inside_a_tool_result_is_refused_before_any_edit() {
 
 #[test]
 fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
-    use respan_gateway_sdk::conversation::Content;
+    use respan_gateway_conversation::Content;
 
     for raw in [
         json!({"type":"tool_use","id":"tool-1","name":"lookup","input":{"query":"safe"},
@@ -383,8 +389,8 @@ fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
         let mut message = Message::new(Role::User, "keep me");
         message
             .content
-            .push(Content::other("anthropic-messages", raw));
-        let mut chat = Conversation::new([message]);
+            .push(Content::native("anthropic-messages", raw));
+        let mut chat = Input::new([message]);
         let before = chat.clone();
         assert_eq!(
             chat.read_all()
@@ -413,8 +419,8 @@ fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
 
 #[test]
 fn tool_indexes_do_not_delay_argument_tails_until_after_the_finish() -> Result<(), Fault> {
+    use respan_gateway_conversation::Finish;
     use respan_gateway_sdk::Filter;
-    use respan_gateway_sdk::conversation::Finish;
 
     let vault = Placeholders::default();
     vault.hide("NAME", "alice");
@@ -424,10 +430,10 @@ fn tool_indexes_do_not_delay_argument_tails_until_after_the_finish() -> Result<(
         id: "t".into(),
         name: "f".into(),
     };
-    filter.edit(Reply::block_start(2, kind), &mut out)?;
-    filter.edit(Reply::arguments(2, "{\"to\":\"<NA"), &mut out)?;
-    filter.edit(Reply::finished(Finish::Length), &mut out)?;
-    assert_eq!(out.last(), Some(&Reply::finished(Finish::Length)));
+    filter.edit(Output::block_start(2, kind), &mut out)?;
+    filter.edit(Output::arguments(2, "{\"to\":\"<NA"), &mut out)?;
+    filter.edit(Output::finished(Finish::Length), &mut out)?;
+    assert_eq!(out.last(), Some(&Output::finished(Finish::Length)));
     assert!(
         arguments_of(&out, 2).contains("<NA"),
         "the tool argument tail must flush before the finish: {out:?}"
@@ -458,7 +464,7 @@ impl Rewrite for Replace42 {
 #[test]
 fn edited_tool_argument_numbers_are_strings_even_when_replacement_looks_like_json() {
     for replacement in [r#"{"admin":true}"#, "null", "[1,2]", "123"] {
-        let mut request = Conversation::new([Message::new(Role::Assistant, "")]);
+        let mut request = Input::new([Message::new(Role::Assistant, "")]);
         request.messages[0].content =
             vec![Content::tool_call("t", "f", r#"{"n":42,"unchanged":7}"#)];
         request
@@ -511,7 +517,7 @@ fn unreadable_reply_content_refuses_before_editing_any_text() {
             ]}),
         ),
     ] {
-        let mut reply = Reply::other(format, opaque);
+        let mut reply = Output::native(format, opaque);
         let before = reply.clone();
         let mut calls = 0;
         let result = reply.edit_all(|text| {
@@ -561,7 +567,7 @@ fn holdback_refuses_unreadable_reply_before_rewriting_or_emitting_text() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut filter = Holdback::new(Count(calls.clone()));
         let mut out = Vec::new();
-        let result = filter.edit(Reply::other(format, opaque), &mut out);
+        let result = filter.edit(Output::native(format, opaque), &mut out);
         assert_eq!(
             result
                 .err()

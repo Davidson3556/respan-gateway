@@ -8,8 +8,9 @@ mod support;
 
 use std::sync::atomic::Ordering;
 
+use respan_gateway_realtime::Input;
 use respan_gateway_sdk::{ClientContext, ErrorCode, Fault, Gateway, Plugin, Response, async_trait};
-use respan_gateway_ws::{ClientEvent, CloseCode, Limits, ProviderClose};
+use respan_gateway_ws::{CloseCode, Limits, ProviderClose};
 use support::*;
 
 const PATH: &str = "/v1/realtime";
@@ -244,7 +245,7 @@ struct Forbid;
 #[async_trait]
 impl Plugin for Forbid {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|e: &mut ClientEvent| match e.json == "forbidden" {
+        cx.filter(|e: &mut Input| match e.json() == "forbidden" {
             true => Err(Fault::new("the input is refused")
                 .with(ErrorCode("policy".into()))
                 .with(CloseCode(1008))),

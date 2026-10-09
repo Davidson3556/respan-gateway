@@ -9,14 +9,17 @@ and runnable examples. The Python distribution is planned separately under
 | Location | Owns | Internal production dependencies |
 | --- | --- | --- |
 | `crates/core/` | Execution, typed streams, plugin hooks, call and response lifecycles | None |
-| `crates/sdk/` | Public core facade, conversation types, usage and fault facts | Core |
+| `crates/sdk/` | Public core facade, usage, fault facts and tagged native values | Core |
+| `crates/conversation/` | Conversation requests, reply events and assembly | SDK |
+| `crates/realtime/` | Format-tagged realtime event pair | SDK |
+| `crates/mcp-messages/` | Typed JSON-RPC message pair | None |
 | `crates/http/` | HTTP bindings, framing, bodies, credentials and optional Reqwest transport | SDK |
-| `crates/ws/` | Outbound WebSocket transport and JSON event format | SDK, HTTP |
-| `crates/mcp/` | MCP message kind, streamable HTTP and stdio transport | SDK, HTTP |
-| `crates/providers/` | OpenAI Chat and Anthropic Messages codecs | SDK, HTTP |
+| `crates/ws/` | Outbound WebSocket transport and JSON event format | SDK, realtime, HTTP |
+| `crates/mcp/` | MCP streamable HTTP and stdio transport | SDK, mcp-messages, HTTP |
+| `crates/providers/` | OpenAI Chat and Anthropic Messages codecs | SDK, conversation, HTTP |
 | `crates/plugins/` | Model routing, attempts, fallback, races and backoff | SDK |
 | `crates/axum/` | HTTP ingress and optional WebSocket hosting | SDK, HTTP, optional WS |
-| `apps/gateway/` | Executable, YAML configuration and component registration | SDK, HTTP, providers, plugins, Axum |
+| `apps/gateway/` | Executable, YAML configuration and component registration | SDK, conversation, HTTP, providers, plugins, Axum |
 | `examples/` | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
 Arrows below point from a dependency toward its consumers. Test dependencies
@@ -25,6 +28,12 @@ can cross these boundaries to exercise a complete request.
 ```mermaid
 flowchart LR
     core --> sdk
+    sdk --> conversation
+    conversation --> providers
+    conversation --> gateway
+    sdk --> realtime
+    realtime --> ws
+    mcp_messages[mcp-messages] --> mcp
     sdk --> http
     sdk --> plugins
     http --> providers
@@ -45,15 +54,20 @@ their filesystem locations.
 
 - The core owns execution and lifecycle contracts. It has no HTTP, provider,
   credential or LLM message dependency.
-- The SDK reexports the core's original types and supplies shared LLM data.
+- The SDK reexports the core's original types and supplies kind-neutral usage
+  and fault facts.
   Protocol implementations depend on the SDK; the SDK does not depend on them.
 - Plugins are compiled in. Applications register concrete components using
   the same public contracts available to external plugin authors.
 - Protocol crates own wire framing and transport behavior. Provider codecs
   translate through typed conversation events.
-- The SDK's only built-in kind is `Conversation` / `Reply`. Other kinds use
-  their own input/output types; no `Format` implementation lives in the SDK.
-  Plugins and whole-body conversation encoders share the SDK's ordered
+- Each message kind owns both directions in one data-model crate:
+  conversation (`Input` / `Output`), realtime (`Input` /
+  `Output`) and mcp-messages (`Input` / `Output`). Codecs and
+  transports depend on these models. HTTP owns its passthrough pair
+  (`Sent<F>` / `Got<F>`) alongside the codecs.
+  The SDK defines no kinds or `Format` implementations.
+  Plugins and whole-body conversation encoders share the conversation crate's ordered
   `Assembled` fold instead of maintaining separate reply representations.
 - Applications own policy choices, configuration, prices, billing stores and
   durable jobs. The examples demonstrate those choices without making them
@@ -74,6 +88,7 @@ the client's input or input of their own. Responses can be streamed, inspected
 or buffered. HTTP raw relay behavior is an explicit policy in the HTTP crate.
 
 See the [SDK guide](../crates/sdk/README.md),
+[conversation guide](../crates/conversation/README.md),
 [HTTP guide](../crates/http/README.md), and
 [routing guide](../crates/plugins/README.md) for their public contracts.
 

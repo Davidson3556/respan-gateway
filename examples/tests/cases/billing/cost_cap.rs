@@ -28,9 +28,9 @@ async fn a_runaway_stream_is_cut_and_charged_its_estimate() -> Result<(), Fault>
     let body = ask(&gw, true).await;
     assert!(!body.contains("[DONE]"), "cut: {body}");
     // Cut on the delta that passed 100 tokens: 21 × 20 characters = 105.
-    // No usage came, so input is its bound: "hi", 8 for framing and two
-    // empty `{}`, 14 bytes.
-    assert_eq!(ledger.spent("team"), PRICE.cost(14, 105));
+    // No usage came, so input is its bound: "hi" and 8 for framing,
+    // 10 bytes. Absent native fields contribute no bytes.
+    assert_eq!(ledger.spent("team"), PRICE.cost(10, 105));
     assert_eq!(fake.requests().len(), 1);
     Ok(())
 }
@@ -106,12 +106,12 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
     let base = fake.base_url();
     let origin = base.trim_end_matches("/v1");
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             provider_support::openai(origin)?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(Cap)
         .plugin(Accounting::new(ledger.clone(), quote))
         .plugin(respan_gateway_http::relay::Relay::RAW)
@@ -150,7 +150,7 @@ async fn a_stream_cut_before_any_text_is_charged_its_reserve() -> Result<(), Fau
         ledger.clone(),
     )?;
     ask(&gw, true).await;
-    assert_eq!(ledger.spent("team"), PRICE.cost(14, CAP));
+    assert_eq!(ledger.spent("team"), PRICE.cost(10, CAP));
     assert_eq!(fake.requests().len(), 1);
     Ok(())
 }

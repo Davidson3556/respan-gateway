@@ -21,9 +21,9 @@
 //!
 //! `cargo run -p respan-gateway-examples --example admission`
 
+use respan_gateway_conversation::{Input, Output};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::admission::{Slot, Slots};
-use respan_gateway_sdk::conversation::{Conversation, Reply};
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream};
 use respan_gateway_sdk::futures::{future::BoxFuture, stream::BoxStream};
 use respan_gateway_sdk::{ErrorCode, RetryAfter};
@@ -162,7 +162,7 @@ impl Plugin for Admission {
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));
         let monitoring = held.clone();
-        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Reply>| {
+        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Output>| {
             bounded(outputs.boxed(), monitoring)
         })?;
         cx.extensions_mut().insert(held);
@@ -206,7 +206,7 @@ fn gateway(
         free,
     };
     Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
@@ -217,7 +217,7 @@ fn gateway(
                 LIMIT,
             ),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(admission)
         .target("openai")
 }

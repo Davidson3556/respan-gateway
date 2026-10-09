@@ -26,15 +26,15 @@ use http_body_util::BodyExt;
 use http_support::{LIMIT, post, read_whole, serve, serve_live, streamed};
 #[cfg(feature = "reqwest")]
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_conversation::{Input, Output};
+#[cfg(feature = "reqwest")]
+use respan_gateway_conversation::{Message, Role};
 #[cfg(feature = "reqwest")]
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{Body, Encoder, Incoming, Outgoing};
 use respan_gateway_http::{http, http_body_util};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_sdk::conversation::{Conversation, Reply};
-#[cfg(feature = "reqwest")]
-use respan_gateway_sdk::conversation::{Message, Role};
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
@@ -492,14 +492,14 @@ fn chat(
     plugins: Vec<Arc<dyn Plugin>>,
 ) -> Gateway {
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
         )
         .and_then(|g| {
-            g.client::<Conversation, _, _>(OpenAiChat)?
-                .client::<Conversation, _, _>(AnthropicMessages)?
+            g.client::<Input, _, _>(OpenAiChat)?
+                .client::<Input, _, _>(AnthropicMessages)?
                 .target("openai")
         });
     let gw = gw.map(|g| plugins.into_iter().fold(g, Gateway::plugin));
@@ -569,12 +569,12 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
         }
     };
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat)?.target("openai"))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("openai"))
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = read_whole(
         serve(&gw, with_headers("/v1/chat/completions", CHAT))
@@ -607,10 +607,10 @@ async fn r9_a_calls_own_input_is_written_from_its_value_alone() {
     #[async_trait]
     impl Plugin for Judge {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let mut prompt = Conversation::new([Message::new(Role::User, "judge")]);
+            let mut prompt = Input::new([Message::new(Role::User, "judge")]);
             prompt.model = Some("gpt-4.1-mini".into());
             let verdict = cx.call("openai").with_input(prompt).await?;
-            let read: Vec<Reply> = verdict.outputs::<Reply>().try_collect().await?;
+            let read: Vec<Output> = verdict.outputs::<Output>().try_collect().await?;
             assert!(!read.is_empty());
             Ok(None)
         }
@@ -641,14 +641,14 @@ async fn r9_a_calls_own_input_is_written_from_its_value_alone() {
 #[derive(Clone, Default)]
 struct Noted(Arc<Mutex<Vec<&'static str>>>);
 
-impl Format<Incoming, Conversation, Reply> for Noted {
+impl Format<Incoming, Input, Output> for Noted {
     fn name(&self) -> &str {
         AnthropicMessages.name()
     }
     fn matches(&self, io: &Incoming) -> bool {
         AnthropicMessages.matches(io)
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
             |request| AnthropicMessages.read_request(request),
@@ -665,22 +665,26 @@ impl Format<Incoming, Conversation, Reply> for Noted {
         ))
     }
 }
-impl Format<Outgoing, Reply, Conversation> for Noted {
+impl Format<Outgoing, Output, Input> for Noted {
     fn name(&self) -> &str {
         AnthropicMessages.name()
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Reply, Conversation>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
         AnthropicMessages.bind(io)
     }
 }
 
-struct Noting(Arc<Mutex<Vec<&'static str>>>, Box<dyn Encoder<Reply>>);
+struct Noting(Arc<Mutex<Vec<&'static str>>>, Box<dyn Encoder<Output>>);
 
-impl Encoder<Reply> for Noting {
-    fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<Output> for Noting {
+    fn encode(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         let noted = match reply {
-            Reply::Other { format, .. } if &**format == AnthropicMessages.name() => "own",
-            Reply::Other { .. } => "other",
+            Output::Native(respan_gateway_sdk::NativeValue { format, .. })
+                if &**format == AnthropicMessages.name() =>
+            {
+                "own"
+            }
+            Output::Native(respan_gateway_sdk::NativeValue { .. }) => "other",
             _ => "event",
         };
         self.0.lock().map(|mut n| n.push(noted)).ok();
@@ -722,22 +726,19 @@ async fn r2_an_encoder_writes_its_own_formats_events_as_they_are_and_no_others()
             )
         };
         let gw = Gateway::new()
-            .provider::<Conversation, _, _>(
+            .provider::<Input, _, _>(
                 "anthropic",
                 noting.clone(),
                 respan_gateway_http::connect(sse(&stream), LIMIT),
             )
             .and_then(|g| {
-                g.provider::<Conversation, _, _>(
+                g.provider::<Input, _, _>(
                     "openai",
                     OpenAiChat,
                     respan_gateway_http::connect(sse(&[chunk, "data: [DONE]\n\n"]), LIMIT),
                 )
             })
-            .and_then(|g| {
-                g.client::<Conversation, _, _>(noting.clone())?
-                    .target(provider)
-            })
+            .and_then(|g| g.client::<Input, _, _>(noting.clone())?.target(provider))
             .unwrap_or_else(|e| panic!("{e}"));
         let (_, _, out) = read_whole(serve(&gw, post("/v1/messages", body)).await.0).await;
         bodies.push(String::from_utf8_lossy(&out.unwrap_or_default()).into_owned());

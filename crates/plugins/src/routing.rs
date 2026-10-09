@@ -14,7 +14,7 @@
 //! ```ignore
 //! let calls = ["openai", "anthropic"].map(|p| cx.call(p));
 //! let backoff = Backoff::new(3, Duration::from_millis(200), Duration::from_secs(10));
-//! first_success(calls, &backoff, Until::content(Reply::is_content),
+//! first_success(calls, &backoff, Until::content(Output::is_content),
 //!     respan_gateway_http::retryable).await.map(Some)
 //! ```
 

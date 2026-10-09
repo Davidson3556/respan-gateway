@@ -14,12 +14,12 @@ use respan_gateway_sdk::ErrorCode;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_conversation::{Assembled, Input, Message, Output, Role};
 use respan_gateway_http::Status;
 use respan_gateway_http::Wire;
 #[cfg(test)]
 use respan_gateway_http::http;
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Assembled, Conversation, Message, Reply, Role};
 use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -38,22 +38,23 @@ struct Judge;
 #[async_trait]
 impl Plugin for Judge {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let Ok(chat) = cx.input::<Conversation>() else {
+        let Ok(chat) = cx.input::<Input>() else {
             return Ok(None);
         };
         let last = chat.messages.last().map(Message::text).unwrap_or_default();
-        let mut prompt = Conversation::new([
+        let mut prompt = Input::new([
             Message::new(
                 Role::System,
-                "Reply HARD or EASY: how hard is this request?",
+                "Output HARD or EASY: how hard is this request?",
             ),
             Message::new(Role::User, last),
         ]);
         prompt.model = Some("judge-mini".into());
-        prompt.max_tokens = Some(1);
-        let replies: Vec<Reply> = cx
+        prompt.options.max_output_tokens = Some(1);
+        let replies: Vec<Output> = cx
             .call("judge")
             .with_input(prompt)
+            .with_extension(respan_gateway_providers::StreamResponse(false))
             .await?
             .outputs()
             .try_collect()
@@ -101,22 +102,22 @@ fn gateway(
     egress: Egress,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "judge",
             OpenAiChat,
             provider_support::openai(&judge.base_url())?.connect(),
         )?
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "cheap",
             OpenAiChat,
             provider_support::openai(&cheap.base_url())?.connect(),
         )?
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "strong",
             OpenAiChat,
             provider_support::openai(&strong.base_url())?.connect(),
         )?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(egress)
         .plugin(Judge)
         .target("cheap")

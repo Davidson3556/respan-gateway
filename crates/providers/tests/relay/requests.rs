@@ -38,8 +38,8 @@ async fn plugins_see_the_request_and_change_its_model() {
                 .map(|a| a.method().clone());
             assert_eq!(asked, Some(http::Method::POST));
             // The client's request, as it said it.
-            let chat = cx.input::<Conversation>()?;
-            assert!(chat.stream);
+            let chat = cx.input::<Input>()?;
+
             let said = chat.messages[0].text();
             cx.extensions_mut()
                 .insert(Seen(if said == "hi" { "hi" } else { "other" }));
@@ -141,8 +141,8 @@ async fn a_plugin_knows_which_format_the_client_speaks() {
     let sites = Sites::default();
     let gw = providers([provider(&sites.openai, "openai", Some("Bearer sk-test"))])
         .and_then(|g| {
-            g.client::<Conversation, _, _>(OpenAiChat)?
-                .client::<Conversation, _, _>(AnthropicMessages)
+            g.client::<Input, _, _>(OpenAiChat)?
+                .client::<Input, _, _>(AnthropicMessages)
         })
         .and_then(|g| g.plugin(Seen(seen.clone())).target("openai"))
         .expect("builds");
@@ -170,8 +170,8 @@ async fn a_calls_own_input_its_format_cannot_write_is_refused_as_a_bad_request()
     impl Plugin for Own {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let image = json!({"type": "image", "source": {"type": "url", "url": "u"}});
-            let message = Message::new(Role::User, Content::other("anthropic-messages", image));
-            let own = Conversation::new([message]);
+            let message = Message::new(Role::User, Content::native("anthropic-messages", image));
+            let own = Input::new([message]);
             cx.call("openai").with_input(own).await.map(Some)
         }
     }
@@ -197,7 +197,7 @@ async fn a_calls_own_input_copied_from_the_clients_keeps_what_it_said() {
     #[async_trait]
     impl Plugin for Trim {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let mut trimmed = cx.input::<Conversation>()?.clone();
+            let mut trimmed = cx.input::<Input>()?.clone();
             trimmed.messages.truncate(1);
             cx.call("openai").with_input(trimmed).await.map(Some)
         }
@@ -224,7 +224,7 @@ async fn a_whole_answer_to_a_calls_own_input_reaches_a_streaming_client_as_a_str
     #[async_trait]
     impl Plugin for Trim {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let own = Conversation::new([Message::new(Role::User, "hi")]);
+            let own = Input::new([Message::new(Role::User, "hi")]);
             Ok(Some(cx.call("openai").with_input(own).await?))
         }
     }
@@ -249,7 +249,7 @@ async fn a_redirect_answering_a_calls_own_input_is_a_bad_gateway() {
     #[async_trait]
     impl Plugin for Trim {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let own = Conversation::new([Message::new(Role::User, "hi")]);
+            let own = Input::new([Message::new(Role::User, "hi")]);
             // The call's response fails as read, not the call at
             // its head; sent, the provider's words stay off a client whose
             // message the call did not relay.
@@ -278,7 +278,7 @@ async fn a_failure_answering_a_calls_own_input_keeps_its_status_and_retry_after(
     #[async_trait]
     impl Plugin for Trim {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let own = Conversation::new([Message::new(Role::User, "hi")]);
+            let own = Input::new([Message::new(Role::User, "hi")]);
             Ok(Some(cx.call("openai").with_input(own).await?))
         }
     }
@@ -340,8 +340,8 @@ async fn a_calls_own_copy_of_the_input_changes_only_that_call() {
             if px.provider() != "openai" {
                 return Ok(());
             }
-            px.filter(|chat: &mut Conversation| {
-                chat.temperature = Some(0.0);
+            px.filter(|chat: &mut Input| {
+                chat.options.temperature = Some(0.0);
                 Ok(())
             })
         }
@@ -417,7 +417,7 @@ async fn a_calls_request_is_as_it_was_when_the_call_was_made() {
         }
 
         async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
-            let model = px.client().input::<Conversation>().ok();
+            let model = px.client().input::<Input>().ok();
             let model = model.and_then(|c| c.model.clone());
             self.0.lock().map(|mut s| s.extend(model)).ok();
         }
@@ -442,12 +442,12 @@ async fn an_undecodable_input_is_refused_without_explicit_raw_delivery() {
     #[async_trait]
     impl Plugin for Read {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let _ = cx.input::<Conversation>();
+            let _ = cx.input::<Input>();
             Ok(None)
         }
 
         async fn on_provider(&self, px: &mut ProviderContext) -> Result<(), Fault> {
-            let _ = px.input::<Conversation>();
+            let _ = px.input::<Input>();
             Ok(())
         }
     }
@@ -598,7 +598,7 @@ async fn a_call_with_its_own_input_names_only_its_own_model() {
     #[async_trait]
     impl Plugin for Own {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let chat = || Conversation::new([Message::new(Role::User, "judge")]);
+            let chat = || Input::new([Message::new(Role::User, "judge")]);
             let _ = cx.call("openai").with_input(chat()).await?;
             let _ = cx
                 .call("openai")

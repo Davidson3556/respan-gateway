@@ -47,7 +47,7 @@ async fn a_filter_may_keep_state_that_is_not_sync() {
     impl Plugin for Count {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let seen = std::cell::Cell::new(0);
-            cx.filter(move |e: &mut Reply| {
+            cx.filter(move |e: &mut Output| {
                 if let Some(text) = text_of_mut(e) {
                     seen.set(seen.get() + 1);
                     *text = format!("{}:{text}", seen.get());
@@ -147,8 +147,8 @@ async fn an_edit_to_the_start_is_written_in_the_clients_format() {
     #[async_trait]
     impl Plugin for Rename {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|e: &mut Reply| {
-                if let Reply::Start(start) = e {
+            cx.filter(|e: &mut Output| {
+                if let Output::Start(start) = e {
                     start.id = "hidden".into();
                 }
                 Ok(())
@@ -178,7 +178,7 @@ async fn a_filter_that_changes_nothing_keeps_what_was_said() {
     #[async_trait]
     impl Plugin for Idle {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|_: &mut Reply| Ok(()))?;
+            cx.filter(|_: &mut Output| Ok(()))?;
             Ok(None)
         }
     }
@@ -203,7 +203,7 @@ async fn a_stream_guardrail_refuses_before_any_bytes_and_fails_the_stream_after(
     assert!(matches!(end, Err(f) if respan_gateway_http::status(&f) == StatusCode::FORBIDDEN));
 
     let world =
-        |e: &Reply| matches!(e, Reply::Delta { delta, .. } if delta.as_str().contains("world"));
+        |e: &Output| matches!(e, Output::Delta { delta, .. } if delta.as_str().contains("world"));
     let h = Harness::new(vec![Arc::new(Guard(world))], Some("openai"));
     h.sites.openai.reply(fixture::sse(STREAM));
 
@@ -225,11 +225,11 @@ async fn a_filter_edits_several_events_of_one_chunk_in_its_shape() {
     #[async_trait]
     impl Plugin for Truncate {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(move |e: &mut Reply| {
+            cx.filter(move |e: &mut Output| {
                 if let Some(text) = text_of_mut(e) {
                     *text = text.to_uppercase();
                 }
-                if let Reply::Finish(finish) = e {
+                if let Output::Finish(finish) = e {
                     *finish = Finish::Length;
                 }
                 Ok(())
@@ -253,7 +253,7 @@ async fn a_filter_edits_several_events_of_one_chunk_in_its_shape() {
 
 #[tokio::test]
 async fn a_unary_guardrail_refuses_with_its_status() {
-    let text = |e: &Reply| matches!(e, Reply::Delta { .. });
+    let text = |e: &Output| matches!(e, Output::Delta { .. });
     let h = Harness::new(vec![Arc::new(Guard(text))], Some("openai"));
     h.sites.openai.reply(fixture::json(StatusCode::OK, UNARY));
 
@@ -337,12 +337,12 @@ async fn a_delta_a_filter_splits_in_two_is_written_as_two_and_reads_back_whole()
     #[derive(Default)]
     struct Split;
 
-    impl Filter<Reply> for Split {
-        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Split {
+        fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             match (text_of(&reply), &reply) {
-                (Some(text), Reply::Delta { block, .. }) if text.len() > 1 => {
+                (Some(text), Output::Delta { block, .. }) if text.len() > 1 => {
                     let (a, b) = text.split_at(1);
-                    out.extend([Reply::text(*block, a), Reply::text(*block, b)]);
+                    out.extend([Output::text(*block, a), Output::text(*block, b)]);
                 }
                 _ => out.push(reply),
             }
@@ -392,8 +392,8 @@ async fn a_filter_holding_everything_of_an_own_stream_releases_it_whole() {
 
 #[tokio::test]
 async fn an_edit_to_the_start_leaves_other_choices_alone() {
-    let h = filtered(|e: &mut Reply| {
-        if let Reply::Start(start) = e {
+    let h = filtered(|e: &mut Output| {
+        if let Output::Start(start) = e {
             start.model = "alias".into();
         }
         Ok(())
@@ -493,9 +493,12 @@ async fn other_choices_a_filter_took_leave_their_chunks() {
     #[derive(Clone)]
     struct Plain;
 
-    impl Filter<Reply> for Plain {
-        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            if !matches!(reply, Reply::Other { .. }) {
+    impl Filter<Output> for Plain {
+        fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+            if !matches!(
+                reply,
+                Output::Native(respan_gateway_sdk::NativeValue { .. })
+            ) {
                 out.push(reply);
             }
             Ok(())
@@ -570,7 +573,7 @@ async fn a_guard_refuses_what_it_cannot_read() {
     #[async_trait]
     impl Plugin for Guard {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let chat = cx.input::<Conversation>()?;
+            let chat = cx.input::<Input>()?;
             if !chat.messages.iter().all(Message::is_plain) {
                 let why = "content the guard cannot read";
                 return Err(Fault::new(why)
@@ -595,7 +598,7 @@ async fn provider_edge_filters_run_before_client_edge_ones_each_last_added_first
     /// Marks the text on both edges.
     struct Mark(&'static str);
 
-    fn mark(tag: String) -> impl FnMut(&mut Reply) -> Result<(), Fault> + Send + 'static {
+    fn mark(tag: String) -> impl FnMut(&mut Output) -> Result<(), Fault> + Send + 'static {
         move |e| {
             if let Some(text) = text_of_mut(e) {
                 text.push_str(&tag);
@@ -636,15 +639,15 @@ async fn a_provider_filter_edits_a_call_a_plugin_collects() {
     #[async_trait]
     impl Plugin for Pick {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let ask = Conversation::new([Message::new(Role::User, "which?")]);
+            let ask = Input::new([Message::new(Role::User, "which?")]);
             let judge = cx.call("openai").with_input(judged(ask, "judge-1"));
             let verdict = judge
                 .await?
-                .outputs::<Reply>()
+                .outputs::<Output>()
                 .try_collect::<Vec<_>>()
                 .await?;
             let pick = verdict.iter().find_map(|e| match e {
-                Reply::Delta { delta, .. } => Some(delta.as_str().to_owned()),
+                Output::Delta { delta, .. } => Some(delta.as_str().to_owned()),
                 _ => None,
             });
             cx.set_target(pick.unwrap_or_default());
@@ -655,8 +658,8 @@ async fn a_provider_filter_edits_a_call_a_plugin_collects() {
     // Overrules the judge on the provider edge.
     let overrule =
         OnProvider(
-            |px| match px.input::<Conversation>()?.model.as_deref() == Some("judge-1") {
-                true => px.filter(move |r: &mut Reply| {
+            |px| match px.input::<Input>()?.model.as_deref() == Some("judge-1") {
+                true => px.filter(move |r: &mut Output| {
                     if let Some(text) = text_of_mut(r) {
                         *text = text.replace("openai", "backup");
                     }
@@ -684,17 +687,17 @@ async fn a_failed_input_filter_fails_the_input_for_every_later_reader() {
     #[async_trait]
     impl Plugin for Careless {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|chat: &mut Conversation| {
-                chat.temperature = Some(0.0);
+            cx.filter(|chat: &mut Input| {
+                chat.options.temperature = Some(0.0);
                 Ok(())
             })?;
-            let fails = |_: &mut Conversation| {
+            let fails = |_: &mut Input| {
                 Err(Fault::new("no")
                     .with(ErrorCode("no".into()))
                     .with(Status(StatusCode::FORBIDDEN)))
             };
             let _ = cx.filter(fails);
-            let read = cx.input::<Conversation>().err().map(|f| fault_code(&f));
+            let read = cx.input::<Input>().err().map(|f| fault_code(&f));
             assert_eq!(read.as_deref(), Some("no"));
             Ok(None)
         }
@@ -703,8 +706,8 @@ async fn a_failed_input_filter_fails_the_input_for_every_later_reader() {
     /// Drops the input.
     struct Gone;
 
-    impl Filter<Conversation> for Gone {
-        fn edit(&mut self, _chat: Conversation, _out: &mut Vec<Conversation>) -> Result<(), Fault> {
+    impl Filter<Input> for Gone {
+        fn edit(&mut self, _chat: Input, _out: &mut Vec<Input>) -> Result<(), Fault> {
             Ok(())
         }
     }
@@ -751,7 +754,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let call = cx.call("openai").with_extension(Mark);
             for _ in 0..2 {
-                let read = call.clone().await?.outputs::<Reply>();
+                let read = call.clone().await?.outputs::<Output>();
                 let _ = read.try_collect::<Vec<_>>().await?;
             }
             Err(Fault::not_found("done"))
@@ -762,7 +765,7 @@ async fn a_calls_own_filter_is_each_copys_own() {
                 return Ok(());
             }
             let (seen, mut count) = (self.0.clone(), 0);
-            px.filter(move |_: &mut Reply| {
+            px.filter(move |_: &mut Output| {
                 count += 1;
                 seen.lock().map(|mut s| s.push(count)).ok();
                 Ok(())
@@ -793,8 +796,8 @@ async fn a_filter_added_after_a_call_is_made_misses_that_whole_calls_input() {
     impl Plugin for FilterAfterCall {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let call = cx.call("openai");
-            cx.filter(|c: &mut Conversation| {
-                c.temperature = Some(0.0);
+            cx.filter(|c: &mut Input| {
+                c.options.temperature = Some(0.0);
                 Ok(())
             })?;
             Ok(Some(call.await?))
@@ -820,7 +823,7 @@ async fn r6_a_guard_refuses_a_plugins_answer_whether_or_not_it_awaited_first() {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let waits = self.0;
             // Its first content, which the guard sees before anything is written.
-            let answer = [Reply::start("cached", "gpt-x"), Reply::text(0, "bomb")];
+            let answer = [Output::start("cached", "gpt-x"), Output::text(0, "bomb")];
             let answer = futures::StreamExt::then(
                 futures::stream::iter(answer.map(Ok)),
                 move |r| async move {
@@ -836,7 +839,7 @@ async fn r6_a_guard_refuses_a_plugins_answer_whether_or_not_it_awaited_first() {
     }
 
     let status = |waits: bool| async move {
-        let guard = Guard(|e| matches!(e, Reply::Delta { delta, .. } if delta.as_str() == "bomb"));
+        let guard = Guard(|e| matches!(e, Output::Delta { delta, .. } if delta.as_str() == "bomb"));
         let h = Harness::new(vec![Arc::new(guard), Arc::new(Answer(waits))], None);
         h.send(unary_chat()).await.0
     };

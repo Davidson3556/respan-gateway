@@ -15,6 +15,7 @@
 //! `cargo run -p respan-gateway-examples --example embedded`
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_conversation::Input;
 use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::Meter;
 use respan_gateway_http::bytes::Bytes;
@@ -22,7 +23,6 @@ use respan_gateway_http::http::HeaderValue;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{HttpClient, http};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::futures::future::join;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{Fault, Gateway};
@@ -37,8 +37,8 @@ fn gateway(
     tally: Meter,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, provider)?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat, provider)?
+        .client::<Input, _, _>(OpenAiChat)?
         .plugin(tally)
         .target("openai")
 }

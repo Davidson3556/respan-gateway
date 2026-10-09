@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
+use respan_gateway_conversation::Input;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::{self, BodyExt};
 use respan_gateway_http::{Body, CallHeaders, Credential, Outgoing, Wire};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -55,7 +55,7 @@ type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 
 fn add_provider<F>(name: &str, format: F, transport: scripted::ScriptedAt) -> AddProvider
 where
-    F: respan_gateway_sdk::Format<Outgoing, respan_gateway_sdk::conversation::Reply, Conversation>,
+    F: respan_gateway_sdk::Format<Outgoing, respan_gateway_conversation::Output, Input>,
 {
     let name = name.to_owned();
     Box::new(move |gw| {
@@ -75,7 +75,7 @@ fn gateway(
     let gw = providers
         .into_iter()
         .try_fold(Gateway::new(), |gw, add| add(gw))?
-        .client::<Conversation, _, _>(OpenAiChat)?;
+        .client::<Input, _, _>(OpenAiChat)?;
     let gw = plugins.into_iter().fold(gw, Gateway::plugin);
     let gw = gw.plugin(relay::Relay::RAW);
     match target {
@@ -150,8 +150,8 @@ struct Cool;
 #[async_trait]
 impl Plugin for Cool {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|chat: &mut Conversation| {
-            chat.temperature = Some(0.0);
+        cx.filter(|chat: &mut Input| {
+            chat.options.temperature = Some(0.0);
             Ok(())
         })?;
         cx.call("openai").await.map(Some)
@@ -575,7 +575,7 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
     }
 
     let provider: AddProvider = Box::new(|gw| {
-        gw.provider::<Conversation, _, _>(
+        gw.provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(

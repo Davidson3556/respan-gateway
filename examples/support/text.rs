@@ -4,10 +4,10 @@
 //! Read and rewrite the chat kind's text safely across stream deltas; refuse
 //! what cannot be read.
 //!
-//! - [`Readable`]: all the text of a [`Conversation`] or a [`Reply`], tools
+//! - [`Readable`]: all the text of a [`Input`] or an [`Output`], tools
 //!   and tool calls included, to read or edit, or a refusal if it carries
 //!   content with no text form, such as an image.
-//! - [`Holdback`]: a [`Reply`] filter that holds back trailing text that may
+//! - [`Holdback`]: an [`Output`] filter that holds back trailing text that may
 //!   start a match, so a [`Rewrite`] sees each match whole, in text and in a
 //!   streamed tool call's arguments.
 //! - [`Placeholders`]: hide values behind `<LABEL_n>` and restore them, a
@@ -17,9 +17,9 @@ use respan_gateway_sdk::ErrorCode;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use respan_gateway_conversation::{Block, Content, Delta, Input, Output, ToolChoice};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_sdk::conversation::{Block, Content, Conversation, Delta, Reply, ToolChoice};
 use respan_gateway_sdk::{Fault, Filter};
 use serde_json::{self, Map, Value};
 
@@ -279,7 +279,9 @@ fn readable_part(part: &Content) -> bool {
     match part {
         Content::Text { .. } | Content::ToolCall { .. } => true,
         Content::ToolResult { content, .. } => content.iter().all(readable_part),
-        Content::Other { format, raw, .. } if format.as_ref() == "anthropic-messages" => {
+        Content::Native(respan_gateway_sdk::NativeValue {
+            format, value: raw, ..
+        }) if format.as_ref() == "anthropic-messages" => {
             matches!(raw["type"].as_str(), Some("tool_use" | "tool_result"))
                 && readable_anthropic(raw)
         }
@@ -299,7 +301,7 @@ fn edit_content(part: &mut Content, edit: &mut Edit) -> Result<(), Fault> {
         Content::ToolResult { content, .. } => content
             .iter_mut()
             .try_for_each(|part| edit_content(part, edit)),
-        Content::Other { raw, .. } => {
+        Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) => {
             let raw = Arc::make_mut(raw);
             if raw["type"] == "tool_use" {
                 if let Some(Value::String(name)) = raw.get_mut("name") {
@@ -329,7 +331,7 @@ fn edit_content(part: &mut Content, edit: &mut Edit) -> Result<(), Fault> {
 /// messages' and the request's fields the kind has no place for (a tool
 /// call, tools), Anthropic tool inputs and text results, the stop sequences
 /// and the end user's id. Content with no text form, such as an image, is refused.
-impl Readable for Conversation {
+impl Readable for Input {
     fn edit_all(
         &mut self,
         mut edit: impl FnMut(&mut String) -> Result<(), Fault>,
@@ -342,9 +344,11 @@ impl Readable for Conversation {
             for part in &mut message.content {
                 edit_content(part, &mut edit)?;
             }
-            edit_fields(&mut message.extra.fields, &mut edit)?;
+            if let Some(native) = &mut message.native {
+                edit_fields(&mut native.fields, &mut edit)?;
+            }
         }
-        for text in self.stop.iter_mut().chain(&mut self.user) {
+        for text in self.options.stop.iter_mut().chain(&mut self.user) {
             edit(text)?;
         }
         for tool in &mut self.tools {
@@ -353,12 +357,17 @@ impl Readable for Conversation {
                 edit(text)?;
             }
             edit_json(&mut tool.parameters, false, &mut edit)?;
-            edit_fields(&mut tool.extra.fields, &mut edit)?;
+            if let Some(native) = &mut tool.native {
+                edit_fields(&mut native.fields, &mut edit)?;
+            }
         }
-        if let Some(ToolChoice::Tool(name)) = &mut self.tool_choice {
+        if let Some(ToolChoice::Tool(name)) = &mut self.options.tool_choice {
             edit(name)?;
         }
-        edit_fields(&mut self.extra.fields, &mut edit)
+        if let Some(native) = &mut self.native {
+            edit_fields(&mut native.fields, &mut edit)?;
+        }
+        Ok(())
     }
 }
 
@@ -523,11 +532,13 @@ fn inert(format: &str, raw: &Value) -> bool {
     }
 }
 
-/// Whether a reader knows `reply`: every event but an [`Reply::Other`] it
+/// Whether a reader knows `reply`: every event but an [`Output::Native`] it
 /// has no reading for.
-fn readable_event(reply: &Reply) -> bool {
+fn readable_event(reply: &Output) -> bool {
     match reply {
-        Reply::Other { format, raw } => readable_other(format, raw),
+        Output::Native(respan_gateway_sdk::NativeValue { format, value: raw }) => {
+            readable_other(format, raw)
+        }
         _ => true,
     }
 }
@@ -537,7 +548,7 @@ fn readable_event(reply: &Reply) -> bool {
 /// arguments are deltas too ([`Delta::Arguments`]): a [`Holdback`] reads them
 /// as JSON text. In a stream a match split across deltas is not seen whole,
 /// unless a [`Holdback`] holds them.
-impl Readable for Reply {
+impl Readable for Output {
     fn edit_all(
         &mut self,
         mut edit: impl FnMut(&mut String) -> Result<(), Fault>,
@@ -565,14 +576,16 @@ fn edit_arguments(arguments: &mut String, edit: &mut Edit) -> Result<(), Fault> 
     }
 }
 
-fn edit_event(reply: &mut Reply, edit: &mut Edit) -> Result<(), Fault> {
+fn edit_event(reply: &mut Output, edit: &mut Edit) -> Result<(), Fault> {
     match reply {
-        Reply::Delta { delta, .. } => edit(delta.as_mut_string()),
-        Reply::BlockStart {
+        Output::Delta { delta, .. } => edit(delta.as_mut_string()),
+        Output::BlockStart {
             kind: Block::ToolCall { name, .. },
             ..
         } => edit(name),
-        Reply::Other { format, raw } if !inert(format, raw) => {
+        Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+            if !inert(format, raw) =>
+        {
             let delta = is_delta(raw);
             edit_raw(Arc::make_mut(raw), "", delta, edit)
         }
@@ -616,7 +629,7 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
     longest
 }
 
-/// A [`Reply`] filter that runs every text through a [`Rewrite`], holding
+/// A [`Output`] filter that runs every text through a [`Rewrite`], holding
 /// back what may start a match. A text or reasoning delta is text, a tool
 /// call's [`Delta::Arguments`] are JSON text, so a match split across their
 /// fragments is seen whole and what replaces it is escaped as JSON. A tail
@@ -628,7 +641,7 @@ pub fn partial_match<'a>(text: &str, terms: impl IntoIterator<Item = &'a str>) -
 /// would move text into a block that does not say it. Events that show
 /// nothing yet (the start, a block opening, held text) wait, in order, until
 /// one that shows something, so nothing is sent while the start is held; an
-/// event that is no content ([`Reply::is_content`]), such as a keep-alive or
+/// event that is no content ([`Output::is_content`]), such as a keep-alive or
 /// usage alone, passes at once unless events wait before it. Other events are
 /// rewritten as [`Readable`] reads them, and refused if it cannot read them.
 #[derive(Debug)]
@@ -640,7 +653,7 @@ pub struct Holdback<R> {
     /// The tails of tool calls' arguments held, by block.
     calls: BTreeMap<u32, String>,
     /// Events that show nothing yet, in order.
-    waiting: Vec<Reply>,
+    waiting: Vec<Output>,
     /// Whether an event that shows something has gone out.
     shown: bool,
 }
@@ -665,33 +678,33 @@ impl<R: Rewrite> Holdback<R> {
     }
 
     /// Release the held text, rewritten, as a delta.
-    fn release_text(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn release_text(&mut self, out: &mut Vec<Output>) -> Result<(), Fault> {
         if let Some((block, mut delta)) = self.held.take() {
             let text = self.rewritten(delta.as_str())?;
             if !text.is_empty() {
                 *delta.as_mut_string() = text;
-                out.push(Reply::Delta { block, delta });
+                out.push(Output::Delta { block, delta });
             }
         }
         Ok(())
     }
 
     /// Release the arguments held of call `block`, rewritten, as a delta.
-    fn release_call(&mut self, block: u32, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn release_call(&mut self, block: u32, out: &mut Vec<Output>) -> Result<(), Fault> {
         if let Some(mut text) = self.calls.remove(&block) {
             edit_json_text(&mut text, &mut |t| {
                 *t = self.rewritten(t)?;
                 Ok(())
             })?;
             if !text.is_empty() {
-                out.push(Reply::arguments(block, text));
+                out.push(Output::arguments(block, text));
             }
         }
         Ok(())
     }
 
     /// Release everything held: the text, then each call's arguments.
-    fn release_all(&mut self, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn release_all(&mut self, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.release_text(out)?;
         let blocks: Vec<u32> = self.calls.keys().copied().collect();
         blocks
@@ -702,7 +715,7 @@ impl<R: Rewrite> Holdback<R> {
     /// Hold back the tail of call `block`'s `arguments` that may start a
     /// match or is a cut-off escape, with what was held of the call before
     /// in front; rewrite the rest.
-    fn hold_call(&mut self, block: u32, delta: String, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn hold_call(&mut self, block: u32, delta: String, out: &mut Vec<Output>) -> Result<(), Fault> {
         let mut text = self.calls.remove(&block).unwrap_or_default() + &delta;
         let cut = held_from(&text, |t| self.rewrite.pending(t));
         let tail = text.split_off(cut);
@@ -714,7 +727,7 @@ impl<R: Rewrite> Holdback<R> {
             Ok(())
         })?;
         if !text.is_empty() {
-            out.push(Reply::arguments(block, text));
+            out.push(Output::arguments(block, text));
         }
         Ok(())
     }
@@ -725,7 +738,7 @@ impl<R: Rewrite> Holdback<R> {
         &mut self,
         block: u32,
         mut delta: Delta,
-        out: &mut Vec<Reply>,
+        out: &mut Vec<Output>,
     ) -> Result<(), Fault> {
         let other = |(b, held): &(u32, Delta)| {
             *b != block || std::mem::discriminant(held) != std::mem::discriminant(&delta)
@@ -748,15 +761,15 @@ impl<R: Rewrite> Holdback<R> {
         let text = self.rewritten(&text)?;
         if !text.is_empty() {
             *delta.as_mut_string() = text;
-            out.push(Reply::Delta { block, delta });
+            out.push(Output::Delta { block, delta });
         }
         Ok(())
     }
 
     /// The events `reply` becomes, in order.
-    fn rewrite_event(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn rewrite_event(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         match reply {
-            Reply::BlockStart { block, kind } => {
+            Output::BlockStart { block, kind } => {
                 self.release_text(out)?;
                 let kind = match kind {
                     Block::ToolCall { id, name } => {
@@ -765,25 +778,26 @@ impl<R: Rewrite> Holdback<R> {
                     }
                     kind => kind,
                 };
-                out.push(Reply::block_start(block, kind));
+                out.push(Output::block_start(block, kind));
             }
-            Reply::Delta { block, delta } => match delta {
+            Output::Delta { block, delta } => match delta {
                 Delta::Arguments(arguments) => self.hold_call(block, arguments, out)?,
                 delta => self.hold_text(block, delta, out)?,
             },
-            Reply::BlockEnd { block } => {
+            Output::BlockEnd { block } => {
                 if self.held.as_ref().is_some_and(|(b, _)| *b == block) {
                     self.release_text(out)?;
                 }
                 self.release_call(block, out)?;
-                out.push(Reply::block_end(block));
+                out.push(Output::block_end(block));
             }
-            Reply::Finish(finish) => {
+            Output::Finish(finish) => {
                 self.release_all(out)?;
-                out.push(Reply::Finish(finish));
+                out.push(Output::Finish(finish));
             }
-            mut other @ Reply::Other { .. } => {
-                if !matches!(&other, Reply::Other { format, raw } if inert(format, raw)) {
+            mut other @ Output::Native(respan_gateway_sdk::NativeValue { .. }) => {
+                if !matches!(&other, Output::Native(respan_gateway_sdk::NativeValue { format, value: raw }) if inert(format, raw))
+                {
                     self.release_text(out)?;
                 }
                 edit_event(&mut other, &mut |text| {
@@ -799,10 +813,10 @@ impl<R: Rewrite> Holdback<R> {
 
     /// Send `event`, or let it wait if nothing has been shown yet and it
     /// shows nothing.
-    fn emit(&mut self, event: Reply, out: &mut Vec<Reply>) {
+    fn emit(&mut self, event: Output, out: &mut Vec<Output>) {
         let shows = match &event {
-            Reply::Finish(_) | Reply::Delta { .. } => true,
-            Reply::BlockStart { kind, .. } => matches!(kind, Block::ToolCall { .. }),
+            Output::Finish(_) | Output::Delta { .. } => true,
+            Output::BlockStart { kind, .. } => matches!(kind, Block::ToolCall { .. }),
             _ => false,
         };
         // No content, such as a keep-alive or usage alone, is not delayed
@@ -817,8 +831,8 @@ impl<R: Rewrite> Holdback<R> {
     }
 }
 
-impl<R: Rewrite> Filter<Reply> for Holdback<R> {
-    fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+impl<R: Rewrite> Filter<Output> for Holdback<R> {
+    fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
         if !readable_event(&reply) {
             return Err(unreadable("content this reader does not know"));
         }
@@ -828,7 +842,7 @@ impl<R: Rewrite> Filter<Reply> for Holdback<R> {
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
         out.append(&mut self.waiting);
         self.release_all(out)
     }

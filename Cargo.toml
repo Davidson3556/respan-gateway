@@ -12,7 +12,10 @@ repository = "https://github.com/respanai/respan-gateway"
 publish = false
 
 [workspace.dependencies]
+respan-gateway-mcp-messages = { path = "crates/mcp-messages" }
+respan-gateway-realtime = { path = "crates/realtime" }
 respan-gateway-core = { path = "crates/core" }
+respan-gateway-conversation = { path = "crates/conversation" }
 respan-gateway-sdk = { path = "crates/sdk" }
 respan-gateway-http = { path = "crates/http" }
 respan-gateway-plugins = { path = "crates/plugins" }
@@ -23,6 +26,7 @@ respan-gateway-ws = { path = "crates/ws" }
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
+base64 = "0.22"
 futures = "0.3"
 getrandom = "0.3"
 http = "1"

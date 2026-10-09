@@ -24,14 +24,15 @@ use http_body_util::{BodyExt, StreamBody};
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
-use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_http::formats::opaque::{self};
+use respan_gateway_http::formats::opaque::{Got, Sent};
 
+use respan_gateway_conversation::{Delta, Input, Message, Output, Role};
 use respan_gateway_http::Encoder;
 use respan_gateway_http::formats::set_path;
 use respan_gateway_http::{Completion, Incoming, Outgoing, Wire};
 use respan_gateway_http::{http, http_body, http_body_util};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Conversation, Delta, Message, Reply, Role};
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
@@ -719,13 +720,13 @@ async fn a_bridge_calls_a_provider_of_another_kind_once_per_input_and_streams_ba
             }
             let call = cx.call(self.0);
             let heard = cx.take_inputs::<Say>().and_then(move |say| {
-                let mut chat = Conversation::new([Message::new(Role::User, say.0)]);
+                let mut chat = Input::new([Message::new(Role::User, say.0)]);
                 chat.model = Some("gpt-x".into());
                 let call = call.clone().with_input(chat);
                 async move {
                     let replies = call.await?;
                     Ok(replies
-                        .outputs::<Reply>()
+                        .outputs::<Output>()
                         .try_filter_map(|reply| async move { Ok(heard(&reply)) }))
                 }
             });
@@ -759,9 +760,9 @@ async fn a_bridge_calls_a_provider_of_another_kind_once_per_input_and_streams_ba
 }
 
 /// The text of `reply`, if it has any, as heard.
-fn heard(reply: &Reply) -> Option<Heard> {
+fn heard(reply: &Output) -> Option<Heard> {
     match reply {
-        Reply::Delta {
+        Output::Delta {
             delta: Delta::Text(text),
             ..
         } if !text.is_empty() => Some(Heard(text.clone())),
@@ -1963,11 +1964,14 @@ impl Plugin for WsToSse {
         let heard = cx
             .take_inputs::<Say>()
             .and_then(move |say| {
-                let mut chat = Conversation::new([Message::new(Role::User, say.0)]);
+                let mut chat = Input::new([Message::new(Role::User, say.0)]);
                 chat.model = Some("gpt-x".into());
-                chat.stream = true;
-                let reply = call.clone().with_input(chat);
-                async move { Ok(reply.await?.outputs::<Reply>()) }
+
+                let reply = call
+                    .clone()
+                    .with_input(chat)
+                    .with_extension(respan_gateway_providers::StreamResponse(true));
+                async move { Ok(reply.await?.outputs::<Output>()) }
             })
             .try_flatten()
             .try_filter_map(|reply| async move { Ok(heard(&reply)) });

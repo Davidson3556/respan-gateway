@@ -115,11 +115,8 @@ async fn the_client_gets_the_streaming_it_asked_for_whatever_a_plugin_asks_of_th
     #[async_trait]
     impl Plugin for Whole {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            use respan_gateway_sdk::conversation::Conversation;
-            cx.filter(|chat: &mut Conversation| {
-                chat.stream = false;
-                Ok(())
-            })?;
+            cx.extensions_mut()
+                .insert(respan_gateway_providers::StreamResponse(false));
             Ok(None)
         }
     }
@@ -200,7 +197,7 @@ async fn unary_responses_translate_both_ways() {
 
 #[tokio::test]
 async fn generated_named_model_text_and_usage_relay_in_native_formats() {
-    let router = ModelRouter::new(|c: &Conversation| c.model.as_deref()).route("gpt", "openai");
+    let router = ModelRouter::new(|c: &Input| c.model.as_deref()).route("gpt", "openai");
     let h = Harness::with(vec![Arc::new(router)]).await;
     for stream in [false, true] {
         h.openai.answer(Answer::text("Hello from OpenAI"));
@@ -473,7 +470,7 @@ async fn an_empty_plugin_made_stream_is_a_whole_anthropic_stream() {
     #[async_trait]
     impl Plugin for Silent {
         async fn on_client(&self, _cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            let none = futures::stream::empty::<Result<Reply, Fault>>();
+            let none = futures::stream::empty::<Result<Output, Fault>>();
             Ok(Some(Response::stream(none)))
         }
     }
@@ -544,15 +541,15 @@ async fn a_guardrail_ending_an_anthropic_stream_early_ends_it() {
     #[derive(Clone)]
     struct Cut;
 
-    impl Filter<Reply> for Cut {
-        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Cut {
+        fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             match reply {
-                Reply::Delta {
+                Output::Delta {
                     block,
                     delta: Delta::Text(text),
                 } if text == " world" => {
-                    out.push(Reply::text(block, " [cut]"));
-                    out.push(Reply::finished(Finish::Filtered));
+                    out.push(Output::text(block, " [cut]"));
+                    out.push(Output::finished(Finish::Filtered));
                 }
                 reply => out.push(reply),
             }

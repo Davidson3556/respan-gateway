@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use respan_gateway_http::formats::opaque::{self, Got, Sent};
+use respan_gateway_http::formats::opaque::{self};
+use respan_gateway_http::formats::opaque::{Got, Sent};
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
@@ -578,7 +579,8 @@ async fn tap(
 #[path = "../../../../tests/support/hooks.rs"]
 mod hooks;
 pub use hooks::{Calls, Outcomes};
-use respan_gateway_ws::{ClientEvent, JsonEvents, WsTransport};
+use respan_gateway_realtime::Input;
+use respan_gateway_ws::{JsonEvents, WsTransport};
 
 /// A gateway that relays every session to the provider at `base` in format
 /// `Raw`, with the recorders of how requests and calls end registered first.
@@ -622,9 +624,9 @@ impl Via {
                 let events = JsonEvents::new("realtime", "/v1/realtime");
                 let transport = WsTransport::new(base).unwrap();
                 let gateway = Gateway::new()
-                    .client::<ClientEvent, _, _>(events.clone())
+                    .client::<Input, _, _>(events.clone())
                     .unwrap()
-                    .provider::<ClientEvent, _, _>("p", events, transport.connect())
+                    .provider::<Input, _, _>("p", events, transport.connect())
                     .unwrap()
                     .plugin(ends.clone())
                     .plugin(calls.clone())

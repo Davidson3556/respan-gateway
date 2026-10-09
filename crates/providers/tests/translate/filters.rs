@@ -8,10 +8,10 @@ async fn a_filter_can_turn_content_of_another_format_into_text() {
     /// block, which the kind has no form for.
     struct Thought;
 
-    impl Filter<Reply> for Thought {
-        fn edit(&mut self, reply: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    impl Filter<Output> for Thought {
+        fn edit(&mut self, reply: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             match &reply {
-                Reply::Other { format, raw }
+                Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
                     if &**format == "anthropic-messages"
                         && raw["content_block"]["type"] == "redacted_thinking" =>
                 {
@@ -88,10 +88,10 @@ async fn a_filter_edits_events_that_share_a_chunk_while_translating() {
     #[async_trait]
     impl Plugin for Truncated {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|r: &mut Reply| {
+            cx.filter(|r: &mut Output| {
                 match r {
-                    Reply::Start(start) => start.model = "alias".into(),
-                    Reply::Finish(finish) => *finish = Finish::Length,
+                    Output::Start(start) => start.model = "alias".into(),
+                    Output::Finish(finish) => *finish = Finish::Length,
                     _ => {}
                 }
                 Ok(())
@@ -249,12 +249,12 @@ async fn a_block_a_filter_adds_to_a_whole_message_is_appended() {
 fn a_filter_is_tested_on_its_own() {
     let mut footer = Footer(0, None);
     let mut out = Vec::new();
-    let _ = footer.edit(Reply::finished(Finish::Stop), &mut out);
+    let _ = footer.edit(Output::finished(Finish::Stop), &mut out);
     // The finish is kept back to the end.
     assert!(out.is_empty());
     let _ = footer.end(&Ok(()), &mut out);
     let mut footed = text(0, " [footer]");
-    footed.push(Reply::finished(Finish::Stop));
+    footed.push(Output::finished(Finish::Stop));
     assert_eq!(out, footed);
 }
 
@@ -344,9 +344,9 @@ async fn made_text_stays_out_of_a_thinking_block() {
     #[derive(Clone)]
     struct OwnNote(bool);
 
-    impl Filter<Reply> for OwnNote {
-        fn edit(&mut self, event: Reply, out: &mut Vec<Reply>) -> Result<(), Fault> {
-            let first = matches!(event, Reply::Start(_)) && !std::mem::replace(&mut self.0, true);
+    impl Filter<Output> for OwnNote {
+        fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+            let first = matches!(event, Output::Start(_)) && !std::mem::replace(&mut self.0, true);
             out.push(event);
             if first {
                 out.extend(text(9, "Note: "));

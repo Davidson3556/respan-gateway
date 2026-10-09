@@ -1,6 +1,6 @@
 //! A model in this process, reached as a provider: a [`Format`] that only
 //! dials, its I/O value the shared model. No bytes are written or read: it
-//! takes the call's [`Conversation`] and answers with [`Reply`]s, which any
+//! takes the call's [`Input`] and answers with [`Output`]s, which any
 //! client of the conversation kind (OpenAI Chat, Anthropic Messages) gets in
 //! its own protocol, JSON or SSE as it asked. It is a full provider, so it
 //! can be a target or a fallback, and every provider-edge plugin (billing,
@@ -13,9 +13,9 @@
 use respan_gateway_sdk::BadRequest;
 use std::sync::Arc;
 
+use respan_gateway_conversation::{Block, Finish, Input, Output, units};
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::{Block, Conversation, Finish, Reply, units};
 use respan_gateway_sdk::futures::FutureExt;
 use respan_gateway_sdk::futures::channel::oneshot;
 use respan_gateway_sdk::futures::{sink, stream};
@@ -26,10 +26,10 @@ mod http_support;
 use http_support::{post, read_whole, serve};
 
 /// Your model: a conversation in, its answer out.
-type Model = Arc<dyn Fn(&Conversation) -> Result<String, Fault> + Send + Sync>;
+type Model = Arc<dyn Fn(&Input) -> Result<String, Fault> + Send + Sync>;
 
 /// A toy model that echoes the last message.
-fn echo(chat: &Conversation) -> Result<String, Fault> {
+fn echo(chat: &Input) -> Result<String, Fault> {
     let last = chat.messages.last().map(|m| m.text()).unwrap_or_default();
     Ok(format!("you said: {last}"))
 }
@@ -37,15 +37,15 @@ fn echo(chat: &Conversation) -> Result<String, Fault> {
 /// A model in this process: each provider attempt receives a model handle.
 struct Local;
 
-impl Format<Model, Reply, Conversation> for Local {
+impl Format<Model, Output, Input> for Local {
     fn name(&self) -> &str {
         "local"
     }
 
-    fn bind(&self, model: Model) -> Result<Connection<Reply, Conversation>, Fault> {
+    fn bind(&self, model: Model) -> Result<Connection<Output, Input>, Fault> {
         let (send, receive) = oneshot::channel();
         let incoming = async move { receive.await.map_err(|_| Fault::abandoned()) };
-        let outgoing = EventSink::preparing(move |flow: &mut EventStream<Conversation>| {
+        let outgoing = EventSink::preparing(move |flow: &mut EventStream<Input>| {
             let chat = flow
                 .value()
                 .transpose()?
@@ -59,17 +59,17 @@ impl Format<Model, Reply, Conversation> for Local {
             usage.add(units::INPUT_TOKENS, prompt);
             usage.add(units::OUTPUT_TOKENS, words(&answer));
             let model = chat.model.clone().unwrap_or_else(|| "local".into());
-            let mut replies = vec![Reply::start("local-1", model)];
+            let mut replies = vec![Output::start("local-1", model)];
             // Each word keeps the space before the next: "you ", "said: ", ...
-            replies.push(Reply::block_start(0, Block::Text));
-            replies.extend(answer.split_inclusive(' ').map(|w| Reply::text(0, w)));
-            replies.push(Reply::block_end(0));
-            replies.push(Reply::usage(usage));
-            replies.push(Reply::finished(Finish::Stop));
+            replies.push(Output::block_start(0, Block::Text));
+            replies.extend(answer.split_inclusive(' ').map(|w| Output::text(0, w)));
+            replies.push(Output::block_end(0));
+            replies.push(Output::usage(usage));
+            replies.push(Output::finished(Finish::Stop));
             let outputs = EventStream::stream(stream::iter(replies.into_iter().map(Ok)));
             Ok(sink::unfold(
                 Some((send, outputs)),
-                |state, item: Result<Conversation, Fault>| async move {
+                |state, item: Result<Input, Fault>| async move {
                     item?;
                     if let Some((send, outputs)) = state {
                         let _ = send.send(outputs);
@@ -85,8 +85,8 @@ impl Format<Model, Reply, Conversation> for Local {
 fn gateway() -> Result<Gateway, Fault> {
     let model: Model = Arc::new(echo);
     Gateway::new()
-        .provider::<Conversation, _, _>("local", Local, move |_| model.clone())?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("local", Local, move |_| model.clone())?
+        .client::<Input, _, _>(OpenAiChat)?
         .target("local")
 }
 

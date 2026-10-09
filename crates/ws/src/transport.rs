@@ -598,7 +598,8 @@ mod tests {
     use respan_gateway_http::http_body_util::BodyExt;
     use respan_gateway_sdk::{Gateway, Plugin, ProviderContext, async_trait};
 
-    use crate::{ClientEvent, JsonEvents};
+    use crate::JsonEvents;
+    use respan_gateway_realtime::Input;
 
     #[test]
     fn upgrades_require_the_key_and_only_negotiated_protocols() {
@@ -891,8 +892,8 @@ mod tests {
         let format = JsonEvents::new("json-ws", "/events");
         let limit = transport.limits.max_message;
         let gateway = Gateway::new()
-            .provider::<ClientEvent, _, _>("ws", format.clone(), transport.connect())
-            .and_then(|g| g.client::<ClientEvent, _, _>(format))
+            .provider::<Input, _, _>("ws", format.clone(), transport.connect())
+            .and_then(|g| g.client::<Input, _, _>(format))
             .map(|g| g.plugin(ended.clone()))
             .and_then(|g| g.target("ws"))
             .expect("gateway");

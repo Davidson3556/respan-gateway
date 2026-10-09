@@ -5,16 +5,16 @@
 //!
 //! A stream and a whole body decode into the same events, by these rules:
 //!
-//! - [`Reply::Start`] comes from `message_start`, or the body's `id` and
-//!   `model`; its `extra` holds the message's other fields.
+//! - [`Output::Start`] comes from `message_start`, or the body's `id` and
+//!   `model`; its `native` holds the message's other fields.
 //! - Blocks are numbered by their `index`. A `text`, `tool_use` or
 //!   `thinking` block opens a [`Block::Text`], [`Block::ToolCall`] or
 //!   [`Block::Reasoning`]; `text_delta`, `input_json_delta` and
 //!   `thinking_delta` are its deltas, and `content_block_stop` its end. A
 //!   whole body's blocks are the same events, one delta each.
-//! - `message_delta`'s `stop_reason` is the [`Reply::Finish`]; `usage` of
-//!   `message_start` and `message_delta` are [`Reply::Usage`] increments.
-//! - What the kind has no form for is a [`Reply::Other`] of this format, as
+//! - `message_delta`'s `stop_reason` is the [`Output::Finish`]; `usage` of
+//!   `message_start` and `message_delta` are [`Output::Usage`] increments.
+//! - What the kind has no form for is a [`Output::Native`] of this format, as
 //!   the stream event that carries it: `ping`, a `signature_delta`, a block
 //!   of another type (and its deltas and stop), citations, a `stop_sequence`
 //!   (as a `message_delta`), an event of an unknown type. In a whole body a
@@ -26,8 +26,10 @@
 //! deltas, until that one ends. A whole body is written from the events
 //! collected, empty text blocks left out, as Anthropic refuses them.
 
+use crate::common::NativeFieldsExt;
 use bytes::Bytes;
 use http::HeaderValue;
+use respan_gateway_conversation::{Assembled, ReplyItem};
 use respan_gateway_http::bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{
@@ -36,20 +38,19 @@ use respan_gateway_http::{
 };
 use respan_gateway_sdk::EventStream as TypedStream;
 use respan_gateway_sdk::futures::stream::BoxStream;
-use respan_gateway_sdk::{Assembled, ReplyItem};
 use respan_gateway_sdk::{BadRequest, Connection, EventSink, Fault, Format};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 use crate::Usage;
 use crate::common::{
-    Gate, Names, Reader, ReplyParser, Totals, UnaryEncoder, Wire, ended, error_event, extra_of,
-    fits, is_inert, merge_fields, post_json, read_content, read_message, refusal, set, stop_json,
-    supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
+    Gate, Names, Reader, ReplyParser, Totals, UnaryEncoder, Wire, ended, error_event, fits,
+    is_inert, merge_fields, native_fields, post_json, read_content, read_message, refusal, set,
+    stop_json, supported_usage, tag, unreadable_event, unsupported_fields, unwritable_content,
     unwritable_usage, usage_extra, write_content, write_message,
 };
 use crate::conversation::{
-    Block, Content, Conversation, Delta, Finish, Message, Reply, Role, Start, units,
+    Block, Content, Delta, Finish, Input, Message, Output, Role, Start, units,
 };
 use crate::errors::{merge_details, says, says_error};
 use crate::formats::sse::{event, event_json, is_stream};
@@ -96,25 +97,22 @@ impl AnthropicMessages {
     }
 
     /// Read a request lazily.
-    pub fn read_request(
-        &self,
-        request: http::Request<Body>,
-    ) -> Result<TypedStream<Conversation>, Fault> {
+    pub fn read_request(&self, request: http::Request<Body>) -> Result<TypedStream<Input>, Fault> {
         Ok(respan_gateway_http::messages(request, |_, raw| {
             Self.decode_request(raw)
         }))
     }
 
     /// Decode a finite request synchronously.
-    pub fn decode_request(&self, bytes: Bytes) -> Result<Conversation, Fault> {
+    pub fn decode_request(&self, bytes: Bytes) -> Result<Input, Fault> {
         crate::common::read_request::<Self>(bytes)
     }
 
     /// Prepare a finite provider request before any transport I/O.
     pub fn write_request(
         &self,
-        source: &mut TypedStream<Conversation>,
-    ) -> Result<(http::Request<Body>, EventSink<Conversation>), Fault> {
+        source: &mut TypedStream<Input>,
+    ) -> Result<(http::Request<Body>, EventSink<Input>), Fault> {
         let (mut request, sink) = post_json::<Self>(source, "/v1/messages")?;
         request
             .headers_mut()
@@ -132,7 +130,7 @@ impl AnthropicMessages {
         &self,
         response: http::Response<Body>,
         call: http::Request<Bytes>,
-    ) -> BoxStream<'static, Result<Reply, Fault>> {
+    ) -> BoxStream<'static, Result<Output, Fault>> {
         crate::common::read_response::<Self>(response, &call.into_parts().0, |body| {
             let parser = Self.parser(true, body.limit());
             crate::formats::read(
@@ -152,7 +150,7 @@ impl AnthropicMessages {
         &self,
         head: &mut ResponseHead,
         request: &http::Request<Bytes>,
-    ) -> Option<Box<dyn Encoder<Reply>>> {
+    ) -> Option<Box<dyn Encoder<Output>>> {
         crate::common::response_encoder(head, request, |head, _asked| match is_stream(head) {
             false => Box::new(UnaryEncoder::<Self>::new()),
             true => Box::new(EventStream::default()),
@@ -163,8 +161,8 @@ impl AnthropicMessages {
     pub fn write_response(
         &self,
         reply: respan_gateway_http::Reply,
-        source: &mut TypedStream<Reply>,
-    ) -> Result<EventSink<Reply>, Fault> {
+        source: &mut TypedStream<Output>,
+    ) -> Result<EventSink<Output>, Fault> {
         let mut head = reply.head();
         Ok(match self.response_encoder(&mut head, reply.request()) {
             Some(encoder) => reply.write(head, encoder),
@@ -186,7 +184,7 @@ impl AnthropicMessages {
     pub fn encode_response(
         &self,
         request: &http::Request<Bytes>,
-        replies: &[Reply],
+        replies: &[Output],
     ) -> Result<http::Response<Bytes>, Fault> {
         let mut head = http::Response::new(()).into_parts().0;
         let encoder = self.response_encoder(&mut head, request);
@@ -198,7 +196,7 @@ impl AnthropicMessages {
         &self,
         response: http::Response<Bytes>,
         call: &RequestHead,
-    ) -> Result<Vec<Reply>, Fault> {
+    ) -> Result<Vec<Output>, Fault> {
         let (mut head, bytes) = response.into_parts();
         if head.status.is_success() && respan_gateway_http::bodiless(&call.method, head.status) {
             return Ok(Vec::new());
@@ -218,7 +216,7 @@ impl AnthropicMessages {
     }
 }
 
-impl Format<Incoming, Conversation, Reply> for AnthropicMessages {
+impl Format<Incoming, Input, Output> for AnthropicMessages {
     fn name(&self) -> &str {
         ANTHROPIC
     }
@@ -228,7 +226,7 @@ impl Format<Incoming, Conversation, Reply> for AnthropicMessages {
         head.uri = io.request().uri().clone();
         self.accepts(&head)
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Conversation, Reply>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         Ok(io.bind(
             |request| Self.read_request(request),
             |reply, source| Self.write_response(reply, source),
@@ -237,13 +235,27 @@ impl Format<Incoming, Conversation, Reply> for AnthropicMessages {
     }
 }
 
-impl Format<Outgoing, Reply, Conversation> for AnthropicMessages {
+impl Format<Outgoing, Output, Input> for AnthropicMessages {
     fn name(&self) -> &str {
         ANTHROPIC
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Reply, Conversation>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
+        let stream = io.extensions().get::<crate::StreamResponse>().copied();
+        let wire = io.extensions().get::<respan_gateway_http::Wire>().cloned();
         Ok(io.bind(
-            |source| Self.write_request(source),
+            move |source| {
+                let (mut request, sink) = crate::common::post_json_with_wire::<Self>(
+                    source,
+                    "/v1/messages",
+                    wire.as_ref(),
+                    stream,
+                )?;
+                request
+                    .headers_mut()
+                    .entry(VERSION_HEADER)
+                    .or_insert(HeaderValue::from_static(VERSION));
+                Ok((request, sink))
+            },
             |response, call| Self.read_response(response, call),
             respan_gateway_http::success,
         ))
@@ -277,7 +289,7 @@ fn is_system(m: &Message) -> bool {
 
 /// The parts of the leading system messages, as the system prompt, and
 /// the rest; a later system message is refused.
-fn split_system(chat: &Conversation) -> Result<(Vec<Content>, &[Message]), Fault> {
+fn split_system(chat: &Input) -> Result<(Vec<Content>, &[Message]), Fault> {
     let lead = chat.messages.iter().take_while(|m| is_system(m)).count();
     let (system, rest) = chat.messages.split_at(lead);
     if rest.iter().any(is_system) {
@@ -285,7 +297,7 @@ fn split_system(chat: &Conversation) -> Result<(Vec<Content>, &[Message]), Fault
             "Anthropic has no place for a system message after the conversation starts",
         ));
     }
-    if system.iter().any(|m| !m.extra.is_empty()) {
+    if system.iter().any(|m| !m.native.is_empty()) {
         return Err(BadRequest::fault(
             "Anthropic's system prompt has no place for a message's other fields",
         ));
@@ -309,7 +321,7 @@ fn without_empty_text(m: &Message) -> std::borrow::Cow<'_, Message> {
 /// Whether a message says nothing: no content, or only empty text.
 fn is_empty(m: &Message) -> bool {
     let empty = |c: &Content| matches!(c, Content::Text { text, .. } if text.is_empty());
-    m.extra.is_empty() && m.content.iter().all(empty)
+    m.native.is_empty() && m.content.iter().all(empty)
 }
 
 impl Wire for AnthropicMessages {
@@ -330,20 +342,19 @@ impl Wire for AnthropicMessages {
     }
 
     /// The system prompt becomes a leading system message.
-    fn read(v: &Value) -> Conversation {
-        let mut chat = Conversation::default();
-        chat.stream = v["stream"] == true;
-        chat.max_tokens = v["max_tokens"].as_u64();
-        chat.temperature = v["temperature"].as_f64();
-        chat.top_p = v["top_p"].as_f64();
-        chat.stop = v["stop_sequences"]
+    fn read(v: &Value) -> Input {
+        let mut chat = Input::default();
+        chat.options.max_output_tokens = v["max_tokens"].as_u64();
+        chat.options.temperature = v["temperature"].as_f64();
+        chat.options.top_p = v["top_p"].as_f64();
+        chat.options.stop = v["stop_sequences"]
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|s| s.as_str().map(Into::into))
             .collect();
         chat.user = v["metadata"]["user_id"].as_str().map(Into::into);
-        chat.extra.fields = unsupported_fields(v, KNOWN, &[]);
+        chat.native = native_fields(ANTHROPIC, unsupported_fields(v, KNOWN, &[]));
         // Metadata beside the user id is kept for this format to write again.
         let others = v["metadata"].as_object().into_iter().flatten();
         let others: Map<String, Value> = others
@@ -351,7 +362,9 @@ impl Wire for AnthropicMessages {
             .map(|(k, x)| (k.clone(), x.clone()))
             .collect();
         if !others.is_empty() {
-            chat.extra.fields.insert("metadata".into(), others.into());
+            chat.native
+                .fields_mut(ANTHROPIC)
+                .insert("metadata".into(), others.into());
         }
         if says(&v["system"]) {
             let mut system = Message::new(Role::System, "");
@@ -364,26 +377,25 @@ impl Wire for AnthropicMessages {
             chat.messages.push(message);
         }
         read_anthropic_tools(v, &mut chat);
-        chat.extra = extra_of(ANTHROPIC, std::mem::take(&mut chat.extra.fields));
+        chat.native = native_fields(ANTHROPIC, std::mem::take(chat.native.fields_mut(ANTHROPIC)));
         chat
     }
 
-    fn write(chat: &Conversation) -> Result<Map<String, Value>, Fault> {
+    fn write(chat: &Input) -> Result<Map<String, Value>, Fault> {
         let (system, rest) = split_system(chat)?;
         if rest.is_empty() {
             return Err(BadRequest::fault(
                 "Anthropic needs at least one user or assistant message",
             ));
         }
-        if chat.temperature.is_some_and(|t| t > 1.0) {
+        if chat.options.temperature.is_some_and(|t| t > 1.0) {
             return Err(BadRequest::fault(
                 "Anthropic's temperature is at most 1, so a higher one cannot be translated",
             ));
         }
         let mut v = Map::new();
-        let max_tokens = chat.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let max_tokens = chat.options.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         v.insert("max_tokens".into(), max_tokens.into());
-        set(&mut v, "stream", chat.stream.then_some(true.into()));
         set(
             &mut v,
             "system",
@@ -401,15 +413,24 @@ impl Wire for AnthropicMessages {
         let messages = kept.map(|(_, m)| write_message(ANTHROPIC, &without_empty_text(m), &ROLES));
         let messages: Vec<Value> = messages.collect::<Result<_, _>>()?;
         v.insert("messages".into(), messages.into());
-        set(&mut v, "temperature", chat.temperature.map(Into::into));
-        set(&mut v, "top_p", chat.top_p.map(Into::into));
-        set(&mut v, "stop_sequences", stop_json(&chat.stop));
+        set(
+            &mut v,
+            "temperature",
+            chat.options.temperature.map(Into::into),
+        );
+        set(&mut v, "top_p", chat.options.top_p.map(Into::into));
+        set(&mut v, "stop_sequences", stop_json(&chat.options.stop));
         let mut metadata = Value::Object(Map::new());
         if let Some(user) = &chat.user {
             metadata["user_id"] = user.as_str().into();
         }
-        let own = chat.extra.format.as_deref() == Some(ANTHROPIC);
-        if let Some(more) = chat.extra.fields.get("metadata").and_then(Value::as_object) {
+        let own = chat.native.format() == Some(ANTHROPIC);
+        if let Some(more) = chat
+            .native
+            .fields()
+            .get("metadata")
+            .and_then(Value::as_object)
+        {
             merge_fields(
                 &mut metadata,
                 &more
@@ -461,12 +482,14 @@ impl Wire for AnthropicMessages {
                     at.push((part.block, content.len()));
                     content.push(block);
                 }
-                ReplyItem::Other(format, raw)
+                ReplyItem::Native(respan_gateway_sdk::NativeValue { format, value: raw })
                     if **format == *ANTHROPIC && fields_of(raw).is_some() =>
                 {
                     fields.extend(fields_of(raw).map(|(b, f)| (b, f.clone())));
                 }
-                ReplyItem::Other(format, raw) if **format == *ANTHROPIC => {
+                ReplyItem::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                    if **format == *ANTHROPIC =>
+                {
                     let place = raw["index"]
                         .as_u64()
                         .and_then(|i| u32::try_from(i).ok())
@@ -508,8 +531,9 @@ impl Wire for AnthropicMessages {
                         _ => return Err(unwritable_content()),
                     }
                 }
-                ReplyItem::Other(format, raw) if is_inert(format, raw) => {}
-                ReplyItem::Other(..) => return Err(unwritable_content()),
+                ReplyItem::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                    if is_inert(format, raw) => {}
+                ReplyItem::Native(..) => return Err(unwritable_content()),
             }
         }
         for (place, text) in input {
@@ -545,11 +569,11 @@ impl Wire for AnthropicMessages {
 
 /// The start's own fields, if they are in this format.
 fn own_fields(start: Option<&Start>) -> Map<String, Value> {
-    let start = start.filter(|s| s.extra.format.as_deref() == Some(ANTHROPIC));
-    start.map(|s| s.extra.fields.clone()).unwrap_or_default()
+    let start = start.filter(|s| s.native.format() == Some(ANTHROPIC));
+    start.map(|s| s.native.fields().clone()).unwrap_or_default()
 }
 
-/// What a `message_delta` [`Reply::Other`] says beyond the finish and usage:
+/// What a `message_delta` [`Output::Native`] says beyond the finish and usage:
 /// fields of its `delta`, such as the stop sequence, and its own.
 #[derive(Debug, Default)]
 struct StopFields {
@@ -588,7 +612,7 @@ impl StopFields {
 
 /// Usage as this format reports it: the cache reads and writes beside the
 /// input they are part of, and reasoning as `thinking_tokens`.
-fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
+fn usage_body(u: &Usage, native: &Map<String, Value>) -> Value {
     let get = |unit| u.get(unit).unwrap_or_default();
     let cached = get(units::CACHED_INPUT_TOKENS);
     let written = get(units::CACHE_WRITE_INPUT_TOKENS);
@@ -606,7 +630,7 @@ fn usage_body(u: &Usage, extra: &Map<String, Value>) -> Value {
     if reasoning > 0 {
         body["output_tokens_details"] = json!({ "thinking_tokens": reasoning });
     }
-    merge_fields(&mut body, extra);
+    merge_fields(&mut body, native);
     body
 }
 
@@ -683,7 +707,7 @@ pub(crate) struct AnthropicReader {
     /// The usage fields with no unit that were last said, to say them once.
     usage_extra: Map<String, Value>,
     /// The indexes of blocks the kind has no form for: all their events are
-    /// [`Reply::Other`].
+    /// [`Output::Native`].
     others: Vec<u32>,
 }
 
@@ -699,11 +723,11 @@ impl Default for AnthropicReader {
     }
 }
 
-/// The type of an [`Reply::Other`] that carries the fields of a block's
+/// The type of an [`Output::Native`] that carries the fields of a block's
 /// start: not an event of the wire, but of this format's words.
 pub(crate) const BLOCK_FIELDS: &str = "content_block_fields";
 
-/// The fields an `Other` of [`BLOCK_FIELDS`] carries for block `block`.
+/// The fields a `Native` of [`BLOCK_FIELDS`] carries for block `block`.
 fn fields_of(raw: &Value) -> Option<(u32, &Map<String, Value>)> {
     let block = u32::try_from(raw["index"].as_u64()?).ok()?;
     (raw["type"] == BLOCK_FIELDS).then_some(())?;
@@ -720,12 +744,12 @@ fn event_of(kind: &str, index: u32, fields: Value) -> Value {
 }
 
 impl AnthropicReader {
-    fn other(&self, v: Value, out: &mut Vec<Reply>) {
-        out.push(Reply::other(self.name.clone(), v));
+    fn other(&self, v: Value, out: &mut Vec<Output>) {
+        out.push(Output::native(self.name.clone(), v));
     }
 
     /// The events of a message: its start and usage so far.
-    fn message(&mut self, m: &Value, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn message(&mut self, m: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
         let known = [
             "id",
             "model",
@@ -740,36 +764,36 @@ impl AnthropicReader {
             m["id"].as_str().unwrap_or_default(),
             m["model"].as_str().unwrap_or_default(),
         );
-        start.extra = extra_of(ANTHROPIC, unsupported_fields(m, &known, &[]));
-        out.push(Reply::Start(start));
+        start.native = native_fields(ANTHROPIC, unsupported_fields(m, &known, &[]));
+        out.push(Output::Start(start));
         let usage = self.totals.increment(&usage_of(&m["usage"])?);
         if !usage.is_empty() {
-            out.push(Reply::Usage(usage));
+            out.push(Output::Usage(usage));
         }
         self.usage_other(&m["usage"], out);
         Ok(())
     }
 
-    /// The fields of the usage object `u` that have no unit, as one `Other`
+    /// The fields of the usage object `u` that have no unit, as one `Native`
     /// that carries them in a `message_delta`'s usage.
-    fn usage_other(&mut self, u: &Value, out: &mut Vec<Reply>) {
-        let extra = extra_usage(u);
-        if !extra.is_empty() && extra != self.usage_extra {
-            let event = json!({ "type": "message_delta", "delta": {}, "usage": extra });
+    fn usage_other(&mut self, u: &Value, out: &mut Vec<Output>) {
+        let native = extra_usage(u);
+        if !native.is_empty() && native != self.usage_extra {
+            let event = json!({ "type": "message_delta", "delta": {}, "usage": native });
             self.other(event, out);
-            self.usage_extra = extra;
+            self.usage_extra = native;
         }
     }
 
     /// The events that open block `block`, `b`, with its first content; a
-    /// block of a kind the kind has no form for is one `Other` of `event`.
-    fn open(&mut self, block: u32, b: &Value, event: Value, out: &mut Vec<Reply>) {
+    /// block of a kind the kind has no form for is one `Native` of `event`.
+    fn open(&mut self, block: u32, b: &Value, event: Value, out: &mut Vec<Output>) {
         let text = || b["text"].as_str().filter(|t| !t.is_empty());
         match b["type"].as_str() {
             Some("text") => {
                 self.fields(block, b, &["type", "text"], out);
-                out.push(Reply::block_start(block, Block::Text));
-                out.extend(text().map(|t| Reply::text(block, t)));
+                out.push(Output::block_start(block, Block::Text));
+                out.extend(text().map(|t| Output::text(block, t)));
             }
             Some("tool_use") => {
                 let call = b["id"].as_str().zip(b["name"].as_str());
@@ -782,16 +806,16 @@ impl AnthropicReader {
                     name: name.into(),
                 };
                 self.fields(block, b, &["type", "id", "name", "input"], out);
-                out.push(Reply::block_start(block, kind));
+                out.push(Output::block_start(block, kind));
                 if !input.is_empty() {
-                    out.push(Reply::arguments(block, b["input"].to_string()));
+                    out.push(Output::arguments(block, b["input"].to_string()));
                 }
             }
             Some("thinking") => {
                 self.fields(block, b, &["type", "thinking", "signature"], out);
-                out.push(Reply::block_start(block, Block::Reasoning));
+                out.push(Output::block_start(block, Block::Reasoning));
                 let thinking = b["thinking"].as_str().filter(|t| !t.is_empty());
-                out.extend(thinking.map(|t| Reply::reasoning(block, t)));
+                out.extend(thinking.map(|t| Output::reasoning(block, t)));
                 if says(&b["signature"]) {
                     let delta = json!({ "type": "signature_delta", "signature": b["signature"] });
                     self.other(
@@ -805,9 +829,9 @@ impl AnthropicReader {
     }
 
     /// The fields of block `b` the kind has no place for, beyond its `known`
-    /// ones, as one `Other` before the block opens, which the encoder merges
+    /// ones, as one `Native` before the block opens, which the encoder merges
     /// into the block's start.
-    fn fields(&self, block: u32, b: &Value, known: &[&str], out: &mut Vec<Reply>) {
+    fn fields(&self, block: u32, b: &Value, known: &[&str], out: &mut Vec<Output>) {
         let rest = b.as_object().into_iter().flatten();
         let rest: Map<String, Value> = rest
             // Kept even when null or empty: an unknown field's presence is
@@ -821,15 +845,15 @@ impl AnthropicReader {
         }
     }
 
-    fn opaque(&mut self, block: u32, event: Value, out: &mut Vec<Reply>) {
+    fn opaque(&mut self, block: u32, event: Value, out: &mut Vec<Output>) {
         self.others.push(block);
         self.other(event, out);
     }
 
     /// What a `message_delta` says beyond the finish and usage, as one
-    /// `Other`, if it says anything: `delta` is its `delta` and `top` its own
+    /// `Native`, if it says anything: `delta` is its `delta` and `top` its own
     /// fields.
-    fn stop_fields(&self, delta: &Value, top: &Value, out: &mut Vec<Reply>) {
+    fn stop_fields(&self, delta: &Value, top: &Value, out: &mut Vec<Output>) {
         let delta: Map<String, Value> = delta
             .as_object()
             .into_iter()
@@ -848,14 +872,14 @@ impl AnthropicReader {
         }
     }
 
-    fn finish(&self, reason: &Value, out: &mut Vec<Reply>) {
+    fn finish(&self, reason: &Value, out: &mut Vec<Output>) {
         let finish = reason.as_str().map(|r| FINISH.finish(r));
-        out.extend(finish.map(Reply::finished));
+        out.extend(finish.map(Output::finished));
     }
 }
 
 impl Reader for AnthropicReader {
-    fn event(&mut self, raw: Bytes, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn event(&mut self, raw: Bytes, out: &mut Vec<Output>) -> Result<(), Fault> {
         if self.done {
             return Ok(());
         }
@@ -878,19 +902,19 @@ impl Reader for AnthropicReader {
                 let delta = &v["delta"];
                 let text = |key: &str| delta[key].as_str().unwrap_or_default();
                 match delta["type"].as_str() {
-                    Some("text_delta") => out.push(Reply::text(block, text("text"))),
+                    Some("text_delta") => out.push(Output::text(block, text("text"))),
                     Some("input_json_delta") => {
-                        out.push(Reply::arguments(block, text("partial_json")))
+                        out.push(Output::arguments(block, text("partial_json")))
                     }
-                    Some("thinking_delta") => out.push(Reply::reasoning(block, text("thinking"))),
+                    Some("thinking_delta") => out.push(Output::reasoning(block, text("thinking"))),
                     _ => self.other(v, out),
                 }
             }
-            Some("content_block_stop") if !opaque => out.push(Reply::block_end(block)),
+            Some("content_block_stop") if !opaque => out.push(Output::block_end(block)),
             Some("message_delta") => {
                 let usage = self.totals.increment(&usage_of(&v["usage"])?);
                 if !usage.is_empty() {
-                    out.push(Reply::Usage(usage));
+                    out.push(Output::Usage(usage));
                 }
                 self.usage_other(&v["usage"], out);
                 self.stop_fields(&v["delta"], &v, out);
@@ -902,11 +926,11 @@ impl Reader for AnthropicReader {
         Ok(())
     }
 
-    fn end(&mut self, _out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn end(&mut self, _out: &mut Vec<Output>) -> Result<(), Fault> {
         ended(self.done)
     }
 
-    fn body(&mut self, v: &Value, out: &mut Vec<Reply>) -> Result<(), Fault> {
+    fn body(&mut self, v: &Value, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.message(v, out)?;
         for (at, b) in v["content"].as_array().into_iter().flatten().enumerate() {
             let block = u32::try_from(at).unwrap_or(u32::MAX);
@@ -917,7 +941,7 @@ impl Reader for AnthropicReader {
             let stop = match opaque {
                 true => event_of("content_block_stop", block, json!({})),
                 false => {
-                    out.push(Reply::block_end(block));
+                    out.push(Output::block_end(block));
                     continue;
                 }
             };
@@ -1137,8 +1161,8 @@ fn emit(out: &mut BytesMut, v: Value) {
     out.extend_from_slice(event(v["type"].as_str(), &v).as_bytes());
 }
 
-impl Encoder<Reply> for EventStream {
-    fn encode(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+impl Encoder<Output> for EventStream {
+    fn encode(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         let mut made = BytesMut::new();
         self.write(reply, &mut made)?;
         self.gate.pass(reply, &made, out);
@@ -1154,27 +1178,31 @@ impl Encoder<Reply> for EventStream {
 }
 
 impl EventStream {
-    fn write(&mut self, reply: &Reply, out: &mut BytesMut) -> Result<(), Fault> {
+    fn write(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         match reply {
-            Reply::Start(start) => _ = self.start.get_or_insert_with(|| start.clone()),
-            Reply::BlockStart { block, kind } => self.open(*block, kind, out)?,
-            Reply::Delta { block, delta } => self.say(*block, delta, out)?,
-            Reply::BlockEnd { block } => self.close(*block, out)?,
-            Reply::Usage(usage) => {
+            Output::Start(start) => _ = self.start.get_or_insert_with(|| start.clone()),
+            Output::BlockStart { block, kind } => self.open(*block, kind, out)?,
+            Output::Delta { block, delta } => self.say(*block, delta, out)?,
+            Output::BlockEnd { block } => self.close(*block, out)?,
+            Output::Usage(usage) => {
                 self.usage += usage;
                 check_usage(&self.usage)?;
             }
-            Reply::Finish(finish) => {
+            Output::Finish(finish) => {
                 FINISH.reason(finish)?;
                 self.finish = Some(finish.clone());
                 self.begin(out);
             }
-            Reply::Other { format, raw } if **format == *ANTHROPIC && fields_of(raw).is_some() => {
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                if **format == *ANTHROPIC && fields_of(raw).is_some() =>
+            {
                 if let Some((block, fields)) = fields_of(raw) {
                     self.fields.push((block, fields.clone()));
                 }
             }
-            Reply::Other { format, raw } if **format == *ANTHROPIC => {
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                if **format == *ANTHROPIC =>
+            {
                 self.begin(out);
                 match raw["type"].as_str() {
                     // Beside the terminal `message_delta`, which carries them.
@@ -1191,8 +1219,11 @@ impl EventStream {
                     }
                 }
             }
-            Reply::Other { format, raw } if is_inert(format, raw) => {}
-            Reply::Other { .. } => return Err(unwritable_content()),
+            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+                if is_inert(format, raw) => {}
+            Output::Native(respan_gateway_sdk::NativeValue { .. }) => {
+                return Err(unwritable_content());
+            }
             _ => return Err(unwritable_content()),
         }
         Ok(())
@@ -1222,10 +1253,10 @@ mod tests {
     use super::*;
 
     use crate::common::write_request;
-    use crate::conversation::{Extra, ToolChoice};
+    use crate::conversation::{NativeFields, ToolChoice};
 
     /// The events of `events`, each decoded in turn.
-    fn decode(events: &[&str]) -> Vec<Reply> {
+    fn decode(events: &[&str]) -> Vec<Output> {
         let mut reader = AnthropicReader::default();
         let mut out = Vec::new();
         for e in events {
@@ -1235,7 +1266,7 @@ mod tests {
     }
 
     /// The events of a whole body.
-    fn decode_body(v: &Value) -> Vec<Reply> {
+    fn decode_body(v: &Value) -> Vec<Output> {
         let mut out = Vec::new();
         AnthropicReader::default()
             .body(v, &mut out)
@@ -1244,7 +1275,7 @@ mod tests {
     }
 
     /// `replies` as a stream, whole.
-    fn stream_of(replies: &[Reply]) -> Result<String, Fault> {
+    fn stream_of(replies: &[Output]) -> Result<String, Fault> {
         let mut enc = EventStream::default();
         let mut out = BytesMut::new();
         for reply in replies {
@@ -1263,7 +1294,7 @@ mod tests {
     }
 
     /// `replies` as a whole body.
-    fn body_of(replies: &[Reply]) -> Result<Value, Fault> {
+    fn body_of(replies: &[Output]) -> Result<Value, Fault> {
         let mut whole = Assembled::default();
         replies.iter().try_for_each(|r| whole.push(r))?;
         AnthropicMessages::render(&whole)
@@ -1276,23 +1307,23 @@ mod tests {
         }
     }
 
-    fn usage(unit: &'static str, n: u64) -> Reply {
+    fn usage(unit: &'static str, n: u64) -> Output {
         let mut u = Usage::default();
         u.add(unit, n);
-        Reply::usage(u)
+        Output::usage(u)
     }
 
-    fn text_events(block: u32, text: &str) -> Vec<Reply> {
+    fn text_events(block: u32, text: &str) -> Vec<Output> {
         vec![
-            Reply::block_start(block, Block::Text),
-            Reply::text(block, text),
-            Reply::block_end(block),
+            Output::block_start(block, Block::Text),
+            Output::text(block, text),
+            Output::block_end(block),
         ]
     }
 
     /// The client's `body` as the conversation it says, with `edit` made,
     /// written as a request.
-    fn written(body: Value, edit: impl FnOnce(&mut Conversation)) -> Result<Value, Fault> {
+    fn written(body: Value, edit: impl FnOnce(&mut Input)) -> Result<Value, Fault> {
         let mut chat = AnthropicMessages.decode_request(Bytes::from(body.to_string()))?;
         edit(&mut chat);
         Ok(write_request::<AnthropicMessages>(&chat)?.into())
@@ -1315,12 +1346,15 @@ mod tests {
         ]});
         let chat = AnthropicMessages::read(&body);
         assert_eq!(
-            chat.tools[0].extra.fields.get("cache_control"),
+            chat.tools[0].native.fields().get("cache_control"),
             Some(&marker)
         );
-        assert_eq!(chat.tools[0].extra.format.as_deref(), Some(ANTHROPIC));
-        assert_eq!(chat.tool_choice, Some(ToolChoice::Tool("lookup".into())));
-        assert_eq!(chat.parallel_tool_calls, Some(false));
+        assert_eq!(chat.tools[0].native.format(), Some(ANTHROPIC));
+        assert_eq!(
+            chat.options.tool_choice,
+            Some(ToolChoice::Tool("lookup".into()))
+        );
+        assert_eq!(chat.options.parallel_tool_calls, Some(false));
         assert_eq!(
             chat.messages[2].content,
             [Content::tool_result(
@@ -1425,13 +1459,13 @@ mod tests {
         ]);
         let mut total = Usage::default();
         for r in &out {
-            if let Reply::Usage(u) = r {
+            if let Output::Usage(u) = r {
                 total += u;
             }
         }
         assert_eq!(total.get(units::INPUT_TOKENS), Some(5));
         assert_eq!(total.get(units::OUTPUT_TOKENS), Some(7));
-        assert!(out.contains(&Reply::reasoning(0, "hm")));
+        assert!(out.contains(&Output::reasoning(0, "hm")));
     }
 
     #[test]
@@ -1446,9 +1480,9 @@ mod tests {
         assert_eq!(
             out,
             [
-                Reply::other(ANTHROPIC, json!({ "type": "future", "text": "secret" })),
-                Reply::other(ANTHROPIC, "not json"),
-                Reply::other(ANTHROPIC, json!({ "type": "ping" })),
+                Output::native(ANTHROPIC, json!({ "type": "future", "text": "secret" })),
+                Output::native(ANTHROPIC, "not json"),
+                Output::native(ANTHROPIC, json!({ "type": "ping" })),
             ]
         );
         assert!(out.iter().all(|r| !r.is_content()));
@@ -1463,17 +1497,17 @@ mod tests {
         assert_eq!(
             out,
             [
-                Reply::block_start(2, Block::Text),
-                Reply::text(2, "Well, "),
+                Output::block_start(2, Block::Text),
+                Output::text(2, "Well, "),
                 // An empty text opens a block that says nothing yet.
-                Reply::block_start(3, Block::Text),
+                Output::block_start(3, Block::Text),
             ]
         );
     }
 
     #[test]
     fn a_system_message_goes_in_the_system_prompt_only_before_the_conversation() {
-        let mut chat = Conversation::new([
+        let mut chat = Input::new([
             Message::new(Role::System, "be brief"),
             Message::new(Role::User, "hi"),
         ]);
@@ -1487,16 +1521,16 @@ mod tests {
 
     #[test]
     fn a_temperature_above_1_is_refused() {
-        let mut chat = Conversation::new([Message::new(Role::User, "hi")]);
-        chat.temperature = Some(1.5);
+        let mut chat = Input::new([Message::new(Role::User, "hi")]);
+        chat.options.temperature = Some(1.5);
         assert!(write_request::<AnthropicMessages>(&chat).is_err());
-        chat.temperature = Some(1.0);
+        chat.options.temperature = Some(1.0);
         assert!(write_request::<AnthropicMessages>(&chat).is_ok());
     }
 
     #[test]
     fn an_empty_turn_but_the_last_is_dropped() {
-        let chat = Conversation::new([
+        let chat = Input::new([
             Message::new(Role::User, "hi"),
             Message::new(Role::Assistant, ""),
             Message::new(Role::User, "again"),
@@ -1515,7 +1549,7 @@ mod tests {
 
     #[test]
     fn a_request_of_only_system_messages_is_refused() {
-        let chat = Conversation::new([Message::new(Role::System, "be brief")]);
+        let chat = Input::new([Message::new(Role::System, "be brief")]);
         assert!(write_request::<AnthropicMessages>(&chat).is_err());
     }
 
@@ -1530,15 +1564,15 @@ mod tests {
         // Edited elsewhere, it is as it was.
         let edited = written(body.clone(), |c| c.messages[1].content = vec!["HI".into()]);
         assert_eq!(edited.map(|v| v["system"].clone()).ok(), Some(system));
-        // A part with a marker is text, with the marker in its own extra.
+        // A part with a marker is text, with the marker in its own native.
         let chat = AnthropicMessages::read(&body);
         assert!(chat.messages[0].is_plain());
-        let Content::Text { text, extra, .. } = &chat.messages[0].content[0] else {
+        let Content::Text { text, native, .. } = &chat.messages[0].content[0] else {
             panic!("{:?}", chat.messages[0].content);
         };
         assert_eq!(text, "the repo");
         assert_eq!(
-            extra.fields.get("cache_control"),
+            native.fields().get("cache_control"),
             Some(&json!({ "type": "ephemeral" }))
         );
         assert_eq!(chat.messages[0].content[1], Content::from("be brief"));
@@ -1598,30 +1632,30 @@ mod tests {
         let cited = json!({ "type": "content_block_fields", "index": 3,
             "fields": { "citations": [{ "type": "char_location" }] } });
         let mut totals = usage(units::INPUT_TOKENS, 2);
-        if let Reply::Usage(u) = &mut totals {
+        if let Output::Usage(u) = &mut totals {
             u.add(units::OUTPUT_TOKENS, 1);
         }
         assert_eq!(
             events,
             [
-                Reply::start("m", "c"),
+                Output::start("m", "c"),
                 totals,
-                Reply::block_start(0, Block::Reasoning),
-                Reply::reasoning(0, "hm"),
-                Reply::other(ANTHROPIC, signature),
-                Reply::block_end(0),
-                Reply::block_start(1, Block::Text),
-                Reply::text(1, "ok"),
-                Reply::block_end(1),
-                Reply::block_start(2, call("t", "f")),
-                Reply::arguments(2, "{\"a\":1}"),
-                Reply::block_end(2),
+                Output::block_start(0, Block::Reasoning),
+                Output::reasoning(0, "hm"),
+                Output::native(ANTHROPIC, signature),
+                Output::block_end(0),
+                Output::block_start(1, Block::Text),
+                Output::text(1, "ok"),
+                Output::block_end(1),
+                Output::block_start(2, call("t", "f")),
+                Output::arguments(2, "{\"a\":1}"),
+                Output::block_end(2),
                 // What the kind has no place for comes before the block opens.
-                Reply::other(ANTHROPIC, cited),
-                Reply::block_start(3, Block::Text),
-                Reply::text(3, "cited"),
-                Reply::block_end(3),
-                Reply::finished(Finish::ToolUse),
+                Output::native(ANTHROPIC, cited),
+                Output::block_start(3, Block::Text),
+                Output::text(3, "cited"),
+                Output::block_end(3),
+                Output::finished(Finish::ToolUse),
             ]
         );
         // Written again, the whole body is what it was.
@@ -1656,10 +1690,10 @@ mod tests {
 
     #[test]
     fn usage_so_far_is_in_message_start_and_the_totals_in_message_delta() {
-        let mut replies = vec![Reply::start("m", "c"), usage(units::INPUT_TOKENS, 4)];
+        let mut replies = vec![Output::start("m", "c"), usage(units::INPUT_TOKENS, 4)];
         replies.extend(text_events(0, "hi"));
         replies.push(usage(units::OUTPUT_TOKENS, 2));
-        replies.push(Reply::finished(Finish::Stop));
+        replies.push(Output::finished(Finish::Stop));
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
         assert_eq!(
@@ -1675,11 +1709,11 @@ mod tests {
 
     #[test]
     fn a_finish_released_after_usage_keeps_the_final_totals() {
-        let mut replies = vec![Reply::start("m", "c")];
+        let mut replies = vec![Output::start("m", "c")];
         replies.extend(text_events(0, "hi"));
         replies.push(usage(units::OUTPUT_TOKENS, 2));
         replies.push(usage(units::OUTPUT_TOKENS, 3));
-        replies.push(Reply::finished(Finish::Length));
+        replies.push(Output::finished(Finish::Length));
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
         let delta = events.iter().find(|e| e["type"] == "message_delta");
@@ -1697,7 +1731,8 @@ mod tests {
         ];
         let mut replies = decode(&events);
         // The second report, which adds 6, is dropped.
-        replies.retain(|r| !matches!(r, Reply::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6)));
+        replies
+            .retain(|r| !matches!(r, Output::Usage(u) if u.get(units::OUTPUT_TOKENS) == Some(6)));
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
         let delta = events.iter().find(|e| e["type"] == "message_delta");
@@ -1730,14 +1765,14 @@ mod tests {
 
     #[test]
     fn unsupported_usage_edits_fail_instead_of_disappearing() {
-        let mut replies = vec![Reply::start("m", "c")];
+        let mut replies = vec![Output::start("m", "c")];
         replies.extend(text_events(0, "ok"));
         replies.push(usage("credits", 3));
         assert!(stream_of(&replies).is_err());
         assert!(body_of(&replies).is_err());
         // Cache reads are part of the input: more than it is no usage.
         let mut more = usage(units::CACHED_INPUT_TOKENS, 3);
-        if let Reply::Usage(u) = &mut more {
+        if let Output::Usage(u) = &mut more {
             u.add(units::INPUT_TOKENS, 1);
         }
         assert!(body_of(&[more]).is_err());
@@ -1820,7 +1855,7 @@ mod tests {
         let blocks: Vec<_> = decode_body(&v)
             .into_iter()
             .filter_map(|r| match r {
-                Reply::BlockStart { block, .. } => Some(block),
+                Output::BlockStart { block, .. } => Some(block),
                 _ => None,
             })
             .collect();
@@ -1829,7 +1864,7 @@ mod tests {
 
     #[test]
     fn a_tool_call_a_filter_turns_to_text_is_gone() {
-        let mut replies = vec![Reply::start("m", "c")];
+        let mut replies = vec![Output::start("m", "c")];
         replies.extend(text_events(0, "[removed]"));
         let stream = stream_of(&replies).expect("a stream");
         assert!(
@@ -1846,9 +1881,12 @@ mod tests {
             "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
         ]);
         assert_eq!(out.len(), 5);
-        assert!(matches!(&out[0], Reply::Other { .. }));
-        assert_eq!(out[1], Reply::block_start(0, Block::Text));
-        assert_eq!(out[2], Reply::text(0, "x"));
+        assert!(matches!(
+            &out[0],
+            Output::Native(respan_gateway_sdk::NativeValue { .. })
+        ));
+        assert_eq!(out[1], Output::block_start(0, Block::Text));
+        assert_eq!(out[2], Output::text(0, "x"));
         // And written as it is, in this format.
         let stream = stream_of(&out).expect("a stream");
         assert!(stream.contains("citations_delta"), "{stream}");
@@ -1857,18 +1895,18 @@ mod tests {
     #[test]
     fn an_event_the_format_cannot_write_fails() {
         // An event of another format that carries content.
-        let foreign = Reply::other(
+        let foreign = Output::native(
             "openai-chat",
             json!({ "choices": [{ "index": 1, "delta": { "content": "B" } }] }),
         );
         assert!(stream_of(std::slice::from_ref(&foreign)).is_err());
         assert!(body_of(&[foreign]).is_err());
         // Text for a block that never opened.
-        assert!(stream_of(&[Reply::text(0, "x")]).is_err());
+        assert!(stream_of(&[Output::text(0, "x")]).is_err());
         // A block that opens as another kind.
         let events = [
-            Reply::block_start(0, Block::Text),
-            Reply::block_start(0, call("t", "f")),
+            Output::block_start(0, Block::Text),
+            Output::block_start(0, call("t", "f")),
         ];
         assert!(stream_of(&events).is_err());
     }
@@ -1933,9 +1971,9 @@ mod tests {
     #[test]
     fn an_empty_answer_has_no_empty_text_block() {
         let replies = [
-            Reply::start("m", "c"),
-            Reply::block_start(0, Block::Text),
-            Reply::block_end(0),
+            Output::start("m", "c"),
+            Output::block_start(0, Block::Text),
+            Output::block_end(0),
         ];
         let body = body_of(&replies).expect("a body");
         assert_eq!(body["content"], json!([]));
@@ -1948,11 +1986,11 @@ mod tests {
         // A filter held the end of block 0 and the next text, and released
         // them at the end of the response, in order.
         let replies = [
-            Reply::start("m", "c"),
-            Reply::block_start(0, Block::Text),
-            Reply::text(0, "a"),
-            Reply::text(0, "b"),
-            Reply::block_end(0),
+            Output::start("m", "c"),
+            Output::block_start(0, Block::Text),
+            Output::text(0, "a"),
+            Output::text(0, "b"),
+            Output::block_end(0),
         ];
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
@@ -1975,13 +2013,13 @@ mod tests {
     fn blocks_that_open_together_are_written_one_at_a_time() {
         // OpenAI streams parallel calls interleaved.
         let replies = [
-            Reply::block_start(0, call("a", "f")),
-            Reply::block_start(1, call("b", "g")),
-            Reply::arguments(1, "{\"b\":"),
-            Reply::arguments(0, "{}"),
-            Reply::arguments(1, "1}"),
-            Reply::block_end(0),
-            Reply::block_end(1),
+            Output::block_start(0, call("a", "f")),
+            Output::block_start(1, call("b", "g")),
+            Output::arguments(1, "{\"b\":"),
+            Output::arguments(0, "{}"),
+            Output::arguments(1, "1}"),
+            Output::block_end(0),
+            Output::block_end(1),
         ];
         let stream = stream_of(&replies).expect("a stream");
         let events = stream_events(&stream);
@@ -2017,9 +2055,9 @@ mod tests {
     fn a_stream_error_after_the_finish_keeps_the_finish_and_ends_last() {
         let mut enc = EventStream::default();
         let mut out = BytesMut::new();
-        let mut replies = vec![Reply::start("m", "c")];
+        let mut replies = vec![Output::start("m", "c")];
         replies.extend(text_events(0, "hi"));
-        replies.push(Reply::finished(Finish::Stop));
+        replies.push(Output::finished(Finish::Stop));
         for reply in &replies {
             assert!(enc.encode(reply, &mut out).is_ok());
         }
@@ -2038,18 +2076,18 @@ mod tests {
             "stop_sequence": null, "container": { "id": "k" },
             "usage": { "input_tokens": 1, "output_tokens": 1 } });
         let events = decode_body(&body);
-        let Some(Reply::Start(start)) = events.first() else {
+        let Some(Output::Start(start)) = events.first() else {
             panic!("{events:?}");
         };
         assert_eq!(
-            start.extra,
-            Extra::new(
+            start.native,
+            Some(NativeFields::new(
                 ANTHROPIC,
                 json!({ "container": { "id": "k" } })
                     .as_object()
                     .cloned()
                     .unwrap_or_default()
-            )
+            ))
         );
         assert_eq!(
             body_of(&events).expect("a body")["container"],

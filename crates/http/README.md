@@ -14,6 +14,9 @@ Their binding helpers handle response handoff, backpressure and completion;
 protocol code supplies parsing, synchronous preparation and refusal formatting.
 There is no additional HTTP format trait or implementation macro.
 
+The `formats::opaque` module owns the `Sent<F>` / `Got<F>` passthrough
+pair, its codecs, and the `Passthrough` format.
+
 ## A small format
 
 This format sends UTF-8 questions to `POST /echo` and receives byte answers.
@@ -146,7 +149,7 @@ publishes its `Wire`, `ClientHead` and the client's `Credential` apart
 (`Incoming::extensions`); credentials must be copied deliberately.
 
 A plugin attaches a `ProviderHead` slot to a call and copies its result into the
-exchange's `ClientHead` to forward a response head. Otherwise `Reply::head()`
+exchange's `ClientHead` to forward a response head. Otherwise `Output::head()`
 returns a fresh success head. Provider failures carry `ProviderError` for
 inspection; only an explicit `RawReply` opts into writing their original body,
 which a call's `RawErrors` asks the binding for.

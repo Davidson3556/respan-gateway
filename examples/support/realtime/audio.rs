@@ -1,10 +1,11 @@
 //! Audio validation and a conservative token bound for PCM24k and G.711.
 //! Rates: https://developers.openai.com/api/docs/guides/voice-latency-cost
 use base64::{Engine, engine::general_purpose::STANDARD};
+use respan_gateway_realtime::Input;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{BadRequest, ErrorCode};
 use respan_gateway_sdk::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
-use respan_gateway_ws::{ClientEvent, CloseCode};
+use respan_gateway_ws::CloseCode;
 use serde_json::{Value, json};
 
 pub(super) fn contains_audio(value: &Value) -> bool {
@@ -33,19 +34,22 @@ impl Plugin for Validate {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let manual = self.0;
         if manual {
-            cx.wrap(|events: EventStream<ClientEvent>| {
-                let manual = ClientEvent::new(json!({
-                    "type": "session.update", "session": {"type": "realtime",
-                    "audio": {"input": {"turn_detection": null}}}
-                }));
+            cx.wrap(|events: EventStream<Input>| {
+                let manual = Input::new(
+                    "openai-realtime",
+                    json!({
+                        "type": "session.update", "session": {"type": "realtime",
+                        "audio": {"input": {"turn_detection": null}}}
+                    }),
+                );
                 stream::once(async { Ok(manual) }).chain(events)
             })?;
         }
-        cx.filter(move |event: &mut ClientEvent| {
-            if event.json["type"] != "session.update" {
+        cx.filter(move |event: &mut Input| {
+            if event.json()["type"] != "session.update" {
                 return Ok(());
             }
-            let session = &event.json["session"];
+            let session = &event.json()["session"];
             if !session.is_object() {
                 return Err(BadRequest::fault("session must be an object").with(CloseCode(1008)));
             }
@@ -92,9 +96,9 @@ impl Plugin for Validate {
                 }
             }
             if manual {
-                event.json["session"]["audio"]["input"]["turn_detection"] = Value::Null;
-                if event.json["session"].get("turn_detection").is_some() {
-                    event.json["session"]["turn_detection"] = Value::Null;
+                event.json_mut()["session"]["audio"]["input"]["turn_detection"] = Value::Null;
+                if event.json()["session"].get("turn_detection").is_some() {
+                    event.json_mut()["session"]["turn_detection"] = Value::Null;
                 }
             }
             Ok(())

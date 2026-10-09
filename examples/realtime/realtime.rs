@@ -84,7 +84,8 @@ use respan_gateway_sdk::{
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
-use respan_gateway_ws::{ClientEvent, CloseCode, JsonEvents, ProviderEvent, WsTransport};
+use respan_gateway_realtime::{Input, Output};
+use respan_gateway_ws::{CloseCode, JsonEvents, WsTransport};
 use serde_json::{Value, json};
 use text::{Placeholders, Rewrite};
 
@@ -157,29 +158,27 @@ impl Restore {
     }
 
     /// The events for what is still held: each item's, restored.
-    fn flush(&mut self, out: &mut Vec<ProviderEvent>) {
+    fn flush(&mut self, out: &mut Vec<Output>) {
         let mut vault = self.vault.clone();
         for (_, (text, mut template)) in self.held.drain() {
             if let Ok(text) = vault.rewrite(&text) {
                 template["delta"] = text.into();
-                out.push(ProviderEvent::new(template));
+                out.push(Output::new("openai-realtime", template));
             }
         }
     }
 }
 
-impl Filter<ProviderEvent> for Restore {
-    fn edit(
-        &mut self,
-        mut event: ProviderEvent,
-        out: &mut Vec<ProviderEvent>,
-    ) -> Result<(), Fault> {
-        let kind = event.json["type"].as_str().unwrap_or_default().to_owned();
+impl Filter<Output> for Restore {
+    fn edit(&mut self, mut event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        let kind = event.json()["type"].as_str().unwrap_or_default().to_owned();
         let mut vault = self.vault.clone();
-        let item = event.json["item_id"].as_str().map(str::to_owned);
-        if let (true, Some(item), Some(delta)) =
-            (kind.ends_with(".delta"), item, event.json["delta"].as_str())
-        {
+        let item = event.json()["item_id"].as_str().map(str::to_owned);
+        if let (true, Some(item), Some(delta)) = (
+            kind.ends_with(".delta"),
+            item,
+            event.json()["delta"].as_str(),
+        ) {
             let held = self.held.remove(&item).map(|(text, _)| text);
             let mut text = held.unwrap_or_default() + delta;
             let mut at = text.len() - vault.pending(&text);
@@ -187,9 +186,9 @@ impl Filter<ProviderEvent> for Restore {
                 at -= 1;
             }
             let kept = text.split_off(at);
-            event.json["delta"] = vault.rewrite(&text)?.into();
+            event.json_mut()["delta"] = vault.rewrite(&text)?.into();
             if !kept.is_empty() {
-                self.held.insert(item, (kept, event.json.clone()));
+                self.held.insert(item, (kept, event.json().clone()));
             }
         } else {
             if kind.ends_with(".done") {
@@ -197,7 +196,7 @@ impl Filter<ProviderEvent> for Restore {
             }
             let mut failed = None;
             edit_texts(
-                &mut event.json,
+                event.json_mut(),
                 WRITTEN,
                 &mut |text| match vault.rewrite(text) {
                     Ok(restored) => *text = restored,
@@ -212,7 +211,7 @@ impl Filter<ProviderEvent> for Restore {
         Ok(())
     }
 
-    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<ProviderEvent>) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
         self.flush(out);
         Ok(())
     }
@@ -228,13 +227,13 @@ impl Plugin for Pii {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let vault = Placeholders::default();
         let hide = vault.clone();
-        cx.filter(move |event: &mut ClientEvent| {
-            if audio::contains_audio(&event.json) {
+        cx.filter(move |event: &mut Input| {
+            if audio::contains_audio(event.json()) {
                 return Err(Fault::new("text PII policy cannot inspect audio")
                     .with(ErrorCode("audio_requires_redaction".into()))
                     .with(CloseCode(1008)));
             }
-            edit_texts(&mut event.json, SAID, &mut |text| {
+            edit_texts(event.json_mut(), SAID, &mut |text| {
                 *text = hide_emails(text, &hide)
             });
             Ok(())
@@ -330,16 +329,16 @@ impl TurnMeter {
     }
 }
 
-impl Filter<ProviderEvent> for TurnMeter {
-    fn edit(&mut self, event: ProviderEvent, out: &mut Vec<ProviderEvent>) -> Result<(), Fault> {
-        let kind = event.json["type"].as_str().unwrap_or_default();
+impl Filter<Output> for TurnMeter {
+    fn edit(&mut self, event: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
+        let kind = event.json()["type"].as_str().unwrap_or_default();
         if kind == "response.created" {
             self.open = Some(0);
         } else if kind.ends_with(".delta")
             && let Some(estimate) = &mut self.open
         {
             // About four bytes a token: an estimate, never zero for a delta.
-            let delta = event.json["delta"].as_str().unwrap_or_default();
+            let delta = event.json()["delta"].as_str().unwrap_or_default();
             *estimate += if kind.ends_with("audio.delta") {
                 audio::tokens(delta)? as u64
             } else {
@@ -348,7 +347,7 @@ impl Filter<ProviderEvent> for TurnMeter {
         } else if kind == "response.done" {
             self.open = None;
             self.said.asked.store(false, Ordering::SeqCst);
-            let response = &event.json["response"];
+            let response = &event.json()["response"];
             let used = |name: &str| response["usage"][name].as_u64().unwrap_or_default();
             let status = response["status"].as_str().unwrap_or_default();
             let usage = &response["usage"];
@@ -368,11 +367,7 @@ impl Filter<ProviderEvent> for TurnMeter {
         Ok(())
     }
 
-    fn end(
-        &mut self,
-        _end: &Result<(), Fault>,
-        _out: &mut Vec<ProviderEvent>,
-    ) -> Result<(), Fault> {
+    fn end(&mut self, _end: &Result<(), Fault>, _out: &mut Vec<Output>) -> Result<(), Fault> {
         // A turn asked for and not done is cut, even before its first event.
         let asked = self.said.asked.swap(false, Ordering::SeqCst);
         if let Some(estimate) = self.open.take().or(asked.then_some(0)) {
@@ -402,14 +397,14 @@ impl Plugin for Meter {
         px.extensions_mut().insert(Metered(session, count.clone()));
         let said = Arc::new(Said::default());
         let heard = said.clone();
-        px.filter(move |event: &mut ClientEvent| {
+        px.filter(move |event: &mut Input| {
             let mut bytes = 0;
-            edit_texts(&mut event.json, SAID, &mut |text| bytes += text.len());
+            edit_texts(event.json_mut(), SAID, &mut |text| bytes += text.len());
             heard.bytes.fetch_add(bytes as u64, Ordering::SeqCst);
             heard
                 .audio
-                .fetch_add(audio_in(&event.json)? as u64, Ordering::SeqCst);
-            if event.json["type"] == "response.create" {
+                .fetch_add(audio_in(event.json())? as u64, Ordering::SeqCst);
+            if event.json()["type"] == "response.create" {
                 heard.asked.store(true, Ordering::SeqCst);
             }
             Ok(())
@@ -450,8 +445,8 @@ struct MaxLength(Duration);
 /// `events` until `limit` has passed, then a fault that closes normally.
 fn until(
     limit: Duration,
-    events: EventStream<ProviderEvent>,
-) -> impl Stream<Item = Result<ProviderEvent, Fault>> {
+    events: EventStream<Output>,
+) -> impl Stream<Item = Result<Output, Fault>> {
     let state = Some((events, Box::pin(tokio::time::sleep(limit))));
     stream::unfold(state, |state| async {
         let (mut events, mut timer) = state?;
@@ -531,8 +526,8 @@ impl<L: Ledger> Wallet<L> {
     /// What the client says is counted; a `response.create` is
     /// capped at `TURN` output tokens and holds a turn first; a
     /// `session.update` is capped the same, for the turns the provider starts.
-    async fn before(self: Arc<Self>, mut event: ClientEvent) -> Result<ClientEvent, Fault> {
-        let said = context(&event.json)?;
+    async fn before(self: Arc<Self>, mut event: Input) -> Result<Input, Fault> {
+        let said = context(event.json())?;
         {
             let mut turns = lock(&self.turns);
             turns.bytes = turns.bytes.saturating_add(said);
@@ -542,8 +537,8 @@ impl<L: Ledger> Wallet<L> {
                     .with(CloseCode(1008)));
             }
         }
-        if event.json["type"] == "response.create" {
-            let response = &mut event.json["response"];
+        if event.json()["type"] == "response.create" {
+            let response = &mut event.json_mut()["response"];
             if !response.is_object() {
                 *response = json!({});
             }
@@ -552,20 +547,20 @@ impl<L: Ledger> Wallet<L> {
                 *cap = TURN.into();
             }
             // The provider's `error` names the event it refuses by this id.
-            let id = match event.json["event_id"].as_str() {
+            let id = match event.json()["event_id"].as_str() {
                 Some(id) => id.to_owned(),
                 None => format!("reserve_{}", HoldId::new()),
             };
-            event.json["event_id"] = id.clone().into();
+            event.json_mut()["event_id"] = id.clone().into();
             let hold = self.hold(true).await?;
             // Begun-able only once held: a turn the provider starts itself
             // meanwhile must not take this entry.
             let mut turns = lock(&self.turns);
             turns.unsent.retain(|held| *held != hold);
             turns.unbegun.push_back((id, hold));
-        } else if event.json["type"] == "session.update" {
+        } else if event.json()["type"] == "session.update" {
             // The cap of the turns the provider starts on its own.
-            let cap = &mut event.json["session"]["max_output_tokens"];
+            let cap = &mut event.json_mut()["session"]["max_output_tokens"];
             if cap.as_i64().is_none_or(|n| !(1..=TURN).contains(&n)) {
                 *cap = TURN.into();
             }
@@ -578,8 +573,8 @@ impl<L: Ledger> Wallet<L> {
     /// cover it. What the provider says is counted. A `response.done`
     /// settles the hold of the oldest begun turn at what it used; the hold leaves the
     /// list only once settled, so a client that leaves meanwhile settles it.
-    async fn after(self: Arc<Self>, event: ProviderEvent) -> Result<ProviderEvent, Fault> {
-        let kind = event.json["type"].as_str().unwrap_or_default();
+    async fn after(self: Arc<Self>, event: Output) -> Result<Output, Fault> {
+        let kind = event.json()["type"].as_str().unwrap_or_default();
         if kind == "response.created" {
             let asked = lock(&self.turns).unbegun.pop_front();
             let hold = match asked {
@@ -590,7 +585,9 @@ impl<L: Ledger> Wallet<L> {
         } else if kind == "error" {
             // A `response.create` the provider refused never ran: its hold
             // is released, not charged at the session's end.
-            let id = event.json["error"]["event_id"].as_str().unwrap_or_default();
+            let id = event.json()["error"]["event_id"]
+                .as_str()
+                .unwrap_or_default();
             let refused = lock(&self.turns)
                 .unbegun
                 .iter()
@@ -611,14 +608,14 @@ impl<L: Ledger> Wallet<L> {
                 begun.and_then(|b| turns.holds.iter().find(|(h, _)| *h == b).copied())
             };
             if let Some((hold, amount)) = done {
-                let used = event.json["response"]["usage"]["total_tokens"].as_i64();
+                let used = event.json()["response"]["usage"]["total_tokens"].as_i64();
                 self.ledger.settle(&hold, used.unwrap_or(amount)).await?;
                 let mut turns = lock(&self.turns);
                 turns.begun.pop_front();
                 turns.holds.retain(|(h, _)| *h != hold);
             }
         }
-        let seen = context(&event.json)?;
+        let seen = context(event.json())?;
         let mut turns = lock(&self.turns);
         turns.bytes = turns.bytes.saturating_add(seen);
         Ok(event)
@@ -747,25 +744,25 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
         let asks = wallet.clone();
         let cap = format!("cap_{}", HoldId::new());
         let capped = cap.clone();
-        cx.wrap(move |events: EventStream<ClientEvent>| {
+        cx.wrap(move |events: EventStream<Input>| {
             // The session is capped before the client says anything, so the
             // turns the provider starts (voice detection) are bounded too.
             let open = json!({ "type": "session.update", "event_id": capped,
                 "session": { "type": "realtime" } });
-            let open = stream::once(async move { Ok(ClientEvent::new(open)) });
+            let open = stream::once(async move { Ok(Input::new("openai-realtime", open)) });
             open.chain(events)
                 .and_then(move |event| asks.clone().before(event))
         })?;
         let answers = wallet.clone();
-        cx.wrap(move |events: EventStream<ProviderEvent>| {
+        cx.wrap(move |events: EventStream<Output>| {
             // The provider's answer to the session's cap is not the client's:
             // its `session.updated` is the first (the client speaks after the
             // cap), and an `error` naming the cap ends a session that cannot
             // be capped, rather than let it run uncapped.
             let mut ours = true;
             let events = events.try_filter_map(move |event| {
-                let kind = event.json["type"].as_str().unwrap_or_default();
-                let refused = kind == "error" && event.json["error"]["event_id"] == cap;
+                let kind = event.json()["type"].as_str().unwrap_or_default();
+                let refused = kind == "error" && event.json()["error"]["event_id"] == cap;
                 let mine = ours && kind == "session.updated";
                 ours &= !mine;
                 std::future::ready(match (refused, mine) {
@@ -790,9 +787,9 @@ impl<L: Ledger + Clone> Plugin for Reserve<L> {
 
 /// A remote classifier's verdict on one thing the client said. The wait
 /// stands for its network call; a real one is `client.post(..).await`.
-async fn classify(event: &ClientEvent) -> Result<(), Fault> {
+async fn classify(event: &Input) -> Result<(), Fault> {
     tokio::time::sleep(Duration::from_millis(2)).await;
-    match event.json.to_string().contains("evil") {
+    match event.json().to_string().contains("evil") {
         true => Err(Fault::new("the classifier flagged an input")
             .with(ErrorCode("flagged".into()))
             .with(CloseCode(1008))),
@@ -807,7 +804,7 @@ struct Vet;
 #[async_trait]
 impl Plugin for Vet {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.wrap(|events: EventStream<ClientEvent>| {
+        cx.wrap(|events: EventStream<Input>| {
             events.and_then(|event| async move { classify(&event).await.map(|()| event) })
         })?;
         Ok(None)
@@ -859,8 +856,8 @@ fn gateway_with_audio(
     allow_audio: bool,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .client::<ClientEvent, _, _>(realtime())?
-        .provider::<ClientEvent, _, _>("openai", realtime(), WsTransport::new(provider)?.connect())?
+        .client::<Input, _, _>(realtime())?
+        .provider::<Input, _, _>("openai", realtime(), WsTransport::new(provider)?.connect())?
         .target("openai")?
         .plugin(ends.clone())
         .plugin(audio::Validate(allow_audio));

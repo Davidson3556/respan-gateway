@@ -1,17 +1,17 @@
 //! Every request-scoped value is dropped once its request ends and the
 //! gateway is idle, and a dropped gateway drops its plugins.
 
-use respan_gateway_sdk::conversation::Conversation;
+use respan_gateway_conversation::Input;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{StreamExt, TryStreamExt, stream};
 use http::StatusCode;
+use respan_gateway_conversation::{Block, Finish, Output};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Body, Completion, Frames};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Block, Finish, Reply};
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response};
 use respan_gateway_sdk::{async_trait, futures};
 #[allow(dead_code, unused_imports)]
@@ -83,18 +83,18 @@ impl Plugin for Probing {
             Answer::Target => Ok(None),
             Answer::Fallback => {
                 let mut first = cx.call("openai").await?;
-                first.buffer_until(Reply::is_content).await?;
+                first.buffer_until(Output::is_content).await?;
                 drop(first);
                 let mut backup = cx.call("backup").await?;
-                backup.buffer_until(Reply::is_content).await?;
+                backup.buffer_until(Output::is_content).await?;
                 Ok(Some(backup))
             }
             Answer::Own => {
                 let own = [
-                    Reply::block_start(0, Block::Text),
-                    Reply::text(0, "hi"),
-                    Reply::block_end(0),
-                    Reply::finished(Finish::Stop),
+                    Output::block_start(0, Block::Text),
+                    Output::text(0, "hi"),
+                    Output::block_end(0),
+                    Output::finished(Finish::Stop),
                 ];
                 Ok(Some(Response::stream(stream::iter(
                     own.map(Ok::<_, Fault>),
@@ -167,7 +167,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         answer,
     };
     let gw = Gateway::new()
-        .provider::<Conversation, _, _>(
+        .provider::<Input, _, _>(
             "openai",
             OpenAiChat,
             respan_gateway_http::connect(
@@ -176,7 +176,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
             ),
         )
         .and_then(|g| {
-            g.provider::<Conversation, _, _>(
+            g.provider::<Input, _, _>(
                 "backup",
                 OpenAiChat,
                 respan_gateway_http::connect(
@@ -185,7 +185,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
                 ),
             )
         })
-        .and_then(|g| g.client::<Conversation, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
         .map(|g| g.plugin(probing))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|f| panic!("{f}"));

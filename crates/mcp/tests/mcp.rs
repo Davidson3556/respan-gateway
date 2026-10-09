@@ -17,7 +17,8 @@ use respan_gateway_http::{
     Body, Completion, Credential, Incoming, Outgoing, credentials, error_code, proxy_call,
     strip_client_origin_headers, strip_origin_headers,
 };
-use respan_gateway_mcp::{Owner, SESSION, StdioTransport, StreamableHttp, ToClient, ToServer};
+use respan_gateway_mcp::{HttpInput as Input, HttpOutput as Output};
+use respan_gateway_mcp::{Owner, SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
 use respan_gateway_sdk::{RetryAfter, Truncated, Upstream, async_trait};
@@ -38,8 +39,8 @@ fn gateway(
     transport: impl Fn(Extensions) -> Outgoing + Send + Sync + 'static,
     plugin: Option<Touch>,
 ) -> Gateway {
-    let gw = Gateway::new().provider::<ToServer, _, _>("mcp", StreamableHttp::default(), transport);
-    let gw = gw.and_then(|g| g.client::<ToServer, _, _>(StreamableHttp::default()));
+    let gw = Gateway::new().provider::<Input, _, _>("mcp", StreamableHttp::default(), transport);
+    let gw = gw.and_then(|g| g.client::<Input, _, _>(StreamableHttp::default()));
     let gw = match plugin {
         Some(p) => gw.map(|g| g.plugin(p)),
         None => gw,
@@ -65,11 +66,14 @@ struct Touch {
 #[async_trait]
 impl Plugin for Touch {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|_: &mut ToServer| Ok(()))?;
+        cx.filter(|_: &mut Input| Ok(()))?;
         let edit = self.edit;
-        cx.filter(move |out: &mut ToClient| {
-            if edit && let Some(m) = out.messages.first_mut() {
-                m["result"] = json!({ "edited": true });
+        cx.filter(move |out: &mut Output| {
+            if edit
+                && let Some(m) = out.messages.first_mut()
+                && let Some(result) = m.result_mut()
+            {
+                *result = json!({ "edited": true });
             }
             Ok(())
         })?;
@@ -287,13 +291,13 @@ struct Rename;
 #[async_trait]
 impl Plugin for Rename {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|input: &mut ToServer| {
+        cx.filter(|input: &mut Input| {
             if input.session.as_deref() == Some("public") {
                 input.session = Some("private".into());
             }
             Ok(())
         })?;
-        cx.filter(|output: &mut ToClient| {
+        cx.filter(|output: &mut Output| {
             if output.session.as_deref() == Some("private") {
                 output.session = Some("public".into());
             }
@@ -421,7 +425,7 @@ struct Resume(Arc<Mutex<Vec<Option<String>>>>);
 impl Plugin for Resume {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let seen = self.0.clone();
-        cx.filter(move |out: &mut ToClient| {
+        cx.filter(move |out: &mut Output| {
             seen.lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(out.event_id.clone());
@@ -465,7 +469,7 @@ struct Inject;
 #[async_trait]
 impl Plugin for Inject {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.filter(|out: &mut ToClient| {
+        cx.filter(|out: &mut Output| {
             if out.event_id.is_some() {
                 out.event_id = Some("2\ndata: injected".into());
             }
@@ -497,7 +501,7 @@ impl Plugin for Rebuild {
         let outputs = cx
             .call("mcp")
             .await?
-            .outputs::<ToClient>()
+            .outputs::<Output>()
             .collect::<Vec<_>>()
             .await;
         Ok(Some(Response::stream(stream::iter(outputs))))
@@ -793,11 +797,11 @@ async fn a_non_success_event_stream_is_refused_with_retry_after_and_can_fall_bac
     ));
     let probe = RefusalProbe::default();
     let gw = Gateway::new()
-        .client::<ToServer, _, _>(StreamableHttp::default())
+        .client::<Input, _, _>(StreamableHttp::default())
         .expect("client")
-        .provider::<ToServer, _, _>("first", StreamableHttp::default(), first.clone().connect())
+        .provider::<Input, _, _>("first", StreamableHttp::default(), first.clone().connect())
         .expect("first")
-        .provider::<ToServer, _, _>(
+        .provider::<Input, _, _>(
             "second",
             StreamableHttp::default(),
             second.clone().connect(),
@@ -1051,12 +1055,12 @@ impl Plugin for Authenticates {
 #[tokio::test]
 async fn a_session_belongs_to_the_owner_a_plugin_sets() -> Result<(), Fault> {
     let gw = Gateway::new()
-        .provider::<ToServer, _, _>(
+        .provider::<Input, _, _>(
             "mcp",
             StreamableHttp::default(),
             StdioTransport::new("sh", ["-c", ECHO]).connect(),
         )?
-        .client::<ToServer, _, _>(StreamableHttp::default())?
+        .client::<Input, _, _>(StreamableHttp::default())?
         .plugin(Authenticates)
         .target("mcp")?;
     let session = init(&gw, &[("authorization", "Bearer alice")]).await;
@@ -1267,8 +1271,12 @@ async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request()
     #[async_trait]
     impl Plugin for Rewrite {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            cx.filter(|input: &mut ToServer| {
-                input.messages[0]["id"] = json!(9);
+            cx.filter(|input: &mut Input| {
+                if let respan_gateway_mcp_messages::Message::Request { id, .. } =
+                    &mut input.messages[0]
+                {
+                    *id = respan_gateway_mcp_messages::Id::Number(9.into());
+                }
                 Ok(())
             })?;
             Ok(None)
@@ -1824,7 +1832,7 @@ struct Requery(Option<&'static str>);
 impl Plugin for Requery {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let query = self.0;
-        cx.filter(move |input: &mut ToServer| {
+        cx.filter(move |input: &mut Input| {
             input.query = query.map(str::to_owned);
             Ok(())
         })?;
@@ -1908,4 +1916,52 @@ async fn a_servers_json_rpc_refusal_keeps_its_code_message_and_status() {
         assert_eq!(error["error"]["code"], -32603, "{text}");
         assert_eq!(error["error"]["message"], "the provider returned 502");
     }
+}
+
+#[tokio::test]
+async fn buffered_and_dropped_typed_messages_keep_their_own_sse_cursors() {
+    #[derive(Default)]
+    struct Buffered(Vec<Output>);
+    impl respan_gateway_sdk::Filter<Output> for Buffered {
+        fn edit(&mut self, mut event: Output, _: &mut Vec<Output>) -> Result<(), Fault> {
+            if event.event_id.as_deref() == Some("drop") {
+                return Ok(());
+            }
+            for message in &mut event.messages {
+                if let respan_gateway_mcp_messages::Message::Notification { method, .. } = message {
+                    method.push_str("/edited");
+                }
+            }
+            self.0.push(event);
+            Ok(())
+        }
+        fn end(&mut self, end: &Result<(), Fault>, out: &mut Vec<Output>) -> Result<(), Fault> {
+            out.append(&mut self.0);
+            end.clone()
+        }
+    }
+    struct Buffer;
+    #[async_trait]
+    impl Plugin for Buffer {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(Buffered::default())?;
+            Ok(None)
+        }
+    }
+    let mock = ScriptedMcp::new();
+    mock.reply(sse(&[
+        "id: first\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"first\"}\n\n",
+        "id: drop\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"drop\"}\n\n",
+        "id: last\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"last\"}\n\n",
+    ]));
+    let gw = gateway(mock.connect(), None).plugin(Buffer);
+    let (_, _, body, _) = send(&gw, request(Method::GET, "", &[])).await;
+    assert_eq!(
+        body,
+        concat!(
+            ": stream\n\n",
+            "id: first\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"first/edited\"}\n\n",
+            "id: last\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"last/edited\"}\n\n",
+        )
+    );
 }

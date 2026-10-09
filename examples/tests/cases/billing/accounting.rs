@@ -16,11 +16,11 @@ use crate::accounting::{Accounting, Quote, Tally};
 use crate::ledger::{Amount, HoldId, Ledger, MemoryLedger};
 use http_support::{post, read_whole, serve};
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_conversation::{Input, Output, units};
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
 use respan_gateway_providers::OpenAiChat;
-use respan_gateway_sdk::conversation::{Conversation, Reply, units};
 
 const CHAT: &str = "/v1/chat/completions";
 /// 10 output tokens at 10 each.
@@ -68,12 +68,13 @@ const DELTA: &str = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\
 /// Output tokens at 10 each, bounded by `max_tokens`; none set is no bound.
 /// Each usage increment the provider reports is priced into the tally.
 fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
-    let chat = px.input::<Conversation>()?;
+    let chat = px.input::<Input>()?;
     let max = chat
-        .max_tokens
+        .options
+        .max_output_tokens
         .ok_or_else(|| BadRequest::fault("no cost bound: set max_tokens"))?;
-    px.filter(move |reply: &mut Reply| {
-        if let Reply::Usage(usage) = reply {
+    px.filter(move |reply: &mut Output| {
+        if let Output::Usage(usage) = reply {
             let output = usage.get(units::OUTPUT_TOKENS).unwrap_or(0);
             tally.add(output as Amount * 10);
         }
@@ -98,8 +99,8 @@ fn gateway(
     ledger: impl Ledger,
 ) -> Gateway {
     let accounting = Accounting::new(ledger, quote).ttl(Duration::from_millis(200));
-    let gw = Gateway::new().client::<Conversation, _, _>(OpenAiChat);
-    let gw = gw.and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, transport));
+    let gw = Gateway::new().client::<Input, _, _>(OpenAiChat);
+    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, transport));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.map(|g| g.plugin(first));
     gw.map(|g| g.plugin(accounting))
@@ -309,8 +310,8 @@ async fn a_quote_without_accounts_is_refused_with_http_401() {
     let ledger = wallet(1000);
     let accounting = Accounting::new(ledger.clone(), |_, _| Ok(Quote::new([] as [&str; 0], 100)));
     let gw = Gateway::new()
-        .client::<Conversation, _, _>(OpenAiChat)
-        .and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, http(&fake)))
+        .client::<Input, _, _>(OpenAiChat)
+        .and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, http(&fake)))
         .and_then(|g| g.target("p"))
         .map(|g| g.plugin(accounting))
         .unwrap_or_else(|f| panic!("{f}"));
@@ -422,7 +423,7 @@ async fn a_hold_that_lands_after_its_settlement_expires_with_its_ttl() {
 async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
     let ledger = wallet(1000);
     let accounting = Accounting::new(ledger.clone(), quote);
-    let gw = Gateway::new().client::<Conversation, _, _>(OpenAiChat);
+    let gw = Gateway::new().client::<Input, _, _>(OpenAiChat);
     // The call is handed to the transport, but its head never arrives.
     let no_head = respan_gateway_http::connect(
         |_call| async {
@@ -431,7 +432,7 @@ async fn a_call_sent_that_times_out_before_its_head_is_charged_the_reserve() {
         },
         LIMIT,
     );
-    let gw = gw.and_then(|g| g.provider::<Conversation, _, _>("p", OpenAiChat, no_head));
+    let gw = gw.and_then(|g| g.provider::<Input, _, _>("p", OpenAiChat, no_head));
     let gw = gw.and_then(|g| g.target("p"));
     let gw = gw.map(|g| g.plugin(accounting));
     let gw = gw.unwrap_or_else(|f| panic!("{f}"));

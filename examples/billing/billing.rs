@@ -1,5 +1,5 @@
 //! Billing: price each call's usage from your own price table and write it
-//! to your own store. The kernel counts no usage: a provider-edge `Reply`
+//! to your own store. The kernel counts no usage: a provider-edge `Output`
 //! filter sums what the provider reports (`meter`), and `on_provider_end`
 //! bills it, once per call, so a fallback's or a judge's calls are billed
 //! too, each at the model it used. No hold, no limit: to stop spending, see
@@ -19,12 +19,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_conversation::Input;
 use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::conversation::Conversation;
 use respan_gateway_sdk::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
@@ -109,7 +109,7 @@ impl<S: UsageStore> Plugin for Billing<S> {
         let header = asked.and_then(|a| a.headers().get("x-account")?.to_str().ok());
         let account = header.unwrap_or("anonymous");
         // The model this call asked for, as every plugin left it.
-        let chat = px.input::<Conversation>().ok();
+        let chat = px.input::<Input>().ok();
         let model = chat.and_then(|c| c.model.clone()).unwrap_or_default();
         let price = self.prices.get(model.as_str());
         let row = Row {
@@ -140,8 +140,8 @@ fn gateway(
         (LARGE, Price::new(2_500_000, 10_000_000)),
     ]);
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, provider)?
-        .client::<Conversation, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat, provider)?
+        .client::<Input, _, _>(OpenAiChat)?
         // Last, so its filter sees each reply first.
         .plugin(Billing { prices, store })
         .target("openai")

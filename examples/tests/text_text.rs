@@ -9,13 +9,11 @@ mod text;
 
 use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_conversation::{Block, Content, Finish, Input, Message, Output, Role, Tool};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{HttpClient, Status};
 use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_sdk::conversation::{
-    Block, Content, Conversation, Finish, Message, Reply, Role, Tool,
-};
 use respan_gateway_sdk::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
 use respan_gateway_sdk::{ErrorCode, Upstream, Usage};
 use serde_json::{self, json};
@@ -41,25 +39,25 @@ impl Rewrite for Terms {
 }
 
 /// The text of every delta in `replies`.
-fn text(replies: &[Reply]) -> String {
+fn text(replies: &[Output]) -> String {
     replies
         .iter()
         .filter_map(|r| match r {
-            Reply::Delta { delta, .. } => Some(delta.as_str()),
+            Output::Delta { delta, .. } => Some(delta.as_str()),
             _ => None,
         })
         .collect()
 }
 
 /// Text block `block` opens and says each of `deltas`.
-fn said(block: u32, deltas: &[&str]) -> Vec<Reply> {
-    let open = Reply::block_start(block, Block::Text);
-    let deltas = deltas.iter().map(|d| Reply::text(block, *d));
+fn said(block: u32, deltas: &[&str]) -> Vec<Output> {
+    let open = Output::block_start(block, Block::Text);
+    let deltas = deltas.iter().map(|d| Output::text(block, *d));
     std::iter::once(open).chain(deltas).collect()
 }
 
-fn keep_alive() -> Reply {
-    Reply::other("anthropic-messages", json!({ "type": "ping" }))
+fn keep_alive() -> Output {
+    Output::native("anthropic-messages", json!({ "type": "ping" }))
 }
 
 fn email() -> Placeholders {
@@ -86,11 +84,11 @@ fn nothing_is_held_past_the_finish() {
     assert_eq!(text(&out), "Hi ");
     assert!(
         holdback
-            .edit(Reply::finished(Finish::Stop), &mut out)
+            .edit(Output::finished(Finish::Stop), &mut out)
             .is_ok()
     );
     assert_eq!(text(&out), "Hi <EMA");
-    assert_eq!(out.last(), Some(&Reply::finished(Finish::Stop)));
+    assert_eq!(out.last(), Some(&Output::finished(Finish::Stop)));
     let mut tail = Vec::new();
     assert!(holdback.end(&Ok(()), &mut tail).is_ok());
     assert!(tail.is_empty(), "{tail:?}");
@@ -101,19 +99,19 @@ fn held_text_goes_before_other_content_and_at_the_end() {
     let mut holdback = Holdback::new(email());
     let tool_use = json!({ "type": "tool_use", "name": "f", "input": {} });
     let mut replies = said(0, &["a <EMAIL_"]);
-    replies.push(Reply::other("anthropic-messages", tool_use.clone()));
+    replies.push(Output::native("anthropic-messages", tool_use.clone()));
     replies.extend(said(1, &["b <EM"]));
     let out = run(&mut holdback, replies).unwrap_or_default();
     assert_eq!(
         out,
         [
-            Reply::block_start(0, Block::Text),
-            Reply::text(0, "a "),
-            Reply::text(0, "<EMAIL_"),
-            Reply::other("anthropic-messages", tool_use),
-            Reply::block_start(1, Block::Text),
-            Reply::text(1, "b "),
-            Reply::text(1, "<EM"),
+            Output::block_start(0, Block::Text),
+            Output::text(0, "a "),
+            Output::text(0, "<EMAIL_"),
+            Output::native("anthropic-messages", tool_use),
+            Output::block_start(1, Block::Text),
+            Output::text(1, "b "),
+            Output::text(1, "<EM"),
         ]
     );
 }
@@ -122,14 +120,17 @@ fn held_text_goes_before_other_content_and_at_the_end() {
 fn an_event_left_showing_nothing_waits_for_one_that_does() {
     let mut holdback = Holdback::new(Terms);
     let mut out = Vec::new();
-    for event in [Reply::start("c1", "m"), Reply::block_start(0, Block::Text)] {
+    for event in [
+        Output::start("c1", "m"),
+        Output::block_start(0, Block::Text),
+    ] {
         assert!(holdback.edit(event, &mut out).is_ok());
     }
-    assert!(holdback.edit(Reply::text(0, "bo"), &mut out).is_ok());
+    assert!(holdback.edit(Output::text(0, "bo"), &mut out).is_ok());
     assert!(out.is_empty(), "{out:?}");
-    assert!(holdback.edit(Reply::text(0, "at"), &mut out).is_ok());
+    assert!(holdback.edit(Output::text(0, "at"), &mut out).is_ok());
     assert_eq!(text(&out), "boat");
-    assert_eq!(out[0], Reply::start("c1", "m"));
+    assert_eq!(out[0], Output::start("c1", "m"));
 }
 
 // Every value reaches a filter: a keep-alive or usage alone passes
@@ -140,7 +141,7 @@ fn a_keep_alive_or_usage_alone_passes_at_once_unless_events_wait() {
     let mut out = Vec::new();
     let mut counts = Usage::default();
     counts.add("output_tokens", 3);
-    let usage = Reply::usage(counts);
+    let usage = Output::usage(counts);
     assert!(holdback.edit(keep_alive(), &mut out).is_ok());
     assert_eq!(out, [keep_alive()]);
     // "bo" may start a match, so it is held; usage alone still passes.
@@ -151,15 +152,18 @@ fn a_keep_alive_or_usage_alone_passes_at_once_unless_events_wait() {
     assert_eq!(out.last(), Some(&usage));
     // Behind an event that waits, it waits too, in order.
     let (mut holdback, mut out) = (Holdback::new(Terms), Vec::new());
-    for event in [Reply::start("c1", "m"), Reply::block_start(1, Block::Text)] {
+    for event in [
+        Output::start("c1", "m"),
+        Output::block_start(1, Block::Text),
+    ] {
         assert!(holdback.edit(event, &mut out).is_ok());
     }
     assert!(holdback.edit(keep_alive(), &mut out).is_ok());
     assert!(out.is_empty(), "{out:?}");
-    assert!(holdback.edit(Reply::text(1, "at"), &mut out).is_ok());
-    assert_eq!(out[0], Reply::start("c1", "m"));
+    assert!(holdback.edit(Output::text(1, "at"), &mut out).is_ok());
+    assert_eq!(out[0], Output::start("c1", "m"));
     assert_eq!(out[2], keep_alive(), "{out:?}");
-    assert_eq!(out[3], Reply::text(1, "at"), "{out:?}");
+    assert_eq!(out[3], Output::text(1, "at"), "{out:?}");
 }
 
 #[test]
@@ -218,10 +222,10 @@ fn partial_match_is_the_longest_unfinished_start() {
 
 #[test]
 fn content_that_cannot_be_read_is_refused() {
-    let image = Content::other("openai-chat", json!({ "type": "image_url" }));
+    let image = Content::native("openai-chat", json!({ "type": "image_url" }));
     let mut message = Message::new(Role::User, "look");
     message.content.push(image);
-    let chat = Conversation::new([message]);
+    let chat = Input::new([message]);
     assert_eq!(
         chat.read_all()
             .err()
@@ -229,10 +233,10 @@ fn content_that_cannot_be_read_is_refused() {
             .as_deref(),
         Some(UNREADABLE)
     );
-    let mut plain = Conversation::new([Message::new(Role::User, "hi")]);
+    let mut plain = Input::new([Message::new(Role::User, "hi")]);
     assert_eq!(plain.read_all().ok().as_deref(), Some("hi\n"));
     // The stop sequences and the end user's id are text too.
-    plain.stop = vec!["bob@x.io".into()];
+    plain.options.stop = vec!["bob@x.io".into()];
     plain.user = Some("bob@y.io".into());
     assert_eq!(
         plain.read_all().ok().as_deref(),
@@ -244,26 +248,26 @@ fn content_that_cannot_be_read_is_refused() {
     });
     assert!(upper.is_ok());
     assert_eq!(
-        (&plain.stop[..], plain.user.as_deref()),
+        (&plain.options.stop[..], plain.user.as_deref()),
         (&["BOB@X.IO".to_owned()][..], Some("BOB@Y.IO"))
     );
     assert_eq!(plain.messages[0].text(), "HI");
     assert_eq!(
-        Reply::text(0, "hi").read_all().ok().as_deref(),
+        Output::text(0, "hi").read_all().ok().as_deref(),
         Some("hi\n")
     );
 }
 
 /// An agent's request: tools, an assistant's tool call and the tool's
 /// answer.
-fn agent_chat() -> Conversation {
+fn agent_chat() -> Input {
     let arguments = json!({ "to": "bob@x.io", "cc": ["a@y.io"] }).to_string();
     let mut call = Message::new(Role::Assistant, "");
     call.content = vec![Content::tool_call("c1", "mail", arguments)];
     let mut answer = Message::new(Role::User, "");
     let said = vec![Content::from("sent to bob@x.io")];
     answer.content = vec![Content::tool_result("c1", said, false)];
-    let mut chat = Conversation::new([Message::new(Role::User, "mail bob"), call, answer]);
+    let mut chat = Input::new([Message::new(Role::User, "mail bob"), call, answer]);
     let parameters = json!({ "type": "object", "properties": { "to": { "type": "string" } } });
     let mut tool = Tool::new("mail", parameters);
     tool.description = Some("Mail; CEO is c@z.io".into());
@@ -319,8 +323,11 @@ fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault>
     let arguments = json!({ "card": 4111111111111111u64, "ok": true }).to_string();
     let mut call = Message::new(Role::Assistant, "");
     call.content = vec![Content::tool_call("c1", "pay", arguments)];
-    let mut chat = Conversation::new([call]);
-    chat.extra
+    let mut chat = Input::new([call]);
+    chat.native
+        .get_or_insert_with(|| {
+            respan_gateway_sdk::NativeFields::new("openai-chat", Default::default())
+        })
         .fields
         .insert("seed".into(), json!(4111111111111111u64));
     assert!(chat.read_all()?.contains("\n4111111111111111\n"));
@@ -335,19 +342,22 @@ fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault>
         serde_json::from_str(arguments).map_err(|e| Fault::internal(e.to_string()))?;
     assert_eq!(arguments, json!({ "card": "<CARD_1>", "ok": true }));
     // The request's own numbers are not texts.
-    assert_eq!(chat.extra.fields["seed"], json!(4111111111111111u64));
+    assert_eq!(
+        chat.native.as_ref().expect("native fields").fields["seed"],
+        json!(4111111111111111u64)
+    );
     Ok(())
 }
 
-fn call_delta(block: u32, arguments: &str) -> Reply {
-    Reply::arguments(block, arguments)
+fn call_delta(block: u32, arguments: &str) -> Output {
+    Output::arguments(block, arguments)
 }
 
 /// The arguments of each streamed call in `replies`, by call.
-fn arguments_by_call(replies: &[Reply]) -> Vec<String> {
+fn arguments_by_call(replies: &[Output]) -> Vec<String> {
     let mut calls: Vec<String> = Vec::new();
     for reply in replies {
-        let Reply::Delta { block, delta } = reply else {
+        let Output::Delta { block, delta } = reply else {
             continue;
         };
         let at = *block as usize;
@@ -365,14 +375,14 @@ fn a_placeholder_split_across_three_argument_deltas_is_restored_by_call() {
         call_delta(0, "IL_"),
         call_delta(0, r#"1>"}"#),
         call_delta(1, "3}"),
-        Reply::finished(Finish::ToolUse),
+        Output::finished(Finish::ToolUse),
     ];
     let out = run(&mut Holdback::new(email()), deltas).unwrap_or_default();
     assert_eq!(
         arguments_by_call(&out),
         [r#"{"to":"bob@x.io"}"#, r#"{"cc":"bob@x.io","n":3}"#]
     );
-    assert_eq!(out.last(), Some(&Reply::finished(Finish::ToolUse)));
+    assert_eq!(out.last(), Some(&Output::finished(Finish::ToolUse)));
 }
 
 #[test]
@@ -394,7 +404,7 @@ struct Guard;
 #[async_trait]
 impl Plugin for Guard {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.input::<Conversation>()?.read_all()?;
+        cx.input::<Input>()?.read_all()?;
         cx.filter(Holdback::new(Terms))?;
         Ok(None)
     }
@@ -426,10 +436,10 @@ fn gateway_with(
     plugin: impl Plugin,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Conversation, _, _>("openai", OpenAiChat, openai)?
-        .provider::<Conversation, _, _>("anthropic", AnthropicMessages, anthropic)?
-        .client::<Conversation, _, _>(OpenAiChat)?
-        .client::<Conversation, _, _>(AnthropicMessages)?
+        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
+        .provider::<Input, _, _>("anthropic", AnthropicMessages, anthropic)?
+        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(AnthropicMessages)?
         .plugin(plugin)
         .target(target)
 }

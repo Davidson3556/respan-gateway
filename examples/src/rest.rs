@@ -9,7 +9,8 @@
 //! no method or path to put in the request head and are rejected before dialing.
 
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::opaque::{self, Got};
+use respan_gateway_http::formats::opaque::Got;
+use respan_gateway_http::formats::opaque::{self};
 use respan_gateway_http::formats::set_path;
 use respan_gateway_http::http::Method;
 use respan_gateway_http::{self as h, Body, Encoder, Incoming, Outgoing};

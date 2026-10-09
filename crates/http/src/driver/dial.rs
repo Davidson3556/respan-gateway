@@ -29,6 +29,11 @@ pub struct Outgoing {
     pub(crate) limit: usize,
 }
 impl Outgoing {
+    /// Per-call transport state supplied by the gateway and its plugins.
+    pub fn extensions(&self) -> &Extensions {
+        &self.extensions
+    }
+
     /// Bind synchronous request preparation and a standard response stream.
     /// The answer is refused, with the first fault `read` gives, if
     /// `success` says it is no success; else it opens, and a fault that
