@@ -4,6 +4,8 @@ use serde_json::Value;
 #[path = "../../../support/live/test.rs"]
 mod support;
 use support::*;
+/// Where a Responses client connects ([`JsonEvents::RESPONSES_WS`]).
+const PATH: &str = "/v1/responses";
 #[tokio::test]
 async fn production_shutdown_closes_active_socket_and_settles_before_exit() {
     use futures::SinkExt;

@@ -1,7 +1,6 @@
 use super::*;
 use respan_gateway_conversation::{Message, Role};
-use respan_gateway_http::formats::opaque::{self};
-use respan_gateway_http::formats::opaque::{Got, Sent};
+use respan_gateway_http::formats::opaque;
 use respan_gateway_http::{self as h, Incoming, Outgoing};
 use respan_gateway_sdk::{Connection, Format};
 
@@ -9,7 +8,7 @@ use respan_gateway_sdk::{Connection, Format};
 #[derive(Clone)]
 struct Responses;
 
-impl Format<Incoming, Sent<Responses>, Got<Responses>> for Responses {
+impl Format<Incoming, opaque::Input<Responses>, opaque::Output<Responses>> for Responses {
     fn name(&self) -> &str {
         "responses"
     }
@@ -17,27 +16,27 @@ impl Format<Incoming, Sent<Responses>, Got<Responses>> for Responses {
         io.request().method() == h::http::Method::POST
             && h::formats::clean_path(io.request().uri().path()).ends_with("/responses")
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Responses>, Got<Responses>>, Fault> {
-        Ok(io.bind(
-            |request| Ok(opaque::read_request(request)),
-            |reply, _| Ok(opaque::write_response(reply)),
-            h::plain_refusal,
-        ))
+    fn bind(
+        &self,
+        io: Incoming,
+    ) -> Result<Connection<opaque::Input<Responses>, opaque::Output<Responses>>, Fault> {
+        Ok(io.bind(opaque::read_request, opaque::write_response, h::plain))
     }
 }
 
-impl Format<Outgoing, Got<Responses>, Sent<Responses>> for Responses {
+impl Format<Outgoing, opaque::Output<Responses>, opaque::Input<Responses>> for Responses {
     fn name(&self) -> &str {
         "responses"
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Responses>, Sent<Responses>>, Fault> {
-        Ok(io.bind(
-            opaque::write_request,
-            |response, request| {
-                opaque::read_response("responses", response, &request.into_parts().0)
-            },
-            |head, _| head.status.is_success(),
-        ))
+    fn bind(
+        &self,
+        io: Outgoing,
+    ) -> Result<Connection<opaque::Output<Responses>, opaque::Input<Responses>>, Fault> {
+        Ok(
+            io.bind(opaque::write_request, opaque::read_response, |answer| {
+                h::provider_fault("responses", answer)
+            }),
+        )
     }
 }
 
@@ -51,8 +50,8 @@ fn gateway_with_responses(
     + 'static,
 ) -> Result<Gateway, Fault> {
     gateway(transport.clone())?
-        .provider::<Sent<Responses>, _, _>("responses", Responses, transport)?
-        .client::<Sent<Responses>, _, _>(Responses)
+        .provider::<opaque::Input<Responses>, _, _>("responses", Responses, transport)?
+        .client::<opaque::Input<Responses>, _, _>(Responses)
 }
 
 #[tokio::test]

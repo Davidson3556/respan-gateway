@@ -41,7 +41,7 @@ use respan_gateway_conversation::{Input, Output};
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Credential, Wire};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
@@ -372,7 +372,7 @@ fn gateway<S: Store>(
     Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(
                 supervised(move |request| {
                     let client = transport.clone();
@@ -381,7 +381,7 @@ fn gateway<S: Store>(
                 LIMIT,
             ),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(Idempotent(store.clone()))
         .target("openai")
 }

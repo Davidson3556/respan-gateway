@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use respan_gateway_http::HttpClient;
 use respan_gateway_mcp::{self as mcp, SESSION, StdioTransport, StreamableHttp};
-use respan_gateway_mcp::{HttpInput as Input, HttpOutput as Output};
+use respan_gateway_mcp::{Input, Output};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;

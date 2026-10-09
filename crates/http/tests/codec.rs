@@ -26,6 +26,8 @@ use http_body_util::BodyExt;
 use http_support::{LIMIT, post, read_whole, serve, serve_live, streamed};
 #[cfg(feature = "reqwest")]
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_codec::Codec;
 use respan_gateway_conversation::{Input, Output};
 #[cfg(feature = "reqwest")]
 use respan_gateway_conversation::{Message, Role};
@@ -34,7 +36,7 @@ use respan_gateway_http::HttpClient;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{Body, Encoder, Incoming, Outgoing};
 use respan_gateway_http::{http, http_body_util};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
@@ -76,7 +78,7 @@ impl Format<Incoming, In, Out> for Msg {
             |request| {
                 let body = request.into_body();
                 if let Some(raw) = body.full_bytes().cloned() {
-                    Ok(EventStream::lazy(move || {
+                    EventStream::lazy(move || {
                         let mut out = Vec::new();
                         let mut decoder = Numbering(0);
                         decoder.decode(raw.clone(), &mut out)?;
@@ -85,9 +87,9 @@ impl Format<Incoming, In, Out> for Msg {
                             return Err(BadRequest::fault("expected one input"));
                         }
                         Ok(out.remove(0))
-                    }))
+                    })
                 } else {
-                    Ok(EventStream::stream(respan_gateway_http::formats::read(
+                    respan_gateway_http::formats::parse(
                         body,
                         Numbering(0),
                         |state, bytes, out| state.decode(bytes, out),
@@ -95,14 +97,11 @@ impl Format<Incoming, In, Out> for Msg {
                             end?;
                             state.end(out)
                         },
-                    )))
+                    )
                 }
             },
-            |reply, source| {
+            |reply| {
                 let mut head = reply.head();
-                if respan_gateway_http::bodiless(reply.request().method(), head.status) {
-                    return Ok(reply.empty(head, source));
-                }
                 if reply.request().headers().contains_key(UPGRADE) && head.status == StatusCode::OK
                 {
                     head.status = StatusCode::SWITCHING_PROTOCOLS;
@@ -119,26 +118,22 @@ impl Format<Outgoing, Out, In> for Msg {
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Out, In>, Fault> {
         Ok(io.bind(
-            |source: &mut EventStream<In>| {
-                let mut head = http::Request::new(()).into_parts().0;
-                respan_gateway_http::formats::set_path(&mut head, "/msg")?;
-                if let Some(value) = source.value().transpose()? {
-                    respan_gateway_http::formats::set_path(
-                        &mut head,
-                        &format!("/msg/{}", value.1),
-                    )?;
-                }
-                let (request, sink) = respan_gateway_http::request(source, Box::new(Numbered(0)))?;
-                let body = request.into_body();
-                Ok((http::Request::from_parts(head, body), sink))
+            |head, input: Option<&In>| {
+                let path = match input {
+                    Some(value) => format!("/msg/{}", value.1),
+                    None => "/msg".to_owned(),
+                };
+                respan_gateway_http::formats::set_path(head, &path)?;
+                Ok(Box::new(Numbered(0)) as Box<dyn Encoder<In>>)
             },
             |response, _| {
-                response
-                    .into_body()
-                    .map(|raw| raw.map(|raw| Out(String::from_utf8_lossy(&raw).into_owned())))
-                    .boxed()
+                EventStream::stream(
+                    response
+                        .into_body()
+                        .map(|raw| raw.map(|raw| Out(String::from_utf8_lossy(&raw).into_owned()))),
+                )
             },
-            respan_gateway_http::success,
+            |answer| respan_gateway_http::provider_fault("msg", answer),
         ))
     }
 }
@@ -494,11 +489,11 @@ fn chat(
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(transport, LIMIT),
         )
         .and_then(|g| {
-            g.client::<Input, _, _>(OpenAiChat)?
+            g.client::<Input, _, _>(OpenAiChat::OPENAI)?
                 .client::<Input, _, _>(AnthropicMessages)?
                 .target("openai")
         });
@@ -546,19 +541,16 @@ async fn r3_a_relay_passes_the_clients_headers_and_query_as_a_proxy_does() {
     assert!(translated.header("x-trace").is_none());
 }
 
-// The kernel passes the client's cookies and forwarding headers on;
-// stripping them is the transport's policy, so one of its own gets them.
-// Conditions, ranges, overrides and encodings are the transport's to strip
-// too ([`respan_gateway_http::proxy_call`]),
-// which this one does, as an HTTP transport would.
+// The binding strips the client's cookies and forwarding headers, and
+// conditions, ranges, overrides and encodings, whatever the transport: one
+// of its own, which strips nothing, gets none of them.
 #[tokio::test]
-async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
+async fn cookies_and_forwarding_headers_reach_no_transport() {
     let seen = Arc::new(Mutex::new(None));
     let transport = {
         let seen = seen.clone();
         move |call: http::Request<Body>| {
-            let (mut head, _) = call.into_parts();
-            respan_gateway_http::proxy_call(&mut head);
+            let (head, _) = call.into_parts();
             *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(head.headers);
             Box::pin(async move {
                 let mut resp = http::Response::new(Body::full(Bytes::from(UNARY)));
@@ -571,10 +563,13 @@ async fn cookies_and_forwarding_headers_are_the_transports_to_strip() {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat)?.target("openai"))
+        .and_then(|g| {
+            g.client::<Input, _, _>(OpenAiChat::OPENAI)?
+                .target("openai")
+        })
         .unwrap_or_else(|e| panic!("{e}"));
     let _ = read_whole(
         serve(&gw, with_headers("/v1/chat/completions", CHAT))
@@ -652,14 +647,10 @@ impl Format<Incoming, Input, Output> for Noted {
         let seen = self.0.clone();
         Ok(io.bind(
             |request| AnthropicMessages.read_request(request),
-            move |reply, source| {
+            move |reply| {
                 let mut head = reply.head();
-                Ok(
-                    match AnthropicMessages.response_encoder(&mut head, reply.request()) {
-                        Some(encoder) => reply.write(head, Box::new(Noting(seen, encoder))),
-                        None => reply.empty(head, source),
-                    },
-                )
+                let encoder = AnthropicMessages.response_encoder(&mut head, reply.request());
+                Ok(reply.write(head, Box::new(Noting(seen, encoder))))
             },
             |fault, request, head| AnthropicMessages.refusal(fault, request, head),
         ))
@@ -734,7 +725,7 @@ async fn r2_an_encoder_writes_its_own_formats_events_as_they_are_and_no_others()
             .and_then(|g| {
                 g.provider::<Input, _, _>(
                     "openai",
-                    OpenAiChat,
+                    OpenAiChat::OPENAI,
                     respan_gateway_http::connect(sse(&[chunk, "data: [DONE]\n\n"]), LIMIT),
                 )
             })
@@ -806,8 +797,8 @@ async fn r13_a_request_decoders_two_inputs_of_one_frame_go_as_two() {
 }
 
 // What the format sets is its own. A relay's call carries
-// the client's head as the adapter handed it over, `Host` included, which a
-// transport strips ([`respan_gateway_http::proxy_call`]); this one does not.
+// the client's head as the adapter handed it over, but `Host`, which the
+// binding strips for every transport.
 #[tokio::test]
 async fn r13_the_format_sets_what_the_kernel_never_passes() {
     struct Pass;

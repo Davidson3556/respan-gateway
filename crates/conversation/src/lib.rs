@@ -31,7 +31,6 @@
 //! [`Output`] travels from provider to client, on either transport edge.
 
 use respan_gateway_sdk::{Fault, Upstream, Usage};
-use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -144,7 +143,7 @@ pub struct Message {
     /// What it says, part by part.
     pub content: Vec<Content>,
     /// The message's fields the kind has no place for, such as a name. A
-    /// [`Role::Other`] is in the format of `native`.
+    /// [`Role::Native`] is in the format of `native`.
     pub native: Option<NativeFields>,
 }
 
@@ -175,7 +174,7 @@ impl Message {
     /// a cache marker, do not change what they say).
     pub fn is_plain(&self) -> bool {
         let text = |c: &Content| matches!(c, Content::Text { .. });
-        !matches!(self.role, Role::Other { .. })
+        !matches!(self.role, Role::Native { .. })
             && self.native.as_ref().is_none_or(NativeFields::is_empty)
             && self.content.iter().all(text)
     }
@@ -197,9 +196,9 @@ pub enum Role {
     /// A role the kind has no form for, as `format` names it; only a call
     /// in that format can send it.
     #[non_exhaustive]
-    Other {
-        /// The name of the format `name` is in.
-        format: Arc<str>,
+    Native {
+        /// The format that names it.
+        format: FormatId,
         /// The role, as that format names it.
         name: String,
     },
@@ -207,8 +206,8 @@ pub enum Role {
 
 impl Role {
     /// The role `name` of `format`, which the kind has no form for.
-    pub fn other(format: impl Into<Arc<str>>, name: impl Into<String>) -> Self {
-        Role::Other {
+    pub fn native(format: impl Into<FormatId>, name: impl Into<String>) -> Self {
+        Role::Native {
             format: format.into(),
             name: name.into(),
         }
@@ -220,6 +219,15 @@ impl Role {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Content {
+    /// Text.
+    #[non_exhaustive]
+    Text {
+        /// The text.
+        text: String,
+        /// The part's fields the kind has no place for, such as a cache
+        /// marker.
+        native: Option<NativeFields>,
+    },
     /// Reasoning retained in conversation history.
     Reasoning {
         /// Reasoning text.
@@ -233,15 +241,6 @@ pub enum Content {
     Audio(Media),
     /// A document with a typed source and MIME type.
     Document(Media),
-    /// Text.
-    #[non_exhaustive]
-    Text {
-        /// The text.
-        text: String,
-        /// The part's fields the kind has no place for, such as a cache
-        /// marker.
-        native: Option<NativeFields>,
-    },
     /// A tool call an assistant made.
     #[non_exhaustive]
     ToolCall {
@@ -266,8 +265,8 @@ pub enum Content {
         /// The part's fields the kind has no place for.
         native: Option<NativeFields>,
     },
-    /// A part the kind has no form for, such as an image or a file, as
-    /// `format` has it; only a call in that format can send it.
+    /// A part the kind has no form for, such as a provider-run tool's
+    /// block, as its format has it; only a call in that format can send it.
     Native(NativeValue),
 }
 
@@ -297,11 +296,8 @@ impl Content {
     }
 
     /// A part of `format` the kind has no form for.
-    pub fn native(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
-        Content::Native(respan_gateway_sdk::NativeValue {
-            format: format.into(),
-            value: Arc::new(raw.into()),
-        })
+    pub fn native(format: impl Into<FormatId>, raw: impl Into<Value>) -> Self {
+        Content::Native(NativeValue::new(format, raw))
     }
 }
 
@@ -522,11 +518,8 @@ impl Output {
     }
 
     /// An event of `format` the kind has no form for.
-    pub fn native(format: impl Into<Arc<str>>, raw: impl Into<Value>) -> Self {
-        Output::Native(respan_gateway_sdk::NativeValue {
-            format: format.into(),
-            value: Arc::new(raw.into()),
-        })
+    pub fn native(format: impl Into<FormatId>, raw: impl Into<Value>) -> Self {
+        Output::Native(NativeValue::new(format, raw))
     }
 
     /// Whether it is content: a start, a block event or a finish. Usage and
@@ -554,9 +547,9 @@ pub enum Finish {
     /// A reason the kind has no form for, as `format` names it; only a
     /// response in that format can say it.
     #[non_exhaustive]
-    Other {
-        /// The name of the format `reason` is in.
-        format: Arc<str>,
+    Native {
+        /// The format that names it.
+        format: FormatId,
         /// The reason, as that format names it.
         reason: String,
     },
@@ -564,8 +557,8 @@ pub enum Finish {
 
 impl Finish {
     /// The reason `reason` of `format`, which the kind has no form for.
-    pub fn other(format: impl Into<Arc<str>>, reason: impl Into<String>) -> Self {
-        Finish::Other {
+    pub fn native(format: impl Into<FormatId>, reason: impl Into<String>) -> Self {
+        Finish::Native {
             format: format.into(),
             reason: reason.into(),
         }
@@ -575,7 +568,7 @@ impl Finish {
 /// A response block with its deltas joined. Its text is ordinary text,
 /// JSON argument text, or reasoning, according to `kind`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReplyBlock {
+pub struct AssembledBlock {
     /// The block's identifier in the event stream.
     pub block: u32,
     /// What the block holds.
@@ -588,9 +581,9 @@ pub struct ReplyBlock {
 /// A block or opaque event in an assembled response. Blocks occupy the
 /// position of their first start; opaque events retain their arrival order.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ReplyItem {
+pub enum AssembledItem {
     /// An assembled content block.
-    Block(ReplyBlock),
+    Block(AssembledBlock),
     /// A format-specific event, kept without interpretation.
     Native(NativeValue),
 }
@@ -607,21 +600,21 @@ pub struct Assembled {
     pub finish: Option<Finish>,
     /// All reported usage increments, summed.
     pub usage: Usage,
-    items: Vec<ReplyItem>,
+    items: Vec<AssembledItem>,
 }
 
 impl Assembled {
     /// The blocks and opaque events, in order. Read-only while assembling
     /// so callers cannot invalidate the state used by subsequent deltas.
-    pub fn items(&self) -> &[ReplyItem] {
+    pub fn items(&self) -> &[AssembledItem] {
         &self.items
     }
 
     /// The content blocks, in the order they opened.
-    pub fn blocks(&self) -> impl Iterator<Item = &ReplyBlock> {
+    pub fn blocks(&self) -> impl Iterator<Item = &AssembledBlock> {
         self.items.iter().filter_map(|item| match item {
-            ReplyItem::Block(part) => Some(part),
-            ReplyItem::Native(..) => None,
+            AssembledItem::Block(part) => Some(part),
+            AssembledItem::Native(..) => None,
         })
     }
 
@@ -646,7 +639,7 @@ impl Assembled {
             Output::BlockStart { block, kind } => match self.part(*block) {
                 Some(part) if part.kind == *kind && !part.ended => {}
                 Some(_) => return Err(malformed("a block opens twice")),
-                None => self.items.push(ReplyItem::Block(ReplyBlock {
+                None => self.items.push(AssembledItem::Block(AssembledBlock {
                     block: *block,
                     kind: kind.clone(),
                     text: String::new(),
@@ -669,7 +662,7 @@ impl Assembled {
             Output::Usage(usage) => self.usage += usage,
             Output::Finish(finish) => self.finish = Some(finish.clone()),
             Output::Native(respan_gateway_sdk::NativeValue { format, value: raw }) => {
-                self.items.push(ReplyItem::Native(NativeValue {
+                self.items.push(AssembledItem::Native(NativeValue {
                     format: format.clone(),
                     value: raw.clone(),
                 }));
@@ -678,14 +671,14 @@ impl Assembled {
         Ok(())
     }
 
-    fn part(&mut self, block: u32) -> Option<&mut ReplyBlock> {
+    fn part(&mut self, block: u32) -> Option<&mut AssembledBlock> {
         self.items.iter_mut().find_map(|item| match item {
-            ReplyItem::Block(part) if part.block == block => Some(part),
+            AssembledItem::Block(part) if part.block == block => Some(part),
             _ => None,
         })
     }
 
-    fn open_part(&mut self, block: u32) -> Result<&mut ReplyBlock, Fault> {
+    fn open_part(&mut self, block: u32) -> Result<&mut AssembledBlock, Fault> {
         match self.part(block) {
             Some(part) if !part.ended => Ok(part),
             Some(_) => Err(malformed("an event names a block that has ended")),
@@ -724,7 +717,7 @@ mod tests {
         ));
         assert_ne!(a, b);
         assert!(a.is_plain() && !b.is_plain());
-        let tagged = Message::new(Role::other("chat", "tool"), "x");
+        let tagged = Message::new(Role::native("chat", "tool"), "x");
         assert!(!tagged.is_plain());
     }
 
@@ -744,12 +737,15 @@ mod tests {
         // A part's native does not change what it says.
         assert!(cached.is_plain());
         assert_ne!(cached, Message::new(Role::User, "hi"));
-        assert_eq!(Role::other("chat", "critic"), Role::other("chat", "critic"));
-        assert_ne!(
-            Role::other("chat", "critic"),
-            Role::other("other", "critic")
+        assert_eq!(
+            Role::native("chat", "critic"),
+            Role::native("chat", "critic")
         );
-        assert_ne!(Finish::other("a", "x"), Finish::other("b", "x"));
+        assert_ne!(
+            Role::native("chat", "critic"),
+            Role::native("other", "critic")
+        );
+        assert_ne!(Finish::native("a", "x"), Finish::native("b", "x"));
     }
 
     #[test]
@@ -801,7 +797,7 @@ mod tests {
         assert_eq!(all.finish, Some(Finish::ToolUse));
         assert_eq!(all.usage.get(units::INPUT_TOKENS), Some(6));
         assert!(
-            matches!(all.items().last(), Some(ReplyItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw }))
+            matches!(all.items().last(), Some(AssembledItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw }))
             if &**f == "chat" && **raw == json!({"type": "ping"}))
         );
     }
@@ -845,13 +841,13 @@ mod tests {
             Output::text(2, "wer"),
         ])
         .expect("interleaved response");
-        assert!(matches!(&all.items()[0], ReplyItem::Block(p)
+        assert!(matches!(&all.items()[0], AssembledItem::Block(p)
             if p.block == 9 && p.kind == Block::Reasoning && p.text == "thinking"));
         assert!(
-            matches!(&all.items()[1], ReplyItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw })
+            matches!(&all.items()[1], AssembledItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw })
             if &**f == "native" && **raw == signature)
         );
-        assert!(matches!(&all.items()[2], ReplyItem::Block(p)
+        assert!(matches!(&all.items()[2], AssembledItem::Block(p)
             if p.block == 2 && p.kind == Block::Text && p.text == "answer"));
         assert_eq!(all.text(), "answer");
 

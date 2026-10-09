@@ -24,15 +24,14 @@ use http_body_util::{BodyExt, StreamBody};
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
-use respan_gateway_http::formats::opaque::{self};
-use respan_gateway_http::formats::opaque::{Got, Sent};
+use respan_gateway_http::formats::opaque;
 
 use respan_gateway_conversation::{Delta, Input, Message, Output, Role};
 use respan_gateway_http::Encoder;
 use respan_gateway_http::formats::set_path;
 use respan_gateway_http::{Completion, Incoming, Outgoing, Wire};
 use respan_gateway_http::{http, http_body, http_body_util};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::{BadRequest, Upstream};
 use respan_gateway_sdk::{
@@ -110,8 +109,8 @@ struct Heard(String);
 #[derive(Clone)]
 struct Talk;
 
-fn read_talk(request: http::Request<Body>, strict: bool) -> Result<EventStream<Say>, Fault> {
-    Ok(respan_gateway_http::messages(request, move |_, raw| {
+fn read_talk(request: http::Request<Body>, strict: bool) -> EventStream<Say> {
+    respan_gateway_http::messages(request, move |_, raw| {
         let mut rest = match serde_json::from_slice::<Value>(&raw) {
             Ok(Value::Object(fields)) => fields,
             _ => serde_json::Map::new(),
@@ -124,13 +123,10 @@ fn read_talk(request: http::Request<Body>, strict: bool) -> Result<EventStream<S
             None => return Err(BadRequest::fault("not talk")),
         };
         Ok(Say(text, rest))
-    }))
+    })
 }
 
-fn talk_reply(
-    reply: respan_gateway_http::Reply,
-    _source: &mut EventStream<Heard>,
-) -> Result<EventSink<Heard>, Fault> {
+fn talk_reply(reply: respan_gateway_http::Reply) -> Result<EventSink<Heard>, Fault> {
     let mut head = reply.head();
     if reply.request().headers().contains_key(UPGRADE) && head.status == StatusCode::OK {
         head.status = StatusCode::SWITCHING_PROTOCOLS;
@@ -140,16 +136,8 @@ fn talk_reply(
     Ok(reply.write(head, Box::new(Write)))
 }
 
-fn read_heard(
-    response: http::Response<Body>,
-    request: http::Request<Bytes>,
-) -> futures::stream::BoxStream<'static, Result<Heard, Fault>> {
-    let switched = response.status() == StatusCode::SWITCHING_PROTOCOLS
-        && request.headers().contains_key(UPGRADE);
-    if !response.status().is_success() && !switched {
-        return respan_gateway_http::formats::whole::read("talk", response, |_, _| Ok(()));
-    }
-    respan_gateway_http::formats::read(
+fn read_heard(response: http::Response<Body>, _: http::Request<Bytes>) -> EventStream<Heard> {
+    respan_gateway_http::formats::parse(
         response.into_body(),
         Messages,
         Messages::decode,
@@ -181,24 +169,25 @@ impl Format<Outgoing, Heard, Say> for Talk {
         "talk"
     }
     fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Heard, Say>, Fault> {
-        Ok(io.bind(
-            |source| {
-                let live = !source.is_single();
-                let (request, sink) = respan_gateway_http::request(source, Box::new(Says))?;
-                let (mut head, body) = request.into_parts();
-                set_path(&mut head, "/talk")?;
-                if live {
-                    head.headers
-                        .insert(UPGRADE, HeaderValue::from_static("websocket"));
-                    head.headers
-                        .insert(CONNECTION, HeaderValue::from_static("upgrade"));
-                }
-                Ok((http::Request::from_parts(head, body), sink))
-            },
-            read_heard,
-            respan_gateway_http::success,
-        ))
+        Ok(io.bind(talk_call, read_heard, |answer| {
+            respan_gateway_http::provider_fault("talk", answer)
+        }))
     }
+}
+
+/// A talk call to `/talk`, upgraded for live input.
+fn talk_call(
+    head: &mut http::request::Parts,
+    say: Option<&Say>,
+) -> Result<Box<dyn Encoder<Say>>, Fault> {
+    set_path(head, "/talk")?;
+    if say.is_none() {
+        head.headers
+            .insert(UPGRADE, HeaderValue::from_static("websocket"));
+        head.headers
+            .insert(CONNECTION, HeaderValue::from_static("upgrade"));
+    }
+    Ok(Box::new(Says))
 }
 
 /// Writes each talk message from its text and its other fields.
@@ -333,7 +322,7 @@ fn talk_with_openai(
     let calls = Calls::default();
     let list = [
         add_provider("echo", Talk, echo.sender()),
-        add_provider("openai", OpenAiChat, openai),
+        add_provider("openai", OpenAiChat::OPENAI, openai),
     ];
     let gw = providers(list).and_then(|g| g.client::<Say, _, _>(Talk));
     let gw = gw.map(|g| g.plugin(calls.clone()));
@@ -1210,17 +1199,13 @@ impl Format<Outgoing, Heard, Say> for TalkHttp {
     }
     fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Heard, Say>, Fault> {
         Ok(io.bind(
-            |source| {
-                if !source.is_single() {
-                    return Err(Fault::config("talk-http cannot stream a request"));
-                }
-                let (request, sink) = respan_gateway_http::request(source, Box::new(Says))?;
-                let (mut head, body) = request.into_parts();
-                set_path(&mut head, "/talk")?;
-                Ok((http::Request::from_parts(head, body), sink))
+            |head, say: Option<&Say>| {
+                say.ok_or_else(|| Fault::config("talk-http cannot stream a request"))?;
+                set_path(head, "/talk")?;
+                Ok(Box::new(Says) as Box<dyn Encoder<Say>>)
             },
             read_heard,
-            respan_gateway_http::success,
+            |answer| respan_gateway_http::provider_fault("talk-http", answer),
         ))
     }
 }
@@ -1253,7 +1238,7 @@ async fn a_framed_requests_inputs_go_only_to_a_call_that_switches_protocols() {
 #[derive(Clone)]
 struct Raw;
 
-impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
+impl Format<Incoming, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
@@ -1263,31 +1248,32 @@ impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
     fn bind(
         &self,
         io: Incoming,
-    ) -> Result<respan_gateway_sdk::Connection<Sent<Raw>, Got<Raw>>, Fault> {
+    ) -> Result<respan_gateway_sdk::Connection<opaque::Input<Raw>, opaque::Output<Raw>>, Fault>
+    {
         Ok(io.bind(
-            |request| Ok(opaque::read_request(request)),
-            |reply, _| Ok(opaque::write_response(reply)),
-            respan_gateway_http::plain_refusal,
+            opaque::read_request,
+            opaque::write_response,
+            respan_gateway_http::plain,
         ))
     }
 }
-impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
+impl Format<Outgoing, opaque::Output<Raw>, opaque::Input<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
     fn bind(
         &self,
         io: Outgoing,
-    ) -> Result<respan_gateway_sdk::Connection<Got<Raw>, Sent<Raw>>, Fault> {
+    ) -> Result<respan_gateway_sdk::Connection<opaque::Output<Raw>, opaque::Input<Raw>>, Fault>
+    {
         Ok(io.bind(
-            |source| {
-                let (request, sink) = opaque::write_request(source)?;
-                let (mut head, body) = request.into_parts();
-                set_path(&mut head, "/")?;
-                Ok((http::Request::from_parts(head, body), sink))
+            |head, input| {
+                let encoder = opaque::write_request(head, input)?;
+                set_path(head, "/")?;
+                Ok(encoder)
             },
-            |response, request| opaque::read_response("raw", response, &request.into_parts().0),
-            respan_gateway_http::success,
+            opaque::read_response,
+            |answer| respan_gateway_http::provider_fault("raw", answer),
         ))
     }
 }
@@ -1296,7 +1282,7 @@ impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
 async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
     let echo = Echo::default();
     let gw = providers([add_provider("raw", Raw, echo.sender())])
-        .and_then(|g| g.client::<Sent<Raw>, _, _>(Raw)?.target("raw"))
+        .and_then(|g| g.client::<opaque::Input<Raw>, _, _>(Raw)?.target("raw"))
         .unwrap_or_else(|e| panic!("{e}"))
         .plugin(explicit::Relay::RAW);
     let (send, req) = upgrade();
@@ -1647,7 +1633,7 @@ async fn a_calls_empty_bodyless_response_ends_ok() {
     });
     let gw = providers([add_provider("raw", Raw, empty)])
         .and_then(|g| {
-            Ok(g.client::<Sent<Raw>, _, _>(Raw)?
+            Ok(g.client::<opaque::Input<Raw>, _, _>(Raw)?
                 .target("raw")?
                 .plugin(calls.clone()))
         })
@@ -1970,7 +1956,7 @@ impl Plugin for WsToSse {
                 let reply = call
                     .clone()
                     .with_input(chat)
-                    .with_extension(respan_gateway_providers::StreamResponse(true));
+                    .with_extension(respan_gateway_codec::StreamResponse(true));
                 async move { Ok(reply.await?.outputs::<Output>()) }
             })
             .try_flatten()

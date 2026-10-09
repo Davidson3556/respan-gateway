@@ -1,7 +1,5 @@
 //! [`WsTransport`]: a provider reached over WebSocket.
 
-use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -10,27 +8,21 @@ use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use respan_gateway_http::{Body, Completion, Frames, RawErrors};
 use respan_gateway_http::{is_connection_header, prepare_call, strip_origin_headers};
-use respan_gateway_sdk::futures::channel::oneshot;
-use respan_gateway_sdk::futures::stream::{SplitSink, SplitStream};
-use respan_gateway_sdk::futures::{FutureExt, SinkExt, Stream, StreamExt, stream};
-use respan_gateway_sdk::{Abandoned, Extensions, Fault, Truncated, Upstream};
-use tokio::sync::mpsc::{self, Sender};
+use respan_gateway_sdk::futures::{FutureExt, Stream, StreamExt, stream};
+use respan_gateway_sdk::{Extensions, Fault, Truncated, Upstream};
 use tokio::time::Instant;
-use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
-use tokio_tungstenite::tungstenite::{Error, Message};
+use tokio_tungstenite::tungstenite::protocol::Role;
 
-use crate::{CloseCode, Limits, ProviderClose};
+use crate::session::{Edge, inbound, pump};
+use crate::{Limits, token, tokens};
 
 /// How long a provider has to answer the upgrade by default: connecting
 /// takes well under a second to a reachable host, and 10 s spans TCP's
 /// first retransmits of a lost handshake (RFC 6298: after 1 s, then 2 s
 /// more, then 4 s more), as `HttpClient`'s connect timeout does.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
-type Socket = WebSocketStream<reqwest::Upgraded>;
 
 /// Headers of the handshake the WebSocket library writes itself, and the
 /// extension and key headers of the client's own connection: none of them
@@ -62,28 +54,27 @@ fn is_handshake(name: &HeaderName) -> bool {
 /// The body of the call is the session's frames to send, each one text
 /// message; the answer's body is the provider's, each one text message.
 ///
+/// It pumps the session as the client edge does ([`serve`](crate::serve)
+/// says how each end goes):
+///
 /// - The call's body ends clean: Close 1000 is sent, and the provider's
 ///   end, however it comes within [`Limits::close_wait`], ends the answer
 ///   clean.
-/// - It ends `Err` (the client broke or left, or a filter or plugin refused
-///   an input): the provider is sent Close (1001 for a client that left
-///   ([`Abandoned`]), else the fault's [`CloseCode`] or 1011) within
-///   [`Limits::close_send`], the connection is dropped, and the answer ends
-///   with that fault.
-/// - The answer's body is dropped: the provider is sent Close 1001 within
-///   [`Limits::close_send`], and the connection is dropped.
+/// - It ends `Err` (the client left, or a filter or plugin refused an
+///   input): the provider is sent Close (1001 for a client that left, else
+///   the fault's [`CloseCode`](crate::CloseCode) or 1011), and the answer
+///   ends with that fault. A frame of it that is no text is a `config`
+///   fault. The answer's body dropped: Close 1001.
 /// - The provider sends Close with no code or 1000: the answer ends clean.
-///   With another code: an `Upstream` fault with that [`ProviderClose`],
-///   and, on a call with [`RawErrors`] (the
-///   [`Relay`](respan_gateway_http::relay::Relay)'s permission to pass the
-///   provider's errors on), that [`CloseCode`] too.
-/// - The provider's connection breaks with no Close: `Err(truncated)`.
-/// - A binary frame in the call is a `config` fault. A provider's binary
-///   frame is an `upstream` fault unless [`Self::with_binary_text`] enables
-///   UTF-8 normalization; invalid UTF-8 remains a fault.
-///
-/// The transport reads the provider no faster than the answer is read (one
-/// frame in flight), and sends no faster than the provider takes.
+///   With another code: an `Upstream` fault with that
+///   [`ProviderClose`](crate::ProviderClose), and, on a call with
+///   [`RawErrors`] (the [`Relay`](respan_gateway_http::relay::Relay)'s
+///   permission to pass the provider's errors on), that `CloseCode` too.
+/// - The provider's connection breaks with no Close, or it is silent
+///   through a ping: `Err(truncated)`.
+/// - A provider's binary frame, unless [`Self::with_binary_text`] enables
+///   UTF-8 normalization (invalid UTF-8 remains a fault), or a message over
+///   `max_message`: `upstream`, and the provider is sent Close 1003 or 1009.
 ///
 /// [`HttpClient`]: respan_gateway_http::HttpClient
 #[derive(Clone)]
@@ -206,61 +197,33 @@ fn shared_client() -> Result<reqwest::Client, Fault> {
 
 /// Verify the negotiated protocol before exposing the upgraded stream.
 fn validate_upgrade(sent: &HeaderMap, received: &HeaderMap) -> Result<(), Fault> {
-    let equals = |name, value: &str| {
-        received
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case(value))
-    };
-    let connection = received
-        .get_all(header::CONNECTION)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .any(|v| v.trim().eq_ignore_ascii_case("upgrade"));
+    let upgrade = received.get(header::UPGRADE);
+    let upgrade = upgrade.is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
+    let connection =
+        tokens(received, header::CONNECTION).any(|v| v.eq_ignore_ascii_case("upgrade"));
     let accept = sent
         .get(header::SEC_WEBSOCKET_KEY)
         .map(|key| derive_accept_key(key.as_bytes()));
-    let key_matches = accept.as_ref().is_some_and(|key| {
-        received
-            .get_all(header::SEC_WEBSOCKET_ACCEPT)
-            .iter()
-            .count()
-            == 1
-            && received
-                .get(header::SEC_WEBSOCKET_ACCEPT)
-                .is_some_and(|v| v == key)
-    });
+    let mut accepted = received.get_all(header::SEC_WEBSOCKET_ACCEPT).iter();
+    let key_matches = match (accepted.next(), accepted.next(), accept) {
+        (Some(got), None, Some(accept)) => got == &accept,
+        _ => false,
+    };
     let mut chosen = received.get_all(header::SEC_WEBSOCKET_PROTOCOL).iter();
     let protocol = match (chosen.next(), chosen.next()) {
         // RFC 6455 4.2.2: a server may decline every offered subprotocol.
         (None, None) => true,
-        (Some(chosen), None)
-            if !chosen.is_empty()
-                && chosen
-                    .as_bytes()
-                    .iter()
-                    .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b)) =>
-        {
-            sent.get_all(header::SEC_WEBSOCKET_PROTOCOL)
-                .iter()
-                .filter_map(|v| v.to_str().ok())
-                .flat_map(|offers| offers.split(','))
-                .any(|p| p.trim().as_bytes() == chosen.as_bytes())
+        (Some(chosen), None) if token(chosen.as_bytes()) => {
+            tokens(sent, header::SEC_WEBSOCKET_PROTOCOL).any(|p| p.as_bytes() == chosen.as_bytes())
         }
         _ => false,
     };
-    if equals(header::UPGRADE, "websocket")
-        && connection
-        && key_matches
-        && protocol
-        && !received.contains_key(header::SEC_WEBSOCKET_EXTENSIONS)
-    {
-        Ok(())
-    } else {
-        Err(Upstream::fault(
+    let extended = received.contains_key(header::SEC_WEBSOCKET_EXTENSIONS);
+    match upgrade && connection && key_matches && protocol && !extended {
+        true => Ok(()),
+        false => Err(Upstream::fault(
             "the provider returned an invalid WebSocket handshake",
-        ))
+        )),
     }
 }
 
@@ -324,9 +287,6 @@ impl WsTransport {
             req.headers_mut().append(name, value.clone());
         }
         let limits = self.limits;
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(limits.max_message))
-            .max_frame_size(Some(limits.max_message));
         let deadline = Instant::now() + self.handshake_timeout;
         let connect = async {
             let expected = req.headers().clone();
@@ -357,24 +317,25 @@ impl WsTransport {
             let upgraded = resp.upgrade().await.map_err(|e| {
                 Upstream::fault("the provider did not upgrade the connection").with_source(e)
             })?;
-            let socket =
-                WebSocketStream::from_raw_socket(upgraded, Role::Client, Some(config)).await;
             head.headers.remove(header::SEC_WEBSOCKET_ACCEPT);
             head.headers.remove(header::SEC_WEBSOCKET_EXTENSIONS);
-            // One frame in flight: a reader that stops reading stops the connection's.
-            let (frames, frames_in) = mpsc::channel(1);
-            let writing = tokio::spawn(session(
-                socket,
-                body,
-                frames,
-                limits,
+            let (frames, end, answer) = inbound(Truncated::fault);
+            let edge = Edge::Provider {
                 relayed,
-                self.binary_text,
-            ));
-            let frames_in = stream::unfold(frames_in, |mut rx| async {
-                rx.recv().await.map(|f| (f, rx))
-            });
-            let answer = http::Response::from_parts(head, Body::stream(frames_in));
+                binary_text: self.binary_text,
+            };
+            let stop = std::future::pending();
+            let session = pump(
+                upgraded,
+                Role::Client,
+                body,
+                (frames, end),
+                edge,
+                limits,
+                stop,
+            );
+            let writing = tokio::spawn(session);
+            let answer = http::Response::from_parts(head, Body::stream(answer));
             let completion: Completion = async move {
                 writing.await.map_err(|error| {
                     if error.is_cancelled() {
@@ -393,199 +354,6 @@ impl WsTransport {
     }
 }
 
-/// How the call's frames ended.
-enum Sent {
-    /// The call's body ended clean, and Close was sent.
-    Closed,
-    /// The body ended `Err`, or held a frame that cannot be sent: the
-    /// session is over, and the answer ends with the fault.
-    Failed(Fault),
-    /// The connection broke while sending; the reader says how.
-    Lost,
-}
-
-/// How the provider's frames ended.
-enum Read {
-    /// The provider's side ended, and the answer with it.
-    Ended,
-    /// The answer was dropped: no one reads the provider.
-    Dropped,
-}
-
-/// Pump `body`'s frames to the provider and the provider's to `frames`,
-/// until one side ends and the other has had its say. Its result completes
-/// the HTTP transport's outgoing transfer; provider-initiated clean closure
-/// stops the upload normally. Read failures remain on the incoming flow.
-async fn session(
-    socket: Socket,
-    body: Frames,
-    frames: Sender<Result<Bytes, Fault>>,
-    limits: Limits,
-    relayed: bool,
-    binary_text: bool,
-) -> Result<(), Fault> {
-    let (mut sink, stream) = socket.split();
-    let closing = AtomicBool::new(false);
-    // Only the reader holds the answer's sender, so the answer ends when it
-    // says so; a fault of the sending side goes to it to say.
-    let (abort, aborted) = oneshot::channel();
-    let reader = read_frames(
-        stream,
-        frames,
-        &closing,
-        aborted,
-        limits,
-        relayed,
-        binary_text,
-    );
-    let mut read = pin!(reader);
-    let sent = tokio::select! {
-        // An input's failure, which ends the call's answer too, says why.
-        biased;
-        sent = send_frames(&mut sink, body, &closing, limits.close_send) => Ok(sent),
-        read = &mut read => Err(read),
-    };
-    match sent {
-        Err(Read::Ended) => Ok(()),
-        // No one reads the session any more: the gateway goes away.
-        Err(Read::Dropped) => {
-            close(&mut sink, 1001, limits.close_send).await;
-            Ok(())
-        }
-        // Close is sent; the provider's part of it may take a while.
-        Ok(Sent::Closed) => {
-            let _ = tokio::time::timeout(limits.close_wait, read).await;
-            Ok(())
-        }
-        Ok(Sent::Failed(fault)) => {
-            // The reader ends the answer with the fault before the
-            // provider's answer to this Close could end it clean.
-            let _ = abort.send(fault.clone());
-            let code = match fault.is::<Abandoned>() {
-                true => 1001,
-                false => fault.get::<CloseCode>().map_or(1011, |c| c.sendable()),
-            };
-            close(&mut sink, code, limits.close_send).await;
-            read.await;
-            Err(fault)
-        }
-        Ok(Sent::Lost) => {
-            // The reader classifies the socket failure on the incoming
-            // flow, preserving its precise close code or truncation.
-            read.await;
-            Ok(())
-        }
-    }
-}
-
-/// Send Close `code` within `wait`, as a peer that has not taken it by then
-/// has stopped reading.
-async fn close(sink: &mut SplitSink<Socket, Message>, code: u16, wait: Duration) {
-    let frame = CloseFrame {
-        code: code.into(),
-        reason: "".into(),
-    };
-    let _ = tokio::time::timeout(wait, sink.send(Message::Close(Some(frame)))).await;
-}
-
-/// The call's frames as text messages, then Close 1000 if the body ended
-/// clean.
-async fn send_frames(
-    sink: &mut SplitSink<Socket, Message>,
-    mut body: Frames,
-    closing: &AtomicBool,
-    close_send: Duration,
-) -> Sent {
-    while let Some(frame) = body.next().await {
-        let bytes = match frame {
-            Ok(bytes) => bytes,
-            Err(fault) => return Sent::Failed(fault),
-        };
-        let Ok(text) = String::from_utf8(bytes.into()) else {
-            let text = "a frame of a call is not text: only text frames are carried";
-            return Sent::Failed(Fault::config(text));
-        };
-        if sink.send(Message::Text(text.into())).await.is_err() {
-            return Sent::Lost;
-        }
-    }
-    closing.store(true, Ordering::SeqCst);
-    close(sink, 1000, close_send).await;
-    Sent::Closed
-}
-
-/// The provider's text messages into `frames`, then how it ended: `frames`
-/// ends clean, or with the fault. A provider's Close with a code other than
-/// 1000 is a [`ProviderClose`], and a [`CloseCode`] too if `relayed`.
-async fn read_frames(
-    mut stream: SplitStream<Socket>,
-    frames: Sender<Result<Bytes, Fault>>,
-    closing: &AtomicBool,
-    mut aborted: oneshot::Receiver<Fault>,
-    limits: Limits,
-    relayed: bool,
-    binary_text: bool,
-) -> Read {
-    let fault = loop {
-        let next = tokio::select! {
-            biased;
-            // The sending side failed: its fault ends the answer.
-            Ok(fault) = &mut aborted => break fault,
-            // The answer was dropped, quiet connection or not.
-            () = frames.closed() => return Read::Dropped,
-            next = stream.next() => next,
-        };
-        match next {
-            Some(Ok(Message::Text(text))) => {
-                let frame = Bytes::copy_from_slice(text.as_bytes());
-                if frames.send(Ok(frame)).await.is_err() {
-                    return Read::Dropped;
-                }
-            }
-            Some(Ok(Message::Binary(bytes))) if binary_text => {
-                if std::str::from_utf8(&bytes).is_err() {
-                    break Upstream::fault(
-                        "the provider sent a binary message that is not UTF-8 text",
-                    );
-                }
-                if frames.send(Ok(bytes)).await.is_err() {
-                    return Read::Dropped;
-                }
-            }
-            Some(Ok(Message::Binary(_))) => {
-                let text = "the provider sent a binary frame: only text frames are carried";
-                break Upstream::fault(text);
-            }
-            Some(Ok(Message::Close(frame))) => {
-                let code = frame.map(|f| u16::from(f.code));
-                let clean = closing.load(Ordering::SeqCst) || matches!(code, None | Some(1000));
-                if let (false, Some(code)) = (clean, code) {
-                    let mut fault = Upstream::fault("the provider closed the session")
-                        .with(ProviderClose(code));
-                    if relayed {
-                        fault = fault.with(CloseCode(code));
-                    }
-                    let _ = frames.send(Err(fault)).await;
-                }
-                // The answer ends; the library sends its reply to the Close
-                // as the stream is read on.
-                drop(frames);
-                let _ = tokio::time::timeout(limits.close_send, stream.next()).await;
-                return Read::Ended;
-            }
-            Some(Ok(_)) => {}
-            // No Close came. After ours, that is how a provider may end.
-            Some(Err(_)) | None if closing.load(Ordering::SeqCst) => return Read::Ended,
-            Some(Err(Error::Capacity(_))) => {
-                break Upstream::fault("the provider sent a message that is too large");
-            }
-            Some(Err(_)) | None => break Truncated::fault(),
-        }
-    };
-    let _ = frames.send(Err(fault)).await;
-    Read::Ended
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +361,10 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use respan_gateway_sdk::futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
 
     use respan_gateway_http::ProviderError;
     use respan_gateway_http::http_body_util::BodyExt;
@@ -765,11 +537,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn binary_text_is_opt_in_and_rejects_invalid_utf8() {
-        for (enabled, bytes, accepted) in [
-            (false, "雪😀".as_bytes(), false),
-            (true, "雪😀".as_bytes(), true),
-            (true, &[0xff, 0xfe][..], false),
+    async fn binary_text_is_gemini_lives_alone_and_rejects_invalid_utf8() {
+        for (format, bytes, accepted) in [
+            (JsonEvents::OPENAI_REALTIME, "雪😀".as_bytes(), false),
+            (JsonEvents::GEMINI_LIVE, "雪😀".as_bytes(), true),
+            (JsonEvents::GEMINI_LIVE, &[0xff, 0xfe][..], false),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
@@ -787,9 +559,7 @@ mod tests {
                 socket.send(Message::Close(None)).await.expect("close");
                 while let Some(Ok(_)) = socket.next().await {}
             });
-            let transport = WsTransport::new(base)
-                .expect("transport")
-                .with_binary_text(enabled);
+            let transport = format.transport(base).expect("transport");
             let request = http::Request::get("/events")
                 .body(Body::stream(stream::pending()))
                 .expect("request");
@@ -906,7 +676,12 @@ mod tests {
             .expect("request");
         let (response, completion) = tokio::time::timeout(
             Duration::from_secs(3),
-            respan_gateway_http::handle(&gateway, request, true, limit),
+            respan_gateway_http::handle(
+                &gateway,
+                request,
+                respan_gateway_http::Framing::Live,
+                limit,
+            ),
         )
         .await
         .expect("refusal must not wait for an upload frame");

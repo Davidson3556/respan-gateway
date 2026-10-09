@@ -21,8 +21,7 @@
 
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::formats;
-use respan_gateway_http::formats::opaque::{self};
-use respan_gateway_http::formats::opaque::{Got, Sent};
+use respan_gateway_http::formats::opaque;
 use respan_gateway_http::formats::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
@@ -44,7 +43,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[derive(Clone)]
 struct Models;
 
-impl Format<Incoming, Sent<Models>, Got<Models>> for Models {
+impl Format<Incoming, opaque::Input<Models>, opaque::Output<Models>> for Models {
     fn name(&self) -> &str {
         "models"
     }
@@ -53,42 +52,48 @@ impl Format<Incoming, Sent<Models>, Got<Models>> for Models {
         io.request().method() == http::Method::GET && io.request().uri().path() == "/v1/models"
     }
 
-    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Models>, Got<Models>>, Fault> {
+    fn bind(
+        &self,
+        io: Incoming,
+    ) -> Result<Connection<opaque::Input<Models>, opaque::Output<Models>>, Fault> {
         Ok(io.bind(
-            |request| Ok(opaque::read_request(request)),
-            |reply, _source| {
+            opaque::read_request,
+            |reply| {
                 // A merged list has no provider's head to borrow a content type from.
                 let mut head = reply.head();
                 formats::default_content_type(&mut head, "application/json");
-                let write = |one: &[Got<Models>]| {
+                let write = |one: &[opaque::Output<Models>]| {
                     Ok(one
                         .iter()
                         .flat_map(|g| g.0.body().to_vec())
                         .collect::<Vec<u8>>())
                 };
-                let fail = |fault: &Fault| {
-                    json!({ "error": { "message": fault.message() } })
-                        .to_string()
-                        .into_bytes()
-                };
-                Ok(reply.write(head, whole::collect(write, fail)))
+                Ok(reply.write(head, whole::collect(write)))
             },
-            h::plain_refusal,
+            |fault, _, head| {
+                formats::default_content_type(head, "application/json");
+                json!({ "error": { "message": fault.message() } })
+                    .to_string()
+                    .into()
+            },
         ))
     }
 }
 
-impl Format<Outgoing, Got<Models>, Sent<Models>> for Models {
+impl Format<Outgoing, opaque::Output<Models>, opaque::Input<Models>> for Models {
     fn name(&self) -> &str {
         "models"
     }
 
-    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Models>, Sent<Models>>, Fault> {
-        Ok(io.bind(
-            opaque::write_request,
-            |response, request| opaque::read_response("models", response, &request.into_parts().0),
-            |head, _| head.status.is_success(),
-        ))
+    fn bind(
+        &self,
+        io: Outgoing,
+    ) -> Result<Connection<opaque::Output<Models>, opaque::Input<Models>>, Fault> {
+        Ok(
+            io.bind(opaque::write_request, opaque::read_response, |answer| {
+                h::provider_fault("models", answer)
+            }),
+        )
     }
 }
 
@@ -98,13 +103,14 @@ struct MergeModels(Vec<&'static str>);
 #[async_trait]
 impl Plugin for MergeModels {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if !cx.is_kind::<Sent<Models>>() {
+        if !cx.is_kind::<opaque::Input<Models>>() {
             return Ok(None);
         }
         let calls: Vec<_> = self.0.iter().map(|p| cx.call(*p)).collect();
         let lists: Vec<Result<Vec<Value>, Fault>> =
             join_all(calls.into_iter().map(|call| async move {
-                let frames: Vec<Got<Models>> = call.await?.outputs().try_collect().await?;
+                let frames: Vec<opaque::Output<Models>> =
+                    call.await?.outputs().try_collect().await?;
                 let bytes: Vec<u8> = frames.iter().flat_map(|f| f.0.body().to_vec()).collect();
                 let mut list: Value = serde_json::from_slice(&bytes)
                     .map_err(|_| Upstream::fault("a provider's models are not JSON"))?;
@@ -131,7 +137,7 @@ impl Plugin for MergeModels {
         }
         let merged = json!({ "object": "list", "data": data }).to_string();
         Ok(Some(Response::stream(stream::iter([Ok(
-            Got::<Models>::new(merged),
+            opaque::Output::<Models>::new(merged),
         )]))))
     }
 }
@@ -229,10 +235,11 @@ fn key(value: &'static str) -> HeaderMap {
 
 fn gateway(a: &LocalModels, b: &LocalModels) -> Result<Gateway, Fault> {
     let providers = [("a", a, "Bearer key-a"), ("b", b, "Bearer key-b")];
-    let mut gateway = Gateway::new().client::<Sent<Models>, _, _>(Models)?;
+    let mut gateway = Gateway::new().client::<opaque::Input<Models>, _, _>(Models)?;
     for (name, server, token) in providers {
         let transport = HttpClient::new(&server.url)?.with_headers(key(token))?;
-        gateway = gateway.provider::<Sent<Models>, _, _>(name, Models, transport.connect())?;
+        gateway =
+            gateway.provider::<opaque::Input<Models>, _, _>(name, Models, transport.connect())?;
     }
     Ok(gateway.plugin(MergeModels(
         providers.iter().map(|(name, ..)| *name).collect(),

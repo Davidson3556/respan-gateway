@@ -20,12 +20,13 @@
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_conversation::{Block, Input, Output};
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::futures::stream;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
@@ -155,8 +156,8 @@ fn base(
     + 'static,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .client::<Input, _, _>(AnthropicMessages)
 }
 

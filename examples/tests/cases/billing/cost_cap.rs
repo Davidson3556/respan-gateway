@@ -108,10 +108,10 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(origin)?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(Cap)
         .plugin(Accounting::new(ledger.clone(), quote))
         .plugin(respan_gateway_http::relay::Relay::RAW)

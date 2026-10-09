@@ -15,9 +15,12 @@ workspace = true
 respan-gateway-conversation.workspace = true
 respan-gateway-sdk.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-providers.workspace = true
+respan-gateway-anthropic.workspace = true
+respan-gateway-openai.workspace = true
 respan-gateway-plugins.workspace = true
-respan-gateway-axum.workspace = true
+respan-gateway-axum = { workspace = true, features = ["ws"] }
+respan-gateway-realtime.workspace = true
+respan-gateway-ws.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_norway.workspace = true
@@ -29,3 +32,4 @@ mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 reqwest.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "process", "io-util", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }

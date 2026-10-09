@@ -1,11 +1,7 @@
 //! Stop accepting clients and close every upgraded session before returning.
-use axum::{
-    Router,
-    extract::{Request, State, ws::WebSocketUpgrade},
-};
 use respan_gateway_sdk::Gateway;
+use respan_gateway_sdk::futures::FutureExt;
 use std::future::Future;
-use tokio::sync::watch;
 
 pub async fn run(gateway: Gateway, address: &str) -> Result<(), std::io::Error> {
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -21,31 +17,16 @@ pub async fn serve_until(
     listener: tokio::net::TcpListener,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
-    let (stop, stopped) = watch::channel(false);
-    let app = Router::new()
-        .fallback(
-            move |State(gw): State<Gateway>, ws: WebSocketUpgrade, req: Request| {
-                let mut stopped = stopped.clone();
-                async move {
-                    let limits = respan_gateway_ws::Limits::default();
-                    respan_gateway_axum::ws::serve_ws_until(&gw, ws, req, limits, async move {
-                        while !*stopped.borrow_and_update() {
-                            if stopped.changed().await.is_err() {
-                                break;
-                            }
-                        }
-                        "draining"
-                    })
-                    .await
-                }
-            },
-        )
-        .with_state(gateway.clone());
+    let shutdown = shutdown.boxed().shared();
+    let limits = respan_gateway_ws::Limits::default();
+    let app = respan_gateway_axum::router_with_ws(
+        gateway.clone(),
+        |_| respan_gateway_examples::LIMIT,
+        limits,
+        shutdown.clone(),
+    );
     axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            let _ = stop.send(true);
-        })
+        .with_graceful_shutdown(shutdown)
         .await?;
     gateway.idle().await;
     Ok(())

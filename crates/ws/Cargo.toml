@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-ws"
-description = "WebSocket outbound transport and JSON events format for gateway sessions."
+description = "WebSocket sessions at both gateway edges, and a JSON events format."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

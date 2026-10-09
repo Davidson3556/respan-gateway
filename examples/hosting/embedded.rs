@@ -22,7 +22,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{HttpClient, http};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::futures::future::join;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{Fault, Gateway};
@@ -37,8 +37,8 @@ fn gateway(
     tally: Meter,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, provider)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, provider)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(tally)
         .target("openai")
 }
@@ -66,7 +66,8 @@ async fn ask(
         .into_parts();
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
     let request = http::Request::from_parts(head, respan_gateway_http::Body::stream(body));
-    let (incoming, answer) = respan_gateway_http::Incoming::accept(request, false, LIMIT);
+    let (incoming, answer) =
+        respan_gateway_http::Incoming::accept(request, respan_gateway_http::Framing::Whole, LIMIT);
     let extensions = incoming.extensions();
     let handled = gw.handle(incoming, extensions);
     let consume = async {

@@ -27,7 +27,7 @@ use respan_gateway_conversation::{Delta, Input, Message, Output};
 use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::Extensions;
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::{
@@ -200,8 +200,8 @@ fn gateway(
         next: AtomicU64::new(1),
     };
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(Tenancy(&["zdr-bank"]))
         .plugin(log)
         .target("openai")

@@ -242,12 +242,6 @@ impl From<Message> for Value {
     }
 }
 
-/// Client-to-provider MCP message. Both directions share the same JSON-RPC shapes.
-pub type Input = Message;
-
-/// Provider-to-client MCP message. Both directions share the same JSON-RPC shapes.
-pub type Output = Message;
-
 fn present_value<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Value>, D::Error> {

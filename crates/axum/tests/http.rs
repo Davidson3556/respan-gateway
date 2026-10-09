@@ -9,12 +9,13 @@ use axum::routing::post;
 use respan_gateway_conversation::{Input, Output};
 use std::sync::{Arc, Mutex};
 
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_axum::router;
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::http;
 use respan_gateway_http::{Body, Completion, Outgoing};
 use respan_gateway_http::{CallHeaders, credentials};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
 use tokio::net::TcpListener;
 
@@ -56,7 +57,7 @@ where
 {
     Gateway::new()
         .provider("local", format, transport)
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"))
 }
@@ -64,7 +65,7 @@ where
 /// A gateway relaying OpenAI clients raw, with their own paths, to the
 /// provider's origin `base`.
 fn openai_gateway(base: impl Into<String>) -> Gateway {
-    gateway_to(OpenAiChat, http(base).connect()).plugin(relay::Relay::RAW)
+    gateway_to(OpenAiChat::OPENAI, http(base).connect()).plugin(relay::Relay::RAW)
 }
 
 async fn spawn(app: Router) -> String {
@@ -228,7 +229,7 @@ async fn an_upgrade_the_server_does_not_switch_is_ignored() {
     }
 
     let note = Note::default();
-    let app = router(gateway_to(OpenAiChat, note.clone().connect()));
+    let app = router(gateway_to(OpenAiChat::OPENAI, note.clone().connect()));
     let chat = r#"{"model":"m","messages":[]}"#;
     let req = http::Request::post("/v1/chat/completions")
         .header("upgrade", "h2c")
@@ -339,7 +340,7 @@ async fn it_joins_its_base_with_the_path_and_sends_its_headers() {
     headers.append("x-team", value("b"));
     let transport = http(format!("{provider}/v1beta/openai/")).with_headers(headers);
     let transport = transport.unwrap_or_else(|e| panic!("{e}"));
-    let gateway = gateway_to(OpenAiChat, transport.connect());
+    let gateway = gateway_to(OpenAiChat::OPENAI, transport.connect());
     let base = spawn(router(gateway)).await;
 
     let resp = reqwest::Client::new()
@@ -403,15 +404,15 @@ fn exchange(
 // which the transport puts back when it has no keys of its own.
 #[tokio::test]
 async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
+    use respan_gateway_http::formats::opaque;
     use respan_gateway_http::formats::opaque::Passthrough;
-    use respan_gateway_http::formats::opaque::Sent;
     use respan_gateway_http::http_body_util::BodyExt;
     let head = call_head("/v1/chat?key=k&beta=1", &CLIENT);
     let before = head.headers.clone();
     let gateway = Gateway::new()
-        .client::<Sent<Passthrough>, _, _>(Passthrough)
+        .client::<opaque::Input<Passthrough>, _, _>(Passthrough)
         .expect("valid test setup")
-        .provider::<Sent<Passthrough>, _, _>(
+        .provider::<opaque::Input<Passthrough>, _, _>(
             "relay",
             Passthrough,
             respan_gateway_http::connect(
@@ -439,7 +440,7 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
     let (answer, ended) = respan_gateway_http::handle(
         &gateway,
         http::Request::from_parts(head, Body::full("")),
-        false,
+        respan_gateway_http::Framing::Whole,
         LIMIT,
     )
     .await;
@@ -541,10 +542,10 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
     let gateway = Gateway::new()
         .provider::<Input, _, _>(
             "local",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             http(format!("{provider}/v1")).connect(),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
         .map(|g| g.plugin(log.clone()).plugin(relay::Relay::HEADS))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
@@ -745,11 +746,11 @@ async fn l6_bodiless(with_304: bool) {
     .await;
     let ends = L6Ends::default();
     let gateway = Gateway::new()
-        .provider::<respan_gateway_http::formats::opaque::Sent<
+        .provider::<respan_gateway_http::formats::opaque::Input<
             respan_gateway_http::formats::opaque::Passthrough,
         >, _, _>("any", Passthrough, http(provider.clone()).connect())
         .and_then(|g| {
-            g.client::<respan_gateway_http::formats::opaque::Sent<
+            g.client::<respan_gateway_http::formats::opaque::Input<
                 respan_gateway_http::formats::opaque::Passthrough,
             >, _, _>(Passthrough)
         })

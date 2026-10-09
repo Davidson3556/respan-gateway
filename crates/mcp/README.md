@@ -3,21 +3,23 @@
 The MCP HTTP adapter carries typed JSON-RPC messages from
 [`respan-gateway-mcp-messages`](../mcp-messages/README.md).
 
-`HttpInput` wraps input messages with HTTP method, batch flag, session,
-protocol version, resume cursor and query. `HttpOutput` wraps output messages
+The kind is `Input` in, `Output` out, as for every kind. `Input` wraps
+input messages with HTTP method, batch flag, session,
+protocol version, resume cursor and query. `Output` wraps output messages
 with session, SSE event ID and event name. Keeping those fields on the same
 envelope preserves their association when a plugin buffers, edits or drops an
 event. SSE comments are dropped; ID-only events retain their cursor.
 
-Import `HttpInput` / `HttpOutput` from this crate for HTTP gateway registration
+Import `Input` / `Output` from this crate for HTTP gateway registration
 and filtering. Inspect each envelope's `messages` as typed JSON-RPC messages.
 
 - `StreamableHttp::new(path)`: MCP over streamable HTTP as direct
-  `Format<Incoming, HttpInput, HttpOutput>` and reversed `Format<Outgoing, HttpOutput, HttpInput>` bindings;
+  `Format<Incoming, Input, Output>` and reversed `Format<Outgoing, Output, Input>` bindings;
   `SESSION` is its session header. The request shapes the answer: a `POST`
   with no request gets 202 and no body, one with requests an event stream
   (one JSON body if its `Accept` takes no event stream), a `GET` the
-  server's own event stream, a `DELETE` 204.
+  server's own event stream, a `DELETE` 204; a 202 or 204 waits for the
+  server's, so its refusal (a 404 for an expired session) reaches the client.
   JSON-only answers contain responses; notifications are omitted, and
   server requests requiring bidirectional interaction are refused. Accept
   `text/event-stream` to receive those independent server messages.
@@ -31,12 +33,19 @@ and filtering. Inspect each envelope's `messages` as typed JSON-RPC messages.
   `.backlog(n)` messages a stream may fall behind (64), `.max_line(bytes)`
   of one message from the child (32 MiB). The owner is the call's `Owner`
   extension, else the client's `Authorization`, as the HTTP adapter lifted
-  it (`respan_gateway_http::Credential`): authenticate first. Its failures
+  it (`respan_gateway_http::Credential`); callers with neither are one
+  owner: authenticate first. Its failures
   are faults the client's format writes, with their status, `error_code`
   and JSON-RPC code: no session named (400) or none there (404),
   `no_session`, -32003; a second `GET` (409), `busy`, -32004; past a limit
   (503), `too_many_sessions`, -32005; not answered in time (504),
-  `timed_out`, -32001.
+  `timed_out`, -32001. The child gets only the gateway's `PATH` and what
+  `.env(key, value)` adds, runs in `.current_dir(dir)` if given, and
+  shares the gateway's stderr. It runs in its own process group, stopped
+  as MCP asks: stdin closed, then SIGTERM, then SIGKILL to the group, 2
+  seconds apart. A session whose `initialize` answer ends before its
+  first message is forgotten at once; a request the client cancels is no
+  longer waited for.
 - `RpcCode`: the JSON-RPC error code a fault is written with, as a fact.
   A server's non-success answer whose body is a JSON-RPC error is read back
   into one: its code, message and `data` (as `Details`) reach the client's

@@ -17,11 +17,13 @@ use respan_gateway_http::Encoder;
 use respan_gateway_http::Status;
 use respan_gateway_http::bodiless;
 use respan_gateway_http::bytes;
+use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_http::{http, http_body_util};
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::{
-    Call, ClientContext, Fault, Filter, Gateway, Plugin, ProviderContext, Response, async_trait,
+    Call, ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
 };
 #[allow(dead_code, unused_imports)]
 #[path = "../../../tests/support/http.rs"]
@@ -62,16 +64,13 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Incoming, LIn, LOut> for Li
     ) -> Result<respan_gateway_sdk::Connection<LIn, LOut>, Fault> {
         Ok(io.bind(
             |request| {
-                Ok(respan_gateway_http::messages(request, |_, raw| {
+                respan_gateway_http::messages(request, |_, raw| {
                     let text = String::from_utf8_lossy(&raw).into_owned();
                     Ok(LIn(text))
-                }))
+                })
             },
-            |reply, source| {
+            |reply| {
                 let head = reply.head();
-                if bodiless(reply.request().method(), head.status) {
-                    return Ok(reply.empty(head, source));
-                }
                 if reply.request().method() == http::Method::GET {
                     Ok(reply.open(
                         head,
@@ -95,26 +94,18 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Li
         &self,
         io: respan_gateway_http::Outgoing,
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
-        Ok(io.bind(
-            |source| {
-                let head = line_head(None);
-                let (request, sink) = respan_gateway_http::request(source, Box::new(Lines))?;
-                Ok((http::Request::from_parts(head, request.into_body()), sink))
-            },
-            line_outputs,
-            respan_gateway_http::success,
-        ))
+        Ok(io.bind(line_call, line_outputs, line_refused))
     }
 }
 
 fn line_outputs(
     response: http::Response<Body>,
     request: http::Request<Bytes>,
-) -> futures::stream::BoxStream<'static, Result<LOut, Fault>> {
-    if response.status().is_success() && bodiless(request.method(), response.status()) {
-        return futures::stream::empty().boxed();
+) -> EventStream<LOut> {
+    if bodiless(request.method(), response.status()) {
+        return EventStream::empty();
     }
-    respan_gateway_http::formats::read(
+    respan_gateway_http::formats::parse(
         response.into_body(),
         LineDecoder::default(),
         |state, bytes, out| state.decode(bytes, out),
@@ -125,15 +116,20 @@ fn line_outputs(
     )
 }
 
-/// A call's head as Line writes it: the client's, or a fresh one, at `/line`.
-fn line_head(
-    client: Option<&respan_gateway_http::http::request::Parts>,
-) -> respan_gateway_http::http::request::Parts {
-    let mut head = client
-        .cloned()
-        .unwrap_or_else(|| http::Request::new(()).into_parts().0);
-    respan_gateway_http::formats::set_path(&mut head, "/line").expect("a path");
-    head
+/// A call as Line writes it: at `/line`, each input as its text.
+fn line_call(head: &mut RequestHead, _: Option<&LIn>) -> Result<Box<dyn Encoder<LIn>>, Fault> {
+    respan_gateway_http::formats::set_path(head, "/line")?;
+    Ok(Box::new(Lines))
+}
+
+/// A refused answer: the provider's fault, with the failure its lines say.
+fn line_refused(answer: http::Response<Bytes>) -> Fault {
+    let fault = respan_gateway_http::provider_fault(LINE, answer.clone());
+    let mut lines = LineDecoder::default();
+    match lines.decode(answer.into_body(), &mut Vec::new()) {
+        Err(said) => said,
+        Ok(()) => fault,
+    }
 }
 
 /// Writes each input as its text.
@@ -465,7 +461,8 @@ async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
 /// status goes; the call still ends as its head says.
 #[tokio::test]
 async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
-    use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+    use respan_gateway_anthropic::AnthropicMessages;
+    use respan_gateway_openai::OpenAiChat;
     // Deliberately nonstandard provider success: no chat payload to decode.
     let transport = |_| async {
         let mut response = http::Response::new(());
@@ -481,7 +478,7 @@ async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
             AnthropicMessages,
             respan_gateway_http::connect(transport, LIMIT),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
         .and_then(|g| g.target("anthropic"))
         .unwrap_or_else(|e| panic!("{e}"));
     let r = http_helpers::post(
@@ -657,8 +654,8 @@ async fn f8_a_client_edge_panic_ends_the_call_internal() {
 }
 
 // A 101 to a whole request is refused, though its provider sent it: the
-// call did not ask to switch, so its answer is no success
-// ([`respan_gateway_http::success`]), and is refused at its head, whatever
+// call did not ask to switch, so its answer is no success by HTTP's rule
+// ([`Outgoing::bind`](respan_gateway_http::Outgoing::bind)), and is refused at its head, whatever
 // its body says. Its relayed head never reaches the client.
 
 #[tokio::test]
@@ -1324,22 +1321,17 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Pa
         io: respan_gateway_http::Outgoing,
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(
-            move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let mut head = http::Request::new(()).into_parts().0;
-                let model = if source.is_single() {
-                    source.value().expect("single input")?.0.as_str()
-                } else {
-                    "none"
-                };
+            move |head: &mut RequestHead, input: Option<&LIn>| {
+                // A model of several words is escaped: its head is written
+                // before its body says whether it can be.
+                let model = input.map_or("none", |input| input.0.as_str());
+                let model = model.replace(' ', "%20");
                 head.method = http::Method::POST;
-                let path = format!("/models/{model}");
-                let (request, sink) =
-                    respan_gateway_http::request(source, Box::new(Untranslatable))?;
-                respan_gateway_http::formats::set_path(&mut head, &path)?;
-                Ok((http::Request::from_parts(head, request.into_body()), sink))
+                respan_gateway_http::formats::set_path(head, &format!("/models/{model}"))?;
+                Ok(Box::new(Untranslatable) as Box<dyn Encoder<LIn>>)
             },
             line_outputs,
-            respan_gateway_http::success,
+            line_refused,
         ))
     }
 }
@@ -1610,14 +1602,12 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Po
         io: respan_gateway_http::Outgoing,
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(
-            move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let mut head = line_head(None);
+            move |head: &mut RequestHead, input: Option<&LIn>| {
                 head.method = http::Method::POST;
-                let (request, sink) = respan_gateway_http::request(source, Box::new(Lines))?;
-                Ok((http::Request::from_parts(head, request.into_body()), sink))
+                line_call(head, input)
             },
             line_outputs,
-            respan_gateway_http::success,
+            line_refused,
         ))
     }
 }
@@ -1670,15 +1660,12 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Se
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
-            move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let raw = false;
-                lock(&seen).push(source.is_single() && !raw);
-                let head = line_head(None);
-                let (request, sink) = respan_gateway_http::request(source, Box::new(Lines))?;
-                Ok((http::Request::from_parts(head, request.into_body()), sink))
+            move |head: &mut RequestHead, input: Option<&LIn>| {
+                lock(&seen).push(input.is_some());
+                line_call(head, input)
             },
             line_outputs,
-            respan_gateway_http::success,
+            line_refused,
         ))
     }
 }
@@ -1812,20 +1799,13 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for In
     ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
-            move |source: &mut respan_gateway_sdk::EventStream<LIn>| {
-                let (value, text) = if source.is_single() {
-                    let first = source.value().expect("single input")?;
-                    (true, first.0.clone())
-                } else {
-                    (false, String::new())
-                };
-                lock(&seen).push((value, text));
-                let head = line_head(None);
-                let (request, sink) = respan_gateway_http::request(source, Box::new(Lines))?;
-                Ok((http::Request::from_parts(head, request.into_body()), sink))
+            move |head: &mut RequestHead, input: Option<&LIn>| {
+                let first = input.map(|first| first.0.clone());
+                lock(&seen).push((first.is_some(), first.unwrap_or_default()));
+                line_call(head, input)
             },
             line_outputs,
-            respan_gateway_http::success,
+            line_refused,
         ))
     }
 }

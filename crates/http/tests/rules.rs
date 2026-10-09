@@ -9,7 +9,7 @@ use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::{self, BodyExt};
 use respan_gateway_http::{Body, CallHeaders, Credential, Outgoing, Wire};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -75,7 +75,7 @@ fn gateway(
     let gw = providers
         .into_iter()
         .try_fold(Gateway::new(), |gw, add| add(gw))?
-        .client::<Input, _, _>(OpenAiChat)?;
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?;
     let gw = plugins.into_iter().fold(gw, Gateway::plugin);
     let gw = gw.plugin(relay::Relay::RAW);
     match target {
@@ -105,13 +105,13 @@ impl Harness {
         let providers = [
             add_provider(
                 "openai",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 mock.at(OPENAI).with_headers(HeaderMap::from_iter([(
                     http::header::AUTHORIZATION,
                     HeaderValue::from_static("Bearer sk-test"),
                 )])),
             ),
-            add_provider("backup", OpenAiChat, mock.at(BACKUP)),
+            add_provider("backup", OpenAiChat::OPENAI, mock.at(BACKUP)),
         ];
         let gw = gateway(providers, plugins, target).unwrap_or_else(|e| panic!("gateway: {e}"));
         Self {
@@ -236,9 +236,9 @@ async fn the_clients_key_stays_off_a_transport_with_headers_of_its_own() {
     };
     let gw = gateway(
         [
-            add_provider("api-key", OpenAiChat, at("api-key")),
-            add_provider("x-team", OpenAiChat, at("x-team")),
-            add_provider("shared", OpenAiChat, at("x-team").clone()),
+            add_provider("api-key", OpenAiChat::OPENAI, at("api-key")),
+            add_provider("x-team", OpenAiChat::OPENAI, at("x-team")),
+            add_provider("shared", OpenAiChat::OPENAI, at("x-team").clone()),
         ],
         vec![Arc::new(ByHeader)],
         None,
@@ -330,7 +330,7 @@ async fn a_transport_header_of_several_values_sends_them_all() {
     let gw = gateway(
         [add_provider(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             mock.at(OPENAI).with_headers(headers),
         )],
         Vec::new(),
@@ -577,7 +577,7 @@ async fn the_kernel_leaves_origin_headers_to_the_transport() {
     let provider: AddProvider = Box::new(|gw| {
         gw.provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(
                 |request| async move { Cookie.send(request).await },
                 LIMIT,

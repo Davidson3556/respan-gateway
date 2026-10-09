@@ -58,14 +58,6 @@ impl Body {
         }
     }
 
-    /// Edit complete bytes before sending. The caller must update stale body headers.
-    pub fn full_bytes_mut(&mut self) -> Option<&mut Bytes> {
-        match &mut self.data {
-            Data::Full(bytes) => bytes.as_mut(),
-            Data::Stream(_) => None,
-        }
-    }
-
     /// Whether its bytes come as a stream of frames rather than whole: how a
     /// call uploads. Not whether its input is live, one message per frame,
     /// which the adapter says ([`Incoming::accept`](crate::Incoming::accept)).

@@ -20,7 +20,9 @@ respan-gateway-sdk = { path = "crates/sdk" }
 respan-gateway-http = { path = "crates/http" }
 respan-gateway-plugins = { path = "crates/plugins" }
 respan-gateway-axum = { path = "crates/axum" }
-respan-gateway-providers = { path = "crates/providers" }
+respan-gateway-codec = { path = "crates/codec" }
+respan-gateway-openai = { path = "crates/openai" }
+respan-gateway-anthropic = { path = "crates/anthropic" }
 respan-gateway-mcp = { path = "crates/mcp" }
 respan-gateway-ws = { path = "crates/ws" }
 async-trait = "0.1"

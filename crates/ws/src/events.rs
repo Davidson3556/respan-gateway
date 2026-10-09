@@ -1,38 +1,27 @@
 //! A WebSocket session as JSON events: the kind ([`Input`] in,
 //! [`Output`] out) and its format on the HTTP wire ([`JsonEvents`]).
 
+use std::borrow::Cow;
+
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{self, whole};
+use respan_gateway_http::formats;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use respan_gateway_http::http::response::Parts as ResponseHead;
-use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{self as h, Body, Incoming, Outgoing};
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_sdk::futures::{StreamExt, stream::BoxStream};
-use respan_gateway_sdk::{BadRequest, Connection, Fault, Format, Upstream};
+use respan_gateway_sdk::futures::StreamExt;
+use respan_gateway_sdk::{BadRequest, Connection, EventStream, Fault, Format, Upstream};
 
-/// Whether `headers` ask to upgrade to a WebSocket.
-fn upgrades(headers: &HeaderMap) -> bool {
-    let asks = headers.get_all(UPGRADE).iter();
-    asks.filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .any(|v| v.trim().eq_ignore_ascii_case("websocket"))
-}
+use crate::WsTransport;
 
-/// Whether `headers` offer the subprotocol `protocol`.
-fn offers(headers: &HeaderMap, protocol: &HeaderValue) -> bool {
-    let offered = headers.get_all(SEC_WEBSOCKET_PROTOCOL).iter();
-    offered
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .any(|v| v.trim().as_bytes() == protocol.as_bytes())
-}
-
-/// An event's `json` as its frame.
+/// An event's `json` as its frame. An event of another format is the
+/// gateway's misconfiguration, a plugin's that moved it untranslated, not
+/// the client's: `config`.
 fn written(format: &str, event: &respan_gateway_sdk::NativeValue) -> Result<Bytes, Fault> {
     if event.format.as_ref() != format {
-        return Err(BadRequest::fault(
+        return Err(Fault::config(
             "a realtime event requires explicit translation to another format",
         ));
     }
@@ -57,33 +46,76 @@ fn refusal(fault: &Fault, _request: &Request<Bytes>, head: &mut ResponseHead) ->
 /// behind it.
 ///
 /// It accepts a `GET` with `Upgrade: websocket` to a path ending in `path`;
-/// a call it writes itself is such a request to `path`. A frame that is not
-/// JSON fails: the client's, `bad_request`; the provider's, `upstream`. A
-/// handshake it refuses is answered text/plain with the fault's error code,
-/// never its message.
+/// a call it writes itself is such a request to `path`, relative to the
+/// transport's base URL. A frame that is not JSON fails: the client's,
+/// `bad_request`; the provider's, `upstream`. A handshake it refuses is
+/// answered text/plain with the fault's error code, never its message.
 ///
 /// It speaks a subprotocol only if told one ([`protocol`](Self::protocol)).
+/// A vendor's own is a constant, named for it, whose provider's base URL
+/// is the one the vendor's SDK takes, with a `ws` or `wss` scheme; it
+/// reads no event either. Its provider is reached by
+/// [`transport`](Self::transport), set as the vendor's frames need.
 ///
 /// ```
 /// # use respan_gateway_ws::JsonEvents;
-/// // Served at `/v1/realtime`, and sent there too, relative to the transport.
-/// let realtime = JsonEvents::new("realtime", "/v1/realtime");
+/// // Served at a path ending in `/events`, and sent to `/events`.
+/// let events = JsonEvents::new("events", "/events");
 /// ```
 #[derive(Debug, Clone)]
 pub struct JsonEvents {
-    name: String,
-    path: String,
+    name: Cow<'static, str>,
+    path: Cow<'static, str>,
     protocol: Option<HeaderValue>,
+    binary_text: bool,
 }
 
 impl JsonEvents {
+    /// OpenAI Realtime, `openai-realtime`: served at a path ending in
+    /// `/realtime` and sent there, as OpenAI's SDKs add it to their base URL
+    /// (`wss://api.openai.com/v1`). It speaks the subprotocol `realtime`,
+    /// which OpenAI's browser clients offer (beside their key, as
+    /// `openai-insecure-api-key.<key>`), as a browser that offered one
+    /// refuses a `101` that names none.
+    pub const OPENAI_REALTIME: Self = Self {
+        name: Cow::Borrowed("openai-realtime"),
+        path: Cow::Borrowed("/realtime"),
+        protocol: Some(HeaderValue::from_static("realtime")),
+        binary_text: false,
+    };
+    /// OpenAI Responses over WebSocket, `responses-ws`: served at a path
+    /// ending in `/responses` and sent there, as for HTTP, relative to
+    /// OpenAI's base URL (`wss://api.openai.com/v1`). Only an upgrade is
+    /// this format's: a `POST` there is no session.
+    pub const RESPONSES_WS: Self = Self {
+        name: Cow::Borrowed("responses-ws"),
+        path: Cow::Borrowed("/responses"),
+        protocol: None,
+        binary_text: false,
+    };
+    /// Gemini Live, `gemini-live`: served at a path ending in, and sent to,
+    /// `/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent`,
+    /// the Live API's endpoint, relative to the origin Google's SDK takes
+    /// (`wss://generativelanguage.googleapis.com`). Its server sends each
+    /// JSON event in a binary frame (Google's SDK reads frames as bytes),
+    /// so its [`transport`](Self::transport) takes binary text.
+    pub const GEMINI_LIVE: Self = Self {
+        name: Cow::Borrowed("gemini-live"),
+        path: Cow::Borrowed(
+            "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+        ),
+        protocol: None,
+        binary_text: true,
+    };
+
     /// A format called `name` (a relay needs the same name at both edges),
     /// served at a path ending in `path` and sent to it.
-    pub fn new(name: impl Into<String>, path: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<Cow<'static, str>>, path: impl Into<Cow<'static, str>>) -> Self {
         Self {
             name: name.into(),
             path: path.into(),
             protocol: None,
+            binary_text: false,
         }
     }
 
@@ -93,14 +125,18 @@ impl JsonEvents {
     /// if `protocol` is no token (RFC 9110 5.6.2).
     pub fn protocol(mut self, protocol: impl Into<String>) -> Result<Self, Fault> {
         let protocol = protocol.into();
-        let token = !protocol.is_empty()
-            && protocol
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
-        let value = HeaderValue::from_str(&protocol).ok().filter(|_| token);
+        let value = HeaderValue::from_str(&protocol);
+        let value = value.ok().filter(|_| crate::token(protocol.as_bytes()));
         let value = value.ok_or_else(|| Fault::config("a subprotocol must be a token"))?;
         self.protocol = Some(value);
         Ok(self)
+    }
+
+    /// A transport to this format's provider at `base_url`
+    /// ([`WsTransport::new`]), taking binary text if its vendor sends
+    /// binary frames ([`WsTransport::with_binary_text`]).
+    pub fn transport(&self, base_url: impl Into<String>) -> Result<WsTransport, Fault> {
+        Ok(WsTransport::new(base_url)?.with_binary_text(self.binary_text))
     }
 }
 
@@ -112,7 +148,7 @@ impl Format<Incoming, Input, Output> for JsonEvents {
     fn matches(&self, io: &Incoming) -> bool {
         let head = io.request();
         head.method() == Method::GET
-            && upgrades(head.headers())
+            && crate::tokens(head.headers(), UPGRADE).any(|v| v.eq_ignore_ascii_case("websocket"))
             && formats::path_ends_with(head.uri(), &self.path)
     }
 
@@ -122,13 +158,13 @@ impl Format<Incoming, Input, Output> for JsonEvents {
         let output_format = self.name.clone();
         Ok(io.bind(
             move |request| {
-                Ok(h::messages(request, move |_, raw| {
+                h::messages(request, move |_, raw| {
                     let json = serde_json::from_slice(&raw)
                         .map_err(|_| BadRequest::fault("a client's frame is not a JSON event"))?;
                     Ok(Input::new(input_format.clone(), json))
-                }))
+                })
             },
-            move |reply, _source| {
+            move |reply| {
                 let mut head = reply.head();
                 if head.status == StatusCode::OK {
                     head.status = StatusCode::SWITCHING_PROTOCOLS;
@@ -137,7 +173,9 @@ impl Format<Incoming, Input, Output> for JsonEvents {
                 }
                 if let Some(protocol) = protocol {
                     head.headers.remove(SEC_WEBSOCKET_PROTOCOL);
-                    if offers(reply.request().headers(), &protocol) {
+                    let mut offers =
+                        crate::tokens(reply.request().headers(), SEC_WEBSOCKET_PROTOCOL);
+                    if offers.any(|v| v.as_bytes() == protocol.as_bytes()) {
                         head.headers.insert(SEC_WEBSOCKET_PROTOCOL, protocol);
                     }
                 }
@@ -157,95 +195,50 @@ impl Format<Outgoing, Output, Input> for JsonEvents {
 
     fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
         let name = self.name.clone();
+        let refused = self.name.clone();
         let input_format = self.name.clone();
         let path = self.path.clone();
         let protocol = self.protocol.clone();
-        Ok(io.bind(
-            move |source| {
-                if source.is_single() {
+        // Only the handshake's 101 is a success: a 2xx is no session.
+        let upgraded =
+            |answer: &ResponseHead, _: &_| answer.status == StatusCode::SWITCHING_PROTOCOLS;
+        Ok(io.with_success(upgraded).bind(
+            move |head, input: Option<&Input>| {
+                if input.is_some() {
                     return Err(Fault::config(
                         "JSON events flow in a WebSocket session, not in a call with one input",
                     ));
                 }
-                let mut head = Request::new(()).into_parts().0;
                 head.method = Method::GET;
-                formats::set_path(&mut head, &path)?;
+                formats::set_path(head, &path)?;
                 head.headers
                     .insert(UPGRADE, HeaderValue::from_static("websocket"));
                 if let Some(protocol) = protocol {
                     head.headers.insert(SEC_WEBSOCKET_PROTOCOL, protocol);
                 }
-                let write =
-                    formats::each(move |event: &Input| written(&input_format, &event.event));
-                let (request, sink) = h::request(source, write)?;
-                Ok((Request::from_parts(head, request.into_body()), sink))
+                Ok(formats::each(move |event: &Input| {
+                    written(&input_format, &event.event)
+                }))
             },
             move |answer, _call| response_events(&name, answer),
-            |answer, _call| answer.status == StatusCode::SWITCHING_PROTOCOLS,
+            move |answer| h::provider_fault(&refused, answer),
         ))
     }
 }
 
-/// The provider's events, or its refusal: an answer that is no `101`. The
-/// call always asks to upgrade, as it is written so ([`JsonEvents`]) or is
-/// the client's, which [`Format::matches`] took for one.
-fn response_events(
-    name: &str,
-    answer: Response<Body>,
-) -> BoxStream<'static, Result<Output, Fault>> {
-    if answer.status() != StatusCode::SWITCHING_PROTOCOLS {
-        return whole::refusal(name, answer);
-    }
+/// The provider's events, one per frame of its upgraded session.
+fn response_events(name: &str, answer: Response<Body>) -> EventStream<Output> {
     let name = name.to_owned();
-    answer
-        .into_body()
-        .map(move |raw| {
-            let raw = raw?;
-            let json = serde_json::from_slice(&raw)
-                .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
-            Ok(Output::new(name.clone(), json))
-        })
-        .boxed()
+    EventStream::stream(answer.into_body().map(move |raw| {
+        let json = serde_json::from_slice(&raw?)
+            .map_err(|_| Upstream::fault("a provider's frame is not a JSON event"))?;
+        Ok(Output::new(name.clone(), json))
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn non_101_success_is_a_refusal_with_original_answer() {
-        for status in [StatusCode::OK, StatusCode::NO_CONTENT] {
-            let bytes = if status == StatusCode::OK {
-                Bytes::from_static(b"not upgraded")
-            } else {
-                Bytes::new()
-            };
-            let answer = Response::builder()
-                .status(status)
-                .header("x-provider", "original")
-                .body(Body::full(bytes.clone()))
-                .expect("valid HTTP head");
-            let mut events = response_events("strict-json-ws", answer);
-            let fault = events
-                .next()
-                .await
-                .expect("refusal")
-                .expect_err("a WebSocket call did not upgrade");
-            let original = fault
-                .get::<respan_gateway_http::ProviderError>()
-                .map(|e| &e.response)
-                .expect("original provider answer");
-            assert_eq!(
-                (
-                    original.status(),
-                    &original.headers()["x-provider"],
-                    original.body()
-                ),
-                (status, &HeaderValue::from_static("original"), &bytes)
-            );
-            assert!(events.next().await.is_none());
-        }
-    }
 
     #[test]
     fn native_events_require_the_target_format_and_edits_do_not_mutate_clones() {
@@ -260,7 +253,7 @@ mod tests {
         assert!(
             written("two", &edited.event)
                 .expect_err("foreign event")
-                .is::<BadRequest>()
+                .is::<respan_gateway_sdk::Config>()
         );
     }
 

@@ -43,7 +43,7 @@
 //!   session's end is recorded once.
 //!
 //! The integration (`respan-gateway-ws`) carries the session: `WsTransport` to the
-//! provider, `serve_ws` for the client, `JsonEvents` as the format, one JSON
+//! provider, `serve` for the client, `JsonEvents` as the format, one JSON
 //! event per text frame. Everything about Realtime's events is here, none in
 //! the integration.
 //!
@@ -58,7 +58,7 @@
 //! The default text-PII policy
 //! rejects opaque audio; it does not pretend a transcript filter redacts speech.
 //! Gemini Live and Responses WebSocket flows have their own examples. Shared
-//! shutdown signals use `serve_ws_until`; no connection is silently resumed.
+//! shutdown signals use `router_with_ws`'s `stop`; no connection is silently resumed.
 //! Sources: https://developers.openai.com/api/docs/guides/voice-latency-cost
 //!
 //! `cargo run -p respan-gateway-examples --example realtime`
@@ -91,11 +91,6 @@ use text::{Placeholders, Rewrite};
 
 /// The longest a session may last, unless a plugin says otherwise.
 const HOUR: Duration = Duration::from_secs(3600);
-
-/// The Realtime format: served and sent at `/v1/realtime`.
-fn realtime() -> JsonEvents {
-    JsonEvents::new("openai-realtime", "/v1/realtime")
-}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -856,8 +851,12 @@ fn gateway_with_audio(
     allow_audio: bool,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .client::<Input, _, _>(realtime())?
-        .provider::<Input, _, _>("openai", realtime(), WsTransport::new(provider)?.connect())?
+        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .provider::<Input, _, _>(
+            "openai",
+            JsonEvents::OPENAI_REALTIME,
+            WsTransport::new(provider)?.connect(),
+        )?
         .target("openai")?
         .plugin(ends.clone())
         .plugin(audio::Validate(allow_audio));
@@ -875,7 +874,12 @@ async fn listen(gateway: &Gateway) -> std::net::SocketAddr {
         .await
         .expect("a port");
     let addr = listener.local_addr().expect("an address");
-    let app = respan_gateway_axum::ws::router(gateway.clone());
+    let app = respan_gateway_axum::router_with_ws(
+        gateway.clone(),
+        |_| respan_gateway_examples::LIMIT,
+        respan_gateway_ws::Limits::default(),
+        std::future::pending(),
+    );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });

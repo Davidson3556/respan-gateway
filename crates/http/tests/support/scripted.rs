@@ -10,9 +10,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{
-    Body, Completion, credentials, proxy_call, strip_client_origin_headers, strip_origin_headers,
-};
+use respan_gateway_http::{Body, Completion, credentials, strip_origin_headers};
 use respan_gateway_sdk::Fault;
 use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::stream;
@@ -101,10 +99,7 @@ impl ScriptedAt {
         &self,
         request: http::Request<Body>,
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
-        let (mut head, body) = request.into_parts();
-        proxy_call(&mut head);
-        strip_client_origin_headers(&mut head.headers);
-        let mut request = http::Request::from_parts(head, body);
+        let mut request = request;
         credentials(&mut request, &self.headers);
         let (mut head, body) = request.into_parts();
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());

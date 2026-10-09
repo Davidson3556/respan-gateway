@@ -5,13 +5,14 @@
 //!
 //! - A `POST` that holds no request (only notifications or responses) is
 //!   answered `202 Accepted` with no body ("the server MUST return HTTP
-//!   status code 202 Accepted with no body").
+//!   status code 202 Accepted with no body") once the server accepted it.
 //! - A `POST` with requests is answered by an event stream, on which the
 //!   server may send its own requests and notifications before its answers,
 //!   each as it comes; by one JSON body only if the client's `Accept` takes
 //!   no event stream. It is complete once every request is answered.
 //! - A `GET` opens the server's own event stream, which may stay quiet.
-//! - A `DELETE` ends the session: `204 No Content`, with no body.
+//! - A `DELETE` ends the session: `204 No Content`, with no body, once the
+//!   server ended it.
 //!
 //! A head a plugin chose ([`ClientHead`](respan_gateway_http::ClientHead))
 //! gives the status and headers instead, but never the framing. What MCP
@@ -34,7 +35,6 @@ use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{
     self as h, Body, Incoming, Outgoing, ProviderError, Status, bodiless, error_code,
 };
-use respan_gateway_sdk::futures::stream::BoxStream;
 use respan_gateway_sdk::futures::{Sink, SinkExt, StreamExt, stream};
 use respan_gateway_sdk::{
     BadRequest, Connection, Details, EventSink, EventStream, Fault, Format, RetryAfter, Truncated,
@@ -42,7 +42,8 @@ use respan_gateway_sdk::{
 };
 use serde_json::{Value, json};
 
-use crate::{Input, Output, PARSE_ERROR, RpcCode, body, error, lock, messages, read, request_ids};
+use crate::{Input, Output, PARSE_ERROR, RpcCode, body, error, lock, messages, read};
+use respan_gateway_mcp_messages::{Message, Outcome};
 
 /// The header naming an MCP session (`Mcp-Session-Id`).
 pub const SESSION: &str = "mcp-session-id";
@@ -91,8 +92,8 @@ impl Format<Incoming, Input, Output> for StreamableHttp {
         let started = Started::default();
         let refused = started.clone();
         Ok(io.bind(
-            |request| Ok(h::messages(request, decode)),
-            move |reply, source| Ok(answer(reply, source, &started)),
+            |request| h::messages(request, decode),
+            move |reply| Ok(answer(reply, &started)),
             move |fault, request, head| {
                 formats::default_content_type(head, JSON);
                 match refused.get() {
@@ -114,15 +115,8 @@ fn decode(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
             let fault = BadRequest::fault("the body is not JSON");
             fault.with(PARSE_ERROR).with_source(e)
         })?;
-        let read = messages(json);
         let bad = || BadRequest::fault("not a JSON-RPC message or batch");
-        let (messages, batch) = read.ok_or_else(bad)?;
-        input.messages = messages
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<_, _>>()
-            .map_err(|_| bad())?;
-        input.batch = batch;
+        (input.messages, input.batch) = messages(json).ok_or_else(bad)?;
     }
     input.session = header(&head.headers, SESSION)?;
     input.protocol_version = header(&head.headers, PROTOCOL_VERSION)?;
@@ -177,44 +171,30 @@ impl Format<Outgoing, Output, Input> for StreamableHttp {
     fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
         let path = self.path;
         Ok(io.bind(
-            move |source: &mut EventStream<Input>| {
-                let Some(input) = source.value() else {
-                    let streamed = "a call in mcp carries one body, not streamed inputs";
-                    return Err(Fault::config(streamed));
-                };
-                let head = call_head(input?, path)?;
-                let write = |input: &Input| {
+            move |head, input: Option<&Input>| {
+                let streamed = "a call in mcp carries one body, not streamed inputs";
+                call_head(head, input.ok_or_else(|| Fault::config(streamed))?, path)?;
+                Ok(formats::each(|input: &Input| {
                     Ok(match input.method {
-                        Method::POST => body(
-                            &input
-                                .messages
-                                .iter()
-                                .cloned()
-                                .map(Value::from)
-                                .collect::<Vec<_>>(),
-                            input.batch,
-                        )
-                        .to_string()
-                        .into(),
+                        Method::POST => {
+                            body(input.messages.clone(), input.batch).to_string().into()
+                        }
                         _ => Bytes::new(),
                     })
-                };
-                let (request, sink) = h::request(source, formats::each(write))?;
-                Ok((Request::from_parts(head, request.into_body()), sink))
+                }))
             },
             response_events,
-            |answer, _| answer.status.is_success(),
+            |answer| rpc_refusal(h::provider_fault(NAME, answer)),
         ))
     }
 }
 
-/// The head of a call of `input` to `path`.
-fn call_head(input: &Input, path: &str) -> Result<RequestHead, Fault> {
-    let mut head = Request::new(()).into_parts().0;
+/// Write the head of a call of `input` to `path`.
+fn call_head(head: &mut RequestHead, input: &Input, path: &str) -> Result<(), Fault> {
     head.method = input.method.clone();
     match &input.query {
-        Some(query) => formats::set_path(&mut head, &format!("{path}?{query}"))?,
-        None => formats::set_path(&mut head, path)?,
+        Some(query) => formats::set_path(head, &format!("{path}?{query}"))?,
+        None => formats::set_path(head, path)?,
     }
     // MCP: a client lists both in its `Accept`.
     let both = HeaderValue::from_static("application/json, text/event-stream");
@@ -232,15 +212,14 @@ fn call_head(input: &Input, path: &str) -> Result<RequestHead, Fault> {
             put(&mut head.headers, name, value)?;
         }
     }
-    Ok(head)
+    Ok(())
 }
 
-fn response_events(
-    answer: Response<Body>,
-    sent: Request<Bytes>,
-) -> BoxStream<'static, Result<Output, Fault>> {
+/// The outputs of a server's answer: its JSON-RPC messages, whole or as
+/// events, each request of a `POST` answered once, or `truncated`.
+fn response_events(answer: Response<Body>, sent: Request<Bytes>) -> EventStream<Output> {
     let posted = read(sent.body()).unwrap_or_default().0;
-    let pending: Vec<Value> = request_ids(&posted).cloned().collect();
+    let pending: Vec<Value> = posted.iter().filter_map(Message::request_id).collect();
     // GET may resume replies from previous POSTs; only a POST's replies
     // are correlated against the requests actually sent in this call.
     let correlate = sent.method() == Method::POST && !pending.is_empty();
@@ -248,35 +227,17 @@ fn response_events(
         && (bodiless(sent.method(), answer.status()) || answer.status() == StatusCode::ACCEPTED)
     {
         if !pending.is_empty() {
-            return stream::once(async { Err(Truncated::fault()) }).boxed();
+            return EventStream::stream(stream::iter([Err(Truncated::fault())]));
         }
-        return stream::empty().boxed();
+        return EventStream::empty();
     }
     let (head, body) = answer.into_parts();
-    let session = if head.status.is_success() {
-        match header(&head.headers, SESSION) {
-            Ok(session) => session,
-            Err(_) => {
-                return stream::once(async {
-                    Err(Upstream::fault(
-                        "the MCP server sent an invalid session header",
-                    ))
-                })
-                .boxed();
-            }
-        }
-    } else {
-        None
+    let Ok(session) = header(&head.headers, SESSION) else {
+        let invalid = "the MCP server sent an invalid session header";
+        return EventStream::stream(stream::iter([Err(Upstream::fault(invalid))]));
     };
-    let output = move |read: Option<(Vec<Value>, bool)>| Output {
-        messages: read
-            .map(|(messages, _)| {
-                messages
-                    .into_iter()
-                    .map(|m| m.try_into().expect("validated RPC message"))
-                    .collect()
-            })
-            .unwrap_or_default(),
+    let output = move |read: Option<(Vec<Message>, bool)>| Output {
+        messages: read.map(|(messages, _)| messages).unwrap_or_default(),
         session: session.clone(),
         ..Output::default()
     };
@@ -295,7 +256,7 @@ fn response_events(
             out.push(output);
             Ok(())
         };
-        sse::read(body, (), on_event, |_, end, _| end)
+        sse::read(body, (), on_event, |_, end, _| end).boxed()
     } else {
         let on_body = move |raw: Bytes, out: &mut Vec<Output>| {
             if !raw.is_empty() {
@@ -306,10 +267,9 @@ fn response_events(
             }
             Ok(())
         };
-        let read = whole::read(NAME, Response::from_parts(head, body), on_body);
-        read.map(|read| read.map_err(rpc_refusal)).boxed()
+        whole::read(body, on_body).boxed()
     };
-    stream::unfold(
+    EventStream::stream(stream::unfold(
         (inner, pending, false),
         move |(mut inner, mut pending, done)| async move {
             if done {
@@ -338,62 +298,48 @@ fn response_events(
                 None => None,
             }
         },
-    )
-    .boxed()
+    ))
 }
 
 /// `fault`, a refusal whose body says a JSON-RPC error (a single one or the
 /// first of a batch), as that error: its [`RpcCode`] and message, its `data`
 /// as [`Details`]`{"data": ..}`; the status, `Retry-After` and the answer
 /// stay. Any other fault, or a body that says none, as it is. The body is
-/// the one [`whole::read`] collected, so it is within the body's limit.
+/// the one the binding collected, so it is within the body's limit.
 fn rpc_refusal(fault: Fault) -> Fault {
     let Some(error) = fault.get::<ProviderError>().cloned() else {
         return fault;
     };
-    let said = serde_json::from_slice(error.response.body())
-        .ok()
-        .and_then(|value| {
-            let all = match value {
-                Value::Array(all) => all,
-                one => vec![one],
-            };
-            all.into_iter().find_map(|mut m| {
-                // MCP permits an ID-less error in an HTTP refusal. Normalize
-                // only here; an ordinary stream message still needs its ID.
-                m.as_object_mut()?.entry("id").or_insert(Value::Null);
-                if !crate::valid_message(&m) {
-                    return None;
-                }
-                Some(m.get_mut("error")?.take())
-            })
-        });
+    let all = match serde_json::from_slice(error.response.body()) {
+        Ok(Value::Array(all)) => all,
+        Ok(one) => vec![one],
+        Err(_) => Vec::new(),
+    };
+    let said = all.into_iter().find_map(|mut m| {
+        // MCP permits an ID-less error in an HTTP refusal. Normalize
+        // only here; an ordinary stream message still needs its ID.
+        m.as_object_mut()?.entry("id").or_insert(Value::Null);
+        match Message::try_from(m).ok()? {
+            Message::Response {
+                outcome: Outcome::Error(said),
+                ..
+            } => Some(said),
+            _ => None,
+        }
+    });
     let (Some(said), Some(Status(status))) = (said, fault.get::<Status>().copied()) else {
         return fault;
     };
-    let (Some(code), Some(message)) = (said["code"].as_i64(), said["message"].as_str()) else {
-        return fault;
-    };
-    let mut read = Upstream::fault(message)
+    let mut read = Upstream::fault(said.message)
         .with(Status(status))
-        .with(RpcCode(code));
-    if let Some(data) = said.get("data") {
-        read = read.with(Details(serde_json::Map::from_iter([(
-            "data".into(),
-            data.clone(),
-        )])));
+        .with(RpcCode(said.code));
+    if let Some(data) = said.data {
+        read = read.with(Details(serde_json::Map::from_iter([("data".into(), data)])));
     }
     if let Some(&wait) = fault.get::<RetryAfter>() {
         read = read.with(wait);
     }
     read.with(error)
-}
-
-/// Drops from `pending` the requests `output` answers.
-fn forget(pending: &mut Vec<Value>, output: &Output) {
-    for id in output.answers() {
-        pending.retain(|p| *p != id);
-    }
 }
 
 /// What a request has been answered so far, once its answer started:
@@ -417,7 +363,7 @@ impl Answered {
     fn of(body: &[u8]) -> Self {
         let (messages, batch) = read(body).unwrap_or_default();
         Self {
-            pending: request_ids(&messages).cloned().collect(),
+            pending: messages.iter().filter_map(Message::request_id).collect(),
             batch,
             messages: Vec::new(),
         }
@@ -432,16 +378,12 @@ impl Answered {
         };
         let mut all = self.messages.clone();
         all.extend(ids.iter().map(|id| failure(id, fault)));
-        body(&all, self.batch).to_string()
+        body(all, self.batch).to_string()
     }
 }
 
 /// The client's answer, shaped by its request.
-fn answer(
-    reply: h::Reply,
-    source: &mut EventStream<Output>,
-    started: &Started,
-) -> EventSink<Output> {
+fn answer(reply: h::Reply, started: &Started) -> EventSink<Output> {
     let ask = reply.request();
     let answered = Arc::new(Mutex::new(Answered::of(ask.body())));
     let asks = !lock(&answered).pending.is_empty();
@@ -458,8 +400,10 @@ fn answer(
     };
     let mut head = head(status);
     let Some(framing) = framing else {
+        // A 202 is held until the server's answer ends, so a server's
+        // failure reaches the client as one; a 204 has no body to wait for.
         head.headers.remove(CONTENT_TYPE);
-        return reply.empty(head, source);
+        return reply.write(head, Box::new(Bodiless));
     };
     head.headers
         .insert(CONTENT_TYPE, HeaderValue::from_static(framing));
@@ -526,20 +470,20 @@ impl h::Encoder<Output> for Answer {
                 "a server request requires an MCP event stream",
             ));
         }
-        forget(&mut answered.pending, output);
+        for id in output.answers() {
+            answered.pending.retain(|p| *p != id);
+        }
         match self.events {
             true => out.extend_from_slice(&event(output)?),
             // A JSON response contains the posted requests' responses, not
             // notifications mixed into an invented response batch. SSE is
             // needed to receive the server's independent messages.
-            false => answered.messages.extend(
-                output
+            false => {
+                let responses = output.messages.iter().filter(|m| m.method().is_none());
+                answered
                     .messages
-                    .iter()
-                    .filter(|m| m.method().is_none())
-                    .cloned()
-                    .map(Value::from),
-            ),
+                    .extend(responses.cloned().map(Value::from));
+            }
         }
         Ok(())
     }
@@ -548,7 +492,7 @@ impl h::Encoder<Output> for Answer {
         let answered = lock(&self.answered);
         match (end, self.events) {
             (Ok(()), false) if !answered.messages.is_empty() => {
-                let json = body(&answered.messages, answered.batch).to_string();
+                let json = body(answered.messages.clone(), answered.batch).to_string();
                 out.extend_from_slice(json.as_bytes());
             }
             (Err(fault), true) => {
@@ -558,6 +502,15 @@ impl h::Encoder<Output> for Answer {
             }
             _ => {}
         }
+        Ok(())
+    }
+}
+
+/// Encodes the answer to a `POST` of no request or to a `DELETE`: no body.
+struct Bodiless;
+
+impl h::Encoder<Output> for Bodiless {
+    fn encode(&mut self, _: &Output, _: &mut BytesMut) -> Result<(), Fault> {
         Ok(())
     }
 }
@@ -676,16 +629,7 @@ fn event(output: &Output) -> Result<Bytes, Fault> {
     }
     let data = match output.messages.is_empty() {
         true => String::new(),
-        false => body(
-            &output
-                .messages
-                .iter()
-                .cloned()
-                .map(Value::from)
-                .collect::<Vec<_>>(),
-            false,
-        )
-        .to_string(),
+        false => body(output.messages.clone(), false).to_string(),
     };
     out.push_str(&sse::event(None, data));
     Ok(out.into())

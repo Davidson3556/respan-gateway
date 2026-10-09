@@ -9,11 +9,12 @@ mod text;
 
 use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_conversation::{Block, Content, Finish, Input, Message, Output, Role, Tool};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{HttpClient, Status};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
 use respan_gateway_sdk::{ErrorCode, Upstream, Usage};
 use serde_json::{self, json};
@@ -436,9 +437,9 @@ fn gateway_with(
     plugin: impl Plugin,
 ) -> Result<Gateway, Fault> {
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, openai)?
         .provider::<Input, _, _>("anthropic", AnthropicMessages, anthropic)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .client::<Input, _, _>(AnthropicMessages)?
         .plugin(plugin)
         .target(target)

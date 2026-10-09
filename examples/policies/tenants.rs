@@ -23,7 +23,7 @@ use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -115,9 +115,9 @@ fn gateway(
     tenants: Tenants,
 ) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, openai)?
-        .provider::<Input, _, _>("azure", OpenAiChat, azure)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, openai)?
+        .provider::<Input, _, _>("azure", OpenAiChat::OPENAI, azure)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(tenants))
 }
 

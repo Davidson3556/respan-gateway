@@ -22,8 +22,6 @@ use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::{JsonEvents, WsTransport};
 use serde_json::json;
 use std::sync::Arc;
-
-const PATH: &str = "/v1/responses";
 #[derive(Clone)]
 struct Sessions {
     ledger: MemoryLedger,
@@ -113,10 +111,9 @@ impl Plugin for Sessions {
     }
 }
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
-    let format = || JsonEvents::new("responses-ws", PATH);
     Gateway::new()
-        .client::<Input, _, _>(format())?
-        .provider::<Input, _, _>("responses", format(), transport.connect())?
+        .client::<Input, _, _>(JsonEvents::RESPONSES_WS)?
+        .provider::<Input, _, _>("responses", JsonEvents::RESPONSES_WS, transport.connect())?
         .plugin(sessions)
         .target("responses")
 }
@@ -134,7 +131,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut headers = respan_gateway_http::http::HeaderMap::new();
     headers.insert("authorization", format!("Bearer {key}").parse()?);
     let gw = gateway(
-        WsTransport::new("wss://api.openai.com")?.with_headers(headers)?,
+        JsonEvents::RESPONSES_WS
+            .transport("wss://api.openai.com/v1")?
+            .with_headers(headers)?,
         sessions,
     )?;
     serve::run(gw, "127.0.0.1:8081").await?;

@@ -19,7 +19,7 @@ use respan_gateway_http::Status;
 use respan_gateway_http::Wire;
 #[cfg(test)]
 use respan_gateway_http::http;
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -54,7 +54,7 @@ impl Plugin for Judge {
         let replies: Vec<Output> = cx
             .call("judge")
             .with_input(prompt)
-            .with_extension(respan_gateway_providers::StreamResponse(false))
+            .with_extension(respan_gateway_codec::StreamResponse(false))
             .await?
             .outputs()
             .try_collect()
@@ -104,20 +104,20 @@ fn gateway(
     Gateway::new()
         .provider::<Input, _, _>(
             "judge",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&judge.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
             "cheap",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&cheap.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
             "strong",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&strong.base_url())?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(egress)
         .plugin(Judge)
         .target("cheap")

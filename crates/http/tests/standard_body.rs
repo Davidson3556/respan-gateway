@@ -18,21 +18,21 @@ async fn open(
     request: Request<h::Body>,
     decoded: Arc<AtomicUsize>,
 ) -> Result<EventStream<Bytes>, Fault> {
-    let (incoming, _answer) = h::Incoming::accept(request, false, LIMIT);
+    let (incoming, _answer) = h::Incoming::accept(request, h::Framing::Whole, LIMIT);
     let (opening, _sink) = incoming.bind(
         move |request| {
-            Ok(h::messages(request, move |_, bytes| {
+            h::messages(request, move |_, bytes| {
                 decoded.fetch_add(1, Ordering::SeqCst);
                 Ok(bytes)
-            }))
+            })
         },
-        |reply, _: &mut EventStream<()>| {
+        |reply| {
             Ok(reply.write(
                 Response::new(()).into_parts().0,
                 h::formats::each(|_: &()| Ok(Bytes::new())),
             ))
         },
-        h::plain_refusal,
+        h::plain,
     );
     opening.await
 }

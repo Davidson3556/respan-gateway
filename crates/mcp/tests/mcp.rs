@@ -14,10 +14,10 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, Completion, Credential, Incoming, Outgoing, credentials, error_code, proxy_call,
-    strip_client_origin_headers, strip_origin_headers,
+    Body, Completion, Credential, Framing, Incoming, Outgoing, credentials, error_code,
+    strip_origin_headers,
 };
-use respan_gateway_mcp::{HttpInput as Input, HttpOutput as Output};
+use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp::{Owner, SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
@@ -184,10 +184,7 @@ impl ScriptedMcp {
         &self,
         call: http::Request<Body>,
     ) -> Result<(http::Response<Body>, Option<Completion>), Fault> {
-        let (mut head, body) = call.into_parts();
-        proxy_call(&mut head);
-        strip_client_origin_headers(&mut head.headers);
-        let mut request = http::Request::from_parts(head, body);
+        let mut request = call;
         credentials(&mut request, &HeaderMap::new());
         let (mut head, body) = request.into_parts();
         let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
@@ -630,6 +627,25 @@ async fn delete_and_202_are_handled() {
 }
 
 #[tokio::test]
+async fn a_servers_refusal_of_a_notification_or_delete_reaches_the_client() {
+    let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    let mock = ScriptedMcp::new();
+    // The session expired on the server.
+    mock.reply(bare(StatusCode::NOT_FOUND));
+    mock.reply(bare(StatusCode::NOT_FOUND));
+    let gw = gateway(mock.connect(), None);
+    let gone = [(SESSION, "gone")];
+    for asked in [
+        request(Method::POST, note, &gone),
+        request(Method::DELETE, "", &gone),
+    ] {
+        let (status, _, body, outcome) = send(&gw, asked).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(outcome.is_err());
+    }
+}
+
+#[tokio::test]
 async fn a_stdio_child_answers_a_request_in_its_session() {
     let gw = gateway(StdioTransport::new("sh", ["-c", ECHO]).connect(), None);
     let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
@@ -888,7 +904,8 @@ async fn list(gw: &Gateway, session: &str) -> StatusCode {
 
 #[tokio::test]
 async fn a_child_that_exits_is_reaped_and_its_session_forgotten() {
-    let script = r#"read l; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exit 0"#;
+    // What it leaves behind holds its stdout open.
+    let script = r#"sleep 100 & read l; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exit 0"#;
     let gw = gateway(StdioTransport::new("sh", ["-c", script]).connect(), None);
     let session = init(&gw, &[]).await;
     // The session is forgotten only once its child is waited: no zombie.
@@ -1232,6 +1249,80 @@ async fn a_session_whose_initialize_is_never_answered_idles_out() {
     );
 }
 
+/// Whether the process `pid` is still running.
+fn running(pid: &Value) -> bool {
+    let probe = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
+        .status();
+    probe.is_ok_and(|s| s.success())
+}
+
+#[tokio::test]
+async fn a_child_deaf_to_eof_and_sigterm_is_killed_with_all_it_started() {
+    // Its background process, like itself, ignores SIGTERM.
+    let script = r#"trap '' TERM; sleep 100 & read a
+echo '{"jsonrpc":"2.0","id":1,"result":{"pid":'$!'}}'; exec sleep 100"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]).connect(), None);
+    let (_, headers, body, _) = send(&gw, request(Method::POST, INIT, &[])).await;
+    let pid = messages(&body)[0]["result"]["pid"].clone();
+    assert!(running(&pid), "{body}");
+    let with = [(SESSION, headers[SESSION].to_str().unwrap_or_default())];
+    drop(send(&gw, request(Method::DELETE, "", &with)).await);
+    for _ in 0..80 {
+        if !running(&pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("what the child started outlived its session");
+}
+
+#[tokio::test]
+async fn a_child_sees_only_path_and_what_it_is_given() {
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+    let script = r#"read a; printf '{"jsonrpc":"2.0","id":1,"result":{"seen":"%s %s %s %s"}}\n' \
+  "${CARGO_MANIFEST_DIR-unset}" "${GIVEN-unset}" "$(pwd)" "$(command -v sed)""#;
+    let transport = StdioTransport::new("sh", ["-c", script]).env("GIVEN", "yes");
+    let gw = gateway(transport.current_dir("/").connect(), None);
+    let (_, _, body, _) = send(&gw, request(Method::POST, INIT, &[])).await;
+    let seen = messages(&body)[0]["result"]["seen"].clone();
+    let seen = seen.as_str().unwrap_or_default().to_owned();
+    assert!(seen.starts_with("unset yes / /"), "{seen}");
+}
+
+#[tokio::test]
+async fn an_initialize_whose_client_left_frees_its_slot() {
+    let script = r#"read a; sleep 1; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exec sleep 100"#;
+    let transport = StdioTransport::new("sh", ["-c", script]).max_total(1);
+    let gw = gateway(transport.connect(), None);
+    let posted = serve(&gw, request(Method::POST, INIT, &[]));
+    let gave_up = tokio::time::timeout(Duration::from_millis(100), posted).await;
+    assert!(gave_up.is_err(), "answered before the client left");
+    init(&gw, &[]).await;
+}
+
+#[tokio::test]
+async fn a_request_the_client_cancels_ends_its_post() {
+    // Answers `initialize` only.
+    let script = r#"read a; echo '{"jsonrpc":"2.0","id":1,"result":{}}'; exec sleep 100"#;
+    let gw = gateway(StdioTransport::new("sh", ["-c", script]).connect(), None);
+    let session = init(&gw, &[]).await;
+    let with = [(SESSION, &session[..])];
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow"}}"#;
+    let cancel = r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}"#;
+    let cancelled = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        send(&gw, request(Method::POST, cancel, &with)).await.0
+    };
+    let both = async { tokio::join!(send(&gw, request(Method::POST, call, &with)), cancelled) };
+    let ((_, _, body, outcome), cancelled) = tokio::time::timeout(Duration::from_secs(3), both)
+        .await
+        .unwrap_or_else(|_| panic!("the cancelled POST is still waiting"));
+    assert_eq!(cancelled, StatusCode::ACCEPTED);
+    assert_eq!(messages(&body)[0]["id"], json!(2), "{body}");
+    assert!(outcome.is_err());
+}
+
 // MCP is matched however its path is spelled, so what is served after it
 // never takes a call that reaches it.
 #[test]
@@ -1242,7 +1333,7 @@ fn mcp_is_matched_however_its_path_is_spelled() {
             .method(method)
             .uri(uri)
             .body(Body::full(""));
-        Incoming::accept(req.expect("valid request"), false, LIMIT).0
+        Incoming::accept(req.expect("valid request"), Framing::Whole, LIMIT).0
     };
     let same = [
         "/mcp",

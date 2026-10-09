@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
-//! Reusable HTTP-aware wire-format helpers. Concrete provider codecs, and
-//! how they read a vendor's error body, live in `respan-gateway-providers`;
+//! Reusable HTTP-aware wire-format helpers. Concrete provider codecs live in
+//! `respan-gateway-openai` and `respan-gateway-anthropic`, and how they read a
+//! vendor's error body in `respan-gateway-codec`;
 //! shared conversation types live in `respan-gateway-conversation`, and usage
 //! and fault facts live in `respan-gateway-sdk`. Traffic of no kind relays through
 //! [`opaque`](crate::formats::opaque).
@@ -11,10 +12,10 @@ pub mod whole;
 
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{
-    self, HeaderValue, header::CONTENT_ENCODING, header::CONTENT_TYPE,
-    request::Parts as RequestHead, response::Parts as ResponseHead,
+    self, HeaderValue, header::CONTENT_TYPE, request::Parts as RequestHead,
+    response::Parts as ResponseHead,
 };
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{EventStream, Fault};
 use serde_json::{self, Value};
 
 /// A provider's message as JSON: a whole body, or an event's `data:`.
@@ -139,13 +140,6 @@ pub fn set_path(head: &mut RequestHead, path: &str) -> Result<(), Fault> {
     Ok(())
 }
 
-/// Mark a call whose body is not the client's bytes as sent, as when a
-/// value was written or its inputs stream: its `Content-Encoding`, the
-/// client's, goes.
-pub fn body_changed(head: &mut RequestHead) {
-    head.headers.remove(CONTENT_ENCODING);
-}
-
 /// Set a response's content type to `value` if it has none (RFC 9110 8.3).
 pub fn default_content_type(head: &mut ResponseHead, value: &'static str) {
     let value = HeaderValue::from_static(value);
@@ -170,7 +164,7 @@ where
     }
 }
 
-/// The most frames that decode to nothing one poll of [`read`] reads before
+/// The most frames that decode to nothing one poll of [`parse`] reads before
 /// it yields: what tokio's cooperative budget allows one poll of a task
 /// (128), so a body always ready, of comments alone say, cannot hold its
 /// thread.
@@ -180,29 +174,25 @@ const FRAMES_PER_POLL: usize = 128;
 /// an error precede it. `end` sees clean EOF or a wire fault, never a semantic
 /// `push` failure. The returned stream does not prefetch another frame while
 /// decoded values remain, and yields after 128 frames that decode to
-/// nothing, as tokio's cooperative budget does a task.
-pub fn read<T, S, P, E>(
-    body: crate::Body,
-    state: S,
-    push: P,
-    end: E,
-) -> respan_gateway_sdk::futures::stream::BoxStream<'static, Result<T, Fault>>
+/// nothing, as tokio's cooperative budget does a task. What `state` holds
+/// between frames is its own to bound, as [`sse::Parser`] holds an event to
+/// its body's [`limit`](crate::Body::limit): this holds no bytes, and only
+/// the values of one frame.
+pub fn parse<T, S, P, E>(body: crate::Body, state: S, push: P, end: E) -> EventStream<T>
 where
     T: Send + 'static,
     S: Send + 'static,
     P: FnMut(&mut S, Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
     E: FnOnce(&mut S, Result<(), Fault>, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
-    use respan_gateway_sdk::futures::StreamExt;
-    Parsed {
+    EventStream::stream(Parsed {
         body,
         state,
         push,
         end: Some(end),
         ready: std::collections::VecDeque::new(),
         ended: false,
-    }
-    .boxed()
+    })
 }
 struct Parsed<T, S, P, E> {
     body: crate::Body,

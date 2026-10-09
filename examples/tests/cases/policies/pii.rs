@@ -1,7 +1,7 @@
 use super::*;
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation::{Message, Role};
-use respan_gateway_providers::AnthropicMessages;
 
 #[test]
 fn hides_addresses_only() {
@@ -416,7 +416,7 @@ async fn a_placeholder_split_across_anthropic_tool_input_is_restored() -> Result
             AnthropicMessages,
             provider_support::anthropic(&fake.base_url())?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(Pii)
         .plugin(PiiInput)
         .target("anthropic")?;

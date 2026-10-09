@@ -1,16 +1,16 @@
 //! Native HTTP sending bound to the kernel's symmetric event interface.
 
 use super::reader::observed;
-use super::upload::Upload;
+use super::upload::{self, Upload};
 
-use crate::{Body, Completion};
+use crate::formats::whole;
+use crate::{Body, Completion, Encoder, encode_all};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
-use futures::stream::BoxStream;
 use futures::{Future, FutureExt, SinkExt, Stream, StreamExt, TryStreamExt, stream};
 use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
-use respan_gateway_sdk::{Connection, EventSink, EventStream, Extensions, Fault, Upstream};
+use respan_gateway_sdk::{Connection, EventSink, EventStream, Extensions, Fault};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -21,12 +21,16 @@ pub(crate) type Sending = dyn Fn(
     + Send
     + Sync;
 
+type Success = Box<dyn FnOnce(&ResponseHead, &RequestHead) -> bool + Send>;
+
 /// One provider attempt, owning its extensions and sharing only the sender.
 pub struct Outgoing {
     pub(crate) send: Arc<Sending>,
     pub(crate) extensions: Extensions,
     /// The most bytes a reader holds of its answer at once.
     pub(crate) limit: usize,
+    /// What it takes for a success, if not HTTP's.
+    pub(crate) success: Option<Success>,
 }
 impl Outgoing {
     /// Per-call transport state supplied by the gateway and its plugins.
@@ -34,25 +38,52 @@ impl Outgoing {
         &self.extensions
     }
 
-    /// Bind synchronous request preparation and a standard response stream.
-    /// The answer is refused, with the first fault `read` gives, if
-    /// `success` says it is no success; else it opens, and a fault that
-    /// comes later fails it. A call's [`RawErrors`](crate::RawErrors) give
-    /// each fault of its answer the provider's error answer to write.
-    pub fn bind<I, O, P, R, S>(self, prepare: P, read: R, success: S) -> Connection<O, I>
+    /// Take an answer for a success if `success` says so, instead of HTTP's
+    /// own rule: a 2xx, or a 101 to a call that asked to switch protocols.
+    /// A WebSocket format, say, takes only its handshake's 101.
+    pub fn with_success(
+        mut self,
+        success: impl FnOnce(&ResponseHead, &RequestHead) -> bool + Send + 'static,
+    ) -> Self {
+        self.success = Some(Box::new(success));
+        self
+    }
+
+    /// Bind a request's encoder, its response's decoder and the format's
+    /// error reader to core events.
+    ///
+    /// `encode` writes the call's head, given as `GET /` with no headers, and
+    /// returns the encoder of its body. It is given the call's one input, or
+    /// `None` for live input, one message per frame, which a format that
+    /// takes one value per call refuses. One input is encoded whole now,
+    /// before the call is sent; live input is encoded as it comes, as the
+    /// provider reads it. A [`SendRaw`](crate::SendRaw) request goes as given
+    /// instead: a whole one with its own bytes, its input unread; a live one
+    /// with its head, its input encoded. Whatever its transport, the call
+    /// loses what a proxy does not pass on: a hop's headers but `Upgrade`,
+    /// which gets its `Connection: upgrade` (RFC 9110 7.6.1, 7.8); `Host`;
+    /// `Expect`; conditions and ranges (13, 14); method overrides;
+    /// `Accept-Encoding`, as the gateway decodes what it reads; and the
+    /// gateway origin's `Cookie`, `Forwarded`, `Via`, `X-Forwarded-*` and
+    /// `X-Real-IP`, which plugins still see ([`Wire`](crate::Wire)) and a
+    /// call's [`CallHeaders`](crate::CallHeaders) may set.
+    ///
+    /// An answer that is a success ([`with_success`](Self::with_success))
+    /// opens at its head and goes to `decode` with the call as sent; a fault
+    /// its body says later fails it. Any other answer is refused: its body is
+    /// read whole, up to the transport's limit, and `error` reads it into
+    /// the fault ([`provider_fault`](crate::provider_fault) reads none of
+    /// it). A call's [`RawErrors`](crate::RawErrors) give each fault of its
+    /// answer the provider's error answer to write.
+    pub fn bind<I, O, E, D, R>(self, encode: E, decode: D, error: R) -> Connection<O, I>
     where
         I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
-        P: FnOnce(&mut EventStream<I>) -> Result<(http::Request<Body>, EventSink<I>), Fault>
+        E: FnOnce(&mut RequestHead, Option<&I>) -> Result<Box<dyn Encoder<I>>, Fault>
             + Send
             + 'static,
-        R: FnOnce(
-                http::Response<Body>,
-                http::Request<Bytes>,
-            ) -> BoxStream<'static, Result<O, Fault>>
-            + Send
-            + 'static,
-        S: FnOnce(&ResponseHead, &RequestHead) -> bool + Send + 'static,
+        D: FnOnce(http::Response<Body>, http::Request<Bytes>) -> EventStream<O> + Send + 'static,
+        R: FnOnce(http::Response<Bytes>) -> Fault + Send + 'static,
     {
         let (answer, answered) = oneshot::channel();
         let incoming = async move { answered.await.map_err(|_| Fault::abandoned())? }.boxed();
@@ -61,65 +92,58 @@ impl Outgoing {
             if let Some(fault) = events.refusal() {
                 return Err(fault.clone());
             }
-            let (mut request, mut sink) = match self.extensions.get::<crate::SendRaw>() {
+            let raw = match self.extensions.get::<crate::SendRaw>() {
                 Some(crate::SendRaw(wire)) => {
-                    let raw = wire
-                        .get()
-                        .ok_or_else(|| Fault::internal("raw request unavailable"))?
-                        .clone();
-                    let (head, bytes) = raw.into_parts();
-                    if wire.is_live() {
-                        let (encoded, sink) = prepare(events)?;
-                        (http::Request::from_parts(head, encoded.into_body()), sink)
-                    } else {
-                        events.stop();
-                        (
-                            http::Request::from_parts(head, Body::full(bytes)),
-                            EventSink::new(
-                                futures::sink::drain().sink_map_err(|never| match never {}),
-                            ),
-                        )
-                    }
+                    let unavailable = || Fault::internal("raw request unavailable");
+                    Some((wire.get().ok_or_else(unavailable)?.clone(), wire.is_live()))
                 }
-                None => prepare(events)?,
+                None => None,
             };
-            sink.prepare(events)?;
-            let streaming = request.body().is_streaming();
-            if !streaming {
-                events.stop();
-            }
-            let (head, mut body) = request.into_parts();
-            let initial = body.full_bytes().cloned().unwrap_or_default();
-            let sent = http::Request::from_parts(head.clone(), initial);
-            let mut handoff = body.upload.take();
-            if streaming && handoff.is_none() {
-                let (drained, draining) = oneshot::channel::<()>();
-                let mut drained = Some(drained);
-                let failed = super::reader::Failure::default();
-                let failure = failed.clone();
-                body = Body::stream(stream::poll_fn(move |cx| {
-                    let item = Pin::new(&mut body).poll_next(cx);
-                    if let Poll::Ready(Some(Err(fault))) = &item {
-                        let _ = failure.set(fault.clone());
+            let (mut head, mut body, sink) = match raw {
+                Some((raw, false)) => {
+                    events.stop();
+                    let (head, bytes) = raw.into_parts();
+                    (head, Body::full(bytes), drained())
+                }
+                raw => {
+                    let mut head = http::Request::new(()).into_parts().0;
+                    let (body, sink) = match events.is_single() {
+                        true => {
+                            let none = || Fault::internal("a whole request has no input");
+                            let input = events.value().transpose()?.ok_or_else(none)?;
+                            let encoder = encode(&mut head, Some(input))?;
+                            let bytes = encode_all(encoder, std::slice::from_ref(input))?;
+                            events.stop();
+                            (Body::full(bytes), drained())
+                        }
+                        false => {
+                            let (sink, body) = upload::encoding(encode(&mut head, None)?);
+                            (body, sink)
+                        }
+                    };
+                    if let Some((raw, _)) = raw {
+                        head = raw.into_parts().0;
                     }
-                    if matches!(item, Poll::Ready(None | Some(Err(_)))) {
-                        drained.take();
-                    }
-                    item
-                }));
-                handoff = Some(super::upload::Handoff {
-                    draining: draining.map(|_| Ok(())).boxed(),
-                    failed,
-                    settled: Default::default(),
-                });
-            }
+                    (head, body, sink)
+                }
+            };
+            crate::transport::proxy_call(&mut head);
+            crate::transport::strip_client_origin_headers(&mut head.headers);
+            let streaming = body.is_streaming();
+            let sent = http::Request::from_parts(
+                head.clone(),
+                body.full_bytes().cloned().unwrap_or_default(),
+            );
+            // Only an encoding body streams, and it brings its handoff.
+            let handoff = body.upload.take();
             let failed = handoff
                 .as_ref()
                 .map(|h| h.failed.clone())
                 .unwrap_or_default();
-            request = http::Request::from_parts(head, body);
+            let mut request = http::Request::from_parts(head, body);
             let provider_head = self.extensions.get::<crate::ProviderHead>().cloned();
             let raw_errors = self.extensions.get::<crate::RawErrors>().cloned();
+            let success = self.success;
             let limit = self.limit;
             request.extensions_mut().insert(self.extensions);
             let failure = failed.clone();
@@ -132,31 +156,37 @@ impl Outgoing {
                     if let Some(slot) = provider_head {
                         slot.set(Some(head.clone()));
                     }
-                    let refused = !success(&head, &sent.clone().into_parts().0);
-                    let status = head.status;
-                    let body = observed(body, failure, limit);
-                    let stream = read(http::Response::from_parts(head, body), sent);
-                    let mut stream = match raw_errors {
-                        Some(raw) => stream.map_err(move |fault| raw.apply(fault)).boxed(),
-                        None => stream,
+                    let call = sent.clone().into_parts().0;
+                    let succeeded = match success {
+                        Some(success) => success(&head, &call),
+                        None => crate::success(&head, &call),
                     };
-                    let response = if refused {
-                        let fault = match stream.next().await {
-                            Some(Err(fault)) => fault,
-                            _ => Upstream::fault(crate::formats::whole::answered(status)),
+                    let body = observed(body, failure, limit);
+                    let applied = move |fault| match &raw_errors {
+                        Some(raw) => raw.apply(fault),
+                        None => fault,
+                    };
+                    if !succeeded {
+                        let fault = match whole::bytes(body).await {
+                            Ok(bytes) => error(http::Response::from_parts(head, bytes)),
+                            Err(fault) => fault,
                         };
-                        EventStream::refused(fault)
-                    } else if streaming && completion.is_none() {
-                        let mut ended = Some(ended);
-                        EventStream::stream(stream::poll_fn(move |cx| {
-                            let item = stream.as_mut().poll_next(cx);
-                            if matches!(item, Poll::Ready(None | Some(Err(_)))) {
-                                ended.take();
-                            }
-                            item
-                        }))
-                    } else {
-                        EventStream::stream(stream)
+                        return Ok((EventStream::refused(applied(fault)), completion));
+                    }
+                    let mut events =
+                        decode(http::Response::from_parts(head, body), sent).map_err(applied);
+                    let response = match streaming && completion.is_none() {
+                        true => {
+                            let mut ended = Some(ended);
+                            EventStream::stream(stream::poll_fn(move |cx| {
+                                let item = events.poll_next_unpin(cx);
+                                if matches!(item, Poll::Ready(None | Some(Err(_)))) {
+                                    ended.take();
+                                }
+                                item
+                            }))
+                        }
+                        false => EventStream::stream(events),
                     };
                     Ok::<_, Fault>((response, completion))
                 }
@@ -203,6 +233,12 @@ impl Outgoing {
         });
         (incoming, outgoing)
     }
+}
+
+/// The sink of a call whose input was encoded whole, or went unread: there
+/// is nothing left to send.
+fn drained<T: Send + 'static>() -> EventSink<T> {
+    EventSink::new(futures::sink::drain().sink_map_err(|never| match never {}))
 }
 
 impl std::fmt::Debug for Outgoing {

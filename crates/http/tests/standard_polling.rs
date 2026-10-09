@@ -151,18 +151,21 @@ fn opening(
     body: h::Body,
     decoded: Arc<AtomicUsize>,
 ) -> impl Future<Output = Result<EventStream<Bytes>, Fault>> {
-    let (incoming, _answer) = h::Incoming::accept(Request::new(body), false, LIMIT);
+    let (incoming, _answer) = h::Incoming::accept(Request::new(body), h::Framing::Whole, LIMIT);
     let (opening, _sink) = incoming.bind(
         move |request| {
-            Ok(h::messages(request, move |_, bytes| {
+            h::messages(request, move |_, bytes| {
                 decoded.fetch_add(1, Ordering::SeqCst);
                 Ok(bytes)
-            }))
+            })
         },
-        |reply, source: &mut EventStream<()>| {
-            Ok(reply.empty(Response::new(()).into_parts().0, source))
+        |reply| {
+            Ok(reply.write(
+                Response::new(()).into_parts().0,
+                h::formats::each(|_: &()| Ok(Bytes::new())),
+            ))
         },
-        h::plain_refusal,
+        h::plain,
     );
     opening
 }

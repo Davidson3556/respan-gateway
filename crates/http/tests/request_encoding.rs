@@ -7,7 +7,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::Duration;
 
 use h::{
@@ -55,40 +55,66 @@ fn writer(fail_encode: bool, fail_end: bool) -> Writes {
 }
 
 /// A body read and discarded, keeping its wire failure.
-fn nothing(
-    body: Body,
-) -> respan_gateway_sdk::futures::stream::BoxStream<'static, Result<u8, Fault>> {
-    h::formats::read(body, (), |_, _, _| Ok(()), |_, wire, _| wire)
+fn nothing(body: Body) -> EventStream<u8> {
+    h::formats::parse(body, (), |_, _, _| Ok(()), |_, wire, _| wire)
+}
+
+/// Where a transport keeps the request it was sent.
+type Sent = Arc<std::sync::Mutex<Option<Request<Body>>>>;
+
+/// An outgoing binding encoding with `encoder`, its transport keeping the
+/// request it is sent and never answering.
+fn dial<T: Clone + Send + Sync + 'static>(encoder: Box<dyn Encoder<T>>) -> (Sent, EventSink<T>) {
+    let sent = Sent::default();
+    let kept = sent.clone();
+    let send = h::connect(
+        move |request| {
+            *kept.lock().expect("unpoisoned") = Some(request);
+            future::pending::<Result<(Response<Body>, Option<h::Completion>), Fault>>()
+        },
+        LIMIT,
+    );
+    let (_read, sink) = send(Extensions::new()).bind(
+        move |_, _| Ok(encoder),
+        |response, _| nothing(response.into_body()),
+        |_| Fault::new("refused"),
+    );
+    (sent, sink)
+}
+
+/// The request `sink` sends, once its delivery starts.
+fn sent<T: 'static>(sent: &Sent, sink: &mut EventSink<T>) -> Request<Body> {
+    let _ = sink.flush().now_or_never();
+    sent.lock()
+        .expect("unpoisoned")
+        .take()
+        .expect("a sent request")
 }
 
 #[tokio::test]
 async fn default_request_decodes_encodes_and_finalizes_one_initial_body() {
-    let (incoming, _answer) = h::Incoming::accept(Request::new(Body::full("raw")), false, LIMIT);
+    let request = Request::new(Body::full("raw"));
+    let (incoming, _answer) = h::Incoming::accept(request, h::Framing::Whole, LIMIT);
     let (read, _sink) = incoming.bind(
-        |request| {
-            Ok(h::messages(request, |_, _| -> Result<u8, Fault> {
-                Ok(b'r')
-            }))
+        |request| h::messages(request, |_, _| -> Result<u8, Fault> { Ok(b'r') }),
+        |reply| {
+            let head = reply.head();
+            Ok(reply.write(head, h::formats::each(|_: &u8| Ok(Bytes::new()))))
         },
-        |reply, source: &mut EventStream<u8>| {
-            Ok(reply.empty(
-                respan_gateway_http::http::Response::new(()).into_parts().0,
-                source,
-            ))
-        },
-        h::plain_refusal,
+        h::plain,
     );
     let mut source = read.await.expect("expected value");
     let encode = writer(false, false);
     let (calls, ends) = (encode.calls.clone(), encode.ends.clone());
-    let (request, _) = h::request(&mut source, Box::new(encode)).expect("expected value");
+    let (kept, mut sink) = dial(Box::new(encode));
+    sink.prepare(&mut source).expect("expected value");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(ends.load(Ordering::SeqCst), 1);
     assert!(
         source.is_single(),
         "stop retains source shape and ownership"
     );
-    let mut body = request.into_body();
+    let mut body = sent(&kept, &mut sink).into_body();
     assert_eq!(body.full_bytes().expect("expected value"), "r!");
     assert_eq!(
         body.next()
@@ -104,7 +130,9 @@ async fn default_request_decodes_encodes_and_finalizes_one_initial_body() {
 fn value_fails_synchronously_on_encoding_or_end_and_live_consumes_nothing() {
     for (encode, end, message) in [(true, false, "encode"), (false, true, "end")] {
         let mut source = EventStream::single(7);
-        let error = h::request(&mut source, Box::new(writer(encode, end)))
+        let (_, mut sink) = dial(Box::new(writer(encode, end)));
+        let error = sink
+            .prepare(&mut source)
             .expect_err("synchronous encoding failure");
         assert_eq!(error.message(), message);
         assert_eq!(
@@ -123,8 +151,9 @@ fn value_fails_synchronously_on_encoding_or_end_and_live_consumes_nothing() {
     }));
     let encode = writer(true, true);
     let calls = encode.calls.clone();
-    let (request, _) = h::request(&mut source, Box::new(encode)).expect("expected value");
-    assert!(request.body().full_bytes().is_none());
+    let (kept, mut sink) = dial(Box::new(encode));
+    sink.prepare(&mut source).expect("expected value");
+    assert!(sent(&kept, &mut sink).body().full_bytes().is_none());
     assert_eq!(polls.load(Ordering::SeqCst), 0);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
@@ -143,31 +172,28 @@ fn encode_all_writes_values_end_and_propagates_end_failure() {
     );
 }
 
+/// A response HTTP gives no body, to a `HEAD` or a 204, never calls its
+/// encoder, and stops its source unread; one that has a body keeps its
+/// prefix through a decorating sink.
 #[tokio::test]
-async fn empty_does_not_encode_and_open_keeps_prefix_through_decorator() {
-    for empty in [true, false] {
-        let (incoming, answer) = h::Incoming::accept(Request::new(Body::default()), false, LIMIT);
+async fn a_bodiless_response_does_not_encode_and_open_keeps_prefix_through_decorator() {
+    for (method, status) in [("HEAD", 200), ("GET", 204), ("GET", 200)] {
+        let empty = (method, status) != ("GET", 200);
+        let mut request = Request::new(Body::default());
+        *request.method_mut() = h::http::Method::from_bytes(method.as_bytes()).expect("method");
+        let (incoming, answer) = h::Incoming::accept(request, h::Framing::Whole, LIMIT);
         let encode = writer(false, false);
         let calls = encode.calls.clone();
         let ends = encode.ends.clone();
         let (read, mut sink) = incoming.bind(
-            |request| Ok(h::messages(request, |_, _| Ok(0_u8))),
-            move |reply, source| {
-                let sink = if empty {
-                    reply.empty(
-                        respan_gateway_http::http::Response::new(()).into_parts().0,
-                        source,
-                    )
-                } else {
-                    reply.open(
-                        respan_gateway_http::http::Response::new(()).into_parts().0,
-                        Bytes::from_static(b"prefix:"),
-                        Box::new(encode),
-                    )
-                };
+            |request| h::messages(request, |_, _| Ok(0_u8)),
+            move |reply| {
+                let mut head = reply.head();
+                head.status = h::http::StatusCode::from_u16(status).expect("status");
+                let sink = reply.open(head, Bytes::from_static(b"prefix:"), Box::new(encode));
                 Ok(EventSink::new(sink.sink_map_err(|fault| fault)))
             },
-            h::plain_refusal,
+            h::plain,
         );
         read.await.expect("expected value");
         let mut source = EventStream::single(1_u8);
@@ -206,117 +232,41 @@ async fn empty_does_not_encode_and_open_keeps_prefix_through_decorator() {
     }
 }
 
-struct Fallible {
-    phase: u8,
-    inner: Option<EventSink<u8>>,
-}
-impl Sink<Result<u8, Fault>> for Fallible {
-    type Error = Fault;
-    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if self.phase == 0 {
-            return Poll::Ready(Err(Fault::config("custom ready")));
-        }
-        self.inner
-            .as_mut()
-            .map_or(Poll::Ready(Ok(())), |sink| Pin::new(sink).poll_ready(cx))
-    }
-    fn start_send(mut self: Pin<&mut Self>, value: Result<u8, Fault>) -> Result<(), Fault> {
-        self.inner
-            .as_mut()
-            .map_or(Ok(()), |sink| Pin::new(sink).start_send(value))
-    }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if self.phase == 1 {
-            return Poll::Ready(Err(Fault::config("custom flush")));
-        }
-        self.inner
-            .as_mut()
-            .map_or(Poll::Ready(Ok(())), |sink| Pin::new(sink).poll_flush(cx))
-    }
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Fault>> {
-        if self.phase == 2 {
-            return Poll::Ready(Err(Fault::config("custom close")));
-        }
-        if self.phase == 3 {
-            return Poll::Pending;
-        }
-        self.inner
-            .as_mut()
-            .map_or(Poll::Ready(Ok(())), |sink| Pin::new(sink).poll_close(cx))
-    }
+/// An encoder's failure fails the call: a transport that says its write is
+/// complete does not hide it.
+#[tokio::test]
+async fn an_encoders_failure_is_not_hidden_by_transport_completion() {
+    let send = h::connect(
+        |_| async {
+            let completion: h::Completion = future::ready(Ok(())).boxed();
+            Ok((Response::new(Body::default()), Some(completion)))
+        },
+        LIMIT,
+    );
+    let (_read, mut sink) = send(Extensions::new()).bind(
+        |_, _| Ok(Box::new(writer(true, false)) as Box<dyn Encoder<u8>>),
+        |response, _| nothing(response.into_body()),
+        |_| Fault::new("refused"),
+    );
+    sink.prepare(&mut EventStream::stream(stream::pending()))
+        .expect("expected value");
+    let error = tokio::time::timeout(Duration::from_secs(1), sink.send(Ok(1)))
+        .await
+        .expect("expected value")
+        .expect_err("expected failure");
+    assert_eq!(h::error_code(&error), "config");
 }
 
 #[tokio::test]
-async fn custom_and_decorated_sink_faults_are_not_hidden_by_transport_completion() {
-    for wrapped in [false, true] {
-        for complete in [false, true] {
-            for phase in 0..3 {
-                let send = h::connect(
-                    move |_| async move {
-                        let completion: h::Completion = if complete {
-                            future::ready(Ok(())).boxed()
-                        } else {
-                            future::pending().boxed()
-                        };
-                        Ok((Response::new(Body::default()), Some(completion)))
-                    },
-                    LIMIT,
-                );
-                let (_read, mut sink) = send(Extensions::new()).bind(
-                    move |source| {
-                        let (request, inner) = if wrapped {
-                            let (request, sink) = h::request(
-                                source,
-                                h::formats::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v]))),
-                            )?;
-                            (request, Some(sink))
-                        } else {
-                            (Request::new(Body::default()), None)
-                        };
-                        Ok((request, EventSink::new(Fallible { phase, inner })))
-                    },
-                    |response, _| nothing(response.into_body()),
-                    h::success,
-                );
-                let mut source = EventStream::stream(stream::pending());
-                sink.prepare(&mut source).expect("expected value");
-                let action = future::poll_fn(|cx| match phase {
-                    0 => Pin::new(&mut sink).poll_ready(cx),
-                    1 => Pin::new(&mut sink).poll_flush(cx),
-                    _ => Pin::new(&mut sink).poll_close(cx),
-                });
-                let error = tokio::time::timeout(Duration::from_secs(1), action)
-                    .await
-                    .expect("expected value")
-                    .expect_err("expected failure");
-                assert_eq!(
-                    h::error_code(&error),
-                    "config",
-                    "wrapped={wrapped} complete={complete} phase={phase}"
-                );
-            }
-        }
-    }
-}
-
-#[tokio::test]
-async fn transport_failure_does_not_wait_for_a_pending_custom_sink_close() {
+async fn transport_failure_ends_the_call() {
     let send = h::connect(
         |_| async { Err(Upstream::fault("transport failed")) },
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |_| {
-            Ok((
-                Request::new(Body::default()),
-                EventSink::new(Fallible {
-                    phase: 3,
-                    inner: None,
-                }),
-            ))
-        },
+        |_, _| Ok(h::formats::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
         |response, _| nothing(response.into_body()),
-        h::success,
+        |_| Fault::new("refused"),
     );
     sink.prepare(&mut EventStream::single(0))
         .expect("expected value");
@@ -327,8 +277,10 @@ async fn transport_failure_does_not_wait_for_a_pending_custom_sink_close() {
     assert_eq!(error.message(), "transport failed");
 }
 
+/// A live body an encoder broke off fails the call, though its transport
+/// answered.
 #[tokio::test]
-async fn custom_request_body_failure_survives_a_successful_transport() {
+async fn a_live_body_failure_survives_a_successful_transport() {
     let send = h::connect(
         |mut request| async move {
             assert!(
@@ -344,25 +296,21 @@ async fn custom_request_body_failure_survives_a_successful_transport() {
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |_| {
-            let body = Body::stream(stream::once(future::ready(Err(Fault::config(
-                "custom body",
-            )))));
-            Ok((
-                Request::new(body),
-                EventSink::new(futures::sink::drain().sink_map_err(|never| match never {})),
-            ))
-        },
+        |_, _| Ok(Box::new(writer(true, false)) as Box<dyn Encoder<u8>>),
         |response, _| nothing(response.into_body()),
-        h::success,
+        |_| Fault::new("refused"),
     );
     sink.prepare(&mut EventStream::<u8>::stream(stream::pending()))
         .expect("expected value");
-    let error = tokio::time::timeout(Duration::from_secs(1), sink.close())
+    let sent = async {
+        sink.feed(Ok(1)).await?;
+        sink.close().await
+    };
+    let error = tokio::time::timeout(Duration::from_secs(1), sent)
         .await
         .expect("expected value")
         .expect_err("expected failure");
-    assert_eq!(error.message(), "custom body");
+    assert_eq!(error.message(), "encode");
 }
 
 #[tokio::test]
@@ -393,14 +341,9 @@ async fn authoritative_completion_releases_an_unconsumed_encoded_frame() {
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |source| {
-            h::request(
-                source,
-                h::formats::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v]))),
-            )
-        },
+        |_, _| Ok(h::formats::each(|v: &u8| Ok(Bytes::copy_from_slice(&[*v])))),
         |response, _| nothing(response.into_body()),
-        h::success,
+        |_| Fault::new("refused"),
     );
     sink.prepare(&mut EventStream::stream(stream::pending()))
         .expect("expected value");
@@ -441,9 +384,9 @@ async fn a_late_error_in_a_success_fails_the_opened_answer() {
         LIMIT,
     );
     let (read, mut sink) = send(Extensions::new()).bind(
-        |source| h::request(source, h::formats::each(|_: &u8| Ok(Bytes::new()))),
+        |_, _| Ok(h::formats::each(|_: &u8| Ok(Bytes::new()))),
         |response, _| {
-            h::formats::read::<u8, _, _, _>(
+            h::formats::parse::<u8, _, _, _>(
                 response.into_body(),
                 (),
                 |_, _, _| Ok(()),
@@ -453,7 +396,7 @@ async fn a_late_error_in_a_success_fails_the_opened_answer() {
                 },
             )
         },
-        h::success,
+        |_| Fault::new("refused"),
     );
     sink.prepare(&mut EventStream::single(0))
         .expect("expected value");
@@ -491,9 +434,9 @@ async fn empty_error_frames_yield_even_though_the_byte_cap_is_not_reached() {
         LIMIT,
     );
     let (_read, mut sink) = send(Extensions::new()).bind(
-        |source| h::request(source, h::formats::each(|_: &u8| Ok(Bytes::new()))),
-        |response, _| h::formats::whole::read::<u8>("test", response, |_, _| Ok(())),
-        h::success,
+        |_, _| Ok(h::formats::each(|_: &u8| Ok(Bytes::new()))),
+        |response, _| nothing(response.into_body()),
+        |answer| h::provider_fault("test", answer),
     );
     sink.prepare(&mut EventStream::single(0))
         .expect("expected value");
@@ -510,7 +453,84 @@ async fn ignored_incoming_frames_cannot_spin_in_one_poll() {
         seen.fetch_add(1, Ordering::SeqCst);
         Ok(Bytes::new())
     }));
-    let mut read = h::formats::read::<u8, _, _, _>(body, (), |_, _, _| Ok(()), |_, wire, _| wire);
+    let mut read = h::formats::parse::<u8, _, _, _>(body, (), |_, _, _| Ok(()), |_, wire, _| wire);
     assert!(read.next().now_or_never().is_none());
     assert_eq!(count.load(Ordering::SeqCst), 128);
+}
+
+/// An answer the format takes for no success is read whole by the binding,
+/// never by its decoder, into its error reader's fault, which keeps HTTP's
+/// facts of it, even for a 2xx a stricter format refuses: its status, its
+/// `Retry-After` and the answer as it came.
+#[tokio::test]
+async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
+    let send = h::connect(
+        |_| async {
+            let frames = [
+                Ok(Bytes::from_static(b"not ")),
+                Ok(Bytes::from_static(b"up")),
+            ];
+            let response = Response::builder()
+                .header("retry-after", "3")
+                .body(Body::stream(stream::iter(frames)))
+                .expect("a response");
+            Ok((response, None))
+        },
+        LIMIT,
+    );
+    let (read, mut sink) = send(Extensions::new())
+        .with_success(|answer, _| answer.status == h::http::StatusCode::SWITCHING_PROTOCOLS)
+        .bind(
+            |_, _| Ok(h::formats::each(|_: &u8| Ok(Bytes::new()))),
+            |_, _| -> EventStream<u8> { panic!("a refusal reached the decoder") },
+            |answer| h::provider_fault("strict", answer),
+        );
+    sink.prepare(&mut EventStream::single(0))
+        .expect("expected value");
+    let (_, output) = future::join(sink.close(), read).await;
+    let output = output.expect("an answer");
+    let fault = output.refusal().expect("refused");
+    assert!(fault.is::<Upstream>());
+    assert_eq!(
+        fault.get(),
+        Some(&h::Status(h::http::StatusCode::BAD_GATEWAY))
+    );
+    assert_eq!(
+        fault.get(),
+        Some(&respan_gateway_sdk::RetryAfter(Duration::from_secs(3)))
+    );
+    let answer = &fault
+        .get::<h::ProviderError>()
+        .expect("the answer")
+        .response;
+    assert_eq!(
+        (answer.status().as_u16(), &answer.body()[..]),
+        (200, &b"not up"[..])
+    );
+}
+
+/// A passthrough relays a 101 only to a call that asked to switch: one
+/// that did not is refused, the answer never relayed.
+#[tokio::test]
+async fn a_passthrough_refuses_a_101_no_one_asked_for() {
+    use respan_gateway_sdk::Format;
+    let send = h::connect(
+        |_| async {
+            let mut response = Response::new(Body::default());
+            *response.status_mut() = h::http::StatusCode::SWITCHING_PROTOCOLS;
+            Ok((response, None))
+        },
+        LIMIT,
+    );
+    let (read, mut sink) = h::formats::opaque::Passthrough
+        .bind(send(Extensions::new()))
+        .expect("bound");
+    let input = h::formats::opaque::Input::new("x");
+    sink.prepare(&mut EventStream::single(input))
+        .expect("expected value");
+    let (_, output) = future::join(sink.close(), read).await;
+    let output = output.expect("an answer");
+    let fault = output.refusal().expect("refused");
+    assert!(fault.is::<Upstream>());
+    assert!(fault.get::<h::ProviderError>().is_none(), "never relayed");
 }

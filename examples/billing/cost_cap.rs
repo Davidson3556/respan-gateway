@@ -36,7 +36,7 @@ use respan_gateway_sdk::Usage;
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -179,8 +179,8 @@ fn gateway(
 ) -> Result<Gateway, Fault> {
     let accounting = Accounting::new(ledger, quote);
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(Cap) // before accounting
         .plugin(accounting)
         .target("openai")

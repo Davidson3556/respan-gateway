@@ -5,8 +5,10 @@
 //! and every failure as a [`Fault`], which the client's format writes.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::hash::{BuildHasher, RandomState};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,8 +17,9 @@ use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Completion, Credential};
+use respan_gateway_mcp_messages::Message;
+use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{BadRequest, ErrorCode, Extensions, Fault, Upstream};
-use serde_json::Value;
 use tokio::process::Command;
 
 use crate::session::{Limits, Session};
@@ -30,10 +33,21 @@ type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 ///
 /// A session belongs to the owner that started it: the call's [`Owner`]
 /// extension if any, else the client's `Authorization`, as the adapter
-/// lifted it ([`Credential`]). A session ends when its child exits, on
-/// `DELETE`, or when idle; its child is then killed and reaped. Its id is
-/// 128 bits from the operating system's secure random source (MCP: a
-/// session id "SHOULD be globally unique and cryptographically secure").
+/// lifted it ([`Credential`]); callers with neither are one owner. A
+/// session ends when its child exits, on `DELETE`, when idle, or when the
+/// answer to its `initialize` ends before its first message, as when its
+/// client left or it timed out, since its id then reached no one. Its child
+/// is then stopped as MCP asks of a client: stdin closed, then SIGTERM,
+/// then SIGKILL to its process group, each a moment later. Its id is 128
+/// bits from the operating system's secure random source (MCP: a session
+/// id "SHOULD be globally unique and cryptographically secure").
+///
+/// The child is given only the gateway's `PATH`, so a program is found as
+/// from a shell, and what [`env`](Self::env) adds: an MCP server is handed
+/// only the secrets meant for it, not the gateway's own. It runs in the
+/// gateway's directory unless [`current_dir`](Self::current_dir) says
+/// otherwise, and writes its stderr to the gateway's, where MCP lets a
+/// server log ("stdio") and where the operator reads the gateway's own.
 ///
 /// Its own failures are faults the client's format writes, each with a
 /// JSON-RPC code ([`RpcCode`]) of its own in the range JSON-RPC 2.0 (5.1)
@@ -57,6 +71,8 @@ type Sessions = Mutex<HashMap<(String, u64), Option<Arc<Session>>>>;
 pub struct StdioTransport {
     program: PathBuf,
     args: Vec<String>,
+    env: Vec<(OsString, OsString)>,
+    dir: Option<PathBuf>,
     max_sessions: usize,
     max_total: usize,
     limits: Limits,
@@ -77,6 +93,8 @@ impl StdioTransport {
         Self {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
+            env: Vec::new(),
+            dir: None,
             max_sessions: 8,
             max_total: 64,
             limits: Limits {
@@ -88,6 +106,18 @@ impl StdioTransport {
             sessions: Arc::default(),
             keys: RandomState::new(),
         }
+    }
+
+    /// Sets `key` to `value` in the child's environment.
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Runs the child in `dir`.
+    pub fn current_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.dir = Some(dir.into());
+        self
     }
 
     /// At most `n` sessions per owner at once. By default 8: an owner runs
@@ -207,7 +237,7 @@ impl StdioTransport {
     /// Starts a session for `owner` with the `initialize` in `body`.
     async fn start(&self, owner: u64, body: &[u8]) -> Result<http::Response<Body>, Fault> {
         let messages = posted(body)?;
-        if !messages.iter().any(|m| m["method"] == "initialize") {
+        if !messages.iter().any(|m| m.method() == Some("initialize")) {
             return Err(no_session_named());
         }
         let key = (session_id()?, owner);
@@ -222,15 +252,25 @@ impl StdioTransport {
             }
             sessions.insert(key.clone(), None);
         }
-        let all = Arc::downgrade(&self.sessions);
-        let forget = key.clone();
-        let ended = move || {
+        let (all, forgotten) = (Arc::downgrade(&self.sessions), key.clone());
+        let forget = move || {
             if let Some(all) = all.upgrade() {
-                lock(&all).remove(&forget);
+                lock(&all).remove(&forgotten);
             }
         };
         let mut command = Command::new(&self.program);
-        let started = Session::start(command.args(&self.args), self.limits, ended);
+        command
+            .args(&self.args)
+            .env_clear()
+            .stderr(Stdio::inherit());
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
+        command.envs(self.env.iter().cloned());
+        if let Some(dir) = &self.dir {
+            command.current_dir(dir);
+        }
+        let started = Session::start(&mut command, self.limits, forget.clone());
         let session = {
             let mut sessions = lock(&self.sessions);
             match (started, sessions.get_mut(&key)) {
@@ -243,10 +283,26 @@ impl StdioTransport {
                 (Ok(_), None) => return Err(Upstream::fault("the MCP server stopped")),
             }
         };
-        let mut resp = session.post(messages).await?;
+        // Forgotten unless a message of its answer reaches the client,
+        // which learns the id in the answer's head.
+        let mut unclaimed = OnDrop(Some(forget));
+        let resp = session.post(messages).await?;
         let id = HeaderValue::from_str(&key.0).map_err(|e| Fault::internal("an id").with_source(e));
+        let mut resp =
+            resp.map(|body| Body::stream(body.inspect_ok(move |_| drop(unclaimed.0.take()))));
         resp.headers_mut().insert(SESSION, id?);
         Ok(resp)
+    }
+}
+
+/// Calls its function when dropped, unless it was taken out first.
+struct OnDrop<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
     }
 }
 
@@ -260,7 +316,7 @@ fn session_id() -> Result<String, Fault> {
 }
 
 /// The messages a `POST` carries; `Err` with a parse error if none.
-fn posted(body: &[u8]) -> Result<Vec<Value>, Fault> {
+fn posted(body: &[u8]) -> Result<Vec<Message>, Fault> {
     let read = read(body).map(|(messages, _)| messages);
     read.ok_or_else(|| BadRequest::fault("not JSON-RPC").with(PARSE_ERROR))
 }

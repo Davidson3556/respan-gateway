@@ -58,10 +58,22 @@ It relays chat and every other endpoint of that vendor (`count_tokens`,
 `/v1/responses`) byte for byte, with each client's own credentials.
 
 A provider's `base_url` is the one its own SDK takes. OpenAI-compatible
-ones include the version, such as `https://api.openai.com/v1`,
-`https://api.groq.com/openai/v1` or
-`https://generativelanguage.googleapis.com/v1beta/openai`; Anthropic's does
-not: `https://api.anthropic.com`.
+ones include the version, such as `https://api.openai.com/v1` or
+`https://generativelanguage.googleapis.com/v1beta/openai` (format
+`openai-chat`), `https://api.groq.com/openai/v1` (`groq-chat`) or
+`https://openrouter.ai/api/v1` (`openrouter-chat`); Anthropic's does not:
+`https://api.anthropic.com`. `openai-chat` reads only OpenAI's own fields; a
+vendor whose fields the gateway reads has a format of its own name (the
+[dialects](crates/openai/README.md)), and one whose additions it does not
+read, as Gemini's endpoint, is `openai-chat`.
+
+Sessions go over WebSocket: a provider of format `openai-realtime` (OpenAI
+Realtime), `responses-ws` (OpenAI Responses over WebSocket) or
+`gemini-live` (Gemini Live) has a `wss://` base URL, as its SDK takes it:
+`wss://api.openai.com/v1`, `wss://generativelanguage.googleapis.com` (with
+`auth: { type: header, name: x-goog-api-key, key: ... }`). Serving one makes
+each WebSocket upgrade a session, relayed event by event to the one
+provider of its format ([presets](crates/ws/README.md)).
 
 ## Glossary
 
@@ -92,9 +104,10 @@ the provider edge own them
   Formats of one kind translate through typed events. Calls always encode
   typed input unless an application explicitly supplies raw HTTP data. HTTP formats implement this same contract
   directly: `Format<Incoming, Input, Output>` accepts a client exchange and
-  `Format<Outgoing, Output, Input>` makes a provider call. The HTTP crate
-  supplies native HTTP bodies and stream/sink construction helpers, not a
-  second format trait or an implementation macro.
+  `Format<Outgoing, Output, Input>` makes a provider call. Their mirrored
+  `bind`s each take a decoder, an encoder and an error writer (client) or
+  reader (provider); the HTTP crate's bindings own the rest, not a second
+  format trait or an implementation macro.
 - **Call**: what the gateway sends a provider on a request's behalf
   (`cx.call`): the request's inputs, as filters and wraps left them, or
   one input of its own (`with_input`). HTTP plugins opt into raw requests
@@ -140,11 +153,12 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/sdk/` | General plugin-author facade: core contracts, usage and fault facts; no HTTP dependency. |
 | `crates/conversation/` | Input requests, reply events, assembly and typed text accessors. |
 | `crates/realtime/` | Client/provider JSON event pair. |
-| `crates/mcp-messages/` | MCP client-request/server-message pair and session metadata. |
+| `crates/mcp-messages/` | Typed JSON-RPC messages MCP carries, either direction. |
 | `crates/http/` | Owned HTTP edges, native request/response bodies, stream/sink helpers, credentials, retry classification and optional Reqwest backend; framing/error helpers in `formats`. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
 | `crates/{mcp,ws}/` | Optional MCP and WebSocket protocol/transport integrations. |
-| `crates/providers/` | First-party OpenAI Chat and Anthropic Messages codecs, reusable on both edges. |
+| `crates/codec/` | The reader and encoder machinery the conversation codecs share. |
+| `crates/{openai,anthropic}/` | First-party OpenAI Chat (with vendor dialects) and Anthropic Messages codecs, reusable on both edges. |
 | `crates/axum/` | Axum HTTP ingress and optional WebSocket hosting. |
 | `apps/gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
@@ -164,7 +178,7 @@ available from the HTTP protocol module. The future PyO3 bindings and PyPI packa
 [`python/`](python/README.md); they are not implemented yet.
 
 The HTTP protocol module's `reqwest` feature enables `HttpClient`. The Axum adapter's
-`ws` feature enables its `ws` hosting module. Both are opt-in, so codec authors
+`ws` feature enables its `router_with_ws`. Both are opt-in, so codec authors
 and ordinary HTTP hosts do not need unrelated hosting or transport code.
 
 HTTP formats prepare actual requests and event sinks synchronously, then let

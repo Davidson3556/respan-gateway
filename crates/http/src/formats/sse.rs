@@ -1,10 +1,9 @@
 //! Server-sent events, for any format that streams them.
 
 use crate::Body;
-use futures::stream::BoxStream;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http;
-use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::{EventStream, Fault};
 use serde_json::{self, Value};
 
 /// A response's content type, if it is readable.
@@ -20,8 +19,13 @@ pub fn is_stream(head: &http::response::Parts) -> bool {
     sse && head.status.is_success()
 }
 
-/// Splits a body into events. At the end, a last event of whole lines is
-/// kept without its blank line; one cut mid-line is dropped, as clients do.
+/// The byte order mark a stream may start with, which is no part of its
+/// first line (HTML, 9.2.6).
+const BOM: &[u8] = b"\xEF\xBB\xBF";
+
+/// Splits a body into events. A byte order mark that starts it is dropped.
+/// At the end, a last event of whole lines is kept without its blank line;
+/// one cut mid-line is dropped, as clients do.
 #[derive(Debug, Default)]
 pub struct Parser {
     buf: BytesMut,
@@ -29,6 +33,8 @@ pub struct Parser {
     scanned: usize,
     /// The most bytes of one event it holds.
     limit: Option<usize>,
+    /// Whether it is past where a byte order mark may be.
+    started: bool,
 }
 
 impl Parser {
@@ -37,9 +43,8 @@ impl Parser {
     /// ([`Body::limit`]), or any number for `None`.
     pub fn new(limit: Option<usize>) -> Self {
         Self {
-            buf: BytesMut::new(),
-            scanned: 0,
             limit,
+            ..Self::default()
         }
     }
 
@@ -82,6 +87,15 @@ impl Parser {
     /// The events of `bytes`, then, `at_end`, the last one left.
     fn split(&mut self, bytes: &[u8], at_end: bool) -> Vec<Bytes> {
         self.buf.extend_from_slice(bytes);
+        if !self.started {
+            if !at_end && self.buf.len() < BOM.len() && BOM.starts_with(&self.buf) {
+                return Vec::new();
+            }
+            if self.buf.starts_with(BOM) {
+                let _ = self.buf.split_to(BOM.len());
+            }
+            self.started = true;
+        }
         let mut events = Vec::new();
         while let Some(event) = self.next_event(at_end) {
             events.push(event);
@@ -111,12 +125,7 @@ fn line_end(b: &[u8], at_end: bool) -> Option<usize> {
 /// Parse SSE through ordinary stateful functions. Wire failure does not flush
 /// an incomplete event; the terminal function receives the original fault.
 /// An event over the body's [`limit`](Body::limit) fails `upstream`.
-pub fn read<T, S, P, E>(
-    body: Body,
-    state: S,
-    event: P,
-    end: E,
-) -> BoxStream<'static, Result<T, Fault>>
+pub fn read<T, S, P, E>(body: Body, state: S, event: P, end: E) -> EventStream<T>
 where
     T: Send + 'static,
     S: Send + 'static,
@@ -124,7 +133,7 @@ where
     E: FnOnce(&mut S, Result<(), Fault>, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
 {
     let parser = Parser::new(body.limit());
-    crate::formats::read(
+    crate::formats::parse(
         body,
         (parser, state, event),
         |(parser, state, event), bytes, out| {
@@ -144,47 +153,38 @@ where
     )
 }
 
-/// Read SSE events for a successful event-stream response, otherwise read its
-/// whole body. Non-success responses preserve their original provider answer.
-pub fn or_whole<T, F>(
-    format: &str,
-    response: http::Response<Body>,
-    mut on_message: F,
-) -> BoxStream<'static, Result<T, Fault>>
-where
-    T: Send + 'static,
-    F: FnMut(Bytes, &mut Vec<T>) -> Result<(), Fault> + Send + 'static,
-{
-    let (head, body) = response.into_parts();
-    if is_stream(&head) {
-        read(
-            body,
-            (),
-            move |_, raw, out| on_message(raw, out),
-            |_, wire, _| wire,
-        )
-    } else {
-        crate::formats::whole::read(format, http::Response::from_parts(head, body), on_message)
-    }
-}
-
-/// A comment of one line, which clients skip, such as a quiet stream's
-/// opening bytes ([`Reply::open`](crate::Reply::open)).
+/// A comment, which clients skip, such as a quiet stream's opening bytes
+/// ([`Reply::open`](crate::Reply::open)): a `:` line for each line of
+/// `text`, so no text can start a field or end its event.
 pub fn comment(text: &str) -> String {
-    format!(": {text}\n\n")
+    let mut out = String::new();
+    field(&mut out, "", text);
+    out.push('\n');
+    out
 }
 
-/// An event of `data`, one `data:` line per line, named `name` if given.
+/// An event of `data`, named `name` if given: each line of either, however
+/// it ends, a line of its field, so no value can end its event or start
+/// another field. Data of several lines is one value to a reader; a name of
+/// several, its last line.
 pub fn event(name: Option<&str>, data: impl std::fmt::Display) -> String {
-    let data = data.to_string();
-    let mut out = name.map(|n| format!("event: {n}\n")).unwrap_or_default();
-    for line in data.split("\r\n").flat_map(|l| l.split(['\n', '\r'])) {
-        out.push_str("data: ");
+    let mut out = String::new();
+    if let Some(name) = name {
+        field(&mut out, "event", name);
+    }
+    field(&mut out, "data", &data.to_string());
+    out.push('\n');
+    out
+}
+
+/// Write `value` as lines of the field `name`, one per line it holds.
+fn field(out: &mut String, name: &str, value: &str) {
+    for line in value.split("\r\n").flat_map(|l| l.split(['\n', '\r'])) {
+        out.push_str(name);
+        out.push_str(": ");
         out.push_str(line);
         out.push('\n');
     }
-    out.push('\n');
-    out
 }
 
 /// An event's `data:` as JSON.
@@ -273,37 +273,6 @@ mod tests {
         );
     }
 
-    fn head(content_type: &'static str) -> http::response::Parts {
-        let mut head = http::Response::new(()).into_parts().0;
-        let value = http::HeaderValue::from_static(content_type);
-        head.headers.insert(http::header::CONTENT_TYPE, value);
-        head
-    }
-
-    #[tokio::test]
-    async fn a_decoder_for_a_stream_or_a_whole_body_follows_the_head() {
-        for (content_type, body, values) in [
-            (
-                "text/event-stream",
-                &b"data: 1\n\n: ping\n\ndata: 2\n\n"[..],
-                3,
-            ),
-            ("application/json", b"{\"a\":1}", 1),
-        ] {
-            let d = or_whole(
-                "f",
-                http::Response::from_parts(head(content_type), Body::full(body)),
-                |raw, out: &mut Vec<Bytes>| {
-                    out.push(raw);
-                    Ok(())
-                },
-            );
-            use futures::TryStreamExt;
-            let out: Vec<_> = d.try_collect().await.expect("expected value");
-            assert_eq!(out.len(), values, "{content_type}");
-        }
-    }
-
     #[test]
     fn a_bare_data_line_is_empty_data() {
         assert_eq!(event_data(b"data\n\n").as_deref(), Some(""));
@@ -313,13 +282,10 @@ mod tests {
     async fn a_stream_stops_at_its_first_failure() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let seen = calls.clone();
-        let d = or_whole(
-            "f",
-            http::Response::from_parts(
-                head("text/event-stream"),
-                Body::full(Bytes::from_static(b": ping\n\ndata: x\n\ndata: y\n\n")),
-            ),
-            move |raw, out: &mut Vec<Bytes>| {
+        let d = read(
+            Body::full(Bytes::from_static(b": ping\n\ndata: x\n\ndata: y\n\n")),
+            (),
+            move |_, raw, out: &mut Vec<Bytes>| {
                 seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if event_data(&raw).is_some() {
                     return Err(respan_gateway_sdk::Upstream::fault("unreadable"));
@@ -327,11 +293,62 @@ mod tests {
                 out.push(raw);
                 Ok(())
             },
+            |_, wire, _| wire,
         );
         use futures::StreamExt;
         let out: Vec<_> = d.collect().await;
         assert!(out.len() == 2 && out[0].is_ok() && out[1].is_err());
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    // A byte order mark that starts a stream, however its frames split it,
+    // is no part of its first line; one later is data.
+    #[test]
+    fn a_leading_byte_order_mark_is_dropped() {
+        let stream = b"\xEF\xBB\xBFdata: a\n\n\xEF\xBB\xBFdata: b\n\n";
+        for cut in 0..=stream.len() {
+            let mut d = Parser::new(None);
+            let mut out = Vec::new();
+            for part in [&stream[..cut], &stream[cut..]] {
+                out.extend(d.push(Bytes::copy_from_slice(part)).unwrap_or_default());
+            }
+            let data: Vec<_> = out.iter().map(|e| event_data(e)).collect();
+            assert_eq!(data, [Some("a".to_owned()), None], "cut at {cut}");
+            let second = String::from_utf8_lossy(&out[1]);
+            assert_eq!(second.trim_end(), "\u{feff}data: b", "cut at {cut}");
+        }
+        // A body that only begins like one keeps its bytes.
+        let mut d = Parser::new(None);
+        assert!(
+            d.push(Bytes::from_static(b"\xEF\xBB"))
+                .is_ok_and(|e| e.is_empty())
+        );
+        assert!(
+            d.push(Bytes::from_static(b"x\n\n"))
+                .is_ok_and(|e| e.len() == 1)
+        );
+    }
+
+    // No name, data or comment can end its event or start a field.
+    #[test]
+    fn a_value_of_several_lines_starts_no_field() {
+        let injected = "x\r\ndata: forged\rid: 9\n";
+        assert_eq!(
+            event(Some(injected), 1),
+            "event: x\nevent: data: forged\nevent: id: 9\nevent: \ndata: 1\n\n"
+        );
+        assert_eq!(comment(injected), ": x\n: data: forged\n: id: 9\n: \n\n");
+        let mut d = Parser::new(None);
+        let mut events = d
+            .push(Bytes::from(event(None, injected) + &comment(injected)))
+            .unwrap_or_default();
+        events.extend(d.finish());
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            event_data(&events[0]).as_deref(),
+            Some("x\ndata: forged\nid: 9\n")
+        );
+        assert_eq!(event_data(&events[1]), None);
     }
 
     #[test]

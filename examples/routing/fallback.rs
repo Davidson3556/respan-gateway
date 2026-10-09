@@ -13,11 +13,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_conversation::{Input, Output, set_model};
 use respan_gateway_http::http::{self, HeaderValue};
 use respan_gateway_http::{Body, Wire, retryable, watchdog};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_plugins::routing::{Attempt, Backoff, Until, first_success, race};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
@@ -147,15 +148,15 @@ async fn run(name: &str, delay: Duration, req: http::Request<Body>, replies: Rep
         idle,
     );
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(primary, LIMIT),
         )?
         .provider::<Input, _, _>(
             "openai-eu",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&europe.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(

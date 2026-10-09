@@ -1,0 +1,21 @@
+[package]
+name = "respan-gateway-anthropic"
+description = "The Anthropic Messages codec for respan-gateway."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+respan-gateway-codec.workspace = true
+respan-gateway-conversation.workspace = true
+respan-gateway-sdk.workspace = true
+respan-gateway-http.workspace = true
+serde_json.workspace = true
+

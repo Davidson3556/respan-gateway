@@ -3,8 +3,8 @@
 use super::writer::Writer;
 use super::{PANICKED, Written};
 use crate::{
-    Body, ClientHead, Completion, Credential, Encoder, Frames, Status, Unwritten, Wire, answered,
-    bodiless, plain,
+    Body, ClientHead, Completion, Credential, Encoder, Frames, RawReply, Status, Unwritten, Wire,
+    bodiless, error_head, plain_response,
 };
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
@@ -17,13 +17,15 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
-type Refuse = dyn Fn(&Fault, &http::Request<Bytes>, &mut ResponseHead) -> Bytes + Send + Sync;
+type ErrorWriter = dyn Fn(&Fault, &http::Request<Bytes>, &mut ResponseHead) -> Bytes + Send + Sync;
 type Slot = Arc<Mutex<Handoff>>;
 struct Handoff {
     sender: Option<oneshot::Sender<Written>>,
     staged: Option<Written>,
     committed: bool,
     failed: Option<Fault>,
+    /// Whether the response has no body, so its source goes unread.
+    unread: bool,
 }
 impl Handoff {
     fn publish(&mut self, response: Written) {
@@ -47,12 +49,24 @@ impl Handoff {
     }
 }
 
+/// How an accepted request's body carries its messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Framing {
+    /// One message, the whole body, collected before it is decoded: an
+    /// ordinary HTTP request, however the network chunked it.
+    Whole,
+    /// One message per body frame, decoded as each comes: a session's, such
+    /// as a WebSocket's after its upgrade. Its response opens at once, so a
+    /// duplex peer can send without waiting for its own first reply.
+    Live,
+}
+
 /// One accepted request. It is consumed once, rather than shared and runtime-locked.
 ///
 /// An accepted request cannot be cloned:
 /// ```compile_fail
-/// use respan_gateway_http::{Body, Incoming, http::Request};
-/// let (incoming, _) = Incoming::accept(Request::new(Body::default()), false, 1024);
+/// use respan_gateway_http::{Body, Framing, Incoming, http::Request};
+/// let (incoming, _) = Incoming::accept(Request::new(Body::default()), Framing::Whole, 1024);
 /// let duplicate = incoming.clone();
 /// ```
 /// Binding consumes it, preventing a second binding:
@@ -60,7 +74,7 @@ impl Handoff {
 /// use respan_gateway_http::{self as h, formats::opaque::Passthrough};
 /// use respan_gateway_sdk::Format;
 /// let request = h::http::Request::new(h::Body::default());
-/// let (incoming, _) = h::Incoming::accept(request, false, 1024);
+/// let (incoming, _) = h::Incoming::accept(request, h::Framing::Whole, 1024);
 /// let first = Passthrough.bind(incoming);
 /// let second = Passthrough.bind(incoming);
 /// ```
@@ -75,17 +89,17 @@ pub struct Incoming {
 }
 impl Incoming {
     /// Accept an HTTP request, its credentials lifted out of its head into a
-    /// [`Credential`]. `live` explicitly means one semantic message per body
-    /// frame; ordinary network chunks are collected before decoding. `limit`
-    /// is the most bytes of one message it takes, a whole body or a live
-    /// frame: past it, the request fails 413 (`too_large`). Hand the
-    /// gateway its [`extensions`](Self::extensions), and drive the returned
-    /// answer together with `Gateway::handle`.
+    /// [`Credential`], its body framed as `framing`. `limit` is the most
+    /// bytes of one message it takes, a whole body or a live frame: past it,
+    /// the request fails 413 (`too_large`). Hand the gateway its
+    /// [`extensions`](Self::extensions), and drive the returned answer
+    /// together with `Gateway::handle`.
     pub fn accept(
         request: http::Request<Body>,
-        live: bool,
+        framing: Framing,
         limit: usize,
     ) -> (Self, futures::future::BoxFuture<'static, Option<Written>>) {
+        let live = framing == Framing::Live;
         let (mut head, body) = request.into_parts();
         let credential = Credential::lift(&mut head);
         let wire = Wire::unread(live);
@@ -122,13 +136,23 @@ impl Incoming {
         &self.request
     }
 
-    /// Bind ordinary reading and response preparation functions to core events.
-    pub fn bind<I, O, R, W, F>(self, read: R, write: W, refuse: F) -> Connection<I, O>
+    /// Bind a request's decoder, its response's encoder and the format's
+    /// error writer to core events. `decode` reads the request: its whole
+    /// body, collected up to the limit, or its live frames ([`messages`]
+    /// decodes either). `encode` makes the response's sink from a [`Reply`].
+    /// `error` writes a refusal's body, and may edit its head, whose status
+    /// and `Retry-After` the fault's are ([`status`], [`RetryAfter`]); an
+    /// explicit [`RawReply`] is written instead, as it came.
+    ///
+    /// [`messages`]: crate::messages
+    /// [`status`]: crate::status
+    /// [`RetryAfter`]: respan_gateway_sdk::RetryAfter
+    pub fn bind<I, O, D, E, F>(self, decode: D, encode: E, error: F) -> Connection<I, O>
     where
         I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
-        R: FnOnce(http::Request<Body>) -> Result<EventStream<I>, Fault> + Send + 'static,
-        W: FnOnce(Reply, &mut EventStream<O>) -> Result<EventSink<O>, Fault> + Send + 'static,
+        D: FnOnce(http::Request<Body>) -> EventStream<I> + Send + 'static,
+        E: FnOnce(Reply) -> Result<EventSink<O>, Fault> + Send + 'static,
         F: Fn(&Fault, &http::Request<Bytes>, &mut ResponseHead) -> Bytes + Send + Sync + 'static,
     {
         let Self {
@@ -148,19 +172,22 @@ impl Incoming {
                     Ok(bytes) if bytes.len() > limit => Err(too_large()),
                     frame => frame,
                 });
-                return read(http::Request::from_parts(head, Body::stream(frames)));
+                return Ok(decode(http::Request::from_parts(
+                    head,
+                    Body::stream(frames),
+                )));
             }
             let whole = read_whole(body, limit).await;
             let raw = whole.as_ref().cloned().unwrap_or_default();
             filled.fill(http::Request::from_parts(head.clone(), raw));
-            read(http::Request::from_parts(head, Body::full(whole?)))
+            Ok(decode(http::Request::from_parts(head, Body::full(whole?))))
         }
         .boxed();
         let outgoing = EventSink::preparing(move |events: &mut EventStream<O>| {
-            let request = wire
-                .get()
-                .cloned()
-                .ok_or_else(|| Fault::internal(PANICKED))?;
+            // The kernel prepares a response once its request opened, which
+            // filled the wire.
+            let unread = "a response was prepared before its request was read";
+            let request = wire.get().cloned().ok_or_else(|| Fault::internal(unread))?;
             if reply.is_canceled() {
                 return Err(Fault::abandoned());
             }
@@ -172,8 +199,9 @@ impl Incoming {
                     staged: None,
                     committed: false,
                     failed: None,
+                    unread: false,
                 })),
-                refuse: Arc::new(refuse),
+                error: Arc::new(error),
                 live,
             };
             let fallback = reply.fallback();
@@ -182,8 +210,13 @@ impl Incoming {
                 events.stop();
                 reply.failure(fault, false)
             } else {
-                match std::panic::catch_unwind(AssertUnwindSafe(|| write(reply, events))) {
-                    Ok(Ok(sink)) => sink,
+                match std::panic::catch_unwind(AssertUnwindSafe(|| encode(reply))) {
+                    Ok(Ok(sink)) => {
+                        if slot.lock().unwrap_or_else(|e| e.into_inner()).unread {
+                            events.stop();
+                        }
+                        sink
+                    }
                     result => {
                         events.stop();
                         slot.lock().unwrap_or_else(|e| e.into_inner()).staged.take();
@@ -204,11 +237,16 @@ impl Incoming {
 
 /// Owns a client's response handoff and original request. Its methods construct
 /// real event sinks; there is no intermediate response plan.
+///
+/// A response HTTP gives no body ([`bodiless`]: to a `HEAD`, or a 204, 205
+/// or 304) is written with none whatever its encoder: its head goes at
+/// once, its encoder is never called, and its source, if the sink is made
+/// while the response is prepared, is stopped unread.
 pub struct Reply {
     head: ClientHead,
     request: Arc<http::Request<Bytes>>,
     slot: Slot,
-    refuse: Arc<Refuse>,
+    error: Arc<ErrorWriter>,
     live: bool,
 }
 impl Reply {
@@ -217,17 +255,16 @@ impl Reply {
             head: self.head.clone(),
             request: self.request.clone(),
             slot: self.slot.clone(),
-            refuse: self.refuse.clone(),
+            error: self.error.clone(),
             live: self.live,
         }
     }
     /// The explicitly selected client head, or a fresh success head.
     pub fn head(&self) -> ResponseHead {
-        self.head
-            .get()
-            .unwrap_or_else(|| http::Response::new(()).into_parts().0)
+        self.head_or(http::Response::new(()).into_parts().0)
     }
-    /// Use the explicitly selected head, falling back to a typed event head.
+    /// The explicitly selected client head, or `head`, such as a typed
+    /// event's.
     pub fn head_or(&self, head: ResponseHead) -> ResponseHead {
         self.head.get().unwrap_or(head)
     }
@@ -236,14 +273,15 @@ impl Reply {
     pub fn request(&self) -> &http::Request<Bytes> {
         &self.request
     }
-    /// Encode a response, delaying its head until bytes or completion.
+    /// Encode a response, delaying its head until bytes or completion, but
+    /// for [`Framing::Live`] ingress, whose head goes at once.
     pub fn write<T: 'static>(
         self,
         head: ResponseHead,
         encoder: Box<dyn Encoder<T>>,
     ) -> EventSink<T> {
         let open = self.live;
-        self.writer(head, Some(encoder), Bytes::new(), open)
+        self.writer(head, encoder, Bytes::new(), open)
     }
     /// Open a quiet response immediately, optionally with initial bytes.
     pub fn open<T: 'static>(
@@ -252,29 +290,25 @@ impl Reply {
         prefix: Bytes,
         encoder: Box<dyn Encoder<T>>,
     ) -> EventSink<T> {
-        self.writer(head, Some(encoder), prefix, true)
-    }
-    /// Write no body and retain the unread source until delivery settles.
-    pub fn empty<T: 'static>(
-        self,
-        head: ResponseHead,
-        source: &mut EventStream<T>,
-    ) -> EventSink<T> {
-        source.stop();
-        self.writer(head, None, Bytes::new(), true)
+        self.writer(head, encoder, prefix, true)
     }
     fn writer<T: 'static>(
         self,
         head: ResponseHead,
-        encoder: Option<Box<dyn Encoder<T>>>,
+        encoder: Box<dyn Encoder<T>>,
         prefix: Bytes,
         open: bool,
     ) -> EventSink<T> {
-        let mut client = Client::new(self, head, encoder);
-        if client.encoder.is_none() {
+        if bodiless(self.request.method(), head.status) {
+            self.slot.lock().unwrap_or_else(|e| e.into_inner()).unread = true;
+            let mut client = Client::new(self, head, None);
             client.writer.end(Ok(()), None);
             client.ended = true;
-        } else if !prefix.is_empty() {
+            client.open();
+            return EventSink::new(client);
+        }
+        let mut client = Client::new(self, head, Some(encoder));
+        if !prefix.is_empty() {
             client.writer.send(prefix);
         }
         if open {
@@ -357,7 +391,7 @@ impl<T: 'static> Client<T> {
     fn unwritable(&mut self, fault: Fault) {
         self.ended = true;
         self.writer.end(Err(fault.clone()), None);
-        let mut response = plain(&fault);
+        let mut response = plain_response(&fault);
         response.extensions_mut().insert(Unwritten);
         self.head.take();
         let end = self.completion.take().expect("response handed once");
@@ -367,15 +401,27 @@ impl<T: 'static> Client<T> {
             .unwrap_or_else(|e| e.into_inner())
             .publish((response, end));
     }
+    /// Write `fault` as the response: an explicit [`RawReply`] as it came,
+    /// else its status and `Retry-After` and the format's error body.
     fn refuse(&mut self, fault: Fault) {
         let mut head = http::Response::new(()).into_parts().0;
-        let answer = answered(&fault, &mut head);
-        let bytes = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            answer.unwrap_or_else(|| (self.reply.refuse)(&fault, &self.reply.request, &mut head))
-        }));
-        let Ok(bytes) = bytes else {
-            self.unwritable(Fault::internal(PANICKED));
-            return;
+        let bytes = match fault.get::<RawReply>() {
+            Some(RawReply(raw)) => {
+                let (raw, bytes) = raw.clone().into_parts();
+                head = raw;
+                bytes
+            }
+            None => {
+                error_head(&mut head, &fault);
+                let error = &self.reply.error;
+                let request = &self.reply.request;
+                let written = AssertUnwindSafe(|| error(&fault, request, &mut head));
+                let Ok(bytes) = std::panic::catch_unwind(written) else {
+                    self.unwritable(Fault::internal(PANICKED));
+                    return;
+                };
+                bytes
+            }
         };
         if !bytes.is_empty() && !bodiless(self.reply.request.method(), head.status) {
             self.writer.send(bytes);
@@ -429,7 +475,7 @@ impl<T> Drop for Client<T> {
         if self.head.is_some() && slot.committed && slot.sender.is_some() {
             let fault = Fault::abandoned();
             let end = futures::future::ready(Err(fault.clone())).boxed();
-            slot.publish((plain(&fault), end));
+            slot.publish((plain_response(&fault), end));
         }
     }
 }

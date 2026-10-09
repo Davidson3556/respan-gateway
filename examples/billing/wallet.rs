@@ -23,7 +23,7 @@ use respan_gateway_conversation::{Input, Output};
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -104,8 +104,8 @@ fn gateway(
     let prices = prices();
     let accounting = Accounting::new(ledger, move |px, tally| quote(px, tally, &prices));
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         // Register it last, so it prices the call as other plugins left it.
         .plugin(accounting)
         .target("openai")

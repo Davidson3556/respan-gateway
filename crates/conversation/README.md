@@ -11,7 +11,8 @@ use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response, Usage};
 
 The crate exports conversation types and helpers directly from its root;
 usage unit names live in `respan_gateway_conversation::units`.
-OpenAI Chat and Anthropic Messages formats live in `respan-gateway-providers`.
+The OpenAI Chat and Anthropic Messages formats live in `respan-gateway-openai`
+and `respan-gateway-anthropic`.
 This crate defines no protocol or transport implementations.
 
 A reply is a sequence of events, the same for a stream and a whole body, and
@@ -57,7 +58,7 @@ and native values. A `Media` has a MIME type, URL or bytes, optional name, and
 optional native fields. Codecs do not fetch URLs.
 
 Transport preferences are separate: set
-`respan_gateway_providers::StreamResponse(bool)` in call extensions to choose
+`respan_gateway_codec::StreamResponse(bool)` in call extensions to choose
 provider HTTP streaming. Client response framing follows the client's request.
 The HTTP binding retains original token-limit spelling on same-format OpenAI
 calls; standalone semantic encoding uses `max_completion_tokens`.

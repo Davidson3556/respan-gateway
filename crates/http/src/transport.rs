@@ -41,6 +41,7 @@ where
         send: send.clone(),
         extensions,
         limit,
+        success: None,
     }
 }
 
@@ -87,19 +88,17 @@ pub fn base_url(url: &str, schemes: &[&str]) -> Result<String, Fault> {
     }
 }
 
-/// Make `call` the request a transport sends to `base` ([`base_url`]): what
-/// a proxy does not pass on stripped ([`proxy_call`]) with the gateway
-/// origin's headers ([`strip_client_origin_headers`]), its keys decided
-/// ([`credentials`]) over the transport's `headers`, and its path and
-/// query joined to `base`. `Err` with `config` if they make no URL.
+/// Make `call` the request a transport sends to `base` ([`base_url`]): its
+/// keys decided ([`credentials`]) over the transport's `headers`, and its
+/// path and query joined to `base`. `Err` with `config` if they make no URL.
+/// What a proxy does not pass on is already gone
+/// ([`Outgoing::bind`](crate::Outgoing::bind)).
 pub fn prepare_call(
     call: &mut http::Request<crate::Body>,
     base: &str,
     headers: &HeaderMap,
 ) -> Result<(), Fault> {
     let (mut head, body) = std::mem::take(call).into_parts();
-    proxy_call(&mut head);
-    strip_client_origin_headers(&mut head.headers);
     let extensions = head.extensions.get::<Extensions>().cloned();
     keys(&mut head, &extensions.unwrap_or_default(), headers);
     let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
@@ -115,7 +114,7 @@ pub fn prepare_call(
 /// `Connection: upgrade` (7.8); `Host`; `Expect`; conditions and ranges
 /// (13, 14); method overrides; and `Accept-Encoding`, as the gateway
 /// decodes what it reads.
-pub fn proxy_call(head: &mut http::request::Parts) {
+pub(crate) fn proxy_call(head: &mut http::request::Parts) {
     strip_named(&mut head.headers);
     remove_if(&mut head.headers, |n| !passes(n));
     if head.headers.contains_key(UPGRADE) {
@@ -152,7 +151,7 @@ pub fn is_connection_header(name: &HeaderName) -> bool {
 /// Remove from a call the headers of the gateway's origin: `Cookie`,
 /// `Forwarded`, `Via`, `X-Forwarded-*` and `X-Real-IP`. Plugins still see
 /// them ([`Wire`](crate::Wire)); a call's [`CallHeaders`] may set them.
-pub fn strip_client_origin_headers(headers: &mut HeaderMap) {
+pub(crate) fn strip_client_origin_headers(headers: &mut HeaderMap) {
     remove_if(headers, |name| {
         let name = name.as_str();
         matches!(name, "cookie" | "forwarded" | "via" | "x-real-ip")

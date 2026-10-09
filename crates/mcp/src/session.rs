@@ -9,17 +9,24 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::sse;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
+use respan_gateway_mcp_messages::Message;
 use respan_gateway_sdk::futures::stream;
 use respan_gateway_sdk::{BadRequest, Fault, Upstream};
 use serde_json::{self, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
-use tokio::time::{Instant, sleep_until, timeout_at};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 
+use crate::lock;
 use crate::stdio::{empty, late};
-use crate::{lock, request_ids};
+
+/// How long a child has to exit once its stdin is closed, and again once
+/// it is sent SIGTERM: 2 seconds, as the official MCP SDKs wait, long
+/// enough for a server to flush and close what it holds.
+const GRACE: Duration = Duration::from_secs(2);
 
 /// The limits of a session, as its transport was configured.
 #[derive(Debug, Clone, Copy)]
@@ -57,10 +64,15 @@ pub(crate) struct Session {
 /// - anything else (a request or notification of the server's own, or one
 ///   whose `POST` closed) to the `GET` stream if one is open, else to the
 ///   oldest open `POST`, else nowhere.
+///
+/// A request the client cancels (`notifications/cancelled`) is no longer
+/// waited for: its answer, if the server sends one, goes nowhere (MCP,
+/// "Cancellation": the sender "SHOULD ignore any response"), and its
+/// `POST` ends once nothing else of it is waited for.
 #[derive(Debug)]
 struct Routes {
     posts: Vec<Post>,
-    listener: Option<Sender<Value>>,
+    listener: Option<Sender<Message>>,
     /// The start, the last request, or the last `POST` answered.
     touched: Instant,
     /// The number of the next `POST`.
@@ -77,7 +89,7 @@ struct Post {
     tokens: Vec<Value>,
     /// The ids of the server's requests sent on it.
     asked: Vec<Value>,
-    tx: Sender<Value>,
+    tx: Sender<Message>,
 }
 
 impl Routes {
@@ -88,8 +100,9 @@ impl Routes {
 }
 
 impl Session {
-    /// Runs `command` until it exits, the session is dropped, or it is idle
-    /// for `limits.idle`; then kills and reaps it, and calls `ended`.
+    /// Runs `command`, in a process group of its own, until it exits, the
+    /// session is dropped, or it is idle for `limits.idle`; then stops it
+    /// ([`stop`]) and calls `ended`.
     pub(crate) fn start(
         command: &mut Command,
         limits: Limits,
@@ -101,6 +114,8 @@ impl Session {
             ));
         }
         let command = command.stdin(Stdio::piped()).stdout(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .kill_on_drop(true)
             .spawn()
@@ -108,8 +123,9 @@ impl Session {
         let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(Upstream::fault("the MCP server has no stdio"));
         };
+        let group = child.id().and_then(|id| i32::try_from(id).ok());
         let (lines, mut written) = mpsc::channel::<Bytes>(limits.backlog);
-        tokio::spawn(async move {
+        let writer = tokio::spawn(async move {
             while let Some(line) = written.recv().await {
                 if stdin.write_all(&line).await.is_err() || stdin.flush().await.is_err() {
                     break;
@@ -129,17 +145,22 @@ impl Session {
         tokio::spawn(async move {
             let mut lines = Lines::new(BufReader::new(stdout), limits.max_line);
             let mut due = Instant::now().checked_add(limits.idle);
+            let mut exited = false;
             loop {
                 tokio::select! {
                     line = lines.next() => match line {
-                        // Not JSON, such as a stray log line or one over
-                        // the limit: not a message.
-                        Ok(Some(line)) => if let Ok(v) = serde_json::from_slice(&line)
-                            && crate::valid_message(&v)
-                        {
-                            route(&mut lock(&reader), v);
+                        // Not JSON-RPC, such as a stray log line or one
+                        // over the limit: not a message.
+                        Ok(Some(line)) => if let Ok(message) = serde_json::from_slice(&line) {
+                            route(&mut lock(&reader), message);
                         },
                         _ => break,
+                    },
+                    // What it wrote is still read: its group, which may
+                    // hold its stdout open, is killed, so the output ends.
+                    _ = child.wait(), if !exited => {
+                        exited = true;
+                        signal(&mut child, group, true);
                     },
                     _ = &mut gone => break,
                     () = until(due) => {
@@ -156,8 +177,7 @@ impl Session {
                 }
             }
             // Its open streams end, unanswered, as the session is dropped.
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            stop(child, group, writer).await;
             ended();
         });
         Ok(Self {
@@ -190,56 +210,70 @@ impl Session {
     /// unanswered (MCP, "Lifecycle", "Timeouts": "the sender SHOULD issue a
     /// cancellation notification for that request"), but `initialize`,
     /// which a client must not cancel (MCP, "Cancellation").
-    pub(crate) async fn post(&self, messages: Vec<Value>) -> Result<http::Response<Body>, Fault> {
-        let ids: Vec<Value> = request_ids(&messages).cloned().collect();
-        let lines: String = messages.iter().map(|m| format!("{m}\n")).collect();
-        // The deadline covers the write too: a child that stops reading
-        // stdin fills the queue, and a POST waiting for room must still end.
-        let until = Instant::now().checked_add(self.limits.timeout);
-        if ids.is_empty() {
-            within(until, self.stdin.send(lines.into()))
-                .await?
-                .map_err(|_| stopped())?;
-            return Ok(empty(StatusCode::ACCEPTED));
-        }
+    pub(crate) async fn post(&self, messages: Vec<Message>) -> Result<http::Response<Body>, Fault> {
+        let ids: Vec<Value> = messages.iter().filter_map(Message::request_id).collect();
+        let lines: String = messages
+            .iter()
+            .map(|m| format!("{}\n", Value::from(m.clone())))
+            .collect();
         let cancellable: Vec<Value> = messages
             .iter()
-            .filter(|m| m["method"] != "initialize")
-            .filter_map(|m| m.get("id").cloned())
+            .filter(|m| m.method() != Some("initialize"))
+            .filter_map(Message::request_id)
             .collect();
         let tokens = messages
             .iter()
-            .filter_map(|m| m.pointer("/params/_meta/progressToken"))
+            .filter_map(|m| m.params()?.pointer("/_meta/progressToken"))
             .filter(|t| !t.is_null())
             .cloned()
             .collect();
+        let cancels = messages
+            .iter()
+            .filter(|m| m.method() == Some("notifications/cancelled"));
+        let dropped: Vec<&Value> = cancels
+            .filter_map(|m| m.params()?.get("requestId"))
+            .collect();
         let (tx, rx) = mpsc::channel(self.limits.backlog);
-        // Registered before writing, so no answer is missed.
+        // Registered before writing, so no answer is missed; none if
+        // nothing asks.
         let number = {
             let mut routes = lock(&self.routes);
-            routes.posts.retain(|p| !p.tx.is_closed());
+            for post in &mut routes.posts {
+                post.ids.retain(|id| !dropped.contains(&id));
+            }
+            routes
+                .posts
+                .retain(|p| !p.tx.is_closed() && !p.ids.is_empty());
             if ids
                 .iter()
                 .any(|id| routes.posts.iter().any(|post| post.ids.contains(id)))
             {
                 return Err(BadRequest::fault("an MCP request ID is already pending"));
             }
-            let number = routes.next;
-            routes.next += 1;
-            let asked = Vec::new();
-            let post = Post {
-                number,
-                ids,
-                tokens,
-                asked,
-                tx,
-            };
-            routes.posts.push(post);
-            number
+            (!ids.is_empty()).then(|| {
+                let number = routes.next;
+                routes.next += 1;
+                let asked = Vec::new();
+                let post = Post {
+                    number,
+                    ids,
+                    tokens,
+                    asked,
+                    tx,
+                };
+                routes.posts.push(post);
+                number
+            })
         };
+        // The deadline covers the write too: a child that stops reading
+        // stdin fills the queue, and a POST waiting for room must still end.
+        let until = Instant::now().checked_add(self.limits.timeout);
         within(until, self.stdin.send(lines.into()))
             .await?
             .map_err(|_| stopped())?;
+        let Some(number) = number else {
+            return Ok(empty(StatusCode::ACCEPTED));
+        };
         // Weak, so the stream does not keep its session's routes, and so
         // its own sender, open once the session is gone.
         let (routes, stdin) = (Arc::downgrade(&self.routes), self.stdin.downgrade());
@@ -273,10 +307,10 @@ fn cancelled(id: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": params })
 }
 
-fn route(routes: &mut Routes, v: Value) {
+fn route(routes: &mut Routes, message: Message) {
     routes.posts.retain(|p| !p.tx.is_closed());
-    let id = v.get("id").filter(|id| !id.is_null()).cloned();
-    let Some(method) = v.get("method").and_then(Value::as_str) else {
+    let Some(method) = message.method() else {
+        let id = message.response_id();
         let asked = match &id {
             Some(id) => routes.posts.iter().position(|p| p.ids.contains(id)),
             None => (!routes.posts.is_empty()).then_some(0),
@@ -287,11 +321,11 @@ fn route(routes: &mut Routes, v: Value) {
                 Some(id) => ids.retain(|x| x != id),
                 None => ids.clear(),
             }
-            send(routes, i, v);
+            send(routes, i, message);
         }
         return;
     };
-    let params = &v["params"];
+    let params = message.params().unwrap_or(&Value::Null);
     let owner = match method {
         "notifications/progress" => {
             let token = &params["progressToken"];
@@ -304,30 +338,64 @@ fn route(routes: &mut Routes, v: Value) {
         _ => None,
     };
     match owner {
-        Some(i) => send(routes, i, v),
+        Some(i) => send(routes, i, message),
         None if routes.listening() => {
             if let Some(tx) = &routes.listener
-                && tx.try_send(v).is_err()
+                && tx.try_send(message).is_err()
             {
                 routes.listener = None;
             }
         }
         None if !routes.posts.is_empty() => {
-            routes.posts[0].asked.extend(id);
-            send(routes, 0, v);
+            routes.posts[0].asked.extend(message.request_id());
+            send(routes, 0, message);
         }
         None => {}
     }
 }
 
-/// Sends `v` to the `POST` at `i`, which ends once every request of its is
-/// answered, or once it falls behind.
-fn send(routes: &mut Routes, i: usize, v: Value) {
+/// Sends `message` to the `POST` at `i`, which ends once every request of
+/// its is answered, or once it falls behind.
+fn send(routes: &mut Routes, i: usize, message: Message) {
     let post = &routes.posts[i];
-    let fell_behind = post.tx.try_send(v).is_err();
+    let fell_behind = post.tx.try_send(message).is_err();
     if post.ids.is_empty() || fell_behind {
         routes.posts.remove(i);
         routes.touched = Instant::now();
+    }
+}
+
+/// Stops a session's `child` as MCP asks of a client ("Lifecycle",
+/// "Shutdown"): closes its stdin, by ending the `writer` that holds it,
+/// then sends its process `group` SIGTERM if it has not exited within
+/// [`GRACE`], and SIGKILL, which also ends anything the child started
+/// and left behind; then reaps it.
+async fn stop(mut child: Child, group: Option<i32>, writer: JoinHandle<()>) {
+    writer.abort();
+    if timeout(GRACE, child.wait()).await.is_err() {
+        signal(&mut child, group, false);
+        let _ = timeout(GRACE, child.wait()).await;
+    }
+    signal(&mut child, group, true);
+    let _ = child.wait().await;
+}
+
+/// Sends the child's process `group` SIGKILL if `kill`, else SIGTERM.
+/// Without unix process groups and signals, kills only the child, if
+/// `kill`.
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn signal(child: &mut Child, group: Option<i32>, kill: bool) {
+    #[cfg(unix)]
+    if let Some(group) = group {
+        let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
+        // SAFETY: kill(2) takes no pointer and touches none of our memory.
+        #[allow(unsafe_code)]
+        unsafe {
+            libc::kill(-group, signal);
+        }
+    }
+    if kill {
+        let _ = child.start_kill();
     }
 }
 
@@ -357,7 +425,7 @@ async fn within<T>(until: Option<Instant>, work: impl Future<Output = T>) -> Res
 /// An event stream of what `rx` receives, until it closes, or failing at
 /// `until` if any, after calling `on_late`.
 fn events(
-    rx: mpsc::Receiver<Value>,
+    rx: mpsc::Receiver<Message>,
     until: Option<Instant>,
     on_late: impl FnOnce() + Send + 'static,
 ) -> http::Response<Body> {
@@ -365,7 +433,7 @@ fn events(
         let (mut rx, on_late) = state?;
         match within(until, rx.recv()).await {
             Ok(next) => {
-                let event = Bytes::from(sse::event(None, next?));
+                let event = Bytes::from(sse::event(None, Value::from(next?)));
                 Some((Ok(event), Some((rx, on_late))))
             }
             Err(late) => {

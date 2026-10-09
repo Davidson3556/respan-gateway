@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use respan_gateway_http::formats::opaque::{self};
-use respan_gateway_http::formats::opaque::{Got, Sent};
+use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
@@ -33,34 +32,37 @@ pub const PATIENCE: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub struct Raw;
 
-impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
+impl Format<Incoming, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
     fn matches(&self, io: &Incoming) -> bool {
         io.request().method() == Method::GET && io.request().headers().contains_key(UPGRADE)
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Raw>, Got<Raw>>, Fault> {
+    fn bind(
+        &self,
+        io: Incoming,
+    ) -> Result<Connection<opaque::Input<Raw>, opaque::Output<Raw>>, Fault> {
         Ok(io.bind(
-            |request| Ok(opaque::read_request::<Raw>(request)),
-            |reply, _| Ok(opaque::write_response::<Raw>(reply)),
-            h::plain_refusal,
+            opaque::read_request::<Raw>,
+            opaque::write_response::<Raw>,
+            h::plain,
         ))
     }
 }
 
-impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
+impl Format<Outgoing, opaque::Output<Raw>, opaque::Input<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Raw>, Sent<Raw>>, Fault> {
+    fn bind(
+        &self,
+        io: Outgoing,
+    ) -> Result<Connection<opaque::Output<Raw>, opaque::Input<Raw>>, Fault> {
         Ok(io.bind(
             opaque::write_request::<Raw>,
-            |answer, sent| opaque::read_response::<Raw>("raw", answer, &sent.into_parts().0),
-            |answer, call| {
-                answer.status.is_success()
-                    || (answer.status == 101 && call.headers.contains_key(UPGRADE))
-            },
+            opaque::read_response::<Raw>,
+            |answer| h::provider_fault("raw", answer),
         ))
     }
 }
@@ -88,9 +90,18 @@ pub async fn serve(gateway: Gateway) -> Server {
 }
 
 pub async fn serve_typed(gateway: Gateway) -> Server {
+    serve_with(gateway, Limits::default(), std::future::pending()).await
+}
+
+/// Serve `gateway` with `limits`, its sessions closed when `stop` completes.
+pub async fn serve_with(
+    gateway: Gateway,
+    limits: Limits,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = respan_gateway_axum::ws::router(gateway.clone());
+    let app = respan_gateway_axum::router_with_ws(gateway.clone(), |_| 32 << 20, limits, stop);
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -580,7 +591,7 @@ async fn tap(
 mod hooks;
 pub use hooks::{Calls, Outcomes};
 use respan_gateway_realtime::Input;
-use respan_gateway_ws::{JsonEvents, WsTransport};
+use respan_gateway_ws::{JsonEvents, Limits, WsTransport};
 
 /// A gateway that relays every session to the provider at `base` in format
 /// `Raw`, with the recorders of how requests and calls end registered first.
@@ -588,9 +599,9 @@ pub fn relay(base: &str) -> (Gateway, Outcomes, Calls) {
     let (ends, calls) = (Outcomes::default(), Calls::default());
     let transport = WsTransport::new(base).unwrap();
     let gateway = Gateway::new()
-        .client::<Sent<Raw>, _, _>(Raw)
+        .client::<opaque::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<Sent<Raw>, _, _>("p", Raw, transport.connect())
+        .provider::<opaque::Input<Raw>, _, _>("p", Raw, transport.connect())
         .unwrap()
         .plugin(ends.clone())
         .plugin(calls.clone())

@@ -44,6 +44,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_conversation::{Content, Input, Media, MediaSource, Output};
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_examples::store::{
@@ -53,11 +54,11 @@ use respan_gateway_examples::store::{
 };
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::Status;
-use respan_gateway_http::formats::opaque::Got;
+use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential, Wire, retryable};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
 use respan_gateway_sdk::futures::TryStreamExt;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -329,7 +330,7 @@ impl PdfToText {
                 .fold(call, |call, key| call.with_extension(key));
             async move {
                 let mut bytes = Vec::new();
-                let mut chunks = call.await?.outputs::<Got<Rest>>();
+                let mut chunks = call.await?.outputs::<opaque::Output<Rest>>();
                 while let Some(chunk) = chunks.try_next().await? {
                     if chunk.0.body().len() > limit.saturating_sub(bytes.len()) {
                         return Err(too_large());
@@ -590,12 +591,12 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
     Ok(Gateway::new()
         .provider::<Input, _, _>(
             "text-only",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
             "reads-pdf",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&fixture.pdf.base_url())?.connect(),
         )?
         .provider::<Ask, _, _>(
@@ -603,7 +604,7 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
             FILES,
             HttpClient::new(&fixture.files.url)?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(pdfs)
         .plugin(Fallback))
 }
@@ -627,7 +628,7 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
     Ok(Gateway::new()
         .provider::<Input, _, _>(
             "text-only",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&fixture.text.base_url())?.connect(),
         )?
         .provider::<Input, _, _>(
@@ -640,7 +641,7 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
             FILES,
             HttpClient::new(&fixture.files.url)?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(pdfs)
         .plugin(Fallback))
 }

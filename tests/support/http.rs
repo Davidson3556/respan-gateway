@@ -25,7 +25,7 @@ where
     B: respan_gateway_http::http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
-    respan_gateway_http::handle(gateway, req, false, LIMIT)
+    respan_gateway_http::handle(gateway, req, respan_gateway_http::Framing::Whole, LIMIT)
 }
 
 /// Hand a session's `req` to `gateway`: live, a message per frame of its
@@ -44,7 +44,7 @@ where
     B: respan_gateway_http::http_body::Body<Data = Bytes> + Send + 'static,
     B::Error: Into<Fault>,
 {
-    respan_gateway_http::handle(gateway, req, true, LIMIT)
+    respan_gateway_http::handle(gateway, req, respan_gateway_http::Framing::Live, LIMIT)
 }
 
 pub fn post(path: &str, body: impl Into<Bytes>) -> http::Request<Body> {

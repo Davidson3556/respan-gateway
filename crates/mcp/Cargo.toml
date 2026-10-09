@@ -22,3 +22,7 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "mac
 [dev-dependencies]
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "test-util"] }
+
+# Signals a stdio server's process group, which tokio cannot.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

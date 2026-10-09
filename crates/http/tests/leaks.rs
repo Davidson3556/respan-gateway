@@ -11,7 +11,7 @@ use respan_gateway_conversation::{Block, Finish, Output};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http;
 use respan_gateway_http::{Body, Completion, Frames};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response};
 use respan_gateway_sdk::{async_trait, futures};
 #[allow(dead_code, unused_imports)]
@@ -169,7 +169,7 @@ async fn check(answer: Answer, whole: bool, read: bool) {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(
                 move |request| async move { Scripted { whole }.send(request).await },
                 LIMIT,
@@ -178,14 +178,14 @@ async fn check(answer: Answer, whole: bool, read: bool) {
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "backup",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(
                     move |request| async move { Scripted { whole }.send(request).await },
                     LIMIT,
                 ),
             )
         })
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
         .map(|g| g.plugin(probing))
         .and_then(|g| g.target("openai"))
         .unwrap_or_else(|f| panic!("{f}"));

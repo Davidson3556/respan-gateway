@@ -22,7 +22,6 @@ use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::{CloseCode, JsonEvents, WsTransport};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
-const PATH: &str = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 #[derive(Clone)]
 struct Sessions {
     ledger: MemoryLedger,
@@ -135,10 +134,9 @@ impl Plugin for Sessions {
     }
 }
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
-    let format = || JsonEvents::new("gemini-live", PATH);
     Gateway::new()
-        .client::<Input, _, _>(format())?
-        .provider::<Input, _, _>("gemini", format(), transport.connect())?
+        .client::<Input, _, _>(JsonEvents::GEMINI_LIVE)?
+        .provider::<Input, _, _>("gemini", JsonEvents::GEMINI_LIVE, transport.connect())?
         .plugin(sessions)
         .target("gemini")
 }
@@ -156,8 +154,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut headers = respan_gateway_http::http::HeaderMap::new();
     headers.insert("x-goog-api-key", key.parse()?);
     let gw = gateway(
-        WsTransport::new("wss://generativelanguage.googleapis.com")?
-            .with_binary_text(true)
+        JsonEvents::GEMINI_LIVE
+            .transport("wss://generativelanguage.googleapis.com")?
             .with_headers(headers)?,
         sessions,
     )?;

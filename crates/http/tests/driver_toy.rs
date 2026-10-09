@@ -17,7 +17,7 @@ use bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
-    Body, Completion, Encoder, Frames, Incoming, Outgoing, http,
+    Body, Completion, Encoder, Frames, Framing, Incoming, Outgoing, http,
     http::request::Parts as RequestHead,
 };
 use respan_gateway_sdk::futures::channel::mpsc;
@@ -67,16 +67,16 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
         Ok(io.bind(
             |request| {
                 if request.body().full_bytes().is_some() {
-                    Ok(respan_gateway_http::messages(request, |_, bytes| {
+                    respan_gateway_http::messages(request, |_, bytes| {
                         let mut values = Vec::new();
                         ReqDec.decode(bytes, &mut values)?;
                         values
                             .into_iter()
                             .next()
                             .ok_or_else(|| BadRequest::fault("empty input"))
-                    }))
+                    })
                 } else {
-                    Ok(EventStream::stream(respan_gateway_http::formats::read(
+                    respan_gateway_http::formats::parse(
                         request.into_body(),
                         ReqDec,
                         ReqDec::decode,
@@ -84,13 +84,12 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
                             end?;
                             decoder.end(values)
                         },
-                    )))
+                    )
                 }
             },
-            move |reply, source| {
+            move |reply| {
                 let mut head = respan_gateway_http::http::Response::new(()).into_parts().0;
                 head.status = StatusCode::from_u16(toy.answers.unwrap_or(200)).unwrap();
-                let _ = source;
                 Ok(reply.write(head, Box::new(RespEnc)))
             },
             move |fault, _, _| {
@@ -108,33 +107,25 @@ impl respan_gateway_sdk::Format<Outgoing, Out, In> for Toy {
     fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Out, In>, Fault> {
         let toy = self.clone();
         Ok(io.bind(
-            move |source| {
-                let (mut request, sink) = if let Some(open) = toy.open {
-                    source.stop();
-                    (
-                        http::Request::new(Body::full(open)),
-                        EventSink::new(
-                            respan_gateway_sdk::futures::sink::drain().sink_map_err(Fault::from),
-                        ),
-                    )
-                } else {
-                    respan_gateway_http::request(source, Box::new(ReqEnc))?
-                };
-                *request.uri_mut() = http::Uri::from_static("/x");
+            move |head, _| {
+                head.uri = http::Uri::from_static("/x");
                 if toy.upgrade {
-                    request.headers_mut().insert(
+                    head.headers.insert(
                         http::header::UPGRADE,
                         http::HeaderValue::from_static("websocket"),
                     );
                 }
-                Ok((request, sink))
+                Ok(match toy.open {
+                    Some(open) => Box::new(Open(open)) as Box<dyn Encoder<In>>,
+                    None => Box::new(ReqEnc),
+                })
             },
             |answer, _| {
                 let decoder = RespDec {
                     done: false,
                     status: answer.status().as_u16(),
                 };
-                respan_gateway_http::formats::read(
+                respan_gateway_http::formats::parse(
                     answer.into_body(),
                     decoder,
                     RespDec::decode,
@@ -144,12 +135,30 @@ impl respan_gateway_sdk::Format<Outgoing, Out, In> for Toy {
                     },
                 )
             },
-            |answer, request| {
-                answer.status.is_success()
-                    || (answer.status == StatusCode::SWITCHING_PROTOCOLS
-                        && request.headers.contains_key(http::header::UPGRADE))
-            },
+            |answer| refused(answer.status()),
         ))
+    }
+}
+
+/// The fault of an answer of `status` that is no 200.
+fn refused(status: StatusCode) -> Fault {
+    Fault::new("refused")
+        .with(ErrorCode("refused".into()))
+        .with(respan_gateway_http::Status(status))
+        .with(())
+}
+
+/// Writes its bytes alone, whatever the input.
+struct Open(&'static str);
+
+impl Encoder<In> for Open {
+    fn encode(&mut self, _: &In, _: &mut BytesMut) -> Result<(), Fault> {
+        Ok(())
+    }
+
+    fn end(&mut self, _: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(())
     }
 }
 
@@ -200,12 +209,9 @@ struct RespDec {
 impl RespDec {
     fn decode(&mut self, bytes: Bytes, out: &mut Vec<Out>) -> Result<(), Fault> {
         if self.status != 200 {
-            return Err(Fault::new("refused")
-                .with(ErrorCode("refused".into()))
-                .with(respan_gateway_http::Status(
-                    StatusCode::from_u16(self.status).unwrap_or_default(),
-                ))
-                .with(()));
+            return Err(refused(
+                StatusCode::from_u16(self.status).unwrap_or_default(),
+            ));
         }
         let s = String::from_utf8_lossy(&bytes).to_string();
         match s.as_str() {
@@ -390,7 +396,11 @@ async fn open(
     BoxFuture<'static, Result<(), Fault>>,
 ) {
     let req = http::Request::from_parts(ask(), Body::stream(frames));
-    let (resp, end) = respan_gateway_http::handle(gw, req, streams, LIMIT).await;
+    let framing = match streams {
+        true => Framing::Live,
+        false => Framing::Whole,
+    };
+    let (resp, end) = respan_gateway_http::handle(gw, req, framing, LIMIT).await;
     (Some(resp), end)
 }
 
@@ -469,7 +479,7 @@ async fn a_body_ends_at_its_first_failure() {
     assert_eq!(seen.frames(), frames(&[Ok("one"), Err("internal")]));
 }
 
-/// B5: a prebuilt native request body consumes no input and writes only its bytes.
+/// B5: an encoder's own bytes are a whole request's body.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     let seen = Seen::default();
@@ -477,19 +487,6 @@ async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     let (resp, _) = open(&gw, chunks(vec!["q"]), false).await;
     assert_eq!(read(resp).await, Ok((200, "a;!".into())));
     assert_eq!(seen.frames(), frames(&[Ok("<OPEN>")]), "a whole request");
-
-    let seen = Seen::default();
-    let (gw, _, _) = gateway_of(opening("<OPEN>"), seen.transport(true, done));
-    let (tx, body) = upload();
-    send(&tx, "x");
-    let (resp, _) = open(&gw, body, true).await;
-    assert_eq!(read(resp).await, Ok((200, "a;!".into())));
-    drop(tx);
-    assert_eq!(
-        seen.frames(),
-        frames(&[Ok("<OPEN>")]),
-        "a streaming request"
-    );
 }
 
 /// An empty data frame is an input, but an encoding of no bytes is no
@@ -532,7 +529,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
     drop(tx);
     let (wire, _answer) = Incoming::accept(
         http::Request::from_parts(ask(), Body::stream(body)),
-        true,
+        Framing::Live,
         LIMIT,
     );
     let (incoming, _outgoing) = respan_gateway_sdk::Format::bind(&Toy::default(), wire).unwrap();
@@ -542,7 +539,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
 
     let (wire, _answer) = Incoming::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        false,
+        Framing::Whole,
         LIMIT,
     );
     let (incoming, _outgoing) = respan_gateway_sdk::Format::bind(&Toy::default(), wire).unwrap();
@@ -675,13 +672,13 @@ async fn a_refusal_no_codec_can_write_keeps_its_body_even_to_a_head() {
     }
 }
 
-/// An error answer that never ends is read only as far as its format
-/// reads it, a whole one up to its transport's limit
-/// ([`respan_gateway_http::connect`]), and refused.
+/// An error answer that never ends is read whole only up to its
+/// transport's limit ([`respan_gateway_http::connect`]), and refused
+/// `upstream`.
 ///
-/// (ADV-1: a non-2xx answer is read whole before `dial` resolves, with no
-/// bound: an error body that never ends is pulled forever, every frame
-/// held in memory, and the call never resolves.)
+/// (ADV-1: a non-2xx answer is read whole before `dial` resolves; without
+/// that bound, an error body that never ends would be pulled forever,
+/// every frame held in memory, and the call would never resolve.)
 #[tokio::test(flavor = "multi_thread")]
 async fn an_error_answer_that_never_ends_is_refused() {
     let pulled = Arc::new(AtomicUsize::new(0));
@@ -705,9 +702,8 @@ async fn an_error_answer_that_never_ends_is_refused() {
             "dial still pending after 2s; it pulled {frames} frames ({mib} MiB) of a 503's body into memory"
         )
     };
-    // The toy refuses at the first frame it reads.
     let refusal = outputs.refusal().map(respan_gateway_http::error_code);
-    assert_eq!(refusal, Some("refused"));
+    assert_eq!(refusal, Some("upstream"));
 }
 
 /// ADV-2: the adapter drains the body of a bodiless answer (a HEAD) in a
@@ -737,36 +733,6 @@ async fn a_bodiless_answer_ends_with_its_client() {
             codes(calls.all())
         );
     }
-}
-
-/// A bodiless answer whose end is not ready when its head goes out has
-/// nothing to say the end with: the client leaving ends it `abandoned`.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_bodiless_answer_whose_end_is_not_ready_ends_abandoned() {
-    let transport = fnt(|_| {
-        let body = stream::iter([Ok(Bytes::from("a"))])
-            .chain(stream::pending())
-            .boxed();
-        future::ready(Ok(answer(200, body))).boxed()
-    });
-    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
-    let req = http::Request::builder()
-        .method(http::Method::HEAD)
-        .uri("/x");
-    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = serve(&gw, req).await;
-    assert_eq!(resp.status(), 200);
-    drop(resp);
-    let end = ended.await;
-    gw.idle().await;
-    assert_eq!(
-        (code(&end), codes(calls.all()), codes(outcomes.all())),
-        (
-            "abandoned".to_string(),
-            vec!["abandoned".to_string()],
-            vec!["abandoned".to_string()]
-        )
-    );
 }
 
 /// A body that panics when polled, as a buggy adapter body could.
@@ -907,60 +873,56 @@ async fn a_filter_edited_input_and_a_calls_own_input_are_sent_as_they_are() {
     assert_eq!(own, ["own prompt<END>"]);
 }
 
-/// L2-1: a HEAD whose provider answer is complete and ready at once: the
-/// client got all a HEAD can carry, yet how does the session end?
-#[tokio::test(flavor = "multi_thread")]
-async fn a_complete_bodiless_answer_ends_ok() {
-    let transport = fnt(|_| future::ready(Ok(answer(200, chunks(vec!["a", "DONE"])))).boxed());
-    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
-    let req = http::Request::builder()
-        .method(http::Method::HEAD)
-        .uri("/x");
-    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = serve(&gw, req).await;
-    assert_eq!(resp.status(), 200);
-    let got = read(Some(resp)).await;
-    let end = ended.await;
-    gw.idle().await;
-    assert_eq!(
-        (code(&end), codes(calls.all()), codes(outcomes.all())),
-        (
-            "ok".to_string(),
-            vec!["ok".to_string()],
-            vec!["ok".to_string()]
-        ),
-        "client read {got:?}"
-    );
-}
-
-/// A complete bodiless answer whose ready body is far past any bound on
-/// bytes (a plugin or in-process dialer answering a HEAD with its whole
-/// content) still ends `ok`: its end was ready, and is read through.
+/// A HEAD's answer has no body, so the client's binding stops its outputs
+/// unread as its head goes out: whatever the provider's body (pending,
+/// complete, large, many ready frames, frames sent apart), the request ends
+/// `ok` and its call, its outputs dropped unread, `abandoned`.
 #[tokio::test]
-async fn a_complete_bodiless_answer_with_a_large_ready_body_ends_ok() {
-    let transport = fnt(|_| {
+async fn a_bodiless_answer_ends_ok_and_its_unread_call_abandoned() {
+    let pending = || -> Frames {
+        stream::iter([Ok(Bytes::from("a"))])
+            .chain(stream::pending())
+            .boxed()
+    };
+    let large = || -> Frames {
         let big = "a".repeat(4 << 20);
-        let body = stream::iter([Ok(Bytes::from(big)), Ok(Bytes::from("DONE"))]).boxed();
-        future::ready(Ok(answer(200, body))).boxed()
-    });
-    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
-    let req = http::Request::builder()
-        .method(http::Method::HEAD)
-        .uri("/x");
-    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = serve(&gw, req).await;
-    assert_eq!(resp.status(), 200);
-    let _ = read(Some(resp)).await;
-    let end = ended.await;
-    gw.idle().await;
-    assert_eq!(
-        (code(&end), codes(calls.all()), codes(outcomes.all())),
-        (
-            "ok".to_string(),
-            vec!["ok".to_string()],
-            vec!["ok".to_string()]
-        )
-    );
+        stream::iter([Ok(Bytes::from(big)), Ok(Bytes::from("DONE"))]).boxed()
+    };
+    let many = || -> Frames {
+        let frames = (0..8).map(|_| Ok(Bytes::from("a")));
+        stream::iter(frames.chain([Ok(Bytes::from("DONE"))])).boxed()
+    };
+    let apart = || -> Frames {
+        stream::unfold(0, |n| async move {
+            tokio::task::yield_now().await;
+            match n {
+                3000 => Some((Ok(Bytes::from("DONE")), n + 1)),
+                n if n > 3000 => None,
+                n => Some((Ok(Bytes::from("a")), n + 1)),
+            }
+        })
+        .boxed()
+    };
+    let complete = || chunks(vec!["a", "DONE"]);
+    let bodies: [fn() -> Frames; 5] = [pending, complete, large, many, apart];
+    for (i, body) in bodies.into_iter().enumerate() {
+        let transport = fnt(move |_| future::ready(Ok(answer(200, body()))).boxed());
+        let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
+        let req = http::Request::builder()
+            .method(http::Method::HEAD)
+            .uri("/x");
+        let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
+        let (resp, ended) = serve(&gw, req).await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(read(Some(resp)).await, Ok((200, String::new())));
+        let end = ended.await;
+        gw.idle().await;
+        assert_eq!(
+            (code(&end), codes(calls.all()), codes(outcomes.all())),
+            ("ok".into(), vec!["abandoned".into()], vec!["ok".into()]),
+            "body {i}"
+        );
+    }
 }
 
 /// A HEAD answer whose body only ever yields, or is always ready and never
@@ -1063,75 +1025,6 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
             .unwrap();
         assert_eq!(done.load(Ordering::SeqCst), 1, "round {round}");
     }
-}
-
-/// A complete bodiless answer of several small frames, all ready (a plugin's
-/// or an in-process dialer's answer to a HEAD): its end was ready, so it
-/// ends `ok`. (How many ready frames the drain reads is the task's budget.)
-#[tokio::test]
-async fn a_complete_bodiless_answer_of_many_ready_frames_ends_ok() {
-    let transport = fnt(|_| {
-        let frames = (0..8).map(|_| Ok(Bytes::from("a")));
-        let body = stream::iter(frames.chain([Ok(Bytes::from("DONE"))])).boxed();
-        future::ready(Ok(answer(200, body))).boxed()
-    });
-    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
-    let req = http::Request::builder()
-        .method(http::Method::HEAD)
-        .uri("/x");
-    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = serve(&gw, req).await;
-    assert_eq!(resp.status(), 200);
-    let _ = read(Some(resp)).await;
-    let end = ended.await;
-    gw.idle().await;
-    assert_eq!(
-        (code(&end), codes(calls.all()), codes(outcomes.all())),
-        (
-            "ok".to_string(),
-            vec!["ok".to_string()],
-            vec!["ok".to_string()]
-        )
-    );
-}
-
-/// The same answer with its frames sent apart (each after a yield, as a
-/// source that says `Pending` between outputs does): its end is not ready
-/// when the head goes out (outputs dropped unread end their call as their
-/// end says if it is ready, else `abandoned`), however soon the next frame
-/// wakes itself, so it ends `abandoned`.
-#[tokio::test]
-async fn a_bodiless_answer_of_frames_sent_apart_ends_abandoned() {
-    let transport = fnt(|_| {
-        let body = stream::unfold(0, |n| async move {
-            tokio::task::yield_now().await;
-            match n {
-                3000 => Some((Ok(Bytes::from("DONE")), n + 1)),
-                n if n > 3000 => None,
-                n => Some((Ok(Bytes::from("a")), n + 1)),
-            }
-        })
-        .boxed();
-        future::ready(Ok(answer(200, body))).boxed()
-    });
-    let (gw, calls, outcomes) = gateway_of(Toy::default(), transport);
-    let req = http::Request::builder()
-        .method(http::Method::HEAD)
-        .uri("/x");
-    let req = req.body(respan_gateway_http::Body::full("q")).unwrap();
-    let (resp, ended) = serve(&gw, req).await;
-    assert_eq!(resp.status(), 200);
-    let _ = read(Some(resp)).await;
-    let end = ended.await;
-    gw.idle().await;
-    assert_eq!(
-        (code(&end), codes(calls.all()), codes(outcomes.all())),
-        (
-            "abandoned".to_string(),
-            vec!["abandoned".to_string()],
-            vec!["abandoned".to_string()]
-        )
-    );
 }
 
 // ===== loop 6 audit =====
@@ -1249,7 +1142,7 @@ async fn refusal_does_not_wait_for_transport_write_completion() {
 async fn accepted_incoming_moves_into_one_connection() {
     let (incoming, reply) = Incoming::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        false,
+        Framing::Whole,
         LIMIT,
     );
     assert_eq!(incoming.request().method(), http::Method::POST);
@@ -1345,7 +1238,7 @@ async fn response_encoding_failure_closes_without_reading_a_pending_tail() {
 async fn sink_send_fault_waits_for_its_refusal_bytes() {
     let (transport, answer) = Incoming::accept(
         http::Request::from_parts(ask(), Body::stream(chunks(vec!["q"]))),
-        false,
+        Framing::Whole,
         LIMIT,
     );
     let (incoming, mut outgoing) =

@@ -2,14 +2,15 @@ use std::future::IntoFuture;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use respan_gateway_axum::router_with_limit;
-use respan_gateway_conversation::{Input, Output};
+use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_axum::{router_with_limit, router_with_ws};
+use respan_gateway_http::HttpClient;
 use respan_gateway_http::formats::opaque::Passthrough;
-use respan_gateway_http::formats::opaque::{Got, Sent};
-use respan_gateway_http::http::HeaderMap;
-use respan_gateway_http::{HttpClient, Outgoing};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
-use respan_gateway_sdk::{Extensions, Fault};
+use respan_gateway_openai::OpenAiChat;
+use respan_gateway_realtime as realtime;
+use respan_gateway_sdk::Fault;
+use respan_gateway_sdk::futures::FutureExt;
+use respan_gateway_ws::{JsonEvents, Limits};
 
 mod config;
 
@@ -32,13 +33,34 @@ const SHUTDOWN: Duration = Duration::from_secs(30);
 /// request.
 const BODY_LIMIT: usize = 32 << 20;
 
-/// Every format this binary speaks. A custom gateway builds its own
-/// `Gateway` in its own `main.rs`.
-fn formats() -> [KnownFormat; 3] {
+/// Every format this binary speaks: OpenAI Chat as OpenAI and each vendor
+/// with a dialect serve it, Anthropic Messages and passthrough, their
+/// providers reached over HTTP, reading up to `limit` bytes of an answer
+/// at once; and the sessions of OpenAI Realtime, Responses over WebSocket
+/// and Gemini Live, their providers reached over WebSocket. A custom
+/// gateway builds its own `Gateway` in its own `main.rs`.
+fn formats(limit: usize) -> [KnownFormat; 11] {
+    let http = move |base_url: &str, auth| -> Result<_, Fault> {
+        let client = HttpClient::new(base_url)?.with_headers(auth)?;
+        Ok(client.with_limit(limit).connect())
+    };
+    let ws = |format: JsonEvents| {
+        KnownFormat::of(format.clone(), move |base_url, auth| {
+            Ok(format.transport(base_url)?.with_headers(auth)?.connect())
+        })
+    };
     [
-        KnownFormat::of::<OpenAiChat, Input, Output>(),
-        KnownFormat::of::<AnthropicMessages, Input, Output>(),
-        KnownFormat::of::<Passthrough, Sent<Passthrough>, Got<Passthrough>>(),
+        KnownFormat::of(OpenAiChat::OPENAI, http),
+        KnownFormat::of(OpenAiChat::GROQ, http),
+        KnownFormat::of(OpenAiChat::DEEPSEEK, http),
+        KnownFormat::of(OpenAiChat::VLLM, http),
+        KnownFormat::of(OpenAiChat::OPENROUTER, http),
+        KnownFormat::of(OpenAiChat::AZURE, http),
+        KnownFormat::of(AnthropicMessages, http),
+        KnownFormat::of(Passthrough, http),
+        ws(JsonEvents::OPENAI_REALTIME),
+        ws(JsonEvents::RESPONSES_WS),
+        ws(JsonEvents::GEMINI_LIVE),
     ]
 }
 
@@ -73,17 +95,6 @@ fn proxy_config(anthropic: bool, url: Option<&str>) -> config::Config {
         plugins: Vec::new(),
         target: Some("vendor".to_owned()),
     }
-}
-
-/// A provider's transport: HTTP to `base_url`, sending `auth`, reading up
-/// to `limit` bytes of an answer at once.
-fn http(
-    base_url: &str,
-    auth: HeaderMap,
-    limit: usize,
-) -> Result<impl Fn(Extensions) -> Outgoing + Send + Sync + use<>, Fault> {
-    let client = HttpClient::new(base_url)?.with_headers(auth)?;
-    Ok(client.with_limit(limit).connect())
 }
 
 #[tokio::main]
@@ -154,7 +165,8 @@ async fn main() -> ExitCode {
         Err(e) => return fail(&format!("{config_path}: {e}")),
     };
     let limit = config.body_limit.unwrap_or(BODY_LIMIT);
-    let built = config.build(|url, auth| http(url, auth, limit), &formats());
+    let formats = formats(limit);
+    let built = config.build(&formats);
     let gateway = match built {
         Ok(built) => built,
         Err(e) => return fail(&format!("{config_path}: {}", e.message())),
@@ -176,12 +188,26 @@ async fn main() -> ExitCode {
     };
     let bound = listener.local_addr().unwrap_or(addr);
     println!("respan-gateway {VERSION} listening on {bound}");
-    // On a signal, open responses and then end hooks share one deadline.
-    // Responses open at it are cut and lose their end hooks.
+    // A session's format served, a WebSocket upgrade is a session.
+    let session = |f: &KnownFormat| f.is::<realtime::Input, realtime::Output>();
+    let served = |name: &String| formats.iter().any(|f| f.name == *name && session(f));
+    // On a signal, open sessions are closed 1001, and open responses and
+    // then end hooks share one deadline. Responses open at it are cut and
+    // lose their end hooks.
+    let signal = shutdown().shared();
+    let app = match config.serve.iter().any(served) {
+        true => router_with_ws(
+            gateway.clone(),
+            move |_| limit,
+            Limits::default(),
+            signal.clone(),
+        ),
+        false => router_with_limit(gateway.clone(), move |_| limit),
+    };
     let (stopping, mut stopped) = tokio::sync::oneshot::channel();
-    let serve = axum::serve(listener, router_with_limit(gateway.clone(), move |_| limit))
+    let serve = axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            shutdown().await;
+            signal.await;
             let _ = stopping.send(tokio::time::Instant::now() + SHUTDOWN);
         })
         .into_future();

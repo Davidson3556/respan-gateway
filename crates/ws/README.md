@@ -3,8 +3,10 @@
 WebSocket sessions on the gateway, as neutral building blocks. A WebSocket is
 an HTTP Upgrade exchange on the HTTP wire: the call's head is the upgrade
 request, the answer's head is the `101`, and the two bodies are streams of
-frames, **one body item per text frame**. Nothing here knows a provider's
-events; OpenAI Realtime and Gemini Live run through the same code.
+frames, **one body item per text frame**. Nothing here reads a provider's
+events; OpenAI Realtime, Responses over WebSocket and Gemini Live run
+through the same code, each a preset naming only its endpoint, subprotocol
+and framing.
 
 The `Input` / `Output` pair lives in
 [`respan-gateway-realtime`](../realtime/README.md). Import models from
@@ -22,9 +24,21 @@ that crate and codecs/transports from this one.
 - `.with_binary_text(true)` accepts a provider's binary messages containing
   UTF-8 text, such as Gemini Live's JSON. These become text messages toward
   the client; invalid UTF-8 is a fault. Disabled by default.
+- `JsonEvents::{OPENAI_REALTIME, RESPONSES_WS, GEMINI_LIVE}`: the vendors'
+  presets, named `openai-realtime`, `responses-ws` and `gemini-live`, each
+  setting documented with the vendor's reason. Each is served at, and sends
+  to, the path its vendor's SDK adds to its base URL (`/realtime` and
+  `/responses` after `wss://api.openai.com/v1`; Gemini's
+  `/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent`
+  after `wss://generativelanguage.googleapis.com`). OpenAI Realtime speaks
+  the subprotocol `realtime` its browser clients offer.
+  `format.transport(base_url)` is a `WsTransport` to its provider, taking
+  binary text for Gemini Live, whose server sends JSON in binary frames.
+  The key is the transport's (`with_headers`: OpenAI's
+  `Authorization: Bearer`, Gemini's `x-goog-api-key`) or the client's.
 - `JsonEvents::new(name, path)`: incoming and outgoing `Format` bindings
   whose kind is one JSON event per frame, `Input` in and
-  `Output` out (each has `json: Value`). Every event is written from
+  `Output` out (each a format-tagged `NativeValue`, read with `json()`). Every event is written from
   its JSON, so a relay to a format of the same name keeps what an event says,
   not its exact bytes. Plugins filter events with
   `cx.filter(|e: &mut Output| ..)` (client edge) or `px.filter(..)`
@@ -39,15 +53,18 @@ that crate and codecs/transports from this one.
   the `upstream` fault the transport ends the answer with. The client is told
   it only as a `CloseCode`, which the transport adds on a call relayed with
   `RawErrors` (`relay::Relay`), or a plugin sets.
-- `Limits { max_message, close_wait, close_send }`: what an edge takes, with
-  defaults and their reasons on the type: 16 MiB messages, 5 s for the other
-  side's part of a close, 1 s for a Close to leave.
+- `Limits { max_message, close_wait, close_send, ping_after }`: what an edge
+  takes, with defaults and their reasons on the type: 16 MiB messages, 5 s
+  for the other side's part of a close, 1 s for a Close to leave, a ping
+  after 30 s of quiet.
+- `serve(gateway, head, upgraded, limits, stop)`: a client's upgrade through
+  the gateway, for an adapter that hosts sessions; `respan-gateway-axum`'s
+  `router_with_ws` is one, behind its optional `ws` feature. `serve`
+  documents how each end of a session reaches the client and the provider.
 
-Hosting a client's session is the `respan-gateway-axum` adapter's, behind its
-optional `ws` feature (`respan_gateway_axum::ws::{router, serve_ws,
-serve_ws_until}`); its module documents how each end of a session reaches the
-client and the provider. Any other format on the HTTP wire works with the
-transport and the adapter: the tests relay through `formats::opaque` too.
+Both edges pump a session with the same code. Any other format on the HTTP
+wire works with the transport and the adapter: the tests relay through
+`formats::opaque` too.
 
 ## The transport
 
@@ -59,8 +76,9 @@ transport and the adapter: the tests relay through `formats::opaque` too.
 - The provider's Close 1000 (or no code) ends the answer clean; another code
   is an `upstream` fault with its `ProviderClose`. Its reason text is not
   carried.
-- The provider dropping with no Close is `truncated`; a rejected binary
-  frame or a message over `max_message` is `upstream`.
+- The provider dropping with no Close, or silent through a ping, is
+  `truncated`; a rejected binary frame or a message over `max_message` is
+  `upstream`, and the provider is sent Close 1003 or 1009.
 - A provider that cannot be reached, or does not answer the upgrade within
   the handshake timeout (a refusal's body included), is `upstream`. A refusal
   of the upgrade is an answer with its body, which the format reads whole,
@@ -70,10 +88,11 @@ transport and the adapter: the tests relay through `formats::opaque` too.
 ## Limits
 
 - **Text messages by default.** A provider's binary frame is a fault unless
-  `with_binary_text(true)` enables UTF-8 normalization. Gemini Live sends
-  JSON in binary frames; its example enables this. Client binary frames
-  remain unsupported. Ping and pong are answered by each hop's library
-  and never reach a plugin.
+  `with_binary_text(true)` enables UTF-8 normalization, as
+  `JsonEvents::GEMINI_LIVE.transport(..)` does for Gemini Live's JSON in
+  binary frames. A client's binary frame is `bad_request`, closed 1003.
+  Ping and pong are answered by each hop's library and never reach a
+  plugin.
 - **HTTP/1.1 upgrades only** (no WebSockets over HTTP/2), no
   `permessage-deflate` (the extension header is not passed on or negotiated).
 - **Backpressure holds.** A frame moves from a socket to the next only as the
@@ -81,8 +100,10 @@ transport and the adapter: the tests relay through `formats::opaque` too.
   buffers. A client that does not read stalls the provider after about 6 MiB,
   and a provider that does not read stalls the client after about 7 MiB
   (`crates/axum/tests/backpressure.rs`).
-- **No timeouts on a live session**: no idle limit, no keep-alive pings, no
-  maximum length. A limit on long sessions is a plugin's, or `serve_ws_until`'s.
+- **Keep-alive, no idle limit**: a peer quiet for `ping_after` while read is
+  pinged, and quiet that long again is gone, on both edges. A quiet session
+  whose peers answer pings lasts; a limit on its length is a plugin's, and
+  shutdown is the adapter's `stop`.
 - **`wss` uses the system's root certificates** and the `aws-lc-rs` provider,
   named in the code because the workspace's dependencies enable both `ring`
   and `aws-lc-rs`, which makes rustls's own choice panic. Proxies are the
@@ -113,4 +134,5 @@ into a session. Where that shows:
   The adapter answers with the `101`'s other headers, and its subprotocol if
   the client offered it and it is no key.
 
-Used by: [realtime](../../examples/realtime/realtime.rs).
+Used by: the [binary](../../apps/gateway/src/main.rs), and the
+[realtime examples](../../examples/realtime).

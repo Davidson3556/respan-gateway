@@ -34,7 +34,7 @@ use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Status;
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
@@ -208,7 +208,7 @@ fn gateway(
     Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(
                 supervised(move |request| {
                     let client = provider.clone();
@@ -217,7 +217,7 @@ fn gateway(
                 LIMIT,
             ),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(admission)
         .target("openai")
 }

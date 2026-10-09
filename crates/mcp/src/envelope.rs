@@ -1,15 +1,16 @@
 //! HTTP envelopes keep transport metadata attached to typed messages.
 use respan_gateway_http::http::Method;
+use respan_gateway_mcp_messages::Message;
 use serde_json::Value;
 
 /// The kind's input: one HTTP request from an MCP client.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct HttpInput {
+pub struct Input {
     /// `POST` sends messages, `GET` opens the server's stream, `DELETE`
     /// ends the session.
     pub method: Method,
     /// A `POST`'s messages, in order; none for `GET` or `DELETE`.
-    pub messages: Vec<respan_gateway_mcp_messages::Input>,
+    pub messages: Vec<Message>,
     /// Whether they came as a JSON array (a batch).
     pub batch: bool,
     /// The session it belongs to (`Mcp-Session-Id`), none before the server
@@ -28,10 +29,10 @@ pub struct HttpInput {
     pub query: Option<String>,
 }
 
-impl HttpInput {
+impl Input {
     /// A request of `method` with `messages`, a batch if not exactly one,
     /// in no session.
-    pub fn new(method: Method, messages: Vec<respan_gateway_mcp_messages::Input>) -> Self {
+    pub fn new(method: Method, messages: Vec<Message>) -> Self {
         Self {
             batch: method == Method::POST && messages.len() != 1,
             method,
@@ -49,9 +50,9 @@ impl HttpInput {
 /// The kind's output: one message of the server's, a JSON body or an
 /// event. An event the kind cannot read, such as a comment, has none.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct HttpOutput {
+pub struct Output {
     /// Its JSON-RPC messages.
-    pub messages: Vec<respan_gateway_mcp_messages::Output>,
+    pub messages: Vec<Message>,
     /// The session the server's answer named (`Mcp-Session-Id`), as on the
     /// answer to `initialize`, which assigns it. The client's format writes
     /// the first output's into the head of a `POST`'s answer.
@@ -64,9 +65,9 @@ pub struct HttpOutput {
     pub event: Option<String>,
 }
 
-impl HttpOutput {
+impl Output {
     /// A message of `messages`, in no session.
-    pub fn new(messages: Vec<respan_gateway_mcp_messages::Output>) -> Self {
+    pub fn new(messages: Vec<Message>) -> Self {
         Self {
             messages,
             ..Self::default()

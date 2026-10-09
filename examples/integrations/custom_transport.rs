@@ -14,7 +14,7 @@ use respan_gateway_sdk::BadRequest;
 use std::sync::Arc;
 
 use respan_gateway_conversation::{Block, Finish, Input, Output, units};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::futures::FutureExt;
 use respan_gateway_sdk::futures::channel::oneshot;
@@ -86,7 +86,7 @@ fn gateway() -> Result<Gateway, Fault> {
     let model: Model = Arc::new(echo);
     Gateway::new()
         .provider::<Input, _, _>("local", Local, move |_| model.clone())?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .target("local")
 }
 

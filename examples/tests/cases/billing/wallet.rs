@@ -103,10 +103,10 @@ async fn n_answers_cannot_overspend_the_wallet() -> Result<(), Fault> {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(origin)?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(accounting)
         .plugin(respan_gateway_http::relay::Relay::RAW)
         .target("openai")?;
@@ -187,15 +187,15 @@ async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(slow, LIMIT),
         )?
         .provider::<Input, _, _>(
             "openai-eu",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             provider_support::openai(&eu_fake.base_url())?.connect(),
         )?
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(Hedge)
         .plugin(accounting);
     eu_fake.answer(answer());

@@ -11,7 +11,7 @@ use respan_gateway_sdk::Fault;
 #[allow(dead_code, unused_imports)]
 #[path = "../../../tests/support/http.rs"]
 mod http_helpers;
-use http_helpers::{read_whole, serve as serve_http, streamed};
+use http_helpers::{read_whole, serve_live as serve_http, streamed};
 use support::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -80,7 +80,7 @@ async fn a_refused_upgrade_is_the_providers_answer_as_it_came() {
 // The same refusal through the adapter of this crate is a whole answer
 // under the provider's status.
 #[tokio::test(flavor = "multi_thread")]
-async fn serve_ws_writes_a_refused_upgrade_whole() {
+async fn the_router_writes_a_refused_upgrade_whole() {
     let refusing = refusing().await;
     let (gateway, ends, calls) = relay(&format!("ws://{refusing}"));
     let server = serve(gateway).await;
@@ -92,4 +92,23 @@ async fn serve_ws_writes_a_refused_upgrade_whole() {
     idle(&server.gateway).await;
     assert_eq!(ends.all().len(), 1);
     assert_eq!(calls.all().len(), 1);
+}
+
+// A refusal is read whole only up to `max_message`: one larger is the
+// gateway's fault, a 500 with its error code.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_over_max_message_is_a_500() {
+    let refusing = refusing().await;
+    let (gateway, ..) = relay(&format!("ws://{refusing}"));
+    let limits = respan_gateway_ws::Limits {
+        max_message: 8,
+        ..Default::default()
+    };
+    let server = serve_with(gateway.plugin(Relay::RAW), limits, std::future::pending()).await;
+    let refused = connect(server.addr, "/v1/realtime", &[]).await;
+    let Err(tokio_tungstenite::tungstenite::Error::Http(resp)) = refused else {
+        panic!("expected an HTTP answer to the handshake")
+    };
+    assert_eq!(resp.status(), 500);
+    assert_eq!(resp.body().as_deref(), Some(&b"internal"[..]));
 }

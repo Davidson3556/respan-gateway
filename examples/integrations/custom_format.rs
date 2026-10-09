@@ -18,6 +18,7 @@ use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::units::INPUT_TOKENS;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::{self as formats, whole};
+use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
 use respan_gateway_sdk::Usage;
@@ -72,16 +73,13 @@ impl Format<Incoming, EmbedRequest, Embeddings> for OpenAiEmbeddings {
 
     fn bind(&self, io: Incoming) -> Result<Connection<EmbedRequest, Embeddings>, Fault> {
         Ok(io.bind(
-            |request| Ok(h::messages(request, |_, raw| read_request(raw))),
-            |reply, _source| {
+            |request| h::messages(request, |_, raw| read_request(raw)),
+            |reply| {
                 let mut head = reply.head();
                 formats::default_content_type(&mut head, "application/json");
-                Ok(reply.write(head, whole::collect(write_embeddings, error)))
+                Ok(reply.write(head, whole::collect(write_embeddings)))
             },
-            |fault, _, head| {
-                formats::default_content_type(head, "application/json");
-                error(fault)
-            },
+            error,
         ))
     }
 }
@@ -93,28 +91,25 @@ impl Format<Outgoing, Embeddings, EmbedRequest> for OpenAiEmbeddings {
 
     fn bind(&self, io: Outgoing) -> Result<Connection<Embeddings, EmbedRequest>, Fault> {
         Ok(io.bind(
-            |source| {
-                if !source.is_single() {
+            |head, request: Option<&EmbedRequest>| {
+                if request.is_none() {
                     return Err(Fault::config(format!(
                         "a call in {NAME} carries one body, not streamed inputs"
                     )));
                 }
-                let encoder = whole::collect(write_request, |_: &Fault| Bytes::new());
-                let (request, sink) = h::request(source, encoder)?;
-                let (mut head, body) = request.into_parts();
                 head.method = Method::POST;
-                formats::set_path(&mut head, "/embeddings")?;
+                formats::set_path(head, "/embeddings")?;
                 head.headers
                     .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                Ok((h::http::Request::from_parts(head, body), sink))
+                Ok(formats::each(write_request))
             },
             |response, _| {
-                whole::read(NAME, response, |raw, out| {
+                whole::read(response.into_body(), |raw, out| {
                     out.push(read_embeddings(raw)?);
                     Ok(())
                 })
             },
-            |head, _| head.status.is_success(),
+            |answer| h::provider_fault(NAME, answer),
         ))
     }
 }
@@ -168,16 +163,14 @@ fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
     Ok(said)
 }
 
-/// The fault as this protocol's error body.
-fn error(fault: &Fault) -> Bytes {
+/// The fault as this protocol's error body: the format's error writer.
+fn error(fault: &Fault, _: &h::http::Request<Bytes>, head: &mut ResponseHead) -> Bytes {
+    formats::default_content_type(head, "application/json");
     Bytes::from(json!({ "error": { "message": fault.message() } }).to_string())
 }
 
 /// A request, written from its fields.
-fn write_request(one: &[EmbedRequest]) -> Result<Bytes, Fault> {
-    let [r] = one else {
-        return Ok(Bytes::new());
-    };
+fn write_request(r: &EmbedRequest) -> Result<Bytes, Fault> {
     let mut v = r.rest.clone();
     v.insert("model".into(), json!(r.model));
     v.insert("input".into(), json!(r.input));

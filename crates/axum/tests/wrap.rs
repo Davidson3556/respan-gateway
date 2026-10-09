@@ -7,7 +7,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use respan_gateway_http::formats::opaque::Sent;
+use respan_gateway_http::formats::opaque;
 use respan_gateway_sdk::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use support::*;
 
@@ -20,7 +20,7 @@ struct Slow;
 #[async_trait]
 impl Plugin for Slow {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        cx.wrap(|inputs: EventStream<Sent<Raw>>| {
+        cx.wrap(|inputs: EventStream<opaque::Input<Raw>>| {
             inputs.then(|input| async move {
                 tokio::time::sleep(WAIT).await;
                 input
@@ -70,7 +70,7 @@ struct Jitter(u64);
 impl Plugin for Jitter {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
         let seed = self.0;
-        cx.wrap(move |inputs: EventStream<Sent<Raw>>| {
+        cx.wrap(move |inputs: EventStream<opaque::Input<Raw>>| {
             let mut s = seed;
             inputs.then(move |input| {
                 s = s

@@ -10,7 +10,7 @@ use respan_gateway_http::{
     http::{self, Method, StatusCode},
     http_body_util::BodyExt,
 };
-use respan_gateway_mcp::HttpInput as Input;
+use respan_gateway_mcp::Input;
 use respan_gateway_mcp::{SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_sdk::{Fault, Gateway};
 use serde_json::{Value, json};

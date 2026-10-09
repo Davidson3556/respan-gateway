@@ -7,10 +7,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, Completion, http::response::Parts as ResponseHead};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::Upstream;
 use respan_gateway_sdk::futures::{StreamExt, stream};
 use respan_gateway_sdk::{
@@ -131,7 +132,7 @@ impl Harness {
         let gw = Gateway::new()
             .provider::<Input, _, _>(
                 "openai",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(openai, LIMIT),
             )
             .and_then(|g| {
@@ -142,7 +143,7 @@ impl Harness {
                 )
             })
             .and_then(|g| {
-                g.client::<Input, _, _>(OpenAiChat)?
+                g.client::<Input, _, _>(OpenAiChat::OPENAI)?
                     .client::<Input, _, _>(AnthropicMessages)
             });
         let gw = gw
@@ -577,13 +578,13 @@ async fn a_slow_refusal_is_refused() {
     let gw = Gateway::new()
         .provider::<Input, _, _>(
             "openai",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(
                 |request| async move { SlowRefusal.send(request).await },
                 LIMIT,
             ),
         )
-        .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
+        .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
         .map(|g| g.plugin(head_only.clone()).plugin(explicit::Relay::RAW))
         .and_then(|g| g.target("openai"))
         .unwrap();
@@ -629,13 +630,13 @@ async fn an_error_answer_past_the_cap_is_still_refused() {
         let gw = Gateway::new()
             .provider::<Input, _, _>(
                 "openai",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(
                     |request| async move { HugeRefusal.send(request).await },
                     LIMIT,
                 ),
             )
-            .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
+            .and_then(|g| g.client::<Input, _, _>(OpenAiChat::OPENAI))
             .map(|g| g.plugin(outcomes.clone()))
             .map(|g| g.plugin(head_only.clone()))
             .and_then(|g| g.target("openai"))

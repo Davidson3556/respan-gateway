@@ -13,7 +13,7 @@ use futures::future::BoxFuture;
 use http_body_util::BodyExt;
 use respan_gateway_sdk::Fault;
 
-pub use accept::{Incoming, Reply};
+pub use accept::{Framing, Incoming, Reply};
 pub use dial::Outgoing;
 pub(crate) use dial::Sending;
 const PANICKED: &str = "a plugin or format panicked";
@@ -117,7 +117,7 @@ mod tests {
     async fn a_completed_handler_keeps_an_already_ready_reply() {
         let request = http::Request::post("/x").body(Body::full("q"));
         let request = request.unwrap_or_default();
-        let (incoming, answer) = Incoming::accept(request, false, 1024);
+        let (incoming, answer) = Incoming::accept(request, Framing::Whole, 1024);
         let Ok((opening, mut outgoing)) = Passthrough.bind(incoming) else {
             panic!("bound")
         };

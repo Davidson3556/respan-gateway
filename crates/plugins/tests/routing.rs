@@ -13,9 +13,9 @@ use respan_gateway_http::http::{
     header::{AUTHORIZATION, RETRY_AFTER},
 };
 use respan_gateway_http::{Body, Completion, HttpClient, error_code, retryable};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_plugins::routing::{Attempt, Backoff, Role, Until, first_success, race};
-use respan_gateway_providers::OpenAiChat;
 use respan_gateway_sdk::futures::channel::oneshot;
 use respan_gateway_sdk::futures::future::BoxFuture;
 use respan_gateway_sdk::futures::{FutureExt, StreamExt, sink, stream};
@@ -323,67 +323,67 @@ struct Harness {
 async fn harness(plan: Plan) -> Harness {
     let (mock, record) = (Fakes::start().await, Record::default());
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat)
+        .client::<Input, _, _>(OpenAiChat::OPENAI)
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "a",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(mock.at(A), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "b",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(mock.at(B), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "slow",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(slow(mock.at(A), secs(5)), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "stalled",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(watchdog(stall), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "silent",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(watchdog(silent), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "refused",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(refused, LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "dribble",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(dribble, LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "b-in-1s",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(slow(mock.at(B), secs(1)), LIMIT),
             )
         })
         .and_then(|g| {
             g.provider::<Input, _, _>(
                 "late",
-                OpenAiChat,
+                OpenAiChat::OPENAI,
                 respan_gateway_http::connect(watchdog(slow(mock.at(A), secs(3))), LIMIT),
             )
         })
@@ -428,17 +428,17 @@ fn model(input: &Input) -> Option<&str> {
 
 fn model_gateway(mock: &Fakes, router: ModelRouter<Input>) -> Gateway {
     Gateway::new()
-        .client::<Input, _, _>(OpenAiChat)
+        .client::<Input, _, _>(OpenAiChat::OPENAI)
         .expect("chat client")
         .provider::<Input, _, _>(
             "a",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(mock.at(A), LIMIT),
         )
         .expect("a provider")
         .provider::<Input, _, _>(
             "b",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(mock.at(B), LIMIT),
         )
         .expect("b provider")
@@ -510,11 +510,11 @@ async fn model_router_leaves_unreadable_input_on_its_original_target() {
 #[tokio::test]
 async fn model_router_passes_other_kinds_without_changing_their_target() {
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat)
+        .client::<Input, _, _>(OpenAiChat::OPENAI)
         .expect("chat client")
-        .client::<respan_gateway_http::formats::opaque::Sent<Passthrough>, _, _>(Passthrough)
+        .client::<respan_gateway_http::formats::opaque::Input<Passthrough>, _, _>(Passthrough)
         .expect("opaque client")
-        .provider::<respan_gateway_http::formats::opaque::Sent<Passthrough>, _, _>(
+        .provider::<respan_gateway_http::formats::opaque::Input<Passthrough>, _, _>(
             "raw",
             Passthrough,
             respan_gateway_http::connect(
@@ -917,7 +917,7 @@ async fn a_non_http_provider_can_retry_its_own_preopening_fault_code() {
         }),
     );
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat)
+        .client::<Input, _, _>(OpenAiChat::OPENAI)
         .expect("client format")
         .provider::<Input, _, _>("local", Local, {
             let invocations = invocations.clone();

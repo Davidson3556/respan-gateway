@@ -1,20 +1,20 @@
 //! Traffic of no kind, relayed unread. Such a format is a kind of one,
-//! `Sent<F>` in and `Got<F>` out, so it relays only to itself, byte for
-//! byte: one value per body or data frame.
+//! [`Input<F>`] in and [`Output<F>`] out, so it relays only to itself, byte
+//! for byte: one value per body or data frame.
 //!
 use std::marker::PhantomData;
 
 use crate::{Body, Encoder, Incoming, Outgoing, Reply, bodiless};
-use futures::{StreamExt, stream::BoxStream};
+use futures::StreamExt;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, StatusCode, request::Parts as RequestHead};
 use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format};
 
 /// A request's message in format `F`, as the client sent it.
-pub struct Sent<F>(pub http::Request<Bytes>, PhantomData<fn() -> F>);
+pub struct Input<F>(pub http::Request<Bytes>, PhantomData<fn() -> F>);
 
 /// A response's message in format `F`, as the provider sent it.
-pub struct Got<F>(pub http::Response<Bytes>, PhantomData<fn() -> F>);
+pub struct Output<F>(pub http::Response<Bytes>, PhantomData<fn() -> F>);
 
 macro_rules! bytes_type {
     ($name:ident, $http:ident, $($field:ident),+) => {
@@ -64,95 +64,88 @@ macro_rules! bytes_type {
 /// Writes each message as it came.
 struct Writes;
 
-bytes_type!(Sent, Request, method, uri, version);
-bytes_type!(Got, Response, status, version);
+bytes_type!(Input, Request, method, uri, version);
+bytes_type!(Output, Response, status, version);
 
 /// One message per finite body or explicitly live frame.
-pub fn read_request<F: 'static>(request: http::Request<Body>) -> EventStream<Sent<F>> {
+pub fn read_request<F: 'static>(request: http::Request<Body>) -> EventStream<Input<F>> {
     crate::messages(request, |head, raw| {
-        Ok(Sent::from_http(http::Request::from_parts(
+        Ok(Input::from_http(http::Request::from_parts(
             head.clone(),
             raw,
         )))
     })
 }
 
-/// Encode the typed request head and body with its safe forwarded path.
+/// Write each message's bytes as they came, under the head of the call's
+/// one input with its safe forwarded path ([`forwarded_path`]); live input
+/// keeps the given head.
+///
+/// [`forwarded_path`]: crate::formats::forwarded_path
 pub fn write_request<F: 'static>(
-    source: &mut EventStream<Sent<F>>,
-) -> Result<(http::Request<Body>, EventSink<Sent<F>>), Fault> {
-    let head = source
-        .value()
-        .transpose()?
-        .map(|sent| sent.0.clone().into_parts().0)
-        .unwrap_or_else(|| http::Request::new(()).into_parts().0);
-    let (request, sink) = crate::request(source, Box::new(Writes))?;
-    let path = crate::formats::forwarded_path(head.uri.path());
-    let mut head = head;
-    crate::formats::set_path(&mut head, &path)?;
-    Ok((http::Request::from_parts(head, request.into_body()), sink))
+    head: &mut RequestHead,
+    input: Option<&Input<F>>,
+) -> Result<Box<dyn Encoder<Input<F>>>, Fault> {
+    if let Some(input) = input {
+        *head = input.0.clone().into_parts().0;
+        let path = crate::formats::forwarded_path(head.uri.path());
+        crate::formats::set_path(head, &path)?;
+    }
+    Ok(Box::new(Writes))
 }
 
-/// Relay successes and ordinary redirects. A failed or unasked upgrade is a
-/// refusal, and bodyless answers consume no semantic values.
+/// The messages of a relayed answer: one per data frame, or one empty
+/// message carrying the head of an answer with no body to the call `sent`
+/// ([`bodiless`]) or no frames. A switched protocol's head comes first, as
+/// its frames are the session's.
 pub fn read_response<F: 'static>(
-    name: &str,
     response: http::Response<Body>,
-    call: &RequestHead,
-) -> BoxStream<'static, Result<Got<F>, Fault>> {
-    let asked = call.headers.contains_key(http::header::UPGRADE);
-    let status = response.status();
-    let switched = status == StatusCode::SWITCHING_PROTOCOLS && asked;
-    let relayed = status.is_success() || (status.is_redirection() && !asked);
-    if relayed || switched {
-        let (head, body) = response.into_parts();
-        let empty = bodiless(&call.method, status);
-        let first = (empty || switched)
-            .then(|| Got::from_http(http::Response::from_parts(head.clone(), Bytes::new())));
-        let rest = futures::stream::unfold(
-            (body, head, first.is_some(), empty),
-            |(mut body, head, seen, empty)| async move {
-                if empty {
-                    return None;
-                }
-                match body.next().await {
-                    Some(raw) => Some((
-                        raw.map(|raw| {
-                            Got::from_http(http::Response::from_parts(head.clone(), raw))
-                        }),
-                        (body, head, true, false),
-                    )),
-                    None if !seen => Some((
-                        Ok(Got::from_http(http::Response::from_parts(
-                            head.clone(),
-                            Bytes::new(),
-                        ))),
-                        (body, head, true, true),
-                    )),
-                    None => None,
-                }
-            },
-        );
-        futures::stream::iter(first.map(Ok)).chain(rest).boxed()
-    } else {
-        crate::formats::whole::refusal(name, response)
-    }
+    sent: http::Request<Bytes>,
+) -> EventStream<Output<F>> {
+    let (head, body) = response.into_parts();
+    let empty = bodiless(sent.method(), head.status);
+    let switched = head.status == StatusCode::SWITCHING_PROTOCOLS;
+    let first = (empty || switched)
+        .then(|| Output::from_http(http::Response::from_parts(head.clone(), Bytes::new())));
+    let rest = futures::stream::unfold(
+        (body, head, first.is_some(), empty),
+        |(mut body, head, seen, empty)| async move {
+            if empty {
+                return None;
+            }
+            match body.next().await {
+                Some(raw) => Some((
+                    raw.map(|raw| Output::from_http(http::Response::from_parts(head.clone(), raw))),
+                    (body, head, true, false),
+                )),
+                None if !seen => Some((
+                    Ok(Output::from_http(http::Response::from_parts(
+                        head.clone(),
+                        Bytes::new(),
+                    ))),
+                    (body, head, true, true),
+                )),
+                None => None,
+            }
+        },
+    );
+    EventStream::stream(futures::stream::iter(first.map(Ok)).chain(rest))
 }
 
 /// Write opaque response bytes as they come, the head with the first.
-pub fn write_response<F: 'static>(reply: Reply) -> EventSink<Got<F>> {
-    EventSink::new(OpaqueSink {
+pub fn write_response<F: 'static>(reply: Reply) -> Result<EventSink<Output<F>>, Fault> {
+    Ok(EventSink::new(OpaqueSink {
         reply: Some(reply),
         sink: None,
-    })
+    }))
 }
 
 struct OpaqueSink<F> {
     reply: Option<Reply>,
-    sink: Option<EventSink<Got<F>>>,
+    sink: Option<EventSink<Output<F>>>,
 }
 impl<F> Unpin for OpaqueSink<F> {}
-impl<F: 'static> futures::Sink<Result<Got<F>, Fault>> for OpaqueSink<F> {
+impl<F: 'static> futures::Sink<Result<Output<F>, Fault>> for OpaqueSink<F> {
     type Error = Fault;
     fn poll_ready(
         mut self: std::pin::Pin<&mut Self>,
@@ -165,7 +158,7 @@ impl<F: 'static> futures::Sink<Result<Got<F>, Fault>> for OpaqueSink<F> {
     }
     fn start_send(
         mut self: std::pin::Pin<&mut Self>,
-        item: Result<Got<F>, Fault>,
+        item: Result<Output<F>, Fault>,
     ) -> Result<(), Fault> {
         if let Some(reply) = self.reply.take() {
             let head = match &item {
@@ -222,7 +215,7 @@ impl<F: 'static> futures::Sink<Result<Got<F>, Fault>> for OpaqueSink<F> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Passthrough;
 
-impl Format<Incoming, Sent<Self>, Got<Self>> for Passthrough {
+impl Format<Incoming, Input<Self>, Output<Self>> for Passthrough {
     fn name(&self) -> &str {
         "passthrough"
     }
@@ -234,28 +227,29 @@ impl Format<Incoming, Sent<Self>, Got<Self>> for Passthrough {
             .any(|b| b.is_ascii_lowercase())
             && crate::formats::reads_one_way(io.request().uri().path())
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Self>, Got<Self>>, Fault> {
-        Ok(io.bind(
-            |request| Ok(read_request(request)),
-            |reply, _| Ok(write_response(reply)),
-            crate::plain_refusal,
-        ))
+    fn bind(&self, io: Incoming) -> Result<Connection<Input<Self>, Output<Self>>, Fault> {
+        Ok(io.bind(read_request, write_response, crate::plain))
     }
 }
-impl Format<Outgoing, Got<Self>, Sent<Self>> for Passthrough {
+impl Format<Outgoing, Output<Self>, Input<Self>> for Passthrough {
     fn name(&self) -> &str {
         "passthrough"
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Self>, Sent<Self>>, Fault> {
-        Ok(io.bind(
-            write_request,
-            |response, request| read_response("passthrough", response, &request.into_parts().0),
-            |head, call| {
-                crate::success(head, call)
-                    || (head.status.is_redirection()
-                        && !call.headers.contains_key(http::header::UPGRADE))
-            },
-        ))
+    /// Relays successes and the redirects of a call that asked to switch no
+    /// protocols, which are the client's to follow.
+    fn bind(&self, io: Outgoing) -> Result<Connection<Output<Self>, Input<Self>>, Fault> {
+        let relayed = |answer: &http::response::Parts, call: &RequestHead| {
+            let asked = call.headers.contains_key(http::header::UPGRADE);
+            match answer.status {
+                StatusCode::SWITCHING_PROTOCOLS => asked,
+                status => status.is_success() || (status.is_redirection() && !asked),
+            }
+        };
+        Ok(io
+            .with_success(relayed)
+            .bind(write_request, read_response, |answer| {
+                crate::provider_fault("passthrough", answer)
+            }))
     }
 }
 
@@ -269,47 +263,16 @@ mod tests {
     #[tokio::test]
     async fn bytes_pass_as_they_came() {
         let head = http::Response::new(()).into_parts().0;
-        let call = http::Request::new(()).into_parts().0;
         let got: Vec<_> = read_response::<Raw>(
-            "raw",
             http::Response::from_parts(head, Body::full("a")),
-            &call,
+            http::Request::new(Bytes::new()),
         )
         .map(|v| v.expect("expected value"))
         .collect()
         .await;
         let mut writer = Writes;
         let mut out = BytesMut::new();
-        assert!(writer.encode(&Sent::<Raw>::new("b"), &mut out).is_ok());
+        assert!(writer.encode(&Input::<Raw>::new("b"), &mut out).is_ok());
         assert_eq!((&got[0].0.body()[..], &out[..]), (&b"a"[..], &b"b"[..]));
-    }
-
-    // A provider's 101 the call did not ask for fails it, now this
-    // format's rule, not the kernel's.
-    #[tokio::test]
-    async fn a_101_no_one_asked_for_fails_the_call() {
-        let (mut head, ()) = http::Response::new(()).into_parts();
-        head.status = StatusCode::SWITCHING_PROTOCOLS;
-        let call = http::Request::new(()).into_parts().0;
-        let fault = read_response::<Raw>(
-            "raw",
-            http::Response::from_parts(head, Body::full("a")),
-            &call,
-        )
-        .next()
-        .await
-        .expect("expected value")
-        .err();
-        assert!(
-            fault
-                .as_ref()
-                .is_some_and(|f| f.is::<respan_gateway_sdk::Upstream>())
-        );
-        let answer = fault.and_then(|f| {
-            f.get::<respan_gateway_http::ProviderError>()
-                .map(|e| &e.response)
-                .cloned()
-        });
-        assert!(answer.is_none(), "never relayed");
     }
 }

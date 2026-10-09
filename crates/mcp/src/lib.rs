@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
 //! The Model Context Protocol: streamable HTTP as a format ([`StreamableHttp`]) and an
 //! MCP server run as a child process ([`StdioTransport`]).
-//! Typed messages live in `respan_gateway_mcp_messages`; [`HttpInput`] and
-//! [`HttpOutput`] attach HTTP batch, session and SSE metadata.
+//! Typed messages live in `respan_gateway_mcp_messages`; [`Input`] and
+//! [`Output`] attach HTTP batch, session and SSE metadata.
 //!
 //! JSON-RPC requests, notifications and responses are typed. HTTP batching,
 //! session and protocol headers, request queries and SSE cursors live on the
@@ -12,8 +12,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 mod envelope;
-pub use envelope::{HttpInput, HttpOutput};
-use envelope::{HttpInput as Input, HttpOutput as Output};
+pub use envelope::{Input, Output};
+use respan_gateway_mcp_messages::Message;
 use serde_json::{Value, json};
 
 mod session;
@@ -43,44 +43,40 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The ids of the requests in `messages`.
-fn request_ids(messages: &[Value]) -> impl Iterator<Item = &Value> {
-    let requests = messages.iter().filter(|m| m.get("method").is_some());
-    requests.filter_map(|m| m.get("id").filter(|id| !id.is_null()))
-}
-
 /// Messages as JSON: an array if `batch` or not exactly one, else the one
 /// message.
-fn body(messages: &[Value], batch: bool) -> Value {
-    match (messages, batch) {
-        ([one], false) => one.clone(),
-        _ => Value::Array(messages.to_vec()),
+fn body(messages: impl IntoIterator<Item: Into<Value>>, batch: bool) -> Value {
+    let mut all: Vec<Value> = messages.into_iter().map(Into::into).collect();
+    match (all.len(), batch) {
+        (1, false) => all.remove(0),
+        _ => Value::Array(all),
     }
 }
 
 /// The messages of a JSON value, an object or an array of them, and
-/// whether it was an array.
-fn messages(value: Value) -> Option<(Vec<Value>, bool)> {
-    match value {
-        Value::Array(all) if !all.is_empty() && all.iter().all(valid_message) => {
-            // Keep numeric and string IDs distinct while rejecting ambiguous
-            // batches; a response cannot identify two requests at once.
-            let mut ids = std::collections::HashSet::new();
-            let unique = request_ids(&all).all(|id| ids.insert(id.to_string()));
-            unique.then_some((all, true))
-        }
-        one @ Value::Object(_) if valid_message(&one) => Some((vec![one], false)),
-        _ => None,
-    }
-}
-
-/// Validate the JSON-RPC envelope without constraining MCP's extension fields.
-/// An id alone is not a response and must never settle an outstanding request.
-fn valid_message(message: &Value) -> bool {
-    respan_gateway_mcp_messages::Message::try_from(message.clone()).is_ok()
+/// whether it was an array. Each is a valid JSON-RPC envelope, so an id
+/// alone, which is no response, never settles an outstanding request.
+fn messages(value: Value) -> Option<(Vec<Message>, bool)> {
+    let (all, batch) = match value {
+        Value::Array(all) if !all.is_empty() => (all, true),
+        one => (vec![one], false),
+    };
+    let all: Vec<Message> = all
+        .into_iter()
+        .map(Message::try_from)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    // Keep numeric and string IDs distinct while rejecting ambiguous
+    // batches; a response cannot identify two requests at once.
+    let mut ids = std::collections::HashSet::new();
+    let unique = all
+        .iter()
+        .filter_map(Message::request_id)
+        .all(|id| ids.insert(id.to_string()));
+    unique.then_some((all, batch))
 }
 
 /// The messages in `raw`, JSON (never an SSE event), as [`messages`].
-fn read(raw: &[u8]) -> Option<(Vec<Value>, bool)> {
+fn read(raw: &[u8]) -> Option<(Vec<Message>, bool)> {
     messages(serde_json::from_slice(raw).ok()?)
 }

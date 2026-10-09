@@ -12,14 +12,16 @@ and runnable examples. The Python distribution is planned separately under
 | `crates/sdk/` | Public core facade, usage, fault facts and tagged native values | Core |
 | `crates/conversation/` | Conversation requests, reply events and assembly | SDK |
 | `crates/realtime/` | Format-tagged realtime event pair | SDK |
-| `crates/mcp-messages/` | Typed JSON-RPC message pair | None |
+| `crates/mcp-messages/` | Typed JSON-RPC messages | None |
 | `crates/http/` | HTTP bindings, framing, bodies, credentials and optional Reqwest transport | SDK |
-| `crates/ws/` | Outbound WebSocket transport and JSON event format | SDK, realtime, HTTP |
+| `crates/ws/` | WebSocket sessions at both edges (provider transport, client `serve`), JSON event format and its vendor presets | SDK, realtime, HTTP |
 | `crates/mcp/` | MCP streamable HTTP and stdio transport | SDK, mcp-messages, HTTP |
-| `crates/providers/` | OpenAI Chat and Anthropic Messages codecs | SDK, conversation, HTTP |
+| `crates/codec/` | What the conversation codecs share: HTTP codec, reader and encoder machinery | SDK, conversation, HTTP |
+| `crates/openai/` | OpenAI Chat codec and its vendor dialects | SDK, conversation, HTTP, codec |
+| `crates/anthropic/` | Anthropic Messages codec | SDK, conversation, HTTP, codec |
 | `crates/plugins/` | Model routing, attempts, fallback, races and backoff | SDK |
 | `crates/axum/` | HTTP ingress and optional WebSocket hosting | SDK, HTTP, optional WS |
-| `apps/gateway/` | Executable, YAML configuration and component registration | SDK, conversation, HTTP, providers, plugins, Axum |
+| `apps/gateway/` | Executable, YAML configuration and component registration | SDK, conversation, realtime, HTTP, WS, OpenAI, Anthropic, plugins, Axum |
 | `examples/` | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
 Arrows below point from a dependency toward its consumers. Test dependencies
@@ -29,20 +31,25 @@ can cross these boundaries to exercise a complete request.
 flowchart LR
     core --> sdk
     sdk --> conversation
-    conversation --> providers
+    conversation --> codec
     conversation --> gateway
     sdk --> realtime
     realtime --> ws
     mcp_messages[mcp-messages] --> mcp
     sdk --> http
     sdk --> plugins
-    http --> providers
+    http --> codec
+    codec --> openai
+    codec --> anthropic
     http --> mcp
     http --> ws
     http --> axum
     ws -. optional .-> axum
+    realtime --> gateway
+    ws --> gateway
     axum --> gateway
-    providers --> gateway
+    openai --> gateway
+    anthropic --> gateway
     plugins --> gateway
 ```
 
@@ -61,11 +68,11 @@ their filesystem locations.
   the same public contracts available to external plugin authors.
 - Protocol crates own wire framing and transport behavior. Provider codecs
   translate through typed conversation events.
-- Each message kind owns both directions in one data-model crate:
-  conversation (`Input` / `Output`), realtime (`Input` /
-  `Output`) and mcp-messages (`Input` / `Output`). Codecs and
-  transports depend on these models. HTTP owns its passthrough pair
-  (`Sent<F>` / `Got<F>`) alongside the codecs.
+- Every kind is an `Input` in and an `Output` out, named alike wherever it
+  lives: conversation and realtime in their own data-model crates, MCP's
+  HTTP envelopes in `mcp` (around mcp-messages' typed JSON-RPC `Message`),
+  and HTTP's passthrough in `formats::opaque` (`Input<F>` / `Output<F>`).
+  Codecs and transports depend on these models.
   The SDK defines no kinds or `Format` implementations.
   Plugins and whole-body conversation encoders share the conversation crate's ordered
   `Assembled` fold instead of maintaining separate reply representations.
@@ -86,6 +93,13 @@ The core drives typed streams and sinks while protocol code owns bytes and heads
 lifecycle. Filters edit typed events; calls let plugins invoke providers using
 the client's input or input of their own. Responses can be streamed, inspected
 or buffered. HTTP raw relay behavior is an explicit policy in the HTTP crate.
+
+An HTTP format binds `Incoming` and `Outgoing` with mirrored `bind`s, each
+given what only the protocol knows: a decoder, an encoder, and an error
+writer or reader. The bindings own what every HTTP format shares, so no
+format can forget it: response handoff and backpressure, whole or live
+uploads, the headers no proxy passes on, a fault's status and `Retry-After`,
+refused answers read whole into a fault, and no body where HTTP has none.
 
 See the [SDK guide](../crates/sdk/README.md),
 [conversation guide](../crates/conversation/README.md),

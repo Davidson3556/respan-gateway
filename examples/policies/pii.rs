@@ -32,7 +32,7 @@ use respan_gateway_conversation::Input;
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -131,8 +131,8 @@ fn gateway_with(
     middle: impl FnOnce(Gateway) -> Gateway,
 ) -> Result<Gateway, Fault> {
     let gw = Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, transport)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, transport)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(Pii);
     middle(gw).plugin(PiiInput).target("openai")
 }

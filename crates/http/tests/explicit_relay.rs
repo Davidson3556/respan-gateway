@@ -5,7 +5,7 @@ mod http_support;
 use http_support::{LIMIT, serve};
 use respan_gateway_http::{self as h, bytes::Bytes, http};
 use respan_gateway_sdk::{
-    ClientContext, Connection, EventStream, Fault, Format, Gateway, Plugin, Response, async_trait,
+    ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
 use std::sync::{
     Arc, Mutex,
@@ -25,16 +25,16 @@ impl Format<h::Incoming, String, Bytes> for Text {
         let decodes = self.0.clone();
         Ok(io.bind(
             move |request| {
-                Ok(h::messages(request, move |_, bytes| {
+                h::messages(request, move |_, bytes| {
                     decodes.fetch_add(1, Ordering::SeqCst);
                     Ok(format!("encoded:{}", String::from_utf8_lossy(&bytes)))
-                }))
+                })
             },
-            |reply, _: &mut EventStream<Bytes>| {
+            |reply| {
                 let head = reply.head();
                 Ok(reply.write(head, h::formats::each(|value: &Bytes| Ok(value.clone()))))
             },
-            h::plain_refusal,
+            h::plain,
         ))
     }
 }
@@ -44,19 +44,18 @@ impl Format<h::Outgoing, Bytes, String> for Text {
     }
     fn bind(&self, io: h::Outgoing) -> Result<Connection<Bytes, String>, Fault> {
         Ok(io.bind(
-            |source| {
-                h::request(
-                    source,
-                    h::formats::each(|value: &String| Ok(Bytes::from(value.clone()))),
-                )
+            |_, _: Option<&String>| {
+                Ok(h::formats::each(|value: &String| {
+                    Ok(Bytes::from(value.clone()))
+                }))
             },
             |response, _| {
-                h::formats::whole::read("text", response, |bytes, out| {
+                h::formats::whole::read(response.into_body(), |bytes, out| {
                     out.push(bytes);
                     Ok(())
                 })
             },
-            h::success,
+            |answer| h::provider_fault("text", answer),
         ))
     }
 }
@@ -162,8 +161,14 @@ async fn exercise(
         .uri("/original?x=1")
         .header("authorization", "Bearer client")
         .header("x-client", "custom")
-        .header("connection", "x-hop")
+        .header("connection", "x-hop, upgrade")
         .header("x-hop", "strip")
+        .header("upgrade", "h2c")
+        .header("host", "gateway.example")
+        .header("expect", "100-continue")
+        .header("if-none-match", "\"v1\"")
+        .header("cookie", "session=client")
+        .header("x-forwarded-for", "10.0.0.1")
         .body(h::Body::full("raw unknown bytes"))
         .expect("request");
     let (response, end) = serve(&gateway, request).await;
@@ -188,6 +193,11 @@ async fn same_name_default_encodes_without_client_key_or_provider_head() {
     assert_eq!(response.status(), 200);
     assert!(!response.headers().contains_key("x-provider"));
 }
+/// A raw request goes as the client sent it, but for what no proxy passes
+/// on, which the binding strips whatever its transport, though this one
+/// strips nothing: a whole request's `Upgrade`, which the adapter dropped,
+/// a hop's headers, `Host`, `Expect`, conditions and the gateway origin's
+/// cookies and forwarding headers.
 #[tokio::test]
 async fn explicit_raw_request_skips_decoding_and_keys_require_separate_copy() {
     for key in [false, true] {
@@ -206,7 +216,19 @@ async fn explicit_raw_request_skips_decoding_and_keys_require_separate_copy() {
         assert_eq!(request.method(), "PATCH");
         assert_eq!(request.uri(), "/original?x=1");
         assert_eq!(request.headers().contains_key("authorization"), key);
-        assert!(!request.headers().contains_key("x-hop"));
+        for stripped in [
+            "x-hop",
+            "upgrade",
+            "connection",
+            "host",
+            "expect",
+            "if-none-match",
+            "cookie",
+            "x-forwarded-for",
+        ] {
+            assert!(!request.headers().contains_key(stripped), "{stripped}");
+        }
+        assert_eq!(request.headers()["x-client"], "custom");
         assert_eq!(response.status(), 201);
         assert_eq!(response.headers()["x-provider"], "private");
     }

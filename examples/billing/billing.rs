@@ -23,7 +23,7 @@ use respan_gateway_conversation::Input;
 use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
-use respan_gateway_providers::OpenAiChat;
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 #[allow(dead_code)]
@@ -140,8 +140,8 @@ fn gateway(
         (LARGE, Price::new(2_500_000, 10_000_000)),
     ]);
     Gateway::new()
-        .provider::<Input, _, _>("openai", OpenAiChat, provider)?
-        .client::<Input, _, _>(OpenAiChat)?
+        .provider::<Input, _, _>("openai", OpenAiChat::OPENAI, provider)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         // Last, so its filter sees each reply first.
         .plugin(Billing { prices, store })
         .target("openai")

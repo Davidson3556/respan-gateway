@@ -318,10 +318,10 @@ async fn losing_the_store_cancels_a_call_waiting_for_its_provider_head() -> Resu
         }
     };
     let gw = Gateway::new()
-        .client::<Input, _, _>(OpenAiChat)?
+        .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .provider::<Input, _, _>(
             "p",
-            OpenAiChat,
+            OpenAiChat::OPENAI,
             respan_gateway_http::connect(supervised(transport), LIMIT),
         )?
         .plugin(Admission {

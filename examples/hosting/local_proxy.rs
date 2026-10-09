@@ -14,12 +14,12 @@
 //! `RESPAN_ANTHROPIC_UPSTREAM=http://127.0.0.1:PORT` to use a local provider
 //! instead of the default Anthropic upstream.
 
+use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
 use respan_gateway_examples::LIMIT;
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_providers::AnthropicMessages;
 use respan_gateway_sdk::{Fault, Gateway, futures::TryStreamExt};
 use std::sync::{Arc, Mutex, PoisonError};
 

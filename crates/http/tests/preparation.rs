@@ -19,18 +19,26 @@ enum Opening {
     Empty,
 }
 
+/// A response to `request`, of the method `opening` asks.
+fn request(opening: Opening) -> Request<h::Body> {
+    let mut request = Request::new(h::Body::full(Bytes::new()));
+    if let Opening::Empty = opening {
+        // A `HEAD` is answered with no body.
+        *request.method_mut() = h::http::Method::HEAD;
+    }
+    request
+}
+
 async fn preparation_failure(opening: Opening, panic: bool) {
-    let request = Request::new(h::Body::full(Bytes::new()));
-    let (io, answer) = h::Incoming::accept(request, false, LIMIT);
+    let (io, answer) = h::Incoming::accept(request(opening), h::Framing::Whole, LIMIT);
     let (read, mut sink) = io.bind(
-        |_| Ok(EventStream::single(String::new())),
-        move |reply, source: &mut EventStream<u8>| {
+        |_| EventStream::single(String::new()),
+        move |reply| {
             let head = respan_gateway_http::http::Response::new(()).into_parts().0;
             let encoder = h::formats::each(|_: &u8| Ok(Bytes::new()));
             let _sink = match opening {
-                Opening::Delayed => reply.write(head, encoder),
+                Opening::Delayed | Opening::Empty => reply.write(head, encoder),
                 Opening::Immediate => reply.open(head, Bytes::from_static(b"premature"), encoder),
-                Opening::Empty => reply.empty(head, source),
             };
             if panic {
                 panic!("preparation panic after constructing a sink");
@@ -77,11 +85,12 @@ async fn preparation_failure(opening: Opening, panic: bool) {
         );
     } else {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{opening:?}");
-        assert_eq!(
-            bytes,
-            Bytes::from_static(b"preparation failed"),
-            "{opening:?}"
-        );
+        // A refusal of a `HEAD` has no body either.
+        let written = match opening {
+            Opening::Empty => Bytes::new(),
+            _ => Bytes::from_static(b"preparation failed"),
+        };
+        assert_eq!(bytes, written, "{opening:?}");
     }
 }
 
@@ -101,19 +110,14 @@ async fn preparation_panic_wins_after_constructing_each_response_sink() {
 
 #[tokio::test]
 async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
-    for explicit_empty in [false, true] {
-        let (io, answer) =
-            h::Incoming::accept(Request::new(h::Body::full(Bytes::new())), false, LIMIT);
+    for opening in [Opening::Delayed, Opening::Empty] {
+        let (io, answer) = h::Incoming::accept(request(opening), h::Framing::Whole, LIMIT);
         let (read, mut sink) = io.bind(
-            |_| Ok(EventStream::single(String::new())),
-            move |reply, source: &mut EventStream<u8>| {
+            |_| EventStream::single(String::new()),
+            move |reply| {
                 drop(answer);
                 let head = respan_gateway_http::http::Response::new(()).into_parts().0;
-                Ok(if explicit_empty {
-                    reply.empty(head, source)
-                } else {
-                    reply.write(head, h::formats::each(|_: &u8| Ok(Bytes::new())))
-                })
+                Ok(reply.write(head, h::formats::each(|_: &u8| Ok(Bytes::new()))))
             },
             |fault, _, _| Bytes::from(fault.message().to_owned()),
         );
@@ -128,4 +132,29 @@ async fn cancelled_response_handoff_cannot_acknowledge_empty_delivery() {
             "abandoned"
         );
     }
+}
+
+/// A response prepared before its request was read, which no gateway
+/// does, fails `internal` and says so.
+#[tokio::test]
+async fn a_response_prepared_before_its_request_was_read_fails() {
+    let (io, _answer) = h::Incoming::accept(request(Opening::Delayed), h::Framing::Whole, LIMIT);
+    let (_read, mut sink) = io.bind(
+        |_| EventStream::single(String::new()),
+        |reply| {
+            let head = reply.head();
+            Ok(reply.write(head, h::formats::each(|_: &u8| Ok(Bytes::new()))))
+        },
+        h::plain,
+    );
+    let fault = sink
+        .prepare(&mut EventStream::single(1_u8))
+        .expect_err("unread request");
+    assert_eq!(
+        (h::error_code(&fault), fault.message()),
+        (
+            "internal",
+            "a response was prepared before its request was read"
+        )
+    );
 }

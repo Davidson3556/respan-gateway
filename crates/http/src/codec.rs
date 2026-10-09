@@ -2,9 +2,9 @@
 
 use crate::Body;
 use bytes::{Bytes, BytesMut};
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use http::request::Parts as RequestHead;
-use respan_gateway_sdk::{EventSink, EventStream, Fault};
+use respan_gateway_sdk::{EventStream, Fault};
 
 /// Stateful values-to-bytes encoding, independent of heads and transport I/O.
 pub trait Encoder<T>: Send + 'static {
@@ -29,30 +29,6 @@ pub fn encode_all<T: 'static>(
     }
     encoder.end(&Ok(()), &mut bytes)?;
     Ok(bytes.freeze())
-}
-
-/// Prepare the actual request and per-item sink. Finite input is encoded now;
-/// live input stays caller-owned. Explicit raw requests bypass this helper.
-pub fn request<T: Clone + Send + Sync + 'static>(
-    source: &mut EventStream<T>,
-    encoder: Box<dyn Encoder<T>>,
-) -> Result<(http::Request<Body>, EventSink<T>), Fault> {
-    if let Some(fault) = source.refusal() {
-        return Err(fault.clone());
-    }
-    if source.is_single() {
-        let value = source
-            .value()
-            .transpose()?
-            .ok_or_else(|| Fault::internal("a whole request has no input"))?;
-        let bytes = encode_all(encoder, std::slice::from_ref(value))?;
-        source.stop();
-        let sink = EventSink::new(futures::sink::drain().sink_map_err(|never| match never {}));
-        Ok((http::Request::new(Body::full(bytes)), sink))
-    } else {
-        let (sink, body) = crate::driver::upload::encoding(encoder);
-        Ok((http::Request::new(body), sink))
-    }
 }
 
 /// Decode one finite request lazily, or one message per explicitly live frame.

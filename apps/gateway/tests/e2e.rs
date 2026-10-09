@@ -2,9 +2,10 @@
 //!
 //! Each test starts `respan-gateway` itself (`CARGO_BIN_EXE_respan-gateway`)
 //! on a free port, with a temp YAML config whose providers are `mockllm`
-//! fakes on localhost: `FakeOpenAi` and `FakeAnthropic` check each request
-//! by the provider's own rules and answer in its exact framing, streams and
-//! breaks included. Clients speak real HTTP to the real axum server.
+//! fakes on localhost: `FakeOpenAi`, `FakeAnthropic` and `FakeGemini` check
+//! each request by the provider's own rules and answer in its exact
+//! framing, streams, sessions and breaks included. Clients speak real HTTP
+//! and WebSocket to the real axum server.
 //!
 //! A raw relay sends the client's request bytes unedited, which these tests
 //! check byte for byte. Responses are re-encoded, so they are checked by
@@ -1477,4 +1478,134 @@ fn proxy_url_with_a_quote_is_not_parsed_as_yaml() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+// Sessions over WebSocket.
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A WebSocket session with the gateway at `path`, offering `protocols`,
+/// and the subprotocol the gateway chose.
+async fn session(gw: &Gateway, path: &str, protocols: &str) -> (Ws, Option<String>) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("{}{path}", gw.base.replace("http://", "ws://"));
+    let mut req = url.into_client_request().unwrap();
+    if !protocols.is_empty() {
+        let offered = protocols.parse().unwrap();
+        req.headers_mut().insert("sec-websocket-protocol", offered);
+    }
+    let (ws, resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let chosen = header(resp.headers(), "sec-websocket-protocol").map(str::to_owned);
+    (ws, chosen)
+}
+
+/// Sends `event` as a text frame.
+async fn say(ws: &mut Ws, event: Value) {
+    use futures::SinkExt;
+    let text = event.to_string().into();
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(text))
+        .await
+        .unwrap();
+}
+
+/// The next message `ws` hears, bounded: a JSON event, or the code of a
+/// Close (`Err`).
+async fn hear(ws: &mut Ws) -> Result<Value, Option<u16>> {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let next = tokio::time::timeout(support::BOUND, ws.next()).await;
+    match next.unwrap() {
+        Some(Ok(Message::Text(text))) => Ok(json(&text)),
+        Some(Ok(Message::Close(frame))) => Err(frame.map(|f| f.code.into())),
+        other => panic!("no event or Close: {other:?}"),
+    }
+}
+
+/// The events `ws` hears up to and including the first `last` says ends.
+async fn until(ws: &mut Ws, last: impl Fn(&Value) -> bool) -> String {
+    let mut heard = String::new();
+    loop {
+        let event = hear(ws).await.unwrap();
+        heard.push_str(&event.to_string());
+        if last(&event) {
+            return heard;
+        }
+    }
+}
+
+#[tokio::test]
+async fn sessions_from_yaml_relay_with_the_gateways_keys_and_close_1001_on_sigterm() {
+    let openai = FakeOpenAi::start().await;
+    let gemini = mockllm::FakeGemini::start().await;
+    openai.answer(Answer::text("hi there"));
+    gemini.answer(Answer::text("Paris"));
+    let ws = |base: String| base.replace("http://", "ws://");
+    let mut gw = Gateway::start(&format!(
+        "providers:
+  realtime: {{ format: openai-realtime, base_url: '{}', auth: {{ type: bearer, key: sk-gw }} }}
+  live: {{ format: gemini-live, base_url: '{}', auth: {{ type: header, name: x-goog-api-key, key: AIza-gw }} }}
+serve: [openai-realtime, gemini-live]
+",
+        ws(openai.base_url()),
+        ws(gemini.base_url())
+    ))
+    .await;
+
+    // A browser's offer: the subprotocol, and a key, which never goes back.
+    let offer = "realtime, openai-insecure-api-key.sk-client";
+    let (mut realtime, chosen) = session(&gw, "/v1/realtime?model=gpt-realtime", offer).await;
+    assert_eq!(chosen.as_deref(), Some("realtime"));
+    assert_eq!(
+        hear(&mut realtime).await.unwrap()["type"],
+        "session.created"
+    );
+    let says = json!({"type": "conversation.item.create", "item": {"type": "message",
+        "role": "user", "content": [{"type": "input_text", "text": "hi"}]}});
+    say(&mut realtime, says).await;
+    say(&mut realtime, json!({"type": "response.create"})).await;
+    let turn = until(&mut realtime, |e| e["type"] == "response.done").await;
+    assert!(turn.contains("hi there"), "{turn}");
+    let upgrade = &openai.requests()[0];
+    assert_eq!(upgrade.path, "/v1/realtime");
+    assert_eq!(upgrade.header("authorization"), Some("Bearer sk-gw"));
+
+    let live = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+    let (mut live, chosen) = session(&gw, live, "").await;
+    assert_eq!(chosen, None);
+    let setup = json!({"setup": {"model": "models/gemini-live",
+        "generationConfig": {"responseModalities": ["TEXT"]}}});
+    say(&mut live, setup).await;
+    assert!(
+        hear(&mut live)
+            .await
+            .unwrap()
+            .get("setupComplete")
+            .is_some()
+    );
+    say(
+        &mut live,
+        json!({"realtimeInput": {"text": "Capital of France?"}}),
+    )
+    .await;
+    let turn = until(&mut live, |e| e["serverContent"]["turnComplete"] == true).await;
+    assert!(turn.contains("Paris"), "{turn}");
+    assert_eq!(
+        gemini.requests()[0].header("x-goog-api-key"),
+        Some("AIza-gw")
+    );
+
+    let pid = gw.child.id().unwrap().to_string();
+    let killed = std::process::Command::new("kill")
+        .args(["-TERM", &pid])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    assert_eq!(hear(&mut realtime).await, Err(Some(1001)));
+    assert_eq!(hear(&mut live).await, Err(Some(1001)));
+    let status = tokio::time::timeout(support::BOUND, gw.child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success(), "{status}");
 }

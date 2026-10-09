@@ -15,8 +15,7 @@ use http_support::{post, read_whole, serve};
 use mockllm::{Answer as FakeAnswer, FakeOpenAi};
 use respan_gateway_conversation::Input;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::opaque::{self};
-use respan_gateway_http::formats::opaque::{Got, Sent};
+use respan_gateway_http::formats::opaque;
 use respan_gateway_http::formats::whole;
 use respan_gateway_http::formats::{self as formats, default_content_type, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
@@ -25,7 +24,7 @@ use respan_gateway_http::{
     Body, HttpClient, Incoming, Outgoing, Status, Wire, http::request::Parts as RequestHead,
     http::response::Parts as Head,
 };
-use respan_gateway_http::{Encoder, credentials, proxy_call, strip_client_origin_headers};
+use respan_gateway_http::{Encoder, credentials};
 use respan_gateway_sdk::async_trait;
 use respan_gateway_sdk::futures;
 use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
@@ -112,11 +111,7 @@ fn local_with_headers(
     let calls = sent.clone();
     let index = Arc::new(AtomicUsize::new(0));
     let answer = Arc::new(answer);
-    let transport = move |call: http::Request<Body>| {
-        let (mut head, body) = call.into_parts();
-        proxy_call(&mut head);
-        strip_client_origin_headers(&mut head.headers);
-        let mut call = http::Request::from_parts(head, body);
+    let transport = move |mut call: http::Request<Body>| {
         credentials(&mut call, &headers);
         let (head, body) = call.into_parts();
         let calls = calls.clone();
@@ -253,7 +248,7 @@ impl Format<Incoming, Jev, Answer> for JevFormat {
         let jev = *self;
         Ok(io.bind(
             move |request| jev.inputs(request),
-            move |reply, source| jev.outputs(reply, source),
+            move |reply| jev.outputs(reply),
             move |fault, _, head| jev.refusal(fault, head),
         ))
     }
@@ -264,40 +259,35 @@ impl Format<Outgoing, Answer, Jev> for JevFormat {
         self.name
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
-        let jev = *self;
-        Ok(io.bind(
-            move |source| jev.prepare(source),
-            move |response, _| jev.replies(response),
-            respan_gateway_http::success,
-        ))
+        Ok(self.call(io))
     }
 }
 
 impl JevFormat {
-    fn inputs(&self, request: http::Request<Body>) -> Result<EventStream<Jev>, Fault> {
+    fn inputs(&self, request: http::Request<Body>) -> EventStream<Jev> {
         let jev = *self;
-        Ok(respan_gateway_http::messages(request, move |_, raw| {
-            jev.read(&raw)
-        }))
+        respan_gateway_http::messages(request, move |_, raw| jev.read(&raw))
     }
 
-    fn prepare(
-        &self,
-        source: &mut EventStream<Jev>,
-    ) -> Result<(http::Request<Body>, EventSink<Jev>), Fault> {
-        let mut head = http::Request::new(()).into_parts().0;
+    /// This format at the provider edge.
+    fn call(&self, io: Outgoing) -> Connection<Answer, Jev> {
+        let jev = *self;
+        io.bind(
+            move |head, _| jev.prepare(head),
+            move |response, _| jev.replies(response),
+            move |answer| words(respan_gateway_http::provider_fault(jev.name, answer)),
+        )
+    }
+
+    fn prepare(&self, head: &mut RequestHead) -> Result<Box<dyn Encoder<Jev>>, Fault> {
         head.method = http::Method::POST;
-        formats::set_path(&mut head, "/complete")?;
+        formats::set_path(head, "/complete")?;
         head.headers
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let (request, sink) = respan_gateway_http::request(source, Box::new(Prompts(*self)))?;
-        Ok((http::Request::from_parts(head, request.into_body()), sink))
+        Ok(Box::new(Prompts(*self)))
     }
 
-    fn replies(
-        &self,
-        response: http::Response<Body>,
-    ) -> futures::stream::BoxStream<'static, Result<Answer, Fault>> {
+    fn replies(&self, response: http::Response<Body>) -> EventStream<Answer> {
         let (answer, name) = (self.answer, self.name);
         let decode = move |raw: Bytes, out: &mut Vec<Answer>| {
             if raw.starts_with(b":") {
@@ -318,20 +308,21 @@ impl JevFormat {
             out.push(Answer::new(text));
             Ok(())
         };
-        sse::or_whole(self.name, response, decode)
-            .map_err(words)
-            .boxed()
+        let (head, body) = response.into_parts();
+        let read = match sse::is_stream(&head) {
+            true => sse::read(
+                body,
+                decode,
+                |decode, raw, out| decode(raw, out),
+                |_, wire, _| wire,
+            ),
+            false => whole::read(body, decode),
+        };
+        EventStream::stream(read.map_err(words))
     }
 
-    fn outputs(
-        &self,
-        reply: respan_gateway_http::Reply,
-        source: &mut EventStream<Answer>,
-    ) -> Result<EventSink<Answer>, Fault> {
+    fn outputs(&self, reply: respan_gateway_http::Reply) -> Result<EventSink<Answer>, Fault> {
         let mut head = reply.head();
-        if respan_gateway_http::bodiless(reply.request().method(), head.status) {
-            return Ok(reply.empty(head, source));
-        }
         let encoder = self.response_body(&mut head);
         Ok(reply.write(head, encoder))
     }
@@ -427,7 +418,7 @@ impl JevFormat {
             };
         match stream {
             true => Box::new(Events { write, fail }),
-            false => whole::collect(write, fail),
+            false => whole::collect(write),
         }
     }
 
@@ -569,7 +560,11 @@ async fn a_plugin_works_on_every_format_of_its_kind() {
 #[tokio::test]
 async fn a_default_target_of_another_kind_is_not_used() {
     let (transport, sent) = local(|_, _| panic!("wrong kind reached provider"));
-    let openai = add_provider("openai", respan_gateway_providers::OpenAiChat, transport);
+    let openai = add_provider(
+        "openai",
+        respan_gateway_openai::OpenAiChat::OPENAI,
+        transport,
+    );
     let gw = serving(V1, [openai], Vec::new(), Some("openai")).expect("builds");
 
     let (resp, ended) = serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await;
@@ -594,7 +589,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
     #[async_trait]
     impl Plugin for ByFormat {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-            if cx.format() == respan_gateway_providers::OpenAiChat.name() {
+            if cx.format() == respan_gateway_openai::OpenAiChat::OPENAI.name() {
                 cx.set_target("openai");
             }
             Ok(None)
@@ -606,13 +601,13 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
     let gw = |plugins: Vec<Arc<dyn Plugin>>| {
         let openai = add_provider(
             "openai",
-            respan_gateway_providers::OpenAiChat,
+            respan_gateway_openai::OpenAiChat::OPENAI,
             openai(&fake),
         );
         providers([openai, add_provider("v2", V2, v2.clone())])
             .and_then(|gw| {
                 gw.client::<Jev, _, _>(V1)?
-                    .client::<Input, _, _>(respan_gateway_providers::OpenAiChat)
+                    .client::<Input, _, _>(respan_gateway_openai::OpenAiChat::OPENAI)
             })
             .map(|gw| plugins.into_iter().fold(gw, Gateway::plugin))
             .and_then(|gw| gw.target("openai")?.target("v2"))
@@ -661,7 +656,7 @@ async fn a_later_default_target_replaces_the_first_and_a_plugin_routes_by_format
 async fn a_format_of_no_kind_is_served_like_any_other() {
     assert!(
         providers([])
-            .and_then(|gw| gw.client::<Sent<Anywhere>, _, _>(Anywhere))
+            .and_then(|gw| gw.client::<opaque::Input<Anywhere>, _, _>(Anywhere))
             .is_ok()
     );
 }
@@ -678,7 +673,11 @@ async fn a_call_to_a_provider_of_another_kind_is_refused_when_made() {
     }
 
     let (transport, sent) = local(|_, _| panic!("wrong kind reached provider"));
-    let openai = add_provider("openai", respan_gateway_providers::OpenAiChat, transport);
+    let openai = add_provider(
+        "openai",
+        respan_gateway_openai::OpenAiChat::OPENAI,
+        transport,
+    );
     let gw = serving(V1, [openai], vec![Arc::new(Stray)], None).expect("builds");
 
     let (resp, ended) = serve(&gw, to("jev-v1", r#"{"input":"hi"}"#)).await;
@@ -809,7 +808,7 @@ fn formats_of_one_name_and_different_kinds_do_not_build() {
         ..V1
     };
     let err = serving(
-        respan_gateway_providers::OpenAiChat,
+        respan_gateway_openai::OpenAiChat::OPENAI,
         [add_provider("jev", impostor, unused())],
         Vec::new(),
         Some("jev"),
@@ -863,38 +862,41 @@ async fn a_format_of_no_kind_relays_and_has_no_input_type() {
     #[derive(Clone)]
     struct Opaque;
 
-    impl Format<Incoming, Sent<Opaque>, Got<Opaque>> for Opaque {
+    impl Format<Incoming, opaque::Input<Opaque>, opaque::Output<Opaque>> for Opaque {
         fn name(&self) -> &str {
             "opaque"
         }
         fn matches(&self, io: &Incoming) -> bool {
             io.request().method() == http::Method::POST && io.request().uri().path() == "/opaque"
         }
-        fn bind(&self, io: Incoming) -> Result<Connection<Sent<Opaque>, Got<Opaque>>, Fault> {
+        fn bind(
+            &self,
+            io: Incoming,
+        ) -> Result<Connection<opaque::Input<Opaque>, opaque::Output<Opaque>>, Fault> {
             Ok(io.bind(
-                |request| Ok(opaque::read_request(request)),
-                |reply, _| Ok(opaque::write_response(reply)),
-                respan_gateway_http::plain_refusal,
+                opaque::read_request,
+                opaque::write_response,
+                respan_gateway_http::plain,
             ))
         }
     }
-    impl Format<Outgoing, Got<Opaque>, Sent<Opaque>> for Opaque {
+    impl Format<Outgoing, opaque::Output<Opaque>, opaque::Input<Opaque>> for Opaque {
         fn name(&self) -> &str {
             "opaque"
         }
-        fn bind(&self, io: Outgoing) -> Result<Connection<Got<Opaque>, Sent<Opaque>>, Fault> {
+        fn bind(
+            &self,
+            io: Outgoing,
+        ) -> Result<Connection<opaque::Output<Opaque>, opaque::Input<Opaque>>, Fault> {
             Ok(io.bind(
-                |source| {
-                    let (mut request, sink) = opaque::write_request(source)?;
-                    *request.method_mut() = http::Method::POST;
-                    let (mut head, body) = request.into_parts();
-                    formats::set_path(&mut head, "/")?;
-                    Ok((http::Request::from_parts(head, body), sink))
+                |head, input| {
+                    let encoder = opaque::write_request(head, input)?;
+                    head.method = http::Method::POST;
+                    formats::set_path(head, "/")?;
+                    Ok(encoder)
                 },
-                |response, request| {
-                    opaque::read_response("opaque", response, &request.into_parts().0)
-                },
-                respan_gateway_http::success,
+                opaque::read_response,
+                |answer| respan_gateway_http::provider_fault("opaque", answer),
             ))
         }
     }
@@ -1037,7 +1039,7 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             Ok(io.bind(
                 move |request| V2.inputs(request),
-                move |reply, source| V2.outputs(reply, source),
+                move |reply| V2.outputs(reply),
                 |fault, _, head| {
                     let words = V2.refusal(fault, head);
                     head.status = StatusCode::OK;
@@ -1051,11 +1053,7 @@ async fn a_format_that_writes_errors_as_200_is_refused_once() {
             V2.name
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
-            Ok(io.bind(
-                |source| V2.prepare(source),
-                |response, _| V2.replies(response),
-                respan_gateway_http::success,
-            ))
+            Ok(V2.call(io))
         }
     }
 
@@ -1091,7 +1089,7 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             Ok(io.bind(
                 move |request| V2.inputs(request),
-                |_, _| panic!("a buggy format"),
+                |_| panic!("a buggy format"),
                 |_, _, _| panic!("a buggy format"),
             ))
         }
@@ -1101,11 +1099,7 @@ async fn a_format_that_panics_building_its_encoder_is_a_plain_500() {
             V2.name
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
-            Ok(io.bind(
-                |source| V2.prepare(source),
-                |response, _| V2.replies(response),
-                respan_gateway_http::success,
-            ))
+            Ok(V2.call(io))
         }
     }
 
@@ -1403,7 +1397,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
         fn bind(&self, io: Incoming) -> Result<Connection<Jev, Answer>, Fault> {
             Ok(io.bind(
                 |request| {
-                    Ok(respan_gateway_http::messages(request, |head, _| {
+                    respan_gateway_http::messages(request, |head, _| {
                         let prompt = head
                             .headers
                             .get("x-prompt")
@@ -1415,13 +1409,10 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
                             unknown: Vec::new(),
                             from: "jev-headed",
                         })
-                    }))
+                    })
                 },
-                |reply, source| {
+                |reply| {
                     let mut head = reply.head();
-                    if respan_gateway_http::bodiless(reply.request().method(), head.status) {
-                        return Ok(reply.empty(head, source));
-                    }
                     let encoder = V2.response_body(&mut head);
                     Ok(reply.write(head, encoder))
                 },
@@ -1434,11 +1425,7 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
             "jev-headed"
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
-            Ok(io.bind(
-                |source| V2.prepare(source),
-                |response, _| V2.replies(response),
-                respan_gateway_http::success,
-            ))
+            Ok(V2.call(io))
         }
     }
 
@@ -1482,38 +1469,41 @@ async fn the_input_is_read_from_the_head_as_it_arrived() {
 #[derive(Clone)]
 struct Anywhere;
 
-impl Format<Incoming, Sent<Anywhere>, Got<Anywhere>> for Anywhere {
+impl Format<Incoming, opaque::Input<Anywhere>, opaque::Output<Anywhere>> for Anywhere {
     fn name(&self) -> &str {
         "anywhere"
     }
     fn matches(&self, io: &Incoming) -> bool {
         io.request().method() == http::Method::POST
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Anywhere>, Got<Anywhere>>, Fault> {
+    fn bind(
+        &self,
+        io: Incoming,
+    ) -> Result<Connection<opaque::Input<Anywhere>, opaque::Output<Anywhere>>, Fault> {
         Ok(io.bind(
-            |request| Ok(opaque::read_request(request)),
-            |reply, _| Ok(opaque::write_response(reply)),
-            respan_gateway_http::plain_refusal,
+            opaque::read_request,
+            opaque::write_response,
+            respan_gateway_http::plain,
         ))
     }
 }
-impl Format<Outgoing, Got<Anywhere>, Sent<Anywhere>> for Anywhere {
+impl Format<Outgoing, opaque::Output<Anywhere>, opaque::Input<Anywhere>> for Anywhere {
     fn name(&self) -> &str {
         "anywhere"
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Anywhere>, Sent<Anywhere>>, Fault> {
+    fn bind(
+        &self,
+        io: Outgoing,
+    ) -> Result<Connection<opaque::Output<Anywhere>, opaque::Input<Anywhere>>, Fault> {
         Ok(io.bind(
-            |source| {
-                let (mut request, sink) = opaque::write_request(source)?;
-                *request.method_mut() = http::Method::POST;
-                let (mut head, body) = request.into_parts();
-                formats::set_path(&mut head, "/")?;
-                Ok((http::Request::from_parts(head, body), sink))
+            |head, input| {
+                let encoder = opaque::write_request(head, input)?;
+                head.method = http::Method::POST;
+                formats::set_path(head, "/")?;
+                Ok(encoder)
             },
-            |response, request| {
-                opaque::read_response("anywhere", response, &request.into_parts().0)
-            },
-            respan_gateway_http::success,
+            opaque::read_response,
+            |answer| respan_gateway_http::provider_fault("anywhere", answer),
         ))
     }
 }
@@ -1539,12 +1529,12 @@ impl Plugin for NoteFormat {
 async fn the_first_format_served_that_accepts_a_request_serves_it() {
     let serving_by = |gw: Gateway, anywhere_first: bool| match anywhere_first {
         true => gw
-            .client::<Sent<Anywhere>, _, _>(Anywhere)?
+            .client::<opaque::Input<Anywhere>, _, _>(Anywhere)?
             .client::<Jev, _, _>(V1),
         false => gw
             .client::<Jev, _, _>(V1)?
             .client::<Jev, _, _>(V2)?
-            .client::<Sent<Anywhere>, _, _>(Anywhere),
+            .client::<opaque::Input<Anywhere>, _, _>(Anywhere),
     };
     let served = async |anywhere_first: bool| {
         let note = NoteFormat::default();
@@ -1644,7 +1634,7 @@ async fn a_plugin_for_one_kind_lets_other_traffic_pass_when_it_says_so() {
     .and_then(|gw| {
         let gw = gw
             .client::<Jev, _, _>(V2)?
-            .client::<Sent<Anywhere>, _, _>(Anywhere)?;
+            .client::<opaque::Input<Anywhere>, _, _>(Anywhere)?;
         Ok(gw.plugin(ToHeader).plugin(PoliteJev))
     })
     .unwrap_or_else(|e| panic!("{e}"));
@@ -1785,7 +1775,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
             let jev = cx.is_kind::<Jev>();
             assert_eq!(other.is_some_and(|c| c == "internal"), !jev);
             let kinds = (
-                cx.is_kind::<Sent<Anywhere>>(),
+                cx.is_kind::<opaque::Input<Anywhere>>(),
                 cx.is_kind::<Jev>(),
                 cx.is_kind::<Answer>(),
             );
@@ -1802,7 +1792,7 @@ async fn traffic_of_no_kind_is_a_kind_of_its_own() {
         .and_then(|gw| {
             Ok(gw
                 .client::<Jev, _, _>(V1)?
-                .client::<Sent<Anywhere>, _, _>(Anywhere)?
+                .client::<opaque::Input<Anywhere>, _, _>(Anywhere)?
                 .plugin(kinds.clone()))
         })
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1865,7 +1855,9 @@ async fn until_content_returns_a_response_of_no_kind_at_its_first_bytes_or_its_f
     impl Plugin for Race {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             let mut response = cx.call("any").await?;
-            response.buffer_until(|_: &Got<Anywhere>| true).await?;
+            response
+                .buffer_until(|_: &opaque::Output<Anywhere>| true)
+                .await?;
             Ok(Some(response))
         }
     }
@@ -1916,11 +1908,11 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
             let seen = self.0.clone();
             Ok(io.bind(
                 move |request| V1.inputs(request),
-                move |reply, source| {
+                move |reply| {
                     seen.lock()
                         .map(|mut h| *h = Some(reply.head().headers))
                         .ok();
-                    V1.outputs(reply, source)
+                    V1.outputs(reply)
                 },
                 |fault, _, head| V1.refusal(fault, head),
             ))
@@ -1931,11 +1923,7 @@ async fn a_translating_encoder_gets_none_of_the_providers_head() {
             V1.name
         }
         fn bind(&self, io: Outgoing) -> Result<Connection<Answer, Jev>, Fault> {
-            Ok(io.bind(
-                |source| V1.prepare(source),
-                |response, _| V1.replies(response),
-                respan_gateway_http::success,
-            ))
+            Ok(V1.call(io))
         }
     }
 

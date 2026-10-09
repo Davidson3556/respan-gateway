@@ -16,14 +16,15 @@ use std::sync::{Arc, Mutex};
 use hooks::{Calls, Outcomes};
 use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
+use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_codec::Codec;
 use respan_gateway_conversation::{Block, Input, Output, units};
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::opaque::{self};
-use respan_gateway_http::formats::opaque::{Got, Sent};
+use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{Body, HttpClient, Incoming, Outgoing, connect};
-use respan_gateway_providers::{AnthropicMessages, OpenAiChat};
+use respan_gateway_openai::OpenAiChat;
 use respan_gateway_sdk::ErrorCode;
 use respan_gateway_sdk::Usage;
 use respan_gateway_sdk::futures;
@@ -38,31 +39,37 @@ use support::{Metered, with_plugins};
 /// A protocol the gateway relays unread: a kind of its own.
 struct Raw;
 
-impl Format<Incoming, Sent<Raw>, Got<Raw>> for Raw {
+impl Format<Incoming, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
     fn matches(&self, io: &Incoming) -> bool {
         io.request().uri().path().starts_with("/raw")
     }
-    fn bind(&self, io: Incoming) -> Result<Connection<Sent<Raw>, Got<Raw>>, Fault> {
+    fn bind(
+        &self,
+        io: Incoming,
+    ) -> Result<Connection<opaque::Input<Raw>, opaque::Output<Raw>>, Fault> {
         Ok(io.bind(
-            |request| Ok(opaque::read_request(request)),
-            |reply, _| Ok(opaque::write_response(reply)),
-            respan_gateway_http::plain_refusal,
+            opaque::read_request,
+            opaque::write_response,
+            respan_gateway_http::plain,
         ))
     }
 }
-impl Format<Outgoing, Got<Raw>, Sent<Raw>> for Raw {
+impl Format<Outgoing, opaque::Output<Raw>, opaque::Input<Raw>> for Raw {
     fn name(&self) -> &str {
         "raw"
     }
-    fn bind(&self, io: Outgoing) -> Result<Connection<Got<Raw>, Sent<Raw>>, Fault> {
-        Ok(io.bind(
-            opaque::write_request,
-            |response, request| opaque::read_response("raw", response, &request.into_parts().0),
-            respan_gateway_http::success,
-        ))
+    fn bind(
+        &self,
+        io: Outgoing,
+    ) -> Result<Connection<opaque::Output<Raw>, opaque::Input<Raw>>, Fault> {
+        Ok(
+            io.bind(opaque::write_request, opaque::read_response, |answer| {
+                respan_gateway_http::provider_fault("raw", answer)
+            }),
+        )
     }
 }
 
@@ -271,7 +278,11 @@ async fn keep_alives_reach_every_filter_and_a_same_format_client_in_place() {
     let seen = Seen::default();
     let fake = FakeOpenAi::start().await;
     fake.answer(events(&openai_events));
-    let (gw, _, _) = gateway(OpenAiChat, openai(&fake), vec![Arc::new(seen.clone())]);
+    let (gw, _, _) = gateway(
+        OpenAiChat::OPENAI,
+        openai(&fake),
+        vec![Arc::new(seen.clone())],
+    );
     let chat = r#"{"model":"gpt-4.1-mini","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}"#;
 
     let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
@@ -329,31 +340,31 @@ struct Counted(Arc<AtomicUsize>);
 
 impl Format<Incoming, Input, Output> for Counted {
     fn name(&self) -> &str {
-        OpenAiChat.name()
+        OpenAiChat::OPENAI.name()
     }
     fn matches(&self, io: &Incoming) -> bool {
-        OpenAiChat.matches(io)
+        OpenAiChat::OPENAI.matches(io)
     }
     fn bind(&self, io: Incoming) -> Result<Connection<Input, Output>, Fault> {
         let count = self.0.clone();
         Ok(io.bind(
             move |request| {
-                Ok(respan_gateway_http::messages(request, move |_, raw| {
+                respan_gateway_http::messages(request, move |_, raw| {
                     count.fetch_add(1, Ordering::Relaxed);
-                    OpenAiChat.decode_request(raw)
-                }))
+                    OpenAiChat::OPENAI.decode_request(raw)
+                })
             },
-            |reply, source| OpenAiChat.write_response(reply, source),
-            |fault, request, head| OpenAiChat.refusal(fault, request, head),
+            |reply| OpenAiChat::OPENAI.write_response(reply),
+            |fault, request, head| OpenAiChat::OPENAI.refusal(fault, request, head),
         ))
     }
 }
 impl Format<Outgoing, Output, Input> for Counted {
     fn name(&self) -> &str {
-        OpenAiChat.name()
+        OpenAiChat::OPENAI.name()
     }
     fn bind(&self, io: Outgoing) -> Result<Connection<Output, Input>, Fault> {
-        OpenAiChat.bind(io)
+        OpenAiChat::OPENAI.bind(io)
     }
 }
 
@@ -446,7 +457,7 @@ async fn a_meter_registered_after_a_cutting_filter_sees_every_increment() {
             true => plugins.insert(0, Arc::new(Cap(15))),
             false => plugins.push(Arc::new(Cap(15))),
         }
-        let (gw, _, calls) = gateway(OpenAiChat, openai(&fake), plugins);
+        let (gw, _, calls) = gateway(OpenAiChat::OPENAI, openai(&fake), plugins);
         let chat =
             r#"{"model":"gpt-4.1-mini","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
 
@@ -513,7 +524,7 @@ async fn usage_a_plugin_makes_reaches_no_meter_and_an_extension_bills_it() {
         Arc::new(meter.clone()),
         Arc::new(Answers),
     ];
-    let (gw, _, _) = gateway(OpenAiChat, never_called(), plugins);
+    let (gw, _, _) = gateway(OpenAiChat::OPENAI, never_called(), plugins);
     let chat = r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}"#;
 
     let (_, _, body) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;
@@ -560,7 +571,7 @@ async fn a_meter_after_a_guard_sees_the_usage_in_the_reply_it_refuses() {
     fake.answer(Answer::raw(UNARY));
     let meter = Metered::default();
     let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(Guard), Arc::new(meter.clone())];
-    let (gw, _, _) = gateway(OpenAiChat, openai(&fake), plugins);
+    let (gw, _, _) = gateway(OpenAiChat::OPENAI, openai(&fake), plugins);
     let chat = r#"{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}]}"#;
 
     let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", chat)).await.0).await;

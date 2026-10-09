@@ -4,29 +4,34 @@
 //! A WebSocket is an HTTP Upgrade exchange on the HTTP wire: the call's head
 //! is the upgrade request, the answer's head is the `101`, and the two bodies
 //! are streams of frames, **one body item per text frame**. This integration provides
-//! the outbound transport, a format, and the contract of a session's close;
-//! hosting a client's session is an adapter's (`respan_gateway_axum::ws`,
-//! which documents how each end of a session reaches the client):
+//! both edges of a session, a format, and the contract of a session's close
+//! ([`serve`] documents how each end reaches the client and the provider):
 //!
 //! - [`WsTransport`]: an outbound native HTTP sender
 //!   that connects to a `ws://` or `wss://` provider.
+//! - [`serve`]: a client's upgrade, through a gateway, for an adapter that
+//!   hosts sessions (`respan_gateway_axum::router_with_ws`).
 //! - [`JsonEvents`]: a [`Format`](respan_gateway_sdk::Format) whose kind is
 //!   one JSON event per frame ([`Input`](respan_gateway_realtime::Input) in, [`Output`](respan_gateway_realtime::Output) out),
-//!   for plugins that filter a session's events.
+//!   for plugins that filter a session's events, with the vendors' presets
+//!   ([`JsonEvents::OPENAI_REALTIME`], [`JsonEvents::RESPONSES_WS`],
+//!   [`JsonEvents::GEMINI_LIVE`]).
 //! - [`CloseCode`] and [`ProviderClose`]: the code a client is closed with,
 //!   and the one a provider closed with.
 //! - [`Limits`]: what either edge takes of a session, in bytes and time.
 //!
 //! Frames carry text. [`WsTransport::with_binary_text`] can normalize a
 //! provider's binary UTF-8 messages into text; other binary frames are faults.
-//! Nothing here knows a provider's events.
+//! Nothing here reads a provider's events.
 
 use std::time::Duration;
 
 mod events;
+mod session;
 mod transport;
 
 pub use events::JsonEvents;
+pub use session::serve;
 pub use transport::WsTransport;
 
 /// What an edge of a session takes: the provider edge's ([`WsTransport`])
@@ -39,18 +44,26 @@ pub struct Limits {
     /// provider takes (OpenAI Realtime's `input_audio_buffer.append`, up to
     /// 15 MiB). A larger one is a fault.
     pub max_message: usize,
-    /// How long a side waits for the other's part of a close: the gateway
-    /// for a provider's Close after it sent one, and an adapter for the
-    /// response's end after its client sent Close. By default 5 s: a
-    /// provider answers a Close behind the frames it was already sending,
-    /// such as the rest of a turn, and one that does not answer is not
-    /// waited on longer.
+    /// How long a side waits for the other's part of a close: an edge for
+    /// its peer's Close after it sent one, the client edge for the
+    /// response's end after its client sent Close, and for a refusal of the
+    /// upgrade to be read. By default 5 s: a provider answers a Close
+    /// behind the frames it was already sending, such as the rest of a
+    /// turn, and one that does not answer is not waited on longer.
     pub close_wait: Duration,
     /// How long a Close is given to leave, to either side: by default 1 s,
     /// as a Close is under 130 bytes, so a peer that has not taken it in
     /// that time has stopped reading, and waiting on it would keep the
     /// session alive past its end.
     pub close_send: Duration,
+    /// How long a peer may be quiet, while the edge waits for its next
+    /// message, before it is pinged; quiet that long again, it is gone. By
+    /// default 30 s: half the 60 s idle timeout common to load balancers
+    /// and proxies (AWS's ALB, nginx's `proxy_read_timeout`), so an idle
+    /// session's pings keep them from cutting it, and a peer that died
+    /// without a word is seen within a minute. Time spent waiting for the
+    /// other side to take the peer's frame does not count.
+    pub ping_after: Duration,
 }
 
 impl Default for Limits {
@@ -59,6 +72,7 @@ impl Default for Limits {
             max_message: 16 << 20,
             close_wait: Duration::from_secs(5),
             close_send: Duration::from_secs(1),
+            ping_after: Duration::from_secs(30),
         }
     }
 }
@@ -92,3 +106,36 @@ impl CloseCode {
 /// ([`CloseCode`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProviderClose(pub u16);
+
+/// The comma-separated tokens of every `name` header (RFC 9110 5.6.1).
+fn tokens(
+    headers: &respan_gateway_http::http::HeaderMap,
+    name: respan_gateway_http::http::header::HeaderName,
+) -> impl Iterator<Item = &str> {
+    let values = headers.get_all(name).into_iter();
+    values
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(str::trim)
+}
+
+/// Whether `bytes` are a token (RFC 9110 5.6.2), as a subprotocol is.
+fn token(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && (bytes.iter()).all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CloseCode;
+
+    #[test]
+    fn a_code_no_close_may_carry_is_sent_as_1011() {
+        for bad in [999, 1004, 1005, 1006, 1015, 5000] {
+            assert_eq!(CloseCode(bad).sendable(), 1011, "{bad}");
+        }
+        for good in [1000, 1003, 1008, 1014, 4001] {
+            assert_eq!(CloseCode(good).sendable(), good);
+        }
+    }
+}

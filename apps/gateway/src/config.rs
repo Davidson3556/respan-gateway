@@ -3,7 +3,6 @@
 
 use std::any::TypeId;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
@@ -29,7 +28,9 @@ pub struct Config {
     /// The formats served to clients, by name, tried in order. Serve
     /// `passthrough` last to relay every other request unread to the
     /// provider of format `passthrough`, whose `base_url` is then the
-    /// vendor's origin, as clients' paths are sent as they are.
+    /// vendor's origin, as clients' paths are sent as they are. Clients of
+    /// a format no other translates, `passthrough` or a session's, go to
+    /// the one provider of that format.
     pub serve: Vec<String>,
     /// Compiled-in plugins, in the order listed unless `after` says otherwise.
     #[serde(default)]
@@ -74,35 +75,45 @@ pub struct ModelRoute {
     pub provider: String,
 }
 
-type Connect = Arc<dyn Fn(Extensions) -> Outgoing + Send + Sync>;
+/// A provider's name, base URL and auth headers, added to a gateway.
+type AddProvider = dyn Fn(Gateway, String, &str, HeaderMap) -> Result<Gateway, Fault>;
 
 /// A format compiled into the binary: its name, and how to add a
 /// provider that speaks it or serve its clients.
 pub struct KnownFormat {
     pub name: String,
     kind: (TypeId, TypeId),
-    pub provider: fn(Gateway, String, Connect) -> Result<Gateway, Fault>,
-    pub serve: fn(Gateway) -> Result<Gateway, Fault>,
+    provider: Box<AddProvider>,
+    serve: Box<dyn Fn(Gateway) -> Result<Gateway, Fault>>,
 }
 
 impl KnownFormat {
-    /// An HTTP format, as every provider the binary knows speaks.
-    pub fn of<F, I, O>() -> Self
+    /// `format`, its providers reached by `reach`, given one's base URL
+    /// and auth headers.
+    pub fn of<F, I, O, T>(
+        format: F,
+        reach: impl Fn(&str, HeaderMap) -> Result<T, Fault> + 'static,
+    ) -> Self
     where
-        F: Default + Format<Incoming, I, O> + Format<Outgoing, O, I>,
+        F: Clone + Send + Sync + 'static + Format<Incoming, I, O> + Format<Outgoing, O, I>,
         I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
+        T: Fn(Extensions) -> Outgoing + Send + Sync + 'static,
     {
+        let client = format.clone();
         Self {
-            name: <F as Format<Incoming, I, O>>::name(&F::default()).to_owned(),
+            name: <F as Format<Incoming, I, O>>::name(&format).to_owned(),
             kind: (TypeId::of::<I>(), TypeId::of::<O>()),
-            provider: |gateway, name, transport| {
-                gateway.provider::<I, O, _>(name, F::default(), move |extensions| {
-                    transport(extensions)
-                })
-            },
-            serve: |gateway| gateway.client::<I, O, _>(F::default()),
+            provider: Box::new(move |gateway, name, base_url, auth| {
+                gateway.provider::<I, O, _>(name, format.clone(), reach(base_url, auth)?)
+            }),
+            serve: Box::new(move |gateway| gateway.client::<I, O, _>(client.clone())),
         }
+    }
+
+    /// Whether its kind is `I` in and `O` out.
+    pub fn is<I: 'static, O: 'static>(&self) -> bool {
+        self.kind == (TypeId::of::<I>(), TypeId::of::<O>())
     }
 }
 
@@ -111,13 +122,8 @@ impl Config {
         serde_norway::from_str(yaml).map_err(|e| Fault::config(e.to_string()))
     }
 
-    /// Builds the gateway: each provider's transport comes from `transport`,
-    /// given its base URL and auth headers; formats are found in `formats`.
-    pub fn build<T: Fn(Extensions) -> Outgoing + Send + Sync + 'static>(
-        &self,
-        transport: impl Fn(&str, HeaderMap) -> Result<T, Fault>,
-        formats: &[KnownFormat],
-    ) -> Result<Gateway, Fault> {
+    /// Builds the gateway of the formats in `formats`.
+    pub fn build(&self, formats: &[KnownFormat]) -> Result<Gateway, Fault> {
         let format = |name: &str, owner: &str| {
             formats.iter().find(|f| f.name == name).ok_or_else(|| {
                 let known: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
@@ -131,9 +137,8 @@ impl Config {
         for (name, p) in &self.providers {
             let format = format(&p.format, &format!("provider '{name}'"))?;
             let auth = auth_headers(name, p.auth.as_ref())?;
-            let reach = transport(&p.base_url, auth)
+            gateway = (format.provider)(gateway, name.clone(), &p.base_url, auth)
                 .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
-            gateway = (format.provider)(gateway, name.clone(), Arc::new(reach))?;
         }
         let after = (self.serve.iter().skip_while(|n| *n != PASSTHROUGH)).nth(1);
         if let Some(after) = after {
@@ -142,8 +147,21 @@ impl Config {
                  serve '{PASSTHROUGH}' last"
             )));
         }
+        // Only the conversation kind translates: a client of another kind
+        // goes to the one provider of its own format.
+        let mut own = BTreeMap::new();
         for name in &self.serve {
-            gateway = (format(name, "serve")?.serve)(gateway)?;
+            let served = format(name, "serve")?;
+            gateway = (served.serve)(gateway)?;
+            if served.is::<Input, Output>() {
+                continue;
+            }
+            let mut providers = self.providers.iter().filter(|(_, p)| p.format == *name);
+            let (Some((provider, _)), None) = (providers.next(), providers.next()) else {
+                let message = format!("serve: {name} needs exactly one provider of that format");
+                return Err(Fault::config(message));
+            };
+            own.insert(name.clone(), provider.clone());
         }
         for p in ordered(&self.plugins)? {
             let bad = |e: Fault| Fault::config(format!("plugin '{}': {}", p.name, e.message()));
@@ -159,8 +177,8 @@ impl Config {
                         m.provider
                     ))));
                 };
-                let kind = format(&provider.format, &format!("provider '{}'", m.provider))?.kind;
-                if kind != (TypeId::of::<Input>(), TypeId::of::<Output>()) {
+                let format = format(&provider.format, &format!("provider '{}'", m.provider))?;
+                if !format.is::<Input, Output>() {
                     return Err(bad(Fault::config(format!(
                         "provider '{}' uses format '{}', incompatible with conversation models routes",
                         m.provider, provider.format
@@ -173,17 +191,8 @@ impl Config {
             });
             gateway = gateway.plugin(router);
         }
-        if self.serve.iter().any(|name| name == PASSTHROUGH) {
-            let mut own = self
-                .providers
-                .iter()
-                .filter(|(_, p)| p.format == PASSTHROUGH);
-            let (Some((name, _)), None) = (own.next(), own.next()) else {
-                let message =
-                    format!("serve: {PASSTHROUGH} needs exactly one provider of that format");
-                return Err(Fault::config(message));
-            };
-            gateway = gateway.plugin(SendTo(name.clone()));
+        if !own.is_empty() {
+            gateway = gateway.plugin(SendTo(own));
         }
         match &self.target {
             Some(target) => gateway
@@ -197,15 +206,15 @@ impl Config {
 /// The name of the format that relays what no other served format accepts.
 const PASSTHROUGH: &str = "passthrough";
 
-/// Sends the requests of format `passthrough` to the provider `.0`: a
+/// Sends the clients of each format in `.0` to its provider there: a
 /// default target serves one kind, and these are of another.
-struct SendTo(String);
+struct SendTo(BTreeMap<String, String>);
 
 #[async_trait]
 impl Plugin for SendTo {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if cx.format() == PASSTHROUGH {
-            cx.set_target(self.0.as_str());
+        if let Some(provider) = self.0.get(cx.format()) {
+            cx.set_target(provider.as_str());
         }
         Ok(None)
     }
@@ -302,7 +311,7 @@ mod tests {
         Config::parse(yaml)
             .and_then(|c| {
                 let limit = c.body_limit.unwrap_or(crate::BODY_LIMIT);
-                c.build(|url, auth| crate::http(url, auth, limit), &crate::formats())
+                c.build(&crate::formats(limit))
             })
             .map_err(|e| e.message().to_owned())
     }
@@ -519,6 +528,34 @@ plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
     }
 
     #[test]
+    fn a_session_provider_is_websocket_and_its_clients_go_to_it_alone() {
+        let realtime = "realtime: { format: openai-realtime, base_url: 'wss://api.openai.com/v1' }";
+        let cases = [
+            (
+                "providers: { p: { format: gemini-live, base_url: 'https://x.test' } }\nserve: []"
+                    .to_owned(),
+                "provider 'p': bad base URL: ws or wss with a host, and no query, fragment or credentials (those go in its headers)",
+            ),
+            (
+                "serve: [openai-realtime]".to_owned(),
+                "serve: openai-realtime needs exactly one provider of that format",
+            ),
+            (
+                format!(
+                    "providers: {{ {realtime} }}\nserve: [openai-realtime]
+plugins: [{{ name: models, models: [{{ prefix: gpt, provider: realtime }}] }}]"
+                ),
+                "plugin 'models': provider 'realtime' uses format 'openai-realtime', incompatible with conversation models routes",
+            ),
+        ];
+        for (yaml, expected) in cases {
+            assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
+        }
+        let both = format!("providers: {{ {realtime} }}\nserve: [openai-realtime]");
+        assert!(resolve(&both).is_ok());
+    }
+
+    #[test]
     fn a_listen_address_is_a_socket_address() {
         let bad = Config::parse("listen: 127.0.0.1\nserve: []").err();
         assert!(bad.is_some_and(|e| e.message().contains("listen")));
@@ -543,7 +580,7 @@ plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
         assert_eq!(
             resolve(yaml).err().as_deref(),
             Some(
-                "serve: unknown format 'nope'; compiled-in formats: [openai-chat, anthropic-messages, passthrough]"
+                "serve: unknown format 'nope'; compiled-in formats: [openai-chat, groq-chat, deepseek-chat, vllm-chat, openrouter-chat, azure-chat, anthropic-messages, passthrough, openai-realtime, responses-ws, gemini-live]"
             )
         );
     }
