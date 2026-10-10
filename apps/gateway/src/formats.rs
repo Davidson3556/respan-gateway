@@ -12,9 +12,9 @@ use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, reqwest};
 use respan_gateway_media::gemini::GeminiVeo;
 use respan_gateway_media::openai::{
-    OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
+    OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
 };
-use respan_gateway_media::{image, speech, transcription, video};
+use respan_gateway_media::{embedding, image, speech, transcription, video};
 use respan_gateway_realtime::JsonEvents;
 
 use crate::presets::origin;
@@ -58,9 +58,19 @@ impl Kind {
         label: "video",
         translates: true,
     };
-    /// The media kinds, whose client formats are served by default once a
-    /// provider speaks the kind.
-    pub const MEDIA: [Kind; 4] = [Kind::IMAGE, Kind::TRANSCRIPTION, Kind::SPEECH, Kind::VIDEO];
+    pub const EMBEDDING: Kind = Kind {
+        label: "embedding",
+        translates: true,
+    };
+    /// The kinds of the media crate, whose client formats are served by
+    /// default once a provider speaks the kind.
+    pub const MEDIA: [Kind; 5] = [
+        Kind::IMAGE,
+        Kind::TRANSCRIPTION,
+        Kind::SPEECH,
+        Kind::VIDEO,
+        Kind::EMBEDDING,
+    ];
 }
 
 /// The first of `items` of each kind, in order.
@@ -123,7 +133,12 @@ macro_rules! routed_by_model {
     )*};
 }
 
-routed_by_model!(image::Input, transcription::Input, speech::Input);
+routed_by_model!(
+    image::Input,
+    transcription::Input,
+    speech::Input,
+    embedding::Input
+);
 
 /// Only a `Create` names a model; a follow-up goes by its job's id
 /// ([`crate::jobs`]).
@@ -355,6 +370,12 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
             http,
         ),
         KnownFormat::of(Kind::SPEECH, &["POST /v1/audio/speech"], OpenAiSpeech, http),
+        KnownFormat::of(
+            Kind::EMBEDDING,
+            &["POST /v1/embeddings"],
+            OpenAiEmbeddings,
+            http,
+        ),
         KnownFormat::of(Kind::VIDEO, VIDEOS, OpenAiVideos, http).job_ids("video_"),
         KnownFormat::provider_only(Kind::VIDEO, GeminiVeo, google)
             .job_ids("veo_")

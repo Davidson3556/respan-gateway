@@ -6,7 +6,7 @@ everything else built as modules on one public API.
 
 > **Status: pre-alpha.** Relays OpenAI and Anthropic chat traffic and
 > translates text and tools between them; serves images, transcription,
-> speech and video jobs through OpenAI's media endpoints, Veo included.
+> speech, embeddings and video jobs through OpenAI's media endpoints, Veo included.
 > APIs will change. The core is now treated as half-frozen, like a release candidate:
 > its contracts are stable by default while the surrounding APIs continue to evolve.
 
@@ -48,7 +48,7 @@ curl localhost:8080/v1/chat/completions \
 ```
 
 Media go the same way, each operation a kind of its own (`image`,
-`transcription`, `speech`, `video`) served at OpenAI's endpoints, to the
+`transcription`, `speech`, `embedding`, `video`) served at OpenAI's endpoints, to the
 providers serving that kind:
 
 ```bash
@@ -57,6 +57,9 @@ curl localhost:8080/v1/images/generations \
   -d '{"model":"gpt-image-1","prompt":"a lighthouse at dusk"}'
 # whisper-1 is OpenAI's; whisper-large-v3 would go to Groq.
 curl localhost:8080/v1/audio/transcriptions -F file=@talk.mp3 -F model=whisper-1
+# text-embedding-3-small is OpenAI's; gemini-embedding-001 would go to Gemini.
+curl localhost:8080/v1/embeddings \
+  -d '{"model":"text-embedding-3-small","input":"hello"}'
 # A video is a job: veo-* goes to Gemini's Veo, answered in OpenAI's shape;
 # polling GET /v1/videos/{id} and GET /v1/videos/{id}/content reach the provider that made it.
 curl localhost:8080/v1/videos -d '{"model":"veo-3.0-generate-001","prompt":"a paper boat"}'
@@ -75,7 +78,8 @@ Vendor presets: `openai`, `anthropic`, `gemini` (`GEMINI_API_KEY` or
 moves a vendor's base URL; with one, the file's `base_url` alone counts
 (`init` writes the moved URL, and `OLLAMA_HOST`'s, into it). A preset speaks every format of its vendor compiled
 in: OpenAI's media endpoints for `openai`, Imagen and Veo for `gemini`,
-transcription and speech for `groq`, images for `xai` and `together`. To configure more, write a config and check it:
+transcription and speech for `groq`, images for `xai` and `together`,
+embeddings for `gemini`, `mistral`, `together`, `fireworks` and `ollama` too. To configure more, write a config and check it:
 
 ```bash
 cargo run -p respan-gateway -- init    # a commented gateway.yaml from the keys found
@@ -137,7 +141,7 @@ vendor whose fields the gateway reads has a format of its own name (the
 [dialects](crates/kinds/conversation/README.md#openai-chat-completions)), and one whose additions it does not
 read, as Gemini's endpoint, is `openai-chat`. The media formats
 (`openai-images`, `openai-transcriptions`, `openai-speech`,
-`openai-videos`) take the same base URL; Veo (`gemini-veo`, a provider
+`openai-videos`, `openai-embeddings`) take the same base URL; Veo (`gemini-veo`, a provider
 format only) takes the Gemini API's,
 `https://generativelanguage.googleapis.com/v1beta`, with its key in
 `x-goog-api-key` ([media kinds](crates/kinds/media/README.md)).
@@ -226,7 +230,7 @@ the gateway, and the binary chooses what to compose. See the
 |---|---|
 | `crates/core/` | The neutral kernel and plugin-author API: typed streams, plugins, lifecycle, fault facts and native values; no HTTP or message kinds. |
 | `crates/kinds/conversation/` | The conversation kind (requests, reply events, typed usage, assembly) and its HTTP formats: OpenAI Chat (with vendor dialects) and Anthropic Messages, sharing the `Schema` trait. |
-| `crates/kinds/media/` | The media kinds, a kind per operation (image generation and edits, transcription, speech, video jobs), and their HTTP formats: OpenAI Images, Audio Transcriptions, Speech and Videos, and Google's Veo as a provider. |
+| `crates/kinds/media/` | The media kinds, a kind per operation (image generation and edits, transcription, speech, embeddings, video jobs), and their HTTP formats: OpenAI Images, Audio Transcriptions, Speech, Embeddings and Videos, and Google's Veo as a provider. |
 | `crates/kinds/realtime/` | The realtime kind (a client/provider JSON event pair) and its WebSocket format, `JsonEvents`, with the vendors' presets. |
 | `crates/kinds/mcp/` | The MCP kind (typed JSON-RPC messages and their envelopes) and its formats: streamable HTTP and stdio. |
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |

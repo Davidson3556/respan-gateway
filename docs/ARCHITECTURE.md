@@ -24,7 +24,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | --- | --- | --- | --- |
 | `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault facts and tagged native values | None |
 | `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly; the HTTP binding (`Schema`) and its vendors, OpenAI Chat (with dialects) and Anthropic Messages | Core; HTTP for its formats |
-| `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, video jobs) over the conversation kind's media and usage; their HTTP formats, OpenAI's endpoints as compatible vendors serve them, and Veo's as a provider | Core, conversation's types; HTTP for its formats |
+| `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage; their HTTP formats, OpenAI's endpoints as compatible vendors serve them, and Veo's as a provider | Core, conversation's types; HTTP for its formats |
 | `crates/kinds/realtime/` | Kind | Format-tagged realtime event pair; the WebSocket format (`JsonEvents`) and its vendor presets | Core; HTTP, WS for its format |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes; streamable HTTP and the stdio transport | Core, HTTP |
 | `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the opaque format; optional Reqwest transport and Axum hosting | Core |
@@ -68,7 +68,7 @@ format of its vendor compiled in); the application registers one core
 provider per format and routes with one plugin of its own: `provider/model`,
 then `models` routes, then preset model prefixes, then the kind's default,
 among the providers serving the request's kind. Each media operation
-(`image`, `transcription`, `speech`, `video`) is a kind that translates
+(`image`, `transcription`, `speech`, `embedding`, `video`) is a kind that translates
 within itself. A video job's follow-up names no model, so a second plugin
 sends it to the provider that made the job, by its id's spelling (`video_`,
 `veo_`); providers sharing a spelling get ids wrapped in their name on the

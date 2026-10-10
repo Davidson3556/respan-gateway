@@ -39,6 +39,7 @@ pub const PRESETS: &[Preset] = &[
             "openai-transcriptions",
             "openai-speech",
             "openai-videos",
+            "openai-embeddings",
         ],
         key_env: &["OPENAI_API_KEY"],
         prefixes: &[
@@ -53,6 +54,7 @@ pub const PRESETS: &[Preset] = &[
             "whisper-1",
             "tts-",
             "sora",
+            "text-embedding",
         ],
         example_model: "gpt-4o-mini",
     },
@@ -67,7 +69,13 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "gemini",
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-        formats: &["openai-chat", "gemini-live", "openai-images", "gemini-veo"],
+        formats: &[
+            "openai-chat",
+            "gemini-live",
+            "openai-images",
+            "gemini-veo",
+            "openai-embeddings",
+        ],
         key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         prefixes: &["gemini", "imagen", "veo"],
         example_model: "gemini-2.5-flash",
@@ -129,7 +137,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "mistral",
         base_url: "https://api.mistral.ai/v1",
-        formats: &["openai-chat"],
+        formats: &["openai-chat", "openai-embeddings"],
         key_env: &["MISTRAL_API_KEY"],
         prefixes: &["mistral", "codestral", "magistral", "pixtral"],
         example_model: "mistral-small-latest",
@@ -137,7 +145,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "together",
         base_url: "https://api.together.xyz/v1",
-        formats: &["openai-chat", "openai-images"],
+        formats: &["openai-chat", "openai-images", "openai-embeddings"],
         key_env: &["TOGETHER_API_KEY"],
         prefixes: &[
             "meta-llama/",
@@ -154,7 +162,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "fireworks",
         base_url: "https://api.fireworks.ai/inference/v1",
-        formats: &["openai-chat"],
+        formats: &["openai-chat", "openai-embeddings"],
         key_env: &["FIREWORKS_API_KEY"],
         prefixes: &["accounts/"],
         example_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
@@ -162,7 +170,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "ollama",
         base_url: "http://localhost:11434/v1",
-        formats: &["openai-chat"],
+        formats: &["openai-chat", "openai-embeddings"],
         key_env: &[],
         prefixes: &[],
         example_model: "llama3.2",

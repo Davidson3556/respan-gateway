@@ -7,6 +7,8 @@ mod http_support;
 #[allow(dead_code)]
 mod support;
 
+#[path = "media/embeddings.rs"]
+mod embeddings;
 #[path = "media/images.rs"]
 mod images;
 #[path = "media/routing.rs"]

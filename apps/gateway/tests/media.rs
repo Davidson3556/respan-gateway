@@ -118,6 +118,16 @@ impl Fake {
                 let usage = json!({"input_tokens": 9, "output_tokens": 70, "total_tokens": 79});
                 axum::Json(json!({"created": 1, "data": [image], "usage": usage})).into_response()
             }
+            (&Method::POST, ["v1", "embeddings"]) => {
+                let asked = seen.json();
+                if !asked["input"].is_string() {
+                    return error(StatusCode::BAD_REQUEST, "input is required");
+                }
+                let item = json!({"object": "embedding", "index": 0, "embedding": [0.25, 0.5]});
+                let usage = json!({"prompt_tokens": 3, "total_tokens": 3});
+                axum::Json(json!({"object": "list", "data": [item], "model": asked["model"], "usage": usage}))
+                    .into_response()
+            }
             (&Method::POST, ["v1", "audio", "transcriptions"]) => {
                 let form = seen.headers["content-type"].to_str().unwrap();
                 let has_file = String::from_utf8_lossy(&seen.body).contains("name=\"file\"");
@@ -286,6 +296,16 @@ async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
     assert_eq!(content_type, "audio/mpeg");
     assert_eq!(audio.as_ref(), AUDIO, "binary bytes pass unchanged");
 
+    let (status, embedded) = post(
+        &app,
+        "/v1/embeddings",
+        json!({"model": "text-embedding-3-small", "input": "hi"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{embedded}");
+    assert_eq!(embedded["data"][0]["embedding"], json!([0.25, 0.5]));
+    assert_eq!(openai.last().path, "/v1/embeddings");
+
     let (status, job) = post(
         &app,
         "/v1/videos",
@@ -339,6 +359,13 @@ async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
         (&json!("speech"), &json!(200))
     );
     assert!(speech["error"].is_null(), "{speech}");
+    let embedding = record("/v1/embeddings");
+    assert_eq!(embedding["kind"], "embedding");
+    assert_eq!(embedding["model"], "text-embedding-3-small");
+    assert_eq!(
+        embedding["usage"],
+        json!({"input_tokens": 3, "output_tokens": 0})
+    );
     let content = record("/v1/videos/video_1/content");
     assert_eq!(
         (&content["kind"], &content["provider"]),
@@ -346,7 +373,7 @@ async fn each_media_kind_is_relayed_to_its_provider_and_logged() {
     );
     assert!(content["error"].is_null(), "{content}");
     let overview = get_json(&app, "/ui/api/overview").await;
-    assert_eq!(overview["totals"]["input_tokens"], 9);
+    assert_eq!(overview["totals"]["input_tokens"], 12);
 }
 
 #[tokio::test]
@@ -493,8 +520,8 @@ async fn models_are_listed_with_their_kinds() {
             ("whisper-1", "transcription"),
             ("gpt-4o-mini-tts", "speech"),
             ("sora-2", "video"),
-        ],
-        "embeddings are served by no kind"
+            ("text-embedding-3-small", "embedding"),
+        ]
     );
 
     // A provider of a media format alone lists the models it serves.

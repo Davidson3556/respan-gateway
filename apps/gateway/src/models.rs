@@ -164,12 +164,12 @@ impl Models {
 }
 
 /// What a model does, by its name as vendors spell them; `None` for one the
-/// gateway serves no kind of, such as embeddings.
+/// gateway serves no kind of.
 fn kind_of(id: &str) -> Option<Kind> {
     let id = id.to_ascii_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| id.contains(w));
     let kind = match () {
-        _ if has(&["embed"]) => return None,
+        _ if has(&["embed"]) => Kind::EMBEDDING,
         _ if has(&["dall-e", "gpt-image", "imagen", "grok-2-image", "flux"]) => Kind::IMAGE,
         _ if has(&["whisper", "transcribe"]) => Kind::TRANSCRIPTION,
         _ if has(&["tts"]) => Kind::SPEECH,
@@ -203,6 +203,7 @@ mod tests {
         assert_eq!(kind("sora-2"), Some("video"));
         assert_eq!(kind("veo-3.0-generate-001"), Some("video"));
         assert_eq!(kind("gpt-realtime"), Some("realtime"));
-        assert_eq!(kind("text-embedding-3-small"), None);
+        assert_eq!(kind("text-embedding-3-small"), Some("embedding"));
+        assert_eq!(kind("gemini-embedding-001"), Some("embedding"));
     }
 }

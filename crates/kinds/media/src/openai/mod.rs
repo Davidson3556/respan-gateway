@@ -18,12 +18,14 @@
 //! and a client's in OpenAI's schema, `{"error": {"message", "type",
 //! "param", "code"}}`, under its status.
 
+mod embeddings;
 mod images;
 mod multipart;
 mod speech;
 mod transcriptions;
 mod videos;
 
+pub use embeddings::OpenAiEmbeddings;
 pub use images::OpenAiImages;
 pub use respan_gateway_conversation::StreamResponse;
 pub use speech::OpenAiSpeech;

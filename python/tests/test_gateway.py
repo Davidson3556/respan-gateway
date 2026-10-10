@@ -152,6 +152,16 @@ def test_openai_sdk(gw):
         client.chat.completions.create(model="missing", messages=CHAT["messages"])
 
 
+def test_openai_sdk_embeddings_travel_as_base64(gw, fake):
+    pytest.importorskip("openai")
+    done = gw.openai().embeddings.create(model="fake-embed", input="hi")
+    assert fake.requests[-1]["encoding_format"] == "base64"
+    assert done.data[0].embedding == [0.25, -0.5, 1.0]
+    assert done.usage.prompt_tokens == 2
+    r = gw.request("POST", "/v1/embeddings", json={"model": "fake-embed", "input": "hi"})
+    assert r.json()["data"][0]["embedding"] == [0.25, -0.5, 1.0]
+
+
 def test_async_openai_sdk(gw):
     pytest.importorskip("openai")
 

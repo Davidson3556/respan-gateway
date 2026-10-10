@@ -34,6 +34,9 @@ pub struct Rules {
     pub extra_answer: Map<String, Value>,
     /// Whether it refuses to stream a transcription, as Groq does.
     pub no_streamed_transcription: bool,
+    /// The encoding it answers embeddings in whatever is asked, as some
+    /// compatible servers do.
+    pub embedding_encoding: Option<&'static str>,
 }
 
 /// A file of a form the fake was sent.
@@ -224,6 +227,7 @@ async fn answer(
         "/v1/audio/transcriptions" => transcriptions(&call, rules, false),
         "/v1/audio/translations" => transcriptions(&call, rules, true),
         "/v1/audio/speech" => speech(&call, rules),
+        "/v1/embeddings" => embeddings(&call, rules),
         _ => error(StatusCode::NOT_FOUND, "Invalid URL.", None, "not_found"),
     }
 }
@@ -589,6 +593,92 @@ fn speech(call: &Seen, rules: &Rules) -> http::Response<Wire> {
         Ok::<_, Infallible>(chunk)
     });
     answered(mime, Wire::from_stream(paced))
+}
+
+/// The vector a fake answers with for item `index`: `dimensions` numbers
+/// that `f32` and JSON both hold exactly.
+pub fn embedding_vector(index: usize, dimensions: usize) -> Vec<f32> {
+    (0..dimensions)
+        .map(|j| (index + 1) as f32 / 4.0 + j as f32 / 8.0)
+        .collect()
+}
+
+fn embeddings(call: &Seen, rules: &Rules) -> http::Response<Wire> {
+    let known = ["model", "input", "encoding_format", "dimensions", "user"];
+    if let Some(field) = unknown(call, &known, rules) {
+        return unrecognized(field);
+    }
+    for required in ["model", "input"] {
+        if !call.fields.contains_key(required) {
+            return missing(required);
+        }
+    }
+    let model = string(call, "model").unwrap_or_default();
+    if !["text-embedding-3-small", "text-embedding-ada-002"].contains(&model) {
+        return no_model(model);
+    }
+    // Each item's token count: a text's words, or the ids it is.
+    let count = |item: &Value| match item {
+        Value::String(text) if !text.is_empty() => Some(text.split_whitespace().count()),
+        Value::Array(ids) if !ids.is_empty() && ids.iter().all(Value::is_u64) => Some(ids.len()),
+        _ => None,
+    };
+    let input = &call.fields["input"];
+    let counts: Option<Vec<usize>> = match input {
+        Value::Array(items) if items.iter().all(Value::is_u64) => count(input).map(|n| vec![n]),
+        Value::Array(items) => items.iter().map(count).collect(),
+        item => count(item).map(|n| vec![n]),
+    };
+    let Some(counts) = counts.filter(|c| !c.is_empty()) else {
+        let message = "'$.input' is invalid. Please check the API reference.";
+        return bad(message, Some("input"));
+    };
+    let dimensions = match call.fields.get("dimensions") {
+        None => 8,
+        Some(_) if model.ends_with("ada-002") => {
+            return bad("This model does not support specifying dimensions.", None);
+        }
+        Some(d) => match d.as_u64().filter(|&d| d > 0) {
+            Some(d) => d as usize,
+            None => {
+                return bad(
+                    "'dimensions' must be a positive integer.",
+                    Some("dimensions"),
+                );
+            }
+        },
+    };
+    let encoding = string(call, "encoding_format").unwrap_or("float");
+    if !["float", "base64"].contains(&encoding) {
+        let message =
+            format!("Invalid value: '{encoding}'. Supported values are: 'float' and 'base64'.");
+        return bad(&message, Some("encoding_format"));
+    }
+    let encoding = rules.embedding_encoding.unwrap_or(encoding);
+    let data: Vec<Value> = (0..counts.len())
+        .map(|i| {
+            let vector = embedding_vector(i, dimensions);
+            let embedding = match encoding {
+                "base64" => b64(&vector
+                    .iter()
+                    .flat_map(|f| f.to_le_bytes())
+                    .collect::<Vec<u8>>())
+                .into(),
+                _ => json!(vector),
+            };
+            json!({"object": "embedding", "index": i, "embedding": embedding})
+        })
+        .collect();
+    let tokens: usize = counts.iter().sum();
+    json_answer(
+        json!({
+            "object": "list",
+            "data": data,
+            "model": model,
+            "usage": {"prompt_tokens": tokens, "total_tokens": tokens},
+        }),
+        rules,
+    )
 }
 
 /// A gateway serving `format` to clients, relaying to `fake` as provider

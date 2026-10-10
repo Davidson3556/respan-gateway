@@ -19,7 +19,7 @@ use respan_gateway_core::{ClientContext, Extensions, Fault, Plugin, ProviderCont
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http_body::{self, Frame, SizeHint};
-use respan_gateway_media::{image, speech, transcription};
+use respan_gateway_media::{embedding, image, speech, transcription};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -537,6 +537,10 @@ impl Plugin for Recorder {
         })?;
         count(cx, &entry, |output: &speech::Output| match output {
             speech::Output::Usage(usage) => Some(Counted::tokens(usage)),
+            _ => None,
+        })?;
+        count(cx, &entry, |output: &embedding::Output| match output {
+            embedding::Output::Usage(usage) => Some(Counted::tokens(usage)),
             _ => None,
         })?;
         Ok(None)

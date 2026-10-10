@@ -239,6 +239,11 @@ fn a_preset_is_every_format_of_its_vendor_compiled_in() {
                 "openai:openai-videos",
                 "https://api.openai.com/v1"
             ),
+            entry(
+                "openai-embeddings",
+                "openai:openai-embeddings",
+                "https://api.openai.com/v1"
+            ),
         ]
     );
     assert_eq!(
@@ -252,6 +257,11 @@ fn a_preset_is_every_format_of_its_vendor_compiled_in() {
                 "http://g.test/v1beta/openai"
             ),
             entry("gemini-veo", "gemini:gemini-veo", "http://g.test/v1beta"),
+            entry(
+                "openai-embeddings",
+                "gemini:openai-embeddings",
+                "http://g.test/v1beta/openai"
+            ),
         ]
     );
     let header = |i: usize, e: usize, name: &str| {
@@ -277,6 +287,7 @@ fn a_preset_is_every_format_of_its_vendor_compiled_in() {
             "openai-images",
             "openai-transcriptions",
             "openai-speech",
+            "openai-embeddings",
             "openai-videos",
             "openai-realtime",
             "responses-ws",
@@ -499,7 +510,7 @@ fn an_unknown_format_names_the_compiled_in_ones() {
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, groq-chat, deepseek-chat, vllm-chat, openrouter-chat, azure-chat, anthropic-messages, openai-images, openai-transcriptions, openai-speech, openai-videos, gemini-veo, passthrough, openai-realtime, responses-ws, gemini-live]"
+            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, groq-chat, deepseek-chat, vllm-chat, openrouter-chat, azure-chat, anthropic-messages, openai-images, openai-transcriptions, openai-speech, openai-embeddings, openai-videos, gemini-veo, passthrough, openai-realtime, responses-ws, gemini-live]"
         )
     );
 }

@@ -25,12 +25,14 @@ listen: 127.0.0.1:8080
 # body_limit: 33554432
 
 # Providers, by name, in order: the first serving a kind (chat, realtime,
-# image, transcription, speech, video, ...) is that kind's default. A vendor
+# image, transcription, speech, embedding, video, ...) is that kind's default. A vendor
 # preset brings the vendor's base URL, its key from env:<VENDOR>_API_KEY,
 # every format of the vendor this binary speaks (OpenAI: chat, realtime,
-# Responses over WebSocket, images, transcriptions, speech and videos;
-# Gemini: chat, Live, Imagen as openai-images and Veo as gemini-veo; Groq:
-# chat, transcriptions and speech; xAI and Together: chat and images), and
+# Responses over WebSocket, images, transcriptions, speech, videos and
+# embeddings; Gemini: chat, Live, Imagen as openai-images, Veo as gemini-veo
+# and embeddings; Groq: chat, transcriptions and speech; xAI: chat and
+# images; Together: chat, images and embeddings; Mistral, Fireworks and
+# Ollama: chat and embeddings), and
 # its model names: gpt-*, o3-*, dall-e*, whisper-1, tts-*, sora* ... go to
 # openai, claude-* to anthropic, gemini-*, imagen-*, veo-* to gemini,
 # whisper-large-* to groq, without a route of your own. A name routes only
@@ -74,8 +76,8 @@ providers:
 # OpenAI's endpoints are formats as OpenAI and compatible vendors serve them
 # (base URL with the version): openai-images (/v1/images/generations and
 # edits), openai-transcriptions (/v1/audio/transcriptions and
-# translations), openai-speech (/v1/audio/speech) and openai-videos
-# (/v1/videos and its jobs). Google's Veo, gemini-veo, is a provider only,
+# translations), openai-speech (/v1/audio/speech), openai-embeddings
+# (/v1/embeddings) and openai-videos (/v1/videos and its jobs). Google's Veo, gemini-veo, is a provider only,
 # at the Gemini API's base with the version, answering OpenAI Videos
 # clients; a job's follow-ups go to the provider that made it, by its id.
 # When two providers speak one video format, the gateway gives clients ids

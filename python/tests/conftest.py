@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import select
 import socket
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,14 +59,26 @@ class FakeOpenAI:
                 else:
                     self.reply(404, {"error": {"message": f"no route {self.path}"}})
 
+            def embeddings(self, body: dict) -> None:
+                # Answers in the form asked: the openai SDK asks for base64 unless told otherwise.
+                vector = struct.pack("<3f", 0.25, -0.5, 1.0)
+                encoded = base64.b64encode(vector).decode() if body.get("encoding_format") == "base64" else [0.25, -0.5, 1.0]
+                self.reply(200, {
+                    "object": "list", "model": body["model"],
+                    "data": [{"object": "embedding", "index": 0, "embedding": encoded}],
+                    "usage": {"prompt_tokens": 2, "total_tokens": 2},
+                })
+
             def do_POST(self) -> None:
-                if self.path != "/v1/chat/completions":
+                if self.path not in ("/v1/chat/completions", "/v1/embeddings"):
                     return self.reply(404, {"error": {"message": f"no route {self.path}"}})
                 if self.headers.get("authorization") != f"Bearer {KEY}":
                     return self.reply(401, {"error": {"message": "bad key", "type": "invalid_request_error"}})
                 raw = self.rfile.read(int(self.headers.get("content-length", 0)))
                 body = json.loads(raw)
                 fake.requests.append(body)
+                if self.path == "/v1/embeddings":
+                    return self.embeddings(body)
                 if not isinstance(body.get("model"), str) or not body.get("messages"):
                     return self.reply(400, {"error": {"message": "model and messages are required"}})
                 if body["model"] == "missing":
@@ -132,13 +146,13 @@ def config_for(fake: FakeOpenAI) -> dict:
     return {
         "providers": {
             "openai": {
-                "format": "openai-chat",
+                "format": ["openai-chat", "openai-embeddings"],
                 "base_url": fake.base_url,
                 "auth": {"type": "bearer", "key": KEY},
             },
             "any": {"format": "passthrough", "base_url": fake.origin},
         },
-        "serve": ["openai-chat", "anthropic-messages", "passthrough"],
+        "serve": ["openai-chat", "anthropic-messages", "openai-embeddings", "passthrough"],
         "target": "openai",
     }
 
