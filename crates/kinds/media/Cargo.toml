@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-media"
-description = "The media kinds (images, transcription, speech) and their HTTP formats (OpenAI Images, Audio Transcriptions and Speech)."
+description = "The media kinds (images, transcription, speech, video) and their HTTP formats (OpenAI Images, Audio Transcriptions, Speech and Videos; Google's Veo)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,15 +12,21 @@ publish.workspace = true
 workspace = true
 
 [features]
-default = ["openai"]
+default = ["openai", "gemini"]
 # OpenAI's media endpoints, as OpenAI and compatible vendors serve them, over
-# HTTP. Without it the crate is the kinds' types alone, with no I/O.
+# HTTP. Without it and `gemini` the crate is the kinds' types alone.
 openai = [
     "dep:respan-gateway-http",
     "respan-gateway-conversation/http",
     "dep:base64",
     "dep:getrandom",
     "dep:memchr",
+]
+# Google's Veo, as the Gemini API serves it, over HTTP, as a provider.
+gemini = [
+    "dep:respan-gateway-http",
+    "respan-gateway-conversation/http",
+    "dep:base64",
 ]
 
 [dependencies]
@@ -43,7 +49,7 @@ respan-gateway-http = { workspace = true, features = ["reqwest"] }
 respan-gateway-plugins.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
-# The suite relays through the OpenAI formats.
+# The suite relays through the OpenAI formats, and to Veo.
 [[test]]
 name = "media"
-required-features = ["openai"]
+required-features = ["openai", "gemini"]

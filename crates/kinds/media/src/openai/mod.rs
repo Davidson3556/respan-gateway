@@ -1,8 +1,9 @@
 //! OpenAI's media endpoints over HTTP, as OpenAI and compatible vendors
-//! serve them, one format per kind: [`OpenAiImages`], [`OpenAiTranscriptions`]
-//! and [`OpenAiSpeech`]. Each is a client format over `ClientIo` and a
-//! provider format over `ProviderIo`; a client's request is recognised by a
-//! `POST` to a path ending in its endpoint, and a provider's base URL
+//! serve them, one format per kind: [`OpenAiImages`], [`OpenAiTranscriptions`],
+//! [`OpenAiSpeech`] and [`OpenAiVideos`]. Each is a client format over
+//! `ClientIo` and a provider format over `ProviderIo`; a client's request is
+//! recognised by its method and a path ending in its endpoint (a `POST` but
+//! for a video job's), and a provider's base URL
 //! includes the version, as OpenAI's SDKs take it
 //! (`https://api.openai.com/v1`).
 //!
@@ -21,11 +22,13 @@ mod images;
 mod multipart;
 mod speech;
 mod transcriptions;
+mod videos;
 
 pub use images::OpenAiImages;
 pub use respan_gateway_conversation::StreamResponse;
 pub use speech::OpenAiSpeech;
 pub use transcriptions::OpenAiTranscriptions;
+pub use videos::OpenAiVideos;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;

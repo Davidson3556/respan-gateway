@@ -151,7 +151,7 @@ the gateway, and the binary chooses what to compose. See the
 |---|---|
 | `crates/core/` | The neutral kernel and plugin-author API: typed streams, plugins, lifecycle, fault facts and native values; no HTTP or message kinds. |
 | `crates/kinds/conversation/` | The conversation kind (requests, reply events, typed usage, assembly) and its HTTP formats: OpenAI Chat (with vendor dialects) and Anthropic Messages, sharing the `Schema` trait. |
-| `crates/kinds/media/` | The media kinds, a kind per operation (image generation and edits, transcription, speech), and their HTTP formats: OpenAI Images, Audio Transcriptions and Speech. |
+| `crates/kinds/media/` | The media kinds, a kind per operation (image generation and edits, transcription, speech, video jobs), and their HTTP formats: OpenAI Images, Audio Transcriptions, Speech and Videos, and Google's Veo as a provider. |
 | `crates/kinds/realtime/` | The realtime kind (a client/provider JSON event pair) and its WebSocket format, `JsonEvents`, with the vendors' presets. |
 | `crates/kinds/mcp/` | The MCP kind (typed JSON-RPC messages and their envelopes) and its formats: streamable HTTP and stdio. |
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
