@@ -59,7 +59,7 @@ async fn a_runaway_tool_call_is_cut_and_charged_its_estimate() -> Result<(), Fau
     let mut data = vec![first];
     data.extend(vec![delta; 300]);
     data.push("[DONE]");
-    fake.answer(sse(&data));
+    fake.answer(data_events(&data));
     let gw = gateway(
         provider_support::openai(&fake.base_url())?.connect(),
         ledger.clone(),
@@ -144,7 +144,7 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
 async fn a_stream_cut_before_any_text_is_charged_its_reserve() -> Result<(), Fault> {
     let (fake, ledger) = (FakeOpenAi::start().await, team());
     let role = r#"{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}"#;
-    fake.answer(sse(&[role]).cut_after(1));
+    fake.answer(data_events(&[role]).cut_after(1));
     let gw = gateway(
         provider_support::openai(&fake.base_url())?.connect(),
         ledger.clone(),

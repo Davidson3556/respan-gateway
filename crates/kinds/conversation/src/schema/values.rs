@@ -30,6 +30,15 @@ pub(crate) struct Keep {
     pub droppable: &'static [&'static str],
 }
 
+impl Keep {
+    /// Nothing is the format's own, and a cache marker is dropped by
+    /// another format: a marker only hints at what to cache.
+    pub const CACHE_MARKER: Keep = Keep {
+        own: &[],
+        droppable: &["cache_control"],
+    };
+}
+
 /// The fields of `native` to write in `format`: all but the `own` keys if they
 /// are in `format`; if they are another's, none if each is droppable, else
 /// an `Err` naming the first that is not, by `what`.
@@ -80,10 +89,10 @@ pub(crate) fn native_fields(format: &str, fields: Map<String, Value>) -> Option<
 /// their names: the one place this crate knows them, as each format's
 /// encoder must know the other's.
 pub(crate) fn is_inert(format: &str, raw: &Value) -> bool {
-    let usage_only = raw.as_object().is_some_and(|o| {
+    let only_usage_or_call_fields = raw.as_object().is_some_and(|o| {
         o.len() == 1 && (o.contains_key("usage") || o.contains_key("call_fields"))
     });
-    (format == "openai-chat" && usage_only)
+    (format == "openai-chat" && only_usage_or_call_fields)
         || format == "anthropic-messages"
             && (matches!(
                 raw["type"].as_str(),
@@ -242,11 +251,8 @@ fn kept_text_fields(
     format: &str,
     native: &Option<NativeFields>,
 ) -> Result<Map<String, Value>, Fault> {
-    let keep = Keep {
-        own: &[],
-        droppable: &["cache_control"],
-    };
-    kept_fields(format, native, |key| format!("a text part's '{key}'"), keep)
+    let what = |key: &str| format!("a text part's '{key}'");
+    kept_fields(format, native, what, Keep::CACHE_MARKER)
 }
 
 /// A part as format `C` has it: text, a part in that format only, or what
@@ -432,11 +438,18 @@ impl Names<Finish> {
             .unwrap_or_else(|| Finish::native(self.1, reason))
     }
 
-    /// The reason to write: a native one, only in its own format; others
-    /// are refused, not invented as a normal completion.
+    /// The reason to write: a native one, only in its own format, but for
+    /// Anthropic's full context window, which is the token limit anywhere;
+    /// others are refused, not invented as a normal completion.
     pub fn reason<'a>(&self, finish: &'a Finish) -> Result<&'a str, Fault> {
         match finish {
             Finish::Native { format, reason, .. } if **format == *self.1 => Ok(reason),
+            Finish::Native { format, reason, .. }
+                if **format == *"anthropic-messages"
+                    && reason == "model_context_window_exceeded" =>
+            {
+                self.name(&Finish::Length).ok_or_else(unwritable_content)
+            }
             Finish::Native { .. } => Err(unwritable_content()),
             _ => self.name(finish).ok_or_else(unwritable_content),
         }

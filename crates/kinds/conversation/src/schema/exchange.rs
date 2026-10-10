@@ -93,7 +93,7 @@ impl<C: Schema> Encoder<Input> for RequestEncoder<C> {
         if let Some(original) = &self.original {
             C::respell(original, &mut v);
         }
-        C::finish(&mut v);
+        C::prepare_call(&mut v);
         out.extend_from_slice(&to_bytes(&v)?);
         Ok(())
     }

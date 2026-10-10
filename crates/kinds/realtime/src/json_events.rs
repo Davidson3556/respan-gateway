@@ -9,7 +9,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
 use respan_gateway_http::http::response::Parts as ResponseHead;
-use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
+use respan_gateway_http::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{self as h, Body, ClientIo, ProviderIo};
 use respan_gateway_ws::WsTransport;
@@ -120,7 +120,8 @@ impl JsonEvents {
     }
 
     /// Speak the subprotocol `protocol` (RFC 6455 1.9): a call it writes
-    /// offers it to the provider, and a client that offered it gets it back
+    /// offers it to the provider beside the client's own offers, and a client
+    /// that offered it gets it back
     /// in its `101`; a client that did not gets none. `Err` with `config`
     /// if `protocol` is no token (RFC 9110 5.6.2).
     pub fn protocol(mut self, protocol: impl Into<String>) -> Result<Self, Fault> {
@@ -204,6 +205,7 @@ impl Format<ProviderIo, Output, Input> for JsonEvents {
         let input_format = self.name.clone();
         let path = self.path.clone();
         let protocol = self.protocol.clone();
+        let wire = io.extensions().get::<h::Wire>().cloned();
         // Only the handshake's 101 is a success: a 2xx is no session.
         let upgraded =
             |answer: &ResponseHead, _: &_| answer.status == StatusCode::SWITCHING_PROTOCOLS;
@@ -219,7 +221,12 @@ impl Format<ProviderIo, Output, Input> for JsonEvents {
                 head.headers
                     .insert(UPGRADE, HeaderValue::from_static("websocket"));
                 if let Some(protocol) = protocol {
-                    head.headers.insert(SEC_WEBSOCKET_PROTOCOL, protocol);
+                    let client = wire.as_ref().and_then(h::Wire::get);
+                    offer_beside_the_clients(
+                        &mut head.headers,
+                        client.map(Request::headers),
+                        &protocol,
+                    )?;
                 }
                 Ok(formats::each(move |event: &Input| {
                     written(&input_format, &event.event)
@@ -229,6 +236,27 @@ impl Format<ProviderIo, Output, Input> for JsonEvents {
             move |answer| h::provider_fault(&refused, answer),
         ))
     }
+}
+
+/// Offer `protocol` in `headers` beside the subprotocols the client
+/// offered, which are kept, if the client did not offer it.
+fn offer_beside_the_clients(
+    headers: &mut HeaderMap,
+    client: Option<&HeaderMap>,
+    protocol: &HeaderValue,
+) -> Result<(), Fault> {
+    let offered = client
+        .into_iter()
+        .flat_map(|client| respan_gateway_http::header_tokens(client, SEC_WEBSOCKET_PROTOCOL));
+    let mut offers: Vec<&str> = offered.filter(|offer| !offer.is_empty()).collect();
+    let named = protocol.to_str().unwrap_or_default();
+    if !offers.contains(&named) {
+        offers.push(named);
+    }
+    let all = HeaderValue::from_str(&offers.join(", "))
+        .map_err(|_| Fault::config("a subprotocol must be a token"))?;
+    headers.insert(SEC_WEBSOCKET_PROTOCOL, all);
+    Ok(())
 }
 
 /// The provider's events, one per frame of its upgraded session.

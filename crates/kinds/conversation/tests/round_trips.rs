@@ -72,7 +72,7 @@ fn text_part_fields_survive_the_same_format_and_a_cache_marker_is_dropped_by_ano
 }
 
 #[test]
-fn tool_part_fields_survive_the_same_format_and_are_refused_by_another() {
+fn tool_part_fields_survive_the_same_format_and_a_cache_marker_is_dropped_by_another() {
     let marker = json!({ "type": "ephemeral" });
     let call =
         json!({ "type": "tool_use", "id": "t", "name": "f", "input": {}, "cache_control": marker });
@@ -92,7 +92,40 @@ fn tool_part_fields_survive_the_same_format_and_are_refused_by_another() {
     assert!(
         matches!(&chat.messages[2].content[0], Content::ToolResult { native, .. } if native.as_ref().is_some_and(|n| !n.is_empty()))
     );
+    let to_openai = sent(ANTHROPIC, OPENAI, &body).expect("translated");
+    assert_eq!(to_openai["messages"][2]["role"], "tool");
+    // Another field of a tool part is not harmless.
+    let vendor_call =
+        json!({ "type": "tool_use", "id": "t", "name": "f", "input": {}, "vendor": 1 });
+    let body = anthropic(json!([
+        { "role": "user", "content": "go" },
+        { "role": "assistant", "content": [vendor_call] },
+    ]));
     assert!(refused(ANTHROPIC, OPENAI, &body));
+}
+
+#[test]
+fn a_cache_marker_on_a_tool_definition_a_tool_result_text_or_media_is_dropped_by_another_format() {
+    let marker = json!({ "type": "ephemeral" });
+    let marked_text = json!({ "type": "text", "text": "x", "cache_control": marker });
+    let image = json!({ "type": "image", "cache_control": marker,
+        "source": { "type": "url", "url": "https://example.com/a.png" } });
+    let mut body = anthropic(json!([
+        { "role": "user", "content": "go" },
+        { "role": "assistant", "content": [
+            { "type": "tool_use", "id": "t", "name": "f", "input": {} }] },
+        { "role": "user", "content": [
+            { "type": "tool_result", "tool_use_id": "t", "content": [marked_text] },
+            image] },
+    ]));
+    body["tools"] = json!([{ "name": "f", "input_schema": { "type": "object" },
+        "cache_control": marker }]);
+    assert_eq!(same(ANTHROPIC, &body), body);
+    let to_openai = sent(ANTHROPIC, OPENAI, &body).expect("translated");
+    assert!(
+        !to_openai.to_string().contains("cache_control"),
+        "{to_openai}"
+    );
 }
 
 #[test]
@@ -750,7 +783,7 @@ async fn finite_and_streamed_response_reads_share_framing_and_errors() {
 }
 
 #[test]
-fn native_context_window_finish_survives_reframing_but_not_translation() {
+fn native_context_window_finish_survives_reframing_and_translates_as_length() {
     let request = |stream| http::Request::new(Bytes::from(json!({"stream": stream}).to_string()));
     let call = http::Request::new(()).into_parts().0;
     let native = "model_context_window_exceeded";
@@ -772,7 +805,11 @@ fn native_context_window_finish_survives_reframing_but_not_translation() {
         body.contains(&format!("\"stop_reason\":\"{native}\"")),
         "{body}"
     );
-    assert!(OPENAI.encode_response(&request(false), &replies).is_err());
+    let translated = OPENAI
+        .encode_response(&request(false), &replies)
+        .expect("translated");
+    let translated: Value = serde_json::from_slice(translated.body()).expect("JSON");
+    assert_eq!(translated["choices"][0]["finish_reason"], "length");
 
     let sse = format!(
         "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"m\",\"model\":\"claude-x\",\"usage\":{{\"input_tokens\":4,\"output_tokens\":0}}}}}}\n\n\
@@ -793,7 +830,11 @@ fn native_context_window_finish_survives_reframing_but_not_translation() {
         .expect("unary");
     let body: Value = serde_json::from_slice(framed.body()).expect("reframed unary JSON");
     assert_eq!(body["stop_reason"], native);
-    assert!(OPENAI.encode_response(&request(false), &replies).is_err());
+    let translated = OPENAI
+        .encode_response(&request(false), &replies)
+        .expect("translated");
+    let translated: Value = serde_json::from_slice(translated.body()).expect("JSON");
+    assert_eq!(translated["choices"][0]["finish_reason"], "length");
 
     let unknown = Output::finished(Finish::native("openai-chat", "unrecognized_native_finish"));
     assert!(

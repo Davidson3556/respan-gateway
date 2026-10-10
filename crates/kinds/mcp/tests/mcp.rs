@@ -1357,6 +1357,34 @@ fn mcp_is_matched_however_its_path_is_spelled() {
 /// Response correlation follows rewritten bytes, while client failures retain
 /// the caller's original JSON-RPC ID.
 #[tokio::test]
+async fn a_post_a_plugin_emptied_is_a_configuration_fault_not_an_empty_batch() {
+    struct Empty;
+    #[async_trait]
+    impl Plugin for Empty {
+        async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
+            cx.filter(|input: &mut Input| {
+                input.messages.clear();
+                Ok(())
+            })?;
+            Ok(None)
+        }
+    }
+    let mock = ScriptedMcp::new();
+    let gw = gateway(mock.clone().connect(), None).plugin(Empty);
+    let (status, ..) = send(&gw, request(Method::POST, INIT, &[])).await;
+    assert!(status.is_server_error(), "{status}");
+    assert!(mock.sent().is_empty());
+}
+
+#[test]
+fn a_new_input_is_a_batch_only_when_it_is_set_to_be() {
+    let one = respan_gateway_mcp::Message::try_from(json!({ "jsonrpc": "2.0", "method": "ping" }));
+    let one = one.expect("a notification");
+    assert!(!Input::new(Method::POST, vec![one.clone(), one]).batch);
+    assert!(!Input::new(Method::POST, Vec::new()).batch);
+}
+
+#[tokio::test]
 async fn rewritten_ids_correlate_with_sent_request_but_refuse_original_request() {
     struct Rewrite;
     #[async_trait]

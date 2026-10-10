@@ -26,3 +26,22 @@ pub fn sse(chunks: &[&str]) -> mockllm::Answer {
         .collect();
     mockllm::Answer::events(events)
 }
+
+/// Send each of `data` as one `data:` event, as a provider streams.
+pub fn data_events(data: &[&str]) -> mockllm::Answer {
+    let events: Vec<String> = data.iter().map(|d| format!("data: {d}\n\n")).collect();
+    sse(&events.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// Stream `deltas` as OpenAI chat chunks of text, then `[DONE]`.
+pub fn deltas(deltas: &[&str]) -> mockllm::Answer {
+    let chunk = |d: &&str| {
+        serde_json::json!({ "id": "c1", "model": "gpt",
+            "choices": [{ "index": 0, "delta": { "content": d } }] })
+        .to_string()
+    };
+    let chunks: Vec<String> = deltas.iter().map(chunk).collect();
+    let mut data: Vec<&str> = chunks.iter().map(String::as_str).collect();
+    data.push("[DONE]");
+    data_events(&data)
+}

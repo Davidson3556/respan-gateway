@@ -19,7 +19,7 @@
 #[path = "../support/text.rs"]
 mod text;
 
-use mockllm::{Answer, FakeOpenAi};
+use mockllm::FakeOpenAi;
 use respan_gateway_conversation::anthropic::AnthropicMessages;
 use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Input, Output};
@@ -38,6 +38,7 @@ mod http_support;
 #[path = "../support/http.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
+use provider_support::deltas;
 use serde_json::{Value, json};
 use text::{Holdback, Readable, Rewrite, UNREADABLE, partial_match};
 
@@ -195,16 +196,6 @@ fn chat(model: &str, content: Value) -> Request<Body> {
     let body = json!({ "model": model, "stream": true,
         "messages": [{ "role": "user", "content": content }] });
     post("/v1/chat/completions", body.to_string())
-}
-
-/// The provider streams `deltas` as OpenAI chunks.
-fn deltas(deltas: &[&str]) -> Answer {
-    let chunk = |d| json!({ "id": "c1", "choices": [{ "index": 0, "delta": { "content": d } }] });
-    let events: String = deltas
-        .iter()
-        .map(|d| format!("data: {}\n\n", chunk(d)))
-        .collect();
-    provider_support::sse(&[&events, "data: [DONE]\n\n"])
 }
 
 async fn send(gw: &Gateway, req: Request<Body>) -> (StatusCode, String) {

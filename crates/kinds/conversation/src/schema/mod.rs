@@ -111,8 +111,9 @@ pub trait Schema: Copy + Send + Sync + 'static {
     fn status(status: StatusCode) -> StatusCode {
         status
     }
-    /// Add to a request what this format needs, such as asking for usage.
-    fn finish(_v: &mut Map<String, Value>) {}
+    /// Prepare the request sent to a provider: add what the gateway needs of it,
+    /// such as usage in a stream.
+    fn prepare_call(_v: &mut Map<String, Value>) {}
     /// Spell the fields of `v` as `original`, the client's request in this
     /// format, did, where the format has two spellings of one field.
     fn respell(_original: &Value, _v: &mut Map<String, Value>) {}

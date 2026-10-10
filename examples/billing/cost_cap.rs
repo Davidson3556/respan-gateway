@@ -44,6 +44,7 @@ mod http_support;
 #[path = "../support/http.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
+use provider_support::data_events;
 
 /// The most output tokens an answer may have.
 const CAP: u64 = 100;
@@ -188,12 +189,6 @@ fn gateway(
         .target("openai")
 }
 
-/// A stream of these events.
-fn sse(data: &[&str]) -> Answer {
-    let events: Vec<String> = data.iter().map(|d| format!("data: {d}\n\n")).collect();
-    provider_support::sse(&events.iter().map(String::as_str).collect::<Vec<_>>())
-}
-
 /// A provider ignoring `max_tokens`: 30 deltas of 20 characters, about 150
 /// tokens, with its usage at the end.
 fn runaway() -> Answer {
@@ -201,7 +196,7 @@ fn runaway() -> Answer {
     let usage = r#"{"id":"c1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":150}}"#;
     let mut data = vec![say; 30];
     data.extend([usage, "[DONE]"]);
-    sse(&data)
+    data_events(&data)
 }
 
 /// Asks for 5,000 tokens: the body the client got, or how it broke off.
