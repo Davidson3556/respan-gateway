@@ -211,7 +211,7 @@ closes remaining contract gaps rather than reopening its design.
 |---|---|
 | M1 Relay kernel | Plugin chain, byte-for-byte relay, response edits, kinds, OpenAI and Anthropic, text translation both ways, model router, HTTP adapter, YAML config, `check` (done) |
 | M2 Plugin API | Calls of their own input, async stream filters, unread bodies; API fixes before the freeze |
-| M3 Formats | Gemini, Responses, embeddings |
+| M3 Formats | Gemini, Responses |
 | M4 Plugins and examples | Fallback, hedge, limits, memo, application billing |
 | M5 Translation | Tool calls, images and reasoning across formats |
 | M6 Hard cases | Realtime relay and bridges, jobs, PII rewriting, admission |
