@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "respan-gateway"
+description = "An LLM gateway with a neutral core, usable in-process from Python or as a server."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+dynamic = ["version"]
+dependencies = ["httpx>=0.25"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1"]
+anthropic = ["anthropic>=0.30"]
+
+[project.scripts]
+respan-gateway = "respan_gateway.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/respanai/respan-gateway"
+
+[tool.maturin]
+python-source = "python"
+module-name = "respan_gateway._native"
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

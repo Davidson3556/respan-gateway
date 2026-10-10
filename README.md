@@ -194,7 +194,7 @@ the gateway, and the binary chooses what to compose. See the
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
 | `validation/` | Separate opt-in live-provider and external-tool checks, excluded from workspace tests. |
-| `python/` | Reserved for PyO3 bindings and the Python package intended for PyPI. |
+| `python/` | The Python package (PyPI `respan-gateway`): a PyO3 extension over the `apps/gateway` library, in-process httpx transports, SDK clients, a background server and the CLI. |
 
 Core exposes contracts and shared types, not production `Plugin` implementations.
 It does not depend on protocol infrastructure, providers, plugins or adapters.
@@ -204,8 +204,8 @@ Billing policies, priced tallies, reservations and settlement live in private
 [example support](examples/README.md#billing-policies), not in a ledger crate or
 public accounting plugin. The conversation kind's typed `Usage` is the shared fact; applications own
 prices, accounts and durable billing stores. Routing takes an explicit retry classifier, with HTTP classification
-available from the HTTP protocol module. The future PyO3 bindings and PyPI package will live together in
-[`python/`](python/README.md); they are not implemented yet.
+available from the HTTP protocol module. The PyO3 bindings and PyPI package live together in
+[`python/`](python/README.md).
 
 Crates are of two sorts: a **kind** (`crates/kinds/`: `conversation`, `media`, `realtime`, `mcp`) owns
 its events, its formats on its wire and its vendors' dialects; a **wire**

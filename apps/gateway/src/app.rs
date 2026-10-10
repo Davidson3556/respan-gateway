@@ -172,7 +172,7 @@ impl App {
     /// end hooks share one 30 s deadline. Responses open at it are cut and
     /// lose their end hooks.
     pub async fn serve(
-        self,
+        &self,
         listener: TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {

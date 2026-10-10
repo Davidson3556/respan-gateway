@@ -1,7 +1,7 @@
 # Architecture
 
 The gateway consists of reusable Rust libraries, a standalone application,
-and runnable examples. The Python distribution is planned separately under
+and runnable examples. The Python distribution (a PyO3 extension over the application library) lives in
 [`python/`](../python/README.md).
 
 ## Repository layers
@@ -31,6 +31,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
 | `crates/plugins/` | Plugins | Model routing, attempts, fallback, races and backoff | Core |
 | `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), its routing step, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
+| `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
 | `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
 Arrows below point from a dependency toward its consumers. Test dependencies

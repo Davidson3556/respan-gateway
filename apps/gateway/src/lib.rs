@@ -18,6 +18,7 @@
 mod admin;
 mod app;
 mod auth;
+mod cli;
 mod compose;
 mod config;
 mod formats;
@@ -28,6 +29,7 @@ mod requests;
 mod routing;
 
 pub use app::{App, DEFAULT_LISTEN, shutdown_signal};
+pub use cli::run;
 pub use config::{
     Auth, Config, DEFAULT_FILE, ModelRoute, PluginConfig, ProviderConfig, ProxyVendor, Source,
     no_keys_message,

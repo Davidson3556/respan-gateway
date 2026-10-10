@@ -5,6 +5,7 @@ members = [
     "crates/kinds/*",
     "crates/wires/*",
     "apps/gateway",
+    "python",
     "examples",
 ]
 exclude = ["validation"]
