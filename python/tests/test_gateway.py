@@ -216,7 +216,7 @@ def test_console_script_version():
 
 def test_cli_check_and_bad_usage(fake, tmp_path):
     ok = tmp_path / "gateway.yaml"
-    ok.write_text("providers: {}\nserve: []\n")
+    ok.write_text(json.dumps(config_for(fake)))
     run = lambda *a: subprocess.run([sys.executable, "-m", "respan_gateway", *a], capture_output=True, text=True)
     assert run("-c", str(ok), "check").stdout.strip().endswith(": ok")
     assert run("--bogus").returncode == 2
@@ -359,12 +359,12 @@ def test_gateway_reads_gateway_yaml_in_the_working_directory(fake, tmp_path, mon
     assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "".join(WORDS)
 
 
-def test_cli_exits_quietly_on_sigint(tmp_path):
+def test_cli_exits_quietly_on_sigint(fake, tmp_path):
     import signal
     import time
 
     cfg = tmp_path / "gateway.yaml"
-    cfg.write_text("providers: {}\nserve: []\n")
+    cfg.write_text(json.dumps(config_for(fake)))
     proc = subprocess.Popen(
         [sys.executable, "-m", "respan_gateway", "-c", str(cfg), "--listen", "127.0.0.1:0"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
