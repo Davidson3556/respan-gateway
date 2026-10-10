@@ -1,9 +1,18 @@
-import { AudioLines, Clapperboard, ImageIcon, MessageSquare, Mic, type LucideIcon } from "lucide-react";
+import {
+  AudioLines,
+  Clapperboard,
+  ImageIcon,
+  MessageSquare,
+  Mic,
+  Sigma,
+  type LucideIcon,
+} from "lucide-react";
 import type { ComponentType } from "react";
 import { useSearchParams } from "react-router";
 import { PageHeader } from "@/components/page-header";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ChatTab } from "./chat";
+import { EmbeddingsTab } from "./embeddings";
 import { ImageTab } from "./image";
 import { SpeechTab } from "./speech";
 import { TranscribeTab } from "./transcribe";
@@ -14,6 +23,7 @@ const tabs: { value: string; label: string; icon: LucideIcon; Panel: ComponentTy
   { value: "image", label: "Image", icon: ImageIcon, Panel: ImageTab },
   { value: "transcribe", label: "Transcribe", icon: Mic, Panel: TranscribeTab },
   { value: "speech", label: "Speech", icon: AudioLines, Panel: SpeechTab },
+  { value: "embeddings", label: "Embeddings", icon: Sigma, Panel: EmbeddingsTab },
   { value: "video", label: "Video", icon: Clapperboard, Panel: VideoTab },
 ];
 

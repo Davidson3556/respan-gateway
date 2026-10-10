@@ -7,6 +7,7 @@ export type Kind =
   | "image"
   | "transcription"
   | "speech"
+  | "embedding"
   | "video"
   | "passthrough";
 

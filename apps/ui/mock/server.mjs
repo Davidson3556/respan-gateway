@@ -1,7 +1,7 @@
 // A stand-in for the gateway, for developing and screenshotting the UI
 // without the Rust binary. It serves the admin API from the UI contract with
 // generated traffic, and fake /v1 endpoints for the playground (chat, images,
-// transcription and speech; video answers 404 to show the "no provider"
+// transcription, speech and embeddings; video answers 404 to show the "no provider"
 // state). Zero dependencies.
 //
 //   pnpm mock                      # http://127.0.0.1:8080, open
@@ -19,8 +19,8 @@ const providers = [
   {
     name: "openai",
     vendor: "openai",
-    formats: ["openai-chat", "openai-images", "openai-transcriptions", "openai-speech"],
-    kinds: ["chat", "image", "transcription", "speech"],
+    formats: ["openai-chat", "openai-images", "openai-transcriptions", "openai-speech", "openai-embeddings"],
+    kinds: ["chat", "image", "transcription", "speech", "embedding"],
     base_url: "https://api.openai.com/v1",
     credentials: "gateway",
   },
@@ -57,6 +57,7 @@ const routes = {
       endpoints: ["POST /v1/audio/transcriptions", "POST /v1/audio/translations"],
     },
     { format: "openai-speech", kind: "speech", endpoints: ["POST /v1/audio/speech"] },
+    { format: "openai-embeddings", kind: "embedding", endpoints: ["POST /v1/embeddings"] },
   ],
   routes: [
     { prefix: "claude", provider: "anthropic" },
@@ -67,6 +68,7 @@ const routes = {
     { kind: "image", provider: "openai" },
     { kind: "transcription", provider: "openai" },
     { kind: "speech", provider: "openai" },
+    { kind: "embedding", provider: "openai" },
   ],
 };
 
@@ -79,6 +81,7 @@ const models = [
   ["gpt-image-1", "openai", "image"],
   ["whisper-1", "openai", "transcription"],
   ["gpt-4o-mini-tts", "openai", "speech"],
+  ["text-embedding-3-small", "openai", "embedding"],
 ].map(([id, owned_by, kind]) => ({ id, object: "model", owned_by, kind }));
 
 // --- request records ------------------------------------------------------
@@ -329,6 +332,17 @@ async function media(req, res, { path, kind, model, answer }) {
   answer(raw);
 }
 
+// A 64-number vector of a text's letter pairs, so texts that share words are alike.
+function hashedVector(text) {
+  const vector = new Array(64).fill(0);
+  const words = text.toLowerCase().replace(/[^a-z0-9 ]/g, "");
+  for (let i = 0; i + 1 < words.length; i++) {
+    vector[(words.charCodeAt(i) * 31 + words.charCodeAt(i + 1)) % 64] += 1;
+  }
+  const norm = Math.hypot(...vector) || 1;
+  return vector.map((v) => Number((v / norm).toFixed(6)));
+}
+
 const routesTable = {
   "GET /healthz": (_req, res) => res.end("ok"),
   "GET /ui/api/overview": (_req, res) =>
@@ -383,6 +397,26 @@ const routesTable = {
         json(res, 200, {
           text: `This is a mock transcript of ${Math.round(raw.length / 1024)} KB of audio. In the real gateway it comes from the transcription provider.`,
         }),
+    }),
+  "POST /v1/embeddings": (req, res) =>
+    media(req, res, {
+      path: "/v1/embeddings",
+      kind: "embedding",
+      model: "text-embedding-3-small",
+      answer: (raw) => {
+        const body = JSON.parse(raw.toString() || "{}");
+        const inputs = [body.input].flat();
+        json(res, 200, {
+          object: "list",
+          model: body.model,
+          data: inputs.map((text, index) => ({
+            object: "embedding",
+            index,
+            embedding: hashedVector(String(text)),
+          })),
+          usage: { prompt_tokens: inputs.length * 4, total_tokens: inputs.length * 4 },
+        });
+      },
     }),
   "POST /v1/audio/speech": (req, res) =>
     media(req, res, {
