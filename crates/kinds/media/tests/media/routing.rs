@@ -85,3 +85,49 @@ async fn a_model_router_sends_each_kind_to_its_models_provider() {
         assert_eq!(went, want, "{path}");
     }
 }
+
+#[tokio::test]
+async fn a_video_goes_to_its_models_provider_and_a_follow_up_to_its_jobs() {
+    use respan_gateway_http::http::Method;
+    use respan_gateway_media::gemini::GeminiVeo;
+    use respan_gateway_media::openai::OpenAiVideos;
+    use respan_gateway_media::video::{self, LocateContent};
+
+    use crate::support::bodiless;
+    use crate::support::veo::Veo;
+    use crate::support::videos::Videos;
+
+    let (openai, veo) = (Videos::openai().await, Veo::start().await);
+    let gateway = Gateway::new()
+        .provider("openai", OpenAiVideos, openai.transport())
+        .and_then(|g| g.provider("veo", GeminiVeo, veo.transport()))
+        .and_then(|g| g.client::<video::Input, _, _>(OpenAiVideos))
+        .and_then(|g| g.target("openai"))
+        .expect("a gateway")
+        // A job's id says whose it is: OpenAI's start `video_`, Veo's `veo_`.
+        .plugin(
+            ModelRouter::new(|i: &video::Input| i.model().or(i.job_id()))
+                .route("veo", "veo")
+                .route("sora", "openai")
+                .route("video_", "openai"),
+        )
+        .plugin(LocateContent::new().provider("veo"));
+
+    let mut ids = Vec::new();
+    for model in ["sora-2", "veo-3.0-generate-001"] {
+        let asked = json!({"model": model, "prompt": "a fox"});
+        let (status, _, body) = send(&gateway, json_request("/v1/videos", asked)).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let job: serde_json::Value = serde_json::from_slice(&body).expect("a job");
+        ids.push(job["id"].as_str().expect("an id").to_owned());
+    }
+    assert_eq!((openai.seen().len(), veo.seen().len()), (1, 1));
+    for (id, to_veo) in [(&ids[0], false), (&ids[1], true)] {
+        let before = (openai.seen().len(), veo.seen().len());
+        let request = bodiless(Method::GET, &format!("/v1/videos/{id}"));
+        let (status, _, body) = send(&gateway, request).await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let went = (openai.seen().len() - before.0, veo.seen().len() - before.1);
+        assert_eq!(went, if to_veo { (0, 1) } else { (1, 0) }, "{id}");
+    }
+}

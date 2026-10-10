@@ -19,6 +19,9 @@ use serde_json::{Map, Value, json};
 
 use crate::http_support::{read_whole, serve};
 
+pub mod veo;
+pub mod videos;
+
 /// The key the fake takes.
 pub const KEY: &str = "sk-test";
 
@@ -42,11 +45,13 @@ pub struct File {
     pub bytes: Bytes,
 }
 
-/// A call the fake took: its path, content type, fields (a form's as
-/// strings, `name[]` as an array under that name) and files.
+/// A call the fake took: its method, path, query, content type, fields (a
+/// form's as strings, `name[]` as an array under that name) and files.
 #[derive(Debug, Clone, Default)]
 pub struct Seen {
+    pub method: String,
     pub path: String,
+    pub query: Option<String>,
     pub content_type: String,
     pub fields: Map<String, Value>,
     pub files: Vec<File>,
@@ -94,10 +99,17 @@ impl Fake {
 
     /// A transport to it, with its key.
     pub fn transport(&self) -> impl Fn(Extensions) -> ProviderIo + Clone + Send + Sync + 'static {
+        Fake::transport_to(&self.base)
+    }
+
+    /// A transport to a fake of OpenAI's at `base`, with its key.
+    pub fn transport_to(
+        base: &str,
+    ) -> impl Fn(Extensions) -> ProviderIo + Clone + Send + Sync + 'static {
         let mut headers = HeaderMap::new();
         let key = HeaderValue::from_str(&format!("Bearer {KEY}")).expect("a header");
         headers.insert(http::header::AUTHORIZATION, key);
-        HttpTransport::new(&self.base)
+        HttpTransport::new(base)
             .and_then(|t| t.with_headers(headers))
             .expect("a transport")
             .connect()
@@ -606,6 +618,14 @@ pub fn request(path: &str, content_type: &str, body: impl Into<Bytes>) -> http::
     request
 }
 
+/// A client's request of `method` to `path`, with no body.
+pub fn bodiless(method: http::Method, path: &str) -> http::Request<Body> {
+    let mut request = http::Request::new(Body::default());
+    *request.method_mut() = method;
+    *request.uri_mut() = path.parse().expect("a path");
+    request
+}
+
 /// A client's JSON request to `path`.
 pub fn json_request(path: &str, body: Value) -> http::Request<Body> {
     request(path, "application/json", body.to_string())
@@ -700,6 +720,12 @@ pub fn content_type(headers: &HeaderMap) -> &str {
         .get(http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
+}
+
+/// Base64 `text` decoded, if it is base64.
+pub fn unb64_str(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
 }
 
 /// Base64 `text` decoded.

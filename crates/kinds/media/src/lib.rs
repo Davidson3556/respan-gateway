@@ -5,6 +5,7 @@
 //! - [`image`]: images generated from a prompt, or edits of source images.
 //! - [`transcription`]: speech to text, or a translation of it to English.
 //! - [`speech`]: text to speech.
+//! - [`video`]: video generation, a job created, polled and downloaded.
 //!
 //! Media are the conversation kind's [`Media`] and usage its [`Usage`]; a
 //! kind has a type of its own only where neither says it, such as a
@@ -14,8 +15,9 @@
 //! hold and compare by it, and keep nothing of the bytes they came as.
 //!
 //! The formats, OpenAI's endpoints as OpenAI and compatible vendors serve
-//! them, are in [`openai`], behind the default `openai` feature. Without it
-//! the crate is the kinds' types alone, with no I/O.
+//! them, are in [`openai`], behind the default `openai` feature, and Google's
+//! Veo in [`gemini`], behind the default `gemini` feature. Without them the
+//! crate is the kinds' types alone, with no I/O of its own.
 //!
 //! [`NativeFields`]: respan_gateway_core::NativeFields
 //! [`NativeValue`]: respan_gateway_core::NativeValue
@@ -23,7 +25,10 @@
 pub mod image;
 pub mod speech;
 pub mod transcription;
+pub mod video;
 
+#[cfg(feature = "gemini")]
+pub mod gemini;
 #[cfg(feature = "openai")]
 pub mod openai;
 

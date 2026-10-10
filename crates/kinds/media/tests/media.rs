@@ -1,5 +1,5 @@
 //! The media kinds relayed through their OpenAI formats to strict local
-//! fakes of OpenAI's media endpoints.
+//! fakes of OpenAI's media endpoints, and video to one of Veo's.
 
 #[allow(dead_code)]
 #[path = "../../../../tests/support/http.rs"]
@@ -15,3 +15,7 @@ mod routing;
 mod speech;
 #[path = "media/transcriptions.rs"]
 mod transcriptions;
+#[path = "media/veo.rs"]
+mod veo;
+#[path = "media/videos.rs"]
+mod videos;
