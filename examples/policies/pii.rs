@@ -27,7 +27,7 @@
 #[path = "../support/text.rs"]
 mod text;
 
-use mockllm::{Answer, FakeOpenAi};
+use mockllm::FakeOpenAi;
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::ErrorCode;
@@ -44,6 +44,7 @@ mod http_support;
 #[path = "../support/http.rs"]
 mod provider_support;
 use http_support::{post, read_whole, serve};
+use provider_support::deltas;
 use serde_json::{self, json};
 use text::{Holdback, Placeholders, Readable};
 
@@ -154,20 +155,6 @@ fn chat(content: serde_json::Value, more: serde_json::Value) -> http::Request<Bo
         body[key] = value.clone();
     }
     post("/v1/chat/completions", body.to_string())
-}
-
-/// The provider streams `deltas` as OpenAI chunks.
-fn deltas(deltas: &[&str]) -> Answer {
-    let mut chunks: Vec<String> = deltas
-        .iter()
-        .map(|d| {
-            let chunk = json!({ "id": "c1", "model": "gpt",
-                "choices": [{ "index": 0, "delta": { "content": d } }] });
-            format!("data: {chunk}\n\n")
-        })
-        .collect();
-    chunks.push("data: [DONE]\n\n".into());
-    provider_support::sse(&chunks.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// The status and the text the client got, and what the provider was sent.
