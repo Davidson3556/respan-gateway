@@ -3,8 +3,9 @@
 
 use super::{
     Fields, as_usage_extras, b64, bind_client, bind_provider, event_json, foreign, invalid,
-    json_bytes, kept, merge_missing, missing, native_of, post_to, read_fields, read_usage, set,
-    sse_event, streams, take_number, take_string, unb64, unreadable, usage_extras, write_usage,
+    json_bytes, kept, merge_missing, missing, native_of, post_to, read_fields, read_usage, sends,
+    set, sse_event, streams, take_number, take_string, unb64, unreadable, usage_extras,
+    write_usage,
 };
 use crate::speech::{Input, Output};
 use respan_gateway_conversation::Usage;
@@ -62,7 +63,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiSpeech {
             io,
             NAME,
             move |head, input| post(head, input, stream),
-            read_response,
+            |response, _| read_response(response),
         ))
     }
 }
@@ -95,24 +96,22 @@ fn decode_request(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
 /// The call of `input`, in JSON.
 fn post(
     head: &mut RequestHead,
-    _input: &Input,
+    input: &Input,
     stream: bool,
 ) -> Result<Box<dyn Encoder<Input>>, Fault> {
     post_to(head, SPEECH, "application/json")?;
-    Ok(formats::each(move |input: &Input| {
-        let mut v = Map::new();
-        set(&mut v, "model", input.model.clone());
-        v.insert("input".into(), input.text.clone().into());
-        set(&mut v, "voice", input.voice.clone());
-        set(&mut v, "instructions", input.instructions.clone());
-        set(&mut v, "response_format", input.audio_format.clone());
-        set(&mut v, "speed", input.speed);
-        merge_missing(&mut v, &kept(NAME, &input.native)?);
-        if stream {
-            v.insert("stream_format".into(), "sse".into());
-        }
-        json_bytes(&v)
-    }))
+    let mut v = Map::new();
+    set(&mut v, "model", input.model.clone());
+    v.insert("input".into(), input.text.clone().into());
+    set(&mut v, "voice", input.voice.clone());
+    set(&mut v, "instructions", input.instructions.clone());
+    set(&mut v, "response_format", input.audio_format.clone());
+    set(&mut v, "speed", input.speed);
+    merge_missing(&mut v, &kept(NAME, &input.native)?);
+    if stream {
+        v.insert("stream_format".into(), "sse".into());
+    }
+    Ok(sends(json_bytes(&v)?))
 }
 
 /// A provider's answer: a stream of events, or the audio's bytes, a chunk

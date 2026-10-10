@@ -3,8 +3,8 @@
 //!
 //! Each request is one operation on a job ([`Input`]); a response is a
 //! sequence of events: a [`Output::Job`] for one job's state, a
-//! [`Output::Jobs`] for a page of them, the content's [`Output::ContentType`]
-//! then its bytes in [`Output::Content`] chunks, or [`Output::Deleted`], with
+//! [`Output::Jobs`] for a page of them, the content's bytes in
+//! [`Output::Content`] chunks, or [`Output::Deleted`], with
 //! [`Output::Native`] among them.
 //!
 //! A job's id is the provider's, opaque, as a client gives it back: a
@@ -141,8 +141,6 @@ pub enum Output {
     Job(Job),
     /// A page of jobs.
     Jobs(Jobs),
-    /// The MIME type of the content whose bytes follow.
-    ContentType(String),
     /// The next bytes of the content.
     Content(Bytes),
     /// The job deleted.
@@ -320,7 +318,13 @@ impl LocateContent {
 #[async_trait]
 impl Plugin for LocateContent {
     async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        let Ok(Input::Content { id, url: None, .. }) = cx.input::<Input>() else {
+        // Only the video itself is at a URL; a provider refuses a still.
+        let Ok(Input::Content {
+            id,
+            variant: Variant::Video,
+            url: None,
+        }) = cx.input::<Input>()
+        else {
             return Ok(None);
         };
         let Some(target) = cx

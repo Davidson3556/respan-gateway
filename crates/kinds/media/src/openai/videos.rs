@@ -6,11 +6,11 @@
 use super::multipart::{self, Writer};
 use super::{
     Fields, bind_client, bytes_of, file_name, foreign, invalid, json_bytes, kept, merge_missing,
-    missing, native_of, read_fields, rest_of, set, take_count, take_string, unreadable, whole_json,
-    write_field,
+    missing, native_of, read_fields, rest_of, sends, set, take_count, take_string, unreadable,
+    whole_json, write_field,
 };
+use crate::edge::{bind_provider, content};
 use crate::video::{Create, Input, Job, JobError, Jobs, Output, Status, Variant};
-use respan_gateway_conversation::read_provider_error;
 use respan_gateway_core::{
     BadRequest, Connection, ErrorCode, EventStream, Fault, Format, Upstream,
 };
@@ -65,16 +65,9 @@ impl Format<ProviderIo, Output, Input> for OpenAiVideos {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        Ok(io.bind(
-            |head, input: Option<&Input>| {
-                let input = input.ok_or_else(|| {
-                    Fault::config(format!("{NAME} does not accept streaming inputs"))
-                })?;
-                call(head, input)
-            },
-            |response, sent| read_response(response, &sent),
-            |answer| read_provider_error(NAME, answer),
-        ))
+        Ok(bind_provider(io, NAME, call, |response, sent| {
+            read_response(response, &sent)
+        }))
     }
 }
 
@@ -267,12 +260,12 @@ fn call(head: &mut RequestHead, input: &Input) -> Result<Box<dyn Encoder<Input>>
         .parse()
         .map_err(|e| Fault::internal("a call's path is no path").with_source(e))?;
     let Some((body, content_type)) = body else {
-        return Ok(formats::each(|_: &Input| Ok(Bytes::new())));
+        return Ok(sends(Bytes::new()));
     };
     let content_type = HeaderValue::from_str(&content_type)
         .map_err(|e| Fault::internal("a content type is no header").with_source(e))?;
     head.headers.insert(CONTENT_TYPE, content_type);
-    Ok(formats::each(move |_: &Input| Ok(body.clone())))
+    Ok(sends(body))
 }
 
 /// The body of a creation and its content type: a form if its reference
@@ -308,25 +301,11 @@ fn read_response(
     response: http::Response<Body>,
     sent: &http::Request<Bytes>,
 ) -> EventStream<Output> {
-    let (head, body) = response.into_parts();
-    if !matches!(route(sent.method(), sent.uri()), Some(Route::Content(_))) {
-        return whole::read(body, decode_whole);
+    let body = response.into_body();
+    match route(sent.method(), sent.uri()) {
+        Some(Route::Content(_)) => content(body),
+        _ => whole::read(body, decode_whole),
     }
-    let mime = head.headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok());
-    let mime = Some(mime.unwrap_or("application/octet-stream").to_owned());
-    formats::parse(
-        body,
-        mime,
-        |mime, bytes, out| {
-            out.extend(mime.take().map(Output::ContentType));
-            out.push(Output::Content(bytes));
-            Ok(())
-        },
-        |mime, wire, out| {
-            out.extend(mime.take().map(Output::ContentType));
-            wire
-        },
-    )
 }
 
 /// The events of a whole JSON answer: a job, a page of jobs, or a deletion.
@@ -454,7 +433,7 @@ fn encode_whole(events: &[Output]) -> Result<Bytes, Fault> {
             }
             Output::Native(n) if &*n.format != NAME => return Err(foreign(NAME, n)),
             // A body has no place for another event.
-            Output::Native(_) | Output::ContentType(_) | Output::Content(_) => {}
+            Output::Native(_) | Output::Content(_) => {}
         }
     }
     json_bytes(&body.ok_or_else(|| Upstream::fault("the provider's answer said no video"))?)

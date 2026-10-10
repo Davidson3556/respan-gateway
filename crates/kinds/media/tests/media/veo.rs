@@ -161,11 +161,13 @@ async fn a_thumbnail_of_a_veo_video_is_refused() {
     let id = id["id"].as_str().expect("an id");
     poll(&gateway, id).await;
     poll(&gateway, id).await;
+    let called = veo.seen().len();
     let thumbnail = format!("/v1/videos/{id}/content?variant=thumbnail");
     let (status, _, body) = send(&gateway, bodiless(Method::GET, &thumbnail)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json_of(&body)["error"]["code"], "unsupported");
-    assert!(veo.seen().iter().all(|s| !s.path.contains(":download")));
+    // Refused before any call, the job not even retrieved to locate it.
+    assert_eq!(veo.seen().len(), called);
 }
 
 #[tokio::test]
