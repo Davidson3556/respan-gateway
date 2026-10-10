@@ -29,7 +29,7 @@ processes or several components.
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/wires/ws/tests/`, `crates/wires/http/tests/axum.rs`, WS unit tests |
 | MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/kinds/mcp/tests/`, MCP unit tests |
 | Routing policy | Attempts, retries, fallback, races and explicit retry classification | `crates/plugins/tests/routing.rs`, routing unit tests |
-| Application behavior | Configuration and presets, zero-config start, CLI/proxy modes, routing, client keys, `/v1/models`, the admin API and UI hosting, in-process library use, path matching, redirects, error limits and graceful shutdown of the built executable | `apps/gateway/tests/`, gateway unit tests |
+| Application behavior | Configuration and presets, zero-config start, CLI/proxy modes, routing (media kinds and video job ids included), client keys, `/v1/models`, the admin API and UI hosting, in-process library use, path matching, redirects, error limits and graceful shutdown of the built executable | `apps/gateway/tests/`, gateway unit tests |
 | Use cases | Billing, guardrails, PII, admission, durable jobs, attachments, routing and realtime policies composed through public APIs | `examples/tests/cases/`, `examples/tests/text_*.rs`, example library tests |
 | Performance | Timing of whole and streamed in-process relay | `crates/kinds/conversation/benches/relay.rs` |
 | Documentation examples | Compilation or execution of Rust examples in API documentation | Rust doctests |
@@ -80,7 +80,7 @@ cargo test --workspace --all-targets --all-features -- --list
 | `crates/*/src/` | Unit tests for private implementation details |
 | `crates/*/tests/` | Public contracts and protocol integration tests |
 | `crates/kinds/conversation/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fixtures remain in each parent test target |
-| `apps/gateway/tests/` | Executable integration tests (`e2e`, `app`), the library in process (`library`), redirects and bounded error bodies |
+| `apps/gateway/tests/` | Executable integration tests (`e2e`, `app`), the library in process (`library`), the media kinds in process against a strict fake of OpenAI's media endpoints and Veo (`media`), redirects and bounded error bodies |
 | `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fixture |
 | `examples/tests/cases/<topic>/` | Test modules included by the corresponding example or private support module |
 | `examples/tests/text_*.rs` | Automatically discovered text and tool-argument integration suites |

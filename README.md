@@ -5,8 +5,9 @@ for LLM traffic what Nginx is for HTTP: a small, fast, predictable core, with
 everything else built as modules on one public API.
 
 > **Status: pre-alpha.** Relays OpenAI and Anthropic chat traffic and
-> translates text and tools between them; images come in M5. APIs will
-> change. The core is now treated as half-frozen, like a release candidate:
+> translates text and tools between them; serves images, transcription,
+> speech and video jobs through OpenAI's media endpoints, Veo included.
+> APIs will change. The core is now treated as half-frozen, like a release candidate:
 > its contracts are stable by default while the surrounding APIs continue to evolve.
 
 ## Ground rules
@@ -46,7 +47,23 @@ curl localhost:8080/v1/chat/completions \
   -d '{"model":"groq/llama-3.3-70b-versatile","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-`GET /v1/models` lists every provider's models as clients name them,
+Media go the same way, each operation a kind of its own (`image`,
+`transcription`, `speech`, `video`) served at OpenAI's endpoints, to the
+providers serving that kind:
+
+```bash
+# gpt-image-1 is OpenAI's; imagen-* would go to Gemini, through its OpenAI-compatible endpoint.
+curl localhost:8080/v1/images/generations \
+  -d '{"model":"gpt-image-1","prompt":"a lighthouse at dusk"}'
+# whisper-1 is OpenAI's; whisper-large-v3 would go to Groq.
+curl localhost:8080/v1/audio/transcriptions -F file=@talk.mp3 -F model=whisper-1
+# A video is a job: veo-* goes to Gemini's Veo, answered in OpenAI's shape;
+# polling GET /v1/videos/{id} and GET /v1/videos/{id}/content reach the provider that made it.
+curl localhost:8080/v1/videos -d '{"model":"veo-3.0-generate-001","prompt":"a paper boat"}'
+```
+
+`GET /v1/models` lists every provider's models as clients name them, each
+with its `kind`,
 `GET /healthz` answers `ok`, and the web UI at
 [localhost:8080/ui/](http://localhost:8080/ui/) shows providers, routes and
 each request live; each finished request is also one line on stderr.
@@ -54,7 +71,9 @@ each request live; each finished request is also one line on stderr.
 Vendor presets: `openai`, `anthropic`, `gemini` (`GEMINI_API_KEY` or
 `GOOGLE_API_KEY`), `groq`, `deepseek`, `openrouter`, `xai`, `mistral`,
 `together`, `fireworks`, each reading `<VENDOR>_API_KEY`, and `ollama`
-(with `OLLAMA_HOST`). To configure more, write a config and check it:
+(with `OLLAMA_HOST`). A preset speaks every format of its vendor compiled
+in: OpenAI's media endpoints for `openai`, Imagen and Veo for `gemini`,
+transcription and speech for `groq`, images for `xai` and `together`. To configure more, write a config and check it:
 
 ```bash
 cargo run -p respan-gateway -- init    # a commented gateway.yaml from the keys found
@@ -98,7 +117,12 @@ ones include the version, such as `https://api.openai.com/v1` or
 `https://api.anthropic.com`. `openai-chat` reads only OpenAI's own fields; a
 vendor whose fields the gateway reads has a format of its own name (the
 [dialects](crates/kinds/conversation/README.md#openai-chat-completions)), and one whose additions it does not
-read, as Gemini's endpoint, is `openai-chat`.
+read, as Gemini's endpoint, is `openai-chat`. The media formats
+(`openai-images`, `openai-transcriptions`, `openai-speech`,
+`openai-videos`) take the same base URL; Veo (`gemini-veo`, a provider
+format only) takes the Gemini API's,
+`https://generativelanguage.googleapis.com/v1beta`, with its key in
+`x-goog-api-key` ([media kinds](crates/kinds/media/README.md)).
 
 Sessions go over WebSocket: a provider of format `openai-realtime` (OpenAI
 Realtime), `responses-ws` (OpenAI Responses over WebSocket) or
@@ -190,7 +214,7 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
 | `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
-| `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing, client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `init` and `proxy`. |
+| `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing (by model within each kind, video jobs by id), client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `init` and `proxy`. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
 | `validation/` | Separate opt-in live-provider and external-tool checks, excluded from workspace tests. |

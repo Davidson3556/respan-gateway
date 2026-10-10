@@ -22,11 +22,16 @@ listen: 127.0.0.1:8080
 # body_limit: 33554432
 
 # Providers, by name, in order: the first serving a kind (chat, realtime,
-# ...) is that kind's default. A vendor preset brings the vendor's base URL,
-# its key from env:<VENDOR>_API_KEY, every format of the vendor this binary
-# speaks (OpenAI: chat, realtime and Responses over WebSocket; Gemini: chat
-# and Live), and its model names: gpt-*, o3-*, ... go to openai, claude-* to
-# anthropic, gemini-* to gemini, without a route of your own. Presets:
+# image, transcription, speech, video, ...) is that kind's default. A vendor
+# preset brings the vendor's base URL, its key from env:<VENDOR>_API_KEY,
+# every format of the vendor this binary speaks (OpenAI: chat, realtime,
+# Responses over WebSocket, images, transcriptions, speech and videos;
+# Gemini: chat, Live, Imagen as openai-images and Veo as gemini-veo; Groq:
+# chat, transcriptions and speech; xAI and Together: chat and images), and
+# its model names: gpt-*, o3-*, dall-e*, whisper-1, tts-*, sora* ... go to
+# openai, claude-* to anthropic, gemini-*, imagen-*, veo-* to gemini,
+# whisper-large-* to groq, without a route of your own. A name routes only
+# among the providers serving the request's kind. Presets:
 # openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral,
 # together, fireworks, ollama. Override `base_url` or `key` in place.
 # Any provider is also reached as `<name>/<model>`, as in
@@ -41,11 +46,12 @@ providers:
 # A provider spelled out: its format (or a list of them), the base URL its
 # own SDK takes (OpenAI's holds the version, Anthropic's does not) and its
 # key, sent as each format expects (Bearer; x-api-key for
-# anthropic-messages; x-goog-api-key for gemini-live), or any one header
-# with `auth`. openai-chat reads only OpenAI's own fields; a vendor whose
-# fields the gateway reads has a format of its own name: groq-chat,
-# deepseek-chat, vllm-chat, openrouter-chat and azure-chat. A provider with
-# no key sends none of the client's: only `proxy` relays clients' keys.
+# anthropic-messages; x-goog-api-key for gemini-live and gemini-veo), or any
+# one header with `auth`. openai-chat reads only OpenAI's own fields; a
+# vendor whose fields the gateway reads has a format of its own name:
+# groq-chat, deepseek-chat, vllm-chat, openrouter-chat and azure-chat. A
+# provider with no key sends none of the client's: only `proxy` relays
+# clients' keys.
 #   groq:
 #     format: groq-chat
 #     base_url: https://api.groq.com/openai/v1
@@ -54,6 +60,29 @@ providers:
 #     format: vllm-chat
 #     base_url: http://gpu-box:8000/v1
 #     key: env:VLLM_KEY
+
+# Media: each operation is a kind of its own, and translates within it.
+# OpenAI's endpoints are formats as OpenAI and compatible vendors serve them
+# (base URL with the version): openai-images (/v1/images/generations and
+# edits), openai-transcriptions (/v1/audio/transcriptions and
+# translations), openai-speech (/v1/audio/speech) and openai-videos
+# (/v1/videos and its jobs). Google's Veo, gemini-veo, is a provider only,
+# at the Gemini API's base with the version, answering OpenAI Videos
+# clients; a job's follow-ups go to the provider that made it, by its id.
+# When two providers speak one video format, the gateway gives clients ids
+# naming the provider, `<provider>~<id>`.
+#   images:
+#     format: openai-images
+#     base_url: https://api.together.xyz/v1
+#     key: env:TOGETHER_API_KEY
+#   asr:
+#     format: [openai-transcriptions, openai-speech]
+#     base_url: https://api.groq.com/openai/v1
+#     key: env:GROQ_API_KEY
+#   veo:
+#     format: gemini-veo
+#     base_url: https://generativelanguage.googleapis.com/v1beta
+#     key: env:GEMINI_API_KEY      # sent as x-goog-api-key
 
 # Sessions over WebSocket, as their SDKs reach them: openai-realtime
 # (clients at .../v1/realtime), responses-ws (an upgrade to .../v1/responses)
@@ -84,7 +113,8 @@ providers:
 # The formats clients speak, tried in order; each recognises its own
 # requests: openai-chat a POST to .../chat/completions, anthropic-messages a
 # POST to .../v1/messages. Anything else is a 404. Unset: openai-chat,
-# anthropic-messages, and every session format some provider speaks.
+# anthropic-messages, the OpenAI format of each media kind some provider
+# speaks, and every session format some provider speaks.
 # serve: [openai-chat, anthropic-messages]
 
 # Compiled-in plugins, run on every request in the order listed, except

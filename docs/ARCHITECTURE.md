@@ -51,6 +51,7 @@ flowchart LR
     core --> realtime
     conversation --> media
     conversation --> gateway
+    media --> gateway
     realtime --> gateway
     mcp --> gateway
     ws --> gateway
@@ -66,7 +67,13 @@ A configured provider may speak several formats (a vendor preset speaks every
 format of its vendor compiled in); the application registers one core
 provider per format and routes with one plugin of its own: `provider/model`,
 then `models` routes, then preset model prefixes, then the kind's default,
-among the providers serving the request's kind. Its HTTP application puts
+among the providers serving the request's kind. Each media operation
+(`image`, `transcription`, `speech`, `video`) is a kind that translates
+within itself. A video job's follow-up names no model, so a second plugin
+sends it to the provider that made the job, by its id's spelling (`video_`,
+`veo_`); providers sharing a spelling get ids wrapped in their name on the
+way out, `<provider>~<id>`, unwrapped on the way in. The media crate's
+`LocateContent` then finds a Veo job's content. Its HTTP application puts
 `/healthz`, `/v1/models` and the web UI's admin API before the formats, and
 client keys and the request log around them. Hosts reuse it as the
 `respan_gateway` library: `App::new(config)` gives an `axum::Router`.
