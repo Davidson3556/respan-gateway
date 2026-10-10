@@ -3,3 +3,5 @@
 .env
 .DS_Store
 *.swp
+node_modules/
+apps/ui/dist/
