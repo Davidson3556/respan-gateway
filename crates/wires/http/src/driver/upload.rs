@@ -109,8 +109,7 @@ impl<T: 'static> Sink<Result<T, Fault>> for Encoding<T> {
             Err(fault) => Err(fault),
         };
         match encoded {
-            Ok(()) if !out.is_empty() => self.writer.send(out.freeze()),
-            Ok(()) => {}
+            Ok(()) => self.writer.send(out.freeze()),
             Err(fault) => self.finish(Err(fault)),
         }
         Ok(())
@@ -167,6 +166,8 @@ impl<T: 'static> Upload<T> {
         }
         Poll::Ready(self.delivered.clone().expect("delivery completed"))
     }
+    /// The sink's readiness, or the delivery's once it has finished or the
+    /// sink was discarded; a failed delivery always wins.
     fn readiness(&mut self, cx: &mut Context<'_>, flush: bool) -> Poll<Result<(), Fault>> {
         let delivery = self.progress(cx);
         if matches!(delivery, Poll::Ready(Err(_))) {
@@ -177,11 +178,19 @@ impl<T: 'static> Upload<T> {
         } else {
             Pin::new(&mut self.sink).poll_ready(cx)
         };
-        match (ready, delivery) {
+        if let Poll::Ready(Err(fault)) = &ready {
             // The delivery, whose waker is set, says how a discarded upload ended.
-            (Poll::Ready(Err(f)), delivery) if f.get::<Discarded>().is_some() => delivery,
-            (ready @ Poll::Ready(Err(_)), _) | (ready, Poll::Pending) => ready,
-            (_, delivery) => delivery,
+            return if fault.get::<Discarded>().is_some() {
+                delivery
+            } else {
+                ready
+            };
+        }
+        // A finished delivery makes the upload ready; an unfinished one
+        // leaves it as the sink says.
+        match delivery {
+            Poll::Pending => ready,
+            delivery => delivery,
         }
     }
 }

@@ -60,7 +60,7 @@ impl Writer {
         let ended = ended
             .map(|end| end.unwrap_or_else(|_| Err(Fault::abandoned())))
             .boxed();
-        (Self(state.clone()), Body(state).boxed(), ended)
+        (Self(state.clone()), Pipe(state).boxed(), ended)
     }
 
     pub(crate) fn poll_ready(
@@ -126,9 +126,9 @@ impl Drop for Writer {
     }
 }
 
-struct Body(Arc<Mutex<State>>);
+struct Pipe(Arc<Mutex<State>>);
 
-impl Stream for Body {
+impl Stream for Pipe {
     type Item = Result<Bytes, Fault>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -157,7 +157,7 @@ impl Stream for Body {
     }
 }
 
-impl Drop for Body {
+impl Drop for Pipe {
     fn drop(&mut self) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.acknowledge(Err(Fault::abandoned()));

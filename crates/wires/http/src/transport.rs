@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue, request::Parts as RequestHead};
-use respan_gateway_core::{Extensions, Fault};
+use respan_gateway_core::{BadRequest, Extensions, Fault};
 
 use crate::credential::{is_credential, take_protocol_keys, take_query};
 use crate::{HOP_BY_HOP, remove_if, strip_named};
@@ -60,7 +60,7 @@ pub fn base_url(url: &str, schemes: &[&str]) -> Result<String, Fault> {
         }
         None => host
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'),
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')),
     };
     let parsed = url.parse::<http::Uri>().ok().filter(|u| {
         let authority = u.authority().map_or("", |a| a.as_str());
@@ -90,7 +90,9 @@ pub fn base_url(url: &str, schemes: &[&str]) -> Result<String, Fault> {
 
 /// Make `call` the request a transport sends to `base` ([`base_url`]): its
 /// keys decided ([`credentials`]) over the transport's `headers`, and its
-/// path and query joined to `base`. `Err` with `config` if they make no URL.
+/// path and query joined to `base`. `Err` with `config` if they make no URL,
+/// and with `bad_request` if the path has a `.` or `..` segment, even
+/// percent-encoded, which would leave `base`'s prefix.
 /// What a proxy does not pass on is already gone
 /// ([`ProviderIo::bind`](crate::ProviderIo::bind)).
 pub fn prepare_call(
@@ -98,15 +100,22 @@ pub fn prepare_call(
     base: &str,
     headers: &HeaderMap,
 ) -> Result<(), Fault> {
-    let (mut head, body) = std::mem::take(call).into_parts();
-    let extensions = head.extensions.get::<Extensions>().cloned();
-    keys(&mut head, &extensions.unwrap_or_default(), headers);
-    let path = head.uri.path_and_query().map_or("/", |p| p.as_str());
+    credentials(call, headers);
+    let path = call.uri().path_and_query().map_or("/", |p| p.as_str());
+    if has_dot_segment(call.uri().path()) {
+        return Err(BadRequest::fault("the request path has a dot segment"));
+    }
     let uri = format!("{base}{path}").parse::<http::Uri>();
-    *call = http::Request::from_parts(head, body);
     *call.uri_mut() =
         uri.map_err(|e| Fault::config("the provider request is not valid").with_source(e))?;
     Ok(())
+}
+
+/// Whether `path` has a `.` or `..` segment, after one percent-decoding.
+fn has_dot_segment(path: &str) -> bool {
+    crate::percent_decode(path)
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".."))
 }
 
 /// Strip from a call, whose head may be the client's, what a proxy does not
@@ -352,5 +361,32 @@ mod tests {
             restored.headers()["sec-websocket-protocol"],
             "realtime, token, dg"
         );
+    }
+
+    #[test]
+    fn a_dot_segment_cannot_leave_the_base_path() {
+        let send = |path: &str| {
+            let mut call = http::Request::new(crate::Body::full(Bytes::new()));
+            *call.uri_mut() = path.parse().expect("a uri");
+            prepare_call(&mut call, "http://h/tenant-a", &HeaderMap::new()).map(|()| call)
+        };
+        for path in [
+            "/../tenant-b/v1/chat",
+            "/%2e%2e/tenant-b/v1/chat",
+            "/v1/%2E./x",
+            "/v1/./x?a=1",
+        ] {
+            let refused = send(path).err();
+            assert!(refused.is_some_and(|f| f.is::<BadRequest>()), "{path}");
+        }
+        // Only one decoding counts: a twice-encoded dot is a name.
+        assert!(send("/v1/%252e%252e/x").is_ok());
+        let call = send("/v1/chat?q=a.b").expect("a clean path");
+        assert_eq!(call.uri(), "http://h/tenant-a/v1/chat?q=a.b");
+    }
+
+    #[test]
+    fn a_base_url_host_may_hold_an_underscore() {
+        assert!(base_url("http://vllm_server:8000/v1", &["http"]).is_ok());
     }
 }

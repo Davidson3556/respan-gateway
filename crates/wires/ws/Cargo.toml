@@ -90,3 +90,11 @@ required-features = ["axum"]
 [[test]]
 name = "ws_recovery"
 required-features = ["axum"]
+
+[[test]]
+name = "empty_messages"
+required-features = ["axum"]
+
+[[test]]
+name = "http_transport"
+required-features = ["axum"]

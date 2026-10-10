@@ -37,7 +37,7 @@ respan-gateway-plugins.workspace = true
 respan-gateway-core.workspace = true
 serde_json.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time", "test-util"] }
 
 [[test]]
 name = "axum"

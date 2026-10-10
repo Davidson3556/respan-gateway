@@ -514,7 +514,7 @@ impl<T: 'static> Sink<Result<T, Fault>> for Client<T> {
             Err(fault) => Err(fault),
         };
         match encoded {
-            Ok(()) if !out.is_empty() => {
+            Ok(()) if self.reply.live || !out.is_empty() => {
                 self.writer.send(out.freeze());
                 self.open();
             }
