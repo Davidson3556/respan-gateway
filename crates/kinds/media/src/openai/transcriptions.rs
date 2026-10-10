@@ -7,7 +7,7 @@ use super::multipart::{self, Writer};
 use super::{
     Fields, as_usage_extras, bind_client, bind_provider, bytes_of, event_json, file_name, foreign,
     invalid, is_true, json_bytes, kept, merge_missing, missing, native_of, post_to, read_fields,
-    read_usage, rest_of, seconds_json, set, sse_event, streams, take_number, take_string,
+    read_usage, rest_of, seconds_json, sends, set, sse_event, streams, take_number, take_string,
     unreadable, usage_extras, whole_json, write_field, write_usage,
 };
 use crate::transcription::{Delta, Input, Output, Segment, Task, Transcript, Word};
@@ -16,7 +16,7 @@ use respan_gateway_core::{
     BadRequest, Connection, EventStream, Fault, Format, NativeValue, Truncated,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::{self, path_ends_with, sse, whole};
+use respan_gateway_http::formats::{path_ends_with, sse, whole};
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
 use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
 use serde_json::{Map, Value};
@@ -80,7 +80,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiTranscriptions {
             io,
             NAME,
             move |head, input| post(head, input, stream),
-            read_response,
+            |response, _| read_response(response),
         ))
     }
 }
@@ -118,29 +118,25 @@ fn post(
         Task::Translate => TRANSLATIONS,
         _ => TRANSCRIPTIONS,
     };
-    let boundary = multipart::random_boundary()?;
-    let form = Writer::with_boundary(boundary.clone());
+    let audio = bytes_of(&input.audio)
+        .ok_or_else(|| BadRequest::fault("audio at a URL cannot be sent as a file"))?;
+    let mut form = Writer::with_boundary(multipart::random_boundary()?);
     post_to(head, path, &form.content_type())?;
-    Ok(formats::each(move |input: &Input| {
-        let audio = bytes_of(&input.audio)
-            .ok_or_else(|| BadRequest::fault("audio at a URL cannot be sent as a file"))?;
-        let mut form = Writer::with_boundary(boundary.clone());
-        let name = file_name(&input.audio, "audio");
-        form.file("file", &name, &input.audio.mime_type, audio);
-        let mut v = Map::new();
-        set(&mut v, "model", input.model.clone());
-        set(&mut v, "language", input.language.clone());
-        set(&mut v, "prompt", input.prompt.clone());
-        set(&mut v, "temperature", input.temperature);
-        merge_missing(&mut v, &kept(NAME, &input.native)?);
-        if stream {
-            v.insert("stream".into(), true.into());
-        }
-        for (name, value) in &v {
-            write_field(&mut form, name, value);
-        }
-        Ok(form.finish())
-    }))
+    let name = file_name(&input.audio, "audio");
+    form.file("file", &name, &input.audio.mime_type, audio);
+    let mut v = Map::new();
+    set(&mut v, "model", input.model.clone());
+    set(&mut v, "language", input.language.clone());
+    set(&mut v, "prompt", input.prompt.clone());
+    set(&mut v, "temperature", input.temperature);
+    merge_missing(&mut v, &kept(NAME, &input.native)?);
+    if stream {
+        v.insert("stream".into(), true.into());
+    }
+    for (name, value) in &v {
+        write_field(&mut form, name, value);
+    }
+    Ok(sends(form.finish()))
 }
 
 /// A provider's answer: a stream of events, a JSON body, or rendered text.

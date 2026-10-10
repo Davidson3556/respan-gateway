@@ -6,8 +6,8 @@ use super::multipart::{self, Writer};
 use super::{
     Fields, as_usage_extras, b64, bind_client, bind_provider, bytes_of, event_json, file_name,
     foreign, invalid, is_true, json_bytes, kept, merge_missing, mime_of, missing, native_of,
-    post_to, read_fields, read_usage, rest_of, set, sse_event, streams, take_count, take_string,
-    unb64, unix_now, unreadable, usage_extras, whole_json, write_field, write_usage,
+    post_to, read_fields, read_usage, rest_of, sends, set, sse_event, streams, take_count,
+    take_string, unb64, unix_now, unreadable, usage_extras, whole_json, write_field, write_usage,
 };
 use crate::image::{Image, Input, Output, Partial, Start};
 use respan_gateway_conversation::{Media, MediaSource, Usage};
@@ -15,7 +15,7 @@ use respan_gateway_core::{
     BadRequest, Connection, EventStream, Fault, Format, NativeFields, NativeValue, Truncated,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::formats::{self, path_ends_with, sse, whole};
+use respan_gateway_http::formats::{path_ends_with, sse, whole};
 use respan_gateway_http::http::{self, Method, request::Parts as RequestHead};
 use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo};
 use serde_json::{Map, Value, json};
@@ -77,7 +77,7 @@ impl Format<ProviderIo, Output, Input> for OpenAiImages {
             io,
             NAME,
             move |head, input| post(head, input, stream),
-            read_response,
+            |response, _| read_response(response),
         ))
     }
 }
@@ -163,39 +163,28 @@ fn post(
             return Err(BadRequest::fault("a mask needs an image to edit"));
         }
         post_to(head, GENERATIONS, "application/json")?;
-        return Ok(formats::each(move |input: &Input| {
-            json_bytes(&fields(input, stream)?)
-        }));
+        return Ok(sends(json_bytes(&fields(input, stream)?)?));
     }
     let mut files = input.images.iter().chain(&input.mask);
     if !files.all(|media| bytes_of(media).is_some()) {
         post_to(head, EDITS, "application/json")?;
-        return Ok(formats::each(move |input: &Input| {
-            json_bytes(&linked_edit(input, stream)?)
-        }));
+        return Ok(sends(json_bytes(&linked_edit(input, stream)?)?));
     }
-    let boundary = multipart::random_boundary()?;
-    post_to(
-        head,
-        EDITS,
-        &Writer::with_boundary(boundary.clone()).content_type(),
-    )?;
-    Ok(formats::each(move |input: &Input| {
-        let mut form = Writer::with_boundary(boundary.clone());
-        for (name, value) in &fields(input, stream)? {
-            write_field(&mut form, name, value);
-        }
-        let name = match input.images.len() {
-            1 => "image",
-            _ => "image[]",
-        };
-        let files = input.images.iter().map(|media| (name, media));
-        for (name, media) in files.chain(input.mask.iter().map(|mask| ("mask", mask))) {
-            let bytes = bytes_of(media).cloned().unwrap_or_default();
-            form.file(name, &file_name(media, "image"), &media.mime_type, &bytes);
-        }
-        Ok(form.finish())
-    }))
+    let mut form = Writer::with_boundary(multipart::random_boundary()?);
+    post_to(head, EDITS, &form.content_type())?;
+    for (name, value) in &fields(input, stream)? {
+        write_field(&mut form, name, value);
+    }
+    let name = match input.images.len() {
+        1 => "image",
+        _ => "image[]",
+    };
+    let files = input.images.iter().map(|media| (name, media));
+    for (name, media) in files.chain(input.mask.iter().map(|mask| ("mask", mask))) {
+        let bytes = bytes_of(media).cloned().unwrap_or_default();
+        form.file(name, &file_name(media, "image"), &media.mime_type, &bytes);
+    }
+    Ok(sends(form.finish()))
 }
 
 /// The fields of a call but its images: its typed fields, then its native
@@ -435,9 +424,9 @@ fn encode_whole(events: &[Output]) -> Result<Bytes, Fault> {
     json_bytes(&body)
 }
 
-/// Writes a stream of events: a partial image at once, and a completed one
-/// when the next one comes or the stream ends, with the usage reported
-/// until then.
+/// Writes a stream of events in order: a partial image at once, and a
+/// completed one when the next event that is not its usage comes or the
+/// stream ends, with the usage reported until then.
 struct StreamEncoder {
     prefix: &'static str,
     created: Option<u64>,
@@ -484,6 +473,7 @@ impl Encoder<Output> for StreamEncoder {
                 self.shared = kept(NAME, &start.native)?;
             }
             Output::Partial(partial) => {
+                self.flush(out);
                 let mut v = self.event("partial_image", &partial.media, &partial.native)?;
                 v.insert("partial_image_index".into(), partial.index.into());
                 out.extend_from_slice(sse_event(&Value::Object(v)).as_bytes());
@@ -498,7 +488,10 @@ impl Encoder<Output> for StreamEncoder {
             Output::Native(n) if &*n.format != NAME => return Err(foreign(NAME, n)),
             Output::Native(n) => match as_usage_extras(&n.value) {
                 Some(more) => merge_missing(&mut self.extras, more),
-                None => out.extend_from_slice(sse_event(&n.value).as_bytes()),
+                None => {
+                    self.flush(out);
+                    out.extend_from_slice(sse_event(&n.value).as_bytes());
+                }
             },
         }
         Ok(())
@@ -541,6 +534,49 @@ mod tests {
         let written = respan_gateway_http::encode_all(encoder, &[input]).expect("a body");
         let written: Value = serde_json::from_slice(&written).unwrap_or_default();
         assert_eq!(written, body);
+    }
+
+    #[test]
+    fn a_stream_of_two_images_is_written_in_order() {
+        let image = |data: &'static [u8]| {
+            let media = Media::new("image/png", MediaSource::Bytes(Bytes::from_static(data)));
+            (Image::new(media.clone()), Partial::new(0, media))
+        };
+        let ((a, partial_a), (b, partial_b)) = (image(b"a"), image(b"b"));
+        let events = [
+            Output::Start(Start::new(Some(1))),
+            Output::Partial(partial_a),
+            Output::Image(a),
+            Output::Usage(Usage::new(1, 2)),
+            Output::Partial(partial_b),
+            Output::Image(b),
+            Output::Usage(Usage::new(3, 4)),
+        ];
+        let encoder = Box::new(StreamEncoder {
+            prefix: "image_generation",
+            created: None,
+            shared: Map::new(),
+            pending: None,
+            usage: None,
+            extras: Map::new(),
+        });
+        let written = respan_gateway_http::encode_all(encoder, &events).expect("a stream");
+        let written = String::from_utf8_lossy(&written);
+        let seen: Vec<(String, u64)> = written
+            .split("\n\n")
+            .filter_map(|e| serde_json::from_str::<Value>(e.strip_prefix("data: ")?).ok())
+            .map(|v| {
+                let kind = v["type"].as_str().unwrap_or_default().to_owned();
+                (kind, v["usage"]["input_tokens"].as_u64().unwrap_or(0))
+            })
+            .collect();
+        let want = [
+            ("image_generation.partial_image", 0),
+            ("image_generation.completed", 1),
+            ("image_generation.partial_image", 0),
+            ("image_generation.completed", 3),
+        ];
+        assert_eq!(seen, want.map(|(k, n)| (k.to_owned(), n)));
     }
 
     #[test]

@@ -9,7 +9,7 @@ module of its name:
 | `image` | Image generation and edits | `prompt`, source `images` and `mask` (an edit has images), `count`, `size`, `quality`, `output_format` | `Start`, `Partial` previews, `Image`, `Usage` |
 | `transcription` | Speech to text, or to English (`Task`) | `audio`, `task`, `language`, `prompt`, `temperature` | `Delta`, `Transcript`, `Rendered`, `Usage`, `Seconds` |
 | `speech` | Text to speech | `text`, `voice`, `instructions`, `speed`, `audio_format` | `Audio` chunks, `Usage` |
-| `video` | Video generation, a job | an operation: `Create` (`model`, `prompt`, `seconds`, `size`, a `reference` image), `Remix`, `Retrieve`, `Content` (a `Variant`), `Delete`, `List` | `Job`, `Jobs`, `ContentType` then `Content` chunks, `Deleted` |
+| `video` | Video generation, a job | an operation: `Create` (`model`, `prompt`, `seconds`, `size`, a `reference` image), `Remix`, `Retrieve`, `Content` (a `Variant`), `Delete`, `List` | `Job`, `Jobs`, `Content` chunks, `Deleted` |
 
 Every `Input` has an optional `model`, which a router reads:
 `ModelRouter::new(|i: &image::Input| i.model.as_deref())`; a video's is

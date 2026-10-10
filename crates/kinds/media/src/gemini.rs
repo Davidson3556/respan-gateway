@@ -3,18 +3,20 @@
 //! includes the version, `https://generativelanguage.googleapis.com/v1beta`,
 //! and its transport the key, `x-goog-api-key`.
 
+use crate::edge::{bind_provider, content, kept, sends};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use respan_gateway_conversation::{Media, MediaSource, read_provider_error};
+use respan_gateway_conversation::{Media, MediaSource};
 use respan_gateway_core::{
-    BadRequest, Connection, ErrorCode, EventStream, Fault, Format, NativeFields, Upstream,
+    BadRequest, Connection, ErrorCode, EventStream, Fault, Format, Upstream,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::formats::{self, whole};
+use respan_gateway_http::formats::whole;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, Method, Uri, request::Parts as RequestHead};
 use respan_gateway_http::{Body, Encoder, ProviderIo};
 use serde_json::{Map, Value, json};
+use std::sync::{Arc, OnceLock};
 
 use crate::video::{Create, Input, Job, JobError, Output, Status, Variant};
 
@@ -81,15 +83,18 @@ impl Format<ProviderIo, Output, Input> for GeminiVeo {
     }
 
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output, Input>, Fault> {
-        Ok(io.bind(
-            |head, input: Option<&Input>| {
-                let input = input.ok_or_else(|| {
-                    Fault::config(format!("{NAME} does not accept streaming inputs"))
-                })?;
-                call(head, input)
+        // What the call was, from the input it was made of.
+        let sent = Arc::new(OnceLock::new());
+        let seen = Arc::clone(&sent);
+        Ok(bind_provider(
+            io,
+            NAME,
+            move |head, input| {
+                let (encoder, call) = call(head, input)?;
+                _ = seen.set(call);
+                Ok(encoder)
             },
-            |response, sent| read_response(response, &sent),
-            |answer| read_provider_error(NAME, answer),
+            move |response, _| read_response(response, sent.get()),
         ))
     }
 }
@@ -104,18 +109,34 @@ fn operation_of(id: &str) -> Result<String, Fault> {
     GeminiVeo::operation(id).ok_or_else(|| Fault::not_found(format!("no Veo video has id {id}")))
 }
 
-/// The call of `input`: its method and path, and its body's encoder.
-fn call(head: &mut RequestHead, input: &Input) -> Result<Box<dyn Encoder<Input>>, Fault> {
-    let (method, path, body) = match input {
+/// What a call asked of Veo, which its answer is read by.
+#[derive(Debug)]
+enum Call {
+    /// A creation, made with these `parameters`.
+    Create(Value),
+    /// An operation's state.
+    Retrieve,
+    /// A video's bytes.
+    Content,
+}
+
+/// The call of `input`: its method and path, its body's encoder, and what
+/// it asks.
+fn call(head: &mut RequestHead, input: &Input) -> Result<(Box<dyn Encoder<Input>>, Call), Fault> {
+    let (method, path, body, asked) = match input {
         Input::Create(create) => {
             let model = create.model.as_deref().filter(|m| is_segment(m));
             let model = model.ok_or_else(|| {
                 BadRequest::fault("a Veo video needs a model, such as veo-3.0-generate-001")
             })?;
             let path = format!("/models/{model}:predictLongRunning");
-            (Method::POST, path, Some(create_body(create)?))
+            let (body, parameters) = create_body(create)?;
+            (Method::POST, path, Some(body), Call::Create(parameters))
         }
-        Input::Retrieve { id } => (Method::GET, format!("/{}", operation_of(id)?), None),
+        Input::Retrieve { id } => {
+            let path = format!("/{}", operation_of(id)?);
+            (Method::GET, path, None, Call::Retrieve)
+        }
         Input::Content { id, variant, url } => {
             if *variant != Variant::Video {
                 return Err(unsupported("make a thumbnail or a spritesheet"));
@@ -124,7 +145,7 @@ fn call(head: &mut RequestHead, input: &Input) -> Result<Box<dyn Encoder<Input>>
             let url = url.as_deref().ok_or_else(|| {
                 Fault::config("Veo's content is at the URL its job names, which the request needs")
             })?;
-            (Method::GET, content_path(url)?, None)
+            (Method::GET, content_path(url)?, None, Call::Content)
         }
         Input::Remix { .. } => return Err(unsupported("remix a video")),
         Input::Delete { .. } => return Err(unsupported("delete a video")),
@@ -135,16 +156,16 @@ fn call(head: &mut RequestHead, input: &Input) -> Result<Box<dyn Encoder<Input>>
         .parse()
         .map_err(|e| Fault::internal("a call's path is no path").with_source(e))?;
     let Some(body) = body else {
-        return Ok(formats::each(|_: &Input| Ok(Bytes::new())));
+        return Ok((sends(Bytes::new()), asked));
     };
     let json = HeaderValue::from_static("application/json");
     head.headers.insert(CONTENT_TYPE, json);
-    Ok(formats::each(move |_: &Input| Ok(body.clone())))
+    Ok((sends(body), asked))
 }
 
 /// A creation's body: one instance, of its prompt and reference image, and
-/// its parameters.
-fn create_body(create: &Create) -> Result<Bytes, Fault> {
+/// its parameters, which are also given apart.
+fn create_body(create: &Create) -> Result<(Bytes, Value), Fault> {
     let mut instance = Map::new();
     instance.insert("prompt".into(), create.prompt.clone().into());
     if let Some(reference) = &create.reference {
@@ -166,29 +187,17 @@ fn create_body(create: &Create) -> Result<Bytes, Fault> {
     if let Some(seconds) = create.seconds {
         parameters.insert("durationSeconds".into(), seconds.into());
     }
-    for (key, value) in native_fields(&create.native)? {
+    for (key, value) in kept(NAME, &create.native)? {
         parameters.entry(key).or_insert(value);
     }
+    let parameters = Value::Object(parameters);
     let mut body = json!({ "instances": [instance] });
-    if !parameters.is_empty() {
-        body["parameters"] = parameters.into();
+    if parameters.as_object().is_some_and(|p| !p.is_empty()) {
+        body["parameters"] = parameters.clone();
     }
-    serde_json::to_vec(&body)
-        .map(Bytes::from)
-        .map_err(|e| Fault::internal("a body could not be written").with_source(e))
-}
-
-/// The fields of `native` if they are this format's; another's are refused,
-/// as only it knows what they mean.
-fn native_fields(native: &Option<NativeFields>) -> Result<Map<String, Value>, Fault> {
-    match native {
-        Some(n) if &*n.format == NAME => Ok(n.fields.clone()),
-        Some(n) if !n.is_empty() => Err(BadRequest::fault(format!(
-            "fields of format {} cannot be written in {NAME}",
-            n.format
-        ))),
-        _ => Ok(Map::new()),
-    }
+    let body = serde_json::to_vec(&body)
+        .map_err(|e| Fault::internal("a body could not be written").with_source(e))?;
+    Ok((Bytes::from(body), parameters))
 }
 
 /// Veo's aspect ratio and resolution of a size `WxH`.
@@ -256,35 +265,22 @@ fn is_version(segment: &str) -> bool {
 
 /// A provider's answer to the call `sent`: an operation, read whole, or
 /// content, chunk by chunk as it comes.
-fn read_response(
-    response: http::Response<Body>,
-    sent: &http::Request<Bytes>,
-) -> EventStream<Output> {
-    let (head, body) = response.into_parts();
-    let path = sent.uri().path();
-    let operation = sent.method() == Method::POST || path.starts_with("/models/");
-    if operation {
-        let sent = serde_json::from_slice::<Value>(sent.body()).unwrap_or_default();
-        return whole::read(body, move |raw, out| {
-            out.push(Output::Job(job_of(&raw, &sent["parameters"])?));
+fn read_response(response: http::Response<Body>, sent: Option<&Call>) -> EventStream<Output> {
+    let body = response.into_body();
+    match sent {
+        Some(Call::Content) => content(body),
+        Some(Call::Create(parameters)) => {
+            let parameters = parameters.clone();
+            whole::read(body, move |raw, out| {
+                out.push(Output::Job(job_of(&raw, &parameters)?));
+                Ok(())
+            })
+        }
+        _ => whole::read(body, |raw, out| {
+            out.push(Output::Job(job_of(&raw, &Value::Null)?));
             Ok(())
-        });
+        }),
     }
-    let mime = head.headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok());
-    let mime = Some(mime.unwrap_or("video/mp4").to_owned());
-    formats::parse(
-        body,
-        mime,
-        |mime, bytes, out| {
-            out.extend(mime.take().map(Output::ContentType));
-            out.push(Output::Content(bytes));
-            Ok(())
-        },
-        |mime, wire, out| {
-            out.extend(mime.take().map(Output::ContentType));
-            wire
-        },
-    )
 }
 
 /// The job of an operation `raw`, and of the `parameters` it was made with

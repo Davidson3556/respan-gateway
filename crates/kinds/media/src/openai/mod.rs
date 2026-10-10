@@ -30,12 +30,12 @@ pub use speech::OpenAiSpeech;
 pub use transcriptions::OpenAiTranscriptions;
 pub use videos::OpenAiVideos;
 
+use crate::edge::{bind_provider, kept, sends};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use respan_gateway_conversation::{Media, MediaSource, Usage, merge_details, read_provider_error};
 use respan_gateway_core::{
-    BadRequest, Connection, Details, ErrorCode, EventStream, Fault, NativeFields, NativeValue,
-    Upstream,
+    BadRequest, Connection, Details, ErrorCode, Fault, NativeFields, NativeValue, Upstream,
 };
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::{self, path_ends_with, sse};
@@ -44,7 +44,7 @@ use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode, request::Parts as RequestHead,
     response::Parts as ResponseHead,
 };
-use respan_gateway_http::{Body, ClientIo, Encoder, ProviderIo, RawReply, Wire, error_code};
+use respan_gateway_http::{ClientIo, Encoder, ProviderIo, RawReply, Wire, error_code};
 use serde_json::{Map, Value, json};
 
 use multipart::Writer;
@@ -61,6 +61,11 @@ struct Fields {
 /// The fields of a request of `headers` and body `raw`: a form if its
 /// content type says so, else a JSON object.
 fn read_fields(headers: &HeaderMap, raw: &Bytes) -> Result<Fields, Fault> {
+    read_fields_in(headers, raw, true)
+}
+
+/// [`read_fields`], with a form's files read only if `files`.
+fn read_fields_in(headers: &HeaderMap, raw: &Bytes, files: bool) -> Result<Fields, Fault> {
     let content_type = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok());
     let Some(boundary) = content_type.and_then(multipart::boundary) else {
         return match serde_json::from_slice::<Value>(raw) {
@@ -80,6 +85,9 @@ fn read_fields(headers: &HeaderMap, raw: &Bytes) -> Result<Fields, Fault> {
             None => (part.name.clone(), false),
         };
         if let Some(filename) = part.filename {
+            if !files {
+                continue;
+            }
             let mime = mime_of(part.content_type.as_deref(), &filename, &part.body);
             let mut media = Media::new(mime, MediaSource::Bytes(part.body));
             media.name = Some(filename);
@@ -241,20 +249,6 @@ fn is_true(v: Option<&Value>) -> bool {
 /// `fields` as the native of a value of `format`: none if empty.
 fn native_of(format: &str, fields: Map<String, Value>) -> Option<NativeFields> {
     (!fields.is_empty()).then(|| NativeFields::new(format, fields))
-}
-
-/// The fields of `native` to write in `format`: all of them if they are
-/// its, none if there are none; another format's are refused, as only it
-/// knows what they mean.
-fn kept(format: &str, native: &Option<NativeFields>) -> Result<Map<String, Value>, Fault> {
-    match native {
-        Some(n) if &*n.format == format => Ok(n.fields.clone()),
-        Some(n) if !n.is_empty() => Err(BadRequest::fault(format!(
-            "fields of format {} cannot be written in {format}",
-            n.format
-        ))),
-        _ => Ok(Map::new()),
-    }
 }
 
 /// Add to `base` the fields of `more` it lacks, objects field by field:
@@ -475,32 +469,6 @@ where
     )
 }
 
-/// The provider edge of `format`: a call written by `encode`, which sets
-/// its head, its success read by `decode`, its failure leniently.
-fn bind_provider<I, O, E>(
-    io: ProviderIo,
-    format: &'static str,
-    encode: E,
-    decode: fn(http::Response<Body>) -> EventStream<O>,
-) -> Connection<O, I>
-where
-    I: Clone + Send + Sync + 'static,
-    O: Clone + Send + Sync + 'static,
-    E: FnOnce(&mut RequestHead, &I) -> Result<Box<dyn Encoder<I>>, Fault> + Send + 'static,
-{
-    io.bind(
-        move |head, input: Option<&I>| {
-            let input = input.ok_or_else(|| {
-                Fault::config(format!("{format} does not accept streaming inputs"))
-            })?;
-            head.method = http::Method::POST;
-            encode(head, input)
-        },
-        move |response, _call| decode(response),
-        move |answer| read_provider_error(format, answer),
-    )
-}
-
 /// Set a call's path and content type.
 fn post_to(head: &mut RequestHead, path: &str, content_type: &str) -> Result<(), Fault> {
     formats::set_path(head, path)?;
@@ -512,24 +480,23 @@ fn post_to(head: &mut RequestHead, path: &str, content_type: &str) -> Result<(),
 
 /// Whether a provider is asked to stream: as the call's [`StreamResponse`]
 /// says, else as the client's request did, if to one of `paths`, by
-/// `asked`, else not.
-fn streams(io: &ProviderIo, paths: &[&str], asked: fn(&Map<String, Value>) -> bool) -> bool {
+/// `wants`, else not.
+fn streams(io: &ProviderIo, paths: &[&str], wants: fn(&Map<String, Value>) -> bool) -> bool {
     if let Some(StreamResponse(stream)) = io.extensions().get::<StreamResponse>() {
         return *stream;
     }
     let request = io.extensions().get::<Wire>().and_then(Wire::get);
     request
         .filter(|r| paths.iter().any(|p| path_ends_with(r.uri(), p)))
-        .and_then(|r| read_fields(r.headers(), r.body()).ok())
-        .is_some_and(|fields| asked(&fields.map))
+        .is_some_and(|r| wants(&asked(r)))
 }
 
-/// The fields of a client's request, for its response's framing; none if
-/// it cannot be read, as it then was refused.
+/// The text fields of a client's request, for its response's framing: a
+/// form's files are skipped, not read; none if it cannot be read, as it
+/// then was refused.
 fn asked(request: &http::Request<Bytes>) -> Map<String, Value> {
-    read_fields(request.headers(), request.body())
-        .map(|f| f.map)
-        .unwrap_or_default()
+    let fields = read_fields_in(request.headers(), request.body(), false);
+    fields.map(|f| f.map).unwrap_or_default()
 }
 
 /// Write the field `name` of JSON `value` into a form, as OpenAI's SDKs

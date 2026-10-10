@@ -27,6 +27,8 @@ pub mod speech;
 pub mod transcription;
 pub mod video;
 
+#[cfg(any(feature = "openai", feature = "gemini"))]
+mod edge;
 #[cfg(feature = "gemini")]
 pub mod gemini;
 #[cfg(feature = "openai")]
