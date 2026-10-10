@@ -28,7 +28,6 @@
 
 extern crate self as respan_gateway_http;
 
-/// Shared framing and opaque relay helpers for format authors.
 #[cfg(feature = "axum")]
 pub mod axum;
 pub mod formats;
@@ -338,25 +337,16 @@ fn depart(
     }
 }
 
-/// Read what `body` has ready now: until it ends, waits on something, or
-/// the task's budget is spent. A bodiless answer's frames are content it
-/// cannot send, read only to reach its end, so a ready body is read through
-/// and its end told: outputs dropped unread end their call as their end
-/// says if it is ready, else `abandoned`. The gateway's body says `Pending`
-/// between the frames a provider sent apart but wakes itself at once, as a
-/// yield does, so a `Pending` that was woken during its poll is ready and
-/// one that was not is waiting: the gateway's own body cannot tell a source
-/// that yields between frames from one that has them all, so neither can
-/// this. What a task may do in one poll is what tokio's cooperative budget
-/// allows, so every poll spends from it, and a spent budget is not ready
-/// either. A task under `tokio::task::unconstrained` never spends it, so
-/// the read has a bound of its own that does not depend on the runtime,
-/// `DRAIN_POLLS`: a bodiless answer's body has no frames to a few, so the
-/// bound is far past any real one and costs the thread milliseconds at
-/// most (a runtime's own budget is 128). A body ready without end, or
-/// waking itself and never giving a frame, cannot hold the thread. A
-/// bodiless answer of more frames than the budget or this bound ends
-/// `abandoned`, as one still waiting does.
+/// Read what `body` has ready now, dropping its frames: a bodiless answer's
+/// are content it cannot send, read only to reach its end, so outputs dropped
+/// unread end their call as that end says if it is ready, else `abandoned`.
+///
+/// The drain stops at the body's end or error, at a `Pending` nothing woke
+/// (the body is waiting; the gateway's own body wakes itself between frames
+/// sent apart, which counts as ready), when tokio's cooperative budget is
+/// spent, or after `DRAIN_POLLS` polls, which bounds a task under
+/// `tokio::task::unconstrained` and a body that wakes itself without giving
+/// a frame.
 fn drain_ready(body: &mut Body) {
     /// The most polls one drain makes.
     const DRAIN_POLLS: usize = 1 << 16;
@@ -434,12 +424,8 @@ pub(crate) fn remove_if(headers: &mut HeaderMap, is: impl Fn(&HeaderName) -> boo
 
 /// Remove the headers `Connection` names, but `Upgrade` (RFC 9110 7.6.1).
 pub(crate) fn strip_named(headers: &mut HeaderMap) {
-    let named: Vec<HeaderName> = headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
+    let named: Vec<HeaderName> = header_tokens(headers, CONNECTION)
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
         .filter(|name| name != UPGRADE)
         .collect();
     for name in named {

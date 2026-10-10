@@ -11,10 +11,28 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// at once; a whole body that broke off or passed the limit leaves the head
 /// alone, as the request is refused. Plugins copy the `Credential`
 /// deliberately when constructing a relay.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Wire {
     request: Arc<OnceLock<Request<Bytes>>>,
     live: bool,
+}
+impl std::fmt::Debug for Wire {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Header values and query strings may be keys.
+        let mut debug = f.debug_struct("Wire");
+        match self.request.get() {
+            Some(request) => {
+                let names: Vec<_> = request.headers().keys().collect();
+                debug
+                    .field("method", request.method())
+                    .field("path", &request.uri().path())
+                    .field("headers", &names)
+                    .field("body_len", &request.body().len())
+            }
+            None => debug.field("request", &"unread"),
+        };
+        debug.field("live", &self.live).finish()
+    }
 }
 impl Wire {
     /// Supply an owned request; `live` means its body is a handshake prefix.
@@ -125,5 +143,24 @@ impl RawErrors {
             *error.response.status_mut() = crate::status(&fault);
         }
         fault.with(RawReply(error.response))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::{HeaderValue, Uri};
+
+    #[test]
+    fn debug_shows_header_names_only() {
+        let mut request = Request::new(Bytes::from_static(b"body"));
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_static("Bearer sk-secret"),
+        );
+        *request.uri_mut() = Uri::from_static("/v1/x?key=sk-secret");
+        let shown = format!("{:?}", SendRaw(Wire::new(request, false)));
+        assert!(shown.contains("authorization"), "{shown}");
+        assert!(!shown.contains("sk-secret"), "{shown}");
     }
 }

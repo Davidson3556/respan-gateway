@@ -489,10 +489,10 @@ async fn a_request_encoders_open_saying_done_is_the_whole_body() {
     assert_eq!(seen.frames(), frames(&[Ok("<OPEN>")]), "a whole request");
 }
 
-/// An empty data frame is an input, but an encoding of no bytes is no
-/// frame: the provider gets none for it.
+/// An empty data frame is an input, and its encoding of no bytes is a frame
+/// of none: a live message may be empty.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_empty_frame_is_an_input_that_writes_no_frame() {
+async fn an_empty_frame_is_an_input_that_writes_an_empty_frame() {
     let seen = Seen::default();
     let (gw, _, _) = gateway_of(Toy::default(), seen.transport(true, done));
     let (tx, body) = upload();
@@ -501,7 +501,7 @@ async fn an_empty_frame_is_an_input_that_writes_no_frame() {
     drop(tx);
     let (resp, _) = open(&gw, body, true).await;
     let _ = read(resp).await;
-    assert_eq!(seen.frames(), frames(&[Ok("one"), Ok("<END>")]));
+    assert_eq!(seen.frames(), frames(&[Ok("one"), Ok(""), Ok("<END>")]));
 }
 
 /// B1: the client's body breaks; the provider's body ends with that `Err`,

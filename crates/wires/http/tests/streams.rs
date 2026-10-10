@@ -1296,10 +1296,9 @@ async fn a_request_that_asks_to_switch_protocols_is_framed_in_any_format() {
 
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
     let frames = frames(resp).await;
-    // Every data frame is an input, an empty one too, but one of no bytes
-    // writes no frame.
-    assert_eq!(echo.frames(), [r#"{"say":"a"}"#]);
-    assert_eq!(frames, [r#"{"heard":"a"}"#]);
+    // Every data frame is an input, an empty one too, and writes its frame.
+    assert_eq!(echo.frames(), [r#"{"say":"a"}"#, ""]);
+    assert_eq!(frames, [r#"{"heard":"a"}"#, r#"{"heard":null}"#]);
 }
 
 #[tokio::test]

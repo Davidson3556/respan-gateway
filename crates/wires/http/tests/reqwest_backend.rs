@@ -64,3 +64,26 @@ fn a_connection_header_is_refused() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+#[allow(clippy::unwrap_used)]
+async fn a_switch_of_protocols_is_an_upstream_fault() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = provider.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut socket, _) = provider.accept().await.unwrap();
+        let _ = socket.read(&mut [0; 4096]).await;
+        let answer =
+            "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: upgrade\r\n\r\n";
+        socket.write_all(answer.as_bytes()).await.unwrap();
+    });
+    let transport = HttpTransport::new(format!("http://{addr}")).unwrap();
+    let mut call = http::Request::new(respan_gateway_http::Body::full(Vec::new()));
+    call.headers_mut()
+        .insert("upgrade", http::HeaderValue::from_static("websocket"));
+    call.headers_mut()
+        .insert("connection", http::HeaderValue::from_static("upgrade"));
+    let fault = transport.send(call).await.err().expect("a 101 is refused");
+    assert!(fault.is::<respan_gateway_core::Upstream>(), "{fault:?}");
+}

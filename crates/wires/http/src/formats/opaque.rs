@@ -166,6 +166,11 @@ impl<F: 'static> futures::Sink<Result<Output<F>, Fault>> for OpaqueSink<F> {
                 Err(_) => reply.head(),
             };
             self.sink = Some(reply.open(head, Bytes::new(), Box::new(Writes)));
+            // A switched protocol's first message is its head alone
+            // (`read_response`), not a frame of the session.
+            if matches!(&item, Ok(got) if got.0.status() == StatusCode::SWITCHING_PROTOCOLS) {
+                return Ok(());
+            }
         }
         std::pin::Pin::new(self.sink.as_mut().expect("opaque sink initialized")).start_send(item)
     }
@@ -240,10 +245,7 @@ impl Format<ProviderIo, Output<Self>, Input<Self>> for Passthrough {
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output<Self>, Input<Self>>, Fault> {
         let relayed = |answer: &http::response::Parts, call: &RequestHead| {
             let asked = call.headers.contains_key(http::header::UPGRADE);
-            match answer.status {
-                StatusCode::SWITCHING_PROTOCOLS => asked,
-                status => status.is_success() || (status.is_redirection() && !asked),
-            }
+            crate::success(answer, call) || (answer.status.is_redirection() && !asked)
         };
         Ok(io
             .with_success(relayed)

@@ -140,6 +140,11 @@ impl HttpTransport {
                 true => invalid(e),
                 false => Upstream::fault("the provider could not be reached").with_source(e),
             })?;
+        if resp.status() == http::StatusCode::SWITCHING_PROTOCOLS {
+            return Err(Upstream::fault(
+                "the provider switched protocols, which this transport does not",
+            ));
+        }
         let broke = |e| Upstream::fault("the provider's body broke off").with_source(e);
         let mut resp = http::Response::from(resp)
             .map(|body| Body::stream(body.map_err(broke).into_data_stream()));
