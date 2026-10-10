@@ -5,6 +5,8 @@ import { readSse } from "@/lib/sse";
 import { queryKeys, useGatewayKey } from "@/hooks/queries";
 import { LiveModeContext, upsertRecord, type LiveMode } from "@/hooks/use-live-requests";
 
+const SILENCE_MS = 45_000;
+
 /**
  * Holds one connection to /ui/api/events for the whole app and folds each
  * record into the query cache. While it is down, useRequests() polls, and the
@@ -20,7 +22,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     let attempt = 0;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let refresh: ReturnType<typeof setTimeout> | undefined;
-    const controller = new AbortController();
+    let controller = new AbortController();
 
     // Totals and provider counts change when a request finishes; refresh them
     // at most once a second rather than on every event.
@@ -41,7 +43,15 @@ export function LiveProvider({ children }: { children: ReactNode }) {
     };
 
     const connect = async () => {
+      // The gateway pings every 15 s; a silent connection is dead.
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      const feed = () => {
+        clearTimeout(watchdog);
+        watchdog = setTimeout(() => controller.abort(), SILENCE_MS);
+      };
+      controller = new AbortController();
       try {
+        feed();
         const res = await gatewayFetch("/ui/api/events", {
           signal: controller.signal,
           headers: { accept: "text/event-stream" },
@@ -58,10 +68,11 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           } catch {
             // A malformed event is skipped; the next poll or event repairs it.
           }
-        });
+        }, feed);
       } catch {
         // Fall through to polling and a retry.
       }
+      clearTimeout(watchdog);
       if (stopped) return;
       setMode("polling");
       attempt += 1;

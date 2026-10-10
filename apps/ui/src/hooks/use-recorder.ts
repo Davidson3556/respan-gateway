@@ -8,6 +8,8 @@ export function useRecorder(onDone: (file: File) => void) {
   const [state, setState] = useState<RecorderState>(supported ? "idle" : "unsupported");
   const [seconds, setSeconds] = useState(0);
   const recorder = useRef<MediaRecorder | null>(null);
+  const starting = useRef(false);
+  const unmounted = useRef(false);
   const done = useRef(onDone);
 
   useEffect(() => {
@@ -22,19 +24,32 @@ export function useRecorder(onDone: (file: File) => void) {
   }, [state]);
 
   // Leaving the page mid-recording releases the microphone and drops the clip.
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    unmounted.current = false; // StrictMode re-runs effects after a cleanup
+    return () => {
+      unmounted.current = true;
       const rec = recorder.current;
       if (!rec) return;
       rec.onstop = null;
       rec.stop();
       rec.stream.getTracks().forEach((t) => t.stop());
-    },
-    [],
-  );
+    };
+  }, []);
 
   const start = async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (starting.current || recorder.current) return;
+    starting.current = true;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } finally {
+      starting.current = false;
+    }
+    // Left the page while the permission prompt was open.
+    if (unmounted.current) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
     const rec = new MediaRecorder(stream);
     const chunks: Blob[] = [];
     rec.ondataavailable = (e) => chunks.push(e.data);

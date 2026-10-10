@@ -9,7 +9,7 @@ import { CopyButton } from "@/components/copy-button";
 type Block =
   | { type: "code"; lang: string; text: string }
   | { type: "heading"; level: number; text: string }
-  | { type: "list"; ordered: boolean; items: string[] }
+  | { type: "list"; ordered: boolean; start: number; items: string[] }
   | { type: "quote"; text: string }
   | { type: "paragraph"; text: string };
 
@@ -37,10 +37,19 @@ function parseBlocks(source: string): Block[] {
       continue;
     }
     if (listItem.test(line)) {
-      const ordered = !!line.match(listItem)?.[1];
+      const first = line.match(listItem)!;
+      const ordered = !!first[1];
       const items: string[] = [];
-      while (i < lines.length && listItem.test(lines[i])) items.push(lines[i++].match(listItem)![2]);
-      blocks.push({ type: "list", ordered, items });
+      for (;;) {
+        // Blank lines between items keep the list going when another item follows.
+        let next = i;
+        while (next < lines.length && lines[next].trim() === "") next += 1;
+        const m = next < lines.length ? lines[next].match(listItem) : null;
+        if (!m || !!m[1] !== ordered) break;
+        items.push(m[2]);
+        i = next + 1;
+      }
+      blocks.push({ type: "list", ordered, start: ordered ? Number(first[1]) : 1, items });
       continue;
     }
     if (line.startsWith(">")) {
@@ -130,7 +139,11 @@ function renderBlock(block: Block, key: number): ReactNode {
     case "list": {
       const Tag = block.ordered ? "ol" : "ul";
       return (
-        <Tag key={key} className={`my-2 grid gap-1 pl-5 ${block.ordered ? "list-decimal" : "list-disc"}`}>
+        <Tag
+          key={key}
+          start={block.ordered && block.start !== 1 ? block.start : undefined}
+          className={`my-2 grid gap-1 pl-5 ${block.ordered ? "list-decimal" : "list-disc"}`}
+        >
           {block.items.map((item, i) => (
             <li key={i}>{renderInline(item)}</li>
           ))}

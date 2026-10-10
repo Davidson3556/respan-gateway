@@ -140,7 +140,11 @@ export function ChatTab() {
       </Card>
 
       <Card className="flex min-h-[32rem] flex-col gap-0 overflow-hidden py-0 shadow-none">
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6" aria-live="polite">
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+          {/* Announce completion only; per-token updates would be read out one by one. */}
+          <p role="status" className="sr-only">
+            {!streaming && turns.length > 0 ? "Response complete" : ""}
+          </p>
           {turns.length === 0 ? (
             <EmptyState icon={MessageSquare} title="Talk to any model" className="border-none">
               <p>

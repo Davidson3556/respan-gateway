@@ -77,6 +77,7 @@ function KeyCard({ stored }: { stored: string | null }) {
               onClick={() => {
                 setValue("");
                 setGatewayKey(null);
+                void queryClient.invalidateQueries();
                 toast.success("Gateway key cleared");
               }}
             >

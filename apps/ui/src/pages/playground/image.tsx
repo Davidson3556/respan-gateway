@@ -4,13 +4,6 @@ import { useState } from "react";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
@@ -18,6 +11,7 @@ import { postJson } from "@/lib/api";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
+import { SelectField } from "./select-field";
 
 interface ImagesResponse {
   data: { b64_json?: string; url?: string; revised_prompt?: string }[];
@@ -65,36 +59,8 @@ export function ImageTab() {
           </div>
           <ModelPicker id="image-model" choice={choice} />
           <div className="grid grid-cols-2 gap-3">
-            <div className="grid gap-2">
-              <Label htmlFor="image-size">Size</Label>
-              <Select value={size} onValueChange={setSize}>
-                <SelectTrigger id="image-size" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {sizes.map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="image-n">Images</Label>
-              <Select value={n} onValueChange={setN}>
-                <SelectTrigger id="image-n" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {["1", "2", "3", "4"].map((v) => (
-                    <SelectItem key={v} value={v}>
-                      {v}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <SelectField id="image-size" label="Size" value={size} onChange={setSize} options={sizes} />
+            <SelectField id="image-n" label="Images" value={n} onChange={setN} options={["1", "2", "3", "4"]} />
           </div>
         </>
       }

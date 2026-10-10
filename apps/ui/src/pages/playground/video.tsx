@@ -5,20 +5,15 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
 import { useObjectUrl } from "@/hooks/use-object-url";
+import { describeError } from "@/lib/query-client";
 import { gatewayFetch, getJson, postJson } from "@/lib/api";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
+import { SelectField } from "./select-field";
 
 interface VideoJob {
   id: string;
@@ -32,13 +27,14 @@ const done = (job: VideoJob | undefined) => job?.status === "completed" || job?.
 function useVideoJob(id: string | undefined) {
   const job = useQuery({
     queryKey: ["video", id],
-    queryFn: ({ signal }) => getJson<VideoJob>(`/v1/videos/${id}`, signal),
+    queryFn: ({ signal }) => getJson<VideoJob>(`/v1/videos/${encodeURIComponent(id!)}`, signal),
     enabled: !!id,
-    refetchInterval: (q) => (done(q.state.data) ? false : 2000),
+    // A failing poll (a 404 after a restart, say) is final: stop asking.
+    refetchInterval: (q) => (done(q.state.data) || q.state.error ? false : 2000),
   });
   const content = useQuery({
     queryKey: ["video-content", id],
-    queryFn: async ({ signal }) => (await gatewayFetch(`/v1/videos/${id}/content`, { signal })).blob(),
+    queryFn: async ({ signal }) => (await gatewayFetch(`/v1/videos/${encodeURIComponent(id!)}/content`, { signal })).blob(),
     enabled: job.data?.status === "completed",
     staleTime: Infinity,
   });
@@ -80,8 +76,8 @@ export function VideoTab() {
   const { job, content } = useVideoJob(create.data?.id);
   const current = job.data ?? create.data;
   const url = useObjectUrl(content.data);
-  const error = create.error ?? job.error ?? content.error;
-  const running = create.isPending || (!!current && !done(current));
+  const error = create.error ?? content.error;
+  const running = create.isPending || (!!current && !done(current) && !job.error);
 
   return (
     <MediaLayout
@@ -102,26 +98,24 @@ export function VideoTab() {
             />
           </div>
           <ModelPicker id="video-model" choice={choice} />
-          <div className="grid gap-2">
-            <Label htmlFor="video-seconds">Length</Label>
-            <Select value={seconds} onValueChange={setSeconds}>
-              <SelectTrigger id="video-seconds" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {["4", "8", "12"].map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s} seconds
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <SelectField
+            id="video-seconds"
+            label="Length"
+            value={seconds}
+            onChange={setSeconds}
+            options={["4", "8", "12"]}
+            optionLabel={(s) => `${s} seconds`}
+          />
         </>
       }
     >
       {error ? (
         <RequestError error={error} what="video" />
+      ) : job.error ? (
+        <RequestError
+          error={new Error(`Lost track of the job: ${describeError(job.error)}`)}
+          what="video"
+        />
       ) : current?.status === "failed" ? (
         <RequestError error={new Error(current.error?.message ?? "The job failed")} what="video" />
       ) : url ? (

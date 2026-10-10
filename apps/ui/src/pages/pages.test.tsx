@@ -90,4 +90,11 @@ describe("RequestsPage", () => {
     expect(await screen.findByText("No requests yet")).toBeInTheDocument();
     expect(screen.getByText(/curl .*\/v1\/chat\/completions/)).toBeInTheDocument();
   });
+
+  it("shows an error, not an empty filter result, when loading fails", async () => {
+    serve({});
+    renderPage(<RequestsPage />);
+    expect(await screen.findByText("Couldn't load requests")).toBeInTheDocument();
+    expect(screen.queryByText("No requests match")).not.toBeInTheDocument();
+  });
 });

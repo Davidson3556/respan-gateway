@@ -5,13 +5,6 @@ import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useModelChoice } from "@/hooks/use-model-choice";
@@ -20,6 +13,7 @@ import { gatewayFetch } from "@/lib/api";
 import { MediaLayout } from "./media-form";
 import { ModelPicker } from "./model-picker";
 import { RequestError } from "./request-error";
+import { SelectField } from "./select-field";
 
 const voices = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"];
 
@@ -58,21 +52,14 @@ export function SpeechTab() {
             />
           </div>
           <ModelPicker id="speech-model" choice={choice} />
-          <div className="grid gap-2">
-            <Label htmlFor="speech-voice">Voice</Label>
-            <Select value={voice} onValueChange={setVoice}>
-              <SelectTrigger id="speech-voice" className="w-full capitalize">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {voices.map((v) => (
-                  <SelectItem key={v} value={v} className="capitalize">
-                    {v}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          <SelectField
+            id="speech-voice"
+            label="Voice"
+            value={voice}
+            onChange={setVoice}
+            options={voices}
+            className="capitalize"
+          />
         </>
       }
     >

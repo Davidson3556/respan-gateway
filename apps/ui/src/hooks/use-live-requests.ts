@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useMemo } from "react";
 import { api, type RequestRecord } from "@/lib/api";
 import { queryKeys } from "@/hooks/queries";
@@ -30,12 +30,34 @@ export function upsertRecord(list: RequestRecord[], record: RequestRecord): Requ
   return next.slice(0, REQUEST_LIMIT);
 }
 
+/**
+ * Folds a freshly fetched list into the cached one. The stream may have
+ * updated records while the fetch was in flight, so a finished record
+ * (status set) is never replaced by an unfinished one, and records the fetch
+ * did not see yet are kept.
+ */
+export function mergeRecords(fetched: RequestRecord[], cached: RequestRecord[] = []): RequestRecord[] {
+  const byId = new Map(fetched.map((r) => [r.id, r]));
+  for (const c of cached) {
+    const f = byId.get(c.id);
+    if (!f || (f.status === null && c.status !== null)) byId.set(c.id, c);
+  }
+  return [...byId.values()]
+    .sort((a, b) => (a.started_at < b.started_at ? 1 : a.started_at > b.started_at ? -1 : 0))
+    .slice(0, REQUEST_LIMIT);
+}
+
 /** Recent requests, kept current by the event stream or, failing that, polling. */
 export function useRequests() {
   const mode = useLiveMode();
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: queryKeys.requests,
-    queryFn: ({ signal }) => api.requests(REQUEST_LIMIT, signal),
+    queryFn: async ({ signal }) =>
+      mergeRecords(
+        await api.requests(REQUEST_LIMIT, signal),
+        queryClient.getQueryData<RequestRecord[]>(queryKeys.requests),
+      ),
     refetchInterval: mode === "live" ? false : 4000,
   });
 }

@@ -55,10 +55,14 @@ export class SseParser {
   }
 }
 
-/** Read an SSE response body to the end, calling onEvent for each event. */
+/**
+ * Read an SSE response body to the end, calling onEvent for each event and
+ * onChunk for every read, comments and keep-alive pings included.
+ */
 export async function readSse(
   body: ReadableStream<Uint8Array>,
   onEvent: (event: SseEvent) => void,
+  onChunk?: () => void,
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -67,6 +71,7 @@ export async function readSse(
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      onChunk?.();
       for (const event of parser.push(decoder.decode(value, { stream: true }))) onEvent(event);
     }
     for (const event of parser.push(decoder.decode() + "\n\n")) onEvent(event);

@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useLiveMode, useRequests } from "@/hooks/use-live-requests";
+import { describeError } from "@/lib/query-client";
 import { formatCount } from "@/lib/format";
 import { outcomeOf } from "@/lib/requests";
 
@@ -54,7 +55,7 @@ const distinct = (values: (string | null)[]) =>
   [...new Set(values.filter((v): v is string => !!v))].sort();
 
 export function RequestsPage() {
-  const { data, isPending } = useRequests();
+  const { data, isPending, isError, error } = useRequests();
   const mode = useLiveMode();
   const { id } = useParams();
   const [params, setParams] = useSearchParams();
@@ -103,7 +104,15 @@ export function RequestsPage() {
         }
       />
 
-      {data?.length === 0 ? (
+      {isError && !data ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm"
+        >
+          <p className="font-medium">Couldn't load requests</p>
+          <p className="text-muted-foreground">{describeError(error)}</p>
+        </div>
+      ) : data?.length === 0 ? (
         <NoRequests />
       ) : (
         <Card className="gap-0 overflow-hidden py-0 shadow-none">

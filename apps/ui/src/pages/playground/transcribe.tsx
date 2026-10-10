@@ -92,6 +92,7 @@ function AudioInput({ file, onFile }: { file: File | null; onFile: (f: File | nu
         </span>
         <span className="text-xs text-muted-foreground">mp3, wav, m4a, webm, ogg…</span>
         <input
+          id="transcribe-file"
           type="file"
           accept="audio/*,video/webm"
           className="sr-only"
@@ -130,7 +131,7 @@ export function TranscribeTab() {
       fields={
         <>
           <div className="grid gap-2">
-            <Label>Audio</Label>
+            <Label htmlFor="transcribe-file">Audio</Label>
             <AudioInput file={file} onFile={setFile} />
           </div>
           <ModelPicker id="transcribe-model" choice={choice} />
