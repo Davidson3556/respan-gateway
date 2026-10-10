@@ -26,7 +26,7 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use errors::answer;
-pub use errors::merge_details;
+pub use errors::{merge_details, read_provider_error};
 pub(crate) use errors::{says, says_error};
 pub use exchange::Asked;
 #[cfg(test)]

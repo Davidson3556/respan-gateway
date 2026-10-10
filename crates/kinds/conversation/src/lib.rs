@@ -49,7 +49,7 @@ pub use usage::Usage;
 )]
 mod schema;
 #[cfg(feature = "http")]
-pub use schema::{Asked, Decoder, Schema, StreamResponse, merge_details};
+pub use schema::{Asked, Decoder, Schema, StreamResponse, merge_details, read_provider_error};
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;

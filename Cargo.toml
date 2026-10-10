@@ -22,6 +22,7 @@ publish = false
 respan-gateway-realtime = { path = "crates/kinds/realtime" }
 respan-gateway-core = { path = "crates/core" }
 respan-gateway-conversation = { path = "crates/kinds/conversation" }
+respan-gateway-media = { path = "crates/kinds/media" }
 respan-gateway-http = { path = "crates/wires/http" }
 respan-gateway-plugins = { path = "crates/plugins" }
 respan-gateway-mcp = { path = "crates/kinds/mcp" }
@@ -35,6 +36,7 @@ getrandom = "0.3"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
+memchr = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "http2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

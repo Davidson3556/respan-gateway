@@ -1,0 +1,49 @@
+[package]
+name = "respan-gateway-media"
+description = "The media kinds (images, transcription, speech) and their HTTP formats (OpenAI Images, Audio Transcriptions and Speech)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["openai"]
+# OpenAI's media endpoints, as OpenAI and compatible vendors serve them, over
+# HTTP. Without it the crate is the kinds' types alone, with no I/O.
+openai = [
+    "dep:respan-gateway-http",
+    "respan-gateway-conversation/http",
+    "dep:base64",
+    "dep:getrandom",
+    "dep:memchr",
+]
+
+[dependencies]
+bytes.workspace = true
+# The kind's types alone: its formats are not this crate's.
+respan-gateway-conversation = { path = "../conversation", default-features = false }
+respan-gateway-core.workspace = true
+serde_json.workspace = true
+base64 = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true, features = ["std"] }
+memchr = { workspace = true, optional = true }
+respan-gateway-http = { workspace = true, optional = true }
+
+[dev-dependencies]
+axum.workspace = true
+base64.workspace = true
+futures.workspace = true
+multer = "3"
+respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-plugins.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+
+# The suite relays through the OpenAI formats.
+[[test]]
+name = "media"
+required-features = ["openai"]

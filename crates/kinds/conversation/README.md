@@ -93,9 +93,10 @@ events.
   asked to stream; without it the call follows the client's request.
 
 The helpers both vendors share (messages and parts, the `native` fields a
-value keeps for its own format, usage totals, the faults of what cannot be
-written, and how a provider's error body reads, leniently, as compatible
-servers send it) are private to this crate.
+value keeps for its own format, usage totals and the faults of what cannot be
+written) are private to this crate. How a provider's error body reads,
+leniently, as compatible servers send it, is public, `read_provider_error`,
+for the HTTP formats of other JSON kinds, such as the media kinds'.
 
 What a format has no form for stays native to it (`NativeFields`,
 `Content::Native`, `Output::Native`), is written only by that format, and is

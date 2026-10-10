@@ -1342,6 +1342,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "respan-gateway-media"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "getrandom 0.3.4",
+ "memchr",
+ "multer",
+ "respan-gateway-conversation",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-plugins",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "respan-gateway-plugins"
 version = "0.0.0"
 dependencies = [
