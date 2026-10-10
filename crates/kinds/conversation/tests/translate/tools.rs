@@ -487,14 +487,12 @@ async fn a_failed_tool_result_is_not_silently_turned_into_a_success() {
 }
 
 /// NativeFields fields on Anthropic's tool, call and result have no place in
-/// OpenAI's: refused, never dropped.
+/// OpenAI's: refused, never dropped, but for a cache marker.
 #[tokio::test]
 async fn an_extra_tool_field_is_refused_not_dropped() {
-    let cached = json!({ "type": "ephemeral" });
-    let tool =
-        json!({ "name": "read", "input_schema": { "type": "object" }, "cache_control": cached });
+    let tool = json!({ "name": "read", "input_schema": { "type": "object" }, "vendor": 1 });
     let use_block = json!({ "type": "tool_use", "id": "t1", "name": "read", "input": {} });
-    let result = json!({ "type": "tool_result", "tool_use_id": "t1", "content": "x", "cache_control": cached });
+    let result = json!({ "type": "tool_result", "tool_use_id": "t1", "content": "x", "vendor": 1 });
     let ask = json!({ "role": "user", "content": "go" });
     let call_made = json!({ "role": "assistant", "content": [use_block] });
     let answer = json!({ "role": "user", "content": [result] });
@@ -623,8 +621,33 @@ async fn l4_sequential_anthropic_tool_blocks_written_anew_stop_before_the_next_s
     );
 }
 
-/// A tool result's text block carries `cache_control`, which OpenAI has no
-/// place for: refused, as the module says of fields with no equivalent.
+/// A cache marker on a tool, a tool result or its text only hints at what to
+/// cache: OpenAI is sent the request without it.
+#[tokio::test]
+async fn a_cache_marker_on_tools_and_tool_results_is_dropped_for_openai() {
+    let cached = json!({ "type": "ephemeral" });
+    let h = Harness::new(Vec::new()).await;
+    h.openai.answer( json_response(StatusCode::OK, r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#));
+    let body = json!({
+        "model": "gpt-x", "max_tokens": 100,
+        "tools": [{ "name": "read", "input_schema": { "type": "object" }, "cache_control": cached }],
+        "messages": [
+            { "role": "user", "content": "open a.rs" },
+            { "role": "assistant", "content": [{ "type": "tool_use", "id": "t1", "name": "read", "input": {} }] },
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "t1", "cache_control": cached,
+                    "content": [{ "type": "text", "text": "fn main", "cache_control": cached }] }] },
+        ],
+    });
+    let (status, text) = h.text(call(MESSAGES, body.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let sent = h.sent_json(0);
+    assert!(!sent.to_string().contains("cache_control"), "{sent}");
+    assert_eq!(sent["messages"][2]["role"], "tool");
+}
+
+/// A tool result's text block carries a field OpenAI has no place for:
+/// refused, as the module says of fields with no equivalent.
 #[tokio::test]
 async fn l4_a_tool_result_text_blocks_extra_field_is_refused_not_dropped() {
     let h = Harness::new(Vec::new()).await;
@@ -635,7 +658,7 @@ async fn l4_a_tool_result_text_blocks_extra_field_is_refused_not_dropped() {
             { "role": "user", "content": "open a.rs" },
             { "role": "assistant", "content": [{ "type": "tool_use", "id": "t1", "name": "read", "input": {} }] },
             { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1",
-                "content": [{ "type": "text", "text": "fn main", "cache_control": { "type": "ephemeral" } }] }] },
+                "content": [{ "type": "text", "text": "fn main", "citations": [{ "type": "c" }] }] }] },
         ],
     });
     let (status, text) = h.text(call(MESSAGES, body.to_string())).await;

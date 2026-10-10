@@ -12,7 +12,7 @@
 //!   `service_tier`, ...) in this format's terms.
 //! - Blocks are numbered in the order they open. The first choice's
 //!   `reasoning_content` (in a dialect that has it), `content` and each
-//!   `tool_calls` entry (by its `index`, in a whole body by its place) open
+//!   `tool_calls` entry (by its `index`, else by its `id`) open
 //!   a [`Block::Reasoning`], a [`Block::Text`] and a [`Block::ToolCall`] on
 //!   their first non-empty delta, or, for a call, on the entry that names
 //!   its `id` and `name`.
@@ -391,9 +391,9 @@ impl Schema for OpenAiChat {
         json!({ "error": merge_details(error, fault) })
     }
 
-    /// Asks a stream for usage, which the encoder hides from a client that
+    /// Asks a provider stream for usage, which the encoder hides from a client that
     /// did not ask.
-    fn finish(v: &mut Map<String, Value>) {
+    fn prepare_call(v: &mut Map<String, Value>) {
         let usage = v.get("stream_options").and_then(|o| o.get("include_usage"));
         if v.get("stream") != Some(&Value::Bool(true)) || usage == Some(&Value::Bool(true)) {
             return;
@@ -544,7 +544,9 @@ fn rekey(choice: &Value, key: &str) -> Value {
 }
 
 /// Put `more`, a choice of an [`Output::Native`], among a whole body's
-/// `choices`: the first choice's fields join it, another is added.
+/// `choices`: the first choice's fields join it, another is added. What
+/// streamed in pieces is joined: strings are concatenated, and the arrays
+/// of a message and of `logprobs` are appended.
 fn merge_choice(choices: &mut Vec<Value>, more: &Value) {
     let more = rekey(more, "message");
     let index = more["index"].as_u64().unwrap_or(0);
@@ -554,16 +556,38 @@ fn merge_choice(choices: &mut Vec<Value>, more: &Value) {
     let (Some(at), Some(fields)) = (at, more.as_object()) else {
         return choices.push(more);
     };
+    let choice = &mut choices[at];
     for (key, value) in fields {
         match (key.as_str(), value.as_object()) {
             ("index", _) => {}
             ("message", Some(body)) => {
                 for (k, x) in body {
-                    choices[at]["message"][k] = x.clone();
+                    append_piece(&mut choice["message"][k], x);
+                }
+                let refused = choice["message"]["refusal"]
+                    .as_str()
+                    .is_some_and(|r| !r.is_empty());
+                if refused && choice["message"]["content"] == "" {
+                    choice["message"]["content"] = Value::Null;
                 }
             }
-            _ => choices[at][key] = value.clone(),
+            ("logprobs", Some(body)) => {
+                for (k, x) in body {
+                    append_piece(&mut choice["logprobs"][k], x);
+                }
+            }
+            _ => choice[key] = value.clone(),
         }
+    }
+}
+
+/// Join `piece` to what `into` has so far: a string continues, an array
+/// grows, and anything else is replaced.
+fn append_piece(into: &mut Value, piece: &Value) {
+    match (into, piece) {
+        (Value::String(so_far), Value::String(more)) => so_far.push_str(more),
+        (Value::Array(so_far), Value::Array(more)) => so_far.extend(more.iter().cloned()),
+        (into, piece) => *into = piece.clone(),
     }
 }
 
@@ -591,6 +615,8 @@ pub struct OpenAiDecoder {
 struct Opened {
     key: Key,
     open: bool,
+    /// The id of the tool call this block is.
+    call_id: Option<String>,
 }
 
 /// What a block of a response is made of, in OpenAI's terms.
@@ -622,7 +648,8 @@ type Fields = Map<String, Value>;
 
 /// A tool call's part of a chunk or body.
 struct Call {
-    index: u64,
+    /// The entry's `index`, if it names one.
+    index: Option<u64>,
     start: Option<(String, String)>,
     arguments: String,
     /// The entry's fields, and its function's, that the kind has no place
@@ -633,11 +660,11 @@ struct Call {
 
 /// The fields of tool call `block` the kind has no place for, as the
 /// [`Output::Native`] that carries them: before the call's block opens.
-fn call_fields(block: u32, call: &Call) -> Option<Value> {
-    if call.entry.is_empty() && call.function.is_empty() {
+fn call_fields(block: u32, entry: &Fields, function: &Fields) -> Option<Value> {
+    if entry.is_empty() && function.is_empty() {
         return None;
     }
-    let fields = json!({ "block": block, "entry": call.entry, "function": call.function });
+    let fields = json!({ "block": block, "entry": entry, "function": function });
     Some(json!({ "call_fields": fields }))
 }
 
@@ -671,6 +698,25 @@ impl OpenAiDecoder {
         at.and_then(|at| u32::try_from(at).ok())
     }
 
+    /// The number of the tool call `call` is of: its `index`, else, for a
+    /// vendor that sends none, the open call it continues (it names no id,
+    /// or the open call's own) or a new one.
+    fn call_index(&self, call: &Call) -> u64 {
+        if let Some(index) = call.index {
+            return index;
+        }
+        let calls = self.blocks.iter().filter(|b| matches!(b.key, Key::Call(_)));
+        let named = call.start.as_ref().map(|(id, _)| id);
+        match calls.clone().rfind(|b| b.open) {
+            Some(Opened {
+                key: Key::Call(index),
+                call_id,
+                ..
+            }) if named.is_none() || named == call_id.as_ref() => *index,
+            _ => u64::try_from(calls.count()).unwrap_or(u64::MAX),
+        }
+    }
+
     /// Open a block of `key` as `kind`, ending the open text and reasoning.
     fn open(&mut self, key: Key, kind: Block, out: &mut Vec<Output>) -> u32 {
         for (n, block) in self.blocks.iter_mut().enumerate() {
@@ -680,7 +726,15 @@ impl OpenAiDecoder {
             }
         }
         let block = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
-        self.blocks.push(Opened { key, open: true });
+        let call_id = match &kind {
+            Block::ToolCall { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        self.blocks.push(Opened {
+            key,
+            open: true,
+            call_id,
+        });
         out.push(Output::block_start(block, kind));
         block
     }
@@ -745,7 +799,7 @@ impl OpenAiDecoder {
         };
         let body = &first[key];
         let calls = tool_calls(body);
-        if let Some(rest) = rest_of(self.chat, first, key, calls.is_some()) {
+        if let Some(rest) = choice_leftovers(self.chat, first, key, calls.is_some()) {
             out.push(Output::native(
                 self.name.clone(),
                 json!({ "choices": [rest] }),
@@ -766,18 +820,11 @@ impl OpenAiDecoder {
             self.say(Key::Text, Block::Text, Delta::Text(text.into()), out);
         }
         for call in calls.into_iter().flatten() {
-            let key = Key::Call(call.index);
-            let call_fields_source = Call {
-                index: call.index,
-                start: None,
-                arguments: String::new(),
-                entry: call.entry.clone(),
-                function: call.function.clone(),
-            };
+            let key = Key::Call(self.call_index(&call));
             let block = match (call.start, self.open_block(&key)) {
                 (Some((id, name)), None) => {
                     let next = u32::try_from(self.blocks.len()).unwrap_or(u32::MAX);
-                    if let Some(fields) = call_fields(next, &call_fields_source) {
+                    if let Some(fields) = call_fields(next, &call.entry, &call.function) {
                         out.push(Output::native(self.name.clone(), fields));
                     }
                     self.open(key, Block::ToolCall { id, name }, out)
@@ -873,7 +920,7 @@ fn first_choice(v: &Value) -> Option<&Value> {
 /// dialect that has it, tool calls (`typed`, if the kind has all of them),
 /// finish and what the dialect adds to describe it; its body is under
 /// `delta`. `None` if nothing is left.
-fn rest_of(chat: OpenAiChat, choice: &Value, key: &str, typed: bool) -> Option<Value> {
+fn choice_leftovers(chat: OpenAiChat, choice: &Value, key: &str, typed: bool) -> Option<Value> {
     let mut rest = Map::new();
     rest.insert("index".into(), 0.into());
     let fields = choice.as_object().into_iter().flatten();
@@ -909,14 +956,14 @@ fn rest_of(chat: OpenAiChat, choice: &Value, key: &str, typed: bool) -> Option<V
 }
 
 /// The tool calls of a choice's `body`, if each is a function call the
-/// kind can say: numbered by their `index`, else by place. `None` leaves
+/// kind can say, with the `index` each names. `None` leaves
 /// them other content.
 fn tool_calls(body: &Value) -> Option<Vec<Call>> {
     let calls = body.get("tool_calls")?.as_array()?;
     if calls.is_empty() {
         return None;
     }
-    let call = |(at, c): (usize, &Value)| {
+    let call = |c: &Value| {
         let function = &c["function"];
         let function_call = c["type"].is_null() || c["type"] == "function";
         if !function_call {
@@ -927,8 +974,8 @@ fn tool_calls(body: &Value) -> Option<Vec<Call>> {
             arguments => arguments.as_str()?,
         };
         let index = match c.get("index") {
-            Some(index) => index.as_u64()?,
-            None => u64::try_from(at).ok()?,
+            Some(index) => Some(index.as_u64()?),
+            None => None,
         };
         let start = c["id"].as_str().zip(function["name"].as_str());
         Some(Call {
@@ -939,7 +986,7 @@ fn tool_calls(body: &Value) -> Option<Vec<Call>> {
             function: remainder(function, &["name", "arguments"]),
         })
     };
-    calls.iter().enumerate().map(call).collect()
+    calls.iter().map(call).collect()
 }
 
 /// Writes events as OpenAI chunks: the opening chunk, one per delta, and
@@ -1136,33 +1183,8 @@ impl Chunks {
                 self.finish = Some(finish.clone());
                 self.begin(out);
             }
-            Output::Native(NativeValue { format, value: raw })
-                if **format == *OPENAI && usage_fields(raw).is_some() =>
-            {
-                if let Some(fields) = usage_fields(raw) {
-                    self.usage_extra.extend(fields.clone());
-                }
-            }
-            Output::Native(NativeValue { format, value: raw })
-                if **format == *OPENAI && call_fields_of(raw).is_some() =>
-            {
-                if let Some((block, entry, function)) = call_fields_of(raw) {
-                    self.call_fields
-                        .push((block, entry.clone(), function.clone()));
-                }
-            }
             Output::Native(NativeValue { format, value: raw }) if **format == *OPENAI => {
-                match &**raw {
-                    // An event that could not be read, as it came.
-                    Value::String(data) => out.extend_from_slice(event(None, data).as_bytes()),
-                    v if v["choices"].is_array() => {
-                        self.begin(out);
-                        let choices = v["choices"].as_array().into_iter().flatten();
-                        let choices: Vec<Value> = choices.map(|c| rekey(c, "delta")).collect();
-                        self.chunk(out, choices.into(), None);
-                    }
-                    other => out.extend_from_slice(event(None, other).as_bytes()),
-                }
+                self.write_native(raw, out);
             }
             Output::Native(NativeValue { format, value: raw }) if is_inert(format, raw) => {}
             Output::Native(NativeValue { .. }) => {
@@ -1170,6 +1192,29 @@ impl Chunks {
             }
         }
         Ok(())
+    }
+
+    /// An event of this format's own: usage and call fields are kept for
+    /// their place, a chunk is written as it came.
+    fn write_native(&mut self, raw: &Value, out: &mut BytesMut) {
+        if let Some(fields) = usage_fields(raw) {
+            self.usage_extra.extend(fields.clone());
+        } else if let Some((block, entry, function)) = call_fields_of(raw) {
+            self.call_fields
+                .push((block, entry.clone(), function.clone()));
+        } else {
+            match raw {
+                // An event that could not be read, as it came.
+                Value::String(data) => out.extend_from_slice(event(None, data).as_bytes()),
+                v if v["choices"].is_array() => {
+                    self.begin(out);
+                    let choices = v["choices"].as_array().into_iter().flatten();
+                    let choices: Vec<Value> = choices.map(|c| rekey(c, "delta")).collect();
+                    self.chunk(out, choices.into(), None);
+                }
+                other => out.extend_from_slice(event(None, other).as_bytes()),
+            }
+        }
     }
 
     fn write_end(&mut self, end: &Result<(), Fault>, out: &mut BytesMut) -> Result<(), Fault> {
@@ -1398,6 +1443,38 @@ mod tests {
                 // A tool call ends the text before it, and starts its own.
                 Output::block_end(0),
                 Output::block_start(1, call("call_1", "f")),
+                Output::block_end(1),
+                Output::finished(Finish::ToolUse),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_context_window_from_anthropic_is_the_length_limit() {
+        let full = Finish::native("anthropic-messages", "model_context_window_exceeded");
+        let body = body_of(&[Output::start("x", "m"), Output::finished(full)]).expect("a body");
+        assert_eq!(body["choices"][0]["finish_reason"], "length");
+        let paused = Finish::native("anthropic-messages", "pause_turn");
+        assert!(body_of(&[Output::start("x", "m"), Output::finished(paused)]).is_err());
+    }
+
+    #[test]
+    fn calls_without_an_index_are_told_apart_by_their_id() {
+        let (out, _) = decode_all(&[
+            "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n",
+            "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n",
+            "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"b\",\"function\":{\"name\":\"g\",\"arguments\":\"{\\\"y\\\":2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        assert_eq!(
+            out[1..],
+            [
+                Output::block_start(0, call("a", "f")),
+                Output::arguments(0, "{\"x\":"),
+                Output::arguments(0, "1}"),
+                Output::block_start(1, call("b", "g")),
+                Output::arguments(1, "{\"y\":2}"),
+                Output::block_end(0),
                 Output::block_end(1),
                 Output::finished(Finish::ToolUse),
             ]
@@ -1956,7 +2033,7 @@ mod tests {
     /// The request `body` with what the format adds ([`Schema::finish`]).
     fn with_usage(body: &str) -> Value {
         let mut v: Map<String, Value> = serde_json::from_str(body).unwrap_or_default();
-        OpenAiChat::finish(&mut v);
+        OpenAiChat::prepare_call(&mut v);
         v.into()
     }
 
@@ -2578,6 +2655,23 @@ mod tests {
         // OpenAI's own format has no field for reasoning.
         assert!(body_of(&replies).is_err());
         assert!(stream_of(&replies, false).is_err());
+    }
+
+    #[test]
+    fn streamed_refusals_and_logprobs_join_in_a_whole_body() {
+        let (out, end) = decode_all(&[
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"refusal\":\"I'm sorry, \"},\"logprobs\":{\"content\":null,\"refusal\":[{\"token\":\"a\"}]}}]}\n\n",
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"I can't help.\"},\"logprobs\":{\"content\":null,\"refusal\":[{\"token\":\"b\"}]}}]}\n\n",
+            "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        assert!(end.is_ok());
+        let body = body_of(&out).expect("a body");
+        let choice = &body["choices"][0];
+        assert_eq!(choice["message"]["refusal"], "I'm sorry, I can't help.");
+        assert_eq!(choice["message"]["content"], Value::Null);
+        let tokens = json!([{ "token": "a" }, { "token": "b" }]);
+        assert_eq!(choice["logprobs"]["refusal"], tokens);
     }
 
     #[test]

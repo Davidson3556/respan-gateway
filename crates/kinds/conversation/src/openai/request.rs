@@ -91,7 +91,7 @@ pub(crate) fn write_openai_tools(chat: &Input, v: &mut Map<String, Value>) -> Re
             &t.native,
             &mut function,
             tool_field,
-            Keep::default(),
+            Keep::CACHE_MARKER,
         )?;
         Ok(json!({ "type": "function", "function": function }))
     };
@@ -191,12 +191,11 @@ fn openai_calls(calls: &[&Content]) -> Result<Vec<Value>, Fault> {
     Ok(out)
 }
 
-/// OpenAI has no place for the fields of a tool part.
+/// OpenAI has no place for the fields of a tool part, but drops a cache
+/// marker.
 fn refuse_part_fields(native: &Option<NativeFields>) -> Result<(), Fault> {
-    match native.fields().keys().next() {
-        Some(key) => Err(untranslatable(&format!("a tool part's '{key}'"))),
-        None => Ok(()),
-    }
+    let what = |key: &str| format!("a tool part's '{key}'");
+    kept_fields(OPENAI, native, what, Keep::CACHE_MARKER).map(drop)
 }
 
 /// A tool message answering call `id` with `content`.
@@ -373,7 +372,7 @@ pub(crate) fn encode_part(c: &Content) -> Result<Value, Fault> {
         return Err(untranslatable("a display name on image or audio content"));
     }
     let what = |k: &str| format!("media field '{k}'");
-    let native = kept_fields(OPENAI, &media.native, what, Keep::default())?;
+    let native = kept_fields(OPENAI, &media.native, what, Keep::CACHE_MARKER)?;
     let url = || match &media.source {
         MediaSource::Url(url) => url.clone(),
         MediaSource::Bytes(data) => {

@@ -204,7 +204,7 @@ fn write_media(kind: &str, media: &Media) -> Result<Value, Fault> {
 }
 
 /// An Anthropic `tool_use` or `tool_result` block as the kind's part, if it
-/// can say all of it. A field it has no place for, such as a cache marker,
+/// can say all of it. A field it has no place for, other than a cache marker,
 /// on the block or on a text block of a result, keeps it the format's own:
 /// translating it is refused, not dropped.
 fn tool_part(block: &Value) -> Option<Content> {
@@ -226,7 +226,8 @@ fn tool_part(block: &Value) -> Option<Content> {
                 is_error => is_error.as_bool()?,
             };
             let blocks = block["content"].as_array().into_iter().flatten();
-            let marked = |b: &Value| b["type"] == "text" && !only(b, &["type", "text"]);
+            let marked =
+                |b: &Value| b["type"] == "text" && !only(b, &["type", "text", "cache_control"]);
             if blocks.into_iter().any(marked) {
                 return None;
             }
