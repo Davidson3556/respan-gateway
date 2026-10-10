@@ -15,10 +15,8 @@
 //! only that format writes it. Values are plain data: they say what they
 //! hold and compare by it, and keep nothing of the bytes they came as.
 //!
-//! The formats, OpenAI's endpoints as OpenAI and compatible vendors serve
-//! them, are in [`openai`], behind the default `openai` feature, and Google's
-//! Veo in [`gemini`], behind the default `gemini` feature. Without them the
-//! crate is the kinds' types alone, with no I/O of its own.
+//! The crate is the kinds' types alone, with no I/O; their formats over
+//! HTTP are `respan-gateway-media-http`'s.
 //!
 //! [`NativeFields`]: respan_gateway_core::NativeFields
 //! [`NativeValue`]: respan_gateway_core::NativeValue
@@ -28,12 +26,5 @@ pub mod image;
 pub mod speech;
 pub mod transcription;
 pub mod video;
-
-#[cfg(any(feature = "openai", feature = "gemini"))]
-mod edge;
-#[cfg(feature = "gemini")]
-pub mod gemini;
-#[cfg(feature = "openai")]
-pub mod openai;
 
 pub use respan_gateway_conversation::{Media, MediaSource, Usage};

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use respan_gateway_conversation::Input;
-use respan_gateway_conversation::openai::OpenAiChat;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,

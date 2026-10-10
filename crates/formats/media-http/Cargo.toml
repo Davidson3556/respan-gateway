@@ -1,0 +1,31 @@
+[package]
+name = "respan-gateway-media-http"
+description = "The media kinds over HTTP: OpenAI Images, Audio Transcriptions, Speech, Videos and Embeddings, and Google's Veo."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64.workspace = true
+getrandom = { workspace = true, features = ["std"] }
+memchr.workspace = true
+respan-gateway-conversation.workspace = true
+respan-gateway-conversation-http.workspace = true
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-media.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+futures.workspace = true
+multer = "3"
+respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-plugins.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }

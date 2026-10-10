@@ -26,8 +26,8 @@ use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
 use respan_gateway_http::formats::opaque;
 
-use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Delta, Input, Message, Output, Role};
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures;
 use respan_gateway_core::{BadRequest, Upstream};
 use respan_gateway_core::{
@@ -1955,7 +1955,7 @@ impl Plugin for WsToSse {
                 let reply = call
                     .clone()
                     .with_input(chat)
-                    .with_extension(respan_gateway_conversation::StreamResponse(true));
+                    .with_extension(respan_gateway_conversation_http::StreamResponse(true));
                 async move { Ok(reply.await?.outputs::<Output>()) }
             })
             .try_flatten()

@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-mcp"
-description = "MCP streamable-HTTP format and stdio transport."
+description = "The Model Context Protocol's kind: typed JSON-RPC messages and their HTTP envelopes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,17 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+http.workspace = true
 respan-gateway-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-getrandom = { workspace = true, features = ["std"] }
-respan-gateway-http.workspace = true
-tokio = { workspace = true, features = ["process", "io-util", "sync", "rt", "macros", "time"] }
-
-[dev-dependencies]
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "test-util"] }
-
-# Signals a stdio server's process group, which tokio cannot.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"

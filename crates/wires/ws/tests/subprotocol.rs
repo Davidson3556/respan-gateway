@@ -8,7 +8,7 @@ mod support;
 use respan_gateway_core::Gateway;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_realtime::Input;
-use respan_gateway_realtime::JsonEvents;
+use respan_gateway_realtime_ws::JsonEvents;
 use respan_gateway_ws::WsTransport;
 use support::*;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;

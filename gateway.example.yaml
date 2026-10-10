@@ -38,7 +38,8 @@ listen: 127.0.0.1:8080
 # whisper-large-* to groq, without a route of your own. A name routes only
 # among the providers serving the request's kind. Presets:
 # openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral,
-# together, fireworks, ollama. Override `base_url` or `key` in place.
+# together, fireworks, ollama, azure and vllm (these two need a `base_url`).
+# Override `base_url` or `key` in place.
 # Any provider is also reached as `<name>/<model>`, as in
 # `groq/llama-3.3-70b-versatile`; the gateway sends `llama-3.3-70b-versatile`.
 # A name before `/` that is no provider's is part of the model, as

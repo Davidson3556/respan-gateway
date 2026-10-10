@@ -23,6 +23,13 @@ const providers = [
     kinds: ["chat", "image", "transcription", "speech", "embedding"],
     base_url: "https://api.openai.com/v1",
     credentials: "gateway",
+    quirks: [
+      {
+        name: "protocol",
+        description:
+          "Realtime speaks the subprotocol `realtime`, which its browser clients offer beside their key; a browser that offered one refuses a `101` that names none.",
+      },
+    ],
   },
   {
     name: "anthropic",
@@ -31,6 +38,7 @@ const providers = [
     kinds: ["chat"],
     base_url: "https://api.anthropic.com",
     credentials: "gateway",
+    quirks: [],
   },
   {
     name: "groq",
@@ -39,6 +47,27 @@ const providers = [
     kinds: ["chat"],
     base_url: "https://api.groq.com/openai/v1",
     credentials: "client",
+    quirks: [
+      {
+        name: "usage_under",
+        description: "A stream reports usage under `x_groq`, beside the response; the object's other fields stay native.",
+      },
+    ],
+  },
+  {
+    name: "gemini",
+    vendor: "gemini",
+    formats: ["openai-chat", "gemini-live", "openai-images", "gemini-veo", "openai-embeddings"],
+    kinds: ["chat", "realtime", "image", "video", "embedding"],
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    credentials: "gateway",
+    quirks: [
+      {
+        name: "binary_text",
+        description: "Live sends each JSON event in a binary frame, as Google's SDK reads frames as bytes.",
+      },
+      { name: "model_id_prefix", description: "Its OpenAI-compatible model list names each model `models/<id>`." },
+    ],
   },
 ];
 

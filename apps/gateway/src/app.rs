@@ -15,8 +15,8 @@ use respan_gateway_http::axum::router_with_limit;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::relay::Relay;
-use respan_gateway_media::gemini::GeminiVeo;
 use respan_gateway_media::video::LocateContent;
+use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_ws::Limits;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -252,6 +252,18 @@ impl App {
                  spends your provider keys; set `keys:` in the config"
             )
         })
+    }
+
+    /// Each provider's vendor's quirks, a line each, as `check` prints them.
+    pub fn quirks(&self) -> Vec<String> {
+        let upstreams = self.plan.upstreams.iter();
+        let quirks = upstreams.flat_map(|u| {
+            let quirks = u.preset.map_or(&[][..], |p| p.quirks);
+            quirks
+                .iter()
+                .map(move |q| format!("{}: {}: {}", u.name, q.name, q.description))
+        });
+        quirks.collect()
     }
 
     /// A chat request to the default chat provider, as curl sends it.

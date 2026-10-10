@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{StreamExt, TryStreamExt, stream};
 use http::StatusCode;
-use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Finish, Output};
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response};
 use respan_gateway_core::{async_trait, futures};
 use respan_gateway_http::bytes::Bytes;

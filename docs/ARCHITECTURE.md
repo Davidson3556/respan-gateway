@@ -6,29 +6,49 @@ and runnable examples. The Python distribution (a PyO3 extension over the applic
 
 ## Repository layers
 
-Libraries are of two sorts, each in its own folder, beside the kernel they
+Libraries are in layers, each in its own folder, beside the kernel they
 extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 
-- A **kind** (`crates/kinds/`) owns a pair of events (`Input` in, `Output` out) that plugins
-  read, and everything about that kind on the wire: its formats, each a
-  `Format`, and its vendors' dialects. A kind is tied to one wire
-  (conversation and media to HTTP and SSE, realtime to WebSocket, MCP to
-  streamable HTTP or stdio); what varies within it is the provider, and the kind's
-  events are what every provider has in common. Its formats are behind
-  default features, so a plugin can depend on its types alone.
+```
+            core
+           /    \
+      kinds      wires
+           \    /
+          formats
+             |
+         providers
+             |
+   plugins · apps/gateway · python · examples · validation
+```
+
+- A **kind** (`crates/kinds/`) owns a pair of events (`Input` in, `Output`
+  out) that plugins read, and nothing else: its types, with no I/O, so a
+  plugin depends on them alone.
 - A **wire** (`crates/wires/`) moves bytes at both edges and knows no kind: its owned I/O
   types (`ClientIo`, `ProviderIo`), framing, credentials, a **transport** for
   the provider edge and **hosting** for the client edge (behind features).
+- A **format** (`crates/formats/`) is a kind over a wire, a crate per pair
+  (`conversation-http`, `media-http`, `realtime-ws`, `mcp-http`), each a
+  `Format`. Formats name no vendor: a vendor's departure from one is a knob
+  the format offers.
+- The **providers** crate (`crates/providers/`) is every vendor, a file
+  each: where it is, its key, its models, and the formats it speaks, set
+  with its quirks, each described.
 
 | Location | Sort | Owns | Internal production dependencies |
 | --- | --- | --- | --- |
 | `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault facts and tagged native values | None |
-| `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly; the HTTP binding (`Schema`) and its vendors, OpenAI Chat (with dialects) and Anthropic Messages | Core; HTTP for its formats |
-| `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage; their HTTP formats, OpenAI's endpoints as compatible vendors serve them, and Veo's as a provider | Core, conversation's types; HTTP for its formats |
-| `crates/kinds/realtime/` | Kind | Format-tagged realtime event pair; the WebSocket format (`JsonEvents`) and its vendor presets | Core; HTTP, WS for its format |
-| `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes; streamable HTTP and the stdio transport | Core, HTTP |
+| `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly | Core |
+| `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
+| `crates/kinds/realtime/` | Kind | Format-tagged realtime event pair | Core |
+| `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
 | `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the opaque format; optional Reqwest transport and Axum hosting | Core |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
+| `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat (with `ChatQuirks`) and Anthropic Messages | Conversation, HTTP |
+| `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
+| `crates/formats/realtime-ws/` | Format | `JsonEvents` (with `SessionQuirks`) | Realtime, HTTP, WS |
+| `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
+| `crates/providers/` | Providers | Every vendor, a file each, and their quirks | The formats |
 | `crates/plugins/` | Plugins | Model routing, attempts, fallback, races and backoff | Core |
 | `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), its routing step, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
@@ -41,20 +61,24 @@ can cross these boundaries to exercise a complete request.
 flowchart LR
     core --> http
     core --> plugins
-    http --> ws
-    http -. formats .-> conversation
-    http -. formats .-> media
-    http -. format .-> realtime
-    ws -. format .-> realtime
-    http --> mcp
     core --> conversation
     core --> realtime
+    core --> mcp
     conversation --> media
-    conversation --> gateway
-    media --> gateway
-    realtime --> gateway
-    mcp --> gateway
-    ws --> gateway
+    http --> ws
+    conversation --> conversation-http
+    http --> conversation-http
+    media --> media-http
+    conversation-http --> media-http
+    realtime --> realtime-ws
+    ws --> realtime-ws
+    mcp --> mcp-http
+    http --> mcp-http
+    conversation-http --> providers
+    media-http --> providers
+    realtime-ws --> providers
+    providers --> gateway
+    mcp-http --> gateway
     plugins --> gateway
 ```
 
@@ -64,7 +88,7 @@ their filesystem locations.
 
 The application (`apps/gateway`) composes these crates with public APIs only.
 A configured provider may speak several formats (a vendor preset speaks every
-format of its vendor compiled in); the application registers one core
+format of its vendor, as `crates/providers` says); the application registers one core
 provider per format and routes with one plugin of its own: `provider/model`,
 then `models` routes, then preset model prefixes, then the kind's default,
 among the providers serving the request's kind. Each media operation
@@ -88,7 +112,8 @@ client keys and the request log around them. Hosts reuse it as the
 - Plugins are compiled in. Applications register concrete components using
   the same public contracts available to external plugin authors.
 - Wire crates own framing and transport behavior and know no kind. A kind's
-  vendor formats translate through its typed events.
+  formats translate through its typed events, and name no vendor; vendors
+  and their quirks are the providers crate's.
 - Every kind is an `Input` in and an `Output` out, in the crate that owns
   it: `conversation`, `media` (a module per operation), `realtime` and `mcp` (envelopes around its typed
   JSON-RPC `Message`). HTTP's passthrough (`formats::opaque`,
@@ -123,6 +148,8 @@ refused answers read whole into a fault, and no body where HTTP has none.
 
 See the [core guide](../crates/core/README.md),
 [conversation guide](../crates/kinds/conversation/README.md),
+[conversation formats guide](../crates/formats/conversation-http/README.md),
+[providers guide](../crates/providers/README.md),
 [HTTP guide](../crates/wires/http/README.md), and
 [routing guide](../crates/plugins/README.md) for their public contracts.
 

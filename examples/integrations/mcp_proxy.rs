@@ -21,8 +21,9 @@ use respan_gateway_http::http::{HeaderValue, StatusCode};
 use serde_json::{Value, json};
 
 use respan_gateway_http::HttpTransport;
-use respan_gateway_mcp::{self as mcp, SESSION, StdioTransport, StreamableHttp};
+use respan_gateway_mcp as mcp;
 use respan_gateway_mcp::{Input, Output};
+use respan_gateway_mcp_http::{SESSION, StdioTransport, StreamableHttp};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;

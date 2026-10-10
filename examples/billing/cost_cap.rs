@@ -36,7 +36,7 @@ use respan_gateway_conversation::{Block, Input, Output};
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
-use respan_gateway_conversation::openai::OpenAiChat;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;

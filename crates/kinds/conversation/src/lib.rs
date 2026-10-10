@@ -29,6 +29,9 @@
 //!
 //! Direction is gateway-wide: [`Input`] travels from client to provider;
 //! [`Output`] travels from provider to client, on either transport edge.
+//!
+//! The crate is the kind's types alone, with no I/O; its formats over HTTP
+//! are `respan-gateway-conversation-http`'s.
 
 use respan_gateway_core::{Fault, Upstream};
 
@@ -40,21 +43,6 @@ mod media;
 mod usage;
 pub use media::{Media, MediaSource};
 pub use usage::Usage;
-
-// Some helpers serve one vendor; without both, they go unused.
-#[cfg(feature = "http")]
-#[cfg_attr(
-    not(all(feature = "openai", feature = "anthropic")),
-    allow(dead_code, unused_imports)
-)]
-mod schema;
-#[cfg(feature = "http")]
-pub use schema::{Asked, Decoder, Schema, StreamResponse, merge_details, read_provider_error};
-
-#[cfg(feature = "anthropic")]
-pub mod anthropic;
-#[cfg(feature = "openai")]
-pub mod openai;
 
 /// Provider-neutral generation settings, independent of response framing.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -547,13 +535,16 @@ pub enum Finish {
     /// A safety filter.
     Filtered,
     /// A reason the kind has no form for, as `format` names it; only a
-    /// response in that format can say it.
+    /// response in that format can say it, and another writes its
+    /// `fallback`, if it has one.
     #[non_exhaustive]
     Native {
         /// The format that names it.
         format: FormatId,
         /// The reason, as that format names it.
         reason: String,
+        /// The kind's reason nearest to it, which another format writes.
+        fallback: Option<Box<Finish>>,
     },
 }
 
@@ -563,6 +554,21 @@ impl Finish {
         Finish::Native {
             format: format.into(),
             reason: reason.into(),
+            fallback: None,
+        }
+    }
+
+    /// The reason `reason` of `format`, which another format writes as
+    /// `fallback`.
+    pub fn native_or(
+        format: impl Into<FormatId>,
+        reason: impl Into<String>,
+        fallback: Finish,
+    ) -> Self {
+        Finish::Native {
+            format: format.into(),
+            reason: reason.into(),
+            fallback: Some(Box::new(fallback)),
         }
     }
 }

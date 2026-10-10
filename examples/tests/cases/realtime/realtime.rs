@@ -836,10 +836,10 @@ async fn remote_session(
         lag: Duration::from_millis(lag),
     };
     let gw = Gateway::new()
-        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .client::<Input, _, _>(openai::REALTIME)?
         .provider::<Input, _, _>(
             "openai",
-            JsonEvents::OPENAI_REALTIME,
+            openai::REALTIME,
             WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
         )?
         .target("openai")?
@@ -935,10 +935,10 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .client::<Input, _, _>(openai::REALTIME)?
         .provider::<Input, _, _>(
             "openai",
-            JsonEvents::OPENAI_REALTIME,
+            openai::REALTIME,
             WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
         )?
         .target("openai")?
@@ -1167,10 +1167,10 @@ async fn l6_a_refused_turn_being_released_as_the_client_left_is_settled() -> Res
         lag: Duration::from_millis(300),
     };
     let gw = Gateway::new()
-        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .client::<Input, _, _>(openai::REALTIME)?
         .provider::<Input, _, _>(
             "openai",
-            JsonEvents::OPENAI_REALTIME,
+            openai::REALTIME,
             WsTransport::new(format!("ws://{at}"))?.connect(),
         )?
         .target("openai")?
@@ -1248,10 +1248,10 @@ async fn l6_leave_during_a_wrap(
     let provider = openai.base_url().replace("http://", "ws://");
     let at = EndAt::default();
     let gw = Gateway::new()
-        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .client::<Input, _, _>(openai::REALTIME)?
         .provider::<Input, _, _>(
             "openai",
-            JsonEvents::OPENAI_REALTIME,
+            openai::REALTIME,
             WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
         )?
         .target("openai")?
@@ -1500,10 +1500,10 @@ async fn l7_a_turn_the_provider_starts_during_a_reserve_is_still_held() -> Resul
         lag: Duration::from_millis(0),
     };
     let gw = Gateway::new()
-        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .client::<Input, _, _>(openai::REALTIME)?
         .provider::<Input, _, _>(
             "openai",
-            JsonEvents::OPENAI_REALTIME,
+            openai::REALTIME,
             WsTransport::new(format!("ws://{at}"))?.connect(),
         )?
         .target("openai")?
@@ -1548,10 +1548,10 @@ async fn l7_a_client_that_leaves_at_any_moment_leaves_no_hold() -> Result<(), Fa
                 lag: Duration::from_millis(60),
             };
             let gw = Gateway::new()
-                .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+                .client::<Input, _, _>(openai::REALTIME)?
                 .provider::<Input, _, _>(
                     "openai",
-                    JsonEvents::OPENAI_REALTIME,
+                    openai::REALTIME,
                     WsTransport::new(provider.trim_end_matches("/v1"))?.connect(),
                 )?
                 .target("openai")?
@@ -1705,10 +1705,10 @@ async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<
         first: Arc::new(AtomicUsize::new(0)),
     };
     let gw = Gateway::new()
-        .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+        .client::<Input, _, _>(openai::REALTIME)?
         .provider::<Input, _, _>(
             "openai",
-            JsonEvents::OPENAI_REALTIME,
+            openai::REALTIME,
             WsTransport::new(format!("ws://{at}"))?.connect(),
         )?
         .target("openai")?
@@ -1833,10 +1833,10 @@ async fn l9_provider_turns_and_a_client_that_leaves_at_any_moment_leave_no_hold(
             lag: Duration::from_millis(40),
         };
         let gw = Gateway::new()
-            .client::<Input, _, _>(JsonEvents::OPENAI_REALTIME)?
+            .client::<Input, _, _>(openai::REALTIME)?
             .provider::<Input, _, _>(
                 "openai",
-                JsonEvents::OPENAI_REALTIME,
+                openai::REALTIME,
                 WsTransport::new(format!("ws://{at}"))?.connect(),
             )?
             .target("openai")?

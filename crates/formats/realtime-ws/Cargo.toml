@@ -1,0 +1,19 @@
+[package]
+name = "respan-gateway-realtime-ws"
+description = "The realtime kind over WebSocket: a session of JSON events."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-realtime.workspace = true
+respan-gateway-ws.workspace = true
+serde_json.workspace = true

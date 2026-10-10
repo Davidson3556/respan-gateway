@@ -460,8 +460,8 @@ async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
 /// status goes; the call still ends as its head says.
 #[tokio::test]
 async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
-    use respan_gateway_conversation::anthropic::AnthropicMessages;
-    use respan_gateway_conversation::openai::OpenAiChat;
+    use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+    use respan_gateway_conversation_http::openai::OpenAiChat;
     // Deliberately nonstandard provider success: no chat payload to decode.
     let transport = |_| async {
         let mut response = http::Response::new(());

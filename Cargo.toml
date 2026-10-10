@@ -4,6 +4,8 @@ members = [
     "crates/plugins",
     "crates/kinds/*",
     "crates/wires/*",
+    "crates/formats/*",
+    "crates/providers",
     "apps/gateway",
     "python",
     "examples",
@@ -28,6 +30,11 @@ respan-gateway-http = { path = "crates/wires/http" }
 respan-gateway-plugins = { path = "crates/plugins" }
 respan-gateway-mcp = { path = "crates/kinds/mcp" }
 respan-gateway-ws = { path = "crates/wires/ws" }
+respan-gateway-conversation-http = { path = "crates/formats/conversation-http" }
+respan-gateway-media-http = { path = "crates/formats/media-http" }
+respan-gateway-realtime-ws = { path = "crates/formats/realtime-ws" }
+respan-gateway-mcp-http = { path = "crates/formats/mcp-http" }
+respan-gateway-providers = { path = "crates/providers" }
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"

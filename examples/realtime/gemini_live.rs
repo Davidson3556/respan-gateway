@@ -18,7 +18,7 @@ use respan_gateway_core::{
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
-use respan_gateway_realtime::JsonEvents;
+use respan_gateway_providers::gemini;
 use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
@@ -136,8 +136,8 @@ impl Plugin for Sessions {
 }
 fn gateway(transport: WsTransport, sessions: Sessions) -> Result<Gateway, Fault> {
     Gateway::new()
-        .client::<Input, _, _>(JsonEvents::GEMINI_LIVE)?
-        .provider::<Input, _, _>("gemini", JsonEvents::GEMINI_LIVE, transport.connect())?
+        .client::<Input, _, _>(gemini::LIVE)?
+        .provider::<Input, _, _>("gemini", gemini::LIVE, transport.connect())?
         .plugin(sessions)
         .target("gemini")
 }
@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut headers = respan_gateway_http::http::HeaderMap::new();
     headers.insert("x-goog-api-key", key.parse()?);
     let gw = gateway(
-        JsonEvents::GEMINI_LIVE
+        gemini::LIVE
             .transport("wss://generativelanguage.googleapis.com")?
             .with_headers(headers)?,
         sessions,

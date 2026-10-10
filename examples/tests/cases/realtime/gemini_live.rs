@@ -3,7 +3,7 @@ use super::*;
 #[path = "../../../support/live/test.rs"]
 mod support;
 use support::*;
-/// Where a Gemini Live client connects ([`JsonEvents::GEMINI_LIVE`]).
+/// Where a Gemini Live client connects ([`gemini::LIVE`]).
 const PATH: &str = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 fn configured(balance: i64) -> Sessions {
     let ledger = MemoryLedger::new();

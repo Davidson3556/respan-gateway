@@ -32,7 +32,9 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["h
 [dev-dependencies]
 http.workspace = true
 respan-gateway-realtime.workspace = true
+respan-gateway-realtime-ws.workspace = true
 respan-gateway-conversation.workspace = true
+respan-gateway-conversation-http.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "sync", "test-util"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }

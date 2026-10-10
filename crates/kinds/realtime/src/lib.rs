@@ -2,19 +2,11 @@
 //! The realtime kind: directional events with explicit wire-format identity.
 //! Input travels client to provider; output travels provider to client.
 //!
-//! Its wire is a WebSocket session, one JSON event per frame: [`JsonEvents`]
-//! (behind the default `ws` feature), with the vendors' presets
-//! ([`JsonEvents::OPENAI_REALTIME`], [`JsonEvents::RESPONSES_WS`],
-//! [`JsonEvents::GEMINI_LIVE`]). Without that feature the crate is the kind's
-//! types alone, with no I/O.
+//! The crate is the kind's types alone, with no I/O; its format, a
+//! WebSocket session of JSON events, is `respan-gateway-realtime-ws`'s.
 
 use respan_gateway_core::{FormatId, NativeValue};
 use serde_json::Value;
-
-#[cfg(feature = "ws")]
-mod json_events;
-#[cfg(feature = "ws")]
-pub use json_events::JsonEvents;
 
 macro_rules! event {
     ($(#[$doc:meta])* $name:ident) => {

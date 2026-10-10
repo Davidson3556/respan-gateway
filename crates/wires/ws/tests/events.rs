@@ -19,8 +19,8 @@ use respan_gateway_core::{
     async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::JsonEvents;
 use respan_gateway_realtime::{Input, Output};
+use respan_gateway_realtime_ws::JsonEvents;
 use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
 use support::*;

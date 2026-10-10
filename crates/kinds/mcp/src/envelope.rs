@@ -1,6 +1,6 @@
 //! HTTP envelopes keep transport metadata attached to typed messages.
 use crate::messages::Message;
-use respan_gateway_http::http::Method;
+use http::Method;
 use serde_json::Value;
 
 /// The kind's input: one HTTP request from an MCP client.

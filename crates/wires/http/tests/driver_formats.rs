@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use respan_gateway_conversation::Input;
-use respan_gateway_conversation::anthropic::AnthropicMessages;
-use respan_gateway_conversation::openai::OpenAiChat;
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Upstream;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{

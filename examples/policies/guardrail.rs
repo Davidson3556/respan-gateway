@@ -20,9 +20,9 @@
 mod text;
 
 use mockllm::FakeOpenAi;
-use respan_gateway_conversation::anthropic::AnthropicMessages;
-use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Input, Output};
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::futures::stream;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, ProviderContext};

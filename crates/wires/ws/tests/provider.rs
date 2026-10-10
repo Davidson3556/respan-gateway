@@ -13,7 +13,8 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode, header};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, ProviderError};
-use respan_gateway_realtime::{Input, JsonEvents};
+use respan_gateway_realtime::Input;
+use respan_gateway_realtime_ws::JsonEvents;
 use respan_gateway_ws::{Limits, WsTransport};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
@@ -87,57 +88,6 @@ async fn fragmented_unicode_with_interleaved_ping_and_no_selected_subprotocol() 
             assert!(body.next().await.is_none());
         } else {
             assert!(first.is_err_and(|f| f.is::<Upstream>()));
-        }
-        drop(body);
-        tokio::time::timeout(Duration::from_secs(3), completion.expect("completion"))
-            .await
-            .expect("session deadline")
-            .expect("upload ended");
-        tokio::time::timeout(Duration::from_secs(3), provider)
-            .await
-            .expect("server deadline")
-            .expect("server task");
-    }
-}
-
-#[tokio::test]
-async fn binary_text_is_gemini_lives_alone_and_rejects_invalid_utf8() {
-    for (format, bytes, accepted) in [
-        (JsonEvents::OPENAI_REALTIME, "雪😀".as_bytes(), false),
-        (JsonEvents::GEMINI_LIVE, "雪😀".as_bytes(), true),
-        (JsonEvents::GEMINI_LIVE, &[0xff, 0xfe][..], false),
-    ] {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listen");
-        let base = format!("ws://{}", listener.local_addr().expect("address"));
-        let provider = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.expect("accept");
-            let mut socket = tokio_tungstenite::accept_async(socket)
-                .await
-                .expect("handshake");
-            socket
-                .send(Message::Binary(Bytes::copy_from_slice(bytes)))
-                .await
-                .expect("binary");
-            socket.send(Message::Close(None)).await.expect("close");
-            while let Some(Ok(_)) = socket.next().await {}
-        });
-        let transport = format.transport(base).expect("transport");
-        let request = http::Request::get("/events")
-            .body(Body::stream(stream::pending()))
-            .expect("request");
-        let (answer, completion) = transport.send(request).await.expect("upgrade");
-        let mut body = answer.into_body();
-        let frame = tokio::time::timeout(Duration::from_secs(3), body.next())
-            .await
-            .expect("message deadline")
-            .expect("message");
-        if accepted {
-            assert_eq!(frame.expect("UTF-8 text"), bytes);
-            assert!(body.next().await.is_none());
-        } else {
-            assert!(frame.is_err_and(|f| f.is::<Upstream>()));
         }
         drop(body);
         tokio::time::timeout(Duration::from_secs(3), completion.expect("completion"))

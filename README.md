@@ -73,11 +73,13 @@ each request live; each finished request is also one line on stderr.
 
 Vendor presets: `openai`, `anthropic`, `gemini` (`GEMINI_API_KEY` or
 `GOOGLE_API_KEY`), `groq`, `deepseek`, `openrouter`, `xai`, `mistral`,
-`together`, `fireworks`, each reading `<VENDOR>_API_KEY`, and `ollama`
-(with `OLLAMA_HOST`). Without a config file, `RESPAN_<VENDOR>_BASE_URL`
+`together`, `fireworks`, each reading `<VENDOR>_API_KEY`, `ollama`
+(with `OLLAMA_HOST`), and `azure` (`AZURE_OPENAI_API_KEY`) and `vllm`, which
+need a `base_url`. Each is a file in
+[`crates/providers`](crates/providers/README.md), with the quirks the gateway
+handles for it; `check` prints them. Without a config file, `RESPAN_<VENDOR>_BASE_URL`
 moves a vendor's base URL; with one, the file's `base_url` alone counts
-(`init` writes the moved URL, and `OLLAMA_HOST`'s, into it). A preset speaks every format of its vendor compiled
-in: OpenAI's media endpoints for `openai`, Imagen and Veo for `gemini`,
+(`init` writes the moved URL, and `OLLAMA_HOST`'s, into it). A preset speaks every format of its vendor: OpenAI's media endpoints for `openai`, Imagen and Veo for `gemini`,
 transcription and speech for `groq`, images for `xai` and `together`,
 embeddings for `gemini`, `mistral`, `together`, `fireworks` and `ollama` too. To configure more, write a config and check it:
 
@@ -138,13 +140,13 @@ ones include the version, such as `https://api.openai.com/v1` or
 `https://openrouter.ai/api/v1` (`openrouter-chat`); Anthropic's does not:
 `https://api.anthropic.com`. `openai-chat` reads only OpenAI's own fields; a
 vendor whose fields the gateway reads has a format of its own name (the
-[dialects](crates/kinds/conversation/README.md#openai-chat-completions)), and one whose additions it does not
+[dialects](crates/providers/README.md)), and one whose additions it does not
 read, as Gemini's endpoint, is `openai-chat`. The media formats
 (`openai-images`, `openai-transcriptions`, `openai-speech`,
 `openai-videos`, `openai-embeddings`) take the same base URL; Veo (`gemini-veo`, a provider
 format only) takes the Gemini API's,
 `https://generativelanguage.googleapis.com/v1beta`, with its key in
-`x-goog-api-key` ([media kinds](crates/kinds/media/README.md)).
+`x-goog-api-key` ([media formats](crates/formats/media-http/README.md)).
 
 Sessions go over WebSocket: a provider of format `openai-realtime` (OpenAI
 Realtime), `responses-ws` (OpenAI Responses over WebSocket) or
@@ -152,7 +154,7 @@ Realtime), `responses-ws` (OpenAI Responses over WebSocket) or
 `wss://api.openai.com/v1`, `wss://generativelanguage.googleapis.com` (with
 `auth: { type: header, name: x-goog-api-key, key: ... }`). Serving one makes
 each WebSocket upgrade a session, relayed event by event to the one
-provider of its format ([presets](crates/wires/ws/README.md)).
+provider of its format ([vendors](crates/providers/README.md)).
 
 ## Glossary
 
@@ -229,12 +231,17 @@ the gateway, and the binary chooses what to compose. See the
 | Path | What it is |
 |---|---|
 | `crates/core/` | The neutral kernel and plugin-author API: typed streams, plugins, lifecycle, fault facts and native values; no HTTP or message kinds. |
-| `crates/kinds/conversation/` | The conversation kind (requests, reply events, typed usage, assembly) and its HTTP formats: OpenAI Chat (with vendor dialects) and Anthropic Messages, sharing the `Schema` trait. |
-| `crates/kinds/media/` | The media kinds, a kind per operation (image generation and edits, transcription, speech, embeddings, video jobs), and their HTTP formats: OpenAI Images, Audio Transcriptions, Speech, Embeddings and Videos, and Google's Veo as a provider. |
-| `crates/kinds/realtime/` | The realtime kind (a client/provider JSON event pair) and its WebSocket format, `JsonEvents`, with the vendors' presets. |
-| `crates/kinds/mcp/` | The MCP kind (typed JSON-RPC messages and their envelopes) and its formats: streamable HTTP and stdio. |
+| `crates/kinds/conversation/` | The conversation kind: requests, reply events, typed usage and assembly. |
+| `crates/kinds/media/` | The media kinds, a kind per operation: image generation and edits, transcription, speech, embeddings, video jobs. |
+| `crates/kinds/realtime/` | The realtime kind: a client/provider JSON event pair. |
+| `crates/kinds/mcp/` | The MCP kind: typed JSON-RPC messages and their envelopes. |
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
 | `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |
+| `crates/formats/conversation-http/` | The conversation kind over HTTP: OpenAI Chat (with `ChatQuirks` for vendors' dialects) and Anthropic Messages, sharing the `Schema` trait. |
+| `crates/formats/media-http/` | The media kinds over HTTP: OpenAI Images, Audio Transcriptions, Speech, Embeddings and Videos, and Google's Veo as a provider. |
+| `crates/formats/realtime-ws/` | The realtime kind over WebSocket: `JsonEvents` (with `SessionQuirks`). |
+| `crates/formats/mcp-http/` | MCP over HTTP: streamable HTTP, and a stdio server as a transport. |
+| `crates/providers/` | Every vendor, a file each: base URL, key, models, the formats it speaks set with its quirks, and a table of them. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
 | `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing (by model within each kind, video jobs by id), client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `init` and `proxy`. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
@@ -253,13 +260,14 @@ prices, accounts and durable billing stores. Routing takes an explicit retry cla
 available from the HTTP protocol module. The PyO3 bindings and PyPI package live together in
 [`python/`](python/README.md).
 
-Crates are of two sorts: a **kind** (`crates/kinds/`: `conversation`, `media`, `realtime`, `mcp`) owns
-its events, its formats on its wire and its vendors' dialects; a **wire**
-(`crates/wires/`: `http`, `ws`) moves bytes at both edges and knows no kind. A kind's formats
-are behind default features, so a plugin can depend on its types alone. A
-wire's `reqwest` (`HttpTransport`) and `axum` (hosting) features are opt-in,
-so format authors and ordinary HTTP hosts do not need unrelated hosting or
-transport code.
+Crates are in layers: a **kind** (`crates/kinds/`: `conversation`, `media`,
+`realtime`, `mcp`) is its events' types alone; a **wire** (`crates/wires/`:
+`http`, `ws`) moves bytes at both edges and knows no kind; a **format**
+(`crates/formats/`) is a kind over a wire, and names no vendor; and
+`crates/providers` is every vendor, a file each, with the quirks it sets on
+the formats it speaks. A wire's `reqwest` (`HttpTransport`) and `axum`
+(hosting) features are opt-in, so format authors and ordinary HTTP hosts do
+not need unrelated hosting or transport code.
 
 HTTP formats prepare actual requests and event sinks synchronously, then let
 core drive delivery. Response readers return streams. Finite inputs are encoded

@@ -103,6 +103,16 @@ pub struct Delta {
     pub native: Option<NativeFields>,
 }
 
+impl Delta {
+    /// The next `text`.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            native: None,
+        }
+    }
+}
+
 /// A whole transcript.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]

@@ -1,9 +1,10 @@
 # Conversation kind
 
 `respan-gateway-conversation` is the conversation kind: the shared LLM
-request/event pair (`Input` in, `Output` events out), and its formats over
-HTTP, one per vendor ([below](#formats-over-http)). Plugins read any
-conversation through the pair and never see which vendor it came from.
+request/event pair (`Input` in, `Output` events out). Plugins read any
+conversation through the pair and never see which vendor it came from. Its
+formats over HTTP are
+[`respan-gateway-conversation-http`](../../formats/conversation-http/README.md)'s.
 
 ```rust
 use respan_gateway_conversation::{Input, Message, Output, Role};
@@ -11,11 +12,9 @@ use respan_gateway_conversation::Usage;
 use respan_gateway_core::{ClientContext, Fault, Plugin, Response};
 ```
 
-The crate exports conversation types and helpers directly from its root.
-The formats are behind features (`openai`, `anthropic`, both on by default,
-each turning on `http`). With `default-features = false` the crate is the
-kind's types alone, depending only on `respan-gateway-core` and
-`serde_json`, for plugins that need no I/O.
+The crate exports conversation types and helpers directly from its root. It
+is the kind's types alone, depending only on `respan-gateway-core`,
+`serde_json` and `bytes`, for plugins that need no I/O.
 
 `Usage` is the token counts a provider reports: input, output, and the
 cached, cache-write and reasoning counts that are parts of them. A count
@@ -56,90 +55,16 @@ decoded from, and compare by what they say. Only an explicit raw relay
 (`respan_gateway_http::relay::Relay::RAW`) sends a request's own bytes, and a
 response is always written again from its events.
 
-
-
 `Input.options: GenerationOptions` groups the output token limit, sampling,
 stop sequences, tool selection, parallel calls and structured-output requirements.
 `Content` includes text, reasoning, tool calls/results, images, audio, documents,
 and native values. A `Media` has a MIME type, URL or bytes, optional name, and
 optional native fields. Formats do not fetch URLs.
 
-Transport preferences are separate: set
-`StreamResponse(bool)` in call extensions to choose
-provider HTTP streaming. Client response framing follows the client's request.
-The HTTP binding retains original token-limit spelling on same-format OpenAI
-calls; standalone semantic encoding uses `max_completion_tokens`.
-Neither spelling nor streaming preference lives in `Input`.
+Transport preferences are the formats', not `Input`'s, such as whether a
+provider is asked to stream.
 
 `Finish` records why the model stopped. Delivery completes when the event stream
-ends; usage and native events may arrive after `Finish`.
-
-## Formats over HTTP
-
-The kind's wire is HTTP: JSON requests, JSON or SSE responses. Each vendor's
-format is usable on either edge, as a client format over `ClientIo` and a
-provider format over `ProviderIo`, and they translate through the kind's
-events.
-
-- `Schema`: what a vendor supplies, its names and its JSON both ways
-  (`decode_json`/`encode_json`, `decode_part`/`encode_part`, `encode_whole`,
-  its stream encoder and its error body). Its provided methods are the HTTP
-  binding on both edges, which a format's `Format` implementations call
-  (`bind_client`, `bind_provider`). `decode_*`/`encode_*` convert finite
-  values; `read_*`/`write_*` bind lazy event streams to a body.
-- `Decoder`: a format's decoder of one response into events, driven over
-  SSE, holding a response's start until its first content.
-- `StreamResponse(bool)`: a call extension choosing whether the provider is
-  asked to stream; without it the call follows the client's request.
-
-The helpers both vendors share (messages and parts, the `native` fields a
-value keeps for its own format, usage totals and the faults of what cannot be
-written) are private to this crate. How a provider's error body reads,
-leniently, as compatible servers send it, is public, `read_provider_error`,
-for the HTTP formats of other JSON kinds, such as the media kinds'.
-
-What a format has no form for stays native to it (`NativeFields`,
-`Content::Native`, `Output::Native`), is written only by that format, and is
-refused in translation where it could change the answer. Only an explicit
-raw relay ([`Relay::RAW`](../../wires/http/src/relay.rs)) sends a client's own bytes.
-
-### OpenAI Chat Completions
-
-`openai::OpenAiChat`: a `POST` to a path ending in `/chat/completions`; its
-provider base URL includes the version, such as `https://api.openai.com/v1`.
-
-`OpenAiChat::OPENAI`, named `openai-chat`, reads only OpenAI's own fields.
-Another vendor's field stays native, so it survives a relay in this format
-and is refused in translation where it could change the answer. A vendor
-whose fields the kind has a form for gets a dialect of its own name, which
-reads and writes them:
-
-| Constant | Name | Its fields |
-| --- | --- | --- |
-| `GROQ` | `groq-chat` | A stream's usage under `x_groq` |
-| `DEEPSEEK` | `deepseek-chat` | Reasoning as `reasoning_content` |
-| `VLLM` | `vllm-chat` | Reasoning as `reasoning_content`; a choice's `stop_reason` |
-| `OPENROUTER` | `openrouter-chat` | A choice's `native_finish_reason` |
-| `AZURE` | `azure-chat` | A choice's `content_filter_results` and `content_filter_offsets` |
-
-A choice's fields in the table describe it and carry no content: the
-dialect drops them, as it reads them, rather than keep them native and so
-refuse their translation. Every dialect's values are `openai-chat`'s, so
-what one keeps native another writes. A dialect writes what it reads: serve
-`deepseek-chat` to give clients reasoning, which `openai-chat` has no field
-for and refuses.
-
-### Anthropic Messages
-
-`anthropic::AnthropicMessages`, named `anthropic-messages`: a `POST` to a
-path ending in `/v1/messages`; its provider base URL leaves the version out,
-such as `https://api.anthropic.com`, and `anthropic-version: 2023-06-01` is
-sent if the request names none.
-
-Thinking is the kind's reasoning; its signature, and what else the kind has
-no form for, stays native to this format.
-
-### Tests
-
-The suites under `tests/` drive the kernel's relay through these formats and
-translate between them, so they need both features.
+ends; usage and native events may arrive after `Finish`. A `Finish::Native`
+reason, one the kind has no form for, may carry a `fallback`
+(`Finish::native_or`), the kind's nearest reason, which another format writes.

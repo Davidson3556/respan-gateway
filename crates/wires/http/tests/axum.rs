@@ -9,8 +9,8 @@ use axum::routing::post;
 use respan_gateway_conversation::{Input, Output};
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_conversation::anthropic::AnthropicMessages;
-use respan_gateway_conversation::openai::OpenAiChat;
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
 use respan_gateway_http::HttpTransport;
 use respan_gateway_http::axum::router;

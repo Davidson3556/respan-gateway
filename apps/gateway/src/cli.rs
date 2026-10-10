@@ -128,6 +128,9 @@ where
         Err(e) => return fail(&format!("{source}: {e}")),
     };
     if check_only {
+        for quirk in app.quirks() {
+            println!("quirk of {quirk}");
+        }
         println!("{source}: ok");
         return SUCCESS;
     }

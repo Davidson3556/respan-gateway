@@ -499,7 +499,7 @@ async fn a_provider_silent_through_a_ping_is_truncated() {
     // Not reading, it answers no ping.
     probe.reading.store(false, Ordering::SeqCst);
     let (ends, calls) = (Outcomes::default(), Calls::default());
-    let events = respan_gateway_realtime::JsonEvents::new("realtime", PATH);
+    let events = respan_gateway_realtime_ws::JsonEvents::new("realtime", PATH);
     let transport = respan_gateway_ws::WsTransport::new(probe.base())
         .unwrap()
         .with_limits(pinging());

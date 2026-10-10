@@ -37,6 +37,7 @@ const provider: Provider = {
   kinds: ["chat"],
   base_url: "https://api.anthropic.com",
   credentials: "client",
+  quirks: [{ name: "usage_under", description: "A stream reports usage under `x_groq`." }],
   requests: 40,
   errors: 2,
   avg_latency_ms: 1250,
@@ -65,6 +66,7 @@ describe("ProvidersPage", () => {
     renderPage(<ProvidersPage />);
     expect(await screen.findByText("anthropic-messages")).toBeInTheDocument();
     expect(screen.getByText("Client key")).toBeInTheDocument();
+    expect(screen.getByText("usage_under")).toBeInTheDocument();
     expect(screen.getByText("5.0%")).toBeInTheDocument();
     expect(screen.getByText("1.25 s")).toBeInTheDocument();
   });

@@ -10,9 +10,10 @@ use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 
 use crate::config::{Auth, Config, PluginConfig, ProviderConfig};
-use crate::formats::{Base, KeyHeader, Kind, KnownFormat};
-use crate::presets::{self, Preset};
+use crate::formats::{Kind, KnownFormat};
+use crate::presets;
 use crate::routing::Routes;
+use respan_gateway_providers::{Auth as KeyIn, Base, Provider};
 
 /// The name of the format that relays what no other served format accepts.
 pub const PASSTHROUGH: &str = "passthrough";
@@ -21,7 +22,7 @@ pub const PASSTHROUGH: &str = "passthrough";
 #[derive(Debug)]
 pub struct Upstream {
     pub name: String,
-    pub preset: Option<&'static Preset>,
+    pub preset: Option<&'static Provider>,
     pub entries: Vec<Entry>,
     /// Whether it sends a key of its own, rather than the client's.
     pub own_key: bool,
@@ -237,7 +238,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     }
     let preset = match &p.vendor {
         None => None,
-        Some(vendor) => Some(presets::preset(vendor).ok_or_else(|| {
+        Some(vendor) => Some(respan_gateway_providers::find(vendor).ok_or_else(|| {
             bad(format!(
                 "unknown vendor '{vendor}'; presets: [{}]",
                 presets::vendors().join(", ")
@@ -246,12 +247,10 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     };
     let names: Vec<String> = match (&p.format, preset) {
         (Some(names), _) => names.clone(),
-        // A preset's formats not compiled in are left out.
         (None, Some(preset)) => preset
             .formats
             .iter()
-            .filter(|f| formats.iter().any(|known| known.name == **f))
-            .map(|f| (*f).to_owned())
+            .map(|s| s.format.name().to_owned())
             .collect(),
         (None, None) => return Err(bad("needs a `vendor` or a `format`".into())),
     };
@@ -261,7 +260,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     let base_url = p
         .base_url
         .as_deref()
-        .or(preset.map(|preset| preset.base_url))
+        .or(preset.and_then(|preset| preset.base_url))
         .ok_or_else(|| bad("needs a `base_url`".into()))?;
     let key = match (&p.key, &p.auth, preset) {
         (Some(_), Some(_), _) => return Err(bad("set `key` or `auth`, not both".into())),
@@ -280,14 +279,17 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     let mut entries = Vec::new();
     for (i, format) in names.iter().enumerate() {
         let known = format_named(formats, format, &owner)?;
+        // As its vendor speaks it, else as the format's first vendor does.
+        let spoken = preset.and_then(|v| v.formats.iter().find(|s| s.format.name() == format));
+        let (key_in, base) = spoken.map_or((known.key, known.base), |s| (s.auth, s.base));
         let auth = match (&p.auth, &key) {
             (Some(auth), _) => auth_headers(name, auth)?,
-            (None, Some(key)) => key_headers(name, known.key, key)?,
+            (None, Some(key)) => key_headers(name, key_in, key)?,
             (None, None) => HeaderMap::new(),
         };
         let base_url = match exact {
             true => base_url.to_owned(),
-            false => base_for(known, base_url),
+            false => base_for(known, base, base_url),
         };
         let internal = match i {
             0 => name.to_owned(),
@@ -313,10 +315,10 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     })
 }
 
-/// Where `format` sits for a provider at `base_url`.
-fn base_for(format: &KnownFormat, base_url: &str) -> String {
+/// Where `format` sits, at `base`, for a provider at `base_url`.
+fn base_for(format: &KnownFormat, base: Base, base_url: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
-    let base = match format.base {
+    let base = match base {
         Base::Same => base_url,
         Base::Origin => presets::origin(base_url),
         Base::Without(suffix) => base_url.strip_suffix(suffix).unwrap_or(base_url),
@@ -388,10 +390,10 @@ pub fn secret(owner: &str, value: &str) -> Result<String, Fault> {
 }
 
 /// A key read already, sent as a format expects.
-fn key_headers(provider: &str, header: KeyHeader, key: &str) -> Result<HeaderMap, Fault> {
+fn key_headers(provider: &str, header: KeyIn, key: &str) -> Result<HeaderMap, Fault> {
     match header {
-        KeyHeader::Bearer => one_header(provider, AUTHORIZATION, &format!("Bearer {key}")),
-        KeyHeader::Header(name) => one_header(provider, HeaderName::from_static(name), key),
+        KeyIn::Bearer => one_header(provider, AUTHORIZATION, &format!("Bearer {key}")),
+        KeyIn::Header(name) => one_header(provider, HeaderName::from_static(name), key),
     }
 }
 

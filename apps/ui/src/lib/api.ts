@@ -29,6 +29,12 @@ export interface Overview {
   totals: Totals;
 }
 
+/** A vendor quirk the gateway handles for a provider. */
+export interface Quirk {
+  name: string;
+  description: string;
+}
+
 export interface Provider {
   name: string;
   vendor: string | null;
@@ -36,6 +42,7 @@ export interface Provider {
   kinds: Kind[];
   base_url: string;
   credentials: "gateway" | "client";
+  quirks: Quirk[];
   requests: number;
   errors: number;
   avg_latency_ms: number | null;

@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::FakeOpenAi;
 use respan_gateway_conversation::Usage;
-use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Delta, Input, Message, Output};
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::Extensions;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,

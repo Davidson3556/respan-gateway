@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-media"
-description = "The media kinds (images, transcription, speech, video, embeddings) and their HTTP formats (OpenAI Images, Audio Transcriptions, Speech, Videos and Embeddings; Google's Veo)."
+description = "The media kinds: images, transcription, speech, video and embeddings."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,45 +11,8 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = ["openai", "gemini"]
-# OpenAI's media endpoints, as OpenAI and compatible vendors serve them, over
-# HTTP. Without it and `gemini` the crate is the kinds' types alone.
-openai = [
-    "dep:respan-gateway-http",
-    "respan-gateway-conversation/http",
-    "dep:base64",
-    "dep:getrandom",
-    "dep:memchr",
-]
-# Google's Veo, as the Gemini API serves it, over HTTP, as a provider.
-gemini = [
-    "dep:respan-gateway-http",
-    "respan-gateway-conversation/http",
-    "dep:base64",
-]
-
 [dependencies]
 bytes.workspace = true
-# The kind's types alone: its formats are not this crate's.
-respan-gateway-conversation = { path = "../conversation", default-features = false }
+respan-gateway-conversation.workspace = true
 respan-gateway-core.workspace = true
 serde_json.workspace = true
-base64 = { workspace = true, optional = true }
-getrandom = { workspace = true, optional = true, features = ["std"] }
-memchr = { workspace = true, optional = true }
-respan-gateway-http = { workspace = true, optional = true }
-
-[dev-dependencies]
-axum.workspace = true
-base64.workspace = true
-futures.workspace = true
-multer = "3"
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-plugins.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
-
-# The suite relays through the OpenAI formats, and to Veo.
-[[test]]
-name = "media"
-required-features = ["openai", "gemini"]

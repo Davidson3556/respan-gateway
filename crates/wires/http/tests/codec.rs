@@ -26,12 +26,12 @@ use http_body_util::BodyExt;
 use http_support::{LIMIT, post, read_whole, serve, serve_live, streamed};
 #[cfg(feature = "reqwest")]
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_conversation::Schema;
-use respan_gateway_conversation::anthropic::AnthropicMessages;
-use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Input, Output};
 #[cfg(feature = "reqwest")]
 use respan_gateway_conversation::{Message, Role};
+use respan_gateway_conversation_http::Schema;
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures;
 use respan_gateway_core::{BadRequest, Upstream};
 use respan_gateway_core::{

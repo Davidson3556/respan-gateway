@@ -16,7 +16,7 @@
 
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_conversation::Input;
-use respan_gateway_conversation::openai::OpenAiChat;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::future::join;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{Fault, Gateway};

@@ -17,6 +17,7 @@ use crate::auth;
 use crate::compose::{Entry, Upstream};
 use crate::formats::{Kind, first_of_each_kind, unreachable};
 use crate::routing::Routes;
+use respan_gateway_providers::Provider;
 
 /// How long a provider may take to list its models.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,6 +28,8 @@ const FRESH: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 struct Listing {
     provider: String,
+    /// Its vendor, which may name a model's id its own way.
+    vendor: Option<&'static Provider>,
     url: String,
     headers: HeaderMap,
     /// A format of each kind it serves.
@@ -65,6 +68,7 @@ impl Models {
                 let kinds = first_of_each_kind(entries().map(|e| (e.kind, e.format.clone())));
                 Some(Listing {
                     provider: u.name.clone(),
+                    vendor: u.preset,
                     url,
                     headers,
                     kinds,
@@ -133,8 +137,7 @@ impl Models {
             .iter()
             .filter_map(|m| {
                 let id = m["id"].as_str()?;
-                // Gemini's OpenAI endpoint names them `models/<id>`.
-                let id = id.strip_prefix("models/").unwrap_or(id);
+                let id = listing.vendor.map_or(id, |v| v.model_id(id));
                 let kind = kind_of(id)?;
                 let (_, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
                 let mut model = json!({

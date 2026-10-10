@@ -33,6 +33,7 @@ serde_json.workspace = true
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 respan-gateway-conversation.workspace = true
+respan-gateway-conversation-http.workspace = true
 respan-gateway-plugins.workspace = true
 respan-gateway-core.workspace = true
 serde_json.workspace = true

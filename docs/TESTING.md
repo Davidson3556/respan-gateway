@@ -25,13 +25,13 @@ processes or several components.
 | Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
 | Shared data contracts | Input assembly, text access and message representation | Input unit tests |
 | HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/wires/http/tests/`, HTTP unit tests |
-| Provider compatibility | Native relay, OpenAI/Anthropic translation, vendor dialects, tools, errors and usage | `crates/kinds/conversation/tests/{relay,translate,round_trips}`, format unit tests |
+| Provider compatibility | Native relay, OpenAI/Anthropic translation, vendor dialects, tools, errors and usage | `crates/formats/conversation-http/tests/{relay,translate,round_trips}`, format unit tests; each vendor's quirks in `crates/providers/tests/<vendor>.rs` |
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/wires/ws/tests/`, `crates/wires/http/tests/axum.rs`, WS unit tests |
-| MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/kinds/mcp/tests/`, MCP unit tests |
+| MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/formats/mcp-http/tests/`, MCP unit tests |
 | Routing policy | Attempts, retries, fallback, races and explicit retry classification | `crates/plugins/tests/routing.rs`, routing unit tests |
 | Application behavior | Configuration and presets, zero-config start, CLI/proxy modes, routing (media kinds and video job ids included), client keys, `/v1/models`, the admin API and UI hosting, in-process library use, path matching, redirects, error limits and graceful shutdown of the built executable | `apps/gateway/tests/`, gateway unit tests |
 | Use cases | Billing, guardrails, PII, admission, durable jobs, attachments, routing and realtime policies composed through public APIs | `examples/tests/cases/`, `examples/tests/text_*.rs`, example library tests |
-| Performance | Timing of whole and streamed in-process relay | `crates/kinds/conversation/benches/relay.rs` |
+| Performance | Timing of whole and streamed in-process relay | `crates/formats/conversation-http/benches/relay.rs` |
 | Documentation examples | Compilation or execution of Rust examples in API documentation | Rust doctests |
 
 Security and resilience are cross-cutting concerns. Credential isolation and
@@ -79,13 +79,13 @@ cargo test --workspace --all-targets --all-features -- --list
 | --- | --- |
 | `crates/*/src/` | Unit tests for private implementation details |
 | `crates/*/tests/` | Public contracts and protocol integration tests |
-| `crates/kinds/conversation/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fixtures remain in each parent test target |
+| `crates/formats/conversation-http/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fixtures remain in each parent test target |
 | `apps/gateway/tests/` | Executable integration tests (`e2e`, `app`), the library in process (`library`), the media kinds in process against a strict fake of OpenAI's media endpoints and Veo (`media`), redirects and bounded error bodies |
 | `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fixture |
 | `examples/tests/cases/<topic>/` | Test modules included by the corresponding example or private support module |
 | `examples/tests/text_*.rs` | Automatically discovered text and tool-argument integration suites |
 | `tests/support/` | Source-only HTTP and lifecycle helpers shared across packages |
-| `crates/kinds/conversation/benches/` | Opt-in relay timing benchmark |
+| `crates/formats/conversation-http/benches/` | Opt-in relay timing benchmark |
 
 `examples/Cargo.toml` registers runnable examples with `test = true`. Their
 included case modules run under those example targets. Keeping these files in

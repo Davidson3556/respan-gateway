@@ -1,8 +1,8 @@
 use super::*;
 use mockllm::Answer;
 use respan_gateway_conversation::Input;
-use respan_gateway_conversation::anthropic::AnthropicMessages;
 use respan_gateway_conversation::{Message, Role};
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 
 #[test]
 fn hides_addresses_only() {

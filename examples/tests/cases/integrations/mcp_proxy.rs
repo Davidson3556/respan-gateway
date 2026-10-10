@@ -35,8 +35,8 @@ async fn clients_see_and_call_only_the_allowed_tools() -> Result<(), Fault> {
 async fn a_mock_llm_tool_round_trip_uses_mcp_and_keeps_the_provider_call_id() -> Result<(), Fault> {
     use mockllm::{Answer, FakeAnthropic};
     use respan_gateway_conversation::Input;
-    use respan_gateway_conversation::anthropic::AnthropicMessages;
-    use respan_gateway_conversation::openai::OpenAiChat;
+    use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+    use respan_gateway_conversation_http::openai::OpenAiChat;
     let mcp = McpServer::start().await;
     let tools = gateway(HttpTransport::new(&mcp.url)?.connect())?;
     let (_, session, _) = initialize(&tools).await?;

@@ -11,13 +11,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = ["ws"]
-# The kind's wire: a WebSocket session of JSON events ([`JsonEvents`]).
-ws = ["dep:respan-gateway-ws", "dep:respan-gateway-http"]
-
 [dependencies]
-respan-gateway-ws = { workspace = true, optional = true }
-respan-gateway-http = { workspace = true, optional = true }
 respan-gateway-core.workspace = true
 serde_json.workspace = true

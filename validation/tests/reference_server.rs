@@ -11,7 +11,7 @@ use respan_gateway_http::{
     http_body_util::BodyExt,
 };
 use respan_gateway_mcp::Input;
-use respan_gateway_mcp::{SESSION, StdioTransport, StreamableHttp};
+use respan_gateway_mcp_http::{SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_core::{Fault, Gateway};
 use serde_json::{Value, json};
 use std::process::Stdio;

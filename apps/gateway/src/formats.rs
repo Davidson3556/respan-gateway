@@ -4,18 +4,13 @@
 
 use std::sync::Arc;
 
-use respan_gateway_conversation::anthropic::AnthropicMessages;
-use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Upstream};
 use respan_gateway_http::formats::opaque::{self, Passthrough};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, reqwest};
-use respan_gateway_media::gemini::GeminiVeo;
-use respan_gateway_media::openai::{
-    OpenAiEmbeddings, OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
-};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
-use respan_gateway_realtime::JsonEvents;
+use respan_gateway_providers::{ALL, Auth, Base, Format as Spoken};
+use respan_gateway_realtime_ws::JsonEvents;
 
 use crate::presets::origin;
 
@@ -84,25 +79,6 @@ pub fn first_of_each_kind<T>(items: impl IntoIterator<Item = (Kind, T)>) -> Vec<
     firsts
 }
 
-/// How a provider of a format takes the key configured for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyHeader {
-    Bearer,
-    Header(&'static str),
-}
-
-/// Where a format sits relative to the base URL of a provider with several
-/// formats, or a vendor preset: the base itself, or its origin. A
-/// WebSocket format takes `ws`/`wss` in place of `http`/`https`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Base {
-    Same,
-    Origin,
-    /// The base without this suffix, if it ends in it: Gemini's own API is
-    /// its OpenAI-compatible base without `/openai`.
-    Without(&'static str),
-}
-
 /// A request's input, as routing reads and rewrites its model.
 pub trait Routed: Clone + Send + Sync + 'static {
     fn model(&self) -> Option<&str> {
@@ -167,8 +143,10 @@ pub struct KnownFormat {
     pub name: String,
     pub kind: Kind,
     /// What its clients send, as `METHOD /path`.
-    pub endpoints: &'static [&'static str],
-    pub key: KeyHeader,
+    pub endpoints: Vec<String>,
+    /// How a provider of it takes a key, and where it sits beside a base
+    /// URL: as the first vendor that speaks it does.
+    pub key: Auth,
     pub base: Base,
     pub websocket: bool,
     /// What its video jobs' ids start with, which routes a follow-up.
@@ -195,7 +173,7 @@ impl KnownFormat {
     /// headers.
     pub fn of<F, I, O, T>(
         kind: Kind,
-        endpoints: &'static [&'static str],
+        endpoints: &[&str],
         format: F,
         reach: impl Fn(&str, &str, HeaderMap) -> Result<T, Fault> + Send + Sync + 'static,
     ) -> Self
@@ -207,7 +185,7 @@ impl KnownFormat {
     {
         let client = format.clone();
         let mut known = Self::provider_only(kind, format, reach);
-        known.endpoints = endpoints;
+        known.endpoints = endpoints.iter().map(|e| (*e).to_owned()).collect();
         known.serve = Some(Box::new(move |gateway| {
             gateway.client::<I, O, _>(client.clone())
         }));
@@ -229,8 +207,8 @@ impl KnownFormat {
         Self {
             name: <F as Format<ProviderIo, O, I>>::name(&format).to_owned(),
             kind,
-            endpoints: &[],
-            key: KeyHeader::Bearer,
+            endpoints: Vec::new(),
+            key: Auth::Bearer,
             base: Base::Same,
             websocket: false,
             job_ids: None,
@@ -251,7 +229,7 @@ impl KnownFormat {
         }
     }
 
-    fn key(mut self, key: KeyHeader) -> Self {
+    fn key(mut self, key: Auth) -> Self {
         self.key = key;
         self
     }
@@ -315,12 +293,10 @@ const VIDEOS: &[&str] = &[
     "POST /v1/videos/{id}/remix",
 ];
 
-/// Every format this binary speaks: OpenAI Chat as OpenAI and each vendor
-/// with a dialect serve it, Anthropic Messages and passthrough, OpenAI's
-/// media endpoints and Google's Veo, their providers reached over HTTP,
-/// reading up to `limit` bytes of an answer at once; and the sessions of
-/// OpenAI Realtime, Responses over WebSocket and Gemini Live, their
-/// providers reached over WebSocket. A new format is one line here.
+/// Every format this binary speaks: each format a vendor speaks
+/// ([`ALL`]), reached as the first that speaks it is, and passthrough. Its
+/// providers are reached over HTTP, reading up to `limit` bytes of an answer
+/// at once, or over WebSocket for a session.
 pub fn formats(limit: usize) -> Vec<KnownFormat> {
     let http = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
         let client = HttpTransport::new(base_url)?.with_headers(auth)?;
@@ -335,63 +311,76 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
             limit,
         ))
     };
-    let ws = |format: JsonEvents, endpoints| {
+    let mut known: Vec<KnownFormat> = Vec::new();
+    for speaks in ALL.iter().flat_map(|p| p.formats) {
+        if known.iter().any(|k| k.name == speaks.format.name()) {
+            continue;
+        }
+        let format = match speaks.format.clone() {
+            Spoken::OpenAiChat(f) => KnownFormat::of(Kind::CHAT, CHAT_COMPLETIONS, f, http),
+            Spoken::AnthropicMessages(f) => {
+                KnownFormat::of(Kind::CHAT, &["POST /v1/messages"], f, http)
+            }
+            Spoken::OpenAiImages(f) => KnownFormat::of(
+                Kind::IMAGE,
+                &["POST /v1/images/generations", "POST /v1/images/edits"],
+                f,
+                http,
+            ),
+            Spoken::OpenAiTranscriptions(f) => KnownFormat::of(
+                Kind::TRANSCRIPTION,
+                &[
+                    "POST /v1/audio/transcriptions",
+                    "POST /v1/audio/translations",
+                ],
+                f,
+                http,
+            ),
+            Spoken::OpenAiSpeech(f) => {
+                KnownFormat::of(Kind::SPEECH, &["POST /v1/audio/speech"], f, http)
+            }
+            Spoken::OpenAiEmbeddings(f) => {
+                KnownFormat::of(Kind::EMBEDDING, &["POST /v1/embeddings"], f, http)
+            }
+            Spoken::OpenAiVideos(f) => {
+                KnownFormat::of(Kind::VIDEO, VIDEOS, f, http).job_ids("video_")
+            }
+            Spoken::GeminiVeo(f) => {
+                KnownFormat::provider_only(Kind::VIDEO, f, google).job_ids("veo_")
+            }
+            Spoken::JsonEvents(f) => session(f, speaks.base),
+        };
+        known.push(format.key(speaks.auth).base(speaks.base));
+    }
+    known.push(
         KnownFormat::of(
-            Kind::REALTIME,
-            endpoints,
-            format.clone(),
-            move |_: &str, base_url: &str, auth| {
-                Ok(format.transport(base_url)?.with_headers(auth)?.connect())
-            },
+            Kind::PASSTHROUGH,
+            &["ANY /* (every other request)"],
+            Passthrough,
+            http,
         )
-        .websocket()
-    };
-    let chat = |format: OpenAiChat| KnownFormat::of(Kind::CHAT, CHAT_COMPLETIONS, format, http);
-    let goog_key = KeyHeader::Header("x-goog-api-key");
-    vec![
-        chat(OpenAiChat::OPENAI),
-        chat(OpenAiChat::GROQ),
-        chat(OpenAiChat::DEEPSEEK),
-        chat(OpenAiChat::VLLM),
-        chat(OpenAiChat::OPENROUTER),
-        chat(OpenAiChat::AZURE),
-        KnownFormat::of(Kind::CHAT, &["POST /v1/messages"], AnthropicMessages, http)
-            .key(KeyHeader::Header("x-api-key")),
-        KnownFormat::of(
-            Kind::IMAGE,
-            &["POST /v1/images/generations", "POST /v1/images/edits"],
-            OpenAiImages,
-            http,
-        ),
-        KnownFormat::of(
-            Kind::TRANSCRIPTION,
-            &["POST /v1/audio/transcriptions", "POST /v1/audio/translations"],
-            OpenAiTranscriptions,
-            http,
-        ),
-        KnownFormat::of(Kind::SPEECH, &["POST /v1/audio/speech"], OpenAiSpeech, http),
-        KnownFormat::of(
-            Kind::EMBEDDING,
-            &["POST /v1/embeddings"],
-            OpenAiEmbeddings,
-            http,
-        ),
-        KnownFormat::of(Kind::VIDEO, VIDEOS, OpenAiVideos, http).job_ids("video_"),
-        KnownFormat::provider_only(Kind::VIDEO, GeminiVeo, google)
-            .job_ids("veo_")
-            .key(goog_key)
-            .base(Base::Without("/openai")),
-        KnownFormat::of(Kind::PASSTHROUGH, &["ANY /* (every other request)"], Passthrough, http)
-            .base(Base::Origin),
-        ws(JsonEvents::OPENAI_REALTIME, &["GET /v1/realtime (WebSocket)"]),
-        ws(JsonEvents::RESPONSES_WS, &["GET /v1/responses (WebSocket)"]),
-        ws(
-            JsonEvents::GEMINI_LIVE,
-            &["GET /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent (WebSocket)"],
-        )
-        .key(goog_key)
         .base(Base::Origin),
-    ]
+    );
+    known
+}
+
+/// A session of JSON events, its clients sending to its path: after `/v1`,
+/// as an SDK adds it to the gateway's base URL, unless it sits at the
+/// origin.
+fn session(format: JsonEvents, base: Base) -> KnownFormat {
+    let endpoint = match base {
+        Base::Origin => format!("GET {} (WebSocket)", format.path()),
+        _ => format!("GET /v1{} (WebSocket)", format.path()),
+    };
+    KnownFormat::of(
+        Kind::REALTIME,
+        &[&endpoint],
+        format.clone(),
+        move |_: &str, base_url: &str, auth| {
+            Ok(format.transport(base_url)?.with_headers(auth)?.connect())
+        },
+    )
+    .websocket()
 }
 
 /// `client`'s calls, a provider that cannot be reached named in the fault

@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_conversation::openai::OpenAiChat;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::Status;
 use respan_gateway_http::Wire;

@@ -18,7 +18,7 @@
 //! Frames carry text. [`WsTransport::with_binary_text`] can normalize a
 //! provider's binary UTF-8 messages into text; other binary frames are faults.
 //! Nothing here reads a provider's events: a session's format is its kind's
-//! (`respan_gateway_realtime::JsonEvents`).
+//! (`respan_gateway_realtime_ws::JsonEvents`).
 
 use std::time::Duration;
 

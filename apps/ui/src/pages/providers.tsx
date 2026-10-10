@@ -62,6 +62,15 @@ function ProviderCard({ provider: p }: { provider: Provider }) {
             </Badge>
           ))}
         </div>
+        {p.quirks.length > 0 && (
+          <ul className="grid gap-1.5">
+            {p.quirks.map((q) => (
+              <li key={q.name} className="text-xs text-muted-foreground">
+                <span className="font-mono text-foreground/70">{q.name}</span> · {q.description}
+              </li>
+            ))}
+          </ul>
+        )}
         <div className="mt-auto grid grid-cols-3 gap-3 border-t pt-4">
           <Metric label="Requests" value={formatCount(p.requests)} />
           <Metric label="Errors" value={p.requests ? formatPercent(p.errors / p.requests) : "—"} />

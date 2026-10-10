@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_conversation::openai::OpenAiChat;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::{FutureExt, StreamExt, sink, stream};

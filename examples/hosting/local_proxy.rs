@@ -15,7 +15,7 @@
 //! instead of the default Anthropic upstream.
 
 use respan_gateway_conversation::Input;
-use respan_gateway_conversation::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_core::{Fault, Gateway, futures::TryStreamExt};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_http::Body;

@@ -591,7 +591,7 @@ async fn tap(
 mod hooks;
 pub use hooks::{Calls, Outcomes};
 use respan_gateway_realtime::Input;
-use respan_gateway_realtime::JsonEvents;
+use respan_gateway_realtime_ws::JsonEvents;
 use respan_gateway_ws::{Limits, WsTransport};
 
 /// A gateway that relays every session to the provider at `base` in format

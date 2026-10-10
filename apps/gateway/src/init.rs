@@ -1,7 +1,8 @@
 //! `respan-gateway init`: a commented starter `gateway.yaml`, with a
 //! provider for each vendor whose key is in the environment.
 
-use crate::presets::{self, PRESETS};
+use crate::presets;
+use respan_gateway_providers::ALL;
 
 /// The starter config: the vendors with keys in the environment enabled,
 /// with any base URL the environment moves them to (`OLLAMA_HOST`,
@@ -9,26 +10,25 @@ use crate::presets::{self, PRESETS};
 /// none has one.
 pub fn starter_config() -> String {
     let detected = presets::detected();
-    let found = |vendor: &str| detected.iter().find(|(p, ..)| p.vendor == vendor);
+    let found = |vendor: &str| detected.iter().find(|(p, ..)| p.id == vendor);
     let enabled = |vendor: &str| match detected.is_empty() {
         true => vendor == "openai",
         false => found(vendor).is_some(),
     };
     let mut providers = String::new();
-    for preset in PRESETS {
-        let key = match preset.key_env {
+    for vendor in ALL {
+        let key = match vendor.key_env {
             [] => "no key".to_owned(),
             names => format!("key: env:{}", names.join(" or env:")),
         };
-        let mark = if enabled(preset.vendor) { "" } else { "# " };
-        let base_url = found(preset.vendor).and_then(|(.., base_url)| base_url.as_ref());
+        let mark = if enabled(vendor.id) { "" } else { "# " };
+        let base_url = found(vendor.id).and_then(|(.., base_url)| base_url.as_deref());
+        // A vendor with no base URL of its own needs one.
+        let base_url = base_url.or(vendor.base_url.is_none().then_some("<base URL>"));
         let base_url = base_url.map_or(String::new(), |url| {
             format!(", base_url: '{}'", url.replace('\'', "''"))
         });
-        let entry = format!(
-            "{}: {{ vendor: {}{base_url} }}",
-            preset.vendor, preset.vendor
-        );
+        let entry = format!("{}: {{ vendor: {}{base_url} }}", vendor.id, vendor.id);
         providers.push_str(&format!("  {mark}{entry:<36} # {key}\n"));
     }
     format!(

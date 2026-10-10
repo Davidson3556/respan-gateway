@@ -191,7 +191,7 @@ fn plan(yaml: &str) -> Result<Plan, String> {
 }
 
 #[test]
-fn a_preset_is_every_format_of_its_vendor_compiled_in() {
+fn a_preset_is_every_format_of_its_vendor() {
     let plan = plan(
         "providers:
   openai: { vendor: openai, key: sk }
@@ -287,8 +287,8 @@ fn a_preset_is_every_format_of_its_vendor_compiled_in() {
             "openai-images",
             "openai-transcriptions",
             "openai-speech",
-            "openai-embeddings",
             "openai-videos",
+            "openai-embeddings",
             "openai-realtime",
             "responses-ws",
             "gemini-live"
@@ -320,7 +320,7 @@ fn a_bad_provider_is_an_error() {
         ("p: {}", "provider 'p': needs a `vendor` or a `format`"),
         (
             "p: { vendor: nope }",
-            "provider 'p': unknown vendor 'nope'; presets: [openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral, together, fireworks, ollama]",
+            "provider 'p': unknown vendor 'nope'; presets: [openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral, together, fireworks, ollama, azure, vllm]",
         ),
         (
             "p: { format: openai-chat }",
@@ -510,7 +510,7 @@ fn an_unknown_format_names_the_compiled_in_ones() {
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, groq-chat, deepseek-chat, vllm-chat, openrouter-chat, azure-chat, anthropic-messages, openai-images, openai-transcriptions, openai-speech, openai-embeddings, openai-videos, gemini-veo, passthrough, openai-realtime, responses-ws, gemini-live]"
+            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, groq-chat, deepseek-chat, openrouter-chat, azure-chat, vllm-chat, passthrough]"
         )
     );
 }

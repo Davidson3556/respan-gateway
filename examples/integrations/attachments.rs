@@ -44,9 +44,9 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_conversation::anthropic::AnthropicMessages;
-use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Content, Input, Media, MediaSource, Output};
+use respan_gateway_conversation_http::anthropic::AnthropicMessages;
+use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,

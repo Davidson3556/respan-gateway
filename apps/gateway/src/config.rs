@@ -189,12 +189,12 @@ impl Config {
             .into_iter()
             .map(|(preset, key, base_url)| {
                 let provider = ProviderConfig {
-                    vendor: Some(preset.vendor.to_owned()),
+                    vendor: Some(preset.id.to_owned()),
                     key,
                     base_url,
                     ..ProviderConfig::default()
                 };
-                (preset.vendor.to_owned(), provider)
+                (preset.id.to_owned(), provider)
             })
             .collect();
         Ok(Config {
@@ -252,7 +252,7 @@ impl Config {
 
 /// What to do when there is no config file and no key in the environment.
 pub fn no_keys_message() -> String {
-    let names: Vec<&str> = presets::PRESETS
+    let names: Vec<&str> = respan_gateway_providers::ALL
         .iter()
         .flat_map(|p| p.key_env.iter().copied())
         .collect();
