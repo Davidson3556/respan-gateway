@@ -127,10 +127,15 @@ type ContentReader =
 /// How far [`first_success`] and [`race`] read an answer before they judge
 /// it: a success that fails before that point is retried, or loses the
 /// race; one that fails after it is committed.
+///
+/// A response whose call carries live (streaming) inputs is not read by
+/// [`Until::content`] or [`Until::End`], because holding it could deadlock
+/// the peer: such an answer commits as at [`Until::Head`].
 #[non_exhaustive]
 #[derive(Clone)]
 pub enum Until {
-    /// The response opening, without reading events.
+    /// The response opening, without reading events. A provider's refusal
+    /// (such as a 429 or 503 answer) is a failure here, not a success.
     Head,
     /// A plugin's condition for committing to a response. Use [`Until::content`].
     Content(ContentReader),
@@ -169,15 +174,31 @@ impl std::fmt::Debug for Until {
 /// An errored final candidate must still be replayable, with its call alive.
 struct Answer {
     attempt: Attempt,
-    response: Option<Response>,
-    fault: Option<Fault>,
+    /// The opened response and how its inspection went, or the failure to open.
+    outcome: Result<(Response, Option<Fault>), Fault>,
+}
+
+impl Answer {
+    fn opened(&self) -> bool {
+        self.outcome.is_ok()
+    }
+
+    /// Why the attempt failed, if it did.
+    fn fault(&self) -> Option<&Fault> {
+        match &self.outcome {
+            Ok((_, inspected)) => inspected.as_ref(),
+            Err(fault) => Some(fault),
+        }
+    }
 }
 
 /// Send `call` as `attempt` and read it `until` a point.
 async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
-    match call.with_extension(attempt.clone()).await {
+    let outcome = match call.with_extension(attempt.clone()).await {
         Ok(mut response) => {
-            let result = match until {
+            let inspected = match until {
+                // A provider's refusal is an opened response, but not a success.
+                Until::Head if response.is_refused() => response.until_end().await,
                 Until::Head => Ok(()),
                 Until::Content(read) => {
                     let (held, result) = read(response).await;
@@ -186,43 +207,28 @@ async fn send(call: Call, attempt: Attempt, until: Until) -> Answer {
                 }
                 Until::End => response.until_end().await,
             };
-            Answer {
-                attempt,
-                response: Some(response),
-                fault: result.err(),
-            }
+            Ok((response, inspected.err()))
         }
-        Err(fault) => Answer {
-            attempt,
-            response: None,
-            fault: Some(fault),
-        },
-    }
-}
-
-fn failure(answer: &Answer) -> Option<&Fault> {
-    answer.fault.as_ref()
+        Err(fault) => Err(fault),
+    };
+    Answer { attempt, outcome }
 }
 
 /// Promote even an errored opened response before it is replayed and its
 /// provider end hooks settle. A pre-opening fault has no response to commit.
 fn win(answer: Answer) -> Result<Response, Fault> {
-    match answer.response {
-        Some(response) => {
-            // A failed inspection replays only a response that holds its own
-            // failed end, which cannot pass for healthy output; a wrong
-            // predicate type or a custom inspection failure on a still-healthy
-            // response is returned as that fault.
-            if let Some(fault) = answer.fault
-                && !matches!(response.buffered_end(), Some(Err(_)))
-            {
-                return Err(fault);
-            }
-            answer.attempt.won.store(true, Ordering::SeqCst);
-            Ok(response)
-        }
-        None => Err(answer.fault.expect("a response or a failure")),
+    let (response, inspected) = answer.outcome?;
+    // A failed inspection replays only a response that holds its own
+    // failed end, which cannot pass for healthy output; a wrong
+    // predicate type or a custom inspection failure on a still-healthy
+    // response is returned as that fault.
+    if let Some(fault) = inspected
+        && !matches!(response.buffered_end(), Some(Err(_)))
+    {
+        return Err(fault);
     }
+    answer.attempt.won.store(true, Ordering::SeqCst);
+    Ok(response)
 }
 
 /// The last answer; with none, `upstream`.
@@ -233,7 +239,7 @@ fn last(answer: Option<Answer>) -> Result<Response, Fault> {
 /// Prefer an opened candidate over a fallback that never opened. Replacing
 /// one drops its response as a loser, settling its pending call.
 fn keep(previous: &mut Option<Answer>, answer: Answer) {
-    if answer.response.is_some() || previous.as_ref().is_none_or(|p| p.response.is_none()) {
+    if answer.opened() || previous.as_ref().is_none_or(|p| !p.opened()) {
         *previous = Some(answer);
     }
 }
@@ -263,10 +269,10 @@ pub async fn first_success(
         for tries in 1..=backoff.tries {
             let answer = send(call.clone(), Attempt::new(index), until.clone()).await;
             index = index.saturating_add(1);
-            let wait = match failure(&answer) {
+            let wait = match answer.fault() {
                 None => return win(answer),
-                Some(f) if should_retry(f, answer.response.is_some()) => {
-                    let delay = if answer.response.is_some() {
+                Some(f) if should_retry(f, answer.opened()) => {
+                    let delay = if answer.opened() {
                         f.get::<RetryAfter>().map(|r| r.0)
                     } else {
                         None
@@ -280,7 +286,7 @@ pub async fn first_success(
                 break;
             };
             // Do not hold a failed attempt's call through backoff: its end
-            // hooks and reservations must settle before another attempt.
+            // hooks and reservations must settle before a retry of the same target.
             drop(answer);
             tokio::time::sleep(wait).await;
         }
@@ -308,7 +314,7 @@ pub async fn race(
     loop {
         tokio::select! {
             Some(answer) = running.next() => {
-                if failure(&answer).is_none() {
+                if answer.fault().is_none() {
                     return win(answer);
                 }
                 keep(&mut previous, answer);

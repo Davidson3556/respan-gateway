@@ -102,6 +102,18 @@ impl<E: Edge> Drop for EndHooks<E> {
     }
 }
 
+/// Wait on `notify` until `done`, registering before each check so a
+/// notification in between wakes it.
+async fn wait_until(notify: &Notify, done: impl Fn() -> bool) {
+    loop {
+        let notified = notify.notified();
+        if done() {
+            return;
+        }
+        notified.await;
+    }
+}
+
 /// Closed once, and never reopened: whoever waits on it then wakes.
 #[derive(Clone, Default)]
 pub(crate) struct Latch(Arc<LatchState>);
@@ -122,16 +134,7 @@ impl Latch {
     /// Resolves once it is closed.
     pub(crate) fn closed(&self) -> impl Future<Output = ()> + Send + 'static {
         let state = self.0.clone();
-        async move {
-            loop {
-                // Registered before the check, so a close in between wakes it.
-                let closed = state.notify.notified();
-                if state.closed.load(Ordering::SeqCst) {
-                    return;
-                }
-                closed.await;
-            }
-        }
+        async move { wait_until(&state.notify, || state.closed.load(Ordering::SeqCst)).await }
     }
 }
 
@@ -154,15 +157,7 @@ impl InFlight {
     /// Resolves once none is left.
     pub(crate) fn idle(self: &Arc<Self>) -> impl Future<Output = ()> + Send + 'static {
         let this = self.clone();
-        async move {
-            loop {
-                let idle = this.idle.notified();
-                if this.count.load(Ordering::SeqCst) == 0 {
-                    return;
-                }
-                idle.await;
-            }
-        }
+        async move { wait_until(&this.idle, || this.count.load(Ordering::SeqCst) == 0).await }
     }
 }
 

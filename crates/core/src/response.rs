@@ -170,8 +170,8 @@ impl Response {
     }
 
     /// Whether the provider refused it at its head: its one batch is the
-    /// refusal.
-    pub(crate) fn is_refused(&self) -> bool {
+    /// refusal, which [`until_end`](Response::until_end) reads as its `Err`.
+    pub fn is_refused(&self) -> bool {
         matches!(self.feed, Feed::Call { refused: true, .. })
     }
 

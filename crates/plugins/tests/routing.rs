@@ -1156,6 +1156,53 @@ async fn until_head_commits_on_a_success_status_however_its_body_goes() {
 }
 
 #[tokio::test]
+async fn until_head_retries_and_falls_back_from_a_refusal() {
+    let plans = [
+        Plan::First(vec!["a", "b"], retries(3), Until::Head),
+        Plan::Race(vec!["a", "b"], secs(1), Until::Head),
+    ];
+    for plan in plans {
+        let h = harness(plan).await;
+        for _ in 0..3 {
+            h.mock.reply(A, Answer::error(503));
+        }
+        h.mock.reply(B, ok());
+
+        let (status, _, body, outcome) = h.send().await;
+
+        assert_eq!((status, ended(outcome)), (StatusCode::OK, Ok(())), "{body}");
+        assert_eq!(meaning(&body), meaning(&[ROLE, HELLO, STOP, DONE].concat()));
+        assert_eq!(h.sent_to().last().map(String::as_str), Some("b.test"));
+    }
+}
+
+#[tokio::test]
+async fn until_head_asks_the_classifier_about_a_refusal() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let h = harness(Plan::Classified(
+        vec!["a", "b"],
+        retries(3),
+        Until::Head,
+        Arc::new(move |_, opened| {
+            log.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(opened);
+            false
+        }),
+    ))
+    .await;
+    h.mock.reply(A, Answer::error(503));
+    h.mock.reply(B, ok());
+
+    let (status, ..) = h.send().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.sent_to(), ["a.test", "b.test"]);
+    assert_eq!(*seen.lock().unwrap_or_else(PoisonError::into_inner), [true]);
+}
+
+#[tokio::test]
 async fn until_content_moves_on_from_a_success_failing_before_content() {
     let plans = [
         Plan::First(

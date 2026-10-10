@@ -14,8 +14,11 @@ after commitment.
   and a `response_opened` bool: true only if `call.await` returned a response
   before applying `Until`, not when a request was sent, refused, or bytes
   arrived. A false result skips retries of that target, not fallback targets.
-  A response's `Retry-After` delay is honored up to `max`; a failure before
-  opening does not supply a retry delay.
+  A response's `Retry-After` delay is waited for as asked, but a delay over
+  `max` means no retry; a failure before opening supplies no delay.
+  `Until::Head` counts a provider's refusal (such as a 429 or 503 answer) as
+  a failure. With live (streaming) inputs, `Until::content` and `Until::End`
+  cannot read the response and commit as `Head` does.
 - `race(calls, stagger, Until)`: start each call `stagger` after the last;
   the first success wins.
 - `Attempt` (extension on each call): its `index()` and `Role`.

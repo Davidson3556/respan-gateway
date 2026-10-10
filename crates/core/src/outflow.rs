@@ -52,7 +52,8 @@ pub(crate) async fn outflow(
         });
         let fault = match read.catch_unwind().await {
             Ok(Some(Err(fault))) => fault,
-            _ => Fault::internal(PANICKED),
+            Ok(_) => Fault::internal("a refusal that did not fail"),
+            Err(_) => Fault::internal(PANICKED),
         };
         return (EventStream::refused(fault), None);
     }
