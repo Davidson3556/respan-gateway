@@ -125,6 +125,34 @@ async fn a_formats_subprotocol_is_offered_and_given_back_to_a_client_that_offere
     assert_eq!(upgrade.headers["sec-websocket-protocol"], "realtime");
 }
 
+// The subprotocols a client offers besides the format's reach the provider,
+// its key not among them; the format's is added only if it is missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clients_other_subprotocols_are_offered_to_the_provider_beside_the_formats() {
+    for (offered, sent) in [
+        (
+            "realtime, openai-beta.realtime-v1, openai-insecure-api-key.k",
+            "realtime, openai-beta.realtime-v1",
+        ),
+        (
+            "openai-beta.realtime-v1",
+            "openai-beta.realtime-v1, realtime",
+        ),
+    ] {
+        let probe = Probe::start().await;
+        let server = serve_typed(speaking(&probe)).await;
+        let mut req = format!("ws://{}/v1/realtime", server.addr)
+            .into_client_request()
+            .unwrap();
+        let offered = HeaderValue::from_static(offered);
+        req.headers_mut().insert("sec-websocket-protocol", offered);
+        let _ws = tokio_tungstenite::connect_async(req).await;
+        probe.connected(0).await;
+        let upgrade = &probe.upgrades()[0];
+        assert_eq!(upgrade.headers["sec-websocket-protocol"], sent);
+    }
+}
+
 // A client that offered none gets none, though the provider is offered it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_that_offered_no_subprotocol_gets_none() {
