@@ -69,18 +69,18 @@ mod audio;
 #[path = "../support/text.rs"]
 mod text;
 
-use respan_gateway_sdk::ErrorCode;
+use respan_gateway_core::ErrorCode;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use respan_gateway_http::{Credential, Status};
-use respan_gateway_sdk::futures::{Stream, StreamExt, TryStreamExt, stream};
-use respan_gateway_sdk::{
+use respan_gateway_core::futures::{Stream, StreamExt, TryStreamExt, stream};
+use respan_gateway_core::{
     ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
     async_trait,
 };
+use respan_gateway_http::{Credential, Status};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
@@ -904,7 +904,7 @@ async fn client(addr: std::net::SocketAddr) -> Client {
 }
 
 async fn say(ws: &mut Client, event: Value) {
-    use respan_gateway_sdk::futures::SinkExt;
+    use respan_gateway_core::futures::SinkExt;
     let text = event.to_string().into();
     ws.send(tokio_tungstenite::tungstenite::Message::Text(text))
         .await
@@ -913,7 +913,7 @@ async fn say(ws: &mut Client, event: Value) {
 
 /// The next event the client hears; `None` at a Close, or a break.
 async fn hear(ws: &mut Client) -> Option<Value> {
-    use respan_gateway_sdk::futures::StreamExt;
+    use respan_gateway_core::futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     let next = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await;
     match next.expect("an event in time") {
@@ -1016,7 +1016,7 @@ async fn main() -> Result<(), Fault> {
     println!("provider read: {}", sent[0]["item"]["content"][0]["text"]);
     println!("client heard:  {}", said(&events));
     println!("metered:       {:?}", meter.turns());
-    use respan_gateway_sdk::futures::SinkExt;
+    use respan_gateway_core::futures::SinkExt;
     let close = tokio_tungstenite::tungstenite::Message::Close(None);
     let _ = ws.send(close).await;
     gw.idle().await;

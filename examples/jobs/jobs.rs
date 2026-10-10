@@ -27,8 +27,8 @@
 //!
 //! `cargo run -p respan-gateway-examples --example jobs`
 
+use respan_gateway_core::ErrorCode;
 use respan_gateway_examples::LIMIT;
-use respan_gateway_sdk::ErrorCode;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::collections::HashMap;
@@ -37,13 +37,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::FakeOpenAi;
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::{Input, Output};
+use respan_gateway_core::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::Body;
 use respan_gateway_http::http::{self, HeaderValue, header::AUTHORIZATION};
 use respan_gateway_http::{Credential, Wire};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
-use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -242,7 +242,7 @@ fn supervised<F, Fut>(
     send: F,
 ) -> impl Fn(
     http::Request<respan_gateway_http::Body>,
-) -> respan_gateway_sdk::futures::future::BoxFuture<'static, Result<HttpReply, Fault>>
+) -> respan_gateway_core::futures::future::BoxFuture<'static, Result<HttpReply, Fault>>
 + Send
 + Sync
 + 'static
@@ -255,7 +255,7 @@ where
         async move {
             let Some(running) = call
                 .extensions()
-                .get::<respan_gateway_sdk::Extensions>()
+                .get::<respan_gateway_core::Extensions>()
                 .and_then(|extensions| extensions.get::<Running>())
                 .cloned()
             else {
@@ -320,7 +320,7 @@ impl<S: Store> Plugin for Idempotent<S> {
             deadline: lease.as_ref().map(|(_, receiver)| receiver.clone()),
         };
         cx.extensions_mut().insert(running.clone());
-        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Output>| {
+        cx.wrap(move |outputs: respan_gateway_core::EventStream<Output>| {
             running.bounded(outputs.boxed())
         })?;
         if let (Some(interval), Some((renewed, _))) = (self.0.heartbeat(), lease) {

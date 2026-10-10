@@ -14,9 +14,9 @@ pub const LIMIT: usize = 32 << 20;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_conversation::{Input, Output, units};
-use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::{Fault, Plugin, ProviderContext, async_trait};
+use respan_gateway_conversation::Usage;
+use respan_gateway_conversation::{Input, Output};
+use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
 
 /// A chat call's usage: every [`Output::usage`] increment its provider
 /// reported, summed by the filter [`meter`] adds. Clones share it.
@@ -26,10 +26,7 @@ pub struct CallUsage(Arc<Mutex<Usage>>);
 impl CallUsage {
     /// The usage summed so far.
     pub fn get(&self) -> Usage {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The usage of the call `px`, if [`meter`] ran for it; read it in
@@ -72,10 +69,7 @@ pub struct Meter(Arc<Mutex<Usage>>);
 impl Meter {
     /// The usage of every call that ended, added up.
     pub fn usage(&self) -> Usage {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -117,10 +111,9 @@ impl Price {
         per_million.saturating_add(999_999) / 1_000_000
     }
 
-    /// What `usage`'s input and output tokens cost; a missing count is 0.
+    /// What `usage`'s input and output tokens cost.
     pub fn of(&self, usage: &Usage) -> i64 {
-        let n = |unit| usage.get(unit).unwrap_or(0);
-        self.cost(n(units::INPUT_TOKENS), n(units::OUTPUT_TOKENS))
+        self.cost(usage.input_tokens, usage.output_tokens)
     }
 }
 
@@ -129,7 +122,7 @@ pub mod chat_bound {
     //! `wallet.rs` and `cost_cap.rs`.
 
     use respan_gateway_conversation::{Content, Input, ResponseFormat};
-    use respan_gateway_sdk::{BadRequest, Fault};
+    use respan_gateway_core::{BadRequest, Fault};
     use serde_json::{self, Map, Value};
 
     /// The most input tokens `chat` can be. A token is at least a byte, so

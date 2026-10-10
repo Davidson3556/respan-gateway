@@ -12,14 +12,14 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use respan_gateway_core::futures::TryStreamExt;
+use respan_gateway_core::{BadRequest, ErrorCode, Extensions, Fault, Upstream};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{self, HeaderValue, Method, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Completion, Credential};
 use respan_gateway_mcp_messages::Message;
-use respan_gateway_sdk::futures::TryStreamExt;
-use respan_gateway_sdk::{BadRequest, ErrorCode, Extensions, Fault, Upstream};
 use tokio::process::Command;
 
 use crate::session::{Limits, Session};

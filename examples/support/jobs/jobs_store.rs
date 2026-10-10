@@ -6,7 +6,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use respan_gateway_codec::Codec;
+use respan_gateway_chat::Codec;
 use respan_gateway_examples::store::{Database, rusqlite::OptionalExtension, sql};
 use respan_gateway_http::bytes::Bytes;
 

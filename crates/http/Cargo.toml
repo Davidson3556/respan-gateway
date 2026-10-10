@@ -16,7 +16,7 @@ default = []
 reqwest = ["dep:reqwest"]
 
 [dependencies]
-respan-gateway-sdk.workspace = true
+respan-gateway-core.workspace = true
 reqwest = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "time"] }
 bytes.workspace = true
@@ -30,10 +30,8 @@ serde_json.workspace = true
 [dev-dependencies]
 respan-gateway-conversation.workspace = true
 respan-gateway-plugins.workspace = true
-respan-gateway-anthropic.workspace = true
-respan-gateway-codec.workspace = true
-respan-gateway-openai.workspace = true
-respan-gateway-sdk.workspace = true
+respan-gateway-chat.workspace = true
+respan-gateway-core.workspace = true
 serde_json.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

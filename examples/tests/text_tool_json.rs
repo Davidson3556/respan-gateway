@@ -4,7 +4,7 @@
 mod text;
 
 use respan_gateway_conversation::{Block, Content, Delta, Input, Message, Output, Role, Tool};
-use respan_gateway_sdk::{Fault, Filter};
+use respan_gateway_core::{Fault, Filter};
 #[path = "support/text.rs"]
 mod support;
 
@@ -99,7 +99,7 @@ fn a_whole_tool_call_with_two_quoted_placeholders_is_restored() {
 fn first_other(out: &[Output]) -> Value {
     out.iter()
         .find_map(|r| match r {
-            Output::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) => {
+            Output::Native(respan_gateway_core::NativeValue { value: raw, .. }) => {
                 Some((**raw).clone())
             }
             _ => None,
@@ -180,7 +180,7 @@ fn a_parameter_named_arguments_is_restored_once() {
         Ok(())
     });
     assert!(edited.is_ok());
-    let Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) =
+    let Content::Native(respan_gateway_core::NativeValue { value: raw, .. }) =
         &chat.messages[0].content[0]
     else {
         panic!("tool input")
@@ -340,7 +340,7 @@ fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Re
         *text = text.replace("alice@example.com", "<EMAIL_1>");
         Ok(())
     })?;
-    let Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) =
+    let Content::Native(respan_gateway_core::NativeValue { value: raw, .. }) =
         &chat.messages[0].content[0]
     else {
         panic!("tool input")
@@ -348,7 +348,7 @@ fn anthropic_request_tools_are_read_and_edited_without_changing_link_ids() -> Re
     assert_eq!(raw["input"]["email"], "<EMAIL_1>");
     assert_eq!(raw["input"]["nested"][0]["note"], "<EMAIL_1>");
     assert_eq!(raw["id"], "tool-1");
-    let Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) =
+    let Content::Native(respan_gateway_core::NativeValue { value: raw, .. }) =
         &chat.messages[0].content[1]
     else {
         panic!("tool result")
@@ -420,7 +420,7 @@ fn unknown_request_tool_siblings_refuse_before_any_callback_or_edit() {
 #[test]
 fn tool_indexes_do_not_delay_argument_tails_until_after_the_finish() -> Result<(), Fault> {
     use respan_gateway_conversation::Finish;
-    use respan_gateway_sdk::Filter;
+    use respan_gateway_core::Filter;
 
     let vault = Placeholders::default();
     vault.hide("NAME", "alice");

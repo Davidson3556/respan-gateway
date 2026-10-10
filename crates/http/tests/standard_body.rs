@@ -9,10 +9,10 @@ use h::bytes::Bytes;
 use h::http::{HeaderMap, HeaderValue, Request, Response};
 use h::http_body::Frame;
 use h::http_body_util::{BodyExt, Empty, Full, StreamBody};
+use respan_gateway_core::Upstream;
+use respan_gateway_core::futures::{StreamExt, stream};
+use respan_gateway_core::{EventStream, Fault};
 use respan_gateway_http as h;
-use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::futures::{StreamExt, stream};
-use respan_gateway_sdk::{EventStream, Fault};
 
 async fn open(
     request: Request<h::Body>,
@@ -94,7 +94,7 @@ async fn standard_body_collection_keeps_wire_failure_out_of_semantic_decoding() 
 
 #[tokio::test]
 async fn incoming_collection_releases_frames_before_requesting_more() {
-    use respan_gateway_sdk::futures::channel::oneshot;
+    use respan_gateway_core::futures::channel::oneshot;
 
     struct PooledFrame(Option<oneshot::Sender<()>>);
     impl AsRef<[u8]> for PooledFrame {

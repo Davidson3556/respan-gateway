@@ -1,4 +1,4 @@
-use respan_gateway_sdk::{Fault, Filter};
+use respan_gateway_core::{Fault, Filter};
 
 /// Values emitted by a filter, including its successful end.
 pub fn run_filter<T>(filter: &mut impl Filter<T>, values: Vec<T>) -> Result<Vec<T>, Fault> {

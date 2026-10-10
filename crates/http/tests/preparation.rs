@@ -7,10 +7,10 @@ use h::bytes::Bytes;
 use h::http::{Request, StatusCode};
 use h::http_body_util::BodyExt;
 use http_support::LIMIT;
+use respan_gateway_core::BadRequest;
+use respan_gateway_core::futures::{SinkExt, future};
+use respan_gateway_core::{EventSink, EventStream};
 use respan_gateway_http as h;
-use respan_gateway_sdk::BadRequest;
-use respan_gateway_sdk::futures::{SinkExt, future};
-use respan_gateway_sdk::{EventSink, EventStream};
 
 #[derive(Clone, Copy, Debug)]
 enum Opening {

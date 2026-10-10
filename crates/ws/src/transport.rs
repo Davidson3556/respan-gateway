@@ -3,13 +3,13 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use respan_gateway_core::futures::{FutureExt, Stream, StreamExt, stream};
+use respan_gateway_core::{Extensions, Fault, Truncated, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::{self, HeaderName};
 use respan_gateway_http::http::{self, HeaderMap, StatusCode};
 use respan_gateway_http::{Body, Completion, Frames, RawErrors};
 use respan_gateway_http::{is_connection_header, prepare_call, strip_origin_headers};
-use respan_gateway_sdk::futures::{FutureExt, Stream, StreamExt, stream};
-use respan_gateway_sdk::{Extensions, Fault, Truncated, Upstream};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -251,7 +251,7 @@ impl WsTransport {
     /// Create fresh outgoing I/O for each call using this backend.
     pub fn connect(
         self,
-    ) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Clone + Send + Sync
+    ) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Clone + Send + Sync
     {
         // One message, or a refusal's body, is what a reader holds of the
         // provider's answer.
@@ -363,12 +363,12 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use respan_gateway_sdk::futures::SinkExt;
+    use respan_gateway_core::futures::SinkExt;
     use tokio_tungstenite::tungstenite::Message;
 
+    use respan_gateway_core::{Gateway, Plugin, ProviderContext, async_trait};
     use respan_gateway_http::ProviderError;
     use respan_gateway_http::http_body_util::BodyExt;
-    use respan_gateway_sdk::{Gateway, Plugin, ProviderContext, async_trait};
 
     use crate::JsonEvents;
     use respan_gateway_realtime::Input;

@@ -11,7 +11,7 @@ use futures::channel::oneshot;
 use futures::{FutureExt, Sink, StreamExt, TryStreamExt};
 use http::StatusCode;
 use http::response::Parts as ResponseHead;
-use respan_gateway_sdk::{Connection, ErrorCode, EventSink, EventStream, Extensions, Fault};
+use respan_gateway_core::{Connection, ErrorCode, EventSink, EventStream, Extensions, Fault};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -72,7 +72,7 @@ pub enum Framing {
 /// Binding consumes it, preventing a second binding:
 /// ```compile_fail
 /// use respan_gateway_http::{self as h, formats::opaque::Passthrough};
-/// use respan_gateway_sdk::Format;
+/// use respan_gateway_core::Format;
 /// let request = h::http::Request::new(h::Body::default());
 /// let (incoming, _) = h::Incoming::accept(request, h::Framing::Whole, 1024);
 /// let first = Passthrough.bind(incoming);
@@ -146,7 +146,7 @@ impl Incoming {
     ///
     /// [`messages`]: crate::messages
     /// [`status`]: crate::status
-    /// [`RetryAfter`]: respan_gateway_sdk::RetryAfter
+    /// [`RetryAfter`]: respan_gateway_core::RetryAfter
     pub fn bind<I, O, D, E, F>(self, decode: D, encode: E, error: F) -> Connection<I, O>
     where
         I: Clone + Send + Sync + 'static,

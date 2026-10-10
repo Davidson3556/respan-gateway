@@ -19,24 +19,24 @@
 //!
 //! `cargo run -p respan-gateway-examples --example cost_cap`
 
-use respan_gateway_sdk::ErrorCode;
+use respan_gateway_core::ErrorCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_core::{Fault, Filter, Gateway, Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_http::Status;
-use respan_gateway_sdk::{Fault, Filter, Gateway, Plugin, ProviderContext, async_trait};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
-use respan_gateway_conversation::{Block, Input, Output, units};
-use respan_gateway_sdk::Usage;
+use respan_gateway_conversation::Usage;
+use respan_gateway_conversation::{Block, Input, Output};
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
-use respan_gateway_openai::OpenAiChat;
+use respan_gateway_chat::openai::OpenAiChat;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -95,7 +95,7 @@ impl Plugin for Cap {
                     kind: Block::ToolCall { name, .. },
                     ..
                 } => name.len(),
-                Output::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) => {
+                Output::Native(respan_gateway_core::NativeValue { value: raw, .. }) => {
                     raw.to_string().len()
                 }
                 _ => 0,
@@ -142,13 +142,15 @@ impl Filter<Output> for Settle {
         if self.usage.is_empty() && !cut {
             return Ok(());
         }
-        let n = |unit| self.usage.get(unit);
-        let reported = n(units::OUTPUT_TOKENS);
-        let mut output = reported.unwrap_or(0);
-        if reported.is_none() || cut {
+        // A count of 0 is one the provider did not report.
+        let mut output = self.usage.output_tokens;
+        if output == 0 || cut {
             output = output.max(self.seen.tokens());
         }
-        let input = n(units::INPUT_TOKENS).unwrap_or(self.input);
+        let input = match self.usage.input_tokens {
+            0 => self.input,
+            n => n,
+        };
         self.tally.add(PRICE.cost(input, output));
         Ok(())
     }
@@ -171,7 +173,7 @@ fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
 }
 
 fn gateway(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

@@ -1,7 +1,6 @@
 use super::*;
 use respan_gateway_conversation::Input;
-use respan_gateway_conversation::units;
-use respan_gateway_sdk::BadRequest;
+use respan_gateway_core::BadRequest;
 
 #[tokio::test]
 async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
@@ -24,7 +23,7 @@ async fn each_call_is_billed_at_its_models_price() -> Result<(), Fault> {
         billed,
         [("acme", Some(450)), ("acme", Some(7_500)), ("globex", None)]
     );
-    assert_eq!(rows[0].usage.get(units::OUTPUT_TOKENS), Some(500));
+    assert_eq!(rows[0].usage.output_tokens, 500);
     Ok(())
 }
 

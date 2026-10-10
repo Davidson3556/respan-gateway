@@ -6,14 +6,14 @@ use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::stream::{SplitSink, SplitStream};
+use respan_gateway_core::futures::{SinkExt, StreamExt, stream};
+use respan_gateway_core::{Abandoned, BadRequest, Fault, Gateway, Truncated, Upstream};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::header::{self, HeaderValue};
 use respan_gateway_http::http::{self, Method, StatusCode, Version};
 use respan_gateway_http::{Body, Credential, Frames, Framing, error_code, status};
-use respan_gateway_sdk::futures::channel::oneshot;
-use respan_gateway_sdk::futures::stream::{SplitSink, SplitStream};
-use respan_gateway_sdk::futures::{SinkExt, StreamExt, stream};
-use respan_gateway_sdk::{Abandoned, BadRequest, Fault, Gateway, Truncated, Upstream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::WebSocketStream;

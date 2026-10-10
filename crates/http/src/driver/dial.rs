@@ -10,7 +10,7 @@ use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::{Future, FutureExt, SinkExt, Stream, StreamExt, TryStreamExt, stream};
 use http::{request::Parts as RequestHead, response::Parts as ResponseHead};
-use respan_gateway_sdk::{Connection, EventSink, EventStream, Extensions, Fault};
+use respan_gateway_core::{Connection, EventSink, EventStream, Extensions, Fault};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;

@@ -16,7 +16,7 @@ default = []
 ws = ["dep:respan-gateway-ws", "dep:hyper", "dep:hyper-util"]
 
 [dependencies]
-respan-gateway-sdk.workspace = true
+respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 respan-gateway-ws = { workspace = true, optional = true }
 axum.workspace = true
@@ -28,10 +28,9 @@ http-body-util.workspace = true
 http.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-conversation.workspace = true
-respan-gateway-anthropic.workspace = true
-respan-gateway-openai.workspace = true
+respan-gateway-chat.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-sdk.workspace = true
+respan-gateway-core.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time", "sync", "test-util"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-native-roots"] }

@@ -7,10 +7,10 @@ mod support;
 
 use futures::channel::mpsc;
 use futures::{StreamExt, TryStreamExt};
+use respan_gateway_core::{ErrorCode, Fault};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{Body, Completion};
-use respan_gateway_sdk::{ErrorCode, Fault};
 use respan_gateway_ws::{CloseCode, Limits, WsTransport};
 use std::sync::atomic::Ordering;
 use support::*;

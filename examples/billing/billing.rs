@@ -19,13 +19,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Input;
+use respan_gateway_conversation::Usage;
+use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::{CallUsage, Price, meter};
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -129,7 +129,7 @@ const LARGE: &str = "gpt-4o";
 const UNPRICED: &str = "gpt-4.1";
 
 fn gateway(
-    provider: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    provider: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

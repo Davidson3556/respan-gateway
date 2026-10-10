@@ -4,14 +4,14 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use respan_gateway_core::futures::stream;
+use respan_gateway_core::{BadRequest, Fault, Upstream};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::sse;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode};
 use respan_gateway_mcp_messages::Message;
-use respan_gateway_sdk::futures::stream;
-use respan_gateway_sdk::{BadRequest, Fault, Upstream};
 use serde_json::{self, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};

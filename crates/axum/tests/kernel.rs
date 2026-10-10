@@ -5,9 +5,9 @@
 
 mod support;
 
+use respan_gateway_core::Fault;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_sdk::Fault;
 #[allow(dead_code, unused_imports)]
 #[path = "../../../tests/support/http.rs"]
 mod http_helpers;

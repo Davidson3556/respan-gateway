@@ -1,6 +1,6 @@
 //! End-hook records for public-API lifecycle tests.
 
-use respan_gateway_sdk::{ClientContext, Fault, Plugin, ProviderContext, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Plugin, ProviderContext, async_trait};
 use std::sync::{Arc, Mutex, PoisonError};
 
 #[derive(Debug, Clone, Default)]

@@ -1,10 +1,10 @@
 //! Audio validation and a conservative token bound for PCM24k and G.711.
 //! Rates: https://developers.openai.com/api/docs/guides/voice-latency-cost
 use base64::{Engine, engine::general_purpose::STANDARD};
+use respan_gateway_core::futures::{StreamExt, stream};
+use respan_gateway_core::{BadRequest, ErrorCode};
+use respan_gateway_core::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use respan_gateway_realtime::Input;
-use respan_gateway_sdk::futures::{StreamExt, stream};
-use respan_gateway_sdk::{BadRequest, ErrorCode};
-use respan_gateway_sdk::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use respan_gateway_ws::CloseCode;
 use serde_json::{Value, json};
 

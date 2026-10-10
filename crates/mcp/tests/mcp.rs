@@ -9,6 +9,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use respan_gateway_core::futures::{StreamExt, stream};
+use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
+use respan_gateway_core::{RetryAfter, Truncated, Upstream, async_trait};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode};
@@ -19,9 +22,6 @@ use respan_gateway_http::{
 };
 use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp::{Owner, SESSION, StdioTransport, StreamableHttp};
-use respan_gateway_sdk::futures::{StreamExt, stream};
-use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response};
-use respan_gateway_sdk::{RetryAfter, Truncated, Upstream, async_trait};
 use serde_json::{Value, json};
 
 use respan_gateway_http::relay;
@@ -485,7 +485,7 @@ async fn an_event_id_that_would_break_its_line_is_refused_not_written() {
     let gw = gateway(mock.connect(), None).plugin(Inject);
     let (_, _, body, outcome) = send(&gw, request(Method::GET, "", &[])).await;
     assert!(!body.contains("injected"), "{body}");
-    assert!(outcome.is_err_and(|f| f.is::<respan_gateway_sdk::Internal>()));
+    assert!(outcome.is_err_and(|f| f.is::<respan_gateway_core::Internal>()));
 }
 
 /// A plugin-created response has no provider response head; the format must
@@ -734,7 +734,7 @@ struct RefusalProbe(Arc<Mutex<Vec<RefusalEntry>>>);
 impl Plugin for RefusalProbe {
     async fn on_provider_end(
         &self,
-        px: &respan_gateway_sdk::ProviderContext,
+        px: &respan_gateway_core::ProviderContext,
         end: &Result<(), Fault>,
     ) {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).push((
@@ -2013,7 +2013,7 @@ async fn a_servers_json_rpc_refusal_keeps_its_code_message_and_status() {
 async fn buffered_and_dropped_typed_messages_keep_their_own_sse_cursors() {
     #[derive(Default)]
     struct Buffered(Vec<Output>);
-    impl respan_gateway_sdk::Filter<Output> for Buffered {
+    impl respan_gateway_core::Filter<Output> for Buffered {
         fn edit(&mut self, mut event: Output, _: &mut Vec<Output>) -> Result<(), Fault> {
             if event.event_id.as_deref() == Some("drop") {
                 return Ok(());

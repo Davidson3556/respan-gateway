@@ -15,10 +15,10 @@ use h::bytes::Bytes;
 use h::http::{HeaderMap, Request, Response};
 use h::http_body::{Body as HttpBody, Frame, SizeHint};
 use h::http_body_util::BodyExt;
+use respan_gateway_core::Upstream;
+use respan_gateway_core::futures::{Future, Stream};
+use respan_gateway_core::{EventStream, Fault};
 use respan_gateway_http as h;
-use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::futures::{Future, Stream};
-use respan_gateway_sdk::{EventStream, Fault};
 
 enum Step {
     Data(&'static [u8]),

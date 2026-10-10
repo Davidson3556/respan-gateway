@@ -26,23 +26,23 @@ use http_body_util::BodyExt;
 use http_support::{LIMIT, post, read_whole, serve, serve_live, streamed};
 #[cfg(feature = "reqwest")]
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_anthropic::AnthropicMessages;
-use respan_gateway_codec::Codec;
+use respan_gateway_chat::Codec;
+use respan_gateway_chat::anthropic::AnthropicMessages;
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::{Input, Output};
 #[cfg(feature = "reqwest")]
 use respan_gateway_conversation::{Message, Role};
+use respan_gateway_core::futures;
+use respan_gateway_core::{BadRequest, Upstream};
+use respan_gateway_core::{
+    ClientContext, Connection, EventStream, Fault, Format, Gateway, Plugin, ProviderContext,
+    Response, async_trait,
+};
 #[cfg(feature = "reqwest")]
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::bytes;
 use respan_gateway_http::{Body, Encoder, Incoming, Outgoing};
 use respan_gateway_http::{http, http_body_util};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::futures;
-use respan_gateway_sdk::{BadRequest, Upstream};
-use respan_gateway_sdk::{
-    ClientContext, Connection, EventStream, Fault, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait,
-};
 
 /// A message in: its number in its stream and its text.
 #[derive(Debug, Clone, PartialEq)]
@@ -670,12 +670,12 @@ struct Noting(Arc<Mutex<Vec<&'static str>>>, Box<dyn Encoder<Output>>);
 impl Encoder<Output> for Noting {
     fn encode(&mut self, reply: &Output, out: &mut BytesMut) -> Result<(), Fault> {
         let noted = match reply {
-            Output::Native(respan_gateway_sdk::NativeValue { format, .. })
+            Output::Native(respan_gateway_core::NativeValue { format, .. })
                 if &**format == AnthropicMessages.name() =>
             {
                 "own"
             }
-            Output::Native(respan_gateway_sdk::NativeValue { .. }) => "other",
+            Output::Native(respan_gateway_core::NativeValue { .. }) => "other",
             _ => "event",
         };
         self.0.lock().map(|mut n| n.push(noted)).ok();

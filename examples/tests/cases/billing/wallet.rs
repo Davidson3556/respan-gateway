@@ -150,8 +150,8 @@ async fn two_spellings_of_max_tokens_cannot_overspend() -> Result<(), Fault> {
 /// and it may have cost all it was allowed, so it pays at least its hold.
 #[tokio::test(start_paused = true)]
 async fn the_loser_of_a_hedge_is_charged_at_least_its_hold() -> Result<(), Fault> {
+    use respan_gateway_core::{ClientContext, Plugin, Response, async_trait};
     use respan_gateway_plugins::routing::{Until, race};
-    use respan_gateway_sdk::{ClientContext, Plugin, Response, async_trait};
     use std::time::Duration;
 
     /// Races both deployments, the second starting 200 ms after the first.

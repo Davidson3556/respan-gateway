@@ -49,7 +49,7 @@ async fn real_gemini_live_audio_and_transcription_through_tls_gateway() {
     let transport = respan_gateway_ws::WsTransport::new("wss://generativelanguage.googleapis.com")
         .unwrap()
         .with_binary_text(true);
-    let gw = respan_gateway_sdk::Gateway::new()
+    let gw = respan_gateway_core::Gateway::new()
         .client::<respan_gateway_http::formats::opaque::Input<Raw>, _, _>(Raw)
         .unwrap()
         .provider::<respan_gateway_http::formats::opaque::Input<Raw>, _, _>(

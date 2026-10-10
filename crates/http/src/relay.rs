@@ -1,6 +1,6 @@
 //! Explicit HTTP forwarding policy for local proxies and live sessions.
 use crate::{self as h, ClientHead, Credential, ProviderHead, RawErrors, SendRaw, Wire};
-use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response, async_trait};
+use respan_gateway_core::{ClientContext, Fault, Plugin, Response, async_trait};
 
 /// Opt into raw request, credentials, response head and error body forwarding.
 /// Its [`RawErrors`], granted only on a call to a provider of the client's
@@ -28,7 +28,10 @@ impl Relay {
 }
 #[async_trait]
 impl Plugin for Relay {
-    async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(
+        &self,
+        px: &mut respan_gateway_core::ProviderContext,
+    ) -> Result<(), Fault> {
         // A raw request, the client's key, the provider's head and its raw
         // errors (bodies and close codes alike) go only to and from a
         // provider of the client's own format.

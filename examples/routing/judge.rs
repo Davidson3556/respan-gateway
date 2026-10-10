@@ -10,20 +10,20 @@
 //!
 //! `cargo run -p respan-gateway-examples --example judge`
 
-use respan_gateway_sdk::ErrorCode;
+use respan_gateway_core::ErrorCode;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::{Assembled, Input, Message, Output, Role};
+use respan_gateway_core::futures::TryStreamExt;
+use respan_gateway_core::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
 use respan_gateway_http::Status;
 use respan_gateway_http::Wire;
 #[cfg(test)]
 use respan_gateway_http::http;
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::futures::TryStreamExt;
-use respan_gateway_sdk::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -54,7 +54,7 @@ impl Plugin for Judge {
         let replies: Vec<Output> = cx
             .call("judge")
             .with_input(prompt)
-            .with_extension(respan_gateway_codec::StreamResponse(false))
+            .with_extension(respan_gateway_chat::StreamResponse(false))
             .await?
             .outputs()
             .try_collect()

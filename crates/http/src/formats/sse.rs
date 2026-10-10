@@ -1,9 +1,9 @@
 //! Server-sent events, for any format that streams them.
 
 use crate::Body;
+use respan_gateway_core::{EventStream, Fault};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http;
-use respan_gateway_sdk::{EventStream, Fault};
 use serde_json::{self, Value};
 
 /// A response's content type, if it is readable.
@@ -288,7 +288,7 @@ mod tests {
             move |_, raw, out: &mut Vec<Bytes>| {
                 seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if event_data(&raw).is_some() {
-                    return Err(respan_gateway_sdk::Upstream::fault("unreadable"));
+                    return Err(respan_gateway_core::Upstream::fault("unreadable"));
                 }
                 out.push(raw);
                 Ok(())
@@ -412,6 +412,6 @@ mod tests {
         );
         assert!(d.push(Bytes::from_static(b"data: 1")).is_ok());
         let over = d.push(Bytes::from_static(b"23")).err();
-        assert!(over.is_some_and(|f| f.is::<respan_gateway_sdk::Upstream>()));
+        assert!(over.is_some_and(|f| f.is::<respan_gateway_core::Upstream>()));
     }
 }

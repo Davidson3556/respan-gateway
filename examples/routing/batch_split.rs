@@ -25,13 +25,13 @@
 #![allow(clippy::duplicate_mod)]
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_core::Upstream;
+use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[cfg(test)]
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::retryable;
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
-use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::futures::{StreamExt, TryStreamExt, stream};
-use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -98,7 +98,7 @@ impl Plugin for Split {
 const MODEL: &str = "text-embedding-3-small";
 
 fn gateway(
-    provider: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    provider: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

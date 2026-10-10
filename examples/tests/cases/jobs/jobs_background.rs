@@ -178,7 +178,7 @@ async fn malformed_unicode_ids_are_refused_before_any_call() -> Result<(), Fault
 
 #[tokio::test]
 async fn response_json_split_across_frames_is_mapped_whole() -> Result<(), Fault> {
-    use respan_gateway_sdk::futures::StreamExt;
+    use respan_gateway_core::futures::StreamExt;
 
     let (east, west) = deployments().await?;
     west.answer(StatusCode::OK, r#"{"id":"native-1","status":"completed"}"#);
@@ -265,7 +265,7 @@ async fn a_zero_retention_tenant_is_refused_background_mode() -> Result<(), Faul
     let seen = Seen::default();
     let gateway = slow_west(&east, &west, &seen)?;
     let mut req = request("POST", "/v1/responses", r#"{"background":true}"#);
-    let mut values = respan_gateway_sdk::Extensions::new();
+    let mut values = respan_gateway_core::Extensions::new();
     values.insert(NoContent);
     req.extensions_mut().insert(values);
     let (status, ..) = read_whole(serve(&gateway, req).await.0).await;

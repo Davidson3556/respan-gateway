@@ -1,18 +1,18 @@
 //! HTTP requests and body collection for integration tests.
 
 use futures::StreamExt;
+use respan_gateway_core::{Fault, futures};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_sdk::{Fault, futures};
 
 /// The most bytes of one message a test's adapter and transports hold.
 pub const LIMIT: usize = 32 << 20;
 
 /// Hand `req` to `gateway` as an HTTP server does: whole, up to [`LIMIT`].
 pub fn serve<B>(
-    gateway: &respan_gateway_sdk::Gateway,
+    gateway: &respan_gateway_core::Gateway,
     req: http::Request<B>,
 ) -> impl Future<
     Output = (
@@ -31,7 +31,7 @@ where
 /// Hand a session's `req` to `gateway`: live, a message per frame of its
 /// body, up to [`LIMIT`] each.
 pub fn serve_live<B>(
-    gateway: &respan_gateway_sdk::Gateway,
+    gateway: &respan_gateway_core::Gateway,
     req: http::Request<B>,
 ) -> impl Future<
     Output = (

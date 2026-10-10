@@ -1238,32 +1238,19 @@ dependencies = [
  "futures",
  "mockllm",
  "reqwest",
- "respan-gateway-anthropic",
  "respan-gateway-axum",
+ "respan-gateway-chat",
  "respan-gateway-conversation",
+ "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-openai",
  "respan-gateway-plugins",
  "respan-gateway-realtime",
- "respan-gateway-sdk",
  "respan-gateway-ws",
  "serde",
  "serde_json",
  "serde_norway",
  "tokio",
  "tokio-tungstenite",
-]
-
-[[package]]
-name = "respan-gateway-anthropic"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "respan-gateway-codec",
- "respan-gateway-conversation",
- "respan-gateway-http",
- "respan-gateway-sdk",
- "serde_json",
 ]
 
 [[package]]
@@ -1280,12 +1267,11 @@ dependencies = [
  "hyper-util",
  "mockllm",
  "reqwest",
- "respan-gateway-anthropic",
+ "respan-gateway-chat",
  "respan-gateway-conversation",
+ "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-openai",
  "respan-gateway-realtime",
- "respan-gateway-sdk",
  "respan-gateway-ws",
  "serde_json",
  "tokio",
@@ -1294,14 +1280,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "respan-gateway-codec"
+name = "respan-gateway-chat"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "mockllm",
  "respan-gateway-conversation",
+ "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-sdk",
+ "respan-gateway-plugins",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1309,7 +1300,7 @@ name = "respan-gateway-conversation"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "respan-gateway-sdk",
+ "respan-gateway-core",
  "serde_json",
 ]
 
@@ -1319,6 +1310,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "futures",
+ "serde_json",
  "tokio",
 ]
 
@@ -1336,16 +1328,14 @@ dependencies = [
  "http",
  "mockllm",
  "reqwest",
- "respan-gateway-anthropic",
  "respan-gateway-axum",
- "respan-gateway-codec",
+ "respan-gateway-chat",
  "respan-gateway-conversation",
+ "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-mcp",
- "respan-gateway-openai",
  "respan-gateway-plugins",
  "respan-gateway-realtime",
- "respan-gateway-sdk",
  "respan-gateway-ws",
  "rusqlite",
  "serde_json",
@@ -1367,12 +1357,10 @@ dependencies = [
  "http-body-util",
  "mockllm",
  "reqwest",
- "respan-gateway-anthropic",
- "respan-gateway-codec",
+ "respan-gateway-chat",
  "respan-gateway-conversation",
- "respan-gateway-openai",
+ "respan-gateway-core",
  "respan-gateway-plugins",
- "respan-gateway-sdk",
  "serde",
  "serde_json",
  "tokio",
@@ -1384,9 +1372,9 @@ version = "0.0.0"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
+ "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-mcp-messages",
- "respan-gateway-sdk",
  "serde_json",
  "tokio",
 ]
@@ -1400,46 +1388,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "respan-gateway-openai"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "futures",
- "mockllm",
- "respan-gateway-anthropic",
- "respan-gateway-codec",
- "respan-gateway-conversation",
- "respan-gateway-http",
- "respan-gateway-plugins",
- "respan-gateway-sdk",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "respan-gateway-plugins"
 version = "0.0.0"
 dependencies = [
  "futures",
  "mockllm",
+ "respan-gateway-chat",
  "respan-gateway-conversation",
+ "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-openai",
- "respan-gateway-sdk",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
 name = "respan-gateway-realtime"
-version = "0.0.0"
-dependencies = [
- "respan-gateway-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "respan-gateway-sdk"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
@@ -1451,9 +1414,9 @@ name = "respan-gateway-ws"
 version = "0.0.0"
 dependencies = [
  "reqwest",
+ "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-realtime",
- "respan-gateway-sdk",
  "rustls",
  "rustls-native-certs",
  "serde_json",

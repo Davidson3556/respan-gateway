@@ -11,7 +11,7 @@ use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use http_body_util::BodyExt;
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::Fault;
 
 pub use accept::{Framing, Incoming, Reply};
 pub use dial::Outgoing;
@@ -110,7 +110,7 @@ impl http_body::Body for Pump {
 mod tests {
     use super::*;
     use crate::formats::opaque::Passthrough;
-    use respan_gateway_sdk::{EventStream, Format, Upstream};
+    use respan_gateway_core::{EventStream, Format, Upstream};
 
     /// A reply prepared before handling ends is kept, however it ended.
     #[tokio::test]

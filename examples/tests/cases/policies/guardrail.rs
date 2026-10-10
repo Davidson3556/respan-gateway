@@ -1,8 +1,8 @@
 use super::*;
 use respan_gateway_conversation::{Message, Role};
+use respan_gateway_core::{Connection, Format};
 use respan_gateway_http::formats::opaque;
 use respan_gateway_http::{self as h, Incoming, Outgoing};
-use respan_gateway_sdk::{Connection, Format};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl Format<Outgoing, opaque::Output<Responses>, opaque::Input<Responses>> for R
 /// The example's gateway, also serving the Responses API. Its one target
 /// stays OpenAI; the guard refuses Responses traffic before any call.
 fn gateway_with_responses(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Clone
     + Send
     + Sync

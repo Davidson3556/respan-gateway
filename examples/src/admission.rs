@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use respan_gateway_sdk::{Fault, Result};
+use respan_gateway_core::{Fault, Result};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;

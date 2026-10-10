@@ -10,16 +10,16 @@
 //!
 //! `cargo run -p respan-gateway-examples --example custom_transport`
 
-use respan_gateway_sdk::BadRequest;
+use respan_gateway_core::BadRequest;
 use std::sync::Arc;
 
-use respan_gateway_conversation::{Block, Finish, Input, Output, units};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::futures::FutureExt;
-use respan_gateway_sdk::futures::channel::oneshot;
-use respan_gateway_sdk::futures::{sink, stream};
-use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format, Gateway};
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::Usage;
+use respan_gateway_conversation::{Block, Finish, Input, Output};
+use respan_gateway_core::futures::FutureExt;
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::{sink, stream};
+use respan_gateway_core::{Connection, EventSink, EventStream, Fault, Format, Gateway};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -56,8 +56,8 @@ impl Format<Model, Output, Input> for Local {
             let words = |s: &str| s.split_whitespace().count() as u64;
             let mut usage = Usage::default();
             let prompt: u64 = chat.messages.iter().map(|m| words(&m.text())).sum();
-            usage.add(units::INPUT_TOKENS, prompt);
-            usage.add(units::OUTPUT_TOKENS, words(&answer));
+            usage.input_tokens += prompt;
+            usage.output_tokens += words(&answer);
             let model = chat.model.clone().unwrap_or_else(|| "local".into());
             let mut replies = vec![Output::start("local-1", model)];
             // Each word keeps the space before the next: "you ", "said: ", ...

@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::{FutureExt, Stream, StreamExt};
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::Fault;
 
 use crate::{Completion, Frames};
 

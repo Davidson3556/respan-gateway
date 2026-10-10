@@ -87,7 +87,7 @@ fn usage(input: u64, output: u64) -> Value {
 }
 
 async fn close(ws: &mut Client) {
-    use respan_gateway_sdk::futures::SinkExt;
+    use respan_gateway_core::futures::SinkExt;
     let _ = ws
         .send(tokio_tungstenite::tungstenite::Message::Close(None))
         .await;
@@ -96,7 +96,7 @@ async fn close(ws: &mut Client) {
 
 /// Whether anything more came, of any kind.
 async fn hear_any(ws: &mut Client) -> bool {
-    use respan_gateway_sdk::futures::StreamExt;
+    use respan_gateway_core::futures::StreamExt;
     let next = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await;
     matches!(next, Ok(Some(Ok(_))))
 }
@@ -320,7 +320,7 @@ async fn a_client_that_leaves_is_recorded_abandoned() -> Result<(), Fault> {
 /// The Close the client is sent: its code and reason. EventStream before it are
 /// skipped; `None` if the connection broke without one.
 async fn closed(ws: &mut Client) -> Option<(u16, String)> {
-    use respan_gateway_sdk::futures::StreamExt;
+    use respan_gateway_core::futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     loop {
         let next = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
@@ -802,7 +802,7 @@ struct Remote {
     lag: Duration,
 }
 
-#[respan_gateway_sdk::async_trait]
+#[respan_gateway_core::async_trait]
 impl Ledger for Remote {
     async fn reserve(
         &self,
@@ -903,7 +903,7 @@ async fn l5_a_turn_being_settled_as_the_client_left_is_settled() -> Result<(), F
 #[derive(Clone, Default)]
 struct EndAt(Arc<Mutex<Vec<(std::time::Instant, String)>>>);
 
-#[respan_gateway_sdk::async_trait]
+#[respan_gateway_core::async_trait]
 impl Plugin for EndAt {
     async fn on_client_end(&self, _: &ClientContext, end: &Result<(), Fault>) {
         let code = end.as_ref().err().map_or("ok".into(), |f| {
@@ -919,7 +919,7 @@ impl Plugin for EndAt {
 #[tokio::test(flavor = "multi_thread")]
 async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result<(), Fault> {
     struct Slow;
-    #[respan_gateway_sdk::async_trait]
+    #[respan_gateway_core::async_trait]
     impl Plugin for Slow {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.wrap(|events: EventStream<Input>| {
@@ -1232,7 +1232,7 @@ async fn l6_leave_during_a_wrap(
     items: usize,
 ) -> Result<(Option<(u128, String)>, Vec<Value>), Fault> {
     struct Slow;
-    #[respan_gateway_sdk::async_trait]
+    #[respan_gateway_core::async_trait]
     impl Plugin for Slow {
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.wrap(|events: EventStream<Input>| {
@@ -1668,7 +1668,7 @@ struct Jitter {
     first: Arc<AtomicUsize>,
 }
 
-#[respan_gateway_sdk::async_trait]
+#[respan_gateway_core::async_trait]
 impl Ledger for Jitter {
     async fn reserve(
         &self,
@@ -1800,7 +1800,7 @@ async fn a_small_image_billed_more_than_its_bytes_cannot_overspend() {
 
 /// `Ok` at a `response.done`, or the Close the session ended with.
 async fn done_or_closed(ws: &mut Client) -> Result<(), Option<(u16, String)>> {
-    use respan_gateway_sdk::futures::StreamExt;
+    use respan_gateway_core::futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     loop {
         let next = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;

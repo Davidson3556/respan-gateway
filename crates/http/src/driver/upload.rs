@@ -7,7 +7,7 @@ use crate::{Body, Completion, Encoder};
 use bytes::BytesMut;
 use futures::future::{BoxFuture, Shared};
 use futures::{Future, Sink};
-use respan_gateway_sdk::{EventSink, Fault};
+use respan_gateway_core::{EventSink, Fault};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{

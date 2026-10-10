@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::Fault;
 
 use crate::Frames;
 

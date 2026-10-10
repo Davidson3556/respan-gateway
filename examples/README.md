@@ -48,9 +48,9 @@ and do not need credentials or make paid requests.
 
 ## Billing policies
 
-Billing is application code, not a supported SDK or first-party plugin API.
+Billing is application code, not a supported public or first-party plugin API.
 The private [accounting](support/billing/accounting.rs) module quotes each
-attempt before sending, prices generic `Usage`, and settles once; the
+attempt before sending, prices the typed `Usage`, and settles once; the
 [ledger](support/billing/ledger.rs) demonstrates atomic nested-account holds
 and idempotent settlement in memory, **not** durable charging or recovery.
 Register accounting last so it observes provider outputs before earlier filters

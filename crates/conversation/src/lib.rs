@@ -30,29 +30,16 @@
 //! Direction is gateway-wide: [`Input`] travels from client to provider;
 //! [`Output`] travels from provider to client, on either transport edge.
 
-use respan_gateway_sdk::{Fault, Upstream, Usage};
+use respan_gateway_core::{Fault, Upstream};
 
 use serde_json::Value;
 
-/// The conversation kind's [`Usage`] unit names, which every conversation
-/// format reports alike.
-pub mod units {
-    /// Every input token, cached or not.
-    pub const INPUT_TOKENS: &str = "input_tokens";
-    /// Every output token.
-    pub const OUTPUT_TOKENS: &str = "output_tokens";
-    /// The input tokens read from a cache.
-    pub const CACHED_INPUT_TOKENS: &str = "cached_input_tokens";
-    /// The input tokens written to a cache.
-    pub const CACHE_WRITE_INPUT_TOKENS: &str = "cache_write_input_tokens";
-    /// The output tokens spent on reasoning.
-    pub const REASONING_TOKENS: &str = "reasoning_tokens";
-}
-
-pub use respan_gateway_sdk::{FormatId, NativeFields, NativeValue};
+pub use respan_gateway_core::{FormatId, NativeFields, NativeValue};
 
 mod media;
+mod usage;
 pub use media::{Media, MediaSource};
+pub use usage::Usage;
 
 /// Provider-neutral generation settings, independent of response framing.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -527,7 +514,7 @@ impl Output {
     pub fn is_content(&self) -> bool {
         !matches!(
             self,
-            Output::Usage(_) | Output::Native(respan_gateway_sdk::NativeValue { .. })
+            Output::Usage(_) | Output::Native(respan_gateway_core::NativeValue { .. })
         )
     }
 }
@@ -661,7 +648,7 @@ impl Assembled {
             Output::BlockEnd { block } => self.open_part(*block)?.ended = true,
             Output::Usage(usage) => self.usage += usage,
             Output::Finish(finish) => self.finish = Some(finish.clone()),
-            Output::Native(respan_gateway_sdk::NativeValue { format, value: raw }) => {
+            Output::Native(respan_gateway_core::NativeValue { format, value: raw }) => {
                 self.items.push(AssembledItem::Native(NativeValue {
                     format: format.clone(),
                     value: raw.clone(),
@@ -750,8 +737,7 @@ mod tests {
 
     #[test]
     fn events_fold_into_the_whole_answer() {
-        let mut usage = Usage::default();
-        usage.add(units::INPUT_TOKENS, 3);
+        let usage = Usage::new(3, 0);
         let all = fold(&[
             Output::start("r1", "m"),
             Output::block_start(0, Block::Reasoning),
@@ -772,8 +758,8 @@ mod tests {
             Output::arguments(2, "1}"),
             Output::block_end(2),
             Output::native("chat", json!({"type": "ping"})),
-            Output::usage(usage.clone()),
-            Output::usage(usage.clone()),
+            Output::usage(usage),
+            Output::usage(usage),
             Output::finished(Finish::ToolUse),
         ])
         .expect("a response");
@@ -795,9 +781,9 @@ mod tests {
         );
         assert_eq!(all.text(), "Hello");
         assert_eq!(all.finish, Some(Finish::ToolUse));
-        assert_eq!(all.usage.get(units::INPUT_TOKENS), Some(6));
+        assert_eq!(all.usage.input_tokens, 6);
         assert!(
-            matches!(all.items().last(), Some(AssembledItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw }))
+            matches!(all.items().last(), Some(AssembledItem::Native(respan_gateway_core::NativeValue { format: f, value: raw }))
             if &**f == "chat" && **raw == json!({"type": "ping"}))
         );
     }
@@ -844,7 +830,7 @@ mod tests {
         assert!(matches!(&all.items()[0], AssembledItem::Block(p)
             if p.block == 9 && p.kind == Block::Reasoning && p.text == "thinking"));
         assert!(
-            matches!(&all.items()[1], AssembledItem::Native(respan_gateway_sdk::NativeValue { format: f, value: raw })
+            matches!(&all.items()[1], AssembledItem::Native(respan_gateway_core::NativeValue { format: f, value: raw })
             if &**f == "native" && **raw == signature)
         );
         assert!(matches!(&all.items()[2], AssembledItem::Block(p)

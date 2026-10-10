@@ -1,10 +1,10 @@
 use super::*;
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
+use respan_gateway_core::ErrorCode;
+use respan_gateway_core::{Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::Meter;
 use respan_gateway_http::{Status, http};
-use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::{Plugin, ProviderContext, async_trait};
 
 async fn ask(gw: &Gateway, req: &'static str) -> Result<(http::HeaderMap, String), Fault> {
     let (status, headers, body) =
@@ -72,8 +72,8 @@ async fn the_provider_edge_sees_and_bills_its_calls() -> Result<(), Fault> {
     ask(&gw, STREAM).await?;
     gw.idle().await;
     let usage = meter.usage();
-    assert_eq!(usage.get(units::INPUT_TOKENS), Some(2));
-    assert_eq!(usage.get(units::OUTPUT_TOKENS), Some(4));
+    assert_eq!(usage.input_tokens, 2);
+    assert_eq!(usage.output_tokens, 4);
 
     let gw = gateway()?.plugin(Closed);
     let (status, _, _) = read_whole(serve(&gw, post("/v1/chat/completions", UNARY)).await.0).await;

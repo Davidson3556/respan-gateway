@@ -19,18 +19,18 @@
 //!
 //! `cargo run -p respan-gateway-examples --example models_merge`
 
+use respan_gateway_core::Upstream;
+use respan_gateway_core::futures::future::join_all;
+use respan_gateway_core::futures::{TryStreamExt, stream};
+use respan_gateway_core::{
+    ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
+};
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::formats;
 use respan_gateway_http::formats::opaque;
 use respan_gateway_http::formats::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
-use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::futures::future::join_all;
-use respan_gateway_sdk::futures::{TryStreamExt, stream};
-use respan_gateway_sdk::{
-    ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;

@@ -4,7 +4,7 @@
 mod text;
 
 use respan_gateway_conversation::{Block, Finish, Output};
-use respan_gateway_sdk::ErrorCode;
+use respan_gateway_core::ErrorCode;
 #[path = "support/text.rs"]
 mod support;
 
@@ -161,9 +161,9 @@ impl text::Rewrite for Refuse {
     fn pending(&self, text: &str) -> usize {
         text::partial_match(text, ["bomb"])
     }
-    fn rewrite(&mut self, text: &str) -> Result<String, respan_gateway_sdk::Fault> {
+    fn rewrite(&mut self, text: &str) -> Result<String, respan_gateway_core::Fault> {
         if text.contains("bomb") {
-            Err(respan_gateway_sdk::Fault::new("blocked").with(ErrorCode("blocked".into())))
+            Err(respan_gateway_core::Fault::new("blocked").with(ErrorCode("blocked".into())))
         } else {
             Ok(text.to_owned())
         }
@@ -196,7 +196,7 @@ impl text::Rewrite for MaskDigits {
     fn pending(&self, text: &str) -> usize {
         text.len() - text.trim_end_matches(|c: char| c.is_ascii_digit()).len()
     }
-    fn rewrite(&mut self, text: &str) -> Result<String, respan_gateway_sdk::Fault> {
+    fn rewrite(&mut self, text: &str) -> Result<String, respan_gateway_core::Fault> {
         let (mut out, mut run) = (String::new(), String::new());
         for c in text.chars().map(Some).chain([None]) {
             match c {

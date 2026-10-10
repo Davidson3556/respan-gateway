@@ -15,7 +15,7 @@ async fn unedited_messages_relay_what_they_say_and_a_filter_reads_their_usage() 
     assert_eq!(answered["model"], "text-embedding-3-small");
     assert_eq!(answered["data"][0]["embedding"], json!([0.5, -0.5]));
     assert_eq!(answered["usage"]["prompt_tokens"].as_f64(), Some(1.0));
-    assert_eq!(usage.get(INPUT_TOKENS), Some(1));
+    assert_eq!(usage.input_tokens, 1);
     Ok(())
 }
 

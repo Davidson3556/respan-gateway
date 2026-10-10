@@ -8,9 +8,9 @@ use axum::Router;
 use axum::extract::Request;
 use axum::response::Response;
 use http_body_util::BodyExt;
+use respan_gateway_core::{BadRequest, Gateway};
 use respan_gateway_http::Framing;
 use respan_gateway_http::http::request::Parts as RequestHead;
-use respan_gateway_sdk::{BadRequest, Gateway};
 
 #[cfg(feature = "ws")]
 mod ws;

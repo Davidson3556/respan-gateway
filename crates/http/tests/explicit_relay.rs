@@ -3,10 +3,10 @@
 #[path = "../../../tests/support/http.rs"]
 mod http_support;
 use http_support::{LIMIT, serve};
-use respan_gateway_http::{self as h, bytes::Bytes, http};
-use respan_gateway_sdk::{
+use respan_gateway_core::{
     ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
+use respan_gateway_http::{self as h, bytes::Bytes, http};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},

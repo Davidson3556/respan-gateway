@@ -13,14 +13,14 @@
 //! - [`Placeholders`]: hide values behind `<LABEL_n>` and restore them, a
 //!   placeholder split across deltas included.
 
-use respan_gateway_sdk::ErrorCode;
+use respan_gateway_core::ErrorCode;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_conversation::{Block, Content, Delta, Input, Output, ToolChoice};
+use respan_gateway_core::{Fault, Filter};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::StatusCode;
-use respan_gateway_sdk::{Fault, Filter};
 use serde_json::{self, Map, Value};
 
 /// The code of a refusal of content that cannot be read.
@@ -279,7 +279,7 @@ fn readable_part(part: &Content) -> bool {
     match part {
         Content::Text { .. } | Content::ToolCall { .. } => true,
         Content::ToolResult { content, .. } => content.iter().all(readable_part),
-        Content::Native(respan_gateway_sdk::NativeValue {
+        Content::Native(respan_gateway_core::NativeValue {
             format, value: raw, ..
         }) if format.as_ref() == "anthropic-messages" => {
             matches!(raw["type"].as_str(), Some("tool_use" | "tool_result"))
@@ -301,7 +301,7 @@ fn edit_content(part: &mut Content, edit: &mut Edit) -> Result<(), Fault> {
         Content::ToolResult { content, .. } => content
             .iter_mut()
             .try_for_each(|part| edit_content(part, edit)),
-        Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. }) => {
+        Content::Native(respan_gateway_core::NativeValue { value: raw, .. }) => {
             let raw = Arc::make_mut(raw);
             if raw["type"] == "tool_use" {
                 if let Some(Value::String(name)) = raw.get_mut("name") {
@@ -536,7 +536,7 @@ fn inert(format: &str, raw: &Value) -> bool {
 /// has no reading for.
 fn readable_event(reply: &Output) -> bool {
     match reply {
-        Output::Native(respan_gateway_sdk::NativeValue { format, value: raw }) => {
+        Output::Native(respan_gateway_core::NativeValue { format, value: raw }) => {
             readable_other(format, raw)
         }
         _ => true,
@@ -583,7 +583,7 @@ fn edit_event(reply: &mut Output, edit: &mut Edit) -> Result<(), Fault> {
             kind: Block::ToolCall { name, .. },
             ..
         } => edit(name),
-        Output::Native(respan_gateway_sdk::NativeValue { format, value: raw })
+        Output::Native(respan_gateway_core::NativeValue { format, value: raw })
             if !inert(format, raw) =>
         {
             let delta = is_delta(raw);
@@ -795,8 +795,8 @@ impl<R: Rewrite> Holdback<R> {
                 self.release_all(out)?;
                 out.push(Output::Finish(finish));
             }
-            mut other @ Output::Native(respan_gateway_sdk::NativeValue { .. }) => {
-                if !matches!(&other, Output::Native(respan_gateway_sdk::NativeValue { format, value: raw }) if inert(format, raw))
+            mut other @ Output::Native(respan_gateway_core::NativeValue { .. }) => {
+                if !matches!(&other, Output::Native(respan_gateway_core::NativeValue { format, value: raw }) if inert(format, raw))
                 {
                     self.release_text(out)?;
                 }

@@ -146,7 +146,7 @@ async fn a_zero_retention_request_stores_nothing() -> Result<(), Fault> {
     let gw = gateway(provider_support::openai(&mock.base_url())?, &store)?;
     for _ in 0..2 {
         let mut req = keyed(ACME, "op-1", BODY);
-        let mut values = respan_gateway_sdk::Extensions::new();
+        let mut values = respan_gateway_core::Extensions::new();
         values.insert(NoContent);
         req.extensions_mut().insert(values);
         assert!(whole(&send(&gw, req).await?));

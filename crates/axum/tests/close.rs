@@ -8,8 +8,10 @@ mod support;
 
 use std::sync::atomic::Ordering;
 
+use respan_gateway_core::{
+    ClientContext, ErrorCode, Fault, Gateway, Plugin, Response, async_trait,
+};
 use respan_gateway_realtime::Input;
-use respan_gateway_sdk::{ClientContext, ErrorCode, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_ws::{CloseCode, Limits, ProviderClose};
 use support::*;
 

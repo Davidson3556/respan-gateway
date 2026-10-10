@@ -1,5 +1,5 @@
 use super::*;
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
 use respan_gateway_conversation::{Message, Role};
 

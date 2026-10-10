@@ -9,14 +9,15 @@ mod text;
 
 use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Block, Content, Finish, Input, Message, Output, Role, Tool};
+use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
+use respan_gateway_core::{ErrorCode, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{HttpClient, Status};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
-use respan_gateway_sdk::{ErrorCode, Upstream, Usage};
 use serde_json::{self, json};
 use support::run_filter as run;
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
@@ -140,9 +141,7 @@ fn an_event_left_showing_nothing_waits_for_one_that_does() {
 fn a_keep_alive_or_usage_alone_passes_at_once_unless_events_wait() {
     let mut holdback = Holdback::new(Terms);
     let mut out = Vec::new();
-    let mut counts = Usage::default();
-    counts.add("output_tokens", 3);
-    let usage = Output::usage(counts);
+    let usage = Output::usage(Usage::new(0, 3));
     assert!(holdback.edit(keep_alive(), &mut out).is_ok());
     assert_eq!(out, [keep_alive()]);
     // "bo" may start a match, so it is held; usage alone still passes.
@@ -327,7 +326,7 @@ fn numbers_in_json_text_are_read_but_not_the_requests_own() -> Result<(), Fault>
     let mut chat = Input::new([call]);
     chat.native
         .get_or_insert_with(|| {
-            respan_gateway_sdk::NativeFields::new("openai-chat", Default::default())
+            respan_gateway_core::NativeFields::new("openai-chat", Default::default())
         })
         .fields
         .insert("seed".into(), json!(4111111111111111u64));
@@ -416,7 +415,7 @@ fn http_transport(
     header: &'static str,
     key: &'static str,
 ) -> Result<
-    impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static,
+    impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static,
     Fault,
 > {
     let mut headers = HeaderMap::new();
@@ -425,11 +424,11 @@ fn http_transport(
 }
 
 fn gateway_with(
-    openai: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    openai: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
-    anthropic: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    anthropic: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
@@ -690,9 +689,9 @@ async fn a_clean_stream_passes_unchanged() -> Result<(), Fault> {
 /// event framing. Provider protocol tests use mockllm and real HttpClient.
 fn local(
     chunks: Vec<Result<Bytes, Fault>>,
-) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
+) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
 {
-    use respan_gateway_sdk::futures::{StreamExt, TryStreamExt, stream};
+    use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
     respan_gateway_http::connect(
         move |call| {
             let chunks = chunks.clone();

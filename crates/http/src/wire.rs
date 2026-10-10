@@ -1,7 +1,7 @@
 //! Explicit HTTP data shared with plugins through extensions.
 use bytes::Bytes;
 use http::{Request, Response, response::Parts};
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::Fault;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The client's request as it came, without its

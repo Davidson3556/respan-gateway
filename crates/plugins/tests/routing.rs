@@ -6,6 +6,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::future::BoxFuture;
+use respan_gateway_core::futures::{FutureExt, StreamExt, sink, stream};
+use respan_gateway_core::{
+    BadRequest, ClientContext, Connection, ErrorCode, EventSink, EventStream, Fault, Format,
+    Gateway, Internal, Plugin, ProviderContext, Response, Upstream, async_trait,
+};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::opaque::Passthrough;
 use respan_gateway_http::http::{
@@ -13,16 +21,8 @@ use respan_gateway_http::http::{
     header::{AUTHORIZATION, RETRY_AFTER},
 };
 use respan_gateway_http::{Body, Completion, HttpClient, error_code, retryable};
-use respan_gateway_openai::OpenAiChat;
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_plugins::routing::{Attempt, Backoff, Role, Until, first_success, race};
-use respan_gateway_sdk::futures::channel::oneshot;
-use respan_gateway_sdk::futures::future::BoxFuture;
-use respan_gateway_sdk::futures::{FutureExt, StreamExt, sink, stream};
-use respan_gateway_sdk::{
-    BadRequest, ClientContext, Connection, ErrorCode, EventSink, EventStream, Fault, Format,
-    Gateway, Internal, Plugin, ProviderContext, Response, Upstream, async_trait,
-};
 /// An end by its message, for comparing: `Fault` has no equality.
 fn ended(end: Result<(), Fault>) -> Result<(), String> {
     end.map_err(|f| f.message().to_owned())
@@ -1347,7 +1347,7 @@ async fn content_policy_accepts_custom_events_and_captured_configuration() {
 #[tokio::test]
 async fn until_end_falls_back_when_a_provider_filter_fails_at_end() {
     struct FailEnd;
-    impl respan_gateway_sdk::Filter<Output> for FailEnd {
+    impl respan_gateway_core::Filter<Output> for FailEnd {
         fn edit(&mut self, value: Output, out: &mut Vec<Output>) -> Result<(), Fault> {
             out.push(value);
             Ok(())

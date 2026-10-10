@@ -15,10 +15,10 @@ use h::{
     bytes::{Bytes, BytesMut},
     http::{Request, Response},
 };
+use respan_gateway_core::Upstream;
+use respan_gateway_core::futures::{self, FutureExt, Sink, SinkExt, StreamExt, future, stream};
+use respan_gateway_core::{EventSink, EventStream, Extensions, Fault};
 use respan_gateway_http as h;
-use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::futures::{self, FutureExt, Sink, SinkExt, StreamExt, future, stream};
-use respan_gateway_sdk::{EventSink, EventStream, Extensions, Fault};
 
 struct Writes {
     calls: Arc<AtomicUsize>,
@@ -497,7 +497,7 @@ async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
     );
     assert_eq!(
         fault.get(),
-        Some(&respan_gateway_sdk::RetryAfter(Duration::from_secs(3)))
+        Some(&respan_gateway_core::RetryAfter(Duration::from_secs(3)))
     );
     let answer = &fault
         .get::<h::ProviderError>()
@@ -513,7 +513,7 @@ async fn a_refused_answer_is_read_whole_into_the_error_readers_fault() {
 /// that did not is refused, the answer never relayed.
 #[tokio::test]
 async fn a_passthrough_refuses_a_101_no_one_asked_for() {
-    use respan_gateway_sdk::Format;
+    use respan_gateway_core::Format;
     let send = h::connect(
         |_| async {
             let mut response = Response::new(Body::default());

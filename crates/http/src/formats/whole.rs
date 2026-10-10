@@ -3,10 +3,10 @@
 use std::marker::PhantomData;
 
 use futures::{StreamExt, TryStreamExt, stream};
+use respan_gateway_core::{EventStream, Fault, Upstream};
 use respan_gateway_http::Body;
 use respan_gateway_http::Encoder;
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_sdk::{EventStream, Fault, Upstream};
 
 /// Read a body whole, then its values through `on_body`. Values `on_body`
 /// pushes before failing precede its fault. A body over its

@@ -16,13 +16,10 @@ respan-gateway-mcp-messages = { path = "crates/mcp-messages" }
 respan-gateway-realtime = { path = "crates/realtime" }
 respan-gateway-core = { path = "crates/core" }
 respan-gateway-conversation = { path = "crates/conversation" }
-respan-gateway-sdk = { path = "crates/sdk" }
 respan-gateway-http = { path = "crates/http" }
 respan-gateway-plugins = { path = "crates/plugins" }
 respan-gateway-axum = { path = "crates/axum" }
-respan-gateway-codec = { path = "crates/codec" }
-respan-gateway-openai = { path = "crates/openai" }
-respan-gateway-anthropic = { path = "crates/anthropic" }
+respan-gateway-chat = { path = "crates/chat" }
 respan-gateway-mcp = { path = "crates/mcp" }
 respan-gateway-ws = { path = "crates/ws" }
 async-trait = "0.1"

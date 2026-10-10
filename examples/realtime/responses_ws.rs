@@ -10,9 +10,9 @@ mod budget;
 #[path = "../support/live/serve.rs"]
 mod serve;
 use budget::{Budget, OUTPUT};
-use respan_gateway_sdk::BadRequest;
-use respan_gateway_sdk::futures::{StreamExt, TryStreamExt};
-use respan_gateway_sdk::{
+use respan_gateway_core::BadRequest;
+use respan_gateway_core::futures::{StreamExt, TryStreamExt};
+use respan_gateway_core::{
     ClientContext, EventStream, Fault, Gateway, Plugin, Response, async_trait,
 };
 #[path = "../support/billing/ledger.rs"]

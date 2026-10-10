@@ -6,9 +6,9 @@ use std::marker::PhantomData;
 
 use crate::{Body, Encoder, Incoming, Outgoing, Reply, bodiless};
 use futures::StreamExt;
+use respan_gateway_core::{Connection, EventSink, EventStream, Fault, Format};
 use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::http::{self, StatusCode, request::Parts as RequestHead};
-use respan_gateway_sdk::{Connection, EventSink, EventStream, Fault, Format};
 
 /// A request's message in format `F`, as the client sent it.
 pub struct Input<F>(pub http::Request<Bytes>, PhantomData<fn() -> F>);

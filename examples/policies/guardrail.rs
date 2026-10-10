@@ -20,17 +20,17 @@
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Input, Output};
+use respan_gateway_core::ErrorCode;
+use respan_gateway_core::futures::stream;
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
+use respan_gateway_core::{Response, async_trait};
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{Request, StatusCode};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::futures::stream;
-use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, ProviderContext};
-use respan_gateway_sdk::{Response, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -150,7 +150,7 @@ impl Plugin for Cache {
 /// transport is
 /// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn base(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
@@ -172,7 +172,7 @@ fn guarded(gw: Gateway, middle: impl FnOnce(Gateway) -> Gateway) -> Result<Gatew
 /// The guard around a cache, and `extra` registered after the cache and
 /// before `guard-input`.
 fn gateway_with(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
@@ -182,7 +182,7 @@ fn gateway_with(
 }
 
 fn gateway(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

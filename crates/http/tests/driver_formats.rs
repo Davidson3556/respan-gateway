@@ -7,16 +7,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Input;
-use respan_gateway_http::http::{self, HeaderValue, StatusCode};
-use respan_gateway_http::{Body, Completion, http::response::Parts as ResponseHead};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::futures::{StreamExt, stream};
-use respan_gateway_sdk::{
+use respan_gateway_core::Upstream;
+use respan_gateway_core::futures::{StreamExt, stream};
+use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
+use respan_gateway_http::http::{self, HeaderValue, StatusCode};
+use respan_gateway_http::{Body, Completion, http::response::Parts as ResponseHead};
 #[allow(dead_code)]
 #[path = "../../../tests/support/hooks.rs"]
 mod hooks;
@@ -67,14 +67,14 @@ type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;
 fn marking(
     at: scripted::ScriptedAt,
     marks: Marks,
-) -> impl Fn(http::Request<Body>) -> respan_gateway_sdk::futures::future::BoxFuture<'static, WireResult>
+) -> impl Fn(http::Request<Body>) -> respan_gateway_core::futures::future::BoxFuture<'static, WireResult>
 {
-    use respan_gateway_sdk::futures::FutureExt;
+    use respan_gateway_core::futures::FutureExt;
     move |request| {
         lock(&marks).push(
             request
                 .extensions()
-                .get::<respan_gateway_sdk::Extensions>()
+                .get::<respan_gateway_core::Extensions>()
                 .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some()),
         );
         let at = at.clone();
@@ -671,7 +671,10 @@ impl Plugin for RelaySame {
             Ok(None)
         }
     }
-    async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(
+        &self,
+        px: &mut respan_gateway_core::ProviderContext,
+    ) -> Result<(), Fault> {
         if px
             .extensions()
             .get::<respan_gateway_http::SendRaw>()

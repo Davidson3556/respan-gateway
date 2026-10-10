@@ -26,18 +26,18 @@ use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
 use respan_gateway_http::formats::opaque;
 
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::{Delta, Input, Message, Output, Role};
+use respan_gateway_core::futures;
+use respan_gateway_core::{BadRequest, Upstream};
+use respan_gateway_core::{
+    ClientContext, EventSink, EventStream, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
+    Response, async_trait,
+};
 use respan_gateway_http::Encoder;
 use respan_gateway_http::formats::set_path;
 use respan_gateway_http::{Completion, Incoming, Outgoing, Wire};
 use respan_gateway_http::{http, http_body, http_body_util};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::futures;
-use respan_gateway_sdk::{BadRequest, Upstream};
-use respan_gateway_sdk::{
-    ClientContext, EventSink, EventStream, Fault, Filter, Format, Gateway, Plugin, ProviderContext,
-    Response, async_trait,
-};
 use serde_json::{Value, json};
 #[cfg(not(feature = "reqwest"))]
 use std::collections::VecDeque;
@@ -155,7 +155,7 @@ impl Format<Incoming, Say, Heard> for Talk {
     fn matches(&self, io: &Incoming) -> bool {
         io.request().uri().path().ends_with("/talk")
     }
-    fn bind(&self, io: Incoming) -> Result<respan_gateway_sdk::Connection<Say, Heard>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<respan_gateway_core::Connection<Say, Heard>, Fault> {
         Ok(io.bind(
             |request| read_talk(request, false),
             talk_reply,
@@ -168,7 +168,7 @@ impl Format<Outgoing, Heard, Say> for Talk {
     fn name(&self) -> &str {
         "talk"
     }
-    fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Heard, Say>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<respan_gateway_core::Connection<Heard, Say>, Fault> {
         Ok(io.bind(talk_call, read_heard, |answer| {
             respan_gateway_http::provider_fault("talk", answer)
         }))
@@ -956,7 +956,7 @@ async fn a_panic_ending_a_call_keeps_its_end() {
         async fn on_provider_end(
             &self,
             _px: &ProviderContext,
-            o: &Result<(), respan_gateway_sdk::Fault>,
+            o: &Result<(), respan_gateway_core::Fault>,
         ) {
             let code = o
                 .as_ref()
@@ -1013,7 +1013,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
         async fn on_client_end(
             &self,
             _cx: &ClientContext,
-            _o: &Result<(), respan_gateway_sdk::Fault>,
+            _o: &Result<(), respan_gateway_core::Fault>,
         ) {
             self.0.note("on_client_end");
         }
@@ -1021,7 +1021,7 @@ async fn a_call_pending_at_the_requests_end_ends_abandoned_before_it() {
         async fn on_provider_end(
             &self,
             _px: &ProviderContext,
-            o: &Result<(), respan_gateway_sdk::Fault>,
+            o: &Result<(), respan_gateway_core::Fault>,
         ) {
             let end = o
                 .as_ref()
@@ -1197,7 +1197,7 @@ impl Format<Outgoing, Heard, Say> for TalkHttp {
     fn name(&self) -> &str {
         "talk-http"
     }
-    fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Heard, Say>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<respan_gateway_core::Connection<Heard, Say>, Fault> {
         Ok(io.bind(
             |head, say: Option<&Say>| {
                 say.ok_or_else(|| Fault::config("talk-http cannot stream a request"))?;
@@ -1248,7 +1248,7 @@ impl Format<Incoming, opaque::Input<Raw>, opaque::Output<Raw>> for Raw {
     fn bind(
         &self,
         io: Incoming,
-    ) -> Result<respan_gateway_sdk::Connection<opaque::Input<Raw>, opaque::Output<Raw>>, Fault>
+    ) -> Result<respan_gateway_core::Connection<opaque::Input<Raw>, opaque::Output<Raw>>, Fault>
     {
         Ok(io.bind(
             opaque::read_request,
@@ -1264,7 +1264,7 @@ impl Format<Outgoing, opaque::Output<Raw>, opaque::Input<Raw>> for Raw {
     fn bind(
         &self,
         io: Outgoing,
-    ) -> Result<respan_gateway_sdk::Connection<opaque::Output<Raw>, opaque::Input<Raw>>, Fault>
+    ) -> Result<respan_gateway_core::Connection<opaque::Output<Raw>, opaque::Input<Raw>>, Fault>
     {
         Ok(io.bind(
             |head, input| {
@@ -1375,7 +1375,7 @@ async fn a_clone_of_a_polled_call_keeps_its_settings() {
 #[tokio::test]
 async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
     #[derive(Clone, Default)]
-    struct Hold(Notes, Arc<Mutex<Vec<respan_gateway_sdk::Call>>>);
+    struct Hold(Notes, Arc<Mutex<Vec<respan_gateway_core::Call>>>);
 
     #[async_trait]
     impl Plugin for Hold {
@@ -1403,7 +1403,7 @@ async fn a_pending_call_left_unpolled_still_ends_with_its_request() {
         async fn on_provider_end(
             &self,
             _px: &ProviderContext,
-            o: &Result<(), respan_gateway_sdk::Fault>,
+            o: &Result<(), respan_gateway_core::Fault>,
         ) {
             let end = o
                 .as_ref()
@@ -1449,7 +1449,7 @@ async fn a_call_kept_past_its_request_does_not_keep_the_clients_body() {
     }
 
     #[derive(Clone, Default)]
-    struct Stash(Arc<Mutex<Vec<respan_gateway_sdk::Call>>>);
+    struct Stash(Arc<Mutex<Vec<respan_gateway_core::Call>>>);
 
     #[async_trait]
     impl Plugin for Stash {
@@ -1697,7 +1697,7 @@ async fn dropped_then_retried() {
         async fn on_provider_end(
             &self,
             px: &ProviderContext,
-            _o: &Result<(), respan_gateway_sdk::Fault>,
+            _o: &Result<(), respan_gateway_core::Fault>,
         ) {
             if px.provider() == "never" {
                 self.2.notified().await;
@@ -1708,7 +1708,7 @@ async fn dropped_then_retried() {
         async fn on_client_end(
             &self,
             _cx: &ClientContext,
-            _o: &Result<(), respan_gateway_sdk::Fault>,
+            _o: &Result<(), respan_gateway_core::Fault>,
         ) {
             self.0.note("on_client_end");
         }
@@ -1806,7 +1806,7 @@ impl Format<Incoming, Say, Heard> for Strict {
     fn matches(&self, io: &Incoming) -> bool {
         Talk.matches(io)
     }
-    fn bind(&self, io: Incoming) -> Result<respan_gateway_sdk::Connection<Say, Heard>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<respan_gateway_core::Connection<Say, Heard>, Fault> {
         Ok(io.bind(
             |request| read_talk(request, true),
             talk_reply,
@@ -1818,7 +1818,7 @@ impl Format<Outgoing, Heard, Say> for Strict {
     fn name(&self) -> &str {
         "talk"
     }
-    fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Heard, Say>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<respan_gateway_core::Connection<Heard, Say>, Fault> {
         Talk.bind(io)
     }
 }
@@ -1956,7 +1956,7 @@ impl Plugin for WsToSse {
                 let reply = call
                     .clone()
                     .with_input(chat)
-                    .with_extension(respan_gateway_codec::StreamResponse(true));
+                    .with_extension(respan_gateway_chat::StreamResponse(true));
                 async move { Ok(reply.await?.outputs::<Output>()) }
             })
             .try_flatten()

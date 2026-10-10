@@ -1,8 +1,8 @@
 # HTTP bindings
 
 `respan-gateway-http` connects native HTTP messages to core's streams and sinks.
-It is for protocol authors, separate from the plugin SDK. Concrete vendor formats
-live in `respan-gateway-openai` and `respan-gateway-anthropic`; MCP and WebSockets are optional integrations.
+It is for protocol authors; plugins need only core. Concrete vendor formats
+live in `respan-gateway-chat`; MCP and WebSockets are optional integrations.
 
 A format implements core directly in two orientations:
 
@@ -39,7 +39,7 @@ use respan_gateway_http as h;
 use h::bytes::Bytes;
 use h::formats::{self, whole};
 use h::http::{Method, Uri};
-use respan_gateway_sdk::{BadRequest, Connection, Fault, Format, Result};
+use respan_gateway_core::{BadRequest, Connection, Fault, Format, Result};
 
 #[derive(Clone, Copy)]
 struct Echo;

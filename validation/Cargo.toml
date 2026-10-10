@@ -19,10 +19,9 @@ bench = false
 [dependencies]
 respan-gateway-realtime = { path = "../crates/realtime" }
 respan-gateway-conversation = { path = "../crates/conversation" }
-respan-gateway-sdk = { path = "../crates/sdk" }
+respan-gateway-core = { path = "../crates/core" }
 respan-gateway-http = { path = "../crates/http", features = ["reqwest"] }
-respan-gateway-anthropic = { path = "../crates/anthropic" }
-respan-gateway-openai = { path = "../crates/openai" }
+respan-gateway-chat = { path = "../crates/chat" }
 respan-gateway-plugins = { path = "../crates/plugins" }
 respan-gateway-axum = { path = "../crates/axum", features = ["ws"] }
 respan-gateway-mcp = { path = "../crates/mcp" }

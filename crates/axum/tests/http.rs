@@ -9,14 +9,14 @@ use axum::routing::post;
 use respan_gateway_conversation::{Input, Output};
 use std::sync::{Arc, Mutex};
 
-use respan_gateway_anthropic::AnthropicMessages;
 use respan_gateway_axum::router;
+use respan_gateway_chat::anthropic::AnthropicMessages;
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::http;
 use respan_gateway_http::{Body, Completion, Outgoing};
 use respan_gateway_http::{CallHeaders, credentials};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
 use tokio::net::TcpListener;
 
 use respan_gateway_http::relay;
@@ -393,7 +393,7 @@ const CLIENT: [(&str, &str); 7] = [
 /// A call of `head` with `ext`, as the kernel hands a transport.
 fn exchange(
     head: http::request::Parts,
-    ext: respan_gateway_sdk::Extensions,
+    ext: respan_gateway_core::Extensions,
 ) -> http::Request<Body> {
     let mut call = http::Request::from_parts(head, Body::full(""));
     call.extensions_mut().insert(ext);
@@ -421,7 +421,7 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
                     async move {
                         assert!(
                             call.extensions()
-                                .get::<respan_gateway_sdk::Extensions>()
+                                .get::<respan_gateway_core::Extensions>()
                                 .is_some_and(|e| e.get::<respan_gateway_http::SendRaw>().is_some())
                         );
                         credentials(&mut call, &http::HeaderMap::new());
@@ -454,7 +454,7 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
 fn headers_of_its_own_take_the_clients_credentials_off() {
     let query = "/v1/chat?key=a&api_key=b&access_token=c&api-version=1";
     let head = call_head(query, &CLIENT);
-    let mut call = exchange(head, respan_gateway_sdk::Extensions::new());
+    let mut call = exchange(head, respan_gateway_core::Extensions::new());
 
     let own = headers(&[("x-team", "t")]);
     credentials(&mut call, &own);
@@ -475,7 +475,7 @@ fn headers_of_its_own_take_the_clients_credentials_off() {
 fn a_calls_own_headers_are_the_transports_for_that_call() {
     // With transport headers, the call's replace those of the same name.
     let head = call_head("/v1/chat?key=a", &CLIENT);
-    let mut ext = respan_gateway_sdk::Extensions::new();
+    let mut ext = respan_gateway_core::Extensions::new();
     let call = headers(&[("authorization", "Bearer tenant"), ("host", "evil")]);
     ext.insert(CallHeaders(call));
     let own = headers(&[("authorization", "Bearer operator"), ("x-team", "t")]);
@@ -500,7 +500,7 @@ fn a_calls_own_headers_are_the_transports_for_that_call() {
     // Without transport headers, the call's still remove the client's
     // credentials.
     let head = call_head("/v1/chat", &CLIENT);
-    let mut ext = respan_gateway_sdk::Extensions::new();
+    let mut ext = respan_gateway_core::Extensions::new();
     let call = headers(&[("x-api-key", "tenant")]);
     ext.insert(CallHeaders(call));
     let mut call = exchange(head, ext);
@@ -642,9 +642,9 @@ async fn it_strips_the_clients_cookies_and_forwarding_headers() {
 
 #[tokio::test]
 async fn it_sends_a_whole_body_with_its_length_and_streams_one_that_streams() {
+    use respan_gateway_core::futures;
     use respan_gateway_http::bytes::Bytes;
     use respan_gateway_http::http_body_util::BodyExt;
-    use respan_gateway_sdk::futures;
 
     // Echoes the body, prefixed by its `content-length`, or `-` if none.
     let provider = spawn(Router::new().route(
@@ -706,7 +706,7 @@ impl Plugin for L6Ends {
     }
     async fn on_provider_end(
         &self,
-        _px: &respan_gateway_sdk::ProviderContext,
+        _px: &respan_gateway_core::ProviderContext,
         end: &Result<(), Fault>,
     ) {
         let code = end

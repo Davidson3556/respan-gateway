@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use respan_gateway_http::{Body, Completion, Outgoing, connect, http};
 
 use crate::http_support::LIMIT;
-use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::{Fault, Gateway, Plugin, ProviderContext, async_trait};
+use respan_gateway_conversation::Usage;
+use respan_gateway_core::{Fault, Gateway, Plugin, ProviderContext, async_trait};
 
 pub type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 
@@ -14,7 +14,7 @@ pub fn add_provider<I, O, F, S, Fut>(name: &str, format: F, sender: S) -> AddPro
 where
     I: Clone + Send + Sync + 'static,
     O: Clone + Send + Sync + 'static,
-    F: respan_gateway_sdk::Format<Outgoing, O, I>,
+    F: respan_gateway_core::Format<Outgoing, O, I>,
     S: Fn(http::Request<Body>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<(http::Response<Body>, Option<Completion>), Fault>>
         + Send
@@ -44,10 +44,7 @@ pub struct Metered(Arc<Mutex<Usage>>);
 
 impl Metered {
     pub fn total(&self) -> Usage {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

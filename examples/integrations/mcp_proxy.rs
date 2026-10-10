@@ -15,9 +15,9 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use respan_gateway_core::futures::stream;
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_sdk::futures::stream;
-use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use serde_json::{Value, json};
 
 use respan_gateway_http::HttpClient;
@@ -77,7 +77,7 @@ impl Plugin for ToolAllowList {
 }
 
 fn gateway(
-    server: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    server: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
@@ -221,7 +221,7 @@ async fn initialize(gw: &Gateway) -> Result<(StatusCode, Option<String>, Value),
     )
     .await?;
     if initialized.2["result"]["protocolVersion"] != PROTOCOL_VERSION {
-        return Err(respan_gateway_sdk::Upstream::fault(
+        return Err(respan_gateway_core::Upstream::fault(
             "the MCP server did not negotiate the requested protocol",
         ));
     }
@@ -234,7 +234,7 @@ async fn initialize(gw: &Gateway) -> Result<(StatusCode, Option<String>, Value),
     )
     .await?;
     if status != StatusCode::ACCEPTED {
-        return Err(respan_gateway_sdk::Upstream::fault(
+        return Err(respan_gateway_core::Upstream::fault(
             "the MCP server did not accept initialization",
         ));
     }

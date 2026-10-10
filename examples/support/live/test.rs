@@ -1,6 +1,6 @@
 #![allow(dead_code, clippy::unwrap_used)]
 use futures::{SinkExt, StreamExt};
-use respan_gateway_sdk::Gateway;
+use respan_gateway_core::Gateway;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

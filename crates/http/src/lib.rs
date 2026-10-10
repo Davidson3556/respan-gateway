@@ -59,8 +59,8 @@ use http::{
     response::Parts as ResponseHead,
 };
 use http_body_util::BodyExt;
-use respan_gateway_sdk::futures;
-use respan_gateway_sdk::{
+use respan_gateway_core::futures;
+use respan_gateway_core::{
     Abandoned, BadRequest, Config, ErrorCode, Extensions, Fault, Gateway, Internal, NotFound,
     RetryAfter, Truncated, Upstream,
 };

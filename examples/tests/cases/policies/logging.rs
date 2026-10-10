@@ -1,5 +1,4 @@
 use super::*;
-use respan_gateway_conversation::units;
 
 #[tokio::test]
 async fn content_is_logged_except_for_a_zero_retention_tenant() -> Result<(), Fault> {
@@ -21,6 +20,6 @@ async fn content_is_logged_except_for_a_zero_retention_tenant() -> Result<(), Fa
     // A success logs no status.
     assert_eq!((zdr.status, zdr.end.as_str()), (None, "ok"));
     // Billing and audit still flow: the call's usage is on its record.
-    assert_eq!(records[2].usage.get(units::OUTPUT_TOKENS), Some(2));
+    assert_eq!(records[2].usage.output_tokens, 2);
     Ok(())
 }

@@ -3,6 +3,8 @@
 
 use std::borrow::Cow;
 
+use respan_gateway_core::futures::StreamExt;
+use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, Format, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats;
 use respan_gateway_http::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL, UPGRADE};
@@ -11,15 +13,13 @@ use respan_gateway_http::http::{HeaderValue, Method, StatusCode};
 use respan_gateway_http::http::{Request, Response};
 use respan_gateway_http::{self as h, Body, Incoming, Outgoing};
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_sdk::futures::StreamExt;
-use respan_gateway_sdk::{BadRequest, Connection, EventStream, Fault, Format, Upstream};
 
 use crate::WsTransport;
 
 /// An event's `json` as its frame. An event of another format is the
 /// gateway's misconfiguration, a plugin's that moved it untranslated, not
 /// the client's: `config`.
-fn written(format: &str, event: &respan_gateway_sdk::NativeValue) -> Result<Bytes, Fault> {
+fn written(format: &str, event: &respan_gateway_core::NativeValue) -> Result<Bytes, Fault> {
     if event.format.as_ref() != format {
         return Err(Fault::config(
             "a realtime event requires explicit translation to another format",
@@ -253,7 +253,7 @@ mod tests {
         assert!(
             written("two", &edited.event)
                 .expect_err("foreign event")
-                .is::<respan_gateway_sdk::Config>()
+                .is::<respan_gateway_core::Config>()
         );
     }
 
@@ -262,7 +262,7 @@ mod tests {
         for bad in ["", "a, b", "a b", "realtime\n"] {
             let refused = JsonEvents::new("e", "/e").protocol(bad);
             let refused = refused.expect_err("no token");
-            assert!(refused.is::<respan_gateway_sdk::Config>(), "{bad:?}");
+            assert!(refused.is::<respan_gateway_core::Config>(), "{bad:?}");
         }
         assert!(JsonEvents::new("e", "/e").protocol("v1.realtime").is_ok());
     }

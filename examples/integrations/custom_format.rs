@@ -11,21 +11,20 @@
 //!
 //! `batch_split.rs` builds on this kind (it includes this file as a module).
 
-use respan_gateway_sdk::{BadRequest, Upstream};
+use respan_gateway_core::{BadRequest, Upstream};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_conversation::units::INPUT_TOKENS;
+use respan_gateway_conversation::Usage;
+use respan_gateway_core::{
+    ClientContext, Connection, Fault, Format, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
+};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::{self as formats, whole};
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
-use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::{
-    ClientContext, Connection, Fault, Format, Gateway, Plugin, ProviderContext, Response,
-    async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -157,7 +156,7 @@ fn read_embeddings(raw: Bytes) -> Result<Embeddings, Fault> {
         .ok_or_else(malformed)?;
     let usage = v.remove("usage");
     if let Some(tokens) = usage.and_then(|u| u["prompt_tokens"].as_u64()) {
-        said.usage.add(INPUT_TOKENS, tokens);
+        said.usage.input_tokens += tokens;
     }
     said.rest = v;
     Ok(said)
@@ -186,7 +185,7 @@ fn write_embeddings(one: &[Embeddings]) -> Result<Bytes, Fault> {
     let data = e.vectors.iter().enumerate();
     let data = data.map(|(i, v)| json!({ "index": i, "embedding": v }));
     v.insert("data".into(), data.collect());
-    let tokens = e.usage.get(INPUT_TOKENS);
+    let tokens = e.usage.input_tokens;
     v.insert(
         "usage".into(),
         json!({ "prompt_tokens": tokens, "total_tokens": tokens }),
@@ -249,11 +248,7 @@ async fn embed(body: &'static str) -> Result<(Bytes, StatusCode, Bytes, Usage), 
     let requests = openai.requests();
     assert_eq!(requests.len(), 1, "one provider embedding request");
     let sent = requests[0].raw.clone();
-    let usage = metered
-        .0
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
+    let usage = *metered.0.lock().unwrap_or_else(PoisonError::into_inner);
     Ok((sent, status, answered?, usage))
 }
 

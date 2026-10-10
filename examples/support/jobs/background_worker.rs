@@ -2,7 +2,7 @@
 //! holds and the webhook outbox; task handles only speed up local cancellation.
 
 use super::*;
-use respan_gateway_sdk::Upstream;
+use respan_gateway_core::Upstream;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn now() -> i64 {

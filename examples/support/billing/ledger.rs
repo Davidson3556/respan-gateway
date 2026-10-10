@@ -1,7 +1,7 @@
 //! Private example store: nested accounts and expiring reservations.
 //! Not durable billing infrastructure; applications own persistence and recovery.
 
-use respan_gateway_sdk::ErrorCode;
+use respan_gateway_core::ErrorCode;
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use respan_gateway_core::Details;
+use respan_gateway_core::{Fault, async_trait};
 use respan_gateway_http::Status;
-use respan_gateway_sdk::Details;
-use respan_gateway_sdk::{Fault, async_trait};
 use serde_json::json;
 use tokio::time::Instant;
 

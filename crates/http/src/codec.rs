@@ -4,7 +4,7 @@ use crate::Body;
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use http::request::Parts as RequestHead;
-use respan_gateway_sdk::{EventStream, Fault};
+use respan_gateway_core::{EventStream, Fault};
 
 /// Stateful values-to-bytes encoding, independent of heads and transport I/O.
 pub trait Encoder<T>: Send + 'static {

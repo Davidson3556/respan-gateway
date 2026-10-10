@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use pdf_converter::extract_pdf_with;
 use pdf_fixture::pdf_document;
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::Fault;
 
 #[tokio::test]
 #[ignore = "requires Poppler pdftotext installed"]

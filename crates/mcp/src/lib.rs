@@ -24,7 +24,7 @@ pub use stdio::{Owner, StdioTransport};
 pub use streamable::{SESSION, StreamableHttp};
 
 /// The JSON-RPC error code a format writes for a fault, as a fact
-/// ([`Fault::with`](respan_gateway_sdk::Fault::with)). A fault without one
+/// ([`Fault::with`](respan_gateway_core::Fault::with)). A fault without one
 /// is written as an invalid request (-32600) if it is a `BadRequest`, else
 /// as an internal error (-32603). A server's JSON-RPC error that refused a
 /// call is read back into one.

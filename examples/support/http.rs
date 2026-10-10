@@ -1,8 +1,8 @@
 //! Small HTTP helpers for runnable examples using local scripted providers.
 
+use respan_gateway_core::Fault;
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
-use respan_gateway_sdk::Fault;
 
 pub fn openai(base: &str) -> Result<HttpClient, Fault> {
     let mut headers = HeaderMap::new();

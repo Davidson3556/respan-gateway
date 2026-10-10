@@ -7,9 +7,9 @@ use axum::Router;
 use axum::extract::Request;
 use axum::response::Response;
 use hyper_util::rt::TokioIo;
+use respan_gateway_core::Gateway;
+use respan_gateway_core::futures::FutureExt;
 use respan_gateway_http::http::header;
-use respan_gateway_sdk::Gateway;
-use respan_gateway_sdk::futures::FutureExt;
 use respan_gateway_ws::Limits;
 
 /// A router that serves each WebSocket upgrade (`Upgrade: websocket`) as a
@@ -20,8 +20,8 @@ use respan_gateway_ws::Limits;
 /// that a server's graceful shutdown drains them too:
 ///
 /// ```no_run
-/// # use respan_gateway_sdk::futures::FutureExt;
-/// # async fn run(gateway: respan_gateway_sdk::Gateway) -> std::io::Result<()> {
+/// # use respan_gateway_core::futures::FutureExt;
+/// # async fn run(gateway: respan_gateway_core::Gateway) -> std::io::Result<()> {
 /// let (_stop, stopped) = tokio::sync::oneshot::channel::<()>();
 /// let stopped = stopped.map(drop).shared();
 /// let (limit, limits) = (|_: &_| 32 << 20, Default::default());

@@ -8,20 +8,17 @@ and runnable examples. The Python distribution is planned separately under
 
 | Location | Owns | Internal production dependencies |
 | --- | --- | --- |
-| `crates/core/` | Execution, typed streams, plugin hooks, call and response lifecycles | None |
-| `crates/sdk/` | Public core facade, usage, fault facts and tagged native values | Core |
-| `crates/conversation/` | Conversation requests, reply events and assembly | SDK |
-| `crates/realtime/` | Format-tagged realtime event pair | SDK |
+| `crates/core/` | Execution, typed streams, plugin hooks, call and response lifecycles, fault facts and tagged native values | None |
+| `crates/conversation/` | Conversation requests, reply events, typed usage and assembly | Core |
+| `crates/realtime/` | Format-tagged realtime event pair | Core |
 | `crates/mcp-messages/` | Typed JSON-RPC messages | None |
-| `crates/http/` | HTTP bindings, framing, bodies, credentials and optional Reqwest transport | SDK |
-| `crates/ws/` | WebSocket sessions at both edges (provider transport, client `serve`), JSON event format and its vendor presets | SDK, realtime, HTTP |
-| `crates/mcp/` | MCP streamable HTTP and stdio transport | SDK, mcp-messages, HTTP |
-| `crates/codec/` | What the conversation codecs share: HTTP codec, reader and encoder machinery | SDK, conversation, HTTP |
-| `crates/openai/` | OpenAI Chat codec and its vendor dialects | SDK, conversation, HTTP, codec |
-| `crates/anthropic/` | Anthropic Messages codec | SDK, conversation, HTTP, codec |
-| `crates/plugins/` | Model routing, attempts, fallback, races and backoff | SDK |
-| `crates/axum/` | HTTP ingress and optional WebSocket hosting | SDK, HTTP, optional WS |
-| `apps/gateway/` | Executable, YAML configuration and component registration | SDK, conversation, realtime, HTTP, WS, OpenAI, Anthropic, plugins, Axum |
+| `crates/http/` | HTTP bindings, framing, bodies, credentials and optional Reqwest transport | Core |
+| `crates/ws/` | WebSocket sessions at both edges (provider transport, client `serve`), JSON event format and its vendor presets | Core, realtime, HTTP |
+| `crates/mcp/` | MCP streamable HTTP and stdio transport | Core, mcp-messages, HTTP |
+| `crates/chat/` | OpenAI Chat (with vendor dialects) and Anthropic Messages formats, and the `Codec` trait they share | Core, conversation, HTTP |
+| `crates/plugins/` | Model routing, attempts, fallback, races and backoff | Core |
+| `crates/axum/` | HTTP ingress and optional WebSocket hosting | Core, HTTP, optional WS |
+| `apps/gateway/` | Executable, YAML configuration and component registration | Core, conversation, realtime, HTTP, WS, chat, plugins, Axum |
 | `examples/` | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
 Arrows below point from a dependency toward its consumers. Test dependencies
@@ -29,18 +26,15 @@ can cross these boundaries to exercise a complete request.
 
 ```mermaid
 flowchart LR
-    core --> sdk
-    sdk --> conversation
-    conversation --> codec
+    core --> conversation
+    conversation --> chat
     conversation --> gateway
-    sdk --> realtime
+    core --> realtime
     realtime --> ws
     mcp_messages[mcp-messages] --> mcp
-    sdk --> http
-    sdk --> plugins
-    http --> codec
-    codec --> openai
-    codec --> anthropic
+    core --> http
+    core --> plugins
+    http --> chat
     http --> mcp
     http --> ws
     http --> axum
@@ -48,8 +42,7 @@ flowchart LR
     realtime --> gateway
     ws --> gateway
     axum --> gateway
-    openai --> gateway
-    anthropic --> gateway
+    chat --> gateway
     plugins --> gateway
 ```
 
@@ -61,9 +54,9 @@ their filesystem locations.
 
 - The core owns execution and lifecycle contracts. It has no HTTP, provider,
   credential or LLM message dependency.
-- The SDK reexports the core's original types and supplies kind-neutral usage
-  and fault facts.
-  Protocol implementations depend on the SDK; the SDK does not depend on them.
+- Plugin authors use core directly. It supplies kind-neutral fault facts and
+  native values; usage is typed by the kind that reports it.
+  Protocol implementations depend on core; core does not depend on them.
 - Plugins are compiled in. Applications register concrete components using
   the same public contracts available to external plugin authors.
 - Protocol crates own wire framing and transport behavior. Provider codecs
@@ -73,12 +66,12 @@ their filesystem locations.
   HTTP envelopes in `mcp` (around mcp-messages' typed JSON-RPC `Message`),
   and HTTP's passthrough in `formats::opaque` (`Input<F>` / `Output<F>`).
   Codecs and transports depend on these models.
-  The SDK defines no kinds or `Format` implementations.
+  Core defines no kinds or `Format` implementations.
   Plugins and whole-body conversation encoders share the conversation crate's ordered
   `Assembled` fold instead of maintaining separate reply representations.
 - Applications own policy choices, configuration, prices, billing stores and
   durable jobs. The examples demonstrate those choices without making them
-  supported SDK APIs.
+  supported public APIs.
 - Core contracts are stable by default. Changes to those contracts require
   corresponding documentation and behavioral tests.
 
@@ -101,7 +94,7 @@ format can forget it: response handoff and backpressure, whole or live
 uploads, the headers no proxy passes on, a fault's status and `Retry-After`,
 refused answers read whole into a fault, and no body where HTTP has none.
 
-See the [SDK guide](../crates/sdk/README.md),
+See the [core guide](../crates/core/README.md),
 [conversation guide](../crates/conversation/README.md),
 [HTTP guide](../crates/http/README.md), and
 [routing guide](../crates/plugins/README.md) for their public contracts.

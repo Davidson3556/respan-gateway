@@ -1,7 +1,7 @@
 //! Typed media used in conversation content.
 
 use bytes::Bytes;
-use respan_gateway_sdk::NativeFields;
+use respan_gateway_core::NativeFields;
 
 /// Media content with its representation separated from its meaning.
 #[derive(Debug, Clone, PartialEq, Eq)]

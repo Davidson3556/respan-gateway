@@ -6,16 +6,16 @@
 //!
 //! `cargo run -p respan-gateway-examples --example wallet`
 
-use respan_gateway_sdk::{BadRequest, ErrorCode};
+use respan_gateway_core::{BadRequest, ErrorCode};
 use std::collections::HashMap;
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_core::{Fault, Gateway, ProviderContext, futures};
 use respan_gateway_examples::Price;
 use respan_gateway_examples::chat_bound::{answers, input_bound};
 use respan_gateway_http::Credential;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
-use respan_gateway_sdk::{Fault, Gateway, ProviderContext, futures};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
@@ -23,7 +23,7 @@ use respan_gateway_conversation::{Input, Output};
 #[path = "../support/billing/accounting.rs"]
 mod accounting;
 use accounting::{Accounting, Quote, Tally};
-use respan_gateway_openai::OpenAiChat;
+use respan_gateway_chat::openai::OpenAiChat;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -95,7 +95,7 @@ fn wallets() -> MemoryLedger {
 }
 
 fn gateway(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

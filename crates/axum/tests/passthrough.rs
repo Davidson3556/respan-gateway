@@ -1,7 +1,7 @@
 #![cfg(feature = "ws")]
 //! A session relayed through the opaque format arrives byte for byte, both
 //! ways, against two providers' real protocols (mockllm's OpenAI Realtime
-//! and Gemini Live) through the same `WsTransport`: the SDK knows neither.
+//! and Gemini Live) through the same `WsTransport`: the gateway knows neither.
 #![allow(clippy::unwrap_used)]
 
 mod support;

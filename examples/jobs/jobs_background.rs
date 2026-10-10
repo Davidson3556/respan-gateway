@@ -32,11 +32,15 @@
 //! `cargo run -p respan-gateway-examples --example jobs_background`
 
 use hmac::{Hmac, Mac};
-use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Upstream};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use respan_gateway_core::futures::{TryStreamExt, future, stream};
+use respan_gateway_core::{
+    ClientContext, EventStream, Extensions, Fault, Gateway, Plugin, Response, async_trait,
+};
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_examples::store::{
     Database,
@@ -48,10 +52,6 @@ use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Credential, HttpClient, Wire, built_wrong};
-use respan_gateway_sdk::futures::{TryStreamExt, future, stream};
-use respan_gateway_sdk::{
-    ClientContext, EventStream, Extensions, Fault, Gateway, Plugin, Response, async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -534,7 +534,10 @@ impl Jobs {
 
 #[async_trait]
 impl Plugin for Jobs {
-    async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
+    async fn on_provider(
+        &self,
+        px: &mut respan_gateway_core::ProviderContext,
+    ) -> Result<(), Fault> {
         // This application authenticates the upstream using the job owner's key.
         let mut headers = px
             .extensions()
@@ -697,11 +700,11 @@ async fn deployments() -> Result<(ResponsesServer, ResponsesServer), Fault> {
 }
 
 fn gateway(
-    east: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    east: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
-    west: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    west: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

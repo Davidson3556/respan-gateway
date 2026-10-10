@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use http::header::{self, CONNECTION, HeaderName, UPGRADE};
 use http::{HeaderMap, HeaderValue, request::Parts as RequestHead};
-use respan_gateway_sdk::{Extensions, Fault};
+use respan_gateway_core::{Extensions, Fault};
 
 use crate::credential::{is_credential, take_protocol_keys, take_query};
 use crate::{HOP_BY_HOP, remove_if, strip_named};

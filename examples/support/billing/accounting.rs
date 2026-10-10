@@ -1,13 +1,13 @@
 //! Private example policy: reserve before every call, settle once when it ends.
-//! Quotes, conservative charges and priced tallies are application policy, not SDK APIs.
+//! Quotes, conservative charges and priced tallies are application policy, not public APIs.
 
-use respan_gateway_sdk::{Abandoned, ErrorCode, Internal, Truncated};
+use respan_gateway_core::{Abandoned, ErrorCode, Internal, Truncated};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
+use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
 use respan_gateway_http::Status;
-use respan_gateway_sdk::{Fault, Plugin, ProviderContext, async_trait};
 
 use crate::ledger::{Amount, HoldId, Ledger};
 

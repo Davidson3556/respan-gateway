@@ -11,7 +11,7 @@
 //!   that connects to a `ws://` or `wss://` provider.
 //! - [`serve`]: a client's upgrade, through a gateway, for an adapter that
 //!   hosts sessions (`respan_gateway_axum::router_with_ws`).
-//! - [`JsonEvents`]: a [`Format`](respan_gateway_sdk::Format) whose kind is
+//! - [`JsonEvents`]: a [`Format`](respan_gateway_core::Format) whose kind is
 //!   one JSON event per frame ([`Input`](respan_gateway_realtime::Input) in, [`Output`](respan_gateway_realtime::Output) out),
 //!   for plugins that filter a session's events, with the vendors' presets
 //!   ([`JsonEvents::OPENAI_REALTIME`], [`JsonEvents::RESPONSES_WS`],
@@ -85,7 +85,7 @@ impl Default for Limits {
 /// [`RawErrors`](respan_gateway_http::RawErrors), as
 /// [`Relay`](respan_gateway_http::relay::Relay) relays one.
 ///
-/// [`Fault::with`]: respan_gateway_sdk::Fault::with
+/// [`Fault::with`]: respan_gateway_core::Fault::with
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CloseCode(pub u16);
 

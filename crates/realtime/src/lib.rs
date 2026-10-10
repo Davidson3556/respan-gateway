@@ -2,7 +2,7 @@
 //! Directional realtime events with explicit wire-format identity.
 //! Input travels client to provider; output travels provider to client.
 
-use respan_gateway_sdk::{FormatId, NativeValue};
+use respan_gateway_core::{FormatId, NativeValue};
 use serde_json::Value;
 
 macro_rules! event {

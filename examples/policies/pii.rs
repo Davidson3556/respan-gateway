@@ -28,15 +28,15 @@
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Input;
+use respan_gateway_core::ErrorCode;
+use respan_gateway_core::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
 use respan_gateway_http::Body;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, StatusCode};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -124,7 +124,7 @@ impl Plugin for PiiInput {
 /// the transport is
 /// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway_with(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
@@ -138,7 +138,7 @@ fn gateway_with(
 }
 
 fn gateway(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

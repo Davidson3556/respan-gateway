@@ -4,7 +4,7 @@
 //! provider-edge filter, so these tests show what such a filter sees.
 
 use respan_gateway_conversation::Input;
-use respan_gateway_sdk::{BadRequest, ErrorCode, Truncated, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Truncated, Upstream};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -12,6 +12,12 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use http::StatusCode;
 use http_body_util::BodyExt;
+use respan_gateway_conversation::Usage;
+use respan_gateway_core::futures;
+use respan_gateway_core::{
+    Call, ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
+    async_trait,
+};
 use respan_gateway_http::Body;
 use respan_gateway_http::Encoder;
 use respan_gateway_http::Status;
@@ -19,12 +25,6 @@ use respan_gateway_http::bodiless;
 use respan_gateway_http::bytes;
 use respan_gateway_http::http::request::Parts as RequestHead;
 use respan_gateway_http::{http, http_body_util};
-use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::futures;
-use respan_gateway_sdk::{
-    Call, ClientContext, EventStream, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
-    async_trait,
-};
 #[allow(dead_code, unused_imports)]
 #[path = "../../../tests/support/http.rs"]
 mod http_helpers;
@@ -51,7 +51,7 @@ const LINE: &str = "line";
 #[derive(Clone)]
 struct Line;
 
-impl respan_gateway_sdk::Format<respan_gateway_http::Incoming, LIn, LOut> for Line {
+impl respan_gateway_core::Format<respan_gateway_http::Incoming, LIn, LOut> for Line {
     fn name(&self) -> &str {
         LINE
     }
@@ -61,7 +61,7 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Incoming, LIn, LOut> for Li
     fn bind(
         &self,
         io: respan_gateway_http::Incoming,
-    ) -> Result<respan_gateway_sdk::Connection<LIn, LOut>, Fault> {
+    ) -> Result<respan_gateway_core::Connection<LIn, LOut>, Fault> {
         Ok(io.bind(
             |request| {
                 respan_gateway_http::messages(request, |_, raw| {
@@ -86,14 +86,14 @@ impl respan_gateway_sdk::Format<respan_gateway_http::Incoming, LIn, LOut> for Li
     }
 }
 
-impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Line {
+impl respan_gateway_core::Format<respan_gateway_http::Outgoing, LOut, LIn> for Line {
     fn name(&self) -> &str {
         LINE
     }
     fn bind(
         &self,
         io: respan_gateway_http::Outgoing,
-    ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
+    ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(line_call, line_outputs, line_refused))
     }
 }
@@ -160,8 +160,7 @@ impl LineDecoder {
             let said = match line.split_once(':') {
                 Some(("i", x)) => out(x),
                 Some(("u", n)) => {
-                    let mut u = Usage::default();
-                    u.add("t", n.parse().unwrap_or(0));
+                    let u = Usage::new(0, n.parse().unwrap_or(0));
                     LOut(String::new(), u)
                 }
                 Some(("x", m)) => return Err(Upstream::fault(m)),
@@ -193,7 +192,7 @@ struct LineEncoder(Option<Usage>);
 impl LineEncoder {
     fn release(&mut self, out: &mut BytesMut) {
         if let Some(u) = self.0.take() {
-            let n = u.get("t").unwrap_or(0);
+            let n = u.output_tokens;
             out.extend_from_slice(format!("u:{n}\n").as_bytes());
         }
     }
@@ -333,7 +332,7 @@ impl Plugin for Meter {
 
     async fn on_provider_end(&self, px: &ProviderContext, _end: &Result<(), Fault>) {
         if let Some(LineUsage(usage)) = px.extensions().get::<LineUsage>() {
-            let usage = lock(usage).clone();
+            let usage = *lock(usage);
             lock(&self.0.3).push(usage);
         }
     }
@@ -385,7 +384,7 @@ async fn run(gw: &Gateway, r: http::Request<Body>) -> (StatusCode, Result<Bytes,
 
 /// The `t` a call's lines reported, as [`Meter`] saw them.
 fn t(usage: &Usage) -> Option<u64> {
-    usage.get("t")
+    Some(usage.output_tokens).filter(|&n| n > 0)
 }
 
 // Usage read by `until_content`, then dropped, reaches the call's meter: provider-edge
@@ -461,8 +460,8 @@ async fn f3_a_head_whose_provider_sends_no_body_passes_its_head() {
 /// status goes; the call still ends as its head says.
 #[tokio::test]
 async fn f3b_a_translated_204_is_a_success_of_the_clients_format() {
-    use respan_gateway_anthropic::AnthropicMessages;
-    use respan_gateway_openai::OpenAiChat;
+    use respan_gateway_chat::anthropic::AnthropicMessages;
+    use respan_gateway_chat::openai::OpenAiChat;
     // Deliberately nonstandard provider success: no chat payload to decode.
     let transport = |_| async {
         let mut response = http::Response::new(());
@@ -1294,7 +1293,7 @@ async fn k9_7_a_client_filter_fails_a_plugins_own_outputs_which_count_nothing() 
         async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
             cx.filter(over_budget)?;
             let mut usage = out("");
-            usage.1.add("t", 5);
+            usage.1.output_tokens += 5;
             let own = [out("ok"), out("hi"), usage].map(Ok::<_, Fault>);
             Ok(Some(Response::stream(futures::stream::iter(own))))
         }
@@ -1312,14 +1311,14 @@ async fn k9_7_a_client_filter_fails_a_plugins_own_outputs_which_count_nothing() 
 #[derive(Clone)]
 struct Pathed;
 
-impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Pathed {
+impl respan_gateway_core::Format<respan_gateway_http::Outgoing, LOut, LIn> for Pathed {
     fn name(&self) -> &str {
         "pathed"
     }
     fn bind(
         &self,
         io: respan_gateway_http::Outgoing,
-    ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
+    ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
                 // A model of several words is escaped: its head is written
@@ -1593,14 +1592,14 @@ async fn r10_3_a_panic_while_closing_ends_the_edge_internal() {
 #[derive(Clone)]
 struct Posted;
 
-impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Posted {
+impl respan_gateway_core::Format<respan_gateway_http::Outgoing, LOut, LIn> for Posted {
     fn name(&self) -> &str {
         "posted"
     }
     fn bind(
         &self,
         io: respan_gateway_http::Outgoing,
-    ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
+    ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
         Ok(io.bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
                 head.method = http::Method::POST;
@@ -1650,14 +1649,14 @@ async fn r10_4_until_content_judges_a_head_as_the_provider_sent_it() {
 #[derive(Clone)]
 struct Seen(Shared<bool>);
 
-impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for Seen {
+impl respan_gateway_core::Format<respan_gateway_http::Outgoing, LOut, LIn> for Seen {
     fn name(&self) -> &str {
         "line"
     }
     fn bind(
         &self,
         io: respan_gateway_http::Outgoing,
-    ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
+    ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {
@@ -1789,14 +1788,14 @@ async fn r11_a_heads_post_call_ends_abandoned_unread() {
 #[derive(Clone)]
 struct InPath(Shared<(bool, String)>);
 
-impl respan_gateway_sdk::Format<respan_gateway_http::Outgoing, LOut, LIn> for InPath {
+impl respan_gateway_core::Format<respan_gateway_http::Outgoing, LOut, LIn> for InPath {
     fn name(&self) -> &str {
         "line"
     }
     fn bind(
         &self,
         io: respan_gateway_http::Outgoing,
-    ) -> Result<respan_gateway_sdk::Connection<LOut, LIn>, Fault> {
+    ) -> Result<respan_gateway_core::Connection<LOut, LIn>, Fault> {
         let seen = self.0.clone();
         Ok(io.bind(
             move |head: &mut RequestHead, input: Option<&LIn>| {

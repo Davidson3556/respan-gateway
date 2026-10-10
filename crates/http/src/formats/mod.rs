@@ -1,21 +1,20 @@
 #![warn(missing_docs)]
 //! Reusable HTTP-aware wire-format helpers. Concrete provider codecs live in
-//! `respan-gateway-openai` and `respan-gateway-anthropic`, and how they read a
-//! vendor's error body in `respan-gateway-codec`;
-//! shared conversation types live in `respan-gateway-conversation`, and usage
-//! and fault facts live in `respan-gateway-sdk`. Traffic of no kind relays through
+//! `respan-gateway-chat`, with how they read a vendor's error body;
+//! shared conversation types and usage live in `respan-gateway-conversation`,
+//! and fault facts in `respan-gateway-core`. Traffic of no kind relays through
 //! [`opaque`](crate::formats::opaque).
 
 pub mod opaque;
 pub mod sse;
 pub mod whole;
 
+use respan_gateway_core::{EventStream, Fault};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{
     self, HeaderValue, header::CONTENT_TYPE, request::Parts as RequestHead,
     response::Parts as ResponseHead,
 };
-use respan_gateway_sdk::{EventStream, Fault};
 use serde_json::{self, Value};
 
 /// A provider's message as JSON: a whole body, or an event's `data:`.
@@ -203,7 +202,7 @@ struct Parsed<T, S, P, E> {
     ended: bool,
 }
 impl<T, S, P, E> Unpin for Parsed<T, S, P, E> {}
-impl<T, S, P, E> respan_gateway_sdk::futures::Stream for Parsed<T, S, P, E>
+impl<T, S, P, E> respan_gateway_core::futures::Stream for Parsed<T, S, P, E>
 where
     T: Send + 'static,
     S: Send + 'static,

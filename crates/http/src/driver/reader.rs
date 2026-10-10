@@ -3,7 +3,7 @@
 use crate::Body;
 use bytes::Bytes;
 use futures::Stream;
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::Fault;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};

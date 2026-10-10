@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use crate::ledger::{HoldId, INSUFFICIENT_FUNDS, Ledger, MemoryLedger};
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::Fault;
 
 const TTL: Duration = Duration::from_secs(60);
 

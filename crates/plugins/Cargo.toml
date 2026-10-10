@@ -1,6 +1,6 @@
 [package]
 name = "respan-gateway-plugins"
-description = "First-party model routing policy built on public core and SDK APIs."
+description = "First-party model routing policy built on public core APIs."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,13 +12,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-respan-gateway-sdk.workspace = true
+respan-gateway-core.workspace = true
 tokio = { workspace = true, features = ["time", "macros"] }
 
 [dev-dependencies]
 respan-gateway-conversation.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-openai.workspace = true
+respan-gateway-chat.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 futures.workspace = true
 serde_json.workspace = true

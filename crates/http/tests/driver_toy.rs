@@ -14,17 +14,17 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
+use respan_gateway_core::futures::channel::mpsc;
+use respan_gateway_core::futures::future::{self, BoxFuture};
+use respan_gateway_core::futures::{FutureExt, SinkExt, StreamExt, stream};
+use respan_gateway_core::{BadRequest, ErrorCode, Truncated, Upstream};
+use respan_gateway_core::{EventSink, EventStream, Extensions, Fault, Gateway, async_trait};
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{
     Body, Completion, Encoder, Frames, Framing, Incoming, Outgoing, http,
     http::request::Parts as RequestHead,
 };
-use respan_gateway_sdk::futures::channel::mpsc;
-use respan_gateway_sdk::futures::future::{self, BoxFuture};
-use respan_gateway_sdk::futures::{FutureExt, SinkExt, StreamExt, stream};
-use respan_gateway_sdk::{BadRequest, ErrorCode, Truncated, Upstream};
-use respan_gateway_sdk::{EventSink, EventStream, Extensions, Fault, Gateway, async_trait};
 #[allow(dead_code)]
 #[path = "../../../tests/support/hooks.rs"]
 mod hooks;
@@ -54,14 +54,14 @@ fn opening(bytes: &'static str) -> Toy {
     }
 }
 
-impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
+impl respan_gateway_core::Format<Incoming, In, Out> for Toy {
     fn name(&self) -> &str {
         "toy"
     }
     fn matches(&self, _: &Incoming) -> bool {
         true
     }
-    fn bind(&self, io: Incoming) -> Result<respan_gateway_sdk::Connection<In, Out>, Fault> {
+    fn bind(&self, io: Incoming) -> Result<respan_gateway_core::Connection<In, Out>, Fault> {
         let toy = self.clone();
         let unwritable = self.unwritable;
         Ok(io.bind(
@@ -100,11 +100,11 @@ impl respan_gateway_sdk::Format<Incoming, In, Out> for Toy {
     }
 }
 
-impl respan_gateway_sdk::Format<Outgoing, Out, In> for Toy {
+impl respan_gateway_core::Format<Outgoing, Out, In> for Toy {
     fn name(&self) -> &str {
         "toy"
     }
-    fn bind(&self, io: Outgoing) -> Result<respan_gateway_sdk::Connection<Out, In>, Fault> {
+    fn bind(&self, io: Outgoing) -> Result<respan_gateway_core::Connection<Out, In>, Fault> {
         let toy = self.clone();
         Ok(io.bind(
             move |head, _| {
@@ -532,7 +532,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
         Framing::Live,
         LIMIT,
     );
-    let (incoming, _outgoing) = respan_gateway_sdk::Format::bind(&Toy::default(), wire).unwrap();
+    let (incoming, _outgoing) = respan_gateway_core::Format::bind(&Toy::default(), wire).unwrap();
     let incoming = incoming.await.unwrap();
     assert!(!incoming.is_single());
     assert!(incoming.boxed().next().await.is_none());
@@ -542,7 +542,7 @@ async fn a_streaming_requests_inputs_follow_and_a_one_shots_do_not() {
         Framing::Whole,
         LIMIT,
     );
-    let (incoming, _outgoing) = respan_gateway_sdk::Format::bind(&Toy::default(), wire).unwrap();
+    let (incoming, _outgoing) = respan_gateway_core::Format::bind(&Toy::default(), wire).unwrap();
     let incoming = incoming.await.unwrap();
     assert!(incoming.is_single());
     assert_eq!(
@@ -575,7 +575,7 @@ fn dial(
 ) -> BoxFuture<'static, Result<EventStream<Out>, Fault>> {
     let factory = respan_gateway_http::connect(transport, LIMIT);
     let (incoming, outgoing) =
-        respan_gateway_sdk::Format::bind(codec, factory(Extensions::new())).unwrap();
+        respan_gateway_core::Format::bind(codec, factory(Extensions::new())).unwrap();
     async move {
         let writing = deliver(outgoing, EventStream::single(In("q".into())))?;
         let (opened, written) = future::join(incoming, writing).await;
@@ -757,11 +757,11 @@ async fn a_panic_while_accepting_ends_internal() {
 struct ReadToEnd;
 
 #[async_trait]
-impl respan_gateway_sdk::Plugin for ReadToEnd {
+impl respan_gateway_core::Plugin for ReadToEnd {
     async fn on_client(
         &self,
-        cx: &mut respan_gateway_sdk::ClientContext,
-    ) -> Result<Option<respan_gateway_sdk::Response>, Fault> {
+        cx: &mut respan_gateway_core::ClientContext,
+    ) -> Result<Option<respan_gateway_core::Response>, Fault> {
         let mut resp = cx.call("a").await?;
         resp.until_end().await?;
         Ok(Some(resp))
@@ -804,8 +804,11 @@ async fn a_client_that_leaves_ends_the_request_before_its_call() {
 struct Rewrites;
 
 #[async_trait]
-impl respan_gateway_sdk::Plugin for Rewrites {
-    async fn on_provider(&self, px: &mut respan_gateway_sdk::ProviderContext) -> Result<(), Fault> {
+impl respan_gateway_core::Plugin for Rewrites {
+    async fn on_provider(
+        &self,
+        px: &mut respan_gateway_core::ProviderContext,
+    ) -> Result<(), Fault> {
         px.filter(|input: &mut In| {
             *input = In("the plugin's own prompt".into());
             Ok(())
@@ -817,18 +820,18 @@ impl respan_gateway_sdk::Plugin for Rewrites {
 struct Asks;
 
 #[async_trait]
-impl respan_gateway_sdk::Plugin for Asks {
+impl respan_gateway_core::Plugin for Asks {
     async fn on_client(
         &self,
-        cx: &mut respan_gateway_sdk::ClientContext,
-    ) -> Result<Option<respan_gateway_sdk::Response>, Fault> {
+        cx: &mut respan_gateway_core::ClientContext,
+    ) -> Result<Option<respan_gateway_core::Response>, Fault> {
         let call = cx.call("a").with_input(In("own prompt".into()));
         Ok(Some(call.await?))
     }
 }
 
 /// The bodies the provider got of a client's question through `plugin`.
-async fn provider_saw(plugin: impl respan_gateway_sdk::Plugin) -> Vec<String> {
+async fn provider_saw(plugin: impl respan_gateway_core::Plugin) -> Vec<String> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let noting = {
         let seen = seen.clone();
@@ -984,10 +987,10 @@ async fn idle_waits_for_a_job_handed_through_serve_from_an_end_hook() {
     struct Job;
     struct Detach(Arc<AtomicUsize>);
     #[async_trait]
-    impl respan_gateway_sdk::Plugin for Detach {
+    impl respan_gateway_core::Plugin for Detach {
         async fn on_client_end(
             &self,
-            cx: &respan_gateway_sdk::ClientContext,
+            cx: &respan_gateway_core::ClientContext,
             _end: &Result<(), Fault>,
         ) {
             if cx.extensions().get::<Job>().is_some() {
@@ -1071,7 +1074,7 @@ fn l6_an_endless_ready_bodiless_answer_never_holds_the_thread() {
 #[tokio::test]
 async fn response_opening_does_not_finish_an_outstanding_transport_write() {
     for failure in [false, true] {
-        let (finished, completion) = respan_gateway_sdk::futures::channel::oneshot::channel();
+        let (finished, completion) = respan_gateway_core::futures::channel::oneshot::channel();
         let completion =
             async move { completion.await.unwrap_or_else(|_| Err(Fault::abandoned())) }.boxed();
         let completion = Arc::new(Mutex::new(Some(completion)));
@@ -1148,7 +1151,7 @@ async fn accepted_incoming_moves_into_one_connection() {
     assert_eq!(incoming.request().method(), http::Method::POST);
     // Incoming is move-only: binding transfers exclusive ownership, rather
     // than keeping a clone whose second bind must fail at runtime.
-    let connection = respan_gateway_sdk::Format::bind(&Toy::default(), incoming).unwrap();
+    let connection = respan_gateway_core::Format::bind(&Toy::default(), incoming).unwrap();
     drop(connection);
     assert!(reply.await.is_none());
 }
@@ -1174,12 +1177,12 @@ async fn transport_factory_is_lazy_and_keeps_attempt_extensions_separate() {
     let connection = |id| {
         let mut extensions = Extensions::new();
         extensions.insert(id);
-        respan_gateway_sdk::Format::bind(&Toy::default(), factory(extensions)).unwrap()
+        respan_gateway_core::Format::bind(&Toy::default(), factory(extensions)).unwrap()
     };
     let first = connection(1usize);
     let second = connection(2usize);
     assert!(lock(&seen).is_empty());
-    let drive = |(incoming, outgoing): respan_gateway_sdk::Connection<Out, In>| async move {
+    let drive = |(incoming, outgoing): respan_gateway_core::Connection<Out, In>| async move {
         let writing = deliver(outgoing, EventStream::single(In("q".into()))).unwrap();
         let (opened, written) = future::join(incoming, writing).await;
         opened.unwrap();
@@ -1242,7 +1245,7 @@ async fn sink_send_fault_waits_for_its_refusal_bytes() {
         LIMIT,
     );
     let (incoming, mut outgoing) =
-        respan_gateway_sdk::Format::bind(&Toy::default(), transport).unwrap();
+        respan_gateway_core::Format::bind(&Toy::default(), transport).unwrap();
     incoming.await.unwrap();
     outgoing.prepare(&mut EventStream::empty()).unwrap();
     let fault = Upstream::fault("failed output");
@@ -1264,7 +1267,7 @@ async fn upload_sink_flush_waits_for_its_terminal_body_error() {
     });
     let factory = respan_gateway_http::connect(transport, LIMIT);
     let (incoming, mut outgoing) =
-        respan_gateway_sdk::Format::bind(&Toy::default(), factory(Extensions::new())).unwrap();
+        respan_gateway_core::Format::bind(&Toy::default(), factory(Extensions::new())).unwrap();
     let mut source = EventStream::stream(stream::pending());
     outgoing.prepare(&mut source).unwrap();
     let fault = BadRequest::fault("broken upload");

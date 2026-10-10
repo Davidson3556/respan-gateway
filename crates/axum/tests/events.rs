@@ -2,7 +2,7 @@
 //! Plugins over a session's events: `JsonEvents` writes unedited events
 //! as they said, lets filters edit, drop and count them in either direction,
 //! and a failing filter closes the client with its code. The events are
-//! mockllm's OpenAI Realtime; the SDK knows none of their names.
+//! mockllm's OpenAI Realtime; the gateway knows none of their names.
 #![allow(clippy::unwrap_used)]
 
 #[allow(dead_code)]
@@ -15,12 +15,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use http_support::LIMIT;
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_http::bytes::Bytes;
-use respan_gateway_realtime::{Input, Output};
-use respan_gateway_sdk::{
+use respan_gateway_core::{
     ClientContext, Config, ErrorCode, Fault, Filter, Gateway, Plugin, ProviderContext, Response,
     async_trait,
 };
+use respan_gateway_http::bytes::Bytes;
+use respan_gateway_realtime::{Input, Output};
 use respan_gateway_ws::{CloseCode, JsonEvents, WsTransport};
 use serde_json::{Value, json};
 use support::*;
@@ -337,8 +337,8 @@ async fn it_serves_only_its_path() {
 #[tokio::test]
 async fn a_call_of_its_own_is_an_upgrade_to_its_path_and_needs_a_session() {
     use futures::{SinkExt, StreamExt, TryStreamExt, stream};
+    use respan_gateway_core::{EventStream, Extensions, Format};
     use respan_gateway_http::{Body, Outgoing};
-    use respan_gateway_sdk::{EventStream, Extensions, Format};
     let format = events();
     let factory = respan_gateway_http::connect(
         |call| async move {

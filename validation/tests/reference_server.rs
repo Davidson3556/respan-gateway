@@ -12,7 +12,7 @@ use respan_gateway_http::{
 };
 use respan_gateway_mcp::Input;
 use respan_gateway_mcp::{SESSION, StdioTransport, StreamableHttp};
-use respan_gateway_sdk::{Fault, Gateway};
+use respan_gateway_core::{Fault, Gateway};
 use serde_json::{Value, json};
 use std::process::Stdio;
 use std::time::Duration;

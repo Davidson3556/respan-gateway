@@ -4,16 +4,16 @@
 
 use std::sync::Arc;
 
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Input;
+use respan_gateway_core::ErrorCode;
+use respan_gateway_core::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
 use respan_gateway_http::Status;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::{self, BodyExt};
 use respan_gateway_http::{Body, CallHeaders, Credential, Outgoing, Wire};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
 
 #[allow(dead_code)]
 #[path = "../../../tests/support/hooks.rs"]
@@ -55,7 +55,7 @@ type AddProvider = Box<dyn FnOnce(Gateway) -> Result<Gateway, Fault>>;
 
 fn add_provider<F>(name: &str, format: F, transport: scripted::ScriptedAt) -> AddProvider
 where
-    F: respan_gateway_sdk::Format<Outgoing, respan_gateway_conversation::Output, Input>,
+    F: respan_gateway_core::Format<Outgoing, respan_gateway_conversation::Output, Input>,
 {
     let name = name.to_owned();
     Box::new(move |gw| {

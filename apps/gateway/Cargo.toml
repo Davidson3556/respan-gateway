@@ -13,10 +13,9 @@ workspace = true
 
 [dependencies]
 respan-gateway-conversation.workspace = true
-respan-gateway-sdk.workspace = true
+respan-gateway-core.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-anthropic.workspace = true
-respan-gateway-openai.workspace = true
+respan-gateway-chat.workspace = true
 respan-gateway-plugins.workspace = true
 respan-gateway-axum = { workspace = true, features = ["ws"] }
 respan-gateway-realtime.workspace = true

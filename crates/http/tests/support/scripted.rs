@@ -6,14 +6,14 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use respan_gateway_core::Fault;
+use respan_gateway_core::Upstream;
+use respan_gateway_core::futures::stream;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{Body, Completion, credentials, strip_origin_headers};
-use respan_gateway_sdk::Fault;
-use respan_gateway_sdk::Upstream;
-use respan_gateway_sdk::futures::stream;
 
 pub type Reply = http::Response<Vec<Result<Bytes, Fault>>>;
 type WireResult = Result<(http::Response<Body>, Option<Completion>), Fault>;
@@ -139,9 +139,9 @@ impl ScriptedAt {
         self,
     ) -> impl Fn(
         http::Request<Body>,
-    ) -> respan_gateway_sdk::futures::future::BoxFuture<'static, WireResult>
+    ) -> respan_gateway_core::futures::future::BoxFuture<'static, WireResult>
     + Clone {
-        use respan_gateway_sdk::futures::FutureExt;
+        use respan_gateway_core::futures::FutureExt;
         move |request| {
             let value = self.clone();
             async move { value.send(request).await }.boxed()

@@ -13,7 +13,7 @@ workspace = true
 
 [dependencies]
 respan-gateway-mcp-messages.workspace = true
-respan-gateway-sdk.workspace = true
+respan-gateway-core.workspace = true
 serde_json.workspace = true
 getrandom = { workspace = true, features = ["std"] }
 respan-gateway-http.workspace = true

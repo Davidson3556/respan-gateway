@@ -35,7 +35,7 @@
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
 
-use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Upstream};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -44,8 +44,13 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::{Content, Input, Media, MediaSource, Output};
+use respan_gateway_core::futures::TryStreamExt;
+use respan_gateway_core::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
 use respan_gateway_examples::rest::{Ask, Rest};
 use respan_gateway_examples::store::{
     Database,
@@ -57,12 +62,7 @@ use respan_gateway_http::Status;
 use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential, Wire, retryable};
-use respan_gateway_openai::OpenAiChat;
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
-use respan_gateway_sdk::futures::TryStreamExt;
-use respan_gateway_sdk::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -90,7 +90,7 @@ use pdf_converter::{extract_pdf_with, too_large};
 /// The `file` of `part` if it is a file part.
 fn file(part: &Content) -> Option<&serde_json::Value> {
     match part {
-        Content::Native(respan_gateway_sdk::NativeValue { value: raw, .. })
+        Content::Native(respan_gateway_core::NativeValue { value: raw, .. })
             if raw["type"] == "file" =>
         {
             Some(&raw["file"])

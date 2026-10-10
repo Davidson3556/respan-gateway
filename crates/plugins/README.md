@@ -28,8 +28,8 @@ choose a different classifier without importing HTTP.
 Used by: [fallback](../../examples/routing/fallback.rs),
 [attachments](../../examples/integrations/attachments.rs).
 
-Billing is application policy, not a supported plugin export or SDK. See
+Billing is application policy, not a supported plugin export. See
 [the billing examples](../../examples/README.md#billing-policies) for pricing,
 conservative per-attempt accounting, nested wallets and per-turn reservations.
 Their support modules are private to the examples, not a replacement billing
-crate. Generic provider usage remains in `respan-gateway-sdk`.
+crate. Provider usage is the conversation kind's typed `Usage`.

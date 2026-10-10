@@ -13,15 +13,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::{Input, Output, set_model};
-use respan_gateway_http::http::{self, HeaderValue};
-use respan_gateway_http::{Body, Wire, retryable, watchdog};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_plugins::routing::{Attempt, Backoff, Until, first_success, race};
-use respan_gateway_sdk::{
+use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
+use respan_gateway_http::http::{self, HeaderValue};
+use respan_gateway_http::{Body, Wire, retryable, watchdog};
+use respan_gateway_plugins::routing::{Attempt, Backoff, Until, first_success, race};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;

@@ -6,9 +6,9 @@ mod http_support;
 use h::bytes::Bytes;
 use h::http::{Request, Response};
 use http_support::LIMIT;
+use respan_gateway_core::futures::{SinkExt, StreamExt, TryStreamExt, future, stream};
+use respan_gateway_core::{EventStream, Extensions};
 use respan_gateway_http as h;
-use respan_gateway_sdk::futures::{SinkExt, StreamExt, TryStreamExt, future, stream};
-use respan_gateway_sdk::{EventStream, Extensions};
 
 #[tokio::test]
 async fn a_live_upload_keeps_feeding_a_retained_reader_without_completion() {

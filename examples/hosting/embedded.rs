@@ -15,22 +15,22 @@
 //! `cargo run -p respan-gateway-examples --example embedded`
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Input;
+use respan_gateway_core::futures::future::join;
+use respan_gateway_core::futures::{StreamExt, stream};
+use respan_gateway_core::{Fault, Gateway};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::Meter;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_http::http_body_util::BodyExt;
 use respan_gateway_http::{HttpClient, http};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::futures::future::join;
-use respan_gateway_sdk::futures::{StreamExt, stream};
-use respan_gateway_sdk::{Fault, Gateway};
 
 /// The gateway, with no server. For real use, the transport is
 /// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway(
-    provider: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    provider: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

@@ -8,11 +8,11 @@
 //! [`Ask`] (or relay an already complete raw body); live input streams have
 //! no method or path to put in the request head and are rejected before dialing.
 
+use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::{each, opaque, set_path};
 use respan_gateway_http::http::{Method, request::Parts as RequestHead};
 use respan_gateway_http::{self as h, Encoder, Incoming, Outgoing};
-use respan_gateway_sdk::{Connection, Fault, Format};
 
 /// The API named `name` at paths starting with `prefix`.
 #[derive(Clone, Debug)]

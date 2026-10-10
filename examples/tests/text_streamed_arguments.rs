@@ -5,8 +5,8 @@
 mod text;
 
 use respan_gateway_conversation::Output;
-use respan_gateway_sdk::ErrorCode;
-use respan_gateway_sdk::Fault;
+use respan_gateway_core::ErrorCode;
+use respan_gateway_core::Fault;
 #[path = "support/text.rs"]
 mod support;
 

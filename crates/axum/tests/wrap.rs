@@ -7,8 +7,8 @@ mod support;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use respan_gateway_core::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use respan_gateway_http::formats::opaque;
-use respan_gateway_sdk::{ClientContext, EventStream, Fault, Plugin, Response, async_trait};
 use support::*;
 
 const PATH: &str = "/v1/realtime";

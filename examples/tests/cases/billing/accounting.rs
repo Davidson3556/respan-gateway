@@ -1,14 +1,14 @@
 //! `Accounting` in a gateway: never overspend, settle exactly once, refuse
 //! what has no bound, and release what a cancelled hook held.
 
+use respan_gateway_core::{BadRequest, Upstream};
 use respan_gateway_examples::LIMIT;
-use respan_gateway_sdk::{BadRequest, Upstream};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::http_support;
-use respan_gateway_sdk::futures::future::join_all;
-use respan_gateway_sdk::{
+use respan_gateway_core::futures::future::join_all;
+use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
 
@@ -16,11 +16,11 @@ use crate::accounting::{Accounting, Quote, Tally};
 use crate::ledger::{Amount, HoldId, Ledger, MemoryLedger};
 use http_support::{post, read_whole, serve};
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_conversation::{Input, Output, units};
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::{Input, Output};
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
-use respan_gateway_openai::OpenAiChat;
 
 const CHAT: &str = "/v1/chat/completions";
 /// 10 output tokens at 10 each.
@@ -53,7 +53,7 @@ fn streamed(events: &[&str]) -> Answer {
 
 fn http(
     fake: &FakeOpenAi,
-) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
+) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
 {
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-test"));
@@ -75,7 +75,7 @@ fn quote(px: &mut ProviderContext, tally: Tally) -> Result<Quote, Fault> {
         .ok_or_else(|| BadRequest::fault("no cost bound: set max_tokens"))?;
     px.filter(move |reply: &mut Output| {
         if let Output::Usage(usage) = reply {
-            let output = usage.get(units::OUTPUT_TOKENS).unwrap_or(0);
+            let output = usage.output_tokens;
             tally.add(output as Amount * 10);
         }
         Ok(())
@@ -91,7 +91,7 @@ fn wallet(limit: Amount) -> MemoryLedger {
 
 /// `first`, then accounting over `ledger`, calling provider `p` on `transport`.
 fn gateway(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

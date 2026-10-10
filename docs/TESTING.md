@@ -25,13 +25,13 @@ processes or several components.
 | Kernel contracts | Hook ordering, ownership, cancellation, buffering, panic handling and progress | `crates/core/tests/`, core unit tests |
 | Shared data contracts | Input assembly, text access and message representation | Input unit tests |
 | HTTP behavior | Encoding, framing, credentials, headers, retry hints, body handling and stream completion | `crates/http/tests/`, HTTP unit tests |
-| Provider compatibility | Native relay, OpenAI/Anthropic translation, vendor dialects, tools, errors and usage | `crates/openai/tests/{relay,translate,round_trips}`, codec unit tests |
+| Provider compatibility | Native relay, OpenAI/Anthropic translation, vendor dialects, tools, errors and usage | `crates/chat/tests/{relay,translate,round_trips}`, codec unit tests |
 | Hosting and WebSocket sessions | HTTP ingress, upgrade, subprotocols, session events, backpressure, concurrency and close/recovery behavior | `crates/axum/tests/`, WS unit tests |
 | MCP behavior | JSON-RPC messages, session state, streamable HTTP, stdio and reference-server interoperability | `crates/mcp/tests/`, MCP unit tests |
 | Routing policy | Attempts, retries, fallback, races and explicit retry classification | `crates/plugins/tests/routing.rs`, routing unit tests |
 | Application behavior | Configuration, CLI/proxy modes, path matching, redirects, error limits and graceful shutdown of the built executable | `apps/gateway/tests/`, gateway configuration tests |
 | Use cases | Billing, guardrails, PII, admission, durable jobs, attachments, routing and realtime policies composed through public APIs | `examples/tests/cases/`, `examples/tests/text_*.rs`, example library tests |
-| Performance | Timing of whole and streamed in-process relay | `crates/openai/benches/relay.rs` |
+| Performance | Timing of whole and streamed in-process relay | `crates/chat/benches/relay.rs` |
 | Documentation examples | Compilation or execution of Rust examples in API documentation | Rust doctests |
 
 Security and resilience are cross-cutting concerns. Credential isolation and
@@ -79,13 +79,13 @@ cargo test --workspace --all-targets --all-features -- --list
 | --- | --- |
 | `crates/*/src/` | Unit tests for private implementation details |
 | `crates/*/tests/` | Public contracts and protocol integration tests |
-| `crates/openai/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fixtures remain in each parent test target. Every suite of two formats lives in the OpenAI crate, which alone dev-depends on the Anthropic one |
+| `crates/chat/tests/{relay,translate}/` | Provider suites grouped by requests, responses, filters, errors and related behavior; shared fixtures remain in each parent test target |
 | `apps/gateway/tests/` | Executable integration tests, redirects and bounded error bodies |
 | `apps/gateway/tests/paths/` | Path matching, normalization, allowlists and real client path shapes, using one local wire fixture |
 | `examples/tests/cases/<topic>/` | Test modules included by the corresponding example or private support module |
 | `examples/tests/text_*.rs` | Automatically discovered text and tool-argument integration suites |
 | `tests/support/` | Source-only HTTP and lifecycle helpers shared across packages |
-| `crates/openai/benches/` | Opt-in relay timing benchmark |
+| `crates/chat/benches/` | Opt-in relay timing benchmark |
 
 `examples/Cargo.toml` registers runnable examples with `test = true`. Their
 included case modules run under those example targets. Keeping these files in
@@ -96,8 +96,8 @@ Focused commands:
 
 ```bash
 cargo test -p respan-gateway --test paths
-cargo test -p respan-gateway-openai --test relay usage::
-cargo test -p respan-gateway-openai --test translate tools::
+cargo test -p respan-gateway-chat --test relay usage::
+cargo test -p respan-gateway-chat --test translate tools::
 cargo test -p respan-gateway-examples --example wallet
 cargo test -p respan-gateway-examples --test text_tool_json
 ```
@@ -179,7 +179,7 @@ The relay timing benchmark is an ignored test harness in `benches/`, using
 local in-process responses. Run it explicitly with optimized code:
 
 ```bash
-cargo bench -p respan-gateway-openai --bench relay -- --ignored --nocapture
+cargo bench -p respan-gateway-chat --bench relay -- --ignored --nocapture
 ```
 
 ## Adding tests

@@ -23,16 +23,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use mockllm::FakeOpenAi;
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::Usage;
 use respan_gateway_conversation::{Delta, Input, Message, Output};
+use respan_gateway_core::Extensions;
+use respan_gateway_core::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
 use respan_gateway_examples::{CallUsage, meter};
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::HeaderValue;
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::Extensions;
-use respan_gateway_sdk::Usage;
-use respan_gateway_sdk::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -189,7 +189,7 @@ impl Plugin for Tenancy {
 }
 
 fn gateway(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

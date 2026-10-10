@@ -1,19 +1,24 @@
 # Conversation kind
 
 `respan-gateway-conversation` defines the shared LLM request/event pair:
-`Input` in, `Output` events out. It depends on `respan-gateway-sdk`
-for general faults and usage, and on `serde_json` for JSON values.
+`Input` in, `Output` events out. It depends on `respan-gateway-core`
+for faults and native values, and on `serde_json` for JSON values.
 
 ```rust
 use respan_gateway_conversation::{Input, Message, Output, Role};
-use respan_gateway_sdk::{ClientContext, Fault, Plugin, Response, Usage};
+use respan_gateway_conversation::Usage;
+use respan_gateway_core::{ClientContext, Fault, Plugin, Response};
 ```
 
-The crate exports conversation types and helpers directly from its root;
-usage unit names live in `respan_gateway_conversation::units`.
-The OpenAI Chat and Anthropic Messages formats live in `respan-gateway-openai`
-and `respan-gateway-anthropic`.
-This crate defines no protocol or transport implementations.
+The crate exports conversation types and helpers directly from its root.
+The OpenAI Chat and Anthropic Messages formats live in
+[`respan-gateway-chat`](../chat/README.md). This crate has no protocol or
+transport dependency.
+
+`Usage` is the token counts a provider reports: input, output, and the
+cached, cache-write and reasoning counts that are parts of them. A count
+of 0 is one the provider did not report. A format refuses usage it cannot
+write, such as cache writes in OpenAI Chat.
 
 A reply is a sequence of events, the same for a stream and a whole body, and
 an `Output` is one such event, not a whole reply: `Output::Start`, then for each content block a `BlockStart`, its `Delta`s and a
@@ -37,7 +42,7 @@ Tools are typed too: a request's `Tool`s and `ToolChoice`, an assistant's
 `Message::text` exposes typed text, explicitly skipping tool calls and other
 content; `Message::is_plain` checks for a known role, text parts and no message
 native fields. Text-part native fields are allowed. Holdback, JSON-text rewriting and placeholders remain
-private example support, not SDK promises.
+private example support, not public promises.
 
 What the kind has no form for stays as the format that decoded it has it, in optional
 `NativeFields` (a mandatory format ID and its fields) on an `Input`, `Message`, `Tool`
@@ -58,7 +63,7 @@ and native values. A `Media` has a MIME type, URL or bytes, optional name, and
 optional native fields. Codecs do not fetch URLs.
 
 Transport preferences are separate: set
-`respan_gateway_codec::StreamResponse(bool)` in call extensions to choose
+`respan_gateway_chat::StreamResponse(bool)` in call extensions to choose
 provider HTTP streaming. Client response framing follows the client's request.
 The HTTP binding retains original token-limit spelling on same-format OpenAI
 calls; standalone semantic encoding uses `max_completion_tokens`.
@@ -66,3 +71,4 @@ Neither spelling nor streaming preference lives in `Input`.
 
 `Finish` records why the model stopped. Delivery completes when the event stream
 ends; usage and native events may arrive after `Finish`.
+

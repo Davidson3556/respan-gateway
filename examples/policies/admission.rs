@@ -22,20 +22,20 @@
 //! `cargo run -p respan-gateway-examples --example admission`
 
 use respan_gateway_conversation::{Input, Output};
+use respan_gateway_core::futures::{FutureExt, StreamExt, stream};
+use respan_gateway_core::futures::{future::BoxFuture, stream::BoxStream};
+use respan_gateway_core::{ErrorCode, RetryAfter};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_examples::admission::{Slot, Slots};
-use respan_gateway_sdk::futures::{FutureExt, StreamExt, stream};
-use respan_gateway_sdk::futures::{future::BoxFuture, stream::BoxStream};
-use respan_gateway_sdk::{ErrorCode, RetryAfter};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::Status;
 use respan_gateway_http::Wire;
 use respan_gateway_http::http::{self, HeaderValue, StatusCode, header::RETRY_AFTER};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -102,7 +102,7 @@ fn supervised<F, Fut>(
     send: F,
 ) -> impl Fn(
     http::Request<respan_gateway_http::Body>,
-) -> respan_gateway_sdk::futures::future::BoxFuture<'static, Result<HttpReply, Fault>>
+) -> respan_gateway_core::futures::future::BoxFuture<'static, Result<HttpReply, Fault>>
 + Send
 + Sync
 + 'static
@@ -115,7 +115,7 @@ where
         async move {
             let Some(held) = call
                 .extensions()
-                .get::<respan_gateway_sdk::Extensions>()
+                .get::<respan_gateway_core::Extensions>()
                 .and_then(|extensions| extensions.get::<Held>())
                 .cloned()
             else {
@@ -162,7 +162,7 @@ impl Plugin for Admission {
         };
         let held = Held(Arc::new(Mutex::new(Some(slot))));
         let monitoring = held.clone();
-        cx.wrap(move |outputs: respan_gateway_sdk::EventStream<Output>| {
+        cx.wrap(move |outputs: respan_gateway_core::EventStream<Output>| {
             bounded(outputs.boxed(), monitoring)
         })?;
         cx.extensions_mut().insert(held);

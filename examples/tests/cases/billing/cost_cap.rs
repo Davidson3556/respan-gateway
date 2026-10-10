@@ -127,7 +127,7 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
             status
         })
     });
-    let statuses = respan_gateway_sdk::futures::future::join_all(all).await;
+    let statuses = respan_gateway_core::futures::future::join_all(all).await;
     let served = statuses.iter().flatten().filter(|s| s.is_success()).count();
     let spent = ledger.spent("team");
     assert!(spent <= 10_000, "overspent: {spent} of 10,000");

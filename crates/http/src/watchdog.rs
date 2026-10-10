@@ -3,7 +3,7 @@
 use crate::{Body, Completion};
 use futures::future::BoxFuture;
 use futures::{FutureExt, StreamExt, stream};
-use respan_gateway_sdk::{Fault, Upstream};
+use respan_gateway_core::{Fault, Upstream};
 use std::sync::Arc;
 use std::time::Duration;
 

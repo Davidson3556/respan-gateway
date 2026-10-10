@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use http::HeaderMap;
 use http_body_util::BodyExt;
-use respan_gateway_sdk::{Fault, Upstream};
+use respan_gateway_core::{Fault, Upstream};
 
 use crate::{Body, Completion, Outgoing, is_connection_header, prepare_call, strip_origin_headers};
 
@@ -147,7 +147,7 @@ impl HttpClient {
     /// A provider factory sharing this client's pool and configuration.
     pub fn connect(
         self,
-    ) -> impl Fn(respan_gateway_sdk::Extensions) -> Outgoing + Clone + Send + Sync + 'static {
+    ) -> impl Fn(respan_gateway_core::Extensions) -> Outgoing + Clone + Send + Sync + 'static {
         let limit = self.limit;
         let client = Arc::new(self);
         crate::connect(

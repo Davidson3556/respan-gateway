@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
+use respan_gateway_core::{Connection, Fault, Format, Gateway};
 use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
 use respan_gateway_http::{self as h, Incoming, Outgoing};
-use respan_gateway_sdk::{Connection, Fault, Format, Gateway};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -82,7 +82,7 @@ impl Drop for Server {
 
 #[allow(unused_imports)]
 pub use relay::Relay;
-/// Serve `gateway` on a free local port with the SDK's router.
+/// Serve `gateway` on a free local port with the adapter's router.
 use respan_gateway_http::relay;
 
 pub async fn serve(gateway: Gateway) -> Server {

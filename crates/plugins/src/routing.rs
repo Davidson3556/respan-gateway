@@ -23,10 +23,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use respan_gateway_sdk::futures::future::BoxFuture;
-use respan_gateway_sdk::futures::stream::FuturesUnordered;
-use respan_gateway_sdk::futures::{FutureExt, StreamExt};
-use respan_gateway_sdk::{Call, Fault, Response, RetryAfter, Upstream};
+use respan_gateway_core::futures::future::BoxFuture;
+use respan_gateway_core::futures::stream::FuturesUnordered;
+use respan_gateway_core::futures::{FutureExt, StreamExt};
+use respan_gateway_core::{Call, Fault, Response, RetryAfter, Upstream};
 
 /// How often to try one call, and how long to wait between tries.
 #[derive(Debug, Clone, Copy)]

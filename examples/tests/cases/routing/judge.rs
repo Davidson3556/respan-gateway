@@ -1,5 +1,4 @@
 use super::*;
-use respan_gateway_conversation::units;
 use respan_gateway_examples::Meter;
 
 #[tokio::test]
@@ -36,7 +35,7 @@ async fn the_verdict_picks_the_target_and_the_provider_edge_covers_the_judge() -
     assert_eq!(*egress.seen(), ["judge", "strong"]);
     gw.idle().await;
     // The judge's tokens are billed like the answer's.
-    assert_eq!(meter.usage().get(units::INPUT_TOKENS), Some(18));
+    assert_eq!(meter.usage().input_tokens, 18);
     Ok(())
 }
 

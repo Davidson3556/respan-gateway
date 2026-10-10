@@ -3,7 +3,7 @@
 `attachments/pdf.rs` holds the bounded PDF converter, also used by the separate
 Poppler validation test.
 
-These are source modules included by the runnable examples, not library or SDK
+These are source modules included by the runnable examples, not library
 APIs: `billing/` holds accounting and ledger policies, `jobs/` holds worker and
 store implementations, `live/` holds WebSocket serving, budget and test
 helpers, `http.rs` holds local provider helpers, and `realtime/` holds audio handling. See the

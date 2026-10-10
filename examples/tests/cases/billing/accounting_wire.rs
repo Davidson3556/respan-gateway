@@ -2,19 +2,19 @@
 //! edge contract itself, with no bytes and no heads. The ledger reads
 //! neither, so it settles here by the same rules as over HTTP.
 
-use respan_gateway_sdk::{BadRequest, ErrorCode, Upstream};
+use respan_gateway_core::{BadRequest, ErrorCode, Upstream};
 use std::sync::{Arc, Mutex};
 
 use crate::accounting::{Accounting, Quote, Tally};
 use crate::ledger::{Amount, MemoryLedger};
-use respan_gateway_http::Status;
-use respan_gateway_sdk::futures::FutureExt;
-use respan_gateway_sdk::futures::channel::oneshot;
-use respan_gateway_sdk::futures::future::ready;
-use respan_gateway_sdk::futures::{sink, stream};
-use respan_gateway_sdk::{
+use respan_gateway_core::futures::FutureExt;
+use respan_gateway_core::futures::channel::oneshot;
+use respan_gateway_core::futures::future::ready;
+use respan_gateway_core::futures::{sink, stream};
+use respan_gateway_core::{
     Connection, EventSink, EventStream, Extensions, Fault, Format, Gateway, ProviderContext,
 };
+use respan_gateway_http::Status;
 
 const RESERVE: Amount = 100;
 

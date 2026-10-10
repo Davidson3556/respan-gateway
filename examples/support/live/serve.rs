@@ -1,6 +1,6 @@
 //! Stop accepting clients and close every upgraded session before returning.
-use respan_gateway_sdk::Gateway;
-use respan_gateway_sdk::futures::FutureExt;
+use respan_gateway_core::Gateway;
+use respan_gateway_core::futures::FutureExt;
 use std::future::Future;
 
 pub async fn run(gateway: Gateway, address: &str) -> Result<(), std::io::Error> {

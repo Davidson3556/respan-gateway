@@ -13,20 +13,20 @@
 //! `cargo run -p respan-gateway-examples --example tenants`
 
 use respan_gateway_conversation::Input;
-use respan_gateway_sdk::ErrorCode;
+use respan_gateway_core::ErrorCode;
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use mockllm::{Answer, FakeOpenAi};
+use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_core::{
+    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
+};
 use respan_gateway_http::HttpClient;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
-use respan_gateway_openai::OpenAiChat;
-use respan_gateway_sdk::{
-    ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
-};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -104,11 +104,11 @@ impl Plugin for Tenants {
 }
 
 fn gateway(
-    openai: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    openai: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
-    azure: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    azure: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,

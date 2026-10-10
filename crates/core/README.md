@@ -2,9 +2,8 @@
 
 The neutral kernel. It runs each request through the registered plugins and
 streams the response back, and knows nothing of HTTP, providers,
-credentials or message kinds. Plugin authors use it through
-[`respan-gateway-sdk`](../sdk/README.md), which re-exports these types as
-they are.
+credentials or message kinds. It is also the plugin-author API: plugins,
+protocols and adapters all depend on it directly.
 
 - `Gateway`: built by value (`Gateway::new().provider(..)?.client(..)?
   .plugin(..).target(..)?`) and handed one transport at a time
@@ -20,6 +19,21 @@ they are.
 - `Call` / `Response`: a plugin's call to a provider (`cx.call`), and what
   a call or `Response::stream` gives back: streamed, read or held.
 - `Fault`: the one error, with typed facts (`fault.with(..)`,
-  `fault.get::<T>()`).
+  `fault.get::<T>()`). Facts any protocol can render: `BadRequest`,
+  `Upstream`, `Truncated`, `RetryAfter`, `ErrorCode` and `Details`; the
+  kernel's own markers: `Abandoned`, `Internal`, `Config` and `NotFound`.
+- `NativeFields { format, fields }` preserves unsupported fields on a typed
+  value; `NativeValue { format, value }` an entire unsupported value. The
+  format ID names the wire schema, not a provider deployment, so codecs can
+  reject unsafe cross-format forwarding. Neither carries transport state.
+
+Core defines no request/event kinds or `Format` implementations. Each kind
+names its pair `Input` / `Output`, in the crate that owns it:
+[`respan-gateway-conversation`](../conversation/README.md),
+[`respan-gateway-realtime`](../realtime/README.md), and
+[`respan-gateway-mcp`](../mcp/README.md) (envelopes around
+`respan-gateway-mcp-messages`' JSON-RPC `Message`). Direction is
+gateway-wide: `Input` travels from client to provider, `Output` from
+provider to client. Use a crate alias when working with several kinds.
 
 See [architecture](../../docs/ARCHITECTURE.md) for how the crates fit.

@@ -14,13 +14,13 @@
 //! `RESPAN_ANTHROPIC_UPSTREAM=http://127.0.0.1:PORT` to use a local provider
 //! instead of the default Anthropic upstream.
 
-use respan_gateway_anthropic::AnthropicMessages;
+use respan_gateway_chat::anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
+use respan_gateway_core::{Fault, Gateway, futures::TryStreamExt};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_sdk::{Fault, Gateway, futures::TryStreamExt};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_axum::router;
@@ -40,7 +40,7 @@ fn fixture(
     status: StatusCode,
     body: impl Into<Bytes>,
     sent: Sent,
-) -> impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
+) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
 {
     let body = body.into();
     respan_gateway_http::connect(
@@ -78,7 +78,7 @@ fn fixture(
 
 /// The whole setup, in code: serve Anthropic Messages, relay to Anthropic.
 fn gateway(
-    transport: impl Fn(respan_gateway_sdk::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
     + Send
     + Sync
     + 'static,
