@@ -147,12 +147,31 @@ pub(crate) fn failure_json(raw: &Bytes) -> Option<Value> {
 /// answer, kept as it came, is JSON if it says no type, as the format's are.
 ///
 /// [`ProviderIo::bind`]: respan_gateway_http::ProviderIo::bind
-pub(crate) fn answer<C: Schema>(schema: &C, mut answer: http::Response<Bytes>) -> Fault {
+pub(crate) fn answer<C: Schema>(schema: &C, answer: http::Response<Bytes>) -> Fault {
+    let status = C::status(answer.status());
+    read_answer(schema.name(), status, answer)
+}
+
+/// The fault of a provider's `answer` in format `name` that is no success,
+/// read leniently as the vendors and their compatible servers write errors
+/// (`{"error": {..}}`, a string `error`, Gemini's and Cloudflare's lists,
+/// FastAPI's `detail`, a problem's `title`): the HTTP fault
+/// ([`provider_fault`]) with the code, message and fields its body says,
+/// under its status if an error's, else a 502. Any HTTP format of a JSON
+/// API can use it as its error reader ([`ProviderIo::bind`]).
+///
+/// [`ProviderIo::bind`]: respan_gateway_http::ProviderIo::bind
+pub fn read_provider_error(name: &str, answer: http::Response<Bytes>) -> Fault {
+    let status = answer.status();
+    read_answer(name, status, answer)
+}
+
+/// [`read_provider_error`], under `status`.
+fn read_answer(name: &str, status: StatusCode, mut answer: http::Response<Bytes>) -> Fault {
     let json = http::HeaderValue::from_static("application/json");
     answer.headers_mut().entry(CONTENT_TYPE).or_insert(json);
-    let status = C::status(answer.status());
     let v = failure_json(answer.body()).unwrap_or_default();
-    read(provider_fault(schema.name(), answer), status, &v)
+    read(provider_fault(name, answer), status, &v)
 }
 
 #[cfg(test)]

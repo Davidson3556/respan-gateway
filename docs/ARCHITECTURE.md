@@ -12,8 +12,8 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 - A **kind** (`crates/kinds/`) owns a pair of events (`Input` in, `Output` out) that plugins
   read, and everything about that kind on the wire: its formats, each a
   `Format`, and its vendors' dialects. A kind is tied to one wire
-  (conversation to HTTP and SSE, realtime to WebSocket, MCP to streamable
-  HTTP or stdio); what varies within it is the provider, and the kind's
+  (conversation and media to HTTP and SSE, realtime to WebSocket, MCP to
+  streamable HTTP or stdio); what varies within it is the provider, and the kind's
   events are what every provider has in common. Its formats are behind
   default features, so a plugin can depend on its types alone.
 - A **wire** (`crates/wires/`) moves bytes at both edges and knows no kind: its owned I/O
@@ -24,6 +24,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | --- | --- | --- | --- |
 | `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault facts and tagged native values | None |
 | `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly; the HTTP binding (`Schema`) and its vendors, OpenAI Chat (with dialects) and Anthropic Messages | Core; HTTP for its formats |
+| `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech) over the conversation kind's media and usage; their HTTP formats, OpenAI's endpoints as compatible vendors serve them | Core, conversation's types; HTTP for its formats |
 | `crates/kinds/realtime/` | Kind | Format-tagged realtime event pair; the WebSocket format (`JsonEvents`) and its vendor presets | Core; HTTP, WS for its format |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes; streamable HTTP and the stdio transport | Core, HTTP |
 | `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the opaque format; optional Reqwest transport and Axum hosting | Core |
@@ -41,11 +42,13 @@ flowchart LR
     core --> plugins
     http --> ws
     http -. formats .-> conversation
+    http -. formats .-> media
     http -. format .-> realtime
     ws -. format .-> realtime
     http --> mcp
     core --> conversation
     core --> realtime
+    conversation --> media
     conversation --> gateway
     realtime --> gateway
     mcp --> gateway
@@ -69,7 +72,7 @@ their filesystem locations.
 - Wire crates own framing and transport behavior and know no kind. A kind's
   vendor formats translate through its typed events.
 - Every kind is an `Input` in and an `Output` out, in the crate that owns
-  it: `conversation`, `realtime` and `mcp` (envelopes around its typed
+  it: `conversation`, `media` (a module per operation), `realtime` and `mcp` (envelopes around its typed
   JSON-RPC `Message`). HTTP's passthrough (`formats::opaque`,
   `Input<F>` / `Output<F>`) is the one kind that is its own wire.
   Core defines no kinds or `Format` implementations.

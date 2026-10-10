@@ -151,6 +151,7 @@ the gateway, and the binary chooses what to compose. See the
 |---|---|
 | `crates/core/` | The neutral kernel and plugin-author API: typed streams, plugins, lifecycle, fault facts and native values; no HTTP or message kinds. |
 | `crates/kinds/conversation/` | The conversation kind (requests, reply events, typed usage, assembly) and its HTTP formats: OpenAI Chat (with vendor dialects) and Anthropic Messages, sharing the `Schema` trait. |
+| `crates/kinds/media/` | The media kinds, a kind per operation (image generation and edits, transcription, speech), and their HTTP formats: OpenAI Images, Audio Transcriptions and Speech. |
 | `crates/kinds/realtime/` | The realtime kind (a client/provider JSON event pair) and its WebSocket format, `JsonEvents`, with the vendors' presets. |
 | `crates/kinds/mcp/` | The MCP kind (typed JSON-RPC messages and their envelopes) and its formats: streamable HTTP and stdio. |
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
@@ -173,7 +174,7 @@ prices, accounts and durable billing stores. Routing takes an explicit retry cla
 available from the HTTP protocol module. The future PyO3 bindings and PyPI package will live together in
 [`python/`](python/README.md); they are not implemented yet.
 
-Crates are of two sorts: a **kind** (`crates/kinds/`: `conversation`, `realtime`, `mcp`) owns
+Crates are of two sorts: a **kind** (`crates/kinds/`: `conversation`, `media`, `realtime`, `mcp`) owns
 its events, its formats on its wire and its vendors' dialects; a **wire**
 (`crates/wires/`: `http`, `ws`) moves bytes at both edges and knows no kind. A kind's formats
 are behind default features, so a plugin can depend on its types alone. A
