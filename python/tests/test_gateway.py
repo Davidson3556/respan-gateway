@@ -220,3 +220,157 @@ def test_cli_check_and_bad_usage(fake, tmp_path):
     run = lambda *a: subprocess.run([sys.executable, "-m", "respan_gateway", *a], capture_output=True, text=True)
     assert run("-c", str(ok), "check").stdout.strip().endswith(": ok")
     assert run("--bogus").returncode == 2
+
+
+# -- timeouts, cancellation, threads ---------------------------------------
+
+
+def until(event: threading.Event, seconds: float = 3) -> bool:
+    return event.wait(seconds)
+
+
+def test_sync_timeout_stops_the_provider_call(gw, fake):
+    import time
+
+    import openai
+
+    client = gw.openai(timeout=0.5, max_retries=0)
+    start = time.monotonic()
+    with pytest.raises(openai.APITimeoutError):
+        client.chat.completions.create(model="slow", messages=CHAT["messages"])
+    assert time.monotonic() - start < 3
+    assert until(fake.disconnected)
+
+
+def test_async_timeout_stops_the_provider_call(gw, fake):
+    import time
+
+    import openai
+
+    async def main():
+        client = gw.openai(asynchronous=True, timeout=0.5, max_retries=0)
+        with pytest.raises(openai.APITimeoutError):
+            await client.chat.completions.create(model="slow", messages=CHAT["messages"])
+
+    start = time.monotonic()
+    asyncio.run(main())
+    assert time.monotonic() - start < 3  # no executor thread holds the exit
+    assert until(fake.disconnected)
+
+
+def test_async_cancellation_stops_the_provider_call(gw, fake):
+    import time
+
+    async def main():
+        client = gw.openai(asynchronous=True)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(client.chat.completions.create(model="slow", messages=CHAT["messages"]), 0.5)
+
+    start = time.monotonic()
+    asyncio.run(main())
+    assert time.monotonic() - start < 3
+    assert until(fake.disconnected)
+
+
+def test_read_timeout_between_stream_chunks(gw, fake):
+    body = {**CHAT, "model": "stall", "stream": True}
+    with httpx.Client(transport=gw.transport(), base_url="http://respan-gateway") as client:
+        with client.stream("POST", "/v1/chat/completions", json=body, timeout=httpx.Timeout(0.5)) as r:
+            assert r.status_code == 200
+            with pytest.raises(httpx.ReadTimeout):
+                for _ in r.iter_raw():
+                    pass
+    assert until(fake.disconnected)  # closing the response hangs up on the provider
+
+
+def test_async_read_timeout_between_stream_chunks(gw, fake):
+    async def main():
+        body = {**CHAT, "model": "stall", "stream": True}
+        async with httpx.AsyncClient(transport=gw.async_transport(), base_url="http://respan-gateway") as client:
+            async with client.stream("POST", "/v1/chat/completions", json=body, timeout=httpx.Timeout(0.5)) as r:
+                with pytest.raises(httpx.ReadTimeout):
+                    async for _ in r.aiter_raw():
+                        pass
+
+    asyncio.run(main())
+    assert until(fake.disconnected)
+
+
+def test_many_open_streams_do_not_starve_other_requests(gw, fake):
+    import time
+
+    async def main():
+        body = {**CHAT, "model": "stall", "stream": True}
+        async with httpx.AsyncClient(transport=gw.async_transport(), base_url="http://respan-gateway",
+                                     timeout=None) as client:
+            async def open_stream():
+                async with client.stream("POST", "/v1/chat/completions", json=body) as r:
+                    async for _ in r.aiter_raw():
+                        pass
+
+            streams = [asyncio.create_task(open_stream()) for _ in range(64)]
+            await asyncio.sleep(1)  # every one is now waiting for a chunk
+            start = time.monotonic()
+            r = await client.post("/v1/chat/completions", json=CHAT)
+            assert r.status_code == 200
+            assert time.monotonic() - start < 2
+            for s in streams:
+                s.cancel()
+            await asyncio.gather(*streams, return_exceptions=True)
+
+    asyncio.run(main())
+
+
+def test_requests_send_the_allowed_host_whatever_the_url(gw):
+    from respan_gateway._transport import HOST, _call
+
+    assert HOST == "respan-gateway"
+    for url in ("http://evil.example:9/v1/models", "http://respan-gateway/v1/models", "http://localhost/v1/models"):
+        request = httpx.Request("GET", url, headers={"Host": "attacker.example"})
+        hosts = [v for k, v in _call(request)[2] if k.lower() == "host"]
+        assert hosts == ["respan-gateway"]
+    # And through a real client aimed at another host.
+    with httpx.Client(transport=gw.transport()) as client:
+        assert client.get("http://evil.example/v1/models").status_code == 200
+
+
+def test_bare_serve_keeps_running(gw):
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    gw.serve(port=port)  # the handle is dropped at once
+    import gc
+    import time
+
+    gc.collect()
+    time.sleep(0.3)
+    assert httpx.post(f"http://127.0.0.1:{port}/v1/chat/completions", json=CHAT).status_code == 200
+
+
+def test_gateway_reads_gateway_yaml_in_the_working_directory(fake, tmp_path, monkeypatch):
+    (tmp_path / "gateway.yaml").write_text(json.dumps(config_for(fake)))
+    for var in list(os.environ):
+        if var.endswith("_API_KEY") or var.startswith("RESPAN_"):
+            monkeypatch.delenv(var)
+    monkeypatch.chdir(tmp_path)
+    r = rg.Gateway().request("POST", "/v1/chat/completions", json=CHAT)
+    assert r.status_code == 200 and r.json()["choices"][0]["message"]["content"] == "".join(WORDS)
+
+
+def test_cli_exits_quietly_on_sigint(tmp_path):
+    import signal
+    import time
+
+    cfg = tmp_path / "gateway.yaml"
+    cfg.write_text("providers: {}\nserve: []\n")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "respan_gateway", "-c", str(cfg), "--listen", "127.0.0.1:0"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    time.sleep(1.5)
+    proc.send_signal(signal.SIGINT)
+    out, err = proc.communicate(timeout=15)
+    assert proc.returncode == 0, (out, err)
+    assert "Traceback" not in err and "KeyboardInterrupt" not in err

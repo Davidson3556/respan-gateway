@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import select
+import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -22,6 +25,8 @@ class FakeOpenAI:
         # Set to let a streamed reply continue after its first chunk.
         self.gate = threading.Event()
         self.gate.set()
+        # Set when a client hangs up while a "slow" or "stall" reply waits.
+        self.disconnected = threading.Event()
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -35,6 +40,16 @@ class FakeOpenAI:
                 self.send_header("content-length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            def hang(self, seconds: float) -> bool:
+                """Waits; returns True (and records it) if the client hung up."""
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    readable, _, _ = select.select([self.connection], [], [], 0.05)
+                    if readable and self.connection.recv(1, socket.MSG_PEEK) == b"":
+                        fake.disconnected.set()
+                        return True
+                return False
 
             def do_GET(self) -> None:
                 if self.path == "/v1/models":
@@ -54,6 +69,15 @@ class FakeOpenAI:
                     return self.reply(400, {"error": {"message": "model and messages are required"}})
                 if body["model"] == "missing":
                     return self.reply(404, {"error": {"message": "model not found", "type": "invalid_request_error"}})
+                if body["model"] == "slow" and self.hang(5):  # no head for 5 s
+                    return
+                if body["model"] == "stall" and body.get("stream"):  # a head, then silence
+                    self.send_response(200)
+                    self.send_header("content-type", "text/event-stream")
+                    self.end_headers()
+                    self.chunk("stall", {"role": "assistant", "content": "Hi"})
+                    self.hang(8)
+                    return
                 if body.get("stream"):
                     return self.stream(body["model"])
                 self.reply(200, {

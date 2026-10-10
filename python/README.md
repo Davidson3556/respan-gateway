@@ -63,8 +63,9 @@ python -m respan_gateway proxy --openai
 
 `Gateway(config=...)` takes a dict or a YAML string in the format of
 [`gateway.example.yaml`](../gateway.example.yaml); `Gateway.from_file(path)`
-reads a file. With no config, the gateway is built from the environment as
-the binary is: every vendor whose key is set (`OPENAI_API_KEY`,
+reads a file. With no config, `Gateway()` starts as the binary does with no
+arguments: from `./gateway.yaml` if it exists, else from the environment:
+every vendor whose key is set (`OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, ...) becomes a
 provider, models route by name (`claude-*` to Anthropic, `gemini-*` to
 Gemini, or explicitly `groq/llama-3.3-70b-versatile`), and
@@ -86,7 +87,12 @@ member that depends on the `respan-gateway` library in `apps/gateway`. The
 `extension-module` feature is enabled by maturin only, so `cargo test` and
 `cargo clippy` of the workspace link normally. One tokio runtime, started on
 first use, serves every gateway, server and the command line; every call that
-waits releases the GIL. The async transport runs the blocking native calls on
-the event loop's thread-pool executor rather than bridging futures: the
-calls are short or interruptible (closing a response wakes a pending read),
-and it needs no second native API.
+waits releases the GIL. Async requests use a native callback API (`send_async`, `next_chunk_async`)
+rather than executor threads: a waiting request holds no thread, so many
+open streams cannot starve anything, and cancelling the awaiting task drops
+the in-flight router future, which cancels the provider call. Sync calls
+block with the GIL released and wake every 100 ms to deliver Ctrl-C. httpx's
+read timeout bounds the wait for the response head and each body chunk
+(connect, write and pool timeouts have nothing to bound in-process). A server
+from `serve()` keeps running when its handle is dropped, until `stop()` or
+the process exits.

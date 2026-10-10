@@ -27,7 +27,8 @@ __all__ = [
     "__version__",
 ]
 
-# The host in URLs of in-process requests; the transport ignores it.
+# The base URL of in-process requests; the transport sends its host
+# (`respan-gateway`) whatever URL a client was given.
 _BASE = "http://respan-gateway"
 
 
@@ -35,9 +36,9 @@ class Gateway:
     """A configured gateway.
 
     `config` is a mapping, or a YAML string, in the format of
-    `gateway.example.yaml`. Without it, the gateway is built from the
-    environment, as the binary is with no config file: every vendor whose
-    key is set (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+    `gateway.example.yaml`. Without it, the gateway is configured as the
+    binary is with no arguments: from `./gateway.yaml` if that file exists,
+    else from the environment: every vendor whose key is set (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
     ...), with `RESPAN_<VENDOR>_BASE_URL` to point one elsewhere.
 
     Raises `ConfigError` (a `ValueError`) if the configuration is invalid.
@@ -45,7 +46,7 @@ class Gateway:
 
     def __init__(self, config: Union[Mapping[str, Any], str, None] = None) -> None:
         if config is None:
-            self._native = _native.Native.from_env()
+            self._native = _native.Native.discover()
         elif isinstance(config, str):
             self._native = _native.Native.from_yaml(config)
         else:
@@ -115,26 +116,27 @@ class Gateway:
         """Sends one request and reads the whole response.
 
         `kwargs` are those of `httpx.Client.request` (`json`, `content`,
-        `headers`, `params`...). An HTTP error status is a response, not an
-        exception.
+        `headers`, `params`, `timeout`...). An HTTP error status is a response,
+        not an exception. There is no timeout unless you pass one: it bounds
+        the wait for the response (the provider call).
         """
-        with httpx.Client(base_url=_BASE, transport=self.transport()) as client:
+        with httpx.Client(base_url=_BASE, transport=self.transport(), timeout=None) as client:
             return client.request(method, path, **kwargs)
 
     async def arequest(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         """`request` for asyncio."""
-        async with httpx.AsyncClient(base_url=_BASE, transport=self.async_transport()) as client:
+        async with httpx.AsyncClient(base_url=_BASE, transport=self.async_transport(), timeout=None) as client:
             return await client.request(method, path, **kwargs)
 
     def stream(self, method: str, path: str, **kwargs: Any) -> Iterator[bytes]:
         """Sends one request and yields the response body as it arrives."""
-        with httpx.Client(base_url=_BASE, transport=self.transport()) as client:
+        with httpx.Client(base_url=_BASE, transport=self.transport(), timeout=None) as client:
             with client.stream(method, path, **kwargs) as response:
                 yield from response.iter_raw()
 
     async def astream(self, method: str, path: str, **kwargs: Any) -> AsyncIterator[bytes]:
         """`stream` for asyncio."""
-        async with httpx.AsyncClient(base_url=_BASE, transport=self.async_transport()) as client:
+        async with httpx.AsyncClient(base_url=_BASE, transport=self.async_transport(), timeout=None) as client:
             async with client.stream(method, path, **kwargs) as response:
                 async for chunk in response.aiter_raw():
                     yield chunk
@@ -143,7 +145,9 @@ class Gateway:
         """Serves this gateway on a real socket in the background.
 
         Returns a `Server` (`.url`, `.stop()`), also a context manager that
-        stops on exit. `port=0` picks a free port. Without client `keys` in
+        stops on exit. The server keeps running until stopped or the process
+        exits, even if you drop the returned `Server` (so a bare
+        `gw.serve(port=8080)` serves). `port=0` picks a free port. Without client `keys` in
         the config, anyone who reaches it spends your keys: keep it local.
         """
         return self._native.serve(host, port)

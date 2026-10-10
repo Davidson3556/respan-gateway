@@ -4,7 +4,10 @@
 //! and the command line run on one shared tokio runtime. Every call that
 //! waits releases the GIL.
 
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -18,7 +21,7 @@ use pyo3::types::{PyBytes, PyTuple};
 use respan_gateway::{App, Config};
 use tokio::runtime::Runtime;
 use tokio::sync::{Notify, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tower::ServiceExt;
 
 create_exception!(
@@ -46,6 +49,13 @@ fn runtime() -> &'static Runtime {
     })
 }
 
+create_exception!(
+    _native,
+    GatewayTimeout,
+    GatewayError,
+    "A request or a read of its body outlasted its timeout."
+);
+
 fn gateway_error(e: impl std::fmt::Display) -> PyErr {
     GatewayError::new_err(e.to_string())
 }
@@ -60,6 +70,154 @@ fn unlatin1(text: &str) -> Result<Vec<u8>, PyErr> {
     text.chars()
         .map(|c| u8::try_from(c).map_err(|_| gateway_error("header text is not latin-1")))
         .collect()
+}
+
+/// Why a wait ended without a value.
+#[derive(Debug)]
+enum Failure {
+    Timeout,
+    Error(String),
+}
+
+type Outcome<T> = Result<T, Failure>;
+
+impl From<Failure> for PyErr {
+    fn from(failure: Failure) -> PyErr {
+        match failure {
+            Failure::Timeout => GatewayTimeout::new_err("timed out"),
+            Failure::Error(message) => GatewayError::new_err(message),
+        }
+    }
+}
+
+/// `work` within `limit` seconds (forever if `None`).
+async fn within<T>(
+    limit: Option<f64>,
+    work: impl Future<Output = Result<T, String>>,
+) -> Outcome<T> {
+    let result = match limit {
+        Some(seconds) => {
+            let limit = Duration::try_from_secs_f64(seconds.max(0.0))
+                .unwrap_or(Duration::from_secs(365 * 24 * 3600));
+            tokio::time::timeout(limit, work)
+                .await
+                .map_err(|_| Failure::Timeout)?
+        }
+        None => work.await,
+    };
+    result.map_err(Failure::Error)
+}
+
+/// Runs `work` on the runtime and waits for it with the GIL released,
+/// waking every 100 ms to deliver signals (Ctrl-C); an interrupted wait
+/// drops `work`, which cancels whatever it was doing.
+fn wait<T: Send + 'static>(
+    py: Python<'_>,
+    work: impl Future<Output = Outcome<T>> + Send + 'static,
+) -> PyResult<T> {
+    let mut task = runtime().spawn(work);
+    loop {
+        let slice = py.detach(|| {
+            runtime().block_on(async {
+                tokio::time::timeout(Duration::from_millis(100), &mut task).await
+            })
+        });
+        match slice {
+            Ok(done) => return done.map_err(gateway_error)?.map_err(PyErr::from),
+            Err(_) => {
+                if let Err(e) = py.check_signals() {
+                    task.abort();
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+/// Runs `work` on the runtime and, when it ends, calls `done(value, error)`
+/// from the runtime's thread. The returned handle cancels it.
+fn start<T: Send + 'static>(
+    work: impl Future<Output = Outcome<T>> + Send + 'static,
+    done: Py<PyAny>,
+    into_python: impl FnOnce(Python<'_>, T) -> PyResult<Py<PyAny>> + Send + 'static,
+) -> Pending {
+    let task = runtime().spawn(async move {
+        let outcome = work.await;
+        Python::attach(|py| {
+            let args = match outcome {
+                Ok(value) => into_python(py, value).map(|v| (v, py.None())),
+                Err(failure) => Ok((py.None(), PyErr::from(failure).into_value(py).into_any())),
+            };
+            let called = args.and_then(|args| done.call1(py, args));
+            if let Err(e) = called {
+                e.print(py);
+            }
+        });
+    });
+    Pending {
+        task: task.abort_handle(),
+    }
+}
+
+/// A request or read in flight on the runtime.
+#[pyclass(frozen, module = "respan_gateway._native")]
+#[derive(Debug)]
+struct Pending {
+    task: AbortHandle,
+}
+
+#[pymethods]
+impl Pending {
+    /// Drops the work in flight (the provider call with it); `done` is then
+    /// never called.
+    fn cancel(&self) {
+        self.task.abort();
+    }
+}
+
+/// A response head with the body still to pull.
+struct Head {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Body,
+}
+
+impl Head {
+    fn into_reply(self) -> Reply {
+        Reply {
+            status: self.status,
+            headers: self.headers,
+            inner: Arc::new(Inner {
+                body: tokio::sync::Mutex::new(Some(self.body)),
+                closed: AtomicBool::new(false),
+                wake: Notify::new(),
+            }),
+        }
+    }
+}
+
+async fn open(router: Router, request: Request<Body>, limit: Option<f64>) -> Outcome<Head> {
+    within(limit, async move {
+        let response = router.oneshot(request).await.map_err(|e| e.to_string())?;
+        let (head, body) = response.into_parts();
+        Ok(Head {
+            status: head.status.as_u16(),
+            headers: head
+                .headers
+                .iter()
+                .map(|(n, v)| (n.as_str().to_owned(), latin1(v.as_bytes())))
+                .collect(),
+            body,
+        })
+    })
+    .await
+}
+
+fn chunk_to_python(py: Python<'_>, chunk: Option<Bytes>) -> PyResult<Py<PyAny>> {
+    Ok(match chunk {
+        Some(data) => PyBytes::new(py, &data).into_any().unbind(),
+        None => py.None(),
+    })
 }
 
 /// A configured gateway.
@@ -81,6 +239,25 @@ impl Native {
             app: Arc::new(app),
         })
     }
+
+    fn request(
+        method: &str,
+        target: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> PyResult<Request<Body>> {
+        let mut request = Request::builder()
+            .method(Method::from_bytes(method.as_bytes()).map_err(gateway_error)?)
+            .uri(target);
+        for (name, value) in headers {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(gateway_error)?;
+            let value = HeaderValue::from_bytes(&unlatin1(value)?).map_err(gateway_error)?;
+            request = request.header(name, value);
+        }
+        request
+            .body(Body::from(Bytes::copy_from_slice(body)))
+            .map_err(gateway_error)
+    }
 }
 
 #[pymethods]
@@ -97,14 +274,17 @@ impl Native {
         Self::new(Config::load(path))
     }
 
-    /// A gateway from the vendors the environment has keys for.
+    /// A gateway as the binary starts with no arguments: `./gateway.yaml`
+    /// if there is one, else the vendors the environment has keys for.
     #[staticmethod]
-    fn from_env() -> PyResult<Self> {
-        Self::new(Config::from_env())
+    fn discover() -> PyResult<Self> {
+        Self::new(Config::discover(None))
     }
 
     /// Sends one request through the router and returns once its head is
-    /// ready; the body is then pulled from the returned [`Reply`].
+    /// ready (within `timeout` seconds); the body is then pulled from the
+    /// returned [`Reply`].
+    #[pyo3(signature = (method, target, headers, body, timeout=None))]
     fn send(
         &self,
         py: Python<'_>,
@@ -112,36 +292,35 @@ impl Native {
         target: &str,
         headers: Vec<(String, String)>,
         body: &[u8],
+        timeout: Option<f64>,
     ) -> PyResult<Reply> {
-        let mut request = Request::builder()
-            .method(Method::from_bytes(method.as_bytes()).map_err(gateway_error)?)
-            .uri(target);
-        for (name, value) in &headers {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(gateway_error)?;
-            let value = HeaderValue::from_bytes(&unlatin1(value)?).map_err(gateway_error)?;
-            request = request.header(name, value);
-        }
-        let request = request
-            .body(Body::from(Bytes::copy_from_slice(body)))
-            .map_err(gateway_error)?;
-        let router = self.router.clone();
-        let response = py.detach(|| {
-            runtime().block_on(async { router.oneshot(request).await.map_err(gateway_error) })
-        })?;
-        let (head, body) = response.into_parts();
-        Ok(Reply {
-            status: head.status.as_u16(),
-            headers: head
-                .headers
-                .iter()
-                .map(|(n, v)| (n.as_str().to_owned(), latin1(v.as_bytes())))
-                .collect(),
-            body: tokio::sync::Mutex::new(body),
-            closed: Notify::new(),
-        })
+        let request = Self::request(method, target, &headers, body)?;
+        wait(py, open(self.router.clone(), request, timeout)).map(Head::into_reply)
     }
 
-    /// Starts serving on `host:port` (port 0 picks a free one).
+    /// `send` without blocking: calls `done(reply, error)` from another
+    /// thread when the head is ready. The returned handle cancels the request.
+    #[pyo3(signature = (method, target, headers, body, done, timeout=None))]
+    fn send_async(
+        &self,
+        method: &str,
+        target: &str,
+        headers: Vec<(String, String)>,
+        body: &[u8],
+        done: Py<PyAny>,
+        timeout: Option<f64>,
+    ) -> PyResult<Pending> {
+        let request = Self::request(method, target, &headers, body)?;
+        Ok(start(
+            open(self.router.clone(), request, timeout),
+            done,
+            |py, head| Ok(Py::new(py, head.into_reply())?.into_any()),
+        ))
+    }
+
+    /// Starts serving on `host:port` (port 0 picks a free one). The server
+    /// runs until `stop()` or the end of the process, even if the returned
+    /// handle is dropped.
     fn serve(&self, py: Python<'_>, host: &str, port: u16) -> PyResult<Server> {
         let app = self.app.clone();
         let host = host.to_owned();
@@ -155,7 +334,10 @@ impl Native {
                 let (stop, stopped) = oneshot::channel::<()>();
                 let task = tokio::spawn(async move {
                     app.serve(listener, async {
-                        let _ = stopped.await;
+                        // A dropped sender is not a stop.
+                        if stopped.await.is_err() {
+                            std::future::pending::<()>().await;
+                        }
                     })
                     .await
                 });
@@ -170,6 +352,71 @@ impl Native {
     }
 }
 
+/// The body of a response and whether it was abandoned.
+#[derive(Debug)]
+struct Inner {
+    body: tokio::sync::Mutex<Option<Body>>,
+    closed: AtomicBool,
+    wake: Notify,
+}
+
+impl Inner {
+    /// Completes once closed.
+    async fn closed(&self) {
+        loop {
+            let woken = self.wake.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            if self.closed.load(Ordering::Acquire) {
+                return;
+            }
+            woken.await;
+        }
+    }
+
+    /// Drops the body (and with it the provider call), unless a read holds
+    /// it; that read drops it as it returns.
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.wake.notify_waiters();
+        if let Ok(mut body) = self.body.try_lock() {
+            *body = None;
+        }
+    }
+
+    /// The next chunk of the body, or `None` at its end or once closed.
+    async fn pull(&self) -> Result<Option<Bytes>, String> {
+        let read = async {
+            let mut guard = self.body.lock().await;
+            let Some(body) = guard.as_mut() else {
+                return Ok(None);
+            };
+            loop {
+                match body.frame().await {
+                    None => return Ok(None),
+                    Some(Err(e)) => return Err(e.to_string()),
+                    // Trailers carry nothing a client reads.
+                    Some(Ok(frame)) => {
+                        if let Ok(data) = frame.into_data()
+                            && !data.is_empty()
+                        {
+                            return Ok(Some(data));
+                        }
+                    }
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            () = self.closed() => {
+                self.close();
+                Ok(None)
+            }
+            chunk = read => chunk,
+        }
+    }
+}
+
 /// A response whose head has arrived and whose body is pulled chunk by chunk.
 #[pyclass(frozen, module = "respan_gateway._native")]
 #[derive(Debug)]
@@ -179,51 +426,46 @@ struct Reply {
     /// Header names and latin-1 values, in order.
     #[pyo3(get)]
     headers: Vec<(String, String)>,
-    body: tokio::sync::Mutex<Body>,
-    closed: Notify,
+    inner: Arc<Inner>,
 }
 
 #[pymethods]
 impl Reply {
     /// The next chunk of the body, or `None` at its end, blocking (GIL
-    /// released) until one arrives. Returns `None` once closed, even from
-    /// another thread.
-    fn next_chunk<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        let chunk = py.detach(|| {
-            runtime().block_on(async {
-                let mut body = self.body.lock().await;
-                loop {
-                    let frame = tokio::select! {
-                        biased;
-                        () = self.closed.notified() => return Ok(None),
-                        frame = body.frame() => frame,
-                    };
-                    match frame {
-                        None => return Ok(None),
-                        Some(Err(e)) => return Err(gateway_error(e)),
-                        // Trailers carry nothing a client reads.
-                        Some(Ok(frame)) => {
-                            if let Ok(data) = frame.into_data()
-                                && !data.is_empty()
-                            {
-                                return Ok(Some(data));
-                            }
-                        }
-                    }
-                }
-            })
-        })?;
+    /// released) until one arrives or `timeout` seconds pass. Returns `None`
+    /// once closed, even from another thread.
+    #[pyo3(signature = (timeout=None))]
+    fn next_chunk<'py>(
+        &self,
+        py: Python<'py>,
+        timeout: Option<f64>,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let inner = self.inner.clone();
+        let chunk = wait(py, within(timeout, async move { inner.pull().await }))?;
         Ok(chunk.map(|data| PyBytes::new(py, &data)))
     }
 
-    /// Abandons the body; a blocked `next_chunk` returns `None`.
+    /// `next_chunk` without blocking: calls `done(chunk, error)` from
+    /// another thread. The returned handle cancels the read.
+    #[pyo3(signature = (done, timeout=None))]
+    fn next_chunk_async(&self, done: Py<PyAny>, timeout: Option<f64>) -> Pending {
+        let inner = self.inner.clone();
+        start(
+            within(timeout, async move { inner.pull().await }),
+            done,
+            chunk_to_python,
+        )
+    }
+
+    /// Abandons the body and the provider call behind it; a blocked
+    /// `next_chunk` returns `None`.
     fn close(&self) {
-        // A permit, so a close before the next wait is not lost.
-        self.closed.notify_one();
+        self.inner.close();
     }
 }
 
-/// A gateway listening on a real socket in the background.
+/// A gateway listening on a real socket in the background. Dropping the
+/// handle leaves it running; `stop()` ends it.
 #[pyclass(frozen, module = "respan_gateway._native")]
 #[derive(Debug)]
 struct Server {
@@ -241,12 +483,6 @@ impl Server {
         if let Some(stop) = self.stop.lock().ok().and_then(|mut s| s.take()) {
             let _ = stop.send(());
         }
-    }
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.signal();
     }
 }
 
@@ -283,10 +519,12 @@ fn run_cli(py: Python<'_>, args: Vec<String>) -> i32 {
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Native>()?;
     m.add_class::<Reply>()?;
+    m.add_class::<Pending>()?;
     m.add_class::<Server>()?;
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;
     m.add("ConfigError", m.py().get_type::<ConfigError>())?;
     m.add("GatewayError", m.py().get_type::<GatewayError>())?;
+    m.add("GatewayTimeout", m.py().get_type::<GatewayTimeout>())?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
