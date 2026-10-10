@@ -174,13 +174,14 @@ impl Format<ProviderIo, Output, Input> for StreamableHttp {
             move |head, input: Option<&Input>| {
                 let streamed = "a call in mcp carries one body, not streamed inputs";
                 call_head(head, input.ok_or_else(|| Fault::config(streamed))?, path)?;
-                Ok(formats::each(|input: &Input| {
-                    Ok(match input.method {
-                        Method::POST => {
-                            body(input.messages.clone(), input.batch).to_string().into()
-                        }
-                        _ => Bytes::new(),
-                    })
+                Ok(formats::each(|input: &Input| match input.method {
+                    Method::POST if input.messages.is_empty() => Err(Fault::config(
+                        "a POST to an MCP server carries at least one message",
+                    )),
+                    Method::POST => {
+                        Ok(body(input.messages.clone(), input.batch).to_string().into())
+                    }
+                    _ => Ok(Bytes::new()),
                 }))
             },
             response_events,
