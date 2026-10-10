@@ -16,6 +16,10 @@ import { cn } from "@/lib/utils";
 
 function Tokens({ record }: { record: RequestRecord }) {
   if (!record.usage) return <span className="text-muted-foreground">—</span>;
+  const { input_tokens, output_tokens, seconds } = record.usage;
+  if (seconds !== undefined && input_tokens + output_tokens === 0) {
+    return <span className="tabular">{seconds} s audio</span>;
+  }
   return (
     <span className="tabular">
       {formatCount(record.usage.input_tokens)}

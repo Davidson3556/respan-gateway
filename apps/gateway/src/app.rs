@@ -12,6 +12,8 @@ use axum::routing::get;
 use respan_gateway_core::Gateway;
 use respan_gateway_http::axum::router_with_limit;
 use respan_gateway_http::relay::Relay;
+use respan_gateway_media::gemini::GeminiVeo;
+use respan_gateway_media::video::LocateContent;
 use respan_gateway_ws::Limits;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -21,6 +23,7 @@ use crate::admin::{self, Admin};
 use crate::auth::{self, ClientCredentials, ClientKeys};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{Kind, KnownFormat, formats};
+use crate::jobs::VideoJobs;
 use crate::models::{self, Models};
 use crate::requests::{self, Recorder, RequestLog};
 use crate::routing::Routing;
@@ -92,9 +95,15 @@ impl App {
                     .map(|e| (e.internal.clone(), u.name.clone()))
             })
             .collect();
+        // Veo serves a job's content only where the job says.
+        let veo = plan.upstreams.iter().flat_map(|u| &u.entries);
+        let veo = veo.filter(|e| e.format == GeminiVeo::NAME);
+        let locate = veo.fold(LocateContent::new(), |l, e| l.provider(&e.internal));
         let mut gateway = gateway
             .plugin(Recorder::new(log.clone(), &formats, names))
-            .plugin(Routing::new(plan.routes.clone(), &formats));
+            .plugin(Routing::new(plan.routes.clone(), &formats))
+            .plugin(VideoJobs::new(&plan.upstreams, &formats))
+            .plugin(locate);
         // A raw relay sends each client's credentials itself.
         gateway = match config.raw_relay {
             true => gateway.plugin(Relay::RAW),

@@ -23,6 +23,7 @@ path = "src/main.rs"
 respan-gateway-conversation.workspace = true
 respan-gateway-core.workspace = true
 respan-gateway-http = { workspace = true, features = ["reqwest", "axum"] }
+respan-gateway-media.workspace = true
 respan-gateway-plugins.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-ws = { workspace = true, features = ["axum"] }

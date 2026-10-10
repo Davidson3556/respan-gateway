@@ -23,6 +23,7 @@ mod compose;
 mod config;
 mod formats;
 mod init;
+mod jobs;
 mod models;
 mod presets;
 mod requests;

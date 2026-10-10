@@ -14,10 +14,12 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
+use respan_gateway_conversation as conversation;
 use respan_gateway_core::{ClientContext, Extensions, Fault, Plugin, ProviderContext, async_trait};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http_body::{self, Frame, SizeHint};
+use respan_gateway_media::{image, speech, transcription};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -51,6 +53,34 @@ pub struct RequestRecord {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Seconds of audio billed, as a transcription's provider may say
+    /// instead of tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+}
+
+/// What one event of a response adds to its usage.
+enum Counted {
+    Tokens(u64, u64),
+    Seconds(f64),
+}
+
+impl Counted {
+    fn tokens(usage: &respan_gateway_conversation::Usage) -> Option<Self> {
+        Some(Counted::Tokens(usage.input_tokens, usage.output_tokens))
+    }
+}
+
+impl Usage {
+    fn add(&mut self, counted: Counted) {
+        match counted {
+            Counted::Tokens(input, output) => {
+                self.input_tokens += input;
+                self.output_tokens += output;
+            }
+            Counted::Seconds(seconds) => *self.seconds.get_or_insert(0.0) += seconds,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -276,10 +306,15 @@ fn line(r: &RequestRecord) -> String {
         details.push(format!("ttfb {ttfb}ms"));
     }
     if let Some(u) = r.usage {
-        details.push(format!(
-            "{} in / {} out tokens",
-            u.input_tokens, u.output_tokens
-        ));
+        if u.input_tokens + u.output_tokens > 0 || u.seconds.is_none() {
+            details.push(format!(
+                "{} in / {} out tokens",
+                u.input_tokens, u.output_tokens
+            ));
+        }
+        if let Some(seconds) = u.seconds {
+            details.push(format!("{seconds} s of audio"));
+        }
     }
     if !details.is_empty() {
         line.push_str(&format!(" ({})", details.join(", ")));
@@ -466,18 +501,23 @@ impl Plugin for Recorder {
             }
         }
         self.log.publish(&entry);
-        if cx.is_kind::<respan_gateway_conversation::Output>() {
-            let counting = entry.clone();
-            cx.filter(move |output: &mut respan_gateway_conversation::Output| {
-                if let respan_gateway_conversation::Output::Usage(usage) = output {
-                    let mut record = counting.record();
-                    let total = record.usage.get_or_insert_with(Usage::default);
-                    total.input_tokens += usage.input_tokens;
-                    total.output_tokens += usage.output_tokens;
-                }
-                Ok(())
-            })?;
-        }
+        count(cx, &entry, |output: &conversation::Output| match output {
+            conversation::Output::Usage(usage) => Counted::tokens(usage),
+            _ => None,
+        })?;
+        count(cx, &entry, |output: &image::Output| match output {
+            image::Output::Usage(usage) => Counted::tokens(usage),
+            _ => None,
+        })?;
+        count(cx, &entry, |output: &transcription::Output| match output {
+            transcription::Output::Usage(usage) => Counted::tokens(usage),
+            transcription::Output::Seconds(seconds) => Some(Counted::Seconds(*seconds)),
+            _ => None,
+        })?;
+        count(cx, &entry, |output: &speech::Output| match output {
+            speech::Output::Usage(usage) => Counted::tokens(usage),
+            _ => None,
+        })?;
         Ok(None)
     }
 
@@ -488,6 +528,26 @@ impl Plugin for Recorder {
         }
         Ok(())
     }
+}
+
+/// Adds to `entry`'s usage what `read` finds in each output, if `T` is the
+/// request's output type.
+fn count<T: Clone + Send + Sync + 'static>(
+    cx: &mut ClientContext,
+    entry: &Arc<Entry>,
+    read: fn(&T) -> Option<Counted>,
+) -> Result<(), Fault> {
+    if !cx.is_kind::<T>() {
+        return Ok(());
+    }
+    let entry = entry.clone();
+    cx.filter(move |output: &mut T| {
+        if let Some(counted) = read(output) {
+            let mut record = entry.record();
+            record.usage.get_or_insert_with(Usage::default).add(counted);
+        }
+        Ok(())
+    })
 }
 
 /// `time` as RFC 3339 in UTC, to the millisecond.
@@ -563,6 +623,7 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 12,
                 output_tokens: 40,
+                seconds: None,
             }),
             error: None,
         };

@@ -219,6 +219,26 @@ fn a_preset_is_every_format_of_its_vendor_compiled_in() {
                 "openai:responses-ws",
                 "wss://api.openai.com/v1"
             ),
+            entry(
+                "openai-images",
+                "openai:openai-images",
+                "https://api.openai.com/v1"
+            ),
+            entry(
+                "openai-transcriptions",
+                "openai:openai-transcriptions",
+                "https://api.openai.com/v1"
+            ),
+            entry(
+                "openai-speech",
+                "openai:openai-speech",
+                "https://api.openai.com/v1"
+            ),
+            entry(
+                "openai-videos",
+                "openai:openai-videos",
+                "https://api.openai.com/v1"
+            ),
         ]
     );
     assert_eq!(
@@ -226,6 +246,12 @@ fn a_preset_is_every_format_of_its_vendor_compiled_in() {
         [
             entry("openai-chat", "gemini", "http://g.test/v1beta/openai"),
             entry("gemini-live", "gemini:gemini-live", "ws://g.test"),
+            entry(
+                "openai-images",
+                "gemini:openai-images",
+                "http://g.test/v1beta/openai"
+            ),
+            entry("gemini-veo", "gemini:gemini-veo", "http://g.test/v1beta"),
         ]
     );
     let header = |i: usize, e: usize, name: &str| {
@@ -239,13 +265,19 @@ fn a_preset_is_every_format_of_its_vendor_compiled_in() {
         Some("Bearer AIza")
     );
     assert_eq!(header(1, 1, "x-goog-api-key").as_deref(), Some("AIza"));
+    assert_eq!(header(1, 3, "x-goog-api-key").as_deref(), Some("AIza"));
     assert!(plan.upstreams.iter().all(|u| u.own_key));
-    // Served by default: the chat formats and every session's.
+    // Served by default: the chat formats, each media kind's client format
+    // and every session's.
     assert_eq!(
         plan.serve,
         [
             "openai-chat",
             "anthropic-messages",
+            "openai-images",
+            "openai-transcriptions",
+            "openai-speech",
+            "openai-videos",
             "openai-realtime",
             "responses-ws",
             "gemini-live"
@@ -466,7 +498,15 @@ fn an_unknown_format_names_the_compiled_in_ones() {
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, groq-chat, deepseek-chat, vllm-chat, openrouter-chat, azure-chat, anthropic-messages, passthrough, openai-realtime, responses-ws, gemini-live]"
+            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, groq-chat, deepseek-chat, vllm-chat, openrouter-chat, azure-chat, anthropic-messages, openai-images, openai-transcriptions, openai-speech, openai-videos, gemini-veo, passthrough, openai-realtime, responses-ws, gemini-live]"
         )
+    );
+}
+
+#[test]
+fn a_format_only_providers_speak_cannot_be_served() {
+    assert_eq!(
+        plan("serve: [gemini-veo]").err().as_deref(),
+        Some("serve: gemini-veo is spoken only by providers; no client sends it")
     );
 }

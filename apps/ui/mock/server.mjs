@@ -19,7 +19,7 @@ const providers = [
   {
     name: "openai",
     vendor: "openai",
-    formats: ["openai-chat", "openai-images", "openai-audio"],
+    formats: ["openai-chat", "openai-images", "openai-transcriptions", "openai-speech"],
     kinds: ["chat", "image", "transcription", "speech"],
     base_url: "https://api.openai.com/v1",
     credentials: "gateway",
@@ -46,12 +46,17 @@ const routes = {
   serve: [
     { format: "openai-chat", kind: "chat", endpoints: ["POST /v1/chat/completions"] },
     { format: "anthropic-messages", kind: "chat", endpoints: ["POST /v1/messages"] },
-    { format: "openai-images", kind: "image", endpoints: ["POST /v1/images/generations"] },
     {
-      format: "openai-audio",
-      kind: "transcription",
-      endpoints: ["POST /v1/audio/transcriptions", "POST /v1/audio/speech"],
+      format: "openai-images",
+      kind: "image",
+      endpoints: ["POST /v1/images/generations", "POST /v1/images/edits"],
     },
+    {
+      format: "openai-transcriptions",
+      kind: "transcription",
+      endpoints: ["POST /v1/audio/transcriptions", "POST /v1/audio/translations"],
+    },
+    { format: "openai-speech", kind: "speech", endpoints: ["POST /v1/audio/speech"] },
   ],
   routes: [
     { prefix: "claude", provider: "anthropic" },

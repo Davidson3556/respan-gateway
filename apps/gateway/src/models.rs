@@ -12,7 +12,7 @@ use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::reqwest;
 use serde_json::{Value, json};
 
-use crate::compose::Upstream;
+use crate::compose::{Entry, Upstream};
 use crate::formats::Kind;
 use crate::routing::Routes;
 
@@ -21,13 +21,14 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a merged list is reused.
 const FRESH: Duration = Duration::from_secs(60);
 
-/// Where one provider lists its chat models.
+/// Where one provider lists its models.
 #[derive(Debug)]
 struct Listing {
     provider: String,
-    format: String,
     url: String,
     headers: HeaderMap,
+    /// A format of each kind it serves.
+    kinds: Vec<(Kind, String)>,
 }
 
 #[derive(Debug)]
@@ -43,21 +44,33 @@ impl Models {
         let listings = upstreams
             .iter()
             .filter_map(|u| {
-                let chat = u.entries.iter().find(|e| e.kind == Kind::CHAT)?;
-                let base = chat.base_url.trim_end_matches('/');
-                let mut headers = chat.auth.clone();
-                let url = match chat.format.as_str() {
+                // OpenAI's media formats share its list of models.
+                let openai_media =
+                    |e: &&Entry| Kind::MEDIA.contains(&e.kind) && e.format.starts_with("openai-");
+                let entries = || u.entries.iter();
+                let lister = entries()
+                    .find(|e| e.kind == Kind::CHAT)
+                    .or_else(|| entries().find(openai_media))?;
+                let base = lister.base_url.trim_end_matches('/');
+                let mut headers = lister.auth.clone();
+                let url = match lister.format.as_str() {
                     "anthropic-messages" => {
                         headers.insert("anthropic-version", "2023-06-01".parse().ok()?);
                         format!("{base}/v1/models?limit=1000")
                     }
                     _ => format!("{base}/models"),
                 };
+                let mut kinds: Vec<(Kind, String)> = Vec::new();
+                for e in entries() {
+                    if !kinds.iter().any(|(kind, _)| *kind == e.kind) {
+                        kinds.push((e.kind, e.format.clone()));
+                    }
+                }
                 Some(Listing {
                     provider: u.name.clone(),
-                    format: chat.format.clone(),
                     url,
                     headers,
+                    kinds,
                 })
             })
             .collect();
@@ -109,11 +122,13 @@ impl Models {
                 let id = m["id"].as_str()?;
                 // Gemini's OpenAI endpoint names them `models/<id>`.
                 let id = id.strip_prefix("models/").unwrap_or(id);
+                let kind = kind_of(id)?;
+                let (_, format) = listing.kinds.iter().find(|(k, _)| *k == kind)?;
                 let mut model = json!({
-                    "id": self.public_id(listing, id),
+                    "id": self.public_id(listing, kind, format, id),
                     "object": "model",
                     "owned_by": listing.provider,
-                    "kind": Kind::CHAT.label,
+                    "kind": kind.label,
                 });
                 if let Some(created) = m["created"].as_i64() {
                     model["created"] = created.into();
@@ -123,8 +138,8 @@ impl Models {
             .collect()
     }
 
-    fn public_id(&self, listing: &Listing, id: &str) -> String {
-        let route = self.routes.route(Kind::CHAT, &listing.format, Some(id));
+    fn public_id(&self, listing: &Listing, kind: Kind, format: &str, id: &str) -> String {
+        let route = self.routes.route(kind, format, Some(id));
         match route {
             Some(route) if route.provider == listing.provider && route.model.is_none() => {
                 id.to_owned()
@@ -134,6 +149,43 @@ impl Models {
     }
 }
 
+/// What a model does, by its name as vendors spell them; `None` for one the
+/// gateway serves no kind of, such as embeddings.
+fn kind_of(id: &str) -> Option<Kind> {
+    let id = id.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| id.contains(w));
+    let kind = match () {
+        _ if has(&["embed"]) => return None,
+        _ if has(&["dall-e", "gpt-image", "imagen", "grok-2-image", "flux"]) => Kind::IMAGE,
+        _ if has(&["whisper", "transcribe"]) => Kind::TRANSCRIPTION,
+        _ if has(&["tts"]) => Kind::SPEECH,
+        _ if has(&["sora", "veo"]) => Kind::VIDEO,
+        _ if has(&["realtime"]) => Kind::REALTIME,
+        _ => Kind::CHAT,
+    };
+    Some(kind)
+}
+
 pub async fn list(State(models): State<Arc<Models>>) -> Json<Value> {
     Json(models.list().await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_models_kind_is_read_from_its_name() {
+        let kind = |id| kind_of(id).map(|k| k.label);
+        assert_eq!(kind("gpt-4o-mini"), Some("chat"));
+        assert_eq!(kind("gpt-image-1"), Some("image"));
+        assert_eq!(kind("imagen-4.0-generate-001"), Some("image"));
+        assert_eq!(kind("whisper-large-v3"), Some("transcription"));
+        assert_eq!(kind("gpt-4o-mini-transcribe"), Some("transcription"));
+        assert_eq!(kind("gpt-4o-mini-tts"), Some("speech"));
+        assert_eq!(kind("sora-2"), Some("video"));
+        assert_eq!(kind("veo-3.0-generate-001"), Some("video"));
+        assert_eq!(kind("gpt-realtime"), Some("realtime"));
+        assert_eq!(kind("text-embedding-3-small"), None);
+    }
 }

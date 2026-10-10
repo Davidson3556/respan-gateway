@@ -120,6 +120,11 @@ function Detail({ record }: { record: RequestRecord }) {
           <Field label="Output tokens">
             {record.usage && <span className="tabular">{formatCount(record.usage.output_tokens)}</span>}
           </Field>
+          {record.usage?.seconds !== undefined && (
+            <Field label="Audio billed">
+              <span className="tabular">{record.usage.seconds} s</span>
+            </Field>
+          )}
         </dl>
       </Section>
       <Separator />

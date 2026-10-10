@@ -403,7 +403,17 @@ async fn the_admin_api_reports_requests_as_they_happen() {
     let openai_info = &providers["providers"][0];
     assert_eq!(openai_info["name"], "openai");
     assert_eq!(openai_info["vendor"], "openai");
-    assert_eq!(openai_info["kinds"], json!(["chat", "realtime"]));
+    assert_eq!(
+        openai_info["kinds"],
+        json!([
+            "chat",
+            "realtime",
+            "image",
+            "transcription",
+            "speech",
+            "video"
+        ])
+    );
     assert_eq!(openai_info["credentials"], "gateway");
     assert_eq!(openai_info["requests"], 1);
     assert!(openai_info["avg_latency_ms"].is_u64());

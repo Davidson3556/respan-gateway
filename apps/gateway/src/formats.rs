@@ -9,7 +9,12 @@ use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway};
 use respan_gateway_http::formats::opaque::{self, Passthrough};
 use respan_gateway_http::http::HeaderMap;
-use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo};
+use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, reqwest};
+use respan_gateway_media::gemini::GeminiVeo;
+use respan_gateway_media::openai::{
+    OpenAiImages, OpenAiSpeech, OpenAiTranscriptions, OpenAiVideos,
+};
+use respan_gateway_media::{image, speech, transcription, video};
 use respan_gateway_realtime::JsonEvents;
 
 /// What sort of traffic a format carries, as the admin API and routing
@@ -35,6 +40,25 @@ impl Kind {
         label: "passthrough",
         translates: false,
     };
+    pub const IMAGE: Kind = Kind {
+        label: "image",
+        translates: true,
+    };
+    pub const TRANSCRIPTION: Kind = Kind {
+        label: "transcription",
+        translates: true,
+    };
+    pub const SPEECH: Kind = Kind {
+        label: "speech",
+        translates: true,
+    };
+    pub const VIDEO: Kind = Kind {
+        label: "video",
+        translates: true,
+    };
+    /// The media kinds, whose client formats are served by default once a
+    /// provider speaks the kind.
+    pub const MEDIA: [Kind; 4] = [Kind::IMAGE, Kind::TRANSCRIPTION, Kind::SPEECH, Kind::VIDEO];
 }
 
 /// How a provider of a format takes the key configured for it.
@@ -51,6 +75,9 @@ pub enum KeyHeader {
 pub enum Base {
     Same,
     Origin,
+    /// The base without this suffix, if it ends in it: Gemini's own API is
+    /// its OpenAI-compatible base without `/openai`.
+    Without(&'static str),
 }
 
 /// A request's input, as routing reads and rewrites its model.
@@ -70,11 +97,40 @@ impl Routed for respan_gateway_conversation::Input {
     }
 }
 
+macro_rules! routed_by_model {
+    ($($input:ty),*) => {$(
+        impl Routed for $input {
+            fn model(&self) -> Option<&str> {
+                self.model.as_deref()
+            }
+            fn set_model(&mut self, model: String) {
+                self.model = Some(model);
+            }
+        }
+    )*};
+}
+
+routed_by_model!(image::Input, transcription::Input, speech::Input);
+
+/// Only a `Create` names a model; a follow-up goes by its job's id
+/// ([`crate::jobs`]).
+impl Routed for video::Input {
+    fn model(&self) -> Option<&str> {
+        video::Input::model(self)
+    }
+    fn set_model(&mut self, model: String) {
+        if let video::Input::Create(create) = self {
+            create.model = Some(model);
+        }
+    }
+}
+
 impl Routed for respan_gateway_realtime::Input {}
 
 impl<F: 'static> Routed for opaque::Input<F> {}
 
 type AddProvider = dyn Fn(Gateway, String, &str, HeaderMap) -> Result<Gateway, Fault> + Send + Sync;
+type Serve = dyn Fn(Gateway) -> Result<Gateway, Fault> + Send + Sync;
 pub type ReadModel = dyn Fn(&ClientContext) -> Option<String> + Send + Sync;
 pub type SetModel = dyn Fn(&mut ClientContext, String) -> Result<(), Fault> + Send + Sync;
 
@@ -87,8 +143,11 @@ pub struct KnownFormat {
     pub key: KeyHeader,
     pub base: Base,
     pub websocket: bool,
+    /// What its video jobs' ids start with, which routes a follow-up.
+    pub job_ids: Option<&'static str>,
     provider: Box<AddProvider>,
-    serve: Box<dyn Fn(Gateway) -> Result<Gateway, Fault> + Send + Sync>,
+    /// None for a format only providers speak.
+    serve: Option<Box<Serve>>,
     model: Arc<ReadModel>,
     set_model: Arc<SetModel>,
 }
@@ -103,8 +162,8 @@ impl std::fmt::Debug for KnownFormat {
 }
 
 impl KnownFormat {
-    /// `format` of `kind`, its providers reached by `reach`, given one's
-    /// base URL and auth headers.
+    /// `format` of `kind`, its clients sending to `endpoints`, its
+    /// providers reached by `reach`, given one's base URL and auth headers.
     pub fn of<F, I, O, T>(
         kind: Kind,
         endpoints: &'static [&'static str],
@@ -118,17 +177,38 @@ impl KnownFormat {
         T: Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
     {
         let client = format.clone();
+        let mut known = Self::provider_only(kind, format, reach);
+        known.endpoints = endpoints;
+        known.serve = Some(Box::new(move |gateway| {
+            gateway.client::<I, O, _>(client.clone())
+        }));
+        known
+    }
+
+    /// `format` of `kind`, which only providers speak.
+    pub fn provider_only<F, I, O, T>(
+        kind: Kind,
+        format: F,
+        reach: impl Fn(&str, HeaderMap) -> Result<T, Fault> + Send + Sync + 'static,
+    ) -> Self
+    where
+        F: Clone + Send + Sync + 'static + Format<ProviderIo, O, I>,
+        I: Routed,
+        O: Clone + Send + Sync + 'static,
+        T: Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
+    {
         Self {
-            name: <F as Format<ClientIo, I, O>>::name(&format).to_owned(),
+            name: <F as Format<ProviderIo, O, I>>::name(&format).to_owned(),
             kind,
-            endpoints,
+            endpoints: &[],
             key: KeyHeader::Bearer,
             base: Base::Same,
             websocket: false,
+            job_ids: None,
             provider: Box::new(move |gateway, name, base_url, auth| {
                 gateway.provider::<I, O, _>(name, format.clone(), reach(base_url, auth)?)
             }),
-            serve: Box::new(move |gateway| gateway.client::<I, O, _>(client.clone())),
+            serve: None,
             model: Arc::new(|cx| cx.input::<I>().ok()?.model().map(str::to_owned)),
             set_model: Arc::new(|cx, model| {
                 cx.filter(move |input: &mut I| {
@@ -154,6 +234,16 @@ impl KnownFormat {
         self
     }
 
+    fn job_ids(mut self, prefix: &'static str) -> Self {
+        self.job_ids = Some(prefix);
+        self
+    }
+
+    /// Whether clients may speak it.
+    pub fn servable(&self) -> bool {
+        self.serve.is_some()
+    }
+
     pub fn add_provider(
         &self,
         gateway: Gateway,
@@ -165,7 +255,13 @@ impl KnownFormat {
     }
 
     pub fn serve(&self, gateway: Gateway) -> Result<Gateway, Fault> {
-        (self.serve)(gateway)
+        match &self.serve {
+            Some(serve) => serve(gateway),
+            None => Err(Fault::config(format!(
+                "serve: {} is spoken only by providers; no client sends it",
+                self.name
+            ))),
+        }
     }
 
     pub fn model_reader(&self) -> Arc<ReadModel> {
@@ -178,17 +274,29 @@ impl KnownFormat {
 }
 
 const CHAT_COMPLETIONS: &[&str] = &["POST /v1/chat/completions"];
+const VIDEOS: &[&str] = &[
+    "POST /v1/videos",
+    "GET /v1/videos",
+    "GET /v1/videos/{id}",
+    "DELETE /v1/videos/{id}",
+    "GET /v1/videos/{id}/content",
+    "POST /v1/videos/{id}/remix",
+];
 
 /// Every format this binary speaks: OpenAI Chat as OpenAI and each vendor
-/// with a dialect serve it, Anthropic Messages and passthrough, their
-/// providers reached over HTTP, reading up to `limit` bytes of an answer
-/// at once; and the sessions of OpenAI Realtime, Responses over WebSocket
-/// and Gemini Live, their providers reached over WebSocket. A new format
-/// is one line here.
+/// with a dialect serve it, Anthropic Messages and passthrough, OpenAI's
+/// media endpoints and Google's Veo, their providers reached over HTTP,
+/// reading up to `limit` bytes of an answer at once; and the sessions of
+/// OpenAI Realtime, Responses over WebSocket and Gemini Live, their
+/// providers reached over WebSocket. A new format is one line here.
 pub fn formats(limit: usize) -> Vec<KnownFormat> {
     let http = move |base_url: &str, auth| -> Result<_, Fault> {
         let client = HttpTransport::new(base_url)?.with_headers(auth)?;
         Ok(client.with_limit(limit).connect())
+    };
+    let google = move |base_url: &str, auth| -> Result<_, Fault> {
+        let client = HttpTransport::new(base_url)?.with_client(google_storage()?);
+        Ok(client.with_headers(auth)?.with_limit(limit).connect())
     };
     let ws = |format: JsonEvents, endpoints| {
         KnownFormat::of(
@@ -200,6 +308,7 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
         .websocket()
     };
     let chat = |format: OpenAiChat| KnownFormat::of(Kind::CHAT, CHAT_COMPLETIONS, format, http);
+    let goog_key = KeyHeader::Header("x-goog-api-key");
     vec![
         chat(OpenAiChat::OPENAI),
         chat(OpenAiChat::GROQ),
@@ -209,6 +318,24 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
         chat(OpenAiChat::AZURE),
         KnownFormat::of(Kind::CHAT, &["POST /v1/messages"], AnthropicMessages, http)
             .key(KeyHeader::Header("x-api-key")),
+        KnownFormat::of(
+            Kind::IMAGE,
+            &["POST /v1/images/generations", "POST /v1/images/edits"],
+            OpenAiImages,
+            http,
+        ),
+        KnownFormat::of(
+            Kind::TRANSCRIPTION,
+            &["POST /v1/audio/transcriptions", "POST /v1/audio/translations"],
+            OpenAiTranscriptions,
+            http,
+        ),
+        KnownFormat::of(Kind::SPEECH, &["POST /v1/audio/speech"], OpenAiSpeech, http),
+        KnownFormat::of(Kind::VIDEO, VIDEOS, OpenAiVideos, http).job_ids("video_"),
+        KnownFormat::provider_only(Kind::VIDEO, GeminiVeo, google)
+            .job_ids("veo_")
+            .key(goog_key)
+            .base(Base::Without("/openai")),
         KnownFormat::of(Kind::PASSTHROUGH, &["ANY /* (every other request)"], Passthrough, http)
             .base(Base::Origin),
         ws(JsonEvents::OPENAI_REALTIME, &["GET /v1/realtime (WebSocket)"]),
@@ -217,7 +344,28 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
             JsonEvents::GEMINI_LIVE,
             &["GET /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent (WebSocket)"],
         )
-        .key(KeyHeader::Header("x-goog-api-key"))
+        .key(goog_key)
         .base(Base::Origin),
     ]
+}
+
+/// A client for the Gemini API, which serves a video's bytes by redirecting
+/// to Google's storage: it follows redirects to Google's hosts over HTTPS
+/// alone, as each is sent the key too.
+fn google_storage() -> Result<reqwest::Client, Fault> {
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        let host = attempt.url().host_str().unwrap_or_default();
+        let google = [".googleapis.com", ".googleusercontent.com"];
+        let trusted =
+            attempt.url().scheme() == "https" && google.iter().any(|domain| host.ends_with(domain));
+        match trusted && attempt.previous().len() < 5 {
+            true => attempt.follow(),
+            false => attempt.stop(),
+        }
+    });
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(policy)
+        .build()
+        .map_err(|e| Fault::internal("the HTTP client could not be built").with_source(e))
 }

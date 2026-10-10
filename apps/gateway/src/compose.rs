@@ -79,7 +79,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
 
     let serve = match &config.serve {
         Some(serve) => serve.clone(),
-        None => default_serve(&upstreams),
+        None => default_serve(&upstreams, formats),
     };
     let after = serve.iter().skip_while(|n| *n != PASSTHROUGH).nth(1);
     if let Some(after) = after {
@@ -162,14 +162,21 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
 }
 
 /// The formats served when the config names none: OpenAI Chat, Anthropic
-/// Messages, and every format of a kind that does not translate that some
-/// provider speaks, but passthrough, which takes every request.
-fn default_serve(upstreams: &[Upstream]) -> Vec<String> {
+/// Messages, every client format of a media kind some provider speaks, and
+/// every format of a kind that does not translate that some provider
+/// speaks, but passthrough, which takes every request.
+fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String> {
     let mut serve = vec!["openai-chat".to_owned(), "anthropic-messages".to_owned()];
-    let others = upstreams.iter().flat_map(|u| &u.entries);
-    for entry in others.filter(|e| !e.kind.translates && e.format != PASSTHROUGH) {
-        if !serve.contains(&entry.format) {
-            serve.push(entry.format.clone());
+    let entries = || upstreams.iter().flat_map(|u| &u.entries);
+    let spoken = |kind: Kind| entries().any(|e| e.kind == kind);
+    let media = formats
+        .iter()
+        .filter(|f| Kind::MEDIA.contains(&f.kind) && f.servable() && spoken(f.kind));
+    let sessions = entries().filter(|e| !e.kind.translates && e.format != PASSTHROUGH);
+    let names = media.map(|f| &f.name).chain(sessions.map(|e| &e.format));
+    for name in names {
+        if !serve.contains(name) {
+            serve.push(name.clone());
         }
     }
     serve
@@ -269,6 +276,7 @@ fn base_for(format: &KnownFormat, base_url: &str) -> String {
     let base = match format.base {
         Base::Same => base_url,
         Base::Origin => presets::origin(base_url),
+        Base::Without(suffix) => base_url.strip_suffix(suffix).unwrap_or(base_url),
     };
     presets::with_scheme(base, format.websocket)
 }

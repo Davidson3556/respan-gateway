@@ -49,8 +49,8 @@ pub const PRESETS: &[Preset] = &[
             "codex",
             "dall-e",
             "gpt-image",
-            "whisper",
-            "tts",
+            "whisper-1",
+            "tts-",
             "sora",
             "text-embedding",
         ],
@@ -67,7 +67,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "gemini",
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-        formats: &["openai-chat", "gemini-live"],
+        formats: &["openai-chat", "gemini-live", "openai-images", "gemini-veo"],
         key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         prefixes: &["gemini", "imagen", "veo"],
         example_model: "gemini-2.5-flash",
@@ -75,9 +75,14 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "groq",
         base_url: "https://api.groq.com/openai/v1",
-        formats: &["groq-chat"],
+        formats: &["groq-chat", "openai-transcriptions", "openai-speech"],
         key_env: &["GROQ_API_KEY"],
-        prefixes: &[],
+        prefixes: &[
+            "whisper-large",
+            "distil-whisper",
+            "playai-tts",
+            "canopylabs/orpheus",
+        ],
         example_model: "llama-3.3-70b-versatile",
     },
     Preset {
@@ -99,7 +104,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "xai",
         base_url: "https://api.x.ai/v1",
-        formats: &["openai-chat"],
+        formats: &["openai-chat", "openai-images"],
         key_env: &["XAI_API_KEY"],
         prefixes: &["grok"],
         example_model: "grok-4",
@@ -115,7 +120,7 @@ pub const PRESETS: &[Preset] = &[
     Preset {
         vendor: "together",
         base_url: "https://api.together.xyz/v1",
-        formats: &["openai-chat"],
+        formats: &["openai-chat", "openai-images"],
         key_env: &["TOGETHER_API_KEY"],
         prefixes: &[],
         example_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
