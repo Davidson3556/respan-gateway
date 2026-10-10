@@ -1,265 +1,154 @@
-use std::future::IntoFuture;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
 
-use respan_gateway_conversation::anthropic::AnthropicMessages;
-use respan_gateway_conversation::openai::OpenAiChat;
-use respan_gateway_core::Fault;
-use respan_gateway_core::futures::FutureExt;
-use respan_gateway_http::HttpTransport;
-use respan_gateway_http::axum::router_with_limit;
-use respan_gateway_http::formats::opaque::Passthrough;
-use respan_gateway_realtime as realtime;
-use respan_gateway_realtime::JsonEvents;
-use respan_gateway_ws::Limits;
+use clap::{ArgGroup, Parser, Subcommand};
+use respan_gateway::{App, Config, ProxyVendor};
 
-mod config;
+/// An LLM gateway: one endpoint for OpenAI, Anthropic, Gemini and more,
+/// translating between their APIs.
+///
+/// With no config file it needs only a provider key in the environment:
+///
+///   export OPENAI_API_KEY=sk-...   # and/or ANTHROPIC_API_KEY, GEMINI_API_KEY, ...
+///   respan-gateway
+///
+/// It reads ./gateway.yaml if there is one; `respan-gateway init` writes a
+/// starter.
+#[derive(Debug, Parser)]
+#[command(name = "respan-gateway", version, verbatim_doc_comment, after_help = EXAMPLES)]
+struct Cli {
+    /// The config file [default: ./gateway.yaml if present, else providers
+    /// from the environment]
+    #[arg(short, long, global = true, value_name = "FILE")]
+    config: Option<PathBuf>,
 
-use config::KnownFormat;
+    /// Where to listen, such as 127.0.0.1:8080, in place of the config's
+    #[arg(long, global = true, value_name = "ADDR")]
+    listen: Option<String>,
 
-const USAGE: &str = "usage: respan-gateway [-c|--config <path>] [check] [-V|--version]
-       respan-gateway proxy (--anthropic | --openai) [--url <base_url>] [--listen <addr>]
-
-proxy needs no config file: it relays to the vendor with each client's own
-credentials, chat and every other endpoint of the vendor, byte for byte.";
-const DEFAULT_LISTEN: std::net::SocketAddr =
-    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 8080);
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// How long open responses and end hooks get, together, after a signal.
-const SHUTDOWN: Duration = Duration::from_secs(30);
-/// The most bytes of a client's request, and of a provider's answer held at
-/// once, unless the config's `body_limit` says: 32 MiB, the largest request
-/// the vendors' JSON APIs take (Anthropic's Messages API), so the gateway
-/// refuses nothing a vendor would take, and an answer may be as large as a
-/// request.
-const BODY_LIMIT: usize = 32 << 20;
-
-/// Every format this binary speaks: OpenAI Chat as OpenAI and each vendor
-/// with a dialect serve it, Anthropic Messages and passthrough, their
-/// providers reached over HTTP, reading up to `limit` bytes of an answer
-/// at once; and the sessions of OpenAI Realtime, Responses over WebSocket
-/// and Gemini Live, their providers reached over WebSocket. A custom
-/// gateway builds its own `Gateway` in its own `main.rs`.
-fn formats(limit: usize) -> [KnownFormat; 11] {
-    let http = move |base_url: &str, auth| -> Result<_, Fault> {
-        let client = HttpTransport::new(base_url)?.with_headers(auth)?;
-        Ok(client.with_limit(limit).connect())
-    };
-    let ws = |format: JsonEvents| {
-        KnownFormat::of(format.clone(), move |base_url, auth| {
-            Ok(format.transport(base_url)?.with_headers(auth)?.connect())
-        })
-    };
-    [
-        KnownFormat::of(OpenAiChat::OPENAI, http),
-        KnownFormat::of(OpenAiChat::GROQ, http),
-        KnownFormat::of(OpenAiChat::DEEPSEEK, http),
-        KnownFormat::of(OpenAiChat::VLLM, http),
-        KnownFormat::of(OpenAiChat::OPENROUTER, http),
-        KnownFormat::of(OpenAiChat::AZURE, http),
-        KnownFormat::of(AnthropicMessages, http),
-        KnownFormat::of(Passthrough, http),
-        ws(JsonEvents::OPENAI_REALTIME),
-        ws(JsonEvents::RESPONSES_WS),
-        ws(JsonEvents::GEMINI_LIVE),
-    ]
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-/// The config of `proxy`: one vendor, no keys of its own, its chat format
-/// and every other request relayed raw to the origin of `url`.
-fn proxy_config(anthropic: bool, url: Option<&str>) -> config::Config {
-    let (format, default) = match anthropic {
-        true => ("anthropic-messages", "https://api.anthropic.com"),
-        false => ("openai-chat", "https://api.openai.com/v1"),
-    };
-    let url = url.unwrap_or(default).trim_end_matches('/');
-    // Every call is a raw relay of the client's own path, so both providers
-    // sit at the vendor's origin.
-    let origin = url.strip_suffix("/v1").unwrap_or(url);
-    config::Config {
-        listen: None,
-        body_limit: None,
-        providers: [("vendor", format, origin), ("any", "passthrough", origin)]
-            .into_iter()
-            .map(|(name, format, base)| {
-                (
-                    name.to_owned(),
-                    config::ProviderConfig {
-                        format: format.to_owned(),
-                        base_url: base.to_owned(),
-                        auth: None,
-                    },
-                )
-            })
-            .collect(),
-        serve: vec![format.to_owned(), "passthrough".to_owned()],
-        plugins: Vec::new(),
-        target: Some("vendor".to_owned()),
-    }
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Serve the gateway (the default)
+    Serve,
+    /// Check the configuration and exit
+    Check,
+    /// Write a commented starter config from the keys in the environment
+    Init {
+        /// Where to write it
+        #[arg(short, long, value_name = "FILE", default_value = respan_gateway::DEFAULT_FILE)]
+        output: PathBuf,
+        /// Replace the file if it exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Relay one vendor's whole API, with each client's own credentials
+    ///
+    /// No config file and no keys of its own: chat and every other endpoint
+    /// of the vendor, byte for byte. For Claude Code
+    /// (ANTHROPIC_BASE_URL=http://127.0.0.1:8080) or Codex.
+    #[command(group(ArgGroup::new("vendor").required(true).args(["anthropic", "openai"])))]
+    Proxy {
+        /// Relay to Anthropic
+        #[arg(long)]
+        anthropic: bool,
+        /// Relay to OpenAI
+        #[arg(long)]
+        openai: bool,
+        /// The vendor's base URL, in place of its public one
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+        /// `check`: check the proxy's configuration and exit
+        #[arg(hide = true, value_parser = ["check"])]
+        action: Option<String>,
+    },
 }
+
+const EXAMPLES: &str = "Examples:
+  respan-gateway                    Serve ./gateway.yaml, or the providers in the environment
+  respan-gateway init               Write a starter ./gateway.yaml
+  respan-gateway check -c my.yaml   Check a config
+  respan-gateway proxy --anthropic  Sit in front of Claude Code";
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let mut config_path = "gateway.yaml".to_owned();
-    let mut explicit_config = false;
-    let mut check_only = false;
-    // `proxy`: which vendor (true for Anthropic), its URL, where to listen.
-    let (mut proxy, mut vendor, mut url, mut listen) = (false, None, None, None);
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" | "-c" => match args.next() {
-                Some(p) => {
-                    config_path = p;
-                    explicit_config = true;
-                }
-                None => return fail(USAGE),
-            },
-            "check" => check_only = true,
-            "proxy" => proxy = true,
-            "--anthropic" | "--openai" if proxy && vendor.is_none() => {
-                vendor = Some(arg == "--anthropic");
+    let cli = Cli::parse();
+    let (config, check_only) = match cli.command.unwrap_or(Command::Serve) {
+        Command::Init { output, force } => return init(&output, force),
+        Command::Proxy {
+            anthropic,
+            url,
+            action,
+            ..
+        } => {
+            if cli.config.is_some() {
+                return fail(
+                    "proxy cannot be used with --config; proxy builds its own configuration",
+                );
             }
-            "--url" | "--listen" if proxy => {
-                let Some(value) = args.next() else {
-                    return fail(USAGE);
-                };
-                if arg == "--url" {
-                    url = Some(value);
-                } else {
-                    listen = Some(value);
-                }
-            }
-            "--version" | "-V" => {
-                println!("respan-gateway {VERSION}");
-                return ExitCode::SUCCESS;
-            }
-            _ => return fail(USAGE),
+            let vendor = match anthropic {
+                true => ProxyVendor::Anthropic,
+                false => ProxyVendor::OpenAi,
+            };
+            (Ok(Config::proxy(vendor, url.as_deref())), action.is_some())
+        }
+        Command::Serve => (Config::discover(cli.config.as_deref()), false),
+        Command::Check => (Config::discover(cli.config.as_deref()), true),
+    };
+    let mut config = match config {
+        Ok(config) => config,
+        Err(e) => return fail(e.message()),
+    };
+    if let Some(listen) = &cli.listen {
+        match listen.parse::<SocketAddr>() {
+            Ok(addr) => config.listen = Some(addr),
+            Err(e) => return fail(&format!("--listen: {e}")),
         }
     }
-
-    if proxy && explicit_config {
-        return fail("proxy cannot be used with --config; proxy builds its own configuration");
-    }
-
-    let loaded = match (proxy, vendor) {
-        (true, Some(anthropic)) => {
-            config_path = "proxy".to_owned();
-            let mut config = proxy_config(anthropic, url.as_deref());
-            listen
-                .as_deref()
-                .map(str::parse)
-                .transpose()
-                .map(|addr| {
-                    config.listen = addr;
-                    config
-                })
-                .map_err(|e| format!("--listen: {e}"))
-        }
-        (true, None) => return fail(USAGE),
-        (false, _) => std::fs::read_to_string(&config_path)
-            .map_err(|e| e.to_string())
-            .and_then(|text| config::Config::parse(&text).map_err(|e| e.message().to_owned())),
-    };
-    let config = match loaded {
-        Ok(c) => c,
-        Err(e) => return fail(&format!("{config_path}: {e}")),
-    };
-    let limit = config.body_limit.unwrap_or(BODY_LIMIT);
-    let formats = formats(limit);
-    let built = config.build(&formats);
-    let gateway = match built {
-        Ok(built) => built,
-        Err(e) => return fail(&format!("{config_path}: {}", e.message())),
-    };
-    let gateway = if proxy {
-        gateway.plugin(respan_gateway_http::relay::Relay::RAW)
-    } else {
-        gateway
+    let source = config.source().to_string();
+    let app = match App::new(config) {
+        Ok(app) => app,
+        Err(e) => return fail(&format!("{source}: {e}")),
     };
     if check_only {
-        println!("{config_path}: ok");
+        println!("{source}: ok");
         return ExitCode::SUCCESS;
     }
 
-    let addr = config.listen.unwrap_or(DEFAULT_LISTEN);
+    let addr = app.listen();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => return fail(&format!("listen on {addr}: {e}")),
     };
     let bound = listener.local_addr().unwrap_or(addr);
-    println!("respan-gateway {VERSION} listening on {bound}");
-    // A session's format served, a WebSocket upgrade is a session.
-    let session = |f: &KnownFormat| f.is::<realtime::Input, realtime::Output>();
-    let served = |name: &String| formats.iter().any(|f| f.name == *name && session(f));
-    // On a signal, open sessions are closed 1001, and open responses and
-    // then end hooks share one deadline. Responses open at it are cut and
-    // lose their end hooks.
-    let signal = shutdown().shared();
-    let app = match config.serve.iter().any(served) {
-        true => respan_gateway_ws::axum::router(
-            gateway.clone(),
-            move |_| limit,
-            Limits::default(),
-            signal.clone(),
-        ),
-        false => router_with_limit(gateway.clone(), move |_| limit),
-    };
-    let (stopping, mut stopped) = tokio::sync::oneshot::channel();
-    let serve = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            signal.await;
-            let _ = stopping.send(tokio::time::Instant::now() + SHUTDOWN);
-        })
-        .into_future();
-    let mut serve = std::pin::pin!(serve);
-    let mut deadline = None;
-    let served = tokio::select! {
-        served = &mut serve => served,
-        Ok(at) = &mut stopped => {
-            deadline = Some(at);
-            match tokio::time::timeout_at(at, &mut serve).await {
-                Ok(served) => served,
-                Err(_) => {
-                    eprintln!("shutdown: responses still open at the deadline are cut");
-                    Ok(())
-                }
-            }
-        }
-    };
-    let deadline = deadline
-        .or_else(|| stopped.try_recv().ok())
-        .unwrap_or_else(|| tokio::time::Instant::now() + SHUTDOWN);
-    if tokio::time::timeout_at(deadline, gateway.idle())
-        .await
-        .is_err()
-    {
-        eprintln!("shutdown: end hooks still running at the deadline were dropped");
+    println!("{}", app.banner(bound));
+    if let Some(warning) = app.warning(bound) {
+        eprintln!("{warning}");
     }
-    match served {
+    match app.serve(listener, respan_gateway::shutdown_signal()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => fail(&e.to_string()),
     }
 }
 
-/// Resolves on Ctrl-C, or on SIGTERM where there is one.
-async fn shutdown() {
-    #[cfg(unix)]
-    let terminate = async {
-        use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
-            }
-            Err(_) => std::future::pending().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        () = terminate => {}
+fn init(output: &std::path::Path, force: bool) -> ExitCode {
+    if output.exists() && !force {
+        let path = output.display();
+        return fail(&format!("{path} exists; add --force to replace it"));
     }
+    let config = respan_gateway::starter_config();
+    if let Err(e) = std::fs::write(output, config) {
+        return fail(&format!("write {}: {e}", output.display()));
+    }
+    println!(
+        "wrote {}; check it with `respan-gateway check`, run it with `respan-gateway`",
+        output.display()
+    );
+    ExitCode::SUCCESS
 }
 
 fn fail(message: &str) -> ExitCode {
