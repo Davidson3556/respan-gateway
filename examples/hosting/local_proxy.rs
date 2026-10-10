@@ -14,8 +14,8 @@
 //! `RESPAN_ANTHROPIC_UPSTREAM=http://127.0.0.1:PORT` to use a local provider
 //! instead of the default Anthropic upstream.
 
-use respan_gateway_chat::anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
+use respan_gateway_conversation::anthropic::AnthropicMessages;
 use respan_gateway_core::{Fault, Gateway, futures::TryStreamExt};
 use respan_gateway_examples::LIMIT;
 use respan_gateway_http::Body;
@@ -23,8 +23,8 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use respan_gateway_axum::router;
-use respan_gateway_http::HttpClient;
+use respan_gateway_http::HttpTransport;
+use respan_gateway_http::axum::router;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -35,12 +35,12 @@ const ANTHROPIC: &str = "https://api.anthropic.com";
 type Sent = Arc<Mutex<Vec<(http::Uri, HeaderMap, Bytes)>>>;
 
 /// A single offline response for the runnable demonstration and byte-exact tests.
-/// The production --serve path uses HttpClient instead.
+/// The production --serve path uses HttpTransport instead.
 fn fixture(
     status: StatusCode,
     body: impl Into<Bytes>,
     sent: Sent,
-) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
+) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo + Send + Sync + 'static
 {
     let body = body.into();
     respan_gateway_http::connect(
@@ -78,7 +78,7 @@ fn fixture(
 
 /// The whole setup, in code: serve Anthropic Messages, relay to Anthropic.
 fn gateway(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -100,7 +100,7 @@ fn serve_address(args: &[String]) -> Result<Option<&str>, &'static str> {
 
 fn upstream_gateway(upstream: &str) -> Result<Gateway, Fault> {
     // No `with_headers`: each request carries the developer's own key.
-    gateway(HttpClient::new(upstream)?.connect())
+    gateway(HttpTransport::new(upstream)?.connect())
 }
 
 async fn serve_upstream(

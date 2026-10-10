@@ -2,7 +2,7 @@
 //! reach: a plugin, a filter, a `Format` method and an edge's stream, on
 //! one-shot and streaming requests: the request finishes, every end hook
 //! runs once and `idle` resolves. The codec's points are HTTP's driver's
-//! (`crates/http/tests/driver_toy.rs`).
+//! (`crates/wires/http/tests/driver_toy.rs`).
 #![allow(clippy::unwrap_used)]
 
 mod edge;

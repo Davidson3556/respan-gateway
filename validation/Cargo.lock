@@ -1153,36 +1153,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "respan-gateway-axum"
-version = "0.0.0"
-dependencies = [
- "axum",
- "http-body-util",
- "hyper",
- "hyper-util",
- "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-ws",
-]
-
-[[package]]
-name = "respan-gateway-chat"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "respan-gateway-conversation",
- "respan-gateway-core",
- "respan-gateway-http",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "respan-gateway-conversation"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "respan-gateway-core",
+ "respan-gateway-http",
+ "serde",
  "serde_json",
 ]
 
@@ -1200,6 +1178,7 @@ dependencies = [
 name = "respan-gateway-http"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "bytes",
  "futures",
  "http",
@@ -1220,17 +1199,9 @@ dependencies = [
  "libc",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-mcp-messages",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "respan-gateway-mcp-messages"
-version = "0.0.0"
-dependencies = [
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1246,6 +1217,8 @@ name = "respan-gateway-realtime"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-ws",
  "serde_json",
 ]
 
@@ -1259,8 +1232,6 @@ dependencies = [
  "futures",
  "mockllm",
  "reqwest",
- "respan-gateway-axum",
- "respan-gateway-chat",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
@@ -1279,10 +1250,12 @@ dependencies = [
 name = "respan-gateway-ws"
 version = "0.0.0"
 dependencies = [
+ "axum",
+ "hyper",
+ "hyper-util",
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-realtime",
  "rustls",
  "rustls-native-certs",
  "serde_json",

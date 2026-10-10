@@ -37,7 +37,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::FakeOpenAi;
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Input, Output};
 use respan_gateway_core::futures::{FutureExt, StreamExt, stream, stream::BoxStream};
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
@@ -366,7 +366,7 @@ impl<S: Store> Plugin for Idempotent<S> {
 }
 
 fn gateway<S: Store>(
-    transport: respan_gateway_http::HttpClient,
+    transport: respan_gateway_http::HttpTransport,
     store: &Arc<S>,
 ) -> Result<Gateway, Fault> {
     Gateway::new()

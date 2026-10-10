@@ -11,7 +11,7 @@ use respan_gateway_conversation::{Input, Output};
 use respan_gateway_core::{
     ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
-use respan_gateway_http::{Incoming, Outgoing};
+use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_plugins::ModelRouter;
 use serde::Deserialize;
 
@@ -95,14 +95,14 @@ impl KnownFormat {
         reach: impl Fn(&str, HeaderMap) -> Result<T, Fault> + 'static,
     ) -> Self
     where
-        F: Clone + Send + Sync + 'static + Format<Incoming, I, O> + Format<Outgoing, O, I>,
+        F: Clone + Send + Sync + 'static + Format<ClientIo, I, O> + Format<ProviderIo, O, I>,
         I: Clone + Send + Sync + 'static,
         O: Clone + Send + Sync + 'static,
-        T: Fn(Extensions) -> Outgoing + Send + Sync + 'static,
+        T: Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
     {
         let client = format.clone();
         Self {
-            name: <F as Format<Incoming, I, O>>::name(&format).to_owned(),
+            name: <F as Format<ClientIo, I, O>>::name(&format).to_owned(),
             kind: (TypeId::of::<I>(), TypeId::of::<O>()),
             provider: Box::new(move |gateway, name, base_url, auth| {
                 gateway.provider::<I, O, _>(name, format.clone(), reach(base_url, auth)?)

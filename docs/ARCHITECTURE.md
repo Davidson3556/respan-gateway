@@ -6,43 +6,50 @@ and runnable examples. The Python distribution is planned separately under
 
 ## Repository layers
 
-| Location | Owns | Internal production dependencies |
-| --- | --- | --- |
-| `crates/core/` | Execution, typed streams, plugin hooks, call and response lifecycles, fault facts and tagged native values | None |
-| `crates/conversation/` | Conversation requests, reply events, typed usage and assembly | Core |
-| `crates/realtime/` | Format-tagged realtime event pair | Core |
-| `crates/mcp-messages/` | Typed JSON-RPC messages | None |
-| `crates/http/` | HTTP bindings, framing, bodies, credentials and optional Reqwest transport | Core |
-| `crates/ws/` | WebSocket sessions at both edges (provider transport, client `serve`), JSON event format and its vendor presets | Core, realtime, HTTP |
-| `crates/mcp/` | MCP streamable HTTP and stdio transport | Core, mcp-messages, HTTP |
-| `crates/chat/` | OpenAI Chat (with vendor dialects) and Anthropic Messages formats, and the `Codec` trait they share | Core, conversation, HTTP |
-| `crates/plugins/` | Model routing, attempts, fallback, races and backoff | Core |
-| `crates/axum/` | HTTP ingress and optional WebSocket hosting | Core, HTTP, optional WS |
-| `apps/gateway/` | Executable, YAML configuration and component registration | Core, conversation, realtime, HTTP, WS, chat, plugins, Axum |
-| `examples/` | Application policies and runnable integrations of public APIs | Libraries needed by each example |
+Libraries are of two sorts, each in its own folder, beside the kernel they
+extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
+
+- A **kind** (`crates/kinds/`) owns a pair of events (`Input` in, `Output` out) that plugins
+  read, and everything about that kind on the wire: its formats, each a
+  `Format`, and its vendors' dialects. A kind is tied to one wire
+  (conversation to HTTP and SSE, realtime to WebSocket, MCP to streamable
+  HTTP or stdio); what varies within it is the provider, and the kind's
+  events are what every provider has in common. Its formats are behind
+  default features, so a plugin can depend on its types alone.
+- A **wire** (`crates/wires/`) moves bytes at both edges and knows no kind: its owned I/O
+  types (`ClientIo`, `ProviderIo`), framing, credentials, a **transport** for
+  the provider edge and **hosting** for the client edge (behind features).
+
+| Location | Sort | Owns | Internal production dependencies |
+| --- | --- | --- | --- |
+| `crates/core/` | Kernel | Execution, typed streams, plugin hooks, call and response lifecycles, fault facts and tagged native values | None |
+| `crates/kinds/conversation/` | Kind | Conversation requests, reply events, typed usage and assembly; the HTTP binding (`Schema`) and its vendors, OpenAI Chat (with dialects) and Anthropic Messages | Core; HTTP for its formats |
+| `crates/kinds/realtime/` | Kind | Format-tagged realtime event pair; the WebSocket format (`JsonEvents`) and its vendor presets | Core; HTTP, WS for its format |
+| `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes; streamable HTTP and the stdio transport | Core, HTTP |
+| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the opaque format; optional Reqwest transport and Axum hosting | Core |
+| `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
+| `crates/plugins/` | Plugins | Model routing, attempts, fallback, races and backoff | Core |
+| `apps/gateway/` | Binary | Executable, YAML configuration and component registration | All of the above |
+| `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
 Arrows below point from a dependency toward its consumers. Test dependencies
 can cross these boundaries to exercise a complete request.
 
 ```mermaid
 flowchart LR
-    core --> conversation
-    conversation --> chat
-    conversation --> gateway
-    core --> realtime
-    realtime --> ws
-    mcp_messages[mcp-messages] --> mcp
     core --> http
     core --> plugins
-    http --> chat
-    http --> mcp
     http --> ws
-    http --> axum
-    ws -. optional .-> axum
+    http -. formats .-> conversation
+    http -. format .-> realtime
+    ws -. format .-> realtime
+    http --> mcp
+    core --> conversation
+    core --> realtime
+    conversation --> gateway
     realtime --> gateway
+    mcp --> gateway
     ws --> gateway
-    axum --> gateway
-    chat --> gateway
     plugins --> gateway
 ```
 
@@ -59,13 +66,12 @@ their filesystem locations.
   Protocol implementations depend on core; core does not depend on them.
 - Plugins are compiled in. Applications register concrete components using
   the same public contracts available to external plugin authors.
-- Protocol crates own wire framing and transport behavior. Provider codecs
-  translate through typed conversation events.
-- Every kind is an `Input` in and an `Output` out, named alike wherever it
-  lives: conversation and realtime in their own data-model crates, MCP's
-  HTTP envelopes in `mcp` (around mcp-messages' typed JSON-RPC `Message`),
-  and HTTP's passthrough in `formats::opaque` (`Input<F>` / `Output<F>`).
-  Codecs and transports depend on these models.
+- Wire crates own framing and transport behavior and know no kind. A kind's
+  vendor formats translate through its typed events.
+- Every kind is an `Input` in and an `Output` out, in the crate that owns
+  it: `conversation`, `realtime` and `mcp` (envelopes around its typed
+  JSON-RPC `Message`). HTTP's passthrough (`formats::opaque`,
+  `Input<F>` / `Output<F>`) is the one kind that is its own wire.
   Core defines no kinds or `Format` implementations.
   Plugins and whole-body conversation encoders share the conversation crate's ordered
   `Assembled` fold instead of maintaining separate reply representations.
@@ -87,7 +93,7 @@ lifecycle. Filters edit typed events; calls let plugins invoke providers using
 the client's input or input of their own. Responses can be streamed, inspected
 or buffered. HTTP raw relay behavior is an explicit policy in the HTTP crate.
 
-An HTTP format binds `Incoming` and `Outgoing` with mirrored `bind`s, each
+An HTTP format binds `ClientIo` and `ProviderIo` with mirrored `bind`s, each
 given what only the protocol knows: a decoder, an encoder, and an error
 writer or reader. The bindings own what every HTTP format shares, so no
 format can forget it: response handoff and backpressure, whole or live
@@ -95,8 +101,8 @@ uploads, the headers no proxy passes on, a fault's status and `Retry-After`,
 refused answers read whole into a fault, and no body where HTTP has none.
 
 See the [core guide](../crates/core/README.md),
-[conversation guide](../crates/conversation/README.md),
-[HTTP guide](../crates/http/README.md), and
+[conversation guide](../crates/kinds/conversation/README.md),
+[HTTP guide](../crates/wires/http/README.md), and
 [routing guide](../crates/plugins/README.md) for their public contracts.
 
 ## Tests and examples

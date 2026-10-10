@@ -14,7 +14,7 @@ use respan_gateway_core::ErrorCode;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Assembled, Input, Message, Output, Role};
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
@@ -54,7 +54,7 @@ impl Plugin for Judge {
         let replies: Vec<Output> = cx
             .call("judge")
             .with_input(prompt)
-            .with_extension(respan_gateway_chat::StreamResponse(false))
+            .with_extension(respan_gateway_conversation::StreamResponse(false))
             .await?
             .outputs()
             .try_collect()

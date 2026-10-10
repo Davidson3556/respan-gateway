@@ -1,6 +1,6 @@
 use super::*;
-use respan_gateway_chat::anthropic::AnthropicMessages;
 use respan_gateway_conversation::Input;
+use respan_gateway_conversation::anthropic::AnthropicMessages;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::{Plugin, ProviderContext, async_trait};
 use respan_gateway_examples::Meter;

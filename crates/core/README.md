@@ -24,15 +24,15 @@ protocols and adapters all depend on it directly.
   kernel's own markers: `Abandoned`, `Internal`, `Config` and `NotFound`.
 - `NativeFields { format, fields }` preserves unsupported fields on a typed
   value; `NativeValue { format, value }` an entire unsupported value. The
-  format ID names the wire schema, not a provider deployment, so codecs can
+  format ID names the wire schema, not a provider deployment, so formats can
   reject unsafe cross-format forwarding. Neither carries transport state.
 
 Core defines no request/event kinds or `Format` implementations. Each kind
 names its pair `Input` / `Output`, in the crate that owns it:
-[`respan-gateway-conversation`](../conversation/README.md),
-[`respan-gateway-realtime`](../realtime/README.md), and
-[`respan-gateway-mcp`](../mcp/README.md) (envelopes around
-`respan-gateway-mcp-messages`' JSON-RPC `Message`). Direction is
+[`respan-gateway-conversation`](../kinds/conversation/README.md),
+[`respan-gateway-realtime`](../kinds/realtime/README.md), and
+[`respan-gateway-mcp`](../kinds/mcp/README.md) (envelopes around its JSON-RPC
+`Message`). Direction is
 gateway-wide: `Input` travels from client to provider, `Output` from
 provider to client. Use a crate alias when working with several kinds.
 

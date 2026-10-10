@@ -64,7 +64,7 @@ ones include the version, such as `https://api.openai.com/v1` or
 `https://openrouter.ai/api/v1` (`openrouter-chat`); Anthropic's does not:
 `https://api.anthropic.com`. `openai-chat` reads only OpenAI's own fields; a
 vendor whose fields the gateway reads has a format of its own name (the
-[dialects](crates/chat/README.md#openai-chat-completions)), and one whose additions it does not
+[dialects](crates/kinds/conversation/README.md#openai-chat-completions)), and one whose additions it does not
 read, as Gemini's endpoint, is `openai-chat`.
 
 Sessions go over WebSocket: a provider of format `openai-realtime` (OpenAI
@@ -73,7 +73,7 @@ Realtime), `responses-ws` (OpenAI Responses over WebSocket) or
 `wss://api.openai.com/v1`, `wss://generativelanguage.googleapis.com` (with
 `auth: { type: header, name: x-goog-api-key, key: ... }`). Serving one makes
 each WebSocket upgrade a session, relayed event by event to the one
-provider of its format ([presets](crates/ws/README.md)).
+provider of its format ([presets](crates/wires/ws/README.md)).
 
 ## Glossary
 
@@ -103,8 +103,8 @@ the provider edge own them
   chooses the type order for each edge; Format has no client/provider methods.
   Formats of one kind translate through typed events. Calls always encode
   typed input unless an application explicitly supplies raw HTTP data. HTTP formats implement this same contract
-  directly: `Format<Incoming, Input, Output>` accepts a client exchange and
-  `Format<Outgoing, Output, Input>` makes a provider call. Their mirrored
+  directly: `Format<ClientIo, Input, Output>` accepts a client exchange and
+  `Format<ProviderIo, Output, Input>` makes a provider call. Their mirrored
   `bind`s each take a decoder, an encoder and an error writer (client) or
   reader (provider); the HTTP crate's bindings own the rest, not a second
   format trait or an implementation macro.
@@ -150,14 +150,12 @@ the gateway, and the binary chooses what to compose. See the
 | Path | What it is |
 |---|---|
 | `crates/core/` | The neutral kernel and plugin-author API: typed streams, plugins, lifecycle, fault facts and native values; no HTTP or message kinds. |
-| `crates/conversation/` | Input requests, reply events, typed usage, assembly and typed text accessors. |
-| `crates/realtime/` | Client/provider JSON event pair. |
-| `crates/mcp-messages/` | Typed JSON-RPC messages MCP carries, either direction. |
-| `crates/http/` | Owned HTTP edges, native request/response bodies, stream/sink helpers, credentials, retry classification and optional Reqwest backend; framing/error helpers in `formats`. |
+| `crates/kinds/conversation/` | The conversation kind (requests, reply events, typed usage, assembly) and its HTTP formats: OpenAI Chat (with vendor dialects) and Anthropic Messages, sharing the `Schema` trait. |
+| `crates/kinds/realtime/` | The realtime kind (a client/provider JSON event pair) and its WebSocket format, `JsonEvents`, with the vendors' presets. |
+| `crates/kinds/mcp/` | The MCP kind (typed JSON-RPC messages and their envelopes) and its formats: streamable HTTP and stdio. |
+| `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
+| `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
-| `crates/{mcp,ws}/` | Optional MCP and WebSocket protocol/transport integrations. |
-| `crates/chat/` | First-party OpenAI Chat (with vendor dialects) and Anthropic Messages formats, reusable on both edges, and the `Codec` trait they share. |
-| `crates/axum/` | Axum HTTP ingress and optional WebSocket hosting. |
 | `apps/gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
@@ -175,9 +173,13 @@ prices, accounts and durable billing stores. Routing takes an explicit retry cla
 available from the HTTP protocol module. The future PyO3 bindings and PyPI package will live together in
 [`python/`](python/README.md); they are not implemented yet.
 
-The HTTP protocol module's `reqwest` feature enables `HttpClient`. The Axum adapter's
-`ws` feature enables its `router_with_ws`. Both are opt-in, so codec authors
-and ordinary HTTP hosts do not need unrelated hosting or transport code.
+Crates are of two sorts: a **kind** (`crates/kinds/`: `conversation`, `realtime`, `mcp`) owns
+its events, its formats on its wire and its vendors' dialects; a **wire**
+(`crates/wires/`: `http`, `ws`) moves bytes at both edges and knows no kind. A kind's formats
+are behind default features, so a plugin can depend on its types alone. A
+wire's `reqwest` (`HttpTransport`) and `axum` (hosting) features are opt-in,
+so format authors and ordinary HTTP hosts do not need unrelated hosting or
+transport code.
 
 HTTP formats prepare actual requests and event sinks synchronously, then let
 core drive delivery. Response readers return streams. Finite inputs are encoded

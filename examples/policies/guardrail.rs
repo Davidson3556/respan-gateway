@@ -20,8 +20,8 @@
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::anthropic::AnthropicMessages;
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::anthropic::AnthropicMessages;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Input, Output};
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::futures::stream;
@@ -148,9 +148,9 @@ impl Plugin for Cache {
 
 /// The providers and formats, before any plugin. For real use, the
 /// transport is
-/// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
+/// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn base(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -172,7 +172,7 @@ fn guarded(gw: Gateway, middle: impl FnOnce(Gateway) -> Gateway) -> Result<Gatew
 /// The guard around a cache, and `extra` registered after the cache and
 /// before `guard-input`.
 fn gateway_with(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -182,7 +182,7 @@ fn gateway_with(
 }
 
 fn gateway(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,

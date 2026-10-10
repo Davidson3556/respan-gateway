@@ -16,9 +16,9 @@ use crate::accounting::{Accounting, Quote, Tally};
 use crate::ledger::{Amount, HoldId, Ledger, MemoryLedger};
 use http_support::{post, read_whole, serve};
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Input, Output};
-use respan_gateway_http::HttpClient;
+use respan_gateway_http::HttpTransport;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION};
 
@@ -53,11 +53,11 @@ fn streamed(events: &[&str]) -> Answer {
 
 fn http(
     fake: &FakeOpenAi,
-) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
+) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo + Send + Sync + 'static
 {
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-test"));
-    HttpClient::new(fake.base_url())
+    HttpTransport::new(fake.base_url())
         .and_then(|http| http.with_headers(headers))
         .unwrap_or_else(|fault| panic!("{fault}"))
         .connect()
@@ -91,7 +91,7 @@ fn wallet(limit: Amount) -> MemoryLedger {
 
 /// `first`, then accounting over `ledger`, calling provider `p` on `transport`.
 fn gateway(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,

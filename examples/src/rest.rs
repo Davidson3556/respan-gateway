@@ -12,7 +12,7 @@ use respan_gateway_core::{Connection, Fault, Format};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::{each, opaque, set_path};
 use respan_gateway_http::http::{Method, request::Parts as RequestHead};
-use respan_gateway_http::{self as h, Encoder, Incoming, Outgoing};
+use respan_gateway_http::{self as h, ClientIo, Encoder, ProviderIo};
 
 /// The API named `name` at paths starting with `prefix`.
 #[derive(Clone, Debug)]
@@ -66,16 +66,16 @@ fn request(head: &mut RequestHead, ask: Option<&Ask>) -> Result<Box<dyn Encoder<
     Ok(each(|ask: &Ask| Ok(ask.body.clone())))
 }
 
-impl Format<Incoming, Ask, opaque::Output<Rest>> for Rest {
+impl Format<ClientIo, Ask, opaque::Output<Rest>> for Rest {
     fn name(&self) -> &str {
         self.name
     }
 
-    fn matches(&self, io: &Incoming) -> bool {
+    fn matches(&self, io: &ClientIo) -> bool {
         io.request().uri().path().starts_with(self.prefix)
     }
 
-    fn bind(&self, io: Incoming) -> Result<Connection<Ask, opaque::Output<Rest>>, Fault> {
+    fn bind(&self, io: ClientIo) -> Result<Connection<Ask, opaque::Output<Rest>>, Fault> {
         Ok(io.bind(
             |request| {
                 h::messages(request, |head, body| {
@@ -93,12 +93,12 @@ impl Format<Incoming, Ask, opaque::Output<Rest>> for Rest {
     }
 }
 
-impl Format<Outgoing, opaque::Output<Rest>, Ask> for Rest {
+impl Format<ProviderIo, opaque::Output<Rest>, Ask> for Rest {
     fn name(&self) -> &str {
         self.name
     }
 
-    fn bind(&self, io: Outgoing) -> Result<Connection<opaque::Output<Rest>, Ask>, Fault> {
+    fn bind(&self, io: ProviderIo) -> Result<Connection<opaque::Output<Rest>, Ask>, Fault> {
         let name = self.name;
         Ok(io.bind(request, opaque::read_response, move |answer| {
             h::provider_fault(name, answer)

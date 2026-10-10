@@ -28,8 +28,8 @@
 mod text;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Input;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::ErrorCode;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
@@ -122,9 +122,9 @@ impl Plugin for PiiInput {
 
 /// `pii` first, `pii-input` last, and `middle` between them. For real use,
 /// the transport is
-/// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
+/// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway_with(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -138,7 +138,7 @@ fn gateway_with(
 }
 
 fn gateway(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,

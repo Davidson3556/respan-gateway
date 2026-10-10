@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_chat::anthropic::AnthropicMessages;
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::anthropic::AnthropicMessages;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Input, Output, set_model};
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,

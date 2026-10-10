@@ -17,15 +17,13 @@ test = false
 bench = false
 
 [dependencies]
-respan-gateway-realtime = { path = "../crates/realtime" }
-respan-gateway-conversation = { path = "../crates/conversation" }
+respan-gateway-realtime = { path = "../crates/kinds/realtime" }
+respan-gateway-conversation = { path = "../crates/kinds/conversation" }
 respan-gateway-core = { path = "../crates/core" }
-respan-gateway-http = { path = "../crates/http", features = ["reqwest"] }
-respan-gateway-chat = { path = "../crates/chat" }
+respan-gateway-http = { path = "../crates/wires/http", features = ["reqwest", "axum"] }
 respan-gateway-plugins = { path = "../crates/plugins" }
-respan-gateway-axum = { path = "../crates/axum", features = ["ws"] }
-respan-gateway-mcp = { path = "../crates/mcp" }
-respan-gateway-ws = { path = "../crates/ws" }
+respan-gateway-mcp = { path = "../crates/kinds/mcp" }
+respan-gateway-ws = { path = "../crates/wires/ws", features = ["axum"] }
 axum = "0.8"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

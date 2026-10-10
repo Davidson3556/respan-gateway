@@ -1,11 +1,11 @@
 //! Use case 14, the gateway as a library: another Rust service runs the
 //! pipeline in-process, with no server and no second hop. It builds a
 //! [`Gateway`], hands [`Gateway::handle`] a request on the HTTP wire (an
-//! owned `Incoming` native HTTP request and its whole body), reads the answer
+//! owned `ClientIo` native HTTP request and its whole body), reads the answer
 //! and awaits how the request ended. With no HTTP hop, it needs none of the
 //! adapter's hop rules (`respan_gateway_http::handle` applies them), but
-//! hands the gateway what the `Incoming` publishes, as the adapter does
-//! (`Incoming::extensions`); no answer means no format took the request,
+//! hands the gateway what the `ClientIo` publishes, as the adapter does
+//! (`ClientIo::extensions`); no answer means no format took the request,
 //! and the end says why.
 //!
 //! The kernel counts no usage:
@@ -15,8 +15,8 @@
 //! `cargo run -p respan-gateway-examples --example embedded`
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Input;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::futures::future::join;
 use respan_gateway_core::futures::{StreamExt, stream};
 use respan_gateway_core::{Fault, Gateway};
@@ -25,12 +25,12 @@ use respan_gateway_examples::Meter;
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::HeaderValue;
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{HttpClient, http};
+use respan_gateway_http::{HttpTransport, http};
 
 /// The gateway, with no server. For real use, the transport is
-/// `HttpClient::new("https://api.openai.com/v1")?.with_headers(key)?`.
+/// `HttpTransport::new("https://api.openai.com/v1")?.with_headers(key)?`.
 fn gateway(
-    provider: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    provider: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -43,10 +43,10 @@ fn gateway(
         .target("openai")
 }
 
-fn scripted_provider(openai: &FakeOpenAi) -> Result<HttpClient, Fault> {
+fn scripted_provider(openai: &FakeOpenAi) -> Result<HttpTransport, Fault> {
     let mut headers = http::HeaderMap::new();
     headers.insert("authorization", HeaderValue::from_static("Bearer sk-test"));
-    HttpClient::new(openai.base_url())?.with_headers(headers)
+    HttpTransport::new(openai.base_url())?.with_headers(headers)
 }
 
 /// One chat request through the pipeline: the answer's status and body,
@@ -67,7 +67,7 @@ async fn ask(
     let body = stream::iter([Ok(Bytes::from(body.to_string()))]).boxed();
     let request = http::Request::from_parts(head, respan_gateway_http::Body::stream(body));
     let (incoming, answer) =
-        respan_gateway_http::Incoming::accept(request, respan_gateway_http::Framing::Whole, LIMIT);
+        respan_gateway_http::ClientIo::accept(request, respan_gateway_http::Framing::Whole, LIMIT);
     let extensions = incoming.extensions();
     let handled = gw.handle(incoming, extensions);
     let consume = async {

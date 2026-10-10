@@ -25,12 +25,12 @@ use respan_gateway_core::futures::{TryStreamExt, stream};
 use respan_gateway_core::{
     ClientContext, Connection, Fault, Format, Gateway, Plugin, Response, async_trait,
 };
-use respan_gateway_http::HttpClient;
+use respan_gateway_http::HttpTransport;
 use respan_gateway_http::formats;
 use respan_gateway_http::formats::opaque;
 use respan_gateway_http::formats::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::{self as h, Incoming, Outgoing};
+use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -43,18 +43,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[derive(Clone)]
 struct Models;
 
-impl Format<Incoming, opaque::Input<Models>, opaque::Output<Models>> for Models {
+impl Format<ClientIo, opaque::Input<Models>, opaque::Output<Models>> for Models {
     fn name(&self) -> &str {
         "models"
     }
 
-    fn matches(&self, io: &Incoming) -> bool {
+    fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == http::Method::GET && io.request().uri().path() == "/v1/models"
     }
 
     fn bind(
         &self,
-        io: Incoming,
+        io: ClientIo,
     ) -> Result<Connection<opaque::Input<Models>, opaque::Output<Models>>, Fault> {
         Ok(io.bind(
             opaque::read_request,
@@ -80,14 +80,14 @@ impl Format<Incoming, opaque::Input<Models>, opaque::Output<Models>> for Models 
     }
 }
 
-impl Format<Outgoing, opaque::Output<Models>, opaque::Input<Models>> for Models {
+impl Format<ProviderIo, opaque::Output<Models>, opaque::Input<Models>> for Models {
     fn name(&self) -> &str {
         "models"
     }
 
     fn bind(
         &self,
-        io: Outgoing,
+        io: ProviderIo,
     ) -> Result<Connection<opaque::Output<Models>, opaque::Input<Models>>, Fault> {
         Ok(
             io.bind(opaque::write_request, opaque::read_response, |answer| {
@@ -237,7 +237,7 @@ fn gateway(a: &LocalModels, b: &LocalModels) -> Result<Gateway, Fault> {
     let providers = [("a", a, "Bearer key-a"), ("b", b, "Bearer key-b")];
     let mut gateway = Gateway::new().client::<opaque::Input<Models>, _, _>(Models)?;
     for (name, server, token) in providers {
-        let transport = HttpClient::new(&server.url)?.with_headers(key(token))?;
+        let transport = HttpTransport::new(&server.url)?.with_headers(key(token))?;
         gateway =
             gateway.provider::<opaque::Input<Models>, _, _>(name, Models, transport.connect())?;
     }

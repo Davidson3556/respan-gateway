@@ -19,7 +19,7 @@ pub async fn serve_until(
 ) -> Result<(), std::io::Error> {
     let shutdown = shutdown.boxed().shared();
     let limits = respan_gateway_ws::Limits::default();
-    let app = respan_gateway_axum::router_with_ws(
+    let app = respan_gateway_ws::axum::router(
         gateway.clone(),
         |_| respan_gateway_examples::LIMIT,
         limits,

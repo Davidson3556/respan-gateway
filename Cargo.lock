@@ -1238,8 +1238,6 @@ dependencies = [
  "futures",
  "mockllm",
  "reqwest",
- "respan-gateway-axum",
- "respan-gateway-chat",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
@@ -1254,54 +1252,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "respan-gateway-axum"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "futures",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "mockllm",
- "reqwest",
- "respan-gateway-chat",
- "respan-gateway-conversation",
- "respan-gateway-core",
- "respan-gateway-http",
- "respan-gateway-realtime",
- "respan-gateway-ws",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tower",
-]
-
-[[package]]
-name = "respan-gateway-chat"
+name = "respan-gateway-conversation"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "futures",
  "mockllm",
- "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-plugins",
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "respan-gateway-conversation"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "respan-gateway-core",
- "serde_json",
 ]
 
 [[package]]
@@ -1328,8 +1291,6 @@ dependencies = [
  "http",
  "mockllm",
  "reqwest",
- "respan-gateway-axum",
- "respan-gateway-chat",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
@@ -1350,6 +1311,7 @@ dependencies = [
 name = "respan-gateway-http"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "bytes",
  "futures",
  "http",
@@ -1357,13 +1319,13 @@ dependencies = [
  "http-body-util",
  "mockllm",
  "reqwest",
- "respan-gateway-chat",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-plugins",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -1374,17 +1336,9 @@ dependencies = [
  "libc",
  "respan-gateway-core",
  "respan-gateway-http",
- "respan-gateway-mcp-messages",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "respan-gateway-mcp-messages"
-version = "0.0.0"
-dependencies = [
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1393,7 +1347,6 @@ version = "0.0.0"
 dependencies = [
  "futures",
  "mockllm",
- "respan-gateway-chat",
  "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
@@ -1406,6 +1359,8 @@ name = "respan-gateway-realtime"
 version = "0.0.0"
 dependencies = [
  "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-ws",
  "serde_json",
 ]
 
@@ -1413,7 +1368,16 @@ dependencies = [
 name = "respan-gateway-ws"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "futures",
+ "http",
+ "hyper",
+ "hyper-util",
+ "mockllm",
  "reqwest",
+ "respan-gateway-conversation",
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-realtime",
@@ -1422,6 +1386,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "tower",
 ]
 
 [[package]]

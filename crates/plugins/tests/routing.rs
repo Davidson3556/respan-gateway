@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::futures::channel::oneshot;
 use respan_gateway_core::futures::future::BoxFuture;
 use respan_gateway_core::futures::{FutureExt, StreamExt, sink, stream};
@@ -20,7 +20,7 @@ use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode,
     header::{AUTHORIZATION, RETRY_AFTER},
 };
-use respan_gateway_http::{Body, Completion, HttpClient, error_code, retryable};
+use respan_gateway_http::{Body, Completion, HttpTransport, error_code, retryable};
 use respan_gateway_plugins::ModelRouter;
 use respan_gateway_plugins::routing::{Attempt, Backoff, Role, Until, first_success, race};
 /// An end by its message, for comparing: `Fault` has no equality.
@@ -289,7 +289,7 @@ impl Fakes {
         };
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer sk-test"));
-        let http = HttpClient::new(fake.base_url())
+        let http = HttpTransport::new(fake.base_url())
             .and_then(|transport| transport.with_headers(headers))
             .unwrap_or_else(|fault| panic!("{fault}"));
         let sent = self.sent.clone();

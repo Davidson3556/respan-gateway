@@ -9,15 +9,15 @@ mod text;
 
 use http_support::{LIMIT, post, read_whole, serve};
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_chat::anthropic::AnthropicMessages;
-use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Usage;
+use respan_gateway_conversation::anthropic::AnthropicMessages;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Content, Finish, Input, Message, Output, Role, Tool};
 use respan_gateway_core::{ClientContext, Fault, Filter, Gateway, Plugin, Response, async_trait};
 use respan_gateway_core::{ErrorCode, Upstream};
 use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
-use respan_gateway_http::{HttpClient, Status};
+use respan_gateway_http::{HttpTransport, Status};
 use serde_json::{self, json};
 use support::run_filter as run;
 use text::{Holdback, Placeholders, Readable, Rewrite, UNREADABLE, partial_match};
@@ -415,20 +415,20 @@ fn http_transport(
     header: &'static str,
     key: &'static str,
 ) -> Result<
-    impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static,
+    impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo + Send + Sync + 'static,
     Fault,
 > {
     let mut headers = HeaderMap::new();
     headers.insert(header, HeaderValue::from_static(key));
-    Ok(HttpClient::new(base)?.with_headers(headers)?.connect())
+    Ok(HttpTransport::new(base)?.with_headers(headers)?.connect())
 }
 
 fn gateway_with(
-    openai: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    openai: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
-    anthropic: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    anthropic: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -686,10 +686,10 @@ async fn a_clean_stream_passes_unchanged() -> Result<(), Fault> {
 }
 
 /// Only the byte-fragment and injected-fault tests need control below HTTP
-/// event framing. Provider protocol tests use mockllm and real HttpClient.
+/// event framing. Provider protocol tests use mockllm and real HttpTransport.
 fn local(
     chunks: Vec<Result<Bytes, Fault>>,
-) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing + Send + Sync + 'static
+) -> impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo + Send + Sync + 'static
 {
     use respan_gateway_core::futures::{StreamExt, TryStreamExt, stream};
     respan_gateway_http::connect(

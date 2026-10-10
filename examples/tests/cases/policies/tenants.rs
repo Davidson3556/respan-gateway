@@ -4,10 +4,10 @@ fn auth(req: &mockllm::Request) -> Option<&str> {
     req.header("authorization")
 }
 
-async fn providers() -> Result<(FakeOpenAi, FakeOpenAi, HttpClient, HttpClient), Fault> {
+async fn providers() -> Result<(FakeOpenAi, FakeOpenAi, HttpTransport, HttpTransport), Fault> {
     let (openai, azure) = (FakeOpenAi::start().await, FakeOpenAi::start().await);
-    let first = HttpClient::new(openai.base_url())?;
-    let second = HttpClient::new(azure.base_url())?;
+    let first = HttpTransport::new(openai.base_url())?;
+    let second = HttpTransport::new(azure.base_url())?;
     Ok((openai, azure, first, second))
 }
 

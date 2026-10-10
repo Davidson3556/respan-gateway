@@ -2,7 +2,7 @@
 //! an abandoned or broken upload never looks complete, and what the
 //! client edge produced before it failed is not lost. The byte-level cases
 //! (an encoder's failure, opening bytes) are HTTP's driver's
-//! (`crates/http/tests/driver_toy.rs`). The toy dialer writes each input as
+//! (`crates/wires/http/tests/driver_toy.rs`). The toy dialer writes each input as
 //! its text and a clean end as `<END>`.
 #![allow(clippy::unwrap_used)]
 

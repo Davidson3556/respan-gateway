@@ -6,7 +6,7 @@
 mod http_support;
 
 use respan_gateway_http::{
-    Body, HttpClient,
+    Body, HttpTransport,
     http::{self, Method, StatusCode},
     http_body_util::BodyExt,
 };
@@ -133,7 +133,7 @@ async fn official_http_server_initializes_lists_calls_and_deletes() -> Result<()
         .provider::<Input, _, _>(
             "mcp",
             StreamableHttp::default(),
-            HttpClient::new(format!("http://{addr}"))?.connect(),
+            HttpTransport::new(format!("http://{addr}"))?.connect(),
         )?
         .target("mcp")?;
     exercise(gw).await;

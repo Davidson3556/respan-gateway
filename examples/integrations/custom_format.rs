@@ -24,7 +24,7 @@ use respan_gateway_http::bytes::Bytes;
 use respan_gateway_http::formats::{self as formats, whole};
 use respan_gateway_http::http::response::Parts as ResponseHead;
 use respan_gateway_http::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
-use respan_gateway_http::{self as h, Incoming, Outgoing};
+use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -60,17 +60,17 @@ pub struct OpenAiEmbeddings;
 
 // Each direction binds owned HTTP I/O directly to typed events. These are
 // public core/HTTP APIs, the same ones external format authors use.
-impl Format<Incoming, EmbedRequest, Embeddings> for OpenAiEmbeddings {
+impl Format<ClientIo, EmbedRequest, Embeddings> for OpenAiEmbeddings {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn matches(&self, io: &Incoming) -> bool {
+    fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == Method::POST
             && formats::clean_path(io.request().uri().path()).ends_with("/embeddings")
     }
 
-    fn bind(&self, io: Incoming) -> Result<Connection<EmbedRequest, Embeddings>, Fault> {
+    fn bind(&self, io: ClientIo) -> Result<Connection<EmbedRequest, Embeddings>, Fault> {
         Ok(io.bind(
             |request| h::messages(request, |_, raw| read_request(raw)),
             |reply| {
@@ -83,12 +83,12 @@ impl Format<Incoming, EmbedRequest, Embeddings> for OpenAiEmbeddings {
     }
 }
 
-impl Format<Outgoing, Embeddings, EmbedRequest> for OpenAiEmbeddings {
+impl Format<ProviderIo, Embeddings, EmbedRequest> for OpenAiEmbeddings {
     fn name(&self) -> &str {
         NAME
     }
 
-    fn bind(&self, io: Outgoing) -> Result<Connection<Embeddings, EmbedRequest>, Fault> {
+    fn bind(&self, io: ProviderIo) -> Result<Connection<Embeddings, EmbedRequest>, Fault> {
         Ok(io.bind(
             |head, request: Option<&EmbedRequest>| {
                 if request.is_none() {

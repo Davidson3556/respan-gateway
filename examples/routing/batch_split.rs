@@ -9,10 +9,10 @@
 //! call like any other: every plugin's `on_provider` runs before it, and a
 //! plugin that meters calls sees each one. A call built with `with_input` is
 //! not a relay, so the client's key does not go with it: the provider has
-//! its own key (`HttpClient::new(url)?.with_headers(key)?`), or set the
+//! its own key (`HttpTransport::new(url)?.with_headers(key)?`), or set the
 //! call's `CallHeaders` from the request's `Credential`.
 //!
-//! The embeddings kind and its codec are `custom_format`'s, included as a
+//! The embeddings kind and its format are `custom_format`'s, included as a
 //! module.
 //!
 //! At most eight chunks run concurrently. Each retries transient failures
@@ -98,7 +98,7 @@ impl Plugin for Split {
 const MODEL: &str = "text-embedding-3-small";
 
 fn gateway(
-    provider: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    provider: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,

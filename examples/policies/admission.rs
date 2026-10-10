@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async_trait};
 use respan_gateway_http::Status;
 use respan_gateway_http::Wire;
@@ -196,7 +196,7 @@ const OK: &str =
     r#"{"id":"c","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}"#;
 
 fn gateway(
-    provider: respan_gateway_http::HttpClient,
+    provider: respan_gateway_http::HttpTransport,
     slots: &Slots,
     free: Duration,
 ) -> Result<Gateway, Fault> {

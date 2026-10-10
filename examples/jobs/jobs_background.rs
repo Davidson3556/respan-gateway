@@ -51,7 +51,7 @@ use respan_gateway_http::bytes::{Bytes, BytesMut};
 use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
-use respan_gateway_http::{Body, Credential, HttpClient, Wire, built_wrong};
+use respan_gateway_http::{Body, Credential, HttpTransport, Wire, built_wrong};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -681,8 +681,8 @@ impl ResponsesServer {
         lock(&self.state).requests.clone()
     }
 
-    fn transport(&self) -> Result<HttpClient, Fault> {
-        HttpClient::new(&self.base)
+    fn transport(&self) -> Result<HttpTransport, Fault> {
+        HttpTransport::new(&self.base)
     }
 }
 
@@ -700,11 +700,11 @@ async fn deployments() -> Result<(ResponsesServer, ResponsesServer), Fault> {
 }
 
 fn gateway(
-    east: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    east: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
-    west: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    west: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,

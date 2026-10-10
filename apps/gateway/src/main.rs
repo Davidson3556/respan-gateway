@@ -2,15 +2,16 @@ use std::future::IntoFuture;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use respan_gateway_axum::{router_with_limit, router_with_ws};
-use respan_gateway_chat::anthropic::AnthropicMessages;
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::anthropic::AnthropicMessages;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::Fault;
 use respan_gateway_core::futures::FutureExt;
-use respan_gateway_http::HttpClient;
+use respan_gateway_http::HttpTransport;
+use respan_gateway_http::axum::router_with_limit;
 use respan_gateway_http::formats::opaque::Passthrough;
 use respan_gateway_realtime as realtime;
-use respan_gateway_ws::{JsonEvents, Limits};
+use respan_gateway_realtime::JsonEvents;
+use respan_gateway_ws::Limits;
 
 mod config;
 
@@ -41,7 +42,7 @@ const BODY_LIMIT: usize = 32 << 20;
 /// gateway builds its own `Gateway` in its own `main.rs`.
 fn formats(limit: usize) -> [KnownFormat; 11] {
     let http = move |base_url: &str, auth| -> Result<_, Fault> {
-        let client = HttpClient::new(base_url)?.with_headers(auth)?;
+        let client = HttpTransport::new(base_url)?.with_headers(auth)?;
         Ok(client.with_limit(limit).connect())
     };
     let ws = |format: JsonEvents| {
@@ -196,7 +197,7 @@ async fn main() -> ExitCode {
     // lose their end hooks.
     let signal = shutdown().shared();
     let app = match config.serve.iter().any(served) {
-        true => router_with_ws(
+        true => respan_gateway_ws::axum::router(
             gateway.clone(),
             move |_| limit,
             Limits::default(),

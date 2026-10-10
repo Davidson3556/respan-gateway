@@ -2,7 +2,7 @@
 //! Opt-in live TLS sessions through the same adapter and transport as mocks.
 //! Credentials are environment variables; never include keys in assertions.
 
-#[path = "../../crates/axum/tests/support/mod.rs"]
+#[path = "../../crates/wires/ws/tests/support/mod.rs"]
 mod support;
 
 use serde_json::{Value, json};

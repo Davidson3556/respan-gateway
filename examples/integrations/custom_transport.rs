@@ -13,8 +13,8 @@
 use respan_gateway_core::BadRequest;
 use std::sync::Arc;
 
-use respan_gateway_chat::openai::OpenAiChat;
 use respan_gateway_conversation::Usage;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Block, Finish, Input, Output};
 use respan_gateway_core::futures::FutureExt;
 use respan_gateway_core::futures::channel::oneshot;

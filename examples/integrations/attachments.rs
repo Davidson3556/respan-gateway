@@ -16,7 +16,7 @@
 //! content and converts without reading or writing cached text.
 //!
 //! A fallback in another format gets the original typed document. The
-//! provider codec writes that document in the target format. Provider-specific
+//! provider format writes that document in the target format. Provider-specific
 //! file references remain native until the resolver turns them into bytes.
 //!
 //! A `file_id` (a file uploaded earlier) is resolved before any call, in
@@ -29,7 +29,7 @@
 //! from `GET /v1/files/{id}` and the PDF signature before conversion.
 //!
 //! The HTTP adapter can allow 80 MiB on this route while keeping smaller
-//! limits elsewhere: `respan_gateway_axum::router_with_limit(gateway,
+//! limits elsewhere: `respan_gateway_http::axum::router_with_limit(gateway,
 //! |head| if head.uri.path() == "/v1/chat/completions" { 80 << 20 } else { 1 << 20 })`.
 //! The converter allows 72 MiB of base64, enough for a 50 MiB PDF.
 //!
@@ -44,8 +44,8 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-use respan_gateway_chat::anthropic::AnthropicMessages;
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::anthropic::AnthropicMessages;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_conversation::{Content, Input, Media, MediaSource, Output};
 use respan_gateway_core::futures::TryStreamExt;
 use respan_gateway_core::{
@@ -57,7 +57,7 @@ use respan_gateway_examples::store::{
     rusqlite::{OptionalExtension, params},
     sql,
 };
-use respan_gateway_http::HttpClient;
+use respan_gateway_http::HttpTransport;
 use respan_gateway_http::Status;
 use respan_gateway_http::formats::opaque;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
@@ -602,7 +602,7 @@ fn gateway(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fault> {
         .provider::<Ask, _, _>(
             "files",
             FILES,
-            HttpClient::new(&fixture.files.url)?.connect(),
+            HttpTransport::new(&fixture.files.url)?.connect(),
         )?
         .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(pdfs)
@@ -639,7 +639,7 @@ fn gateway_claude(fixture: &Fixture, pdfs: Arc<PdfToText>) -> Result<Gateway, Fa
         .provider::<Ask, _, _>(
             "files",
             FILES,
-            HttpClient::new(&fixture.files.url)?.connect(),
+            HttpTransport::new(&fixture.files.url)?.connect(),
         )?
         .client::<Input, _, _>(OpenAiChat::OPENAI)?
         .plugin(pdfs)

@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn clients_see_and_call_only_the_allowed_tools() -> Result<(), Fault> {
     let provider = McpServer::start().await;
-    let gw = gateway(HttpClient::new(&provider.url)?.connect())?;
+    let gw = gateway(HttpTransport::new(&provider.url)?.connect())?;
     let answers = session(&gw).await?;
     let [_, (_, list), (_, called), (status, refused)] = &answers[..] else {
         panic!("{answers:?}")
@@ -32,11 +32,11 @@ async fn clients_see_and_call_only_the_allowed_tools() -> Result<(), Fault> {
 #[tokio::test]
 async fn a_mock_llm_tool_round_trip_uses_mcp_and_keeps_the_provider_call_id() -> Result<(), Fault> {
     use mockllm::{Answer, FakeAnthropic};
-    use respan_gateway_chat::anthropic::AnthropicMessages;
-    use respan_gateway_chat::openai::OpenAiChat;
     use respan_gateway_conversation::Input;
+    use respan_gateway_conversation::anthropic::AnthropicMessages;
+    use respan_gateway_conversation::openai::OpenAiChat;
     let mcp = McpServer::start().await;
-    let tools = gateway(HttpClient::new(&mcp.url)?.connect())?;
+    let tools = gateway(HttpTransport::new(&mcp.url)?.connect())?;
     let (_, session, _) = initialize(&tools).await?;
     let (_, _, list) = send(&tools, session.as_deref(), Some(2), "tools/list", json!({})).await?;
     let offered: Vec<_> = list["result"]["tools"].as_array().expect("tool list").iter()
@@ -53,7 +53,7 @@ async fn a_mock_llm_tool_round_trip_uses_mcp_and_keeps_the_provider_call_id() ->
         .provider::<Input, _, _>(
             "llm",
             AnthropicMessages,
-            HttpClient::new(llm.base_url())?
+            HttpTransport::new(llm.base_url())?
                 .with_headers(headers)?
                 .connect(),
         )?

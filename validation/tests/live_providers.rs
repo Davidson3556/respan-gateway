@@ -297,7 +297,7 @@ async fn real_compatible_native_tool_stream_through_passthrough() {
     assert_eq!(json(&args)["text"], "雪😀");
     assert!(finished && usage, "{body}");
     // Passthrough preserves the vendor's native framing, including providers
-    // which finish without the OpenAI codec's required [DONE] sentinel.
+    // which finish without the OpenAI format's required [DONE] sentinel.
 }
 
 #[tokio::test]

@@ -58,7 +58,7 @@
 //! The default text-PII policy
 //! rejects opaque audio; it does not pretend a transcript filter redacts speech.
 //! Gemini Live and Responses WebSocket flows have their own examples. Shared
-//! shutdown signals use `router_with_ws`'s `stop`; no connection is silently resumed.
+//! shutdown signals use `respan_gateway_ws::axum::router`'s `stop`; no connection is silently resumed.
 //! Sources: https://developers.openai.com/api/docs/guides/voice-latency-cost
 //!
 //! `cargo run -p respan-gateway-examples --example realtime`
@@ -84,8 +84,9 @@ use respan_gateway_http::{Credential, Status};
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::{Amount, HoldId, Ledger, MemoryLedger};
+use respan_gateway_realtime::JsonEvents;
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_ws::{CloseCode, JsonEvents, WsTransport};
+use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
 use text::{Placeholders, Rewrite};
 
@@ -874,7 +875,7 @@ async fn listen(gateway: &Gateway) -> std::net::SocketAddr {
         .await
         .expect("a port");
     let addr = listener.local_addr().expect("an address");
-    let app = respan_gateway_axum::router_with_ws(
+    let app = respan_gateway_ws::axum::router(
         gateway.clone(),
         |_| respan_gateway_examples::LIMIT,
         respan_gateway_ws::Limits::default(),

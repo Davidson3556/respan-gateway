@@ -14,12 +14,10 @@ workspace = true
 [dependencies]
 respan-gateway-conversation.workspace = true
 respan-gateway-core.workspace = true
-respan-gateway-http = { workspace = true, features = ["reqwest"] }
-respan-gateway-chat.workspace = true
+respan-gateway-http = { workspace = true, features = ["reqwest", "axum"] }
 respan-gateway-plugins.workspace = true
-respan-gateway-axum = { workspace = true, features = ["ws"] }
 respan-gateway-realtime.workspace = true
-respan-gateway-ws.workspace = true
+respan-gateway-ws = { workspace = true, features = ["axum"] }
 axum.workspace = true
 serde.workspace = true
 serde_norway.workspace = true

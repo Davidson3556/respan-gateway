@@ -20,7 +20,7 @@ use respan_gateway_core::{ClientContext, Fault, Gateway, Plugin, Response, async
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use serde_json::{Value, json};
 
-use respan_gateway_http::HttpClient;
+use respan_gateway_http::HttpTransport;
 use respan_gateway_mcp::{self as mcp, SESSION, StdioTransport, StreamableHttp};
 use respan_gateway_mcp::{Input, Output};
 #[allow(dead_code)]
@@ -77,7 +77,7 @@ impl Plugin for ToolAllowList {
 }
 
 fn gateway(
-    server: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    server: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -273,7 +273,7 @@ async fn main() -> Result<(), Fault> {
             gateway(StdioTransport::new(program, rest).connect())?
         }
         None => {
-            gateway(HttpClient::new(&fixture.as_ref().expect("started fixture").url)?.connect())?
+            gateway(HttpTransport::new(&fixture.as_ref().expect("started fixture").url)?.connect())?
         }
     };
     let methods = [

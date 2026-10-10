@@ -1,0 +1,54 @@
+[package]
+name = "respan-gateway-conversation"
+description = "The conversation kind: requests, reply events and assembly, and its HTTP formats (OpenAI Chat Completions with vendor dialects, Anthropic Messages)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["openai", "anthropic"]
+# The kind's binding to HTTP: JSON requests, JSON or SSE responses ([`Schema`]).
+# Without it the crate is the kind's types alone, with no I/O.
+http = ["dep:respan-gateway-http", "dep:base64", "dep:serde"]
+# OpenAI Chat Completions and its vendor dialects.
+openai = ["http"]
+# Anthropic Messages.
+anthropic = ["http"]
+
+[dependencies]
+bytes.workspace = true
+respan-gateway-core.workspace = true
+serde_json.workspace = true
+base64 = { workspace = true, optional = true }
+respan-gateway-http = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures.workspace = true
+mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
+respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-plugins.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync", "test-util"] }
+
+# The suites relay and translate both formats.
+[[test]]
+name = "relay"
+required-features = ["openai", "anthropic"]
+
+[[test]]
+name = "round_trips"
+required-features = ["openai", "anthropic"]
+
+[[test]]
+name = "translate"
+required-features = ["openai", "anthropic"]
+
+[[bench]]
+name = "relay"
+required-features = ["openai", "anthropic"]

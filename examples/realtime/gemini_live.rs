@@ -18,8 +18,9 @@ use respan_gateway_core::{
 #[path = "../support/billing/ledger.rs"]
 mod ledger;
 use ledger::MemoryLedger;
+use respan_gateway_realtime::JsonEvents;
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_ws::{CloseCode, JsonEvents, WsTransport};
+use respan_gateway_ws::{CloseCode, WsTransport};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 #[derive(Clone)]

@@ -2,35 +2,35 @@ use super::*;
 use respan_gateway_conversation::{Message, Role};
 use respan_gateway_core::{Connection, Format};
 use respan_gateway_http::formats::opaque;
-use respan_gateway_http::{self as h, Incoming, Outgoing};
+use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.
 #[derive(Clone)]
 struct Responses;
 
-impl Format<Incoming, opaque::Input<Responses>, opaque::Output<Responses>> for Responses {
+impl Format<ClientIo, opaque::Input<Responses>, opaque::Output<Responses>> for Responses {
     fn name(&self) -> &str {
         "responses"
     }
-    fn matches(&self, io: &Incoming) -> bool {
+    fn matches(&self, io: &ClientIo) -> bool {
         io.request().method() == h::http::Method::POST
             && h::formats::clean_path(io.request().uri().path()).ends_with("/responses")
     }
     fn bind(
         &self,
-        io: Incoming,
+        io: ClientIo,
     ) -> Result<Connection<opaque::Input<Responses>, opaque::Output<Responses>>, Fault> {
         Ok(io.bind(opaque::read_request, opaque::write_response, h::plain))
     }
 }
 
-impl Format<Outgoing, opaque::Output<Responses>, opaque::Input<Responses>> for Responses {
+impl Format<ProviderIo, opaque::Output<Responses>, opaque::Input<Responses>> for Responses {
     fn name(&self) -> &str {
         "responses"
     }
     fn bind(
         &self,
-        io: Outgoing,
+        io: ProviderIo,
     ) -> Result<Connection<opaque::Output<Responses>, opaque::Input<Responses>>, Fault> {
         Ok(
             io.bind(opaque::write_request, opaque::read_response, |answer| {
@@ -43,7 +43,7 @@ impl Format<Outgoing, opaque::Output<Responses>, opaque::Input<Responses>> for R
 /// The example's gateway, also serving the Responses API. Its one target
 /// stays OpenAI; the guard refuses Responses traffic before any call.
 fn gateway_with_responses(
-    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    transport: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Clone
     + Send
     + Sync

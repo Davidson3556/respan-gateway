@@ -18,11 +18,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use mockllm::{Answer, FakeOpenAi};
-use respan_gateway_chat::openai::OpenAiChat;
+use respan_gateway_conversation::openai::OpenAiChat;
 use respan_gateway_core::{
     ClientContext, Fault, Gateway, Plugin, ProviderContext, Response, async_trait,
 };
-use respan_gateway_http::HttpClient;
+use respan_gateway_http::HttpTransport;
 use respan_gateway_http::Status;
 use respan_gateway_http::http::header::AUTHORIZATION;
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
@@ -104,11 +104,11 @@ impl Plugin for Tenants {
 }
 
 fn gateway(
-    openai: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    openai: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
-    azure: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::Outgoing
+    azure: impl Fn(respan_gateway_core::Extensions) -> respan_gateway_http::ProviderIo
     + Send
     + Sync
     + 'static,
@@ -155,8 +155,8 @@ async fn main() -> Result<(), Fault> {
     azure.answer(Answer::raw(OK));
     let tenants = Tenants::default();
     let gw = gateway(
-        HttpClient::new(openai.base_url())?.connect(),
-        HttpClient::new(azure.base_url())?.connect(),
+        HttpTransport::new(openai.base_url())?.connect(),
+        HttpTransport::new(azure.base_url())?.connect(),
         tenants.clone(),
     )?;
     tenants.upsert("gw-acme", tenant(1, "openai", "sk-acme-1")?);
