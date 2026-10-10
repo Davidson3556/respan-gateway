@@ -54,21 +54,49 @@ impl Plan {
 }
 
 pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Plan), Fault> {
-    let known = |name: &str, owner: &str| {
-        formats.iter().find(|f| f.name == name).ok_or_else(|| {
-            let known: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
-            Fault::config(format!(
-                "{owner}: unknown format '{name}'; compiled-in formats: [{}]",
-                known.join(", ")
-            ))
-        })
+    let (gateway, upstreams) = providers(config, formats)?;
+    let serve = match &config.serve {
+        Some(serve) => serve.clone(),
+        None => default_serve(&upstreams, formats),
     };
+    let gateway = serve_formats(gateway, &serve, &upstreams, formats)?;
+    let tables = model_tables(&config.plugins, &upstreams)?;
+    if let Some(target) = &config.target
+        && !upstreams.iter().any(|u| u.name == *target)
+    {
+        return Err(Fault::config(format!(
+            "target: unknown provider '{target}'"
+        )));
+    }
+    let keys = config
+        .keys
+        .iter()
+        .map(|key| secret("keys", key))
+        .collect::<Result<_, _>>()?;
+    if upstreams.is_empty() {
+        return Err(Fault::config(
+            "providers: none configured; add one, such as `openai: { vendor: openai }`",
+        ));
+    }
+    let routes = Arc::new(Routes::new(&upstreams, tables, config.target.clone()));
+    let plan = Plan {
+        upstreams,
+        serve,
+        routes,
+        keys,
+    };
+    Ok((gateway, plan))
+}
+
+/// The gateway with a core provider for each format of each configured
+/// provider.
+fn providers(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Vec<Upstream>), Fault> {
     let mut gateway = Gateway::new();
     let mut upstreams = Vec::new();
     for (name, p) in &config.providers {
         let upstream = upstream(name, p, formats)?;
         for entry in &upstream.entries {
-            let format = known(&entry.format, &format!("provider '{name}'"))?;
+            let format = format_named(formats, &entry.format, &format!("provider '{name}'"))?;
             let (internal, auth) = (entry.internal.clone(), entry.auth.clone());
             gateway = format
                 .add_provider(gateway, internal, &entry.base_url, auth)
@@ -76,11 +104,17 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
         }
         upstreams.push(upstream);
     }
+    Ok((gateway, upstreams))
+}
 
-    let serve = match &config.serve {
-        Some(serve) => serve.clone(),
-        None => default_serve(&upstreams, formats),
-    };
+/// The gateway serving each format of `serve`, in order. A format that
+/// does not translate needs exactly one provider of its own.
+fn serve_formats(
+    mut gateway: Gateway,
+    serve: &[String],
+    upstreams: &[Upstream],
+    formats: &[KnownFormat],
+) -> Result<Gateway, Fault> {
     let after = serve.iter().skip_while(|n| *n != PASSTHROUGH).nth(1);
     if let Some(after) = after {
         return Err(Fault::config(format!(
@@ -88,8 +122,8 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
              serve '{PASSTHROUGH}' last"
         )));
     }
-    for name in &serve {
-        let served = known(name, "serve")?;
+    for name in serve {
+        let served = format_named(formats, name, "serve")?;
         gateway = served.serve(gateway)?;
         if served.kind.translates {
             continue;
@@ -107,9 +141,17 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
             return Err(Fault::config(message));
         }
     }
+    Ok(gateway)
+}
 
+/// Each `models` plugin's routes, as `(prefix, provider)`, in the order
+/// the plugins run.
+fn model_tables(
+    plugins: &[PluginConfig],
+    upstreams: &[Upstream],
+) -> Result<Vec<Vec<(String, String)>>, Fault> {
     let mut tables = Vec::new();
-    for p in ordered(&config.plugins)? {
+    for p in ordered(plugins)? {
         let bad = |e: String| Fault::config(format!("plugin '{}': {e}", p.name));
         let Some(models) = &p.models else {
             return Err(bad("no plugin given; compiled-in plugins: [models]".into()));
@@ -138,27 +180,29 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
                 .collect(),
         );
     }
+    Ok(tables)
+}
 
-    if let Some(target) = &config.target
-        && !upstreams.iter().any(|u| u.name == *target)
-    {
-        return Err(Fault::config(format!(
-            "target: unknown provider '{target}'"
-        )));
-    }
-    let keys = config
-        .keys
-        .iter()
-        .map(|key| secret("keys", key))
-        .collect::<Result<_, _>>()?;
-    let routes = Arc::new(Routes::new(&upstreams, tables, config.target.clone()));
-    let plan = Plan {
-        upstreams,
-        serve,
-        routes,
-        keys,
-    };
-    Ok((gateway, plan))
+/// The compiled-in format `name`; `owner` says who asked for it in an error.
+fn format_named<'a>(
+    formats: &'a [KnownFormat],
+    name: &str,
+    owner: &str,
+) -> Result<&'a KnownFormat, Fault> {
+    formats.iter().find(|f| f.name == name).ok_or_else(|| {
+        let known: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
+        Fault::config(format!(
+            "{owner}: unknown format '{name}'; compiled-in formats: [{}]",
+            known.join(", ")
+        ))
+    })
+}
+
+/// Whether `name` may name a provider: routing reads `name/model`, video
+/// ids `name~id`, and core providers `name:format`.
+fn valid_provider_name(name: &str) -> bool {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+    !name.is_empty() && name.chars().all(allowed)
 }
 
 /// The formats served when the config names none: OpenAI Chat, Anthropic
@@ -186,6 +230,11 @@ fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String>
 fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<Upstream, Fault> {
     let owner = format!("provider '{name}'");
     let bad = |e: String| Fault::config(format!("{owner}: {e}"));
+    if !valid_provider_name(name) {
+        return Err(bad(
+            "a name is letters, digits, '_', '.' and '-' alone (no '/', '~' or ':')".into(),
+        ));
+    }
     let preset = match &p.vendor {
         None => None,
         Some(vendor) => Some(presets::preset(vendor).ok_or_else(|| {
@@ -230,13 +279,7 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
     let exact = preset.is_none() && names.len() == 1;
     let mut entries = Vec::new();
     for (i, format) in names.iter().enumerate() {
-        let Some(known) = formats.iter().find(|f| f.name == *format) else {
-            let known: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
-            return Err(bad(format!(
-                "unknown format '{format}'; compiled-in formats: [{}]",
-                known.join(", ")
-            )));
-        };
+        let known = format_named(formats, format, &owner)?;
         let auth = match (&p.auth, &key) {
             (Some(auth), _) => auth_headers(name, auth)?,
             (None, Some(key)) => key_headers(name, known.key, key)?,
@@ -326,49 +369,50 @@ pub fn ordered(plugins: &[PluginConfig]) -> Result<Vec<&PluginConfig>, Fault> {
 }
 
 /// `env:NAME` reads the environment variable; anything else is literal.
-/// `owner` says whose it is in an error.
+/// Either is trimmed, and must not be empty. `owner` says whose it is in
+/// an error.
 pub fn secret(owner: &str, value: &str) -> Result<String, Fault> {
-    match value.strip_prefix("env:") {
-        Some(var) => std::env::var(var)
-            .map_err(|_| Fault::config(format!("{owner}: environment variable {var} is not set"))),
-        None => Ok(value.to_owned()),
+    let (value, empty) = match value.strip_prefix("env:") {
+        Some(var) => {
+            let value = std::env::var(var).map_err(|_| {
+                Fault::config(format!("{owner}: environment variable {var} is not set"))
+            })?;
+            (value, format!("environment variable {var} is empty"))
+        }
+        None => (value.to_owned(), "a key is empty".to_owned()),
+    };
+    match value.trim() {
+        "" => Err(Fault::config(format!("{owner}: {empty}"))),
+        trimmed => Ok(trimmed.to_owned()),
     }
 }
 
+/// A key read already, sent as a format expects.
 fn key_headers(provider: &str, header: KeyHeader, key: &str) -> Result<HeaderMap, Fault> {
-    let auth = match header {
-        KeyHeader::Bearer => Auth::Bearer {
-            key: key.to_owned(),
-        },
-        KeyHeader::Header(name) => Auth::Header {
-            name: name.to_owned(),
-            key: key.to_owned(),
-        },
-    };
-    // The key is already read: it is literal here.
-    headers(provider, &auth, |k| Ok(k.to_owned()))
+    match header {
+        KeyHeader::Bearer => one_header(provider, AUTHORIZATION, &format!("Bearer {key}")),
+        KeyHeader::Header(name) => one_header(provider, HeaderName::from_static(name), key),
+    }
 }
 
+/// The header of `auth`, its key read.
 pub fn auth_headers(provider: &str, auth: &Auth) -> Result<HeaderMap, Fault> {
-    headers(provider, auth, |k| {
-        secret(&format!("provider '{provider}'"), k)
-    })
+    let read = |key: &str| secret(&format!("provider '{provider}'"), key);
+    match auth {
+        Auth::Bearer { key } => {
+            one_header(provider, AUTHORIZATION, &format!("Bearer {}", read(key)?))
+        }
+        Auth::Header { name, key } => {
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| Fault::config(format!("provider '{provider}': {e}")))?;
+            one_header(provider, name, &read(key)?)
+        }
+    }
 }
 
-fn headers(
-    provider: &str,
-    auth: &Auth,
-    read: impl Fn(&str) -> Result<String, Fault>,
-) -> Result<HeaderMap, Fault> {
-    let bad = |e: String| Fault::config(format!("provider '{provider}': {e}"));
-    let (name, value) = match auth {
-        Auth::Bearer { key } => (AUTHORIZATION, format!("Bearer {}", read(key)?)),
-        Auth::Header { name, key } => (
-            HeaderName::from_bytes(name.as_bytes()).map_err(|e| bad(e.to_string()))?,
-            read(key)?,
-        ),
-    };
-    let mut value = HeaderValue::from_str(&value).map_err(|e| bad(e.to_string()))?;
+fn one_header(provider: &str, name: HeaderName, value: &str) -> Result<HeaderMap, Fault> {
+    let mut value = HeaderValue::from_str(value)
+        .map_err(|e| Fault::config(format!("provider '{provider}': {e}")))?;
     value.set_sensitive(true);
     let mut headers = HeaderMap::new();
     headers.insert(name, value);

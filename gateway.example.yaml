@@ -3,7 +3,10 @@
 # provider of each vendor whose key is in the environment.
 
 # Without client keys (below), anyone who can reach this address spends
-# your keys. Keep it local.
+# your keys. Keep it local: without keys the gateway also refuses browsers'
+# cross-origin requests and, unless it listens on every address, any Host
+# but localhost, 127.0.0.1, [::1], this address or respan-gateway. host:port
+# (a name is resolved), :port or a bare port (on 127.0.0.1).
 listen: 127.0.0.1:8080
 
 # Client keys, literal or env:NAME. When set, every request needs one, as
@@ -36,6 +39,12 @@ listen: 127.0.0.1:8080
 # together, fireworks, ollama. Override `base_url` or `key` in place.
 # Any provider is also reached as `<name>/<model>`, as in
 # `groq/llama-3.3-70b-versatile`; the gateway sends `llama-3.3-70b-versatile`.
+# A name before `/` that is no provider's is part of the model, as
+# Together's `meta-llama/...` (to together), Fireworks' `accounts/...` (to
+# fireworks) and OpenRouter's `anthropic/...` (to openrouter, unless a
+# provider is named `anthropic`). Of two preset prefixes, the longer wins.
+# Names are letters, digits, `_`, `.` and `-`. With this file,
+# RESPAN_<VENDOR>_BASE_URL is not read: set `base_url`.
 providers:
   openai: { vendor: openai }
   anthropic: { vendor: anthropic }

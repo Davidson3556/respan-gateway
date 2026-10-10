@@ -53,7 +53,7 @@ async fn fetch(gw: &Gateway) -> (String, Duration, usize) {
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
     let start = Instant::now();
-    sock.write_all(b"GET /files/x HTTP/1.1\r\nhost: x\r\nauthorization: Bearer sk\r\nconnection: close\r\n\r\n").await.unwrap();
+    sock.write_all(b"GET /files/x HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer sk\r\nconnection: close\r\n\r\n").await.unwrap();
     let mut first = [0u8; 1];
     sock.read_exact(&mut first).await.unwrap();
     let ttfb = start.elapsed();

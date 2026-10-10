@@ -339,7 +339,8 @@ fn client_keys_are_literal_or_from_the_environment() {
     let unset = plan("keys: [literal, 'env:RESPAN_TEST_UNSET']");
     let said = "keys: environment variable RESPAN_TEST_UNSET is not set";
     assert_eq!(unset.err().as_deref(), Some(said));
-    let set = plan("keys: [one, two]").unwrap_or_else(|e| panic!("{e}"));
+    let one = "providers: { p: { format: openai-chat, base_url: 'http://x.test' } }";
+    let set = plan(&format!("{one}\nkeys: [one, two]")).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(set.keys, ["one", "two"]);
 }
 
@@ -508,5 +509,104 @@ fn a_format_only_providers_speak_cannot_be_served() {
     assert_eq!(
         plan("serve: [gemini-veo]").err().as_deref(),
         Some("serve: gemini-veo is spoken only by providers; no client sends it")
+    );
+}
+
+#[test]
+fn an_empty_key_is_refused_and_keys_are_trimmed() {
+    let one = "providers: { p: { format: openai-chat, base_url: 'http://x.test' } }\n";
+    for keys in ["['']", "['  ']"] {
+        assert_eq!(
+            plan(&format!("{one}keys: {keys}")).err().as_deref(),
+            Some("keys: a key is empty"),
+            "{keys}"
+        );
+    }
+    let trimmed = plan(&format!("{one}keys: [' gk ']")).map(|p| p.keys);
+    assert_eq!(trimmed, Ok(vec!["gk".to_owned()]));
+    let empty_provider_key =
+        "providers: { p: { format: openai-chat, base_url: 'http://x.test', key: '' } }";
+    assert_eq!(
+        plan(empty_provider_key).err().as_deref(),
+        Some("provider 'p': a key is empty")
+    );
+    let empty_auth = "providers: { p: { format: openai-chat, base_url: 'http://x.test', auth: { type: bearer, key: ' ' } } }";
+    assert_eq!(
+        plan(empty_auth).err().as_deref(),
+        Some("provider 'p': a key is empty")
+    );
+}
+
+#[test]
+fn a_config_without_providers_is_refused() {
+    assert_eq!(
+        plan("providers: {}").err().as_deref(),
+        Some("providers: none configured; add one, such as `openai: { vendor: openai }`")
+    );
+}
+
+#[test]
+fn a_provider_name_is_letters_digits_and_a_little_punctuation() {
+    for name in ["'a/b'", "'a~b'", "'a:b'", "'a b'", "''"] {
+        let yaml = format!(
+            "providers: {{ {name}: {{ format: openai-chat, base_url: 'http://x.test' }} }}"
+        );
+        let said = plan(&yaml).err().unwrap_or_default();
+        assert!(said.ends_with("(no '/', '~' or ':')"), "{name}: {said}");
+    }
+    let fine = "providers: { my-gw_2.0: { format: openai-chat, base_url: 'http://x.test' } }";
+    assert!(plan(fine).is_ok());
+}
+
+#[test]
+fn a_vendors_model_name_with_a_slash_goes_to_the_provider_that_serves_it() {
+    let plan = plan(
+        "providers:
+  openai: { vendor: openai, key: sk }
+  deepseek: { vendor: deepseek, key: sk }
+  mistral: { vendor: mistral, key: sk }
+  together: { vendor: together, key: sk }
+  fireworks: { vendor: fireworks, key: sk }
+  openrouter: { vendor: openrouter, key: sk }
+",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let to = |model: &str| {
+        let route = plan.routes.route(Kind::CHAT, "openai-chat", Some(model));
+        route.map(|r| (r.provider, r.model))
+    };
+    let whole = |provider: &str| Some((provider.to_owned(), None));
+    assert_eq!(
+        to("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+        whole("together")
+    );
+    assert_eq!(
+        to("deepseek-ai/DeepSeek-V3"),
+        whole("together"),
+        "not deepseek"
+    );
+    assert_eq!(
+        to("mistralai/Mixtral-8x7B"),
+        whole("together"),
+        "not mistral"
+    );
+    assert_eq!(to("deepseek-chat"), whole("deepseek"));
+    assert_eq!(
+        to("accounts/fireworks/models/llama-v3p3-70b-instruct"),
+        whole("fireworks")
+    );
+    assert_eq!(to("anthropic/claude-3.5-sonnet"), whole("openrouter"));
+    assert_eq!(to("qwen/qwen3-32b"), whole("openrouter"));
+    // A configured provider's name comes first, and is taken off.
+    assert_eq!(
+        to("openai/gpt-4o-mini"),
+        Some(("openai".to_owned(), Some("gpt-4o-mini".to_owned())))
+    );
+    assert_eq!(
+        to("together/openai/gpt-oss-120b"),
+        Some((
+            "together".to_owned(),
+            Some("openai/gpt-oss-120b".to_owned())
+        ))
     );
 }

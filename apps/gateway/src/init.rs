@@ -4,12 +4,15 @@
 use crate::presets::{self, PRESETS};
 
 /// The starter config: the vendors with keys in the environment enabled,
-/// the rest commented out; OpenAI enabled if none has one.
+/// with any base URL the environment moves them to (`OLLAMA_HOST`,
+/// `RESPAN_<VENDOR>_BASE_URL`), the rest commented out; OpenAI enabled if
+/// none has one.
 pub fn starter_config() -> String {
-    let detected: Vec<&str> = presets::detected().iter().map(|(p, ..)| p.vendor).collect();
+    let detected = presets::detected();
+    let found = |vendor: &str| detected.iter().find(|(p, ..)| p.vendor == vendor);
     let enabled = |vendor: &str| match detected.is_empty() {
         true => vendor == "openai",
-        false => detected.contains(&vendor),
+        false => found(vendor).is_some(),
     };
     let mut providers = String::new();
     for preset in PRESETS {
@@ -18,7 +21,14 @@ pub fn starter_config() -> String {
             names => format!("key: env:{}", names.join(" or env:")),
         };
         let mark = if enabled(preset.vendor) { "" } else { "# " };
-        let entry = format!("{}: {{ vendor: {} }}", preset.vendor, preset.vendor);
+        let base_url = found(preset.vendor).and_then(|(.., base_url)| base_url.as_ref());
+        let base_url = base_url.map_or(String::new(), |url| {
+            format!(", base_url: '{}'", url.replace('\'', "''"))
+        });
+        let entry = format!(
+            "{}: {{ vendor: {}{base_url} }}",
+            preset.vendor, preset.vendor
+        );
         providers.push_str(&format!("  {mark}{entry:<36} # {key}\n"));
     }
     format!(
@@ -36,7 +46,8 @@ listen: 127.0.0.1:8080
 # environment, every format the gateway speaks for it, and its model names
 # (gpt-* to openai, claude-* to anthropic, ...). Any provider is also
 # reached as `<name>/<model>`, such as `groq/llama-3.3-70b-versatile`.
-# Override a preset's `base_url` or `key` in place. The first provider
+# Override a preset's `base_url` or `key` in place (with a config file,
+# RESPAN_<VENDOR>_BASE_URL is not read). The first provider
 # serving a kind (chat, realtime, ...) is that kind's default.
 providers:
 {providers}

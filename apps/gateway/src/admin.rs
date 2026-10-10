@@ -12,16 +12,17 @@ use axum::middleware::from_fn_with_state;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use respan_gateway_core::futures::{Stream, stream};
+use respan_gateway_core::futures::{Stream, StreamExt, stream};
 use respan_gateway_http::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::watch;
 
 use crate::auth::{self, ClientKeys};
 use crate::compose::Plan;
-use crate::formats::KnownFormat;
+use crate::formats::{KnownFormat, first_of_each_kind};
 use crate::requests::{RequestLog, rfc3339};
 
 mod assets {
@@ -40,27 +41,25 @@ pub struct Admin {
     /// Each provider, as `/ui/api/providers` lists it, but its counts.
     providers: Vec<Value>,
     routes: Value,
+    /// Set once the server stops: open event streams then end.
+    stopping: Arc<watch::Sender<bool>>,
 }
 
 impl Admin {
-    pub fn new(log: Arc<RequestLog>, source: String, plan: &Plan, formats: &[KnownFormat]) -> Self {
-        let kind_of = |format: &str| {
-            formats
-                .iter()
-                .find(|f| f.name == format)
-                .map(|f| f.kind.label)
-        };
+    pub fn new(
+        log: Arc<RequestLog>,
+        source: String,
+        plan: &Plan,
+        formats: &[KnownFormat],
+        stopping: Arc<watch::Sender<bool>>,
+    ) -> Self {
         let providers = plan
             .upstreams
             .iter()
             .map(|u| {
                 let formats: Vec<&str> = u.entries.iter().map(|e| e.format.as_str()).collect();
-                let mut kinds: Vec<&str> = Vec::new();
-                for kind in formats.iter().filter_map(|f| kind_of(f)) {
-                    if !kinds.contains(&kind) {
-                        kinds.push(kind);
-                    }
-                }
+                let kinds = first_of_each_kind(u.entries.iter().map(|e| (e.kind, ())));
+                let kinds: Vec<&str> = kinds.iter().map(|(kind, _)| kind.label).collect();
                 json!({
                     "name": u.name,
                     "vendor": u.preset.map(|p| p.vendor),
@@ -99,6 +98,7 @@ impl Admin {
             started: Instant::now(),
             providers,
             routes,
+            stopping,
         }
     }
 }
@@ -178,11 +178,15 @@ async fn request(State(admin): State<Arc<Admin>>, Path(id): Path<String>) -> Res
 }
 
 async fn not_found() -> Response {
-    let body = json!({"error": {"message": "not found", "type": "not_found_error"}});
-    (StatusCode::NOT_FOUND, Json(body)).into_response()
+    not_found_response()
 }
 
-/// Every request as it starts and finishes, with a comment each 15 s.
+fn not_found_response() -> Response {
+    auth::error(StatusCode::NOT_FOUND, "not_found_error", "not found")
+}
+
+/// Every request as it starts and finishes, with a comment each 15 s,
+/// until the server stops.
 async fn events(
     State(admin): State<Arc<Admin>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -199,25 +203,27 @@ async fn events(
             }
         }
     });
-    Sse::new(events).keep_alive(
+    let mut stopping = admin.stopping.subscribe();
+    let stopped = async move {
+        let _ = stopping.wait_for(|stop| *stop).await;
+    };
+    Sse::new(events.take_until(stopped)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
     )
 }
 
-/// The UI's file at `path`, or its index for a path of the app's own.
+/// The UI's file at `path`, or its index for a path of the app's own; a
+/// missing file under `assets/` is a 404.
 fn asset(path: &str) -> Response {
-    let found = assets::ASSETS.iter().find(|(name, _)| *name == path);
-    let (name, bytes) = match found {
-        Some(found) => *found,
-        None => match assets::ASSETS
-            .iter()
-            .find(|(name, _)| *name == "index.html")
-        {
-            Some(index) => *index,
-            None => return StatusCode::NOT_FOUND.into_response(),
-        },
+    let file = |path: &str| assets::ASSETS.iter().find(|(name, _)| *name == path);
+    let found = match path.starts_with("assets/") {
+        true => file(path),
+        false => file(path).or_else(|| file("index.html")),
+    };
+    let Some(&(name, bytes)) = found else {
+        return not_found_response();
     };
     let cache = match name.starts_with("assets/") {
         true => "public, max-age=31536000, immutable",

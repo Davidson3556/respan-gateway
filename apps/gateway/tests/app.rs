@@ -201,6 +201,21 @@ providers:
         assert_eq!(got.header("x-api-key"), None);
     }
 
+    // The key in more than one header: none of them goes on, to a
+    // provider without a key of its own either.
+    openai.answer(Answer::text("hi"));
+    let headers = [
+        ("authorization", "Bearer sk-client"),
+        ("x-api-key", "gw-key"),
+        ("x-goog-api-key", "gw-key"),
+    ];
+    let resp = post_chat(&gw, "theirs/gpt-4.1-mini", &headers).await;
+    assert_eq!(resp.status(), 200);
+    let got = openai.requests().pop().unwrap();
+    assert_eq!(got.header("authorization"), Some("Bearer sk-client"));
+    assert_eq!(got.header("x-api-key"), None);
+    assert_eq!(got.header("x-goog-api-key"), None);
+
     let overview = client()
         .get(gw.url("/ui/api/overview"))
         .bearer_auth("gw-key");
@@ -210,7 +225,10 @@ providers:
 
 #[tokio::test]
 async fn health_and_the_web_ui_are_served() {
-    let gw = Gateway::start("providers: {}\n").await;
+    let gw = Gateway::start(
+        "providers: { p: { format: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
+    )
+    .await;
     let health = client().get(gw.url("/healthz")).send().await.unwrap();
     assert_eq!(health.status(), 200);
     assert_eq!(health.text().await.unwrap(), "ok");
@@ -236,8 +254,14 @@ async fn health_and_the_web_ui_are_served() {
     };
     let index = page("/ui/").await;
     assert!(index.contains("<html"), "{index}");
-    // A path of the app's own is its index too.
+    // A path of the app's own is its index too, but a missing file is not.
     assert_eq!(page("/ui/requests/r_000001").await, index);
+    let missing = client()
+        .get(gw.url("/ui/assets/missing.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
 }
 
 /// An OpenAI-compatible server listing `ids` at `/v1/models`, and the
@@ -300,9 +324,38 @@ async fn models_are_merged_from_every_provider() {
     assert_eq!(asked.header("x-api-key"), Some("sk-ant"));
     assert!(asked.header("anthropic-version").is_some());
 
-    // Cached: asked once.
+    // Not kept while a provider fails to list: asked again.
+    get_json(&gw, "/v1/models").await;
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn models_are_kept_a_while_once_every_provider_listed() {
+    let (openai, seen) = listing(&["gpt-4o"]).await;
+    let gw = Gateway::start(&format!(
+        "providers:\n  openai: {{ vendor: openai, base_url: '{openai}', key: sk }}\n"
+    ))
+    .await;
+    get_json(&gw, "/v1/models").await;
     get_json(&gw, "/v1/models").await;
     assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn models_from_no_provider_is_an_error_naming_each() {
+    let gw = Gateway::start(&format!(
+        "providers:\n  down: {{ format: openai-chat, base_url: '{}/v1' }}\n",
+        closed_port().await
+    ))
+    .await;
+    let resp = client().get(gw.url("/v1/models")).send().await.unwrap();
+    assert_eq!(resp.status(), 502);
+    let error = support::json(&resp.text().await.unwrap());
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("no provider listed its models: down: could not be reached"),
+        "{message}"
+    );
 }
 
 /// The `request` events of an SSE body read so far.
@@ -432,4 +485,145 @@ async fn the_admin_api_reports_requests_as_they_happen() {
         routes["defaults"][0],
         json!({"kind": "chat", "provider": "openai"})
     );
+}
+
+#[test]
+fn an_empty_client_key_from_the_environment_is_refused() {
+    let path = support::write_config(
+        "keys: [env:GK]\nproviders: { p: { format: openai-chat, base_url: 'http://x.test/v1' } }\n",
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        .args(["check", "--config", path.to_str().unwrap()])
+        .env("GK", "")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("keys: environment variable GK is empty"),
+        "{said}"
+    );
+}
+
+#[test]
+fn init_keeps_the_base_url_the_environment_gives_ollama() {
+    let dir = empty_dir();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
+        .arg("init")
+        .current_dir(&dir)
+        .env_clear()
+        .env("OLLAMA_HOST", "127.0.0.1:11999")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let written = std::fs::read_to_string(dir.join("gateway.yaml")).unwrap();
+    assert!(
+        written.contains("\n  ollama: { vendor: ollama, base_url: 'http://127.0.0.1:11999/v1' }"),
+        "{written}"
+    );
+}
+
+#[tokio::test]
+async fn listen_takes_a_bare_port_or_colon_port() {
+    let env = [("OPENAI_API_KEY", "sk")];
+    for listen in ["0", ":0"] {
+        let gw = Gateway::run_with(&["--listen", listen], &empty_dir(), &env).await;
+        assert!(
+            gw.base.starts_with("http://127.0.0.1:"),
+            "{listen}: {}",
+            gw.base
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_keys_a_cross_origin_page_cannot_spend_or_read() {
+    let openai = FakeOpenAi::start().await;
+    let gw = Gateway::start(&format!(
+        "providers:\n  openai: {{ vendor: openai, base_url: '{}', key: sk }}\n",
+        openai.base_url()
+    ))
+    .await;
+    // A "simple" cross-site request, which a browser sends unasked.
+    let resp = client()
+        .post(gw.url(CHAT))
+        .header("origin", "https://evil.example")
+        .header("content-type", "text/plain")
+        .body(chat("gpt-4.1-mini"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let error = support::json(&resp.text().await.unwrap());
+    assert_eq!(error["error"]["type"], "permission_error", "{error}");
+    assert!(openai.requests().is_empty());
+
+    // A DNS name rebound to 127.0.0.1: same-origin to the browser.
+    let rebound = client()
+        .get(gw.url("/ui/api/overview"))
+        .header("host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rebound.status(), 403);
+
+    // The UI, same-origin, and curl, with no Origin, are served.
+    openai.answer(Answer::text("hi"));
+    let same = client()
+        .post(gw.url(CHAT))
+        .header("origin", &gw.base)
+        .body(chat("gpt-4.1-mini"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(same.status(), 200);
+    get_json(&gw, "/ui/api/overview").await;
+    let local = client()
+        .get(gw.url("/healthz"))
+        .header("host", "localhost")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local.status(), 200);
+}
+
+#[tokio::test]
+async fn an_unreachable_provider_is_named_with_its_host_and_cause() {
+    let down = closed_port().await;
+    let gw = Gateway::start(&format!(
+        "providers:\n  down: {{ format: openai-chat, base_url: '{down}/v1', key: sk-secret }}\n"
+    ))
+    .await;
+    let resp = post_chat(&gw, "gpt-4.1-mini", &[]).await;
+    assert_eq!(resp.status(), 502);
+    let error = support::json(&resp.text().await.unwrap());
+    let message = error["error"]["message"].as_str().unwrap().to_owned();
+    let host = down.trim_start_matches("http://");
+    let expected = format!("provider 'down' at {host} could not be reached: ");
+    assert!(message.starts_with(&expected), "{message}");
+    assert!(message.to_lowercase().contains("refused"), "{message}");
+    assert!(!message.contains("sk-secret"), "{message}");
+    let logged = get_json(&gw, "/ui/api/requests").await;
+    assert_eq!(logged["requests"][0]["error"], message.as_str());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_open_event_stream_does_not_hold_up_shutdown() {
+    let gw = Gateway::start(
+        "providers: { p: { format: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
+    )
+    .await;
+    let events = client().get(gw.url("/ui/api/events")).send().await.unwrap();
+    assert_eq!(events.status(), 200);
+    let mut gw = gw;
+    let pid = gw.child.id().unwrap().to_string();
+    let sent = std::process::Command::new("kill")
+        .args(["-TERM", &pid])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let exited = tokio::time::timeout(BOUND, gw.child.wait()).await;
+    assert!(exited.is_ok(), "still running {BOUND:?} after SIGTERM");
+    drop(events);
 }

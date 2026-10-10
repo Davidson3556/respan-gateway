@@ -71,7 +71,9 @@ each request live; each finished request is also one line on stderr.
 Vendor presets: `openai`, `anthropic`, `gemini` (`GEMINI_API_KEY` or
 `GOOGLE_API_KEY`), `groq`, `deepseek`, `openrouter`, `xai`, `mistral`,
 `together`, `fireworks`, each reading `<VENDOR>_API_KEY`, and `ollama`
-(with `OLLAMA_HOST`). A preset speaks every format of its vendor compiled
+(with `OLLAMA_HOST`). Without a config file, `RESPAN_<VENDOR>_BASE_URL`
+moves a vendor's base URL; with one, the file's `base_url` alone counts
+(`init` writes the moved URL, and `OLLAMA_HOST`'s, into it). A preset speaks every format of its vendor compiled
 in: OpenAI's media endpoints for `openai`, Imagen and Veo for `gemini`,
 transcription and speech for `groq`, images for `xai` and `together`. To configure more, write a config and check it:
 
@@ -83,7 +85,23 @@ cargo run -p respan-gateway            # reads ./gateway.yaml when there is one
 
 `keys: [env:GATEWAY_KEY]` makes every request carry a gateway key
 (`Authorization: Bearer`, `x-api-key` or `x-goog-api-key`), which is never
-sent on. [`gateway.example.yaml`](gateway.example.yaml) shows every
+sent on. Without keys, the gateway refuses (403) a browser's
+cross-origin request (an `Origin` other than its own, or
+`Sec-Fetch-Site: cross-site`) and, unless it listens on every address, a
+`Host` other than `localhost`, `127.0.0.1`, `[::1]`, its listen address or
+`respan-gateway`, so no web page can spend your provider keys; curl and the
+web UI are served as before. Behind a proxy that rewrites `Host`, set keys.
+
+A model name picks its provider in this order: `name/model` goes to the
+provider `name`, which gets `model`, if `name` is a configured provider;
+otherwise the whole name is the model, routed by the `models` plugin's
+prefixes, then by the presets' (the longest matching prefix wins, then
+config order), then to the kind's default. So `meta-llama/Llama-3.3-70B-Instruct-Turbo`
+and `deepseek-ai/...` go to `together`, `accounts/fireworks/models/...` to
+`fireworks`, and OpenRouter's `anthropic/claude-3.5-sonnet` to `openrouter`
+unless a provider is named `anthropic`; `openrouter/anthropic/claude-3.5-sonnet`
+always goes to OpenRouter. A provider's name is letters, digits, `_`, `.`
+and `-`. [`gateway.example.yaml`](gateway.example.yaml) shows every
 setting, presets first. The binary is a library too, `respan_gateway`:
 `App::new(Config::from_env()?)?` gives an `axum::Router` to serve or to
 hand requests to in process.
@@ -103,7 +121,7 @@ No config file is needed to sit in front of Claude Code or Codex:
 
 ```bash
 cargo run -p respan-gateway -- proxy --anthropic   # ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-cargo run -p respan-gateway -- proxy --openai      # add --listen ADDR or --url BASE
+cargo run -p respan-gateway -- proxy --openai      # add --listen ADDR (host:port, :port or a port) or --url BASE
 ```
 
 It relays chat and every other endpoint of that vendor (`count_tokens`,

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use respan_gateway_conversation::anthropic::AnthropicMessages;
 use respan_gateway_conversation::openai::OpenAiChat;
-use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway};
+use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Upstream};
 use respan_gateway_http::formats::opaque::{self, Passthrough};
 use respan_gateway_http::http::HeaderMap;
 use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, reqwest};
@@ -16,6 +16,8 @@ use respan_gateway_media::openai::{
 };
 use respan_gateway_media::{image, speech, transcription, video};
 use respan_gateway_realtime::JsonEvents;
+
+use crate::presets::origin;
 
 /// What sort of traffic a format carries, as the admin API and routing
 /// name it.
@@ -59,6 +61,17 @@ impl Kind {
     /// The media kinds, whose client formats are served by default once a
     /// provider speaks the kind.
     pub const MEDIA: [Kind; 4] = [Kind::IMAGE, Kind::TRANSCRIPTION, Kind::SPEECH, Kind::VIDEO];
+}
+
+/// The first of `items` of each kind, in order.
+pub fn first_of_each_kind<T>(items: impl IntoIterator<Item = (Kind, T)>) -> Vec<(Kind, T)> {
+    let mut firsts: Vec<(Kind, T)> = Vec::new();
+    for (kind, item) in items {
+        if !firsts.iter().any(|(k, _)| *k == kind) {
+            firsts.push((kind, item));
+        }
+    }
+    firsts
 }
 
 /// How a provider of a format takes the key configured for it.
@@ -163,12 +176,13 @@ impl std::fmt::Debug for KnownFormat {
 
 impl KnownFormat {
     /// `format` of `kind`, its clients sending to `endpoints`, its
-    /// providers reached by `reach`, given one's base URL and auth headers.
+    /// providers reached by `reach`, given one's name, base URL and auth
+    /// headers.
     pub fn of<F, I, O, T>(
         kind: Kind,
         endpoints: &'static [&'static str],
         format: F,
-        reach: impl Fn(&str, HeaderMap) -> Result<T, Fault> + Send + Sync + 'static,
+        reach: impl Fn(&str, &str, HeaderMap) -> Result<T, Fault> + Send + Sync + 'static,
     ) -> Self
     where
         F: Clone + Send + Sync + 'static + Format<ClientIo, I, O> + Format<ProviderIo, O, I>,
@@ -189,7 +203,7 @@ impl KnownFormat {
     pub fn provider_only<F, I, O, T>(
         kind: Kind,
         format: F,
-        reach: impl Fn(&str, HeaderMap) -> Result<T, Fault> + Send + Sync + 'static,
+        reach: impl Fn(&str, &str, HeaderMap) -> Result<T, Fault> + Send + Sync + 'static,
     ) -> Self
     where
         F: Clone + Send + Sync + 'static + Format<ProviderIo, O, I>,
@@ -206,7 +220,10 @@ impl KnownFormat {
             websocket: false,
             job_ids: None,
             provider: Box::new(move |gateway, name, base_url, auth| {
-                gateway.provider::<I, O, _>(name, format.clone(), reach(base_url, auth)?)
+                // A core provider is named `provider` or `provider:format`.
+                let provider = name.split(':').next().unwrap_or_default();
+                let reached = reach(provider, base_url, auth)?;
+                gateway.provider::<I, O, _>(name, format.clone(), reached)
             }),
             serve: None,
             model: Arc::new(|cx| cx.input::<I>().ok()?.model().map(str::to_owned)),
@@ -290,20 +307,27 @@ const VIDEOS: &[&str] = &[
 /// OpenAI Realtime, Responses over WebSocket and Gemini Live, their
 /// providers reached over WebSocket. A new format is one line here.
 pub fn formats(limit: usize) -> Vec<KnownFormat> {
-    let http = move |base_url: &str, auth| -> Result<_, Fault> {
+    let http = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
         let client = HttpTransport::new(base_url)?.with_headers(auth)?;
-        Ok(client.with_limit(limit).connect())
+        Ok(explained(client, provider, base_url, limit))
     };
-    let google = move |base_url: &str, auth| -> Result<_, Fault> {
+    let google = move |provider: &str, base_url: &str, auth| -> Result<_, Fault> {
         let client = HttpTransport::new(base_url)?.with_client(google_storage()?);
-        Ok(client.with_headers(auth)?.with_limit(limit).connect())
+        Ok(explained(
+            client.with_headers(auth)?,
+            provider,
+            base_url,
+            limit,
+        ))
     };
     let ws = |format: JsonEvents, endpoints| {
         KnownFormat::of(
             Kind::REALTIME,
             endpoints,
             format.clone(),
-            move |base_url, auth| Ok(format.transport(base_url)?.with_headers(auth)?.connect()),
+            move |_: &str, base_url: &str, auth| {
+                Ok(format.transport(base_url)?.with_headers(auth)?.connect())
+            },
         )
         .websocket()
     };
@@ -347,6 +371,53 @@ pub fn formats(limit: usize) -> Vec<KnownFormat> {
         .key(goog_key)
         .base(Base::Origin),
     ]
+}
+
+/// `client`'s calls, a provider that cannot be reached named in the fault
+/// with its host and the cause: the transport's own message names neither.
+fn explained(
+    client: HttpTransport,
+    provider: &str,
+    base_url: &str,
+    limit: usize,
+) -> impl Fn(Extensions) -> ProviderIo + Send + Sync + use<> {
+    let client = Arc::new(client);
+    let host = origin(base_url)
+        .split_once("://")
+        .map_or("", |(_, host)| host);
+    let who: Arc<str> = format!("provider '{provider}' at {host}").into();
+    respan_gateway_http::connect(
+        move |call| {
+            let (client, who) = (client.clone(), who.clone());
+            async move {
+                client.send(call).await.map_err(|fault| {
+                    let Some(e) = fault.cause::<reqwest::Error>() else {
+                        return fault;
+                    };
+                    let message = format!("{who} {}", unreachable(e));
+                    Upstream::fault(message).with_source(fault)
+                })
+            }
+        },
+        limit,
+    )
+}
+
+/// Why a provider could not be reached: the transport's own cause, which,
+/// unlike the error itself, names no URL.
+pub fn unreachable(e: &reqwest::Error) -> String {
+    let mut cause = None;
+    let mut next = std::error::Error::source(e);
+    while let Some(e) = next {
+        cause = Some(e.to_string());
+        next = e.source();
+    }
+    let cause = match (cause, e.is_timeout()) {
+        (Some(cause), _) => cause,
+        (None, true) => "timed out".to_owned(),
+        (None, false) => "the connection failed".to_owned(),
+    };
+    format!("could not be reached: {cause}")
 }
 
 /// A client for the Gemini API, which serves a video's bytes by redirecting

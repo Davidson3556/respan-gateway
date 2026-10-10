@@ -957,6 +957,7 @@ async fn an_unknown_path_is_a_404() {
 
     for (verb, path) in [
         (reqwest::Method::POST, "/v1/nope"),
+        (reqwest::Method::POST, "/v1/embeddings"),
         (reqwest::Method::GET, CHAT),
         (reqwest::Method::GET, "/"),
     ] {
@@ -968,10 +969,13 @@ async fn an_unknown_path_is_a_404() {
         assert_eq!(resp.status(), 404, "{verb} {path}");
         assert_eq!(
             header(resp.headers(), "content-type"),
-            Some("text/plain; charset=utf-8"),
+            Some("application/json"),
             "{verb} {path}"
         );
-        assert!(!resp.text().await.unwrap().is_empty());
+        let error = json(&resp.text().await.unwrap());
+        assert_eq!(error["error"]["type"], "not_found_error", "{verb} {path}");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("no format served accepts"), "{message}");
     }
     assert!(openai.requests().is_empty());
 }

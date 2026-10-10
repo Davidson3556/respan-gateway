@@ -75,7 +75,7 @@ async fn record(body: &'static str, lines_only: bool) -> (String, Arc<Mutex<Vec<
 async fn send(addr: &str, method: &str, target: &str, extra: &str, body: &str) -> String {
     let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
     let req = format!(
-        "{method} {target} HTTP/1.1\r\nhost: x\r\n{extra}authorization: Bearer sk-client\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "{method} {target} HTTP/1.1\r\nhost: localhost\r\n{extra}authorization: Bearer sk-client\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     sock.write_all(req.as_bytes()).await.unwrap();

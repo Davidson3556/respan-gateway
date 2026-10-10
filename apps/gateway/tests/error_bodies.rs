@@ -77,7 +77,7 @@ async fn a_client_that_leaves_while_an_error_is_read_frees_the_vendor() {
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-    sock.write_all(b"GET /files/x HTTP/1.1\r\nhost: x\r\nauthorization: Bearer sk\r\n\r\n")
+    sock.write_all(b"GET /files/x HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer sk\r\n\r\n")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -109,7 +109,7 @@ target: any
     .await;
     let addr = gw.base.trim_start_matches("http://").to_owned();
     let mut sock = tokio::net::TcpStream::connect(addr).await.unwrap();
-    sock.write_all(b"GET /files/x HTTP/1.1\r\nhost: x\r\nauthorization: Bearer sk\r\nconnection: close\r\n\r\n").await.unwrap();
+    sock.write_all(b"GET /files/x HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer sk\r\nconnection: close\r\n\r\n").await.unwrap();
     let mut out = Vec::new();
     let r = tokio::time::timeout(Duration::from_secs(20), sock.read_to_end(&mut out)).await;
     assert!(r.is_ok(), "no end within 20 s ({} bytes)", out.len());

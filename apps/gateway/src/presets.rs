@@ -13,7 +13,8 @@ pub struct Preset {
     /// The environment variables its key is read from, the first set; none
     /// for a vendor that needs no key.
     pub key_env: &'static [&'static str],
-    /// Model names routed to it without a `provider/` prefix.
+    /// Model names routed to it without a `provider/` prefix; of two that
+    /// match, the longer wins.
     pub prefixes: &'static [&'static str],
     /// A model to show in examples.
     pub example_model: &'static str,
@@ -52,7 +53,6 @@ pub const PRESETS: &[Preset] = &[
             "whisper-1",
             "tts-",
             "sora",
-            "text-embedding",
         ],
         example_model: "gpt-4o-mini",
     },
@@ -98,7 +98,24 @@ pub const PRESETS: &[Preset] = &[
         base_url: "https://openrouter.ai/api/v1",
         formats: &["openrouter-chat"],
         key_env: &["OPENROUTER_API_KEY"],
-        prefixes: &[],
+        // Its models' names, `<vendor>/<model>`: a configured provider
+        // named `<vendor>` takes the name first.
+        prefixes: &[
+            "openai/",
+            "anthropic/",
+            "google/",
+            "meta-llama/",
+            "mistralai/",
+            "qwen/",
+            "deepseek/",
+            "x-ai/",
+            "moonshotai/",
+            "cohere/",
+            "nvidia/",
+            "microsoft/",
+            "amazon/",
+            "perplexity/",
+        ],
         example_model: "openai/gpt-4o-mini",
     },
     Preset {
@@ -122,7 +139,16 @@ pub const PRESETS: &[Preset] = &[
         base_url: "https://api.together.xyz/v1",
         formats: &["openai-chat", "openai-images"],
         key_env: &["TOGETHER_API_KEY"],
-        prefixes: &[],
+        prefixes: &[
+            "meta-llama/",
+            "mistralai/",
+            "Qwen/",
+            "deepseek-ai/",
+            "google/",
+            "moonshotai/",
+            "zai-org/",
+            "black-forest-labs/",
+        ],
         example_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     },
     Preset {
@@ -130,7 +156,7 @@ pub const PRESETS: &[Preset] = &[
         base_url: "https://api.fireworks.ai/inference/v1",
         formats: &["openai-chat"],
         key_env: &["FIREWORKS_API_KEY"],
-        prefixes: &[],
+        prefixes: &["accounts/"],
         example_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
     },
     Preset {

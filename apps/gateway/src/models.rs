@@ -7,13 +7,15 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
+use axum::response::{IntoResponse, Response};
 use respan_gateway_core::futures::future::join_all;
-use respan_gateway_http::http::HeaderMap;
+use respan_gateway_http::http::{HeaderMap, StatusCode};
 use respan_gateway_http::reqwest;
 use serde_json::{Value, json};
 
+use crate::auth;
 use crate::compose::{Entry, Upstream};
-use crate::formats::Kind;
+use crate::formats::{Kind, first_of_each_kind, unreachable};
 use crate::routing::Routes;
 
 /// How long a provider may take to list its models.
@@ -60,12 +62,7 @@ impl Models {
                     }
                     _ => format!("{base}/models"),
                 };
-                let mut kinds: Vec<(Kind, String)> = Vec::new();
-                for e in entries() {
-                    if !kinds.iter().any(|(kind, _)| *kind == e.kind) {
-                        kinds.push((e.kind, e.format.clone()));
-                    }
-                }
+                let kinds = first_of_each_kind(entries().map(|e| (e.kind, e.format.clone())));
                 Some(Listing {
                     provider: u.name.clone(),
                     url,
@@ -82,41 +79,57 @@ impl Models {
         }
     }
 
-    /// The merged list, fetched again once a minute old.
-    pub async fn list(&self) -> Value {
+    /// The merged list, fetched again once a minute old; not kept while a
+    /// provider fails to list. `Err` says why, when every provider failed.
+    pub async fn list(&self) -> Result<Value, String> {
         let fresh = |at: &Instant| at.elapsed() < FRESH;
         if let Some((_, list)) = self.lock().as_ref().filter(|(at, _)| fresh(at)) {
-            return list.clone();
+            return Ok(list.clone());
         }
         let fetched = join_all(self.listings.iter().map(|l| self.fetch(l))).await;
-        let data: Vec<Value> = fetched.into_iter().flatten().collect();
+        let (listed, failed): (Vec<_>, Vec<_>) = fetched.into_iter().partition(Result::is_ok);
+        let failed: Vec<String> = failed.into_iter().filter_map(Result::err).collect();
+        if listed.is_empty() && !failed.is_empty() {
+            return Err(format!(
+                "no provider listed its models: {}",
+                failed.join("; ")
+            ));
+        }
+        let data: Vec<Value> = listed.into_iter().flatten().flatten().collect();
         let list = json!({ "object": "list", "data": data });
-        *self.lock() = Some((Instant::now(), list.clone()));
-        list
+        if failed.is_empty() {
+            *self.lock() = Some((Instant::now(), list.clone()));
+        }
+        Ok(list)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, Value)>> {
         self.cached.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// One provider's models; none if it fails to say.
-    async fn fetch(&self, listing: &Listing) -> Vec<Value> {
+    /// One provider's models, or why it did not say.
+    async fn fetch(&self, listing: &Listing) -> Result<Vec<Value>, String> {
+        let failed = |why: String| format!("{}: {why}", listing.provider);
         let request = self
             .client
             .get(&listing.url)
             .headers(listing.headers.clone());
         let answered = tokio::time::timeout(TIMEOUT, async {
-            let resp = request.send().await.ok()?.error_for_status().ok()?;
-            let body = resp.bytes().await.ok()?;
-            serde_json::from_slice::<Value>(&body).ok()
+            let resp = request.send().await.map_err(|e| unreachable(&e))?;
+            if !resp.status().is_success() {
+                return Err(format!("answered {}", resp.status().as_u16()));
+            }
+            let body = resp.bytes().await.map_err(|_| "its answer broke off")?;
+            serde_json::from_slice::<Value>(&body).map_err(|_| "its answer is not JSON".to_owned())
         });
-        let Ok(Some(body)) = answered.await else {
-            return Vec::new();
+        let body = match answered.await {
+            Ok(body) => body.map_err(failed)?,
+            Err(_) => return Err(failed(format!("no answer within {}s", TIMEOUT.as_secs()))),
         };
         let Some(models) = body["data"].as_array() else {
-            return Vec::new();
+            return Err(failed("its answer has no `data` list".to_owned()));
         };
-        models
+        let models = models
             .iter()
             .filter_map(|m| {
                 let id = m["id"].as_str()?;
@@ -135,7 +148,8 @@ impl Models {
                 }
                 Some(model)
             })
-            .collect()
+            .collect();
+        Ok(models)
     }
 
     fn public_id(&self, listing: &Listing, kind: Kind, format: &str, id: &str) -> String {
@@ -166,8 +180,11 @@ fn kind_of(id: &str) -> Option<Kind> {
     Some(kind)
 }
 
-pub async fn list(State(models): State<Arc<Models>>) -> Json<Value> {
-    Json(models.list().await)
+pub async fn list(State(models): State<Arc<Models>>) -> Response {
+    match models.list().await {
+        Ok(list) => Json(list).into_response(),
+        Err(why) => auth::error(StatusCode::BAD_GATEWAY, "upstream_error", &why),
+    }
 }
 
 #[cfg(test)]

@@ -7,10 +7,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::middleware::from_fn_with_state;
+use axum::middleware::{from_fn_with_state, map_response};
+use axum::response::Response;
 use axum::routing::get;
 use respan_gateway_core::Gateway;
 use respan_gateway_http::axum::router_with_limit;
+use respan_gateway_http::http::StatusCode;
+use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::relay::Relay;
 use respan_gateway_media::gemini::GeminiVeo;
 use respan_gateway_media::video::LocateContent;
@@ -20,7 +23,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::admin::{self, Admin};
-use crate::auth::{self, ClientCredentials, ClientKeys};
+use crate::auth::{self, ClientCredentials, ClientKeys, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{Kind, KnownFormat, formats};
 use crate::jobs::VideoJobs;
@@ -64,6 +67,8 @@ pub struct App {
     formats: Vec<KnownFormat>,
     router: Router,
     admin: Arc<Admin>,
+    /// Without client keys, what keeps it local.
+    local: Option<Arc<LocalOnly>>,
     /// Set once the server stops: open sessions then close 1001.
     stopping: Arc<watch::Sender<bool>>,
 }
@@ -84,68 +89,19 @@ impl App {
         let limit = config.body_limit.unwrap_or(BODY_LIMIT);
         let formats = formats(limit);
         let (gateway, plan) = compose(&config, &formats)?;
-
         let log = RequestLog::new(config.log);
-        let names: HashMap<String, String> = plan
-            .upstreams
-            .iter()
-            .flat_map(|u| {
-                u.entries
-                    .iter()
-                    .map(|e| (e.internal.clone(), u.name.clone()))
-            })
-            .collect();
-        // Veo serves a job's content only where the job says.
-        let veo = plan.upstreams.iter().flat_map(|u| &u.entries);
-        let veo = veo.filter(|e| e.format == GeminiVeo::NAME);
-        let locate = veo.fold(LocateContent::new(), |l, e| l.provider(&e.internal));
-        let mut gateway = gateway
-            .plugin(Recorder::new(log.clone(), &formats, names))
-            .plugin(Routing::new(plan.routes.clone(), &formats))
-            .plugin(VideoJobs::new(&plan.upstreams, &formats))
-            .plugin(locate);
-        // A raw relay sends each client's credentials itself.
-        gateway = match config.raw_relay {
-            true => gateway.plugin(Relay::RAW),
-            false => {
-                let keyless = plan.upstreams.iter().filter(|u| !u.own_key);
-                let keyless = keyless.flat_map(|u| u.entries.iter().map(|e| e.internal.clone()));
-                gateway.plugin(ClientCredentials::new(keyless.collect()))
-            }
-        };
-
+        let gateway = with_plugins(gateway, &config, &plan, &formats, &log);
         let keys = ClientKeys::new(plan.keys.clone());
         let stopping = Arc::new(watch::channel(false).0);
-        let session = |name: &String| formats.iter().any(|f| f.name == *name && f.websocket);
-        // A session's format served, a WebSocket upgrade is a session.
-        let relay = match plan.serve.iter().any(session) {
-            true => {
-                let stopping = stopping.clone();
-                let stop = async move {
-                    let _ = stopping.subscribe().wait_for(|stop| *stop).await;
-                };
-                let limits = Limits::default();
-                respan_gateway_ws::axum::router(gateway.clone(), move |_| limit, limits, stop)
-            }
-            false => router_with_limit(gateway.clone(), move |_| limit),
-        };
-        let relay = relay
+        let relay = relay(&gateway, &plan, &formats, limit, &stopping)
             .layer(from_fn_with_state(keys.clone(), auth::consume))
             .layer(from_fn_with_state(log.clone(), requests::track));
-
-        let admin = Arc::new(Admin::new(log, config.source.to_string(), &plan, &formats));
-        let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
-        // A gateway that relays every other request lets its vendor answer.
-        if !plan.serves(PASSTHROUGH) {
-            let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
-            let list = get(models::list).with_state(models);
-            let list = list.layer(from_fn_with_state(keys.clone(), auth::require));
-            router = router.route("/v1/models", list);
-        }
-        if config.ui {
-            router = router.merge(admin::router(admin.clone(), keys));
-        }
-        let router = router.fallback_service(relay);
+        let source = config.source.to_string();
+        let admin = Admin::new(log, source, &plan, &formats, stopping.clone());
+        let admin = Arc::new(admin);
+        let local =
+            (!keys.required()).then(|| LocalOnly::new(config.listen.unwrap_or(DEFAULT_LISTEN)));
+        let router = routes(&config, &plan, relay, admin.clone(), keys, local.clone());
         Ok(App {
             config,
             gateway,
@@ -153,6 +109,7 @@ impl App {
             formats,
             router,
             admin,
+            local,
             stopping,
         })
     }
@@ -185,7 +142,11 @@ impl App {
         listener: TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
-        let _ = self.admin.listen.set(listener.local_addr()?);
+        let addr = listener.local_addr()?;
+        let _ = self.admin.listen.set(addr);
+        if let Some(local) = &self.local {
+            local.serving_on(addr);
+        }
         let stopping = self.stopping.clone();
         let (deadline_sender, mut deadline) = tokio::sync::oneshot::channel();
         let serve = axum::serve(listener, self.router.clone())
@@ -314,6 +275,116 @@ impl App {
              -d '{{\"model\":\"{model}\",\"messages\":[{{\"role\":\"user\",\"content\":\"hi\"}}]}}'"
         ))
     }
+}
+
+/// The gateway with the binary's plugins: the request log, routing, video
+/// jobs, and whose credentials go where.
+fn with_plugins(
+    gateway: Gateway,
+    config: &Config,
+    plan: &Plan,
+    formats: &[KnownFormat],
+    log: &Arc<RequestLog>,
+) -> Gateway {
+    let names: HashMap<String, String> = plan
+        .upstreams
+        .iter()
+        .flat_map(|u| {
+            u.entries
+                .iter()
+                .map(|e| (e.internal.clone(), u.name.clone()))
+        })
+        .collect();
+    // Veo serves a job's content only where the job says.
+    let veo = plan.upstreams.iter().flat_map(|u| &u.entries);
+    let veo = veo.filter(|e| e.format == GeminiVeo::NAME);
+    let locate = veo.fold(LocateContent::new(), |l, e| l.provider(&e.internal));
+    let gateway = gateway
+        .plugin(Recorder::new(log.clone(), formats, names))
+        .plugin(Routing::new(plan.routes.clone(), formats))
+        .plugin(VideoJobs::new(&plan.upstreams, formats))
+        .plugin(locate);
+    // A raw relay sends each client's credentials itself.
+    match config.raw_relay {
+        true => gateway.plugin(Relay::RAW),
+        false => {
+            let keyless = plan.upstreams.iter().filter(|u| !u.own_key);
+            let keyless = keyless.flat_map(|u| u.entries.iter().map(|e| e.internal.clone()));
+            gateway.plugin(ClientCredentials::new(keyless.collect()))
+        }
+    }
+}
+
+/// The router of the formats served: a WebSocket upgrade is a session if a
+/// session's format is served. Sessions close 1001 once `stopping` is set.
+fn relay(
+    gateway: &Gateway,
+    plan: &Plan,
+    formats: &[KnownFormat],
+    limit: usize,
+    stopping: &Arc<watch::Sender<bool>>,
+) -> Router {
+    let session = |name: &String| formats.iter().any(|f| f.name == *name && f.websocket);
+    let router = match plan.serve.iter().any(session) {
+        true => {
+            let stopping = stopping.clone();
+            let stop = async move {
+                let _ = stopping.subscribe().wait_for(|stop| *stop).await;
+            };
+            let limits = Limits::default();
+            respan_gateway_ws::axum::router(gateway.clone(), move |_| limit, limits, stop)
+        }
+        false => router_with_limit(gateway.clone(), move |_| limit),
+    };
+    match plan.serves(PASSTHROUGH) {
+        true => router,
+        false => router.layer(map_response(json_404)),
+    }
+}
+
+/// The application: `/healthz`, `/v1/models`, the web UI, and the formats
+/// served for every other request; without client keys, local alone.
+fn routes(
+    config: &Config,
+    plan: &Plan,
+    relay: Router,
+    admin: Arc<Admin>,
+    keys: Arc<ClientKeys>,
+    local: Option<Arc<LocalOnly>>,
+) -> Router {
+    let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
+    // A gateway that relays every other request lets its vendor answer.
+    if !plan.serves(PASSTHROUGH) {
+        let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
+        let list = get(models::list).with_state(models);
+        let list = list.layer(from_fn_with_state(keys.clone(), auth::require));
+        router = router.route("/v1/models", list);
+    }
+    if config.ui {
+        router = router.merge(admin::router(admin, keys.clone()));
+    }
+    let router = router.fallback_service(relay);
+    match local {
+        Some(local) => router.layer(from_fn_with_state(local, auth::local_only)),
+        None => router,
+    }
+}
+
+/// The gateway's own 404, which no format writes, as JSON in OpenAI's
+/// error shape. A 404 a provider sent through passthrough is the vendor's,
+/// and passthrough takes every request, so it never has one.
+async fn json_404(resp: Response) -> Response {
+    let plain = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .is_some_and(|t| t.as_bytes().starts_with(b"text/plain"));
+    if resp.status() != StatusCode::NOT_FOUND || !plain {
+        return resp;
+    }
+    let text = axum::body::to_bytes(resp.into_body(), 64 << 10).await;
+    let text = text.map(|b| String::from_utf8_lossy(&b).into_owned());
+    let message = text.unwrap_or_default();
+    auth::error(StatusCode::NOT_FOUND, "not_found_error", message.trim())
 }
 
 /// Resolves on Ctrl-C, or on SIGTERM where there is one.

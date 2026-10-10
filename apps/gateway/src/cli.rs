@@ -1,7 +1,6 @@
 //! The `respan-gateway` command line.
 
 use std::ffi::OsString;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crate::{App, Config, ProxyVendor};
@@ -25,7 +24,8 @@ struct Cli {
     #[arg(short, long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
 
-    /// Where to listen, such as 127.0.0.1:8080, in place of the config's
+    /// Where to listen, such as 127.0.0.1:8080, localhost:8080 or 8080, in
+    /// place of the config's
     #[arg(long, global = true, value_name = "ADDR")]
     listen: Option<String>,
 
@@ -117,7 +117,7 @@ where
         Err(e) => return fail(e.message()),
     };
     if let Some(listen) = &cli.listen {
-        match listen.parse::<SocketAddr>() {
+        match crate::config::parse_listen(listen) {
             Ok(addr) => config.listen = Some(addr),
             Err(e) => return fail(&format!("--listen: {e}")),
         }

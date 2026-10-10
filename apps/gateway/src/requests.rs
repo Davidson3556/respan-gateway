@@ -29,6 +29,8 @@ use crate::formats::{Kind, KnownFormat, ReadModel};
 const KEPT: usize = 1000;
 /// How much of an error body is read for its message.
 const ERROR_BODY: usize = 4096;
+/// The most characters of a client's path or model kept.
+const KEPT_CHARS: usize = 200;
 
 /// One request, as the admin API returns it.
 #[derive(Debug, Clone, Serialize)]
@@ -66,8 +68,8 @@ enum Counted {
 }
 
 impl Counted {
-    fn tokens(usage: &respan_gateway_conversation::Usage) -> Option<Self> {
-        Some(Counted::Tokens(usage.input_tokens, usage.output_tokens))
+    fn tokens(usage: &respan_gateway_conversation::Usage) -> Self {
+        Counted::Tokens(usage.input_tokens, usage.output_tokens)
     }
 }
 
@@ -212,13 +214,13 @@ impl RequestLog {
             pairs
                 .into_iter()
                 .find(|(name, _)| *name == "model")
-                .map(|(_, m)| m.to_owned())
+                .map(|(_, m)| clip(m))
         });
         let record = RequestRecord {
             id: format!("r_{id:06}"),
             started_at: rfc3339(SystemTime::now()),
             method: req.method().to_string(),
-            path: req.uri().path().to_owned(),
+            path: clip(req.uri().path()),
             format: None,
             kind: None,
             model: query_model,
@@ -279,7 +281,7 @@ impl RequestLog {
         }
         self.publish(entry);
         if self.print {
-            eprintln!("{}", line(&record));
+            eprintln!("{}", escape_controls(&line(&record)));
         }
     }
 }
@@ -450,6 +452,24 @@ fn error_message(body: &[u8]) -> String {
     }
 }
 
+/// What a client sent, as kept: its first [`KEPT_CHARS`] characters, and
+/// `…` if there were more.
+fn clip(text: &str) -> String {
+    match text.char_indices().nth(KEPT_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_owned(),
+    }
+}
+
+/// `line` with its control characters escaped, so one request is one line.
+fn escape_controls(line: &str) -> String {
+    let escaped = |c: char| match c.is_control() {
+        true => c.escape_default().collect(),
+        false => c.to_string(),
+    };
+    line.chars().map(escaped).collect()
+}
+
 /// The plugin that fills in what the gateway knows of a request.
 pub struct Recorder {
     log: Arc<RequestLog>,
@@ -497,25 +517,26 @@ impl Plugin for Recorder {
             record.format = Some(cx.format().to_owned());
             if let Some((kind, model)) = self.formats.get(cx.format()) {
                 record.kind = Some(kind.label);
-                record.model = model(cx).or(record.model.take());
+                let model = model(cx).map(|m| clip(&m));
+                record.model = model.or(record.model.take());
             }
         }
         self.log.publish(&entry);
         count(cx, &entry, |output: &conversation::Output| match output {
-            conversation::Output::Usage(usage) => Counted::tokens(usage),
+            conversation::Output::Usage(usage) => Some(Counted::tokens(usage)),
             _ => None,
         })?;
         count(cx, &entry, |output: &image::Output| match output {
-            image::Output::Usage(usage) => Counted::tokens(usage),
+            image::Output::Usage(usage) => Some(Counted::tokens(usage)),
             _ => None,
         })?;
         count(cx, &entry, |output: &transcription::Output| match output {
-            transcription::Output::Usage(usage) => Counted::tokens(usage),
+            transcription::Output::Usage(usage) => Some(Counted::tokens(usage)),
             transcription::Output::Seconds(seconds) => Some(Counted::Seconds(*seconds)),
             _ => None,
         })?;
         count(cx, &entry, |output: &speech::Output| match output {
-            speech::Output::Usage(usage) => Counted::tokens(usage),
+            speech::Output::Usage(usage) => Some(Counted::tokens(usage)),
             _ => None,
         })?;
         Ok(None)
@@ -602,6 +623,19 @@ mod tests {
         assert_eq!(
             error_message(b" no format served accepts GET /x \n"),
             "no format served accepts GET /x"
+        );
+    }
+
+    #[test]
+    fn what_a_client_sent_is_clipped_and_cannot_forge_a_line() {
+        let long = "m".repeat(10_000);
+        let kept = clip(&long);
+        assert_eq!(kept.chars().count(), KEPT_CHARS + 1);
+        assert!(kept.ends_with('…'));
+        assert_eq!(clip("gpt-4o"), "gpt-4o");
+        assert_eq!(
+            escape_controls("r_1 POST /x 200 1ms a\nr_2 forged\u{1b}[2J"),
+            "r_1 POST /x 200 1ms a\\nr_2 forged\\u{1b}[2J"
         );
     }
 

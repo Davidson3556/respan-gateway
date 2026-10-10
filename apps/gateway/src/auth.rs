@@ -5,18 +5,22 @@
 //! has none of its own.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
-use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, SEC_WEBSOCKET_PROTOCOL};
-use respan_gateway_http::http::{HeaderMap, StatusCode};
+use respan_gateway_http::http::header::{
+    AUTHORIZATION, HOST, HeaderName, ORIGIN, SEC_WEBSOCKET_PROTOCOL,
+};
+use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
 
 const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
+const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
 
 /// Sends a client's own credential headers on a call to a provider of the
 /// client's format that has no key of its own, as the client would have
@@ -56,6 +60,16 @@ impl Plugin for ClientCredentials {
 #[derive(Debug, Default)]
 pub struct ClientKeys(Vec<String>);
 
+/// What a request's headers say to the client keys.
+#[derive(Debug, PartialEq, Eq)]
+enum Presented {
+    /// No key is needed.
+    Open,
+    /// The headers that hold a valid key, each one to take off.
+    Valid(Vec<HeaderName>),
+    Refused,
+}
+
 impl ClientKeys {
     pub fn new(keys: Vec<String>) -> Arc<Self> {
         Arc::new(Self(keys))
@@ -65,33 +79,35 @@ impl ClientKeys {
         !self.0.is_empty()
     }
 
-    /// The header that carries a valid key, if one does; `Some(None)` when
-    /// no key is needed.
-    fn holder(&self, headers: &HeaderMap) -> Option<Option<HeaderName>> {
+    fn presented(&self, headers: &HeaderMap) -> Presented {
         if !self.required() {
-            return Some(None);
+            return Presented::Open;
         }
         let valid = |key: &str| {
-            self.0
-                .iter()
-                .any(|k| constant_time_eq(k.as_bytes(), key.trim().as_bytes()))
+            let key = key.trim().as_bytes();
+            !key.is_empty() && self.0.iter().any(|k| constant_time_eq(k.as_bytes(), key))
         };
         let value = |name: &HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
-        let bearer = value(&AUTHORIZATION).and_then(|v| {
-            let (scheme, token) = v.split_once(' ')?;
-            scheme.eq_ignore_ascii_case("bearer").then_some(token)
-        });
-        if bearer.is_some_and(valid) {
-            return Some(Some(AUTHORIZATION));
-        }
-        [X_API_KEY, X_GOOG_API_KEY]
+        let holds_key = |name: &HeaderName| match *name == AUTHORIZATION {
+            true => value(name)
+                .and_then(|v| v.split_once(' '))
+                .is_some_and(|(scheme, token)| {
+                    scheme.eq_ignore_ascii_case("bearer") && valid(token)
+                }),
+            false => value(name).is_some_and(valid),
+        };
+        let holders: Vec<HeaderName> = [AUTHORIZATION, X_API_KEY, X_GOOG_API_KEY]
             .into_iter()
-            .find(|name| value(name).is_some_and(valid))
-            .map(Some)
+            .filter(holds_key)
+            .collect();
+        match holders.is_empty() {
+            true => Presented::Refused,
+            false => Presented::Valid(holders),
+        }
     }
 
     pub fn allows(&self, headers: &HeaderMap) -> bool {
-        self.holder(headers).is_some()
+        self.presented(headers) != Presented::Refused
     }
 }
 
@@ -102,23 +118,28 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// The 401 of a request without a valid key, in OpenAI's error shape.
 pub fn unauthorized() -> Response {
-    let body = serde_json::json!({"error": {
-        "message": "a valid gateway key is required: send it as `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key`",
-        "type": "authentication_error",
-    }});
-    (StatusCode::UNAUTHORIZED, axum::Json(body)).into_response()
+    let message = "a valid gateway key is required: send it as `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key`";
+    error(StatusCode::UNAUTHORIZED, "authentication_error", message)
 }
 
-/// Refuses a request without a valid key, and takes the key off one with.
+/// An error of the gateway's own, in OpenAI's error shape.
+pub fn error(status: StatusCode, kind: &str, message: &str) -> Response {
+    let body = serde_json::json!({"error": {"message": message, "type": kind}});
+    (status, axum::Json(body)).into_response()
+}
+
+/// Refuses a request without a valid key, and takes every header holding
+/// one off one with: a client's own provider key in another header stays.
 pub async fn consume(
     State(keys): State<Arc<ClientKeys>>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    match keys.holder(req.headers()) {
-        None => unauthorized(),
-        Some(holder) => {
-            if let Some(name) = holder {
+    match keys.presented(req.headers()) {
+        Presented::Refused => unauthorized(),
+        Presented::Open => next.run(req).await,
+        Presented::Valid(holders) => {
+            for name in holders {
                 req.headers_mut().remove(name);
             }
             next.run(req).await
@@ -131,6 +152,92 @@ pub async fn require(State(keys): State<Arc<ClientKeys>>, req: Request, next: Ne
     match keys.allows(req.headers()) {
         true => next.run(req).await,
         false => unauthorized(),
+    }
+}
+
+/// Without client keys, whoever reaches the gateway spends its provider
+/// keys. On loopback that is meant to be local programs alone, but a web
+/// page the user opens reaches it too: by a cross-site request, which a
+/// browser sends without asking when it is "simple", or by a DNS name of
+/// the attacker's rebound to 127.0.0.1, which makes its pages same-origin
+/// with the gateway. So a gateway without keys refuses a browser's
+/// cross-origin request, and a `Host` that is not one of its own names.
+/// With keys neither is needed: a browser never adds a gateway key itself.
+#[derive(Debug)]
+pub struct LocalOnly {
+    configured: SocketAddr,
+    /// Where it was bound, once served.
+    bound: OnceLock<SocketAddr>,
+}
+
+impl LocalOnly {
+    pub fn new(configured: SocketAddr) -> Arc<Self> {
+        let bound = OnceLock::new();
+        Arc::new(Self { configured, bound })
+    }
+
+    pub fn serving_on(&self, addr: SocketAddr) {
+        let _ = self.bound.set(addr);
+    }
+
+    /// Whether it answers to the host `name`: any, when it listens on every
+    /// address.
+    fn answers_to(&self, name: &str) -> bool {
+        let listen = self.bound.get().unwrap_or(&self.configured);
+        let own = match listen.ip() {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        let names = ["localhost", "127.0.0.1", "[::1]", "respan-gateway"];
+        listen.ip().is_unspecified() || names.contains(&name) || name == own
+    }
+
+    /// Why a request is refused, if it is.
+    fn refusal(&self, req: &Request) -> Option<String> {
+        let headers = req.headers();
+        let value = |name| {
+            headers
+                .get(name)
+                .and_then(|v: &HeaderValue| v.to_str().ok())
+        };
+        let host = value(HOST).or_else(|| req.uri().authority().map(|a| a.as_str()));
+        if let Some(host) = host {
+            let name = host_name(host).to_ascii_lowercase();
+            if !self.answers_to(&name) {
+                return Some(format!(
+                    "Host '{name}' is not this gateway's: without client keys it answers \
+                     only to localhost; set `keys:` to reach it by another name"
+                ));
+            }
+        }
+        let cross_site = value(SEC_FETCH_SITE) == Some("cross-site");
+        let origin = value(ORIGIN).map(|origin| origin.split_once("://").map(|(_, at)| at));
+        let same_origin =
+            |at: Option<&str>| at.zip(host).is_some_and(|(a, h)| a.eq_ignore_ascii_case(h));
+        if cross_site || origin.is_some_and(|at| !same_origin(at)) {
+            return Some(
+                "a cross-origin browser request is refused: without client keys any web \
+                 page could spend the gateway's provider keys; set `keys:` to allow it"
+                    .to_owned(),
+            );
+        }
+        None
+    }
+}
+
+/// `host` without its port.
+fn host_name(host: &str) -> &str {
+    match host.strip_prefix('[') {
+        Some(rest) => rest.find(']').map_or(host, |end| &host[..end + 2]),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    }
+}
+
+/// Refuses a request [`LocalOnly`] refuses, 403.
+pub async fn local_only(State(local): State<Arc<LocalOnly>>, req: Request, next: Next) -> Response {
+    match local.refusal(&req) {
+        Some(why) => error(StatusCode::FORBIDDEN, "permission_error", &why),
+        None => next.run(req).await,
     }
 }
 
@@ -150,28 +257,107 @@ mod tests {
     #[test]
     fn a_key_is_read_from_any_of_three_headers() {
         let keys = ClientKeys(vec!["k1".into(), "k2".into()]);
-        let holder = |pairs: &[(&'static str, &str)]| keys.holder(&headers(pairs));
+        let presented = |pairs: &[(&'static str, &str)]| keys.presented(&headers(pairs));
+        let valid = |names: &[HeaderName]| Presented::Valid(names.to_vec());
         assert_eq!(
-            holder(&[("authorization", "Bearer k1")]),
-            Some(Some(AUTHORIZATION))
+            presented(&[("authorization", "Bearer k1")]),
+            valid(&[AUTHORIZATION])
         );
-        assert_eq!(holder(&[("x-api-key", "k2")]), Some(Some(X_API_KEY)));
+        assert_eq!(presented(&[("x-api-key", "k2")]), valid(&[X_API_KEY]));
         assert_eq!(
-            holder(&[("x-goog-api-key", "k1")]),
-            Some(Some(X_GOOG_API_KEY))
+            presented(&[("x-goog-api-key", "k1")]),
+            valid(&[X_GOOG_API_KEY])
         );
         // The client's provider key in one header, the gateway's in another.
         let both = [("authorization", "Bearer sk-provider"), ("x-api-key", "k1")];
-        assert_eq!(holder(&both), Some(Some(X_API_KEY)));
-        assert_eq!(holder(&[("authorization", "Bearer k3")]), None);
-        assert_eq!(holder(&[("authorization", "k1")]), None);
-        assert_eq!(holder(&[]), None);
+        assert_eq!(presented(&both), valid(&[X_API_KEY]));
+        assert_eq!(
+            presented(&[("authorization", "Bearer k3")]),
+            Presented::Refused
+        );
+        assert_eq!(presented(&[("authorization", "k1")]), Presented::Refused);
+        assert_eq!(presented(&[]), Presented::Refused);
+    }
+
+    #[test]
+    fn every_header_holding_a_valid_key_is_taken_off() {
+        let keys = ClientKeys(vec!["k1".into()]);
+        let all = [
+            ("authorization", "Bearer k1"),
+            ("x-api-key", "k1"),
+            ("x-goog-api-key", " k1 "),
+        ];
+        assert_eq!(
+            keys.presented(&headers(&all)),
+            Presented::Valid(vec![AUTHORIZATION, X_API_KEY, X_GOOG_API_KEY])
+        );
+    }
+
+    #[test]
+    fn an_empty_key_never_matches() {
+        let keys = ClientKeys(vec![String::new()]);
+        assert_eq!(
+            keys.presented(&headers(&[("x-api-key", "")])),
+            Presented::Refused
+        );
+        assert_eq!(
+            keys.presented(&headers(&[("authorization", "Bearer ")])),
+            Presented::Refused
+        );
     }
 
     #[test]
     fn without_keys_everything_passes() {
         let keys = ClientKeys::default();
         assert!(!keys.required());
-        assert_eq!(keys.holder(&HeaderMap::new()), Some(None));
+        assert_eq!(keys.presented(&HeaderMap::new()), Presented::Open);
+    }
+
+    fn refused(local: &LocalOnly, pairs: &[(&'static str, &str)]) -> bool {
+        let mut req = Request::new(axum::body::Body::empty());
+        *req.headers_mut() = headers(pairs);
+        local.refusal(&req).is_some()
+    }
+
+    #[test]
+    fn without_keys_a_cross_origin_browser_request_is_refused() {
+        let local = LocalOnly::new("127.0.0.1:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        let host = ("host", "127.0.0.1:8080");
+        assert!(!refused(&local, &[host]), "curl");
+        assert!(
+            !refused(&local, &[host, ("origin", "http://127.0.0.1:8080")]),
+            "the UI"
+        );
+        assert!(refused(&local, &[host, ("origin", "https://evil.example")]));
+        assert!(refused(
+            &local,
+            &[host, ("origin", "http://localhost:3000")]
+        ));
+        assert!(refused(&local, &[host, ("origin", "null")]));
+        assert!(refused(&local, &[host, ("sec-fetch-site", "cross-site")]));
+    }
+
+    #[test]
+    fn without_keys_only_the_gateways_own_host_names_are_answered() {
+        let local = LocalOnly::new("127.0.0.1:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        for host in [
+            "localhost:8080",
+            "127.0.0.1",
+            "[::1]:8080",
+            "respan-gateway",
+            "LOCALHOST",
+        ] {
+            assert!(!refused(&local, &[("host", host)]), "{host}");
+        }
+        assert!(!refused(&local, &[]), "no Host");
+        assert!(refused(&local, &[("host", "evil.example:8080")]));
+        assert!(refused(&local, &[("host", "localhost.evil.example")]));
+        let everywhere = LocalOnly::new("0.0.0.0:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        assert!(!refused(&everywhere, &[("host", "gateway.lan:8080")]));
+        let own = LocalOnly::new("10.0.0.2:8080".parse().unwrap_or_else(|e| panic!("{e}")));
+        assert!(!refused(&own, &[("host", "10.0.0.2:8080")]));
+        // Served elsewhere than configured, as a host may.
+        local.serving_on("0.0.0.0:9".parse().unwrap_or_else(|e| panic!("{e}")));
+        assert!(!refused(&local, &[("host", "gateway.lan:9")]));
     }
 }

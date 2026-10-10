@@ -1,8 +1,9 @@
 //! The binary's one routing step. A request goes, of the providers serving
 //! its kind, to the one its model names as `provider/model` (sent as
-//! `model`), else the one a `models` route gives, else the one whose
-//! preset claims its model's prefix, else the kind's default: `target` if
-//! it serves the kind, else the first configured that does.
+//! `model`) if `provider` is configured, else, with the whole name as the
+//! model, to the one a `models` route gives, else the one whose preset
+//! claims the longest prefix of the name, else the kind's default:
+//! `target` if it serves the kind, else the first configured that does.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use respan_gateway_core::{ClientContext, Fault, Plugin, Response, async_trait};
 
 use crate::compose::Upstream;
-use crate::formats::{Kind, KnownFormat, ReadModel, SetModel};
+use crate::formats::{Kind, KnownFormat, ReadModel, SetModel, first_of_each_kind};
 
 /// A format a provider speaks: its name, kind and core provider.
 type Speaks = (String, Kind, String);
@@ -24,7 +25,7 @@ pub struct Routes {
     /// The `models` plugins' routes, in the order they run: a later one's
     /// match wins, as its target was set last.
     tables: Vec<Vec<(String, String)>>,
-    /// The presets' model prefixes, in config order.
+    /// The presets' model prefixes, longest first, then in config order.
     prefixes: Vec<(String, String)>,
     target: Option<String>,
 }
@@ -54,7 +55,7 @@ impl Routes {
                 (u.name.clone(), entries.collect())
             })
             .collect();
-        let prefixes = upstreams
+        let mut prefixes: Vec<(String, String)> = upstreams
             .iter()
             .flat_map(|u| {
                 let prefixes = u.preset.map(|p| p.prefixes).unwrap_or_default();
@@ -63,6 +64,8 @@ impl Routes {
                     .map(|prefix| ((*prefix).to_owned(), u.name.clone()))
             })
             .collect();
+        // `deepseek-ai/` is Together's, though `deepseek` is DeepSeek's.
+        prefixes.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
         Self {
             providers,
             tables,
@@ -121,14 +124,8 @@ impl Routes {
 
     /// The default provider of each kind, as `(kind, provider)`.
     pub fn defaults(&self) -> Vec<(&'static str, String)> {
-        let mut kinds: Vec<(Kind, &str)> = Vec::new();
-        for (_, entries) in &self.providers {
-            for (format, kind, _) in entries {
-                if !kinds.iter().any(|(k, _)| k == kind) {
-                    kinds.push((*kind, format));
-                }
-            }
-        }
+        let entries = self.providers.iter().flat_map(|(_, entries)| entries);
+        let kinds = first_of_each_kind(entries.map(|(format, kind, _)| (*kind, format)));
         kinds
             .into_iter()
             .filter_map(|(kind, format)| {

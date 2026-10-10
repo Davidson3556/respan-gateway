@@ -15,7 +15,9 @@ use crate::presets;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Where to listen; `127.0.0.1:8080` if unset.
+    /// Where to listen, as `host:port` (a name is resolved), `:port` or a
+    /// bare port (on 127.0.0.1); `127.0.0.1:8080` if unset.
+    #[serde(default, deserialize_with = "listen_address")]
     pub listen: Option<SocketAddr>,
     /// The most bytes of a client's request, and of a provider's answer
     /// held at once, past which the request fails 413 or the answer 502;
@@ -262,6 +264,41 @@ pub fn no_keys_message() -> String {
     )
 }
 
+/// Where `text` says to listen: `host:port`, a name resolved, preferring
+/// IPv4; `:port` or a bare port, on 127.0.0.1.
+pub fn parse_listen(text: &str) -> Result<SocketAddr, String> {
+    use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+    let text = text.trim();
+    let port = text.strip_prefix(':').unwrap_or(text);
+    if let Ok(port) = port.parse::<u16>() {
+        return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+    }
+    if let Ok(addr) = text.parse() {
+        return Ok(addr);
+    }
+    let usage = || format!("'{text}' is not host:port, :port or a port");
+    if !text.contains(':') {
+        return Err(usage());
+    }
+    let addrs: Vec<SocketAddr> = text
+        .to_socket_addrs()
+        .map_err(|e| format!("{}: {e}", usage()))?
+        .collect();
+    let v4 = addrs.iter().find(|a| a.is_ipv4());
+    v4.or(addrs.first())
+        .copied()
+        .ok_or_else(|| format!("'{text}' resolves to no address"))
+}
+
+fn listen_address<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SocketAddr>, D::Error> {
+    let Some(text) = Option::<String>::deserialize(d)? else {
+        return Ok(None);
+    };
+    parse_listen(&text)
+        .map(Some)
+        .map_err(|e| serde::de::Error::custom(format!("listen: {e}")))
+}
+
 /// A string or a list of them.
 fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
     #[derive(Deserialize)]
@@ -287,6 +324,24 @@ mod tests {
         assert!(bad.is_some_and(|e| e.to_string().contains("listen")));
         let good = Config::parse("listen: 127.0.0.1:8080");
         assert!(good.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8080)));
+        let named = Config::parse("listen: localhost:8081");
+        assert!(named.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8081)));
+    }
+
+    #[test]
+    fn a_listen_address_may_be_a_name_a_port_or_colon_port() {
+        let local = |port| Ok(SocketAddr::from(([127, 0, 0, 1], port)));
+        assert_eq!(parse_listen("8080"), local(8080));
+        assert_eq!(parse_listen(":8080"), local(8080));
+        assert_eq!(parse_listen("localhost:8080").map(|a| a.port()), Ok(8080));
+        assert!(parse_listen("localhost:8080").is_ok_and(|a| a.ip().is_loopback()));
+        assert_eq!(
+            parse_listen("[::1]:9"),
+            Ok(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 9)))
+        );
+        assert!(parse_listen("0.0.0.0:80").is_ok_and(|a| a.ip().is_unspecified()));
+        assert!(parse_listen("localhost").is_err());
+        assert!(parse_listen("99999").is_err());
     }
 
     #[test]
