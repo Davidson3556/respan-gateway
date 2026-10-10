@@ -64,8 +64,16 @@ impl Plugin for ToolAllowList {
             return Ok(Some(Response::stream(stream::iter([Ok(answer)]))));
         }
         let allowed = self.0.clone();
+        let list_ids: Vec<Value> = input
+            .messages
+            .iter()
+            .filter(|m| m.method() == Some("tools/list"))
+            .filter_map(|m| m.request_id())
+            .collect();
         cx.filter(move |out: &mut Output| {
-            let lists = out.messages.iter_mut();
+            let answers = out.messages.iter_mut();
+            let lists =
+                answers.filter(|m| m.response_id().is_some_and(|id| list_ids.contains(&id)));
             let lists = lists.filter_map(|m| m.result_mut()?.get_mut("tools")?.as_array_mut());
             for tools in lists {
                 tools.retain(|t| allows(&allowed, &t["name"]));
@@ -135,7 +143,7 @@ impl McpServer {
                             { "name": "wipe", "inputSchema": {"type":"object"} }
                         ] }),
                         "tools/call" if session.as_deref() == Some("s1") && body["params"]["name"] == "echo" =>
-                            json!({ "content": [{ "type": "text", "text": body["params"]["arguments"]["message"] }] }),
+                            json!({ "content": [{ "type": "text", "text": body["params"]["arguments"]["message"] }], "tools": ["not a tool list"] }),
                         _ => return (StatusCode::BAD_REQUEST, [("content-type", "application/json"), ("mcp-session-id", "s1")], "invalid method or session".to_owned()),
                     };
                     let answer = json!({ "jsonrpc": "2.0", "id": body["id"], "result": result });

@@ -32,6 +32,10 @@ mod http_support;
 mod provider_support;
 use http_support::{post, read_whole, serve};
 
+/// The models the tiers serve, which replace the client's `auto`.
+const STRONG_MODEL: &str = "strong-large";
+const CHEAP_MODEL: &str = "cheap-small";
+
 /// Routes each conversation by a small model's verdict on its last message.
 struct Judge;
 
@@ -61,11 +65,15 @@ impl Plugin for Judge {
             .await?;
         let mut answer = Assembled::default();
         replies.iter().try_for_each(|reply| answer.push(reply))?;
-        cx.set_target(if answer.text().contains("HARD") {
-            "strong"
-        } else {
-            "cheap"
-        });
+        let (target, model) = match answer.text().contains("HARD") {
+            true => ("strong", STRONG_MODEL),
+            false => ("cheap", CHEAP_MODEL),
+        };
+        cx.set_target(target);
+        cx.filter(move |chat: &mut Input| {
+            chat.model = Some(model.into());
+            Ok(())
+        })?;
         Ok(None)
     }
 }

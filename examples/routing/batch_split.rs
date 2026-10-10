@@ -86,7 +86,11 @@ impl Plugin for Split {
             .buffered(8)
             .try_collect::<Vec<_>>()
             .await?;
-        let mut merged = Embeddings::default();
+        let first = answers.iter().flatten().next().map(|a| a.rest.clone());
+        let mut merged = Embeddings {
+            rest: first.unwrap_or_default(),
+            ..Embeddings::default()
+        };
         for answer in answers.iter().flatten() {
             merged.vectors.extend(answer.vectors.iter().cloned());
             merged.usage += &answer.usage;
@@ -142,8 +146,10 @@ async fn main() -> Result<(), Fault> {
     println!("{status} {}", String::from_utf8_lossy(&answered?));
     let requests = openai.requests();
     assert_eq!(requests.len(), 3);
-    for sent in requests {
-        println!("call: {}", String::from_utf8_lossy(&sent.raw));
+    // The calls may arrive in any order, and each answer is scripted, not
+    // computed from its input.
+    for (n, sent) in requests.iter().enumerate() {
+        println!("call {n} sent input {}", sent.body["input"]);
     }
     Ok(())
 }

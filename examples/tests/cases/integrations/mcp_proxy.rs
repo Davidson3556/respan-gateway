@@ -13,6 +13,8 @@ async fn clients_see_and_call_only_the_allowed_tools() -> Result<(), Fault> {
         json!([{ "name": "echo", "inputSchema": {"type":"object", "properties":{"message":{"type":"string"}}, "required":["message"]} }])
     );
     assert_eq!(called["result"]["content"][0]["text"], "hi");
+    // Only a tools/list answer is trimmed, not any result with a `tools` field.
+    assert_eq!(called["result"]["tools"], json!(["not a tool list"]));
     assert_eq!(
         (*status, &refused["id"], &refused["error"]["code"]),
         (StatusCode::OK, &json!(4), &json!(-32602))

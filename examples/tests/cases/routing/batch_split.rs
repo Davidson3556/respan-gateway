@@ -44,6 +44,8 @@ async fn a_batch_over_the_cap_is_split_and_merged_in_order_with_usage_summed() -
         json!(5),
         "every call's usage"
     );
+    assert_eq!(answered["object"], "list");
+    assert_eq!(answered["model"], MODEL);
     // Three calls of at most two inputs, each keeping the client's other fields.
     let sent: Vec<Value> = openai.requests().into_iter().map(|r| r.body).collect();
     assert_eq!(sent.len(), 3);

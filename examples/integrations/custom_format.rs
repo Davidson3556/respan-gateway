@@ -117,11 +117,18 @@ fn read_request(raw: Bytes) -> Result<EmbedRequest, Fault> {
     let mut v: Map<String, Value> =
         serde_json::from_slice(&raw).map_err(|_| BadRequest::fault("not a JSON object"))?;
     let model = v.remove("model").and_then(|m| m.as_str().map(Into::into));
+    let texts_only = || BadRequest::fault("input must be a string or an array of strings");
     let input = match v.remove("input") {
         Some(Value::String(one)) => vec![one],
         // Texts; token arrays are not read here.
-        all => serde_json::from_value(all.unwrap_or_default()).unwrap_or_default(),
+        Some(all) => serde_json::from_value(all).map_err(|_| texts_only())?,
+        None => return Err(texts_only()),
     };
+    // Base64 vectors are not read here either: the provider would be paid
+    // for answers this kind cannot hold.
+    if v.get("encoding_format").is_some_and(|f| f == "base64") {
+        return Err(BadRequest::fault("encoding_format base64 is not supported"));
+    }
     Ok(EmbedRequest {
         model,
         input,
@@ -183,7 +190,7 @@ fn write_embeddings(one: &[Embeddings]) -> Result<Bytes, Fault> {
     };
     let mut v = e.rest.clone();
     let data = e.vectors.iter().enumerate();
-    let data = data.map(|(i, v)| json!({ "index": i, "embedding": v }));
+    let data = data.map(|(i, v)| json!({ "object": "embedding", "index": i, "embedding": v }));
     v.insert("data".into(), data.collect());
     let tokens = e.usage.input_tokens;
     v.insert(

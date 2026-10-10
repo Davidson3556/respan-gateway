@@ -32,6 +32,11 @@ async fn the_verdict_picks_the_target_and_the_provider_edge_covers_the_judge() -
         judged.contains("judge-mini") && judged.contains("Riemann"),
         "{judged}"
     );
+    let sent = String::from_utf8_lossy(&strong.requests()[0].raw).into_owned();
+    assert!(
+        sent.contains(STRONG_MODEL) && !sent.contains("auto"),
+        "{sent}"
+    );
     assert_eq!(*egress.seen(), ["judge", "strong"]);
     gw.idle().await;
     // The judge's tokens are billed like the answer's.
@@ -61,6 +66,11 @@ async fn an_easy_verdict_keeps_the_cheap_model() -> Result<(), Fault> {
         (1, 1, 0)
     );
     assert_eq!(cheap.requests()[0].path, "/v1/chat/completions");
+    let sent = String::from_utf8_lossy(&cheap.requests()[0].raw).into_owned();
+    assert!(
+        sent.contains(CHEAP_MODEL) && !sent.contains("auto"),
+        "{sent}"
+    );
     Ok(())
 }
 
