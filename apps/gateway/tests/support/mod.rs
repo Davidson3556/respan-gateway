@@ -6,6 +6,7 @@
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -20,6 +21,8 @@ pub struct Gateway {
     /// `http://127.0.0.1:<port>`
     pub base: String,
     pub child: Child,
+    /// Its stdout lines so far.
+    pub stdout: Arc<Mutex<Vec<String>>>,
 }
 
 impl Gateway {
@@ -33,8 +36,22 @@ impl Gateway {
     /// Starts the binary with `args`, which give no config file and say
     /// where to listen (`--listen 127.0.0.1:0`).
     pub async fn run(args: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
-            .args(args)
+        let mut command = Command::new(env!("CARGO_BIN_EXE_respan-gateway"));
+        command.args(args);
+        Self::spawn(command).await
+    }
+
+    /// Starts the binary with `args` in `dir`, with `env` as its whole
+    /// environment, so no provider key of the test's own leaks in.
+    pub async fn run_with(args: &[&str], dir: &std::path::Path, env: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_respan-gateway"));
+        command.args(args).current_dir(dir).env_clear();
+        command.envs(env.iter().copied());
+        Self::spawn(command).await
+    }
+
+    async fn spawn(mut command: Command) -> Self {
+        let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
@@ -52,11 +69,30 @@ impl Gateway {
             .map(|(_, a)| a.trim().to_owned())
             .unwrap_or_else(|| panic!("unexpected first line: {line}"));
         // Keep draining stdout so the child never blocks on a full pipe.
-        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+        let stdout = Arc::new(Mutex::new(vec![line]));
+        let printed = stdout.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                printed.lock().unwrap().push(line);
+            }
+        });
         Self {
             base: format!("http://{addr}"),
             child,
+            stdout,
         }
+    }
+
+    /// What it printed on stdout, once some line contains `text`, bounded.
+    pub async fn stdout_until(&self, text: &str) -> String {
+        let printed = || self.stdout.lock().unwrap().join("\n");
+        let deadline = tokio::time::Instant::now() + BOUND;
+        while !printed().contains(text) {
+            let late = tokio::time::Instant::now() > deadline;
+            assert!(!late, "no {text:?} in {}", printed());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        printed()
     }
 
     pub fn url(&self, path: &str) -> String {

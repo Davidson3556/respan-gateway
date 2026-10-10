@@ -1,53 +1,105 @@
-//! The YAML config: providers, the formats served, plugins in order, and
-//! the default target.
+//! The configuration: where it comes from (a YAML file, the environment or
+//! `proxy`) and what it says. [`App::new`](crate::App::new) checks and
+//! composes it.
 
-use std::any::TypeId;
-use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 
-use respan_gateway_http::http::HeaderMap;
-use respan_gateway_http::http::header::{AUTHORIZATION, HeaderName, HeaderValue};
+use indexmap::IndexMap;
+use serde::{Deserialize, Deserializer};
 
-use respan_gateway_conversation::{Input, Output};
-use respan_gateway_core::{
-    ClientContext, Extensions, Fault, Format, Gateway, Plugin, Response, async_trait,
-};
-use respan_gateway_http::{ClientIo, ProviderIo};
-use respan_gateway_plugins::ModelRouter;
-use serde::Deserialize;
+use crate::Error;
+use crate::presets;
 
-#[derive(Debug, Deserialize)]
+/// A gateway's configuration, as `gateway.yaml` writes it.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub listen: Option<std::net::SocketAddr>,
+    /// Where to listen; `127.0.0.1:8080` if unset.
+    pub listen: Option<SocketAddr>,
     /// The most bytes of a client's request, and of a provider's answer
     /// held at once, past which the request fails 413 or the answer 502;
     /// 32 MiB if unset.
     pub body_limit: Option<usize>,
+    /// Client keys, literal or `env:NAME`. When set, every request needs
+    /// one; it is consumed by the gateway and never sent to a provider.
     #[serde(default)]
-    pub providers: BTreeMap<String, ProviderConfig>,
-    /// The formats served to clients, by name, tried in order. Serve
+    pub keys: Vec<String>,
+    /// Whether each finished request is printed to stderr.
+    #[serde(default = "enabled")]
+    pub log: bool,
+    /// Whether the web UI and its admin API are served under `/ui/`.
+    #[serde(default = "enabled")]
+    pub ui: bool,
+    /// Providers by name, in order: the first serving a kind is that
+    /// kind's default.
+    #[serde(default)]
+    pub providers: IndexMap<String, ProviderConfig>,
+    /// The formats served to clients, by name, tried in order. Unset:
+    /// `openai-chat`, `anthropic-messages`, and every format of another
+    /// kind some provider speaks, except `passthrough`. Serve
     /// `passthrough` last to relay every other request unread to the
     /// provider of format `passthrough`, whose `base_url` is then the
-    /// vendor's origin, as clients' paths are sent as they are. Clients of
-    /// a format no other translates, `passthrough` or a session's, go to
-    /// the one provider of that format.
-    pub serve: Vec<String>,
+    /// vendor's origin. Clients of a format no other translates,
+    /// `passthrough` or a session's, go to the one provider of that format.
+    pub serve: Option<Vec<String>>,
     /// Compiled-in plugins, in the order listed unless `after` says otherwise.
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
-    /// The provider that answers when no plugin sets one.
+    /// The provider of each kind it serves for requests nothing else
+    /// routes.
     pub target: Option<String>,
+    #[serde(skip)]
+    pub(crate) source: Source,
+    /// Relay each request raw, with the client's own credentials (`proxy`).
+    #[serde(skip)]
+    pub(crate) raw_relay: bool,
 }
 
-#[derive(Debug, Deserialize)]
+fn enabled() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            listen: None,
+            body_limit: None,
+            keys: Vec::new(),
+            log: true,
+            ui: true,
+            providers: IndexMap::new(),
+            serve: None,
+            plugins: Vec::new(),
+            target: None,
+            source: Source::Inline,
+            raw_relay: false,
+        }
+    }
+}
+
+/// One provider: a vendor preset, explicit formats, or a preset with some
+/// of its settings replaced.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    pub format: String,
-    pub base_url: String,
+    /// A vendor preset: `openai`, `anthropic`, `gemini`, `groq`, ...
+    pub vendor: Option<String>,
+    /// Its format, or several; a preset's are every format of the vendor
+    /// compiled in.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub format: Option<Vec<String>>,
+    /// The base URL its SDK takes; a preset's is the vendor's.
+    pub base_url: Option<String>,
+    /// Its key, literal or `env:NAME`, sent as its formats expect; a
+    /// preset's is `env:<VENDOR>_API_KEY`.
+    pub key: Option<String>,
+    /// Its credentials as one header, in place of `key`. A provider with
+    /// neither, and no preset key, passes on the client's.
     pub auth: Option<Auth>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Auth {
     /// `Authorization: Bearer <key>`
@@ -58,530 +110,248 @@ pub enum Auth {
 
 /// One plugin: its name, the plugins it runs after, and which plugin it
 /// is, by the one field that configures it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginConfig {
     pub name: String,
     #[serde(default)]
     pub after: Vec<String>,
-    /// A [`ModelRouter`]: model prefix to provider, tried in order.
+    /// Model routes: model prefix to provider, tried in order.
     pub models: Option<Vec<ModelRoute>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRoute {
     pub prefix: String,
     pub provider: String,
 }
 
-/// A provider's name, base URL and auth headers, added to a gateway.
-type AddProvider = dyn Fn(Gateway, String, &str, HeaderMap) -> Result<Gateway, Fault>;
-
-/// A format compiled into the binary: its name, and how to add a
-/// provider that speaks it or serve its clients.
-pub struct KnownFormat {
-    pub name: String,
-    kind: (TypeId, TypeId),
-    provider: Box<AddProvider>,
-    serve: Box<dyn Fn(Gateway) -> Result<Gateway, Fault>>,
+/// Where a configuration came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Source {
+    File(PathBuf),
+    Environment,
+    Proxy,
+    #[default]
+    Inline,
 }
 
-impl KnownFormat {
-    /// `format`, its providers reached by `reach`, given one's base URL
-    /// and auth headers.
-    pub fn of<F, I, O, T>(
-        format: F,
-        reach: impl Fn(&str, HeaderMap) -> Result<T, Fault> + 'static,
-    ) -> Self
-    where
-        F: Clone + Send + Sync + 'static + Format<ClientIo, I, O> + Format<ProviderIo, O, I>,
-        I: Clone + Send + Sync + 'static,
-        O: Clone + Send + Sync + 'static,
-        T: Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
-    {
-        let client = format.clone();
-        Self {
-            name: <F as Format<ClientIo, I, O>>::name(&format).to_owned(),
-            kind: (TypeId::of::<I>(), TypeId::of::<O>()),
-            provider: Box::new(move |gateway, name, base_url, auth| {
-                gateway.provider::<I, O, _>(name, format.clone(), reach(base_url, auth)?)
-            }),
-            serve: Box::new(move |gateway| gateway.client::<I, O, _>(client.clone())),
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::File(path) => write!(f, "{}", path.display()),
+            Source::Environment => f.write_str("environment"),
+            Source::Proxy => f.write_str("proxy"),
+            Source::Inline => f.write_str("inline"),
         }
     }
-
-    /// Whether its kind is `I` in and `O` out.
-    pub fn is<I: 'static, O: 'static>(&self) -> bool {
-        self.kind == (TypeId::of::<I>(), TypeId::of::<O>())
-    }
 }
+
+/// The vendor `proxy` relays to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyVendor {
+    Anthropic,
+    OpenAi,
+}
+
+/// The file read when none is named.
+pub const DEFAULT_FILE: &str = "gateway.yaml";
 
 impl Config {
-    pub fn parse(yaml: &str) -> Result<Self, Fault> {
-        serde_norway::from_str(yaml).map_err(|e| Fault::config(e.to_string()))
+    /// A configuration from YAML text.
+    pub fn parse(yaml: &str) -> Result<Config, Error> {
+        serde_norway::from_str(yaml).map_err(|e| Error::new(e.to_string()))
     }
 
-    /// Builds the gateway of the formats in `formats`.
-    pub fn build(&self, formats: &[KnownFormat]) -> Result<Gateway, Fault> {
-        let format = |name: &str, owner: &str| {
-            formats.iter().find(|f| f.name == name).ok_or_else(|| {
-                let known: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
-                Fault::config(format!(
-                    "{owner}: unknown format '{name}'; compiled-in formats: [{}]",
-                    known.join(", ")
-                ))
-            })
-        };
-        let mut gateway = Gateway::new();
-        for (name, p) in &self.providers {
-            let format = format(&p.format, &format!("provider '{name}'"))?;
-            let auth = auth_headers(name, p.auth.as_ref())?;
-            gateway = (format.provider)(gateway, name.clone(), &p.base_url, auth)
-                .map_err(|e| Fault::config(format!("provider '{name}': {}", e.message())))?;
+    /// The configuration in the file at `path`.
+    pub fn load(path: impl AsRef<Path>) -> Result<Config, Error> {
+        let path = path.as_ref();
+        let in_file = |e: String| Error::new(format!("{}: {e}", path.display()));
+        let text = std::fs::read_to_string(path).map_err(|e| in_file(e.to_string()))?;
+        let mut config = Config::parse(&text).map_err(|e| in_file(e.to_string()))?;
+        config.source = Source::File(path.to_owned());
+        Ok(config)
+    }
+
+    /// A configuration with no file: a provider for every vendor whose key
+    /// is in the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, ...;
+    /// Ollama if `OLLAMA_HOST` is set). `RESPAN_<VENDOR>_BASE_URL` moves a
+    /// vendor's base URL. `Err` if there is none.
+    pub fn from_env() -> Result<Config, Error> {
+        let detected = presets::detected();
+        if detected.is_empty() {
+            return Err(Error::new(no_keys_message()));
         }
-        let after = (self.serve.iter().skip_while(|n| *n != PASSTHROUGH)).nth(1);
-        if let Some(after) = after {
-            return Err(Fault::config(format!(
-                "serve: '{after}' comes after '{PASSTHROUGH}', which accepts every request first; \
-                 serve '{PASSTHROUGH}' last"
-            )));
-        }
-        // Only the conversation kind translates: a client of another kind
-        // goes to the one provider of its own format.
-        let mut own = BTreeMap::new();
-        for name in &self.serve {
-            let served = format(name, "serve")?;
-            gateway = (served.serve)(gateway)?;
-            if served.is::<Input, Output>() {
-                continue;
-            }
-            let mut providers = self.providers.iter().filter(|(_, p)| p.format == *name);
-            let (Some((provider, _)), None) = (providers.next(), providers.next()) else {
-                let message = format!("serve: {name} needs exactly one provider of that format");
-                return Err(Fault::config(message));
-            };
-            own.insert(name.clone(), provider.clone());
-        }
-        for p in ordered(&self.plugins)? {
-            let bad = |e: Fault| Fault::config(format!("plugin '{}': {}", p.name, e.message()));
-            let Some(models) = &p.models else {
-                return Err(bad(Fault::config(
-                    "no plugin given; compiled-in plugins: [models]",
-                )));
-            };
-            for m in models {
-                let Some(provider) = self.providers.get(&m.provider) else {
-                    return Err(bad(Fault::config(format!(
-                        "unknown provider '{}'",
-                        m.provider
-                    ))));
+        let providers = detected
+            .into_iter()
+            .map(|(preset, key, base_url)| {
+                let provider = ProviderConfig {
+                    vendor: Some(preset.vendor.to_owned()),
+                    key,
+                    base_url,
+                    ..ProviderConfig::default()
                 };
-                let format = format(&provider.format, &format!("provider '{}'", m.provider))?;
-                if !format.is::<Input, Output>() {
-                    return Err(bad(Fault::config(format!(
-                        "provider '{}' uses format '{}', incompatible with conversation models routes",
-                        m.provider, provider.format
-                    ))));
-                }
-            }
-            let router = ModelRouter::new(|c: &Input| c.model.as_deref());
-            let router = models.iter().fold(router, |router, m| {
-                router.route(m.prefix.clone(), m.provider.clone())
-            });
-            gateway = gateway.plugin(router);
-        }
-        if !own.is_empty() {
-            gateway = gateway.plugin(SendTo(own));
-        }
-        match &self.target {
-            Some(target) => gateway
-                .target(target.as_str())
-                .map_err(|e| Fault::config(format!("target: {}", e.message()))),
-            None => Ok(gateway),
+                (preset.vendor.to_owned(), provider)
+            })
+            .collect();
+        Ok(Config {
+            providers,
+            source: Source::Environment,
+            ..Config::default()
+        })
+    }
+
+    /// `path` if given, else `./gateway.yaml` if there is one, else
+    /// [`from_env`](Self::from_env).
+    pub fn discover(path: Option<&Path>) -> Result<Config, Error> {
+        match path {
+            Some(path) => Config::load(path),
+            None if Path::new(DEFAULT_FILE).exists() => Config::load(DEFAULT_FILE),
+            None => Config::from_env(),
         }
     }
-}
 
-/// The name of the format that relays what no other served format accepts.
-const PASSTHROUGH: &str = "passthrough";
-
-/// Sends the clients of each format in `.0` to its provider there: a
-/// default target serves one kind, and these are of another.
-struct SendTo(BTreeMap<String, String>);
-
-#[async_trait]
-impl Plugin for SendTo {
-    async fn on_client(&self, cx: &mut ClientContext) -> Result<Option<Response>, Fault> {
-        if let Some(provider) = self.0.get(cx.format()) {
-            cx.set_target(provider.as_str());
-        }
-        Ok(None)
-    }
-}
-
-/// The plugins in the order they run: next is the earliest listed plugin
-/// whose `after` plugins are all placed. `Err` for an unknown name or a
-/// cycle.
-fn ordered(plugins: &[PluginConfig]) -> Result<Vec<&PluginConfig>, Fault> {
-    let index = |name: &str| plugins.iter().position(|p| p.name == name);
-    // `after` names a plugin, so a name is one plugin's.
-    let mut each = plugins.iter().enumerate();
-    if let Some((_, p)) = each.find(|(i, p)| index(&p.name) != Some(*i)) {
-        return Err(Fault::config(format!(
-            "plugin '{}' is registered twice",
-            p.name
-        )));
-    }
-    for p in plugins {
-        if let Some(first) = p.after.iter().find(|a| index(a).is_none()) {
-            return Err(Fault::config(format!(
-                "plugin '{}' runs after unknown plugin '{first}'",
-                p.name
-            )));
-        }
-    }
-    let mut placed = vec![false; plugins.len()];
-    let mut order = Vec::with_capacity(plugins.len());
-    while order.len() < plugins.len() {
-        let ready = (0..plugins.len()).find(|&i| {
-            let after = |a: &String| index(a).is_some_and(|a| placed[a]);
-            !placed[i] && plugins[i].after.iter().all(after)
-        });
-        let Some(i) = ready else {
-            let stuck: Vec<_> = (0..plugins.len())
-                .filter(|&i| !placed[i])
-                .map(|i| format!("'{}'", plugins[i].name))
-                .collect();
-            return Err(Fault::config(format!(
-                "plugins run after each other in a cycle: {}",
-                stuck.join(", ")
-            )));
+    /// The configuration of `proxy`: one vendor at `url` (its public API if
+    /// `None`), no keys of its own, its chat format and every other
+    /// request relayed raw, byte for byte, with each client's credentials.
+    pub fn proxy(vendor: ProxyVendor, url: Option<&str>) -> Config {
+        let (name, format, default) = match vendor {
+            ProxyVendor::Anthropic => (
+                "anthropic",
+                "anthropic-messages",
+                "https://api.anthropic.com",
+            ),
+            ProxyVendor::OpenAi => ("openai", "openai-chat", "https://api.openai.com/v1"),
         };
-        placed[i] = true;
-        order.push(&plugins[i]);
+        let url = url.unwrap_or(default).trim_end_matches('/');
+        // Every call is a raw relay of the client's own path, so both
+        // formats sit at the vendor's origin.
+        let origin = url.strip_suffix("/v1").unwrap_or(url);
+        let provider = ProviderConfig {
+            format: Some(vec![format.to_owned(), "passthrough".to_owned()]),
+            base_url: Some(origin.to_owned()),
+            ..ProviderConfig::default()
+        };
+        Config {
+            providers: IndexMap::from([(name.to_owned(), provider)]),
+            serve: Some(vec![format.to_owned(), "passthrough".to_owned()]),
+            source: Source::Proxy,
+            raw_relay: true,
+            ..Config::default()
+        }
     }
-    Ok(order)
-}
 
-/// `env:NAME` reads the environment variable; anything else is literal.
-fn secret(provider: &str, value: &str) -> Result<String, Fault> {
-    match value.strip_prefix("env:") {
-        Some(var) => std::env::var(var).map_err(|_| {
-            Fault::config(format!(
-                "provider '{provider}': environment variable {var} is not set"
-            ))
-        }),
-        None => Ok(value.to_owned()),
+    /// Where it came from.
+    pub fn source(&self) -> &Source {
+        &self.source
     }
 }
 
-fn auth_headers(provider: &str, auth: Option<&Auth>) -> Result<HeaderMap, Fault> {
-    let bad = |e: String| Fault::config(format!("provider '{provider}': {e}"));
-    let (name, value) = match auth {
-        None => return Ok(HeaderMap::new()),
-        Some(Auth::Bearer { key }) => (AUTHORIZATION, format!("Bearer {}", secret(provider, key)?)),
-        Some(Auth::Header { name, key }) => (
-            HeaderName::from_bytes(name.as_bytes()).map_err(|e| bad(e.to_string()))?,
-            secret(provider, key)?,
-        ),
-    };
-    let mut value = HeaderValue::from_str(&value).map_err(|e| bad(e.to_string()))?;
-    value.set_sensitive(true);
-    let mut headers = HeaderMap::new();
-    headers.insert(name, value);
-    Ok(headers)
+/// What to do when there is no config file and no key in the environment.
+pub fn no_keys_message() -> String {
+    let names: Vec<&str> = presets::PRESETS
+        .iter()
+        .flat_map(|p| p.key_env.iter().copied())
+        .collect();
+    format!(
+        "no {DEFAULT_FILE} here and no provider key in the environment.\n\
+         Set one, such as `export OPENAI_API_KEY=sk-...`, and run again; the keys read are\n  {}\n\
+         (and OLLAMA_HOST for Ollama). Or write a config: `respan-gateway init`.",
+        names.join(", ")
+    )
 }
 
-#[cfg(test)]
-#[allow(dead_code, unused_imports)]
-#[path = "../../../tests/support/http.rs"]
-mod http_helpers;
+/// A string or a list of them.
+fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(d)? {
+        None => None,
+        Some(OneOrMany::One(one)) => Some(vec![one]),
+        Some(OneOrMany::Many(many)) => Some(many),
+    })
+}
 
 #[cfg(test)]
 mod tests {
-    use super::http_helpers::{post, read_whole, serve};
-    use mockllm::{Answer, FakeAnthropic, FakeOpenAi};
-    use respan_gateway_http::http::StatusCode;
-
     use super::*;
-
-    /// A gateway from `yaml` reaching its providers over HTTP.
-    fn resolve(yaml: &str) -> Result<Gateway, String> {
-        Config::parse(yaml)
-            .and_then(|c| {
-                let limit = c.body_limit.unwrap_or(crate::BODY_LIMIT);
-                c.build(&crate::formats(limit))
-            })
-            .map_err(|e| e.message().to_owned())
-    }
-
-    /// Build the actual HTTP configuration against two strict local providers.
-    async fn local(yaml: &str) -> (Gateway, FakeOpenAi, FakeOpenAi) {
-        let a = FakeOpenAi::start().await;
-        let b = FakeOpenAi::start().await;
-        a.answer(Answer::text("a"));
-        b.answer(Answer::text("b"));
-        let yaml = yaml
-            .replace("https://a.test/v1", &a.base_url())
-            .replace("https://b.test/v1", &b.base_url());
-        let gateway = resolve(&yaml).unwrap_or_else(|e| panic!("gateway: {e}"));
-        (gateway, a, b)
-    }
-
-    const TWO: &str = "providers:
-  a: { format: openai-chat, base_url: 'https://a.test/v1', auth: { type: bearer, key: sk-test } }
-  b: { format: openai-chat, base_url: 'https://b.test/v1', auth: { type: bearer, key: sk-test } }
-serve: [openai-chat]
-";
-
-    async fn request(gateway: &Gateway, model: &str) {
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        let (response, _) = serve(gateway, post("/v1/chat/completions", body.to_string())).await;
-        let (status, _, body) = read_whole(response).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.is_ok(), "{body:?}");
-        gateway.idle().await;
-    }
-
-    #[tokio::test]
-    async fn the_first_listed_prefix_a_model_matches_wins() {
-        let yaml = format!(
-            "{TWO}plugins:
-  - name: models
-    models: [{{ prefix: claude, provider: a }}, {{ prefix: claude-3, provider: b }}]
-"
-        );
-        let (gateway, a, b) = local(&yaml).await;
-        request(&gateway, "claude-3-x").await;
-        assert_eq!(a.requests().len(), 1);
-        assert_eq!(a.requests()[0].path, "/v1/chat/completions");
-        assert!(b.requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn plugins_run_in_the_order_after_says() {
-        // `first` is listed first but runs after `second`, so the target it
-        // sets, last, wins.
-        let yaml = format!(
-            "{TWO}plugins:
-  - {{ name: first, after: [second], models: [{{ prefix: gpt, provider: a }}] }}
-  - {{ name: second, models: [{{ prefix: gpt, provider: b }}] }}
-"
-        );
-        let (gateway, a, b) = local(&yaml).await;
-        request(&gateway, "gpt-x").await;
-        assert_eq!(a.requests().len(), 1);
-        assert_eq!(a.requests()[0].path, "/v1/chat/completions");
-        assert!(b.requests().is_empty());
-    }
-
-    #[tokio::test]
-    async fn the_default_target_answers_what_no_router_targets() {
-        let yaml = format!(
-            "{TWO}target: b
-plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
-"
-        );
-        let (gateway, a, b) = local(&yaml).await;
-        request(&gateway, "gpt-x").await;
-        assert!(a.requests().is_empty());
-        assert_eq!(b.requests().len(), 1);
-        assert_eq!(b.requests()[0].path, "/v1/chat/completions");
-    }
-
-    #[tokio::test]
-    async fn the_example_config_routes_by_model_both_ways() {
-        let openai = FakeOpenAi::start().await;
-        let anthropic = FakeAnthropic::start().await;
-        openai.answer(Answer::text("hi"));
-        anthropic.answer(Answer::text("hi"));
-        let yaml = include_str!("../../../gateway.example.yaml")
-            .replace("env:OPENAI_API_KEY", "sk")
-            .replace("env:ANTHROPIC_API_KEY", "sk")
-            .replace("https://api.openai.com/v1", &openai.base_url())
-            .replace("https://api.anthropic.com", &anthropic.base_url());
-        let gateway = resolve(&yaml).unwrap_or_else(|e| panic!("gateway: {e}"));
-
-        let openai_client = r#"{"model":"claude-x","messages":[{"role":"user","content":"hi"}]}"#;
-        let anthropic_client =
-            r#"{"model":"gpt-x","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}"#;
-        let to_claude = serve(&gateway, post("/v1/chat/completions", openai_client));
-        let (_, _, to_claude) = read_whole(to_claude.await.0).await;
-        let to_gpt = serve(&gateway, post("/v1/messages", anthropic_client));
-        let (_, _, to_gpt) = read_whole(to_gpt.await.0).await;
-
-        gateway.idle().await;
-        assert_eq!(anthropic.requests().len(), 1);
-        assert_eq!(anthropic.requests()[0].path, "/v1/messages");
-        assert_eq!(openai.requests().len(), 1);
-        assert_eq!(openai.requests()[0].path, "/v1/chat/completions");
-        let json = |b: Result<respan_gateway_http::bytes::Bytes, Fault>| {
-            b.ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or(serde_json::Value::Null)
-        };
-        let to_claude = json(to_claude);
-        let to_gpt = json(to_gpt);
-        assert_eq!(to_claude["object"], "chat.completion", "{to_claude}");
-        assert_eq!(to_gpt["type"], "message", "{to_gpt}");
-    }
-
-    #[test]
-    fn bearer_auth_is_a_sensitive_header() {
-        let auth = Auth::Bearer { key: "sk".into() };
-        let headers = auth_headers("p", Some(&auth)).unwrap_or_default();
-        let value = headers.get(AUTHORIZATION);
-        assert_eq!(value.and_then(|v| v.to_str().ok()), Some("Bearer sk"));
-        assert!(value.is_some_and(HeaderValue::is_sensitive));
-    }
-
-    #[test]
-    fn a_missing_environment_variable_is_an_error() {
-        let yaml = "providers: { p: { format: openai-chat, base_url: 'http://x', auth: { type: bearer, key: 'env:RESPAN_TEST_UNSET' } } }\nserve: []";
-        assert_eq!(
-            resolve(yaml).err().as_deref(),
-            Some("provider 'p': environment variable RESPAN_TEST_UNSET is not set")
-        );
-    }
-
-    #[test]
-    fn a_bad_base_url_or_auth_header_is_an_error() {
-        let provider =
-            |p: &str| format!("providers: {{ p: {{ format: openai-chat, {p} }} }}\nserve: []");
-        let url = provider("base_url: 'https://k:s@x.test'");
-        let said = resolve(&url).err().unwrap_or_default();
-        assert!(said.starts_with("provider 'p': bad base URL"), "{said}");
-        assert!(!said.contains("k:s"), "{said}");
-        let host =
-            provider("base_url: 'https://x.test', auth: { type: header, name: host, key: k }");
-        assert_eq!(
-            resolve(&host).err().as_deref(),
-            Some("provider 'p': header 'host' is the connection's")
-        );
-    }
-
-    #[test]
-    fn a_model_route_to_an_unknown_provider_is_an_error() {
-        let yaml = "serve: [openai-chat]
-plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
-        assert_eq!(
-            resolve(yaml).err().as_deref(),
-            Some("plugin 'models': unknown provider 'nope'")
-        );
-    }
-
-    /// The names of the plugins in `yaml`'s list, in the order they run.
-    fn order_of(yaml: &str) -> Vec<String> {
-        let config = Config::parse(&format!("serve: []\nplugins: {yaml}"));
-        let config = config.unwrap_or_else(|e| panic!("{}", e.message()));
-        let order = ordered(&config.plugins).unwrap_or_else(|e| panic!("{}", e.message()));
-        order.iter().map(|p| p.name.clone()).collect()
-    }
-
-    #[test]
-    fn after_moves_a_plugin_only_as_far_as_it_needs() {
-        // Listed d, c, b, a; c after a, b after d. The earliest ready one
-        // goes next, so: d, b, a, c.
-        let list = "[{name: d}, {name: c, after: [a]}, {name: b, after: [d]}, {name: a}]";
-        assert_eq!(order_of(list), ["d", "b", "a", "c"]);
-        // Listed a, b, c with a after c: b, c, a.
-        let list = "[{name: a, after: [c]}, {name: b}, {name: c}]";
-        assert_eq!(order_of(list), ["b", "c", "a"]);
-    }
-
-    #[test]
-    fn a_bad_plugin_order_or_target_is_an_error() {
-        let router = "models: [{ prefix: c, provider: a }]";
-        let cases = [
-            (
-                format!("plugins: [{{ name: x, after: [y], {router} }}]"),
-                "plugin 'x' runs after unknown plugin 'y'",
-            ),
-            (
-                format!(
-                    "plugins: [{{ name: x, after: [y], {router} }}, {{ name: y, after: [x], {router} }}]"
-                ),
-                "plugins run after each other in a cycle: 'x', 'y'",
-            ),
-            (
-                format!("plugins: [{{ name: x, after: [x], {router} }}, {{ name: z, {router} }}]"),
-                "plugins run after each other in a cycle: 'x'",
-            ),
-            (
-                format!("plugins: [{{ name: x, {router} }}, {{ name: x, {router} }}]"),
-                "plugin 'x' is registered twice",
-            ),
-            (
-                "plugins: [{ name: x }]".to_owned(),
-                "plugin 'x': no plugin given; compiled-in plugins: [models]",
-            ),
-            ("target: nope".to_owned(), "target: unknown provider 'nope'"),
-        ];
-        for (yaml, expected) in cases {
-            let yaml = format!("{TWO}{yaml}");
-            assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
-        }
-    }
-
-    #[test]
-    fn a_session_provider_is_websocket_and_its_clients_go_to_it_alone() {
-        let realtime = "realtime: { format: openai-realtime, base_url: 'wss://api.openai.com/v1' }";
-        let cases = [
-            (
-                "providers: { p: { format: gemini-live, base_url: 'https://x.test' } }\nserve: []"
-                    .to_owned(),
-                "provider 'p': bad base URL: ws or wss with a host, and no query, fragment or credentials (those go in its headers)",
-            ),
-            (
-                "serve: [openai-realtime]".to_owned(),
-                "serve: openai-realtime needs exactly one provider of that format",
-            ),
-            (
-                format!(
-                    "providers: {{ {realtime} }}\nserve: [openai-realtime]
-plugins: [{{ name: models, models: [{{ prefix: gpt, provider: realtime }}] }}]"
-                ),
-                "plugin 'models': provider 'realtime' uses format 'openai-realtime', incompatible with conversation models routes",
-            ),
-        ];
-        for (yaml, expected) in cases {
-            assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
-        }
-        let both = format!("providers: {{ {realtime} }}\nserve: [openai-realtime]");
-        assert!(resolve(&both).is_ok());
-    }
 
     #[test]
     fn a_listen_address_is_a_socket_address() {
-        let bad = Config::parse("listen: 127.0.0.1\nserve: []").err();
-        assert!(bad.is_some_and(|e| e.message().contains("listen")));
-        let good = Config::parse("listen: 127.0.0.1:8080\nserve: []");
+        let bad = Config::parse("listen: 127.0.0.1").err();
+        assert!(bad.is_some_and(|e| e.to_string().contains("listen")));
+        let good = Config::parse("listen: 127.0.0.1:8080");
         assert!(good.is_ok_and(|c| c.listen.is_some_and(|a| a.port() == 8080)));
     }
 
     #[test]
-    fn a_format_served_after_passthrough_is_refused() {
-        let yaml = "serve: [passthrough, openai-chat]";
+    fn presets_lists_keys_and_switches_parse() {
+        let yaml = "keys: [env:GATEWAY_KEY, sk-local]
+log: false
+ui: false
+providers:
+  openai: { vendor: openai }
+  claude: { vendor: anthropic, key: env:MY_KEY, base_url: 'http://x.test' }
+  both: { format: [openai-chat, anthropic-messages], base_url: 'http://y.test' }
+  one: { format: openai-chat, base_url: 'http://z.test' }
+";
+        let config = Config::parse(yaml).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(config.keys, ["env:GATEWAY_KEY", "sk-local"]);
+        assert!(!config.log && !config.ui);
+        assert!(config.serve.is_none());
+        let names: Vec<&str> = config.providers.keys().map(String::as_str).collect();
         assert_eq!(
-            resolve(yaml).err().as_deref(),
-            Some(
-                "serve: 'openai-chat' comes after 'passthrough', which accepts every request first; serve 'passthrough' last"
-            )
+            names,
+            ["openai", "claude", "both", "one"],
+            "in config order"
         );
+        let both = &config.providers["both"];
+        assert_eq!(
+            both.format.as_deref(),
+            Some(&["openai-chat".to_owned(), "anthropic-messages".to_owned()][..])
+        );
+        assert_eq!(
+            config.providers["one"].format.as_ref().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            config.providers["claude"].key.as_deref(),
+            Some("env:MY_KEY")
+        );
+        assert_eq!(config.providers["openai"].vendor.as_deref(), Some("openai"));
     }
 
     #[test]
-    fn an_unknown_format_names_the_compiled_in_ones() {
-        let yaml = "serve: [openai-chat, nope]";
+    fn defaults_serve_the_ui_and_log() {
+        let config = Config::parse("{}").unwrap_or_else(|e| panic!("{e}"));
+        assert!(config.log && config.ui && config.keys.is_empty());
+        assert_eq!(config.source(), &Source::Inline);
+    }
+
+    #[test]
+    fn unknown_fields_are_refused() {
+        let said = Config::parse("providers: { p: { vendor: openai, bogus: 1 } }")
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(said.contains("bogus"), "{said}");
+    }
+
+    #[test]
+    fn proxy_is_one_provider_of_the_chat_format_and_passthrough_at_the_origin() {
+        let config = Config::proxy(ProxyVendor::OpenAi, Some("http://h.test/v1/"));
+        let provider = &config.providers["openai"];
+        assert_eq!(provider.base_url.as_deref(), Some("http://h.test"));
         assert_eq!(
-            resolve(yaml).err().as_deref(),
-            Some(
-                "serve: unknown format 'nope'; compiled-in formats: [openai-chat, groq-chat, deepseek-chat, vllm-chat, openrouter-chat, azure-chat, anthropic-messages, passthrough, openai-realtime, responses-ws, gemini-live]"
-            )
+            provider.format.as_deref(),
+            Some(&["openai-chat".to_owned(), "passthrough".to_owned()][..])
         );
+        assert!(config.raw_relay);
+        assert_eq!(config.source().to_string(), "proxy");
     }
 }

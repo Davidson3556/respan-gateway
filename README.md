@@ -22,19 +22,52 @@ Current contracts and package boundaries:
 
 ## Try it
 
-```bash
-cp gateway.example.yaml gateway.yaml
-export OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-...
-cargo run -p respan-gateway -- check
-cargo run -p respan-gateway
+No config file is needed: every vendor whose key is in the environment
+becomes a provider.
 
+```bash
+export OPENAI_API_KEY=sk-... ANTHROPIC_API_KEY=sk-ant-...
+cargo run -p respan-gateway
+```
+
+It prints where it listens, the providers it found, what it serves and a
+`curl` to try. Models go to their vendor by name, translated when the
+client speaks another vendor's API:
+
+```bash
 # An OpenAI client asking for a Claude model is translated to Anthropic,
 curl localhost:8080/v1/chat/completions \
   -d '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}'
-# and an Anthropic client asking for a GPT model is translated to OpenAI.
+# an Anthropic client asking for a GPT model is translated to OpenAI,
 curl localhost:8080/v1/messages \
   -d '{"model":"gpt-4o-mini","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+# and `provider/model` picks a provider (here `groq`) and sends `model`.
+curl localhost:8080/v1/chat/completions \
+  -d '{"model":"groq/llama-3.3-70b-versatile","messages":[{"role":"user","content":"hi"}]}'
 ```
+
+`GET /v1/models` lists every provider's models as clients name them,
+`GET /healthz` answers `ok`, and the web UI at
+[localhost:8080/ui/](http://localhost:8080/ui/) shows providers, routes and
+each request live; each finished request is also one line on stderr.
+
+Vendor presets: `openai`, `anthropic`, `gemini` (`GEMINI_API_KEY` or
+`GOOGLE_API_KEY`), `groq`, `deepseek`, `openrouter`, `xai`, `mistral`,
+`together`, `fireworks`, each reading `<VENDOR>_API_KEY`, and `ollama`
+(with `OLLAMA_HOST`). To configure more, write a config and check it:
+
+```bash
+cargo run -p respan-gateway -- init    # a commented gateway.yaml from the keys found
+cargo run -p respan-gateway -- check   # ./gateway.yaml, or -c FILE
+cargo run -p respan-gateway            # reads ./gateway.yaml when there is one
+```
+
+`keys: [env:GATEWAY_KEY]` makes every request carry a gateway key
+(`Authorization: Bearer`, `x-api-key` or `x-goog-api-key`), which is never
+sent on. [`gateway.example.yaml`](gateway.example.yaml) shows every
+setting, presets first. The binary is a library too, `respan_gateway`:
+`App::new(Config::from_env()?)?` gives an `axum::Router` to serve or to
+hand requests to in process.
 
 Each format served recognises its own requests (OpenAI Chat a `POST` to
 `.../chat/completions`, Anthropic Messages to `.../v1/messages`); anything
@@ -157,7 +190,7 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the opaque format, and optional Reqwest transport and Axum hosting. |
 | `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
-| `apps/gateway/` | The binary: YAML configuration, `check`, `proxy` and composition. |
+| `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing, client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `init` and `proxy`. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |
 | `validation/` | Separate opt-in live-provider and external-tool checks, excluded from workspace tests. |

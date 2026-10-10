@@ -1,73 +1,102 @@
-# There is no client auth: anyone who can reach this address spends your
-# keys. Keep it local.
+# Every setting of respan-gateway, with what it does. `respan-gateway init`
+# writes a shorter starter; with no config file at all, the gateway makes a
+# provider of each vendor whose key is in the environment.
+
+# Without client keys (below), anyone who can reach this address spends
+# your keys. Keep it local.
 listen: 127.0.0.1:8080
+
+# Client keys, literal or env:NAME. When set, every request needs one, as
+# `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key`; the
+# gateway takes it off, and no provider sees it. The web UI asks for one too.
+# keys: [env:GATEWAY_KEY]
+
+# Print one line per finished request to stderr; serve the web UI and its
+# admin API at /ui/ (and redirect / there).
+# log: true
+# ui: true
 
 # The most bytes of a client's request, and of a provider's answer held at
 # once: past it, the request fails 413, the answer 502. 32 MiB if unset, the
 # largest request the vendors' JSON APIs take.
 # body_limit: 33554432
 
-# A base URL is what the provider's own SDK takes: OpenAI's holds the
-# version, Anthropic's does not. openai-chat reads only OpenAI's own fields;
-# a vendor whose fields the gateway reads has a format of its own name:
-# groq-chat, deepseek-chat, vllm-chat, openrouter-chat and azure-chat.
-# A provider with `auth` (any header) sends only its own credentials;
-# without it, clients' pass through.
+# Providers, by name, in order: the first serving a kind (chat, realtime,
+# ...) is that kind's default. A vendor preset brings the vendor's base URL,
+# its key from env:<VENDOR>_API_KEY, every format of the vendor this binary
+# speaks (OpenAI: chat, realtime and Responses over WebSocket; Gemini: chat
+# and Live), and its model names: gpt-*, o3-*, ... go to openai, claude-* to
+# anthropic, gemini-* to gemini, without a route of your own. Presets:
+# openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral,
+# together, fireworks, ollama. Override `base_url` or `key` in place.
+# Any provider is also reached as `<name>/<model>`, as in
+# `groq/llama-3.3-70b-versatile`; the gateway sends `llama-3.3-70b-versatile`.
 providers:
-  openai:
-    format: openai-chat
-    base_url: https://api.openai.com/v1
-    auth: { type: bearer, key: env:OPENAI_API_KEY }
-  anthropic:
-    format: anthropic-messages
-    base_url: https://api.anthropic.com
-    auth: { type: header, name: x-api-key, key: env:ANTHROPIC_API_KEY }
+  openai: { vendor: openai }
+  anthropic: { vendor: anthropic }
+#   gemini: { vendor: gemini }        # GEMINI_API_KEY or GOOGLE_API_KEY
+#   groq: { vendor: groq }
+#   local: { vendor: ollama, base_url: http://localhost:11434/v1 }
+
+# A provider spelled out: its format (or a list of them), the base URL its
+# own SDK takes (OpenAI's holds the version, Anthropic's does not) and its
+# key, sent as each format expects (Bearer; x-api-key for
+# anthropic-messages; x-goog-api-key for gemini-live), or any one header
+# with `auth`. openai-chat reads only OpenAI's own fields; a vendor whose
+# fields the gateway reads has a format of its own name: groq-chat,
+# deepseek-chat, vllm-chat, openrouter-chat and azure-chat. A provider with
+# no key sends none of the client's: only `proxy` relays clients' keys.
 #   groq:
 #     format: groq-chat
 #     base_url: https://api.groq.com/openai/v1
 #     auth: { type: bearer, key: env:GROQ_API_KEY }
+#   vllm:
+#     format: vllm-chat
+#     base_url: http://gpu-box:8000/v1
+#     key: env:VLLM_KEY
 
 # Sessions over WebSocket, as their SDKs reach them: openai-realtime
 # (clients at .../v1/realtime), responses-ws (an upgrade to .../v1/responses)
-# and gemini-live. Serve the format too: each WebSocket upgrade is then a
-# session, sent to the one provider of its format, as nothing translates a
-# session's events. body_limit is HTTP's; a session's message may be 16 MiB.
+# and gemini-live. Each WebSocket upgrade is a session, sent to the one
+# provider of its format, as nothing translates a session's events; the
+# openai and gemini presets include theirs. body_limit is HTTP's; a
+# session's message may be 16 MiB.
 #   realtime:
 #     format: openai-realtime
 #     base_url: wss://api.openai.com/v1
 #     auth: { type: bearer, key: env:OPENAI_API_KEY }
-#   gemini:
+#   live:
 #     format: gemini-live
 #     base_url: wss://generativelanguage.googleapis.com
 #     auth: { type: header, name: x-goog-api-key, key: env:GEMINI_API_KEY }
-#   serve: [openai-chat, anthropic-messages, openai-realtime, gemini-live]
 
 # To relay a vendor's other endpoints too (Anthropic's count_tokens, OpenAI's
 # /v1/responses for Codex), add a provider of format `passthrough` at the
 # vendor's origin (no /v1) and serve `passthrough` last: it takes every
-# request no format before it accepts, unread, byte for byte, with the
-# client's own credentials:
+# request no format before it accepts, unread, byte for byte:
 #   providers:
 #     anthropic-any: { format: passthrough, base_url: https://api.anthropic.com }
 #   serve: [openai-chat, anthropic-messages, passthrough]
 # With no config file at all: `respan-gateway proxy --anthropic` (or
-# `--openai`), which does exactly that for one vendor.
+# `--openai`), which does exactly that for one vendor, with each client's
+# own credentials.
 #
 # The formats clients speak, tried in order; each recognises its own
 # requests: openai-chat a POST to .../chat/completions, anthropic-messages a
-# POST to .../v1/messages. Anything else is a 404.
-serve: [openai-chat, anthropic-messages]
+# POST to .../v1/messages. Anything else is a 404. Unset: openai-chat,
+# anthropic-messages, and every session format some provider speaks.
+# serve: [openai-chat, anthropic-messages]
 
 # Compiled-in plugins, run on every request in the order listed, except
-# that an entry runs after the plugins its `after` names.
-plugins:
-  # Claude models go to Anthropic: relayed for Anthropic clients (with
-  # anthropic-beta), translated for OpenAI ones.
-  - name: models
-    models:
-      - { prefix: claude, provider: anthropic }
+# that an entry runs after the plugins its `after` names. `models` routes
+# model names to providers, before the presets' own names.
+# plugins:
+#   - name: models
+#     models:
+#       - { prefix: llama, provider: groq }
 
-# The provider for requests no plugin targets. Translation is text only: a
-# request with tools is refused unless it goes to a provider of its own
-# format.
-target: openai
+# The default provider of each kind it serves, for requests nothing else
+# routes; unset, the first provider serving the kind. Translation is text
+# only: a request with tools is refused unless it goes to a provider of its
+# own format.
+# target: openai
