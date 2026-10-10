@@ -951,7 +951,9 @@ async fn a_system_only_openai_request_is_not_sent_to_anthropic_without_messages(
 #[tokio::test]
 async fn an_unknown_path_is_a_404() {
     let openai = FakeOpenAi::start().await;
-    let gw = Gateway::start(&one_provider("openai-chat", &openai.base_url())).await;
+    // Without the web UI, which takes `/`.
+    let config = one_provider("openai-chat", &openai.base_url());
+    let gw = Gateway::start(&format!("ui: false\n{config}")).await;
 
     for (verb, path) in [
         (reqwest::Method::POST, "/v1/nope"),

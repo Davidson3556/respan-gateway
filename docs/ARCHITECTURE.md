@@ -30,7 +30,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the opaque format; optional Reqwest transport and Axum hosting | Core |
 | `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
 | `crates/plugins/` | Plugins | Model routing, attempts, fallback, races and backoff | Core |
-| `apps/gateway/` | Binary | Executable, YAML configuration and component registration | All of the above |
+| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), its routing step, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
 | `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
 
 Arrows below point from a dependency toward its consumers. Test dependencies
@@ -59,6 +59,16 @@ flowchart LR
 The workspace manifest centralizes local dependency paths and common package
 settings. Crate names and `cargo run -p respan-gateway` remain independent of
 their filesystem locations.
+
+The application (`apps/gateway`) composes these crates with public APIs only.
+A configured provider may speak several formats (a vendor preset speaks every
+format of its vendor compiled in); the application registers one core
+provider per format and routes with one plugin of its own: `provider/model`,
+then `models` routes, then preset model prefixes, then the kind's default,
+among the providers serving the request's kind. Its HTTP application puts
+`/healthz`, `/v1/models` and the web UI's admin API before the formats, and
+client keys and the request log around them. Hosts reuse it as the
+`respan_gateway` library: `App::new(config)` gives an `axum::Router`.
 
 ## Design constraints
 
