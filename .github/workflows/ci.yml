@@ -83,13 +83,27 @@ jobs:
       - run: cargo check --tests --bins
         working-directory: validation
 
+  # The `rust-version` of Cargo.toml is the one truth. rust-toolchain.toml pins
+  # stable for development and would override an installed toolchain, so the
+  # job names its own through RUSTUP_TOOLCHAIN.
   msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace
+      - name: Check on the MSRV
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: |
+          rustc --version | grep -F "rustc $MSRV."
+          cargo check --workspace --all-targets --all-features
 
   deny:
     runs-on: ubuntu-latest
