@@ -57,20 +57,37 @@ use multipart::Writer;
 /// A request's fields, from a JSON object or a form: a form's text fields
 /// as strings, those named `name[]` as an array under `name`, and its files
 /// apart, by name, `[]` dropped.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Fields {
     map: Map<String, Value>,
     files: Vec<(String, Media)>,
 }
 
-/// The fields of a request of `headers` and body `raw`: a form if its
-/// content type says so, else a JSON object.
-fn read_fields(headers: &HeaderMap, raw: &Bytes) -> Result<Fields, Fault> {
-    read_fields_in(headers, raw, true)
+/// A client's request as its decoder reads it: the head's headers and the
+/// body, whose fields are parsed once for every reader of the wire.
+struct Form<'a> {
+    headers: &'a HeaderMap,
+    raw: &'a Bytes,
+    wire: Option<&'a Wire>,
 }
 
-/// [`read_fields`], with a form's files read only if `files`.
-fn read_fields_in(headers: &HeaderMap, raw: &Bytes, files: bool) -> Result<Fields, Fault> {
+impl Form<'_> {
+    /// The fields of the body, a form if the content type says so, else a
+    /// JSON object. The first reader parses them; the response's framing
+    /// reads the same ([`asked`]).
+    fn fields(&self) -> Result<Fields, Fault> {
+        let parsed = self
+            .wire
+            .and_then(|w| w.memo(|r| parse_fields(r.headers(), r.body())));
+        match parsed {
+            Some(parsed) => parsed.clone(),
+            None => parse_fields(self.headers, self.raw),
+        }
+    }
+}
+
+/// The fields of a request of `headers` and body `raw`.
+fn parse_fields(headers: &HeaderMap, raw: &Bytes) -> Result<Fields, Fault> {
     let content_type = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok());
     let Some(boundary) = content_type.and_then(multipart::boundary) else {
         return match serde_json::from_slice::<Value>(raw) {
@@ -90,9 +107,6 @@ fn read_fields_in(headers: &HeaderMap, raw: &Bytes, files: bool) -> Result<Field
             None => (part.name.clone(), false),
         };
         if let Some(filename) = part.filename {
-            if !files {
-                continue;
-            }
             let mime = mime_of(part.content_type.as_deref(), &filename, &part.body);
             let mut media = Media::new(mime, MediaSource::Bytes(part.body));
             media.name = Some(filename);
@@ -430,7 +444,7 @@ type ChooseEncoder<O> =
 /// request, with the head's content type it sets.
 fn bind_client<I, O>(
     io: ClientIo,
-    decode: fn(&RequestHead, Bytes) -> Result<I, Fault>,
+    decode: fn(&RequestHead, &Form) -> Result<I, Fault>,
     encoder: ChooseEncoder<O>,
 ) -> Connection<I, O>
 where
@@ -438,8 +452,18 @@ where
     O: Clone + Send + Sync + 'static,
 {
     let wire = io.extensions().get::<Wire>().cloned();
+    let read = wire.clone();
     io.bind(
-        move |request| respan_gateway_http::messages(request, decode),
+        move |request| {
+            respan_gateway_http::messages(request, move |head, raw| {
+                let form = Form {
+                    headers: &head.headers,
+                    raw: &raw,
+                    wire: read.as_ref(),
+                };
+                decode(head, &form)
+            })
+        },
         move |reply| {
             let mut head = reply.head();
             let fields = asked(wire.as_ref());
@@ -473,16 +497,15 @@ fn streams(io: &ProviderIo, paths: &[&str], wants: fn(&Map<String, Value>) -> bo
     paths_match && wants(asked(wire))
 }
 
-/// The text fields of a client's request, for its response's framing, read
-/// once per wire: a form's files are skipped; none if it cannot be read, as
+/// The text fields of a client's request, for its response's framing, as
+/// its decoder parsed them ([`Form::fields`]); none if it cannot be read, as
 /// it then was refused.
 fn asked(wire: Option<&Wire>) -> &Map<String, Value> {
     static NONE: LazyLock<Map<String, Value>> = LazyLock::new(Map::new);
-    let read = |r: &http::Request<Bytes>| {
-        let fields = read_fields_in(r.headers(), r.body(), false);
-        fields.map(|f| f.map).unwrap_or_default()
-    };
-    wire.and_then(|w| w.memo(read)).unwrap_or(&NONE)
+    let parsed = wire.and_then(|w| w.memo(|r| parse_fields(r.headers(), r.body())));
+    parsed
+        .and_then(|p| p.as_ref().ok())
+        .map_or(&NONE, |f| &f.map)
 }
 
 /// Write the field `name` of JSON `value` into a form, as OpenAI's SDKs
@@ -567,5 +590,31 @@ mod tests {
                 ("chunking", "{\"type\":\"auto\"}".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn a_form_is_parsed_once_for_the_decoder_and_the_framing() {
+        let mut form = Writer::with_boundary("b".into());
+        form.text("stream", "true");
+        form.file("file", "a.wav", "audio/wav", b"RIFF\0\0\0\0WAVEfmt");
+        let body = form.finish();
+        let request = http::Request::post("/v1/audio/transcriptions")
+            .header(CONTENT_TYPE, "multipart/form-data; boundary=b")
+            .body(body)
+            .unwrap_or_default();
+        let wire = Wire::new(request, false);
+        let request = wire.get().cloned().unwrap_or_default();
+        let (head, raw) = request.into_parts();
+        let decoding = Form {
+            headers: &head.headers,
+            raw: &raw,
+            wire: Some(&wire),
+        };
+        let read = decoding.fields().expect("fields");
+        assert_eq!(read.files.len(), 1, "the decoder gets the files");
+        let framing = asked(Some(&wire));
+        assert_eq!(framing["stream"], "true", "the framing gets the text");
+        let parsed = wire.memo(|_| -> Result<Fields, Fault> { unreachable!("parsed again") });
+        assert!(parsed.is_some_and(Result::is_ok), "both read the one parse");
     }
 }

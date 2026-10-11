@@ -1,9 +1,9 @@
 //! OpenAI Embeddings: `POST /embeddings` (JSON), answered whole in JSON.
 
 use super::{
-    Fields, as_usage_extras, b64, bind_client, bind_provider, foreign, invalid, json_bytes, kept,
-    merge_missing, missing, native_of, post_to, read_fields, rest_of, sends, set, take_count,
-    take_string, unb64, unreadable, whole_json,
+    Fields, Form, as_usage_extras, b64, bind_client, bind_provider, foreign, invalid, json_bytes,
+    kept, merge_missing, missing, native_of, post_to, rest_of, sends, set, take_count, take_string,
+    unb64, unreadable, whole_json,
 };
 use respan_gateway_conversation::Usage;
 use respan_gateway_core::{BadRequest, Connection, EventStream, Fault, Format, Upstream};
@@ -62,8 +62,8 @@ impl Format<ProviderIo, Output, Input> for OpenAiEmbeddings {
 }
 
 /// A client's request.
-fn decode_request(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
-    let Fields { mut map, files } = read_fields(&head.headers, &raw)?;
+fn decode_request(_: &RequestHead, form: &Form) -> Result<Input, Fault> {
+    let Fields { mut map, files } = form.fields()?;
     if let Some((name, _)) = files.first() {
         return Err(invalid(name, "is not a file this endpoint takes"));
     }

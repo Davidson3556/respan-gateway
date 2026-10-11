@@ -2,10 +2,9 @@
 //! audio's bytes or, if asked (`stream_format: "sse"`), a stream of events.
 
 use super::{
-    Fields, as_usage_extras, b64, bind_client, bind_provider, event_json, foreign, invalid,
-    json_bytes, kept, merge_missing, missing, native_of, post_to, read_fields, read_usage, sends,
-    set, sse_event, streams, take_number, take_string, unb64, unreadable, usage_extras,
-    write_usage,
+    Fields, Form, as_usage_extras, b64, bind_client, bind_provider, event_json, foreign, invalid,
+    json_bytes, kept, merge_missing, missing, native_of, post_to, read_usage, sends, set,
+    sse_event, streams, take_number, take_string, unb64, unreadable, usage_extras, write_usage,
 };
 use respan_gateway_conversation::Usage;
 use respan_gateway_core::{Connection, EventStream, Fault, Format, NativeValue, Truncated};
@@ -74,8 +73,8 @@ fn asks_events(fields: &Map<String, Value>) -> bool {
 }
 
 /// A client's request.
-fn decode_request(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
-    let Fields { mut map, files } = read_fields(&head.headers, &raw)?;
+fn decode_request(_: &RequestHead, form: &Form) -> Result<Input, Fault> {
+    let Fields { mut map, files } = form.fields()?;
     if let Some((name, _)) = files.first() {
         return Err(invalid(name, "is not a file this endpoint takes"));
     }

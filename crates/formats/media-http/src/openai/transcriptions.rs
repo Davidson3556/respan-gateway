@@ -5,8 +5,8 @@
 
 use super::multipart::{self, Writer};
 use super::{
-    Fields, as_usage_extras, bind_client, bind_provider, bytes_of, event_json, file_name, foreign,
-    invalid, is_true, json_bytes, kept, merge_missing, missing, native_of, post_to, read_fields,
+    Fields, Form, as_usage_extras, bind_client, bind_provider, bytes_of, event_json, file_name,
+    foreign, invalid, is_true, json_bytes, kept, merge_missing, missing, native_of, post_to,
     read_usage, rest_of, seconds_json, sends, set, sse_event, streams, take_number, take_string,
     unreadable, usage_extras, whole_json, write_field, write_usage,
 };
@@ -86,8 +86,8 @@ impl Format<ProviderIo, Output, Input> for OpenAiTranscriptions {
 }
 
 /// A client's request, a translation if to `/audio/translations`.
-fn decode_request(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
-    let Fields { mut map, files } = read_fields(&head.headers, &raw)?;
+fn decode_request(head: &RequestHead, form: &Form) -> Result<Input, Fault> {
+    let Fields { mut map, files } = form.fields()?;
     let mut audio = None;
     for (name, media) in files {
         match name.as_str() {

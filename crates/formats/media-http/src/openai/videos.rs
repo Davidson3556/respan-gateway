@@ -5,8 +5,8 @@
 
 use super::multipart::{self, Writer};
 use super::{
-    Fields, bind_client, bytes_of, file_name, foreign, invalid, json_bytes, kept, merge_missing,
-    missing, native_of, read_fields, rest_of, sends, set, take_count, take_string, unreadable,
+    Fields, Form, bind_client, bytes_of, file_name, foreign, invalid, json_bytes, kept,
+    merge_missing, missing, native_of, rest_of, sends, set, take_count, take_string, unreadable,
     whole_json, write_field,
 };
 use crate::edge::{bind_provider, content};
@@ -154,13 +154,13 @@ fn escape(text: &str) -> String {
 }
 
 /// A client's request.
-fn decode_request(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
+fn decode_request(head: &RequestHead, form: &Form) -> Result<Input, Fault> {
     let route = route(&head.method, &head.uri)
         .ok_or_else(|| BadRequest::fault("the request is to no videos endpoint"))?;
     Ok(match route {
-        Route::Create => Input::Create(decode_create(head, &raw)?),
+        Route::Create => Input::Create(decode_create(form)?),
         Route::Remix(id) => {
-            let Fields { mut map, files } = read_fields(&head.headers, &raw)?;
+            let Fields { mut map, files } = form.fields()?;
             if let Some((name, _)) = files.first() {
                 return Err(invalid(name, "is not a file this endpoint takes"));
             }
@@ -194,8 +194,8 @@ fn decode_request(head: &RequestHead, raw: Bytes) -> Result<Input, Fault> {
 }
 
 /// A client's request for a video.
-fn decode_create(head: &RequestHead, raw: &Bytes) -> Result<Create, Fault> {
-    let Fields { mut map, files } = read_fields(&head.headers, raw)?;
+fn decode_create(form: &Form) -> Result<Create, Fault> {
+    let Fields { mut map, files } = form.fields()?;
     let prompt = take_string(&mut map, "prompt")?.ok_or_else(|| missing("prompt"))?;
     let mut create = Create::new(prompt);
     create.model = take_string(&mut map, "model")?;
