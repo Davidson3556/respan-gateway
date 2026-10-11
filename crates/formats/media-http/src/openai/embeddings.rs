@@ -197,11 +197,11 @@ fn vector_of(v: &Value) -> Result<Vec<f32>, Fault> {
 /// The encoder of a response to a client's `request`, with the vectors
 /// encoded as it asked.
 fn response_encoder(
-    request: &http::Request<Bytes>,
+    _request: &http::Request<Bytes>,
+    asked: &Map<String, Value>,
     head: &mut http::response::Parts,
 ) -> Box<dyn Encoder<Output>> {
     super::content_type(head, "application/json");
-    let asked = super::asked(request);
     let base64 = asked.get("encoding_format").and_then(Value::as_str) == Some("base64");
     whole::collect(move |events: &[Output]| encode_whole(events, base64))
 }

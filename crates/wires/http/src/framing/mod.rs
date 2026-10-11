@@ -4,6 +4,7 @@
 //! themselves are the `respan-gateway-*-http` crates'; traffic of no kind
 //! relays through [`passthrough`](crate::passthrough).
 
+pub mod fields;
 pub mod sse;
 pub mod whole;
 

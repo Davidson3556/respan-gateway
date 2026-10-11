@@ -355,9 +355,10 @@ impl Streamed {
 /// asked for.
 fn response_encoder(
     request: &http::Request<Bytes>,
+    asked: &Map<String, Value>,
     head: &mut http::response::Parts,
 ) -> Box<dyn Encoder<Output>> {
-    if !is_true(super::asked(request).get("stream")) {
+    if !is_true(asked.get("stream")) {
         super::content_type(head, "application/json");
         return whole::collect(encode_whole);
     }
