@@ -84,7 +84,9 @@ What one spec has and the other has not is emulated, dropped or refused:
   tool choice other than `auto` and `create_response: false` are refused.
 - To OpenAI: Gemini's client routes by `?model=` on its URL (OpenAI takes
   its model at connect), and its `activityStart` while the model speaks is
-  `response.cancel`; its tools' schemas name their types as JSON Schema
+  `response.cancel` (one that reaches OpenAI as the response ends is refused
+  there for want of a response, and that refusal is dropped, not a close);
+  its tools' schemas name their types as JSON Schema
   does (`object` for `OBJECT`); a response that calls tools, or is
   interrupted, ends its turn with `turnComplete`, as the Live API's do;
   context compression, VAD sensitivities and
