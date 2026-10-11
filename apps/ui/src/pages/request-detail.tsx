@@ -34,7 +34,7 @@ function useRequestRecord(id: string) {
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="grid gap-3">
+    <section className="grid grid-cols-[minmax(0,1fr)] gap-3">
       <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{title}</h3>
       {children}
     </section>
@@ -69,7 +69,7 @@ function Timing({ record }: { record: RequestRecord }) {
   const { ttfb, rest, total, ttfbShare } = timing;
   const unmeasured = record.ttfb_ms == null;
   return (
-    <div className="grid gap-3">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-3">
       <div className="flex items-baseline justify-between">
         <span className="font-mono text-2xl font-semibold tabular">{formatMs(total)}</span>
         <span className="text-xs text-muted-foreground">total</span>
@@ -87,10 +87,10 @@ function Timing({ record }: { record: RequestRecord }) {
         <div className="flex-1 bg-brand" />
       </div>
       {!unmeasured && (
-        <dl className="grid grid-cols-2 gap-3 text-xs">
+        <dl className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-3 text-xs">
           <div className="flex items-start gap-2">
             <span className="mt-1 size-2 shrink-0 rounded-full bg-brand/45" aria-hidden="true" />
-            <div>
+            <div className="min-w-0">
               <dt className="text-muted-foreground">Time to first byte</dt>
               <dd className="font-mono text-sm tabular">
                 {formatMs(ttfb)} <span className="text-muted-foreground">{formatPercent(ttfbShare)}</span>
@@ -99,7 +99,7 @@ function Timing({ record }: { record: RequestRecord }) {
           </div>
           <div className="flex items-start gap-2">
             <span className="mt-1 size-2 shrink-0 rounded-full bg-brand" aria-hidden="true" />
-            <div>
+            <div className="min-w-0">
               <dt className="text-muted-foreground">{record.stream ? "Streaming the rest" : "Body"}</dt>
               <dd className="font-mono text-sm tabular">
                 {formatMs(rest)} <span className="text-muted-foreground">{formatPercent(1 - ttfbShare)}</span>
@@ -117,7 +117,7 @@ function Usage({ record }: { record: RequestRecord }) {
   if (!usage) return <p className="text-sm text-muted-foreground">No usage was reported.</p>;
   const speed = tokensPerSecond(record);
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+    <div className="grid grid-cols-[repeat(2,minmax(0,1fr))] gap-2 sm:grid-cols-[repeat(3,minmax(0,1fr))]">
       <Stat label="Input tokens" value={formatCount(usage.input_tokens)} />
       <Stat label="Output tokens" value={formatCount(usage.output_tokens)} />
       {usage.seconds !== undefined && <Stat label="Audio billed" value={`${usage.seconds} s`} />}
@@ -143,7 +143,7 @@ function Reproduce({ record }: { record: RequestRecord }) {
 
 function Detail({ record }: { record: RequestRecord }) {
   return (
-    <div className="grid gap-6 px-4 pb-6">
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-6 px-4 pb-6">
       {record.error && (
         <div role="alert" className="flex gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
           <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
@@ -182,7 +182,7 @@ function Detail({ record }: { record: RequestRecord }) {
         </dl>
       </Section>
       <Reproduce record={record} />
-      <details className="group grid gap-2">
+      <details className="group grid grid-cols-[minmax(0,1fr)] gap-2">
         <summary className="w-fit cursor-pointer rounded text-xs font-medium tracking-wide text-muted-foreground uppercase outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50">
           Raw record
         </summary>

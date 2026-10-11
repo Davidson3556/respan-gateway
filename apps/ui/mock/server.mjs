@@ -570,7 +570,7 @@ const routesTable = {
   "GET /healthz": (_req, res) => res.end("ok"),
   "GET /ui/api/overview": (_req, res) =>
     json(res, 200, {
-      version: "0.0.0-mock",
+      version: "0.1.0",
       listen: `127.0.0.1:${PORT}`,
       started_at: startedAt.toISOString(),
       uptime_seconds: Math.floor((Date.now() - startedAt) / 1000) + 7_380,
