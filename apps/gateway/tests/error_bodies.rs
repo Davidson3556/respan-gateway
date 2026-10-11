@@ -53,9 +53,9 @@ async fn trickler(status: &'static str, gap: Duration, closed: Arc<AtomicBool>) 
 async fn gateway(base: &str) -> Gateway {
     Gateway::start(&format!(
         "providers:
-  any: {{ format: passthrough, base_url: '{base}' }}
-serve: [passthrough]
-target: any
+  any: {{ formats: passthrough, base_url: '{base}' }}
+formats: [passthrough]
+default: any
 "
     ))
     .await
@@ -101,9 +101,9 @@ async fn an_endless_error_is_answered_at_the_limit() {
     let gw = Gateway::start(&format!(
         "body_limit: 1048576
 providers:
-  any: {{ format: passthrough, base_url: '{base}' }}
-serve: [passthrough]
-target: any
+  any: {{ formats: passthrough, base_url: '{base}' }}
+formats: [passthrough]
+default: any
 "
     ))
     .await;

@@ -212,7 +212,7 @@ impl KnownFormat {
         match &self.serve {
             Some(serve) => serve(gateway),
             None => Err(Fault::config(format!(
-                "serve: {} is spoken only by providers; no client sends it",
+                "formats: {} is spoken only by providers; no client sends it",
                 self.name
             ))),
         }

@@ -136,7 +136,9 @@ fn init_writes_a_config_that_check_accepts() {
 
     let out = run(&["check"]);
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "gateway.yaml: ok\n");
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(report.contains("config     gateway.yaml"), "{report}");
+    assert!(report.ends_with("gateway.yaml: ok\n"), "{report}");
 
     let out = run(&["init"]);
     assert!(!out.status.success());
@@ -150,10 +152,10 @@ fn init_writes_a_config_that_check_accepts() {
 async fn client_keys_are_required_and_never_forwarded() {
     let openai = FakeOpenAi::start().await;
     let gw = Gateway::start(&format!(
-        "keys: [gw-key]
+        "client_keys: [gw-key]
 providers:
-  own: {{ format: openai-chat, base_url: '{}', key: sk-gw-openai }}
-  theirs: {{ format: openai-chat, base_url: '{}' }}
+  own: {{ formats: openai-chat, base_url: '{}', key: sk-gw-openai }}
+  theirs: {{ formats: openai-chat, base_url: '{}' }}
 ",
         openai.base_url(),
         openai.base_url(),
@@ -226,7 +228,7 @@ providers:
 #[tokio::test]
 async fn health_and_the_web_ui_are_served() {
     let gw = Gateway::start(
-        "providers: { p: { format: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
+        "providers: { p: { formats: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
     )
     .await;
     let health = client().get(gw.url("/healthz")).send().await.unwrap();
@@ -295,7 +297,7 @@ async fn models_are_merged_from_every_provider() {
         "providers:
   anthropic: {{ vendor: anthropic, base_url: '{}', key: sk-ant }}
   openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}
-  down: {{ format: openai-chat, base_url: '{}/v1' }}
+  down: {{ formats: openai-chat, base_url: '{}/v1' }}
 ",
         anthropic.base_url(),
         closed_port().await,
@@ -330,6 +332,24 @@ async fn models_are_merged_from_every_provider() {
 }
 
 #[tokio::test]
+async fn the_merged_models_win_over_a_served_passthrough() {
+    let (openai, seen) = listing(&["gpt-4o"]).await;
+    let origin = openai.trim_end_matches("/v1");
+    let gw = Gateway::start(&format!(
+        "providers:
+  openai: {{ vendor: openai, base_url: '{openai}', key: sk-openai }}
+  any: {{ formats: passthrough, base_url: '{origin}' }}
+formats: [openai-chat, passthrough]
+"
+    ))
+    .await;
+    let list = get_json(&gw, "/v1/models").await;
+    assert_eq!(list["data"][0]["id"], "gpt-4o", "{list}");
+    assert_eq!(list["data"][0]["kind"], "chat", "{list}");
+    assert_eq!(*seen.lock().unwrap(), ["Bearer sk-openai"]);
+}
+
+#[tokio::test]
 async fn models_are_kept_a_while_once_every_provider_listed() {
     let (openai, seen) = listing(&["gpt-4o"]).await;
     let gw = Gateway::start(&format!(
@@ -344,7 +364,7 @@ async fn models_are_kept_a_while_once_every_provider_listed() {
 #[tokio::test]
 async fn models_from_no_provider_is_an_error_naming_each() {
     let gw = Gateway::start(&format!(
-        "providers:\n  down: {{ format: openai-chat, base_url: '{}/v1' }}\n",
+        "providers:\n  down: {{ formats: openai-chat, base_url: '{}/v1' }}\n",
         closed_port().await
     ))
     .await;
@@ -492,7 +512,7 @@ async fn the_admin_api_reports_requests_as_they_happen() {
 #[test]
 fn an_empty_client_key_from_the_environment_is_refused() {
     let path = support::write_config(
-        "keys: [env:GK]\nproviders: { p: { format: openai-chat, base_url: 'http://x.test/v1' } }\n",
+        "client_keys: [env:GK]\nproviders: { p: { formats: openai-chat, base_url: 'http://x.test/v1' } }\n",
     );
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
         .args(["check", "--config", path.to_str().unwrap()])
@@ -502,7 +522,7 @@ fn an_empty_client_key_from_the_environment_is_refused() {
     assert!(!out.status.success());
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(
-        said.contains("keys: environment variable GK is empty"),
+        said.contains("client_keys: environment variable GK is empty"),
         "{said}"
     );
 }
@@ -593,7 +613,7 @@ async fn without_keys_a_cross_origin_page_cannot_spend_or_read() {
 async fn an_unreachable_provider_is_named_with_its_host_and_cause() {
     let down = closed_port().await;
     let gw = Gateway::start(&format!(
-        "providers:\n  down: {{ format: openai-chat, base_url: '{down}/v1', key: sk-secret }}\n"
+        "providers:\n  down: {{ formats: openai-chat, base_url: '{down}/v1', key: sk-secret }}\n"
     ))
     .await;
     let resp = post_chat(&gw, "gpt-4.1-mini", &[]).await;
@@ -613,7 +633,7 @@ async fn an_unreachable_provider_is_named_with_its_host_and_cause() {
 #[tokio::test]
 async fn an_open_event_stream_does_not_hold_up_shutdown() {
     let gw = Gateway::start(
-        "providers: { p: { format: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
+        "providers: { p: { formats: openai-chat, base_url: 'http://127.0.0.1:9/v1' } }\n",
     )
     .await;
     let events = client().get(gw.url("/ui/api/events")).send().await.unwrap();

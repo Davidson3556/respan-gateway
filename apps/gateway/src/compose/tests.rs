@@ -27,9 +27,9 @@ async fn local(yaml: &str) -> (Gateway, FakeOpenAi, FakeOpenAi) {
 }
 
 const TWO: &str = "providers:
-  a: { format: openai-chat, base_url: 'https://a.test/v1', auth: { type: bearer, key: sk-test } }
-  b: { format: openai-chat, base_url: 'https://b.test/v1', auth: { type: bearer, key: sk-test } }
-serve: [openai-chat]
+  a: { formats: openai-chat, base_url: 'https://a.test/v1', auth: { type: bearer, key: sk-test } }
+  b: { formats: openai-chat, base_url: 'https://b.test/v1', auth: { type: bearer, key: sk-test } }
+formats: [openai-chat]
 ";
 
 async fn request(gateway: &Gateway, model: &str) {
@@ -54,8 +54,7 @@ fn models_asked(mock: &FakeOpenAi) -> Vec<String> {
 async fn the_first_listed_prefix_a_model_matches_wins() {
     let yaml = format!(
         "{TWO}plugins:
-  - name: models
-    models: [{{ prefix: claude, provider: a }}, {{ prefix: claude-3, provider: b }}]
+  - models: [{{ prefix: claude, provider: a }}, {{ prefix: claude-3, provider: b }}]
 "
     );
     let (gateway, a, b) = local(&yaml).await;
@@ -66,27 +65,24 @@ async fn the_first_listed_prefix_a_model_matches_wins() {
 }
 
 #[tokio::test]
-async fn plugins_run_in_the_order_after_says() {
-    // `first` is listed first but runs after `second`, so the target it
-    // sets, last, wins.
+async fn a_later_models_plugin_wins_over_an_earlier_one() {
     let yaml = format!(
         "{TWO}plugins:
-  - {{ name: first, after: [second], models: [{{ prefix: gpt, provider: a }}] }}
-  - {{ name: second, models: [{{ prefix: gpt, provider: b }}] }}
+  - models: [{{ prefix: gpt, provider: a }}]
+  - models: [{{ prefix: gpt, provider: b }}]
 "
     );
     let (gateway, a, b) = local(&yaml).await;
     request(&gateway, "gpt-x").await;
-    assert_eq!(a.requests().len(), 1);
-    assert_eq!(a.requests()[0].path, "/v1/chat/completions");
-    assert!(b.requests().is_empty());
+    assert_eq!(b.requests().len(), 1);
+    assert!(a.requests().is_empty());
 }
 
 #[tokio::test]
 async fn the_default_target_answers_what_no_router_targets() {
     let yaml = format!(
-        "{TWO}target: b
-plugins: [{{ name: models, models: [{{ prefix: claude, provider: a }}] }}]
+        "{TWO}default: b
+plugins: [{{ models: [{{ prefix: claude, provider: a }}] }}]
 "
     );
     let (gateway, a, b) = local(&yaml).await;
@@ -300,8 +296,8 @@ fn a_preset_is_every_format_of_its_vendor() {
 fn a_list_of_formats_shares_one_base_url_and_key() {
     let plan = plan(
         "providers:
-  both: { format: [anthropic-messages, passthrough], base_url: 'https://x.test/', key: k }
-serve: [anthropic-messages, passthrough]
+  both: { formats: [anthropic-messages, passthrough], base_url: 'https://x.test/', key: k }
+formats: [anthropic-messages, passthrough]
 ",
     )
     .unwrap_or_else(|e| panic!("{e}"));
@@ -322,7 +318,7 @@ fn a_key_goes_where_its_own_vendor_takes_it() {
         "providers:
   az: { vendor: azure, base_url: 'https://r.test/openai/v1', key: a }
   oa: { vendor: openai, key: o }
-  plain: { format: openai-chat, base_url: 'https://p.test/v1', key: p }
+  plain: { formats: openai-chat, base_url: 'https://p.test/v1', key: p }
 ",
     )
     .unwrap_or_else(|e| panic!("{e}"));
@@ -338,20 +334,20 @@ fn a_key_goes_where_its_own_vendor_takes_it() {
     assert_eq!(auth(2, "authorization").as_deref(), Some("Bearer p"));
     // A vendor's dialect is no format of its own.
     let dialect =
-        plan("providers:\n  g: { format: groq-chat, base_url: 'https://g.test', key: k }");
+        plan("providers:\n  g: { formats: groq-chat, base_url: 'https://g.test', key: k }");
     assert!(dialect.is_err_and(|e: String| e.contains("unknown format 'groq-chat'")));
 }
 
 #[test]
 fn a_bad_provider_is_an_error() {
     let cases = [
-        ("p: {}", "provider 'p': needs a `vendor` or a `format`"),
+        ("p: {}", "provider 'p': needs a `vendor` or `formats`"),
         (
             "p: { vendor: nope }",
             "provider 'p': unknown vendor 'nope'; presets: [openai, anthropic, gemini, groq, deepseek, openrouter, xai, mistral, together, fireworks, ollama, azure, vllm]",
         ),
         (
-            "p: { format: openai-chat }",
+            "p: { formats: openai-chat }",
             "provider 'p': needs a `base_url`",
         ),
         (
@@ -363,7 +359,7 @@ fn a_bad_provider_is_an_error() {
             "provider 'p': environment variable RESPAN_TEST_UNSET is not set",
         ),
         (
-            "p: { format: [openai-chat, openai-chat], base_url: 'http://x' }",
+            "p: { formats: [openai-chat, openai-chat], base_url: 'http://x' }",
             "provider 'p': lists a format twice",
         ),
     ];
@@ -375,11 +371,11 @@ fn a_bad_provider_is_an_error() {
 
 #[test]
 fn client_keys_are_literal_or_from_the_environment() {
-    let unset = plan("keys: [literal, 'env:RESPAN_TEST_UNSET']");
-    let said = "keys: environment variable RESPAN_TEST_UNSET is not set";
+    let unset = plan("client_keys: [literal, 'env:RESPAN_TEST_UNSET']");
+    let said = "client_keys: environment variable RESPAN_TEST_UNSET is not set";
     assert_eq!(unset.err().as_deref(), Some(said));
-    let one = "providers: { p: { format: openai-chat, base_url: 'http://x.test' } }";
-    let set = plan(&format!("{one}\nkeys: [one, two]")).unwrap_or_else(|e| panic!("{e}"));
+    let one = "providers: { p: { formats: openai-chat, base_url: 'http://x.test' } }";
+    let set = plan(&format!("{one}\nclient_keys: [one, two]")).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(set.keys, ["one", "two"]);
 }
 
@@ -387,19 +383,19 @@ fn client_keys_are_literal_or_from_the_environment() {
 fn two_providers_of_a_session_format_no_other_translates_are_an_error() {
     let yaml = "providers:
   openai: { vendor: openai, key: k }
-  responses: { format: responses-ws, base_url: 'wss://x.test/v1' }
+  responses: { formats: responses-ws, base_url: 'wss://x.test/v1' }
 ";
     assert_eq!(
         plan(yaml).err().as_deref(),
         Some(
-            "serve: responses-ws needs exactly one provider of that format; openai, responses all speak it"
+            "formats: responses-ws needs exactly one provider of that format; openai, responses all speak it"
         )
     );
     // A realtime session goes to any provider of the kind.
     let yaml = "providers:
   openai: { vendor: openai, key: k }
-  realtime: { format: openai-realtime, base_url: 'wss://x.test/v1' }
-serve: [openai-realtime, gemini-live]
+  realtime: { formats: openai-realtime, base_url: 'wss://x.test/v1' }
+formats: [openai-realtime, gemini-live]
 ";
     assert!(plan(yaml).is_ok());
 }
@@ -415,7 +411,7 @@ fn bearer_auth_is_a_sensitive_header() {
 
 #[test]
 fn a_missing_environment_variable_is_an_error() {
-    let yaml = "providers: { p: { format: openai-chat, base_url: 'http://x', auth: { type: bearer, key: 'env:RESPAN_TEST_UNSET' } } }\nserve: []";
+    let yaml = "providers: { p: { formats: openai-chat, base_url: 'http://x', auth: { type: bearer, key: 'env:RESPAN_TEST_UNSET' } } }\nformats: []";
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some("provider 'p': environment variable RESPAN_TEST_UNSET is not set")
@@ -425,7 +421,7 @@ fn a_missing_environment_variable_is_an_error() {
 #[test]
 fn a_bad_base_url_or_auth_header_is_an_error() {
     let provider =
-        |p: &str| format!("providers: {{ p: {{ format: openai-chat, {p} }} }}\nserve: []");
+        |p: &str| format!("providers: {{ p: {{ formats: openai-chat, {p} }} }}\nformats: []");
     let url = provider("base_url: 'https://k:s@x.test'");
     let said = resolve(&url).err().unwrap_or_default();
     assert!(said.starts_with("provider 'p': bad base URL"), "{said}");
@@ -438,116 +434,75 @@ fn a_bad_base_url_or_auth_header_is_an_error() {
 }
 
 #[test]
-fn a_model_route_to_an_unknown_provider_is_an_error() {
-    let yaml = "serve: [openai-chat]
-plugins: [{ name: models, models: [{ prefix: c, provider: nope }] }]";
-    assert_eq!(
-        resolve(yaml).err().as_deref(),
-        Some("plugin 'models': unknown provider 'nope'")
-    );
-}
-
-/// The names of the plugins in `yaml`'s list, in the order they run.
-fn order_of(yaml: &str) -> Vec<String> {
-    let config = Config::parse(&format!("serve: []\nplugins: {yaml}"));
-    let config = config.unwrap_or_else(|e| panic!("{e}"));
-    let order = ordered(&config.plugins).unwrap_or_else(|e| panic!("{}", e.message()));
-    order.iter().map(|p| p.name.clone()).collect()
-}
-
-#[test]
-fn after_moves_a_plugin_only_as_far_as_it_needs() {
-    // Listed d, c, b, a; c after a, b after d. The earliest ready one
-    // goes next, so: d, b, a, c.
-    let list = "[{name: d}, {name: c, after: [a]}, {name: b, after: [d]}, {name: a}]";
-    assert_eq!(order_of(list), ["d", "b", "a", "c"]);
-    // Listed a, b, c with a after c: b, c, a.
-    let list = "[{name: a, after: [c]}, {name: b}, {name: c}]";
-    assert_eq!(order_of(list), ["b", "c", "a"]);
-}
-
-#[test]
-fn a_bad_plugin_order_or_target_is_an_error() {
+fn a_bad_plugin_or_default_is_an_error() {
     let router = "models: [{ prefix: c, provider: a }]";
     let cases = [
         (
-            format!("plugins: [{{ name: x, after: [y], {router} }}]"),
-            "plugin 'x' runs after unknown plugin 'y'",
+            "plugins: [{ models: [{ prefix: c, provider: nope }] }]".to_owned(),
+            "plugins: models: unknown provider 'nope'; providers: [a, b]",
         ),
         (
-            format!(
-                "plugins: [{{ name: x, after: [y], {router} }}, {{ name: y, after: [x], {router} }}]"
-            ),
-            "plugins run after each other in a cycle: 'x', 'y'",
+            "default: nope".to_owned(),
+            "default: unknown provider 'nope'; providers: [a, b]",
         ),
-        (
-            format!("plugins: [{{ name: x, after: [x], {router} }}, {{ name: z, {router} }}]"),
-            "plugins run after each other in a cycle: 'x'",
-        ),
-        (
-            format!("plugins: [{{ name: x, {router} }}, {{ name: x, {router} }}]"),
-            "plugin 'x' is registered twice",
-        ),
-        (
-            "plugins: [{ name: x }]".to_owned(),
-            "plugin 'x': no plugin given; compiled-in plugins: [models]",
-        ),
-        ("target: nope".to_owned(), "target: unknown provider 'nope'"),
     ];
     for (yaml, expected) in cases {
         let yaml = format!("{TWO}{yaml}");
         assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
     }
+    let named = format!("{TWO}plugins: [{{ name: x, {router} }}]");
+    let said = resolve(&named).err().unwrap_or_default();
+    assert!(
+        said.contains("unknown field `name`, expected `models`"),
+        "{said}"
+    );
 }
 
 #[test]
 fn a_session_provider_is_websocket_and_its_clients_go_to_it_alone() {
-    let realtime = "realtime: { format: openai-realtime, base_url: 'wss://api.openai.com/v1' }";
+    let realtime = "realtime: { formats: openai-realtime, base_url: 'wss://api.openai.com/v1' }";
     let cases = [
         (
-            "providers: { p: { format: gemini-live, base_url: 'https://x.test' } }\nserve: []"
+            "providers: { p: { formats: gemini-live, base_url: 'https://x.test' } }\nformats: []"
                 .to_owned(),
             "provider 'p': bad base URL: ws or wss with a host, and no query, fragment or credentials (those go in its headers)",
         ),
         (
-            "providers: { p: { format: openai-chat, base_url: 'http://x.test' } }
-serve: [responses-ws]"
+            "providers: { p: { formats: openai-chat, base_url: 'http://x.test' } }
+formats: [responses-ws]"
                 .to_owned(),
-            "serve: responses-ws needs exactly one provider of that format",
-        ),
-        (
-            format!(
-                "providers: {{ {realtime} }}\nserve: [openai-realtime]
-plugins: [{{ name: models, models: [{{ prefix: gpt, provider: realtime }}] }}]"
-            ),
-            "plugin 'models': provider 'realtime' uses format 'openai-realtime', incompatible with conversation models routes",
+            "formats: responses-ws needs exactly one provider of that format",
         ),
     ];
     for (yaml, expected) in cases {
         assert_eq!(resolve(&yaml).err().as_deref(), Some(expected), "{yaml}");
     }
-    let both = format!("providers: {{ {realtime} }}\nserve: [openai-realtime]");
+    let both = format!("providers: {{ {realtime} }}\nformats: [openai-realtime]");
     assert!(resolve(&both).is_ok());
+    // A models route applies to every kind its provider serves.
+    let routed =
+        format!("{both}\nplugins: [{{ models: [{{ prefix: gpt, provider: realtime }}] }}]");
+    assert!(resolve(&routed).is_ok());
 }
 
 #[test]
 fn a_format_served_after_passthrough_is_refused() {
-    let yaml = "serve: [passthrough, openai-chat]";
+    let yaml = "formats: [passthrough, openai-chat]";
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "serve: 'openai-chat' comes after 'passthrough', which accepts every request first; serve 'passthrough' last"
+            "formats: 'openai-chat' comes after 'passthrough', which accepts every request first; serve 'passthrough' last"
         )
     );
 }
 
 #[test]
 fn an_unknown_format_names_the_compiled_in_ones() {
-    let yaml = "serve: [openai-chat, nope]";
+    let yaml = "formats: [openai-chat, nope]";
     assert_eq!(
         resolve(yaml).err().as_deref(),
         Some(
-            "serve: unknown format 'nope'; compiled-in formats: [openai-chat, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, passthrough]"
+            "formats: unknown format 'nope'; compiled-in formats: [openai-chat, openai-realtime, responses-ws, openai-images, openai-transcriptions, openai-speech, openai-videos, openai-embeddings, anthropic-messages, gemini-live, gemini-veo, passthrough]"
         )
     );
 }
@@ -555,30 +510,30 @@ fn an_unknown_format_names_the_compiled_in_ones() {
 #[test]
 fn a_format_only_providers_speak_cannot_be_served() {
     assert_eq!(
-        plan("serve: [gemini-veo]").err().as_deref(),
-        Some("serve: gemini-veo is spoken only by providers; no client sends it")
+        plan("formats: [gemini-veo]").err().as_deref(),
+        Some("formats: gemini-veo is spoken only by providers; no client sends it")
     );
 }
 
 #[test]
 fn an_empty_key_is_refused_and_keys_are_trimmed() {
-    let one = "providers: { p: { format: openai-chat, base_url: 'http://x.test' } }\n";
+    let one = "providers: { p: { formats: openai-chat, base_url: 'http://x.test' } }\n";
     for keys in ["['']", "['  ']"] {
         assert_eq!(
-            plan(&format!("{one}keys: {keys}")).err().as_deref(),
-            Some("keys: a key is empty"),
+            plan(&format!("{one}client_keys: {keys}")).err().as_deref(),
+            Some("client_keys: a key is empty"),
             "{keys}"
         );
     }
-    let trimmed = plan(&format!("{one}keys: [' gk ']")).map(|p| p.keys);
+    let trimmed = plan(&format!("{one}client_keys: [' gk ']")).map(|p| p.keys);
     assert_eq!(trimmed, Ok(vec!["gk".to_owned()]));
     let empty_provider_key =
-        "providers: { p: { format: openai-chat, base_url: 'http://x.test', key: '' } }";
+        "providers: { p: { formats: openai-chat, base_url: 'http://x.test', key: '' } }";
     assert_eq!(
         plan(empty_provider_key).err().as_deref(),
         Some("provider 'p': a key is empty")
     );
-    let empty_auth = "providers: { p: { format: openai-chat, base_url: 'http://x.test', auth: { type: bearer, key: ' ' } } }";
+    let empty_auth = "providers: { p: { formats: openai-chat, base_url: 'http://x.test', auth: { type: bearer, key: ' ' } } }";
     assert_eq!(
         plan(empty_auth).err().as_deref(),
         Some("provider 'p': a key is empty")
@@ -597,12 +552,12 @@ fn a_config_without_providers_is_refused() {
 fn a_provider_name_is_letters_digits_and_a_little_punctuation() {
     for name in ["'a/b'", "'a~b'", "'a:b'", "'a b'", "''"] {
         let yaml = format!(
-            "providers: {{ {name}: {{ format: openai-chat, base_url: 'http://x.test' }} }}"
+            "providers: {{ {name}: {{ formats: openai-chat, base_url: 'http://x.test' }} }}"
         );
         let said = plan(&yaml).err().unwrap_or_default();
         assert!(said.ends_with("(no '/', '~' or ':')"), "{name}: {said}");
     }
-    let fine = "providers: { my-gw_2.0: { format: openai-chat, base_url: 'http://x.test' } }";
+    let fine = "providers: { my-gw_2.0: { formats: openai-chat, base_url: 'http://x.test' } }";
     assert!(plan(fine).is_ok());
 }
 

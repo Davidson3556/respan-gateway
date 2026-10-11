@@ -38,11 +38,11 @@ async fn upgrade(gw: &Gateway, path: &str, protocols: &str) -> Result<Option<Str
 async fn gateway(openai: &realtime::Fake, gemini: &realtime::Fake) -> Gateway {
     let http = |ws: String| ws.replace("ws://", "http://");
     Gateway::start(&format!(
-        "keys: [gw-key]
+        "client_keys: [gw-key]
 providers:
   openai: {{ vendor: openai, base_url: '{}', key: sk-provider }}
   gemini: {{ vendor: gemini, base_url: '{}/v1beta/openai', key: AIza-provider }}
-serve: [openai-realtime, gemini-live]
+formats: [openai-realtime, gemini-live]
 ",
         http(openai.base_url()),
         http(gemini.base_url())

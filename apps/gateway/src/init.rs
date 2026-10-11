@@ -4,6 +4,11 @@
 use crate::presets;
 use respan_gateway_providers::ALL;
 
+/// The vendors the environment has keys for, by name.
+pub fn detected_vendors() -> Vec<&'static str> {
+    presets::detected().iter().map(|(p, ..)| p.id).collect()
+}
+
 /// The starter config: the vendors with keys in the environment enabled,
 /// with any base URL the environment moves them to (`OLLAMA_HOST`,
 /// `RESPAN_<VENDOR>_BASE_URL`), the rest commented out; OpenAI enabled if
@@ -40,7 +45,7 @@ listen: 127.0.0.1:8080
 # Client keys: when set, every request needs one (Authorization: Bearer,
 # x-api-key or x-goog-api-key). Without them, anyone who can reach the
 # gateway spends your provider keys: keep it local.
-# keys: [env:GATEWAY_KEY]
+# client_keys: [env:GATEWAY_KEY]
 
 # Providers, by name. A vendor preset brings its base URL, its key from the
 # environment, every format the gateway speaks for it, and its model names
@@ -53,15 +58,15 @@ providers:
 {providers}
 # Route model names to providers, before the presets' own names:
 # plugins:
-#   - name: models
-#     models:
+#   - models:
 #       - {{ prefix: llama, provider: groq }}
 
 # The default provider for requests nothing else routes:
-# target: openai
+# default: openai
 
-# Print each request to stderr; serve the web UI at /ui/.
-log: true
+# Print each request to stderr as text or json (or off); serve the web UI
+# at /ui/.
+log: text
 ui: true
 "
     )

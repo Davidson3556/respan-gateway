@@ -17,6 +17,7 @@ use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_media::video::LocateContent;
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_plugins::Routing;
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -26,10 +27,12 @@ use crate::auth::{self, ClientCredentials, ClientKeys, LocalOnly};
 use crate::compose::{PASSTHROUGH, Plan, compose};
 use crate::formats::{KnownFormat, formats, kind};
 use crate::jobs::VideoJobs;
+use crate::logging::Level;
 use crate::models::{self, Models};
 use crate::quirks::with_quirks;
+use crate::report;
 use crate::requests::{self, Recorder, RequestLog};
-use crate::{Config, Error};
+use crate::{Config, Error, VERSION};
 
 /// Where the gateway listens unless told.
 pub const DEFAULT_LISTEN: SocketAddr =
@@ -164,7 +167,7 @@ impl App {
                 match tokio::time::timeout_at(deadline, &mut serve).await {
                     Ok(served) => served,
                     Err(_) => {
-                        eprintln!("shutdown: responses still open at the deadline are cut");
+                        self.config.log.say(Level::Warn, "shutdown: responses still open at the deadline are cut");
                         Ok(())
                     }
                 }
@@ -177,7 +180,10 @@ impl App {
             .await
             .is_err()
         {
-            eprintln!("shutdown: end hooks still running at the deadline were dropped");
+            self.config.log.say(
+                Level::Warn,
+                "shutdown: end hooks still running at the deadline were dropped",
+            );
         }
         served
     }
@@ -185,8 +191,7 @@ impl App {
     /// What it serves, for a person starting it: the first line says
     /// where it listens.
     pub fn banner(&self, addr: SocketAddr) -> String {
-        let version = env!("CARGO_PKG_VERSION");
-        let mut lines = vec![format!("respan-gateway {version} listening on {addr}")];
+        let mut lines = vec![format!("respan-gateway {VERSION} listening on {addr}")];
         let shown = match addr.ip().is_unspecified() {
             true => SocketAddr::new(DEFAULT_LISTEN.ip(), addr.port()),
             false => addr,
@@ -222,7 +227,7 @@ impl App {
             .filter_map(|name| self.formats.iter().find(|f| f.name == *name))
             .flat_map(|f| f.endpoints.iter().map(|e| (*e).to_owned()))
             .collect();
-        if !self.plan.serves(PASSTHROUGH) {
+        if !self.config.raw_relay {
             endpoints.push("GET /v1/models".to_owned());
         }
         endpoints.push("GET /healthz".to_owned());
@@ -247,22 +252,23 @@ impl App {
         let open = self.plan.keys.is_empty() && !addr.ip().is_loopback();
         open.then(|| {
             format!(
-                "warning: listening on {addr} with no client keys: anyone who can reach it \
-                 spends your provider keys; set `keys:` in the config"
+                "listening on {addr} with no client keys: anyone who can reach it \
+                 spends your provider keys; set `client_keys:` in the config"
             )
         })
     }
 
-    /// Each provider's vendor's quirks, a line each, as `check` prints them.
-    pub fn quirks(&self) -> Vec<String> {
-        let upstreams = self.plan.upstreams.iter();
-        let quirks = upstreams.flat_map(|u| {
-            let quirks = u.preset.map_or(&[][..], |p| p.quirks);
-            quirks
-                .iter()
-                .map(move |q| format!("{}: {}: {}", u.name, q.name, q.description))
-        });
-        quirks.collect()
+    /// The composed configuration, as `check` prints it.
+    pub fn report(&self) -> String {
+        report::check(&self.config, &self.plan, &self.formats, self.listen())
+    }
+
+    /// Every provider's models, as `/v1/models` lists them (`id`, `kind`,
+    /// `owned_by`), asking each provider now; and why each provider that did
+    /// not list is missing.
+    pub async fn models(&self) -> (Vec<Value>, Vec<String>) {
+        let models = Models::new(&self.plan.upstreams, self.plan.routes.clone());
+        models.collect().await
     }
 
     /// A chat request to the default chat provider, as curl sends it.
@@ -374,8 +380,8 @@ fn routes(
     local: Option<Arc<LocalOnly>>,
 ) -> Router {
     let mut router = Router::new().route("/healthz", get(|| async { "ok" }));
-    // A gateway that relays every other request lets its vendor answer.
-    if !plan.serves(PASSTHROUGH) {
+    // A raw relay lets its vendor answer, with the client's credentials.
+    if !config.raw_relay {
         let models = Arc::new(Models::new(&plan.upstreams, plan.routes.clone()));
         let list = get(models::list).with_state(models);
         let list = list.layer(from_fn_with_state(keys.clone(), auth::require));

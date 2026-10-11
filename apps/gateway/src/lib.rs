@@ -24,18 +24,24 @@ mod config;
 mod formats;
 mod init;
 mod jobs;
+mod logging;
 mod models;
 mod presets;
 mod quirks;
+mod report;
 mod requests;
 
 pub use app::{App, DEFAULT_LISTEN, shutdown_signal};
-pub use cli::run;
+pub use cli::{execute, run};
 pub use config::{
     Auth, Config, DEFAULT_FILE, ModelRoute, PluginConfig, ProviderConfig, ProxyVendor, Source,
     no_keys_message,
 };
 pub use init::starter_config;
+pub use logging::LogFormat;
+
+/// This binary's version, the workspace's.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A configuration that cannot be read or composed: what is wrong, and
 /// where.
@@ -49,10 +55,6 @@ impl Error {
         Self {
             message: message.into(),
         }
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
     }
 }
 

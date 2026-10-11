@@ -14,7 +14,7 @@ async fn a_host_hands_requests_to_the_app_in_process() {
     let openai = FakeOpenAi::start().await;
     openai.answer(Answer::text("hi there"));
     let yaml = format!(
-        "log: false\nproviders: {{ openai: {{ vendor: openai, base_url: '{}', key: sk }} }}",
+        "log: off\nproviders: {{ openai: {{ vendor: openai, base_url: '{}', key: sk }} }}",
         openai.base_url()
     );
     let app = App::new(Config::parse(&yaml).unwrap()).unwrap();
@@ -54,7 +54,7 @@ fn a_bad_config_says_what_is_wrong() {
     let error = App::new(config).unwrap_err();
     assert!(
         error
-            .message()
+            .to_string()
             .starts_with("provider 'p': unknown vendor 'nope'"),
         "{error}"
     );

@@ -29,7 +29,7 @@ Current contracts and package boundaries:
   repository's GitHub releases page.
 - **Docker**: `docker build -t respan-gateway .`, then
   `docker run -p 127.0.0.1:8080:8080 -e OPENAI_API_KEY respan-gateway`. The image
-  listens on `0.0.0.0:8080`, so set `keys` (below).
+  listens on `0.0.0.0:8080`, so set `client_keys` (below).
 - **Python**: `pip install respan-gateway` ([`python/`](python/README.md)).
 - **From source**: `cd apps/ui && pnpm install && pnpm build`, then
   `cargo build --release -p respan-gateway`. Without the first step the
@@ -84,10 +84,11 @@ curl localhost:8080/v1/videos -d '{"model":"veo-3.0-generate-001","prompt":"a pa
 with its `kind`,
 `GET /healthz` answers `ok`, and the web UI at
 [localhost:8080/ui/](http://localhost:8080/ui/) shows providers, routes and
-each request live; each finished request is also one line on stderr. The UI
+each request live; each finished request is also one line on stderr (`--log json` or
+`RESPAN_LOG=json` for a JSON object a line, `off` for none). The UI
 reads a read-only admin API, `GET /ui/api/overview`, `providers`, `routes`,
 `requests` (and `requests/{id}`) and `events` (a live stream), which
-needs a gateway key when `keys` is set. `ui: false` turns off the UI and
+needs a gateway key when `client_keys` is set. `ui: false` turns off the UI and
 the admin API together.
 
 Vendor presets: `openai`, `anthropic`, `gemini` (`GEMINI_API_KEY` or
@@ -103,12 +104,23 @@ transcription and speech for `groq`, images for `xai` and `together`,
 embeddings for `gemini`, `mistral`, `together`, `fireworks` and `ollama` too. To configure more, write a config and check it:
 
 ```bash
-cargo run -p respan-gateway -- init    # a commented gateway.yaml from the keys found
-cargo run -p respan-gateway -- check   # ./gateway.yaml, or -c FILE
-cargo run -p respan-gateway            # reads ./gateway.yaml when there is one
+respan-gateway init     # a commented gateway.yaml from the keys found
+respan-gateway check    # what ./gateway.yaml (or -c FILE) does: providers, key sources,
+                        # endpoints, routes, defaults, auth; exits 1 on any problem
+respan-gateway models   # every provider's models, with their kind
+respan-gateway          # serves ./gateway.yaml when there is one
 ```
 
-`keys: [env:GATEWAY_KEY]` makes every request carry a gateway key
+Settings may come from the environment, or from a `.env` file in the
+current directory (the environment wins over it): provider keys such as
+`OPENAI_API_KEY`, `RESPAN_CONFIG` (the config file, as `--config`),
+`RESPAN_LISTEN` (as `--listen`), `PORT` (the port, on 127.0.0.1, if nothing
+else says where to listen: for a host that hands the port out) and
+`RESPAN_LOG` (`text`, `json` or `off`, as `--log`). `respan-gateway --help`
+lists them. An address already in use fails with the way out
+(`--listen 127.0.0.1:0` takes any free port).
+
+`client_keys: [env:GATEWAY_KEY]` makes every request carry a gateway key
 (`Authorization: Bearer`, `x-api-key` or `x-goog-api-key`), which is never
 sent on. A provider with its own key (a `key`, an `auth`, or a preset's key
 in the environment) always uses that. A provider with none receives the
@@ -124,7 +136,7 @@ web UI are served as before. Behind a proxy that rewrites `Host`, set keys.
 A model name picks its provider in this order: `name/model` goes to the
 provider `name`, which gets `model`, if `name` is a configured provider;
 otherwise the whole name is the model, routed by the `models` plugin's
-prefixes, then by the presets' (the longest matching prefix wins, then
+prefixes (for every kind the provider serves), then by the presets' (the longest matching prefix wins, then
 config order), then to the kind's default. So `meta-llama/Llama-3.3-70B-Instruct-Turbo`
 and `deepseek-ai/...` go to `together`, `accounts/fireworks/models/...` to
 `fireworks`, and OpenRouter's `anthropic/claude-3.5-sonnet` to `openrouter`
@@ -149,8 +161,8 @@ until someone shows a vendor needs it.
 No config file is needed to sit in front of Claude Code or Codex:
 
 ```bash
-cargo run -p respan-gateway -- proxy --anthropic   # ANTHROPIC_BASE_URL=http://127.0.0.1:8080
-cargo run -p respan-gateway -- proxy --openai      # add --listen ADDR (host:port, :port or a port) or --url BASE
+respan-gateway proxy --anthropic   # ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+respan-gateway proxy --openai      # add --listen ADDR (host:port, :port or a port), --url BASE or --check
 ```
 
 It relays chat and every other endpoint of that vendor (`count_tokens`,
@@ -273,7 +285,7 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/formats/mcp-http/` | MCP over HTTP: streamable HTTP, and a stdio server as a transport. |
 | `crates/providers/` | Every vendor, a file each: base URL, key, models, the formats it speaks, its quirks (data and a plugin), and a table of them. |
 | `crates/plugins/` | Concrete model routing and public `routing` attempts, fallback, race and backoff. |
-| `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing (by model within each kind, video jobs by id), client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `init` and `proxy`. |
+| `apps/gateway/` | The binary and its library (`respan_gateway`): configuration (YAML, vendor presets, or none, from the environment), routing (by model within each kind, video jobs by id), client keys, `/v1/models`, the request log, the web UI and its admin API; `serve`, `check`, `models`, `init` and `proxy`. |
 | `apps/ui/` | The web UI: React and shadcn/ui, built with `pnpm build` to `apps/ui/dist`, which `apps/gateway/build.rs` embeds in the binary. |
 | `tests/support/` | Private source-only helpers shared by integration tests; not a public crate. |
 | `examples/` | Runnable, tested integrations of the [use cases](examples/README.md). |

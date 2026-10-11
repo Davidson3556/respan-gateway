@@ -12,17 +12,20 @@ listen: 127.0.0.1:8080
 # Client keys, literal or env:NAME. When set, every request needs one, as
 # `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key`; the
 # gateway takes it off, and no provider sees it. The web UI asks for one too.
-# keys: [env:GATEWAY_KEY]
+# client_keys: [env:GATEWAY_KEY]
 
-# Print one line per finished request to stderr; serve the web UI and its
-# admin API at /ui/ (and redirect / there). `ui: false` turns off both.
-# log: true
+# How each finished request is printed to stderr, with a timestamp and a
+# level: text (the default), json (a line each) or off. `--log` and
+# RESPAN_LOG say it from outside. `ui: false` turns off the web UI and its
+# admin API at /ui/ (`/` redirects there).
+# log: text
 # ui: true
 
 # The most bytes of a client's request, and of a provider's answer held at
-# once: past it, the request fails 413, the answer 502. 32 MiB if unset, the
-# largest request the vendors' JSON APIs take.
-# body_limit: 33554432
+# once: past it, the request fails 413, the answer 502. A number of bytes
+# or a size such as 32MiB. 32 MiB if unset, the largest request the
+# vendors' JSON APIs take.
+# body_limit: 32MiB
 
 # Providers, by name, in order: the first serving a kind (chat, realtime,
 # image, transcription, speech, embedding, video, ...) is that kind's default. A vendor
@@ -66,7 +69,7 @@ providers:
 # headers, but only when the client speaks that provider's format; no key
 # crosses a translation. A provider with a key always uses its own.
 #   compatible:
-#     format: openai-chat
+#     formats: openai-chat
 #     base_url: https://llm.example.com/v1
 #     auth: { type: bearer, key: env:COMPATIBLE_KEY }
 #   vllm:
@@ -85,15 +88,15 @@ providers:
 # When two providers speak one video format, the gateway gives clients ids
 # naming the provider, `<provider>~<id>`.
 #   images:
-#     format: openai-images
+#     formats: openai-images
 #     base_url: https://api.together.xyz/v1
 #     key: env:TOGETHER_API_KEY
 #   asr:
-#     format: [openai-transcriptions, openai-speech]
+#     formats: [openai-transcriptions, openai-speech]
 #     base_url: https://api.groq.com/openai/v1
 #     key: env:GROQ_API_KEY
 #   veo:
-#     format: gemini-veo
+#     formats: gemini-veo
 #     base_url: https://generativelanguage.googleapis.com/v1beta
 #     key: env:GEMINI_API_KEY      # sent as x-goog-api-key
 
@@ -106,11 +109,11 @@ providers:
 # and gemini presets include theirs. body_limit is HTTP's; a session's
 # message may be 16 MiB.
 #   realtime:
-#     format: openai-realtime
+#     formats: openai-realtime
 #     base_url: wss://api.openai.com/v1
 #     auth: { type: bearer, key: env:OPENAI_API_KEY }
 #   live:
-#     format: gemini-live
+#     formats: gemini-live
 #     base_url: wss://generativelanguage.googleapis.com
 #     auth: { type: header, name: x-goog-api-key, key: env:GEMINI_API_KEY }
 
@@ -119,8 +122,8 @@ providers:
 # vendor's origin (no /v1) and serve `passthrough` last: it takes every
 # request no format before it accepts, unread, byte for byte:
 #   providers:
-#     anthropic-any: { format: passthrough, base_url: https://api.anthropic.com }
-#   serve: [openai-chat, anthropic-messages, passthrough]
+#     anthropic-any: { formats: passthrough, base_url: https://api.anthropic.com }
+#   formats: [openai-chat, anthropic-messages, passthrough]
 # With no config file at all: `respan-gateway proxy --anthropic` (or
 # `--openai`), which does exactly that for one vendor, with each client's
 # own credentials.
@@ -130,16 +133,17 @@ providers:
 # POST to .../v1/messages. Anything else is a 404. Unset: openai-chat,
 # anthropic-messages, the OpenAI format of each media kind some provider
 # speaks, and every session format some provider speaks.
-# serve: [openai-chat, anthropic-messages]
+# formats: [openai-chat, anthropic-messages]
 
-# Compiled-in plugins, run on every request in the order listed, except
-# that an entry runs after the plugins its `after` names. `models` routes
-# model names to providers, before the presets' own names.
+# Compiled-in plugins, run on every request in the order listed; a plugin
+# is the one field that configures it. `models` routes model names to
+# providers, before the presets' own names, for every kind the provider
+# serves (a `whisper-` prefix to a transcription provider, say); a later
+# plugin's match wins.
 # plugins:
-#   - name: models
-#     models:
+#   - models:
 #       - { prefix: llama, provider: groq }
 
 # The default provider of each kind it serves, for requests nothing else
 # routes; unset, the first provider serving the kind.
-# target: openai
+# default: openai

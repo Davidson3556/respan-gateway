@@ -1,10 +1,12 @@
 //! The `respan-gateway` command line.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::{App, Config, ProxyVendor};
+use crate::logging::{Level, LogFormat};
+use crate::{App, Config, ProxyVendor, VERSION};
 use clap::{ArgGroup, Parser, Subcommand};
+use serde_json::{Map, json};
 
 /// An LLM gateway: one endpoint for OpenAI, Anthropic, Gemini and more,
 /// translating between their APIs.
@@ -15,19 +17,24 @@ use clap::{ArgGroup, Parser, Subcommand};
 ///   respan-gateway
 ///
 /// It reads ./gateway.yaml if there is one; `respan-gateway init` writes a
-/// starter.
+/// starter. A .env file in the current directory is read first, so keys and
+/// the settings below may live there.
 #[derive(Debug, Parser)]
-#[command(name = "respan-gateway", version, verbatim_doc_comment, after_help = EXAMPLES)]
+#[command(name = "respan-gateway", version = VERSION, verbatim_doc_comment, after_help = EXAMPLES)]
 struct Cli {
     /// The config file [default: ./gateway.yaml if present, else providers
     /// from the environment]
-    #[arg(short, long, global = true, value_name = "FILE")]
+    #[arg(short, long, global = true, value_name = "FILE", env = "RESPAN_CONFIG")]
     config: Option<PathBuf>,
 
     /// Where to listen, such as 127.0.0.1:8080, localhost:8080 or 8080, in
-    /// place of the config's
-    #[arg(long, global = true, value_name = "ADDR")]
+    /// place of the config's (PORT alone sets the port)
+    #[arg(long, global = true, value_name = "ADDR", env = "RESPAN_LISTEN")]
     listen: Option<String>,
+
+    /// How requests are logged to stderr, in place of the config's
+    #[arg(long, global = true, value_name = "FORMAT", env = "RESPAN_LOG")]
+    log: Option<LogFormat>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -37,8 +44,10 @@ struct Cli {
 enum Command {
     /// Serve the gateway (the default)
     Serve,
-    /// Check the configuration and exit
+    /// Check the configuration, print what it serves and exit
     Check,
+    /// List the models of every provider, as `/v1/models` does, and exit
+    Models,
     /// Write a commented starter config from the keys in the environment
     Init {
         /// Where to write it
@@ -64,21 +73,71 @@ enum Command {
         /// The vendor's base URL, in place of its public one
         #[arg(long, value_name = "URL")]
         url: Option<String>,
-        /// `check`: check the proxy's configuration and exit
-        #[arg(hide = true, value_parser = ["check"])]
-        action: Option<String>,
+        /// Check the proxy's configuration, print it and exit
+        #[arg(long)]
+        check: bool,
     },
 }
 
 const EXAMPLES: &str = "Examples:
   respan-gateway                    Serve ./gateway.yaml, or the providers in the environment
   respan-gateway init               Write a starter ./gateway.yaml
-  respan-gateway check -c my.yaml   Check a config
-  respan-gateway proxy --anthropic  Sit in front of Claude Code";
+  respan-gateway check -c my.yaml   Check a config and print what it serves
+  respan-gateway models             List the models the providers offer
+  respan-gateway proxy --anthropic  Sit in front of Claude Code
+
+Environment (also read from ./.env):
+  OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY, ...
+                     Provider keys; with no config file each is a provider
+  RESPAN_CONFIG      The config file, as --config
+  RESPAN_LISTEN      Where to listen, as --listen
+  PORT               The port to listen on (on 127.0.0.1), if nothing else says
+  RESPAN_LOG         text, json or off, as --log
+  RESPAN_<VENDOR>_BASE_URL
+                     Moves a vendor's base URL when there is no config file";
 
 /// Runs the `respan-gateway` command line on `args` (the program name
 /// first) and returns its exit status.
 pub async fn run<I, T>(args: I) -> u8
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    run_with(args, None).await
+}
+
+/// Runs the command line as the binary does: reads `./.env` if there is
+/// one, then runs on a runtime of its own.
+pub fn execute<I, T>(args: I) -> u8
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let dotenv = match load_dotenv() {
+        Ok(loaded) => loaded,
+        Err(e) => return fail(&e),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build();
+    match runtime {
+        Ok(runtime) => runtime.block_on(run_with(args, dotenv)),
+        Err(e) => fail(&format!("start the runtime: {e}")),
+    }
+}
+
+/// Reads `./.env` into the environment, never over a variable already set;
+/// the file if there was one.
+fn load_dotenv() -> Result<Option<PathBuf>, String> {
+    let path = Path::new(".env");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    dotenvy::from_path(path).map_err(|e| format!(".env: {e}"))?;
+    Ok(Some(path.to_owned()))
+}
+
+async fn run_with<I, T>(args: I, dotenv: Option<PathBuf>) -> u8
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -90,12 +149,14 @@ where
             return u8::try_from(e.exit_code()).unwrap_or(FAILURE);
         }
     };
-    let (config, check_only) = match cli.command.unwrap_or(Command::Serve) {
+    let command = cli.command.unwrap_or(Command::Serve);
+    let models = matches!(command, Command::Models);
+    let (config, check) = match command {
         Command::Init { output, force } => return init(&output, force),
         Command::Proxy {
             anthropic,
             url,
-            action,
+            check,
             ..
         } => {
             if cli.config.is_some() {
@@ -107,43 +168,59 @@ where
                 true => ProxyVendor::Anthropic,
                 false => ProxyVendor::OpenAi,
             };
-            (Ok(Config::proxy(vendor, url.as_deref())), action.is_some())
+            (Ok(Config::proxy(vendor, url.as_deref())), check)
         }
         Command::Serve => (Config::discover(cli.config.as_deref()), false),
-        Command::Check => (Config::discover(cli.config.as_deref()), true),
+        Command::Check | Command::Models => (Config::discover(cli.config.as_deref()), true),
     };
     let mut config = match config {
         Ok(config) => config,
-        Err(e) => return fail(e.message()),
+        Err(e) => return fail(&e.to_string()),
     };
-    if let Some(listen) = &cli.listen {
-        match crate::config::parse_listen(listen) {
+    let listen = cli.listen.or_else(|| std::env::var("PORT").ok());
+    if let Some(listen) = listen.filter(|l| !l.is_empty()) {
+        match crate::config::parse_listen(&listen) {
             Ok(addr) => config.listen = Some(addr),
-            Err(e) => return fail(&format!("--listen: {e}")),
+            Err(e) => return fail(&format!("listen {listen}: {e}")),
         }
     }
+    if let Some(log) = cli.log {
+        config.log = log;
+    }
+    let log = config.log;
     let source = config.source().to_string();
     let app = match App::new(config) {
         Ok(app) => app,
         Err(e) => return fail(&format!("{source}: {e}")),
     };
-    if check_only {
-        for quirk in app.quirks() {
-            println!("quirk of {quirk}");
-        }
+    if models {
+        return list_models(&app).await;
+    }
+    if check {
+        println!("{}", app.report());
         println!("{source}: ok");
         return SUCCESS;
+    }
+    if let Some(path) = &dotenv {
+        log.say(Level::Info, &format!("loaded {}", path.display()));
     }
 
     let addr = app.listen();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
-        Err(e) => return fail(&format!("listen on {addr}: {e}")),
+        Err(e) => return fail(&bind_error(addr, &e)),
     };
     let bound = listener.local_addr().unwrap_or(addr);
-    println!("{}", app.banner(bound));
+    match log {
+        LogFormat::Json => {
+            let fields = json!({ "addr": bound.to_string(), "version": VERSION, "config": source });
+            let fields = fields.as_object().cloned().unwrap_or_else(Map::new);
+            eprintln!("{}", log.line(Level::Info, "listening", fields));
+        }
+        _ => println!("{}", app.banner(bound)),
+    }
     if let Some(warning) = app.warning(bound) {
-        eprintln!("{warning}");
+        log.say(Level::Warn, &warning);
     }
     match app.serve(listener, crate::shutdown_signal()).await {
         Ok(()) => SUCCESS,
@@ -151,7 +228,48 @@ where
     }
 }
 
-fn init(output: &std::path::Path, force: bool) -> u8 {
+/// Why `addr` cannot be listened on, and what to do.
+fn bind_error(addr: std::net::SocketAddr, e: &std::io::Error) -> String {
+    use std::io::ErrorKind::{AddrInUse, AddrNotAvailable, PermissionDenied};
+    let hint = match e.kind() {
+        AddrInUse => format!(
+            "something else is listening there; stop it, or use another port \
+             (`--listen {}` or `--listen 127.0.0.1:0` for any free one)",
+            addr.port().saturating_add(1)
+        ),
+        PermissionDenied => {
+            "ports below 1024 need privileges; use a higher one, such as 8080".to_owned()
+        }
+        AddrNotAvailable => "that address is not one of this machine's".to_owned(),
+        _ => return format!("listen on {addr}: {e}"),
+    };
+    format!("listen on {addr}: {e}\n  {hint}")
+}
+
+async fn list_models(app: &App) -> u8 {
+    let (models, failed) = app.models().await;
+    let text = |m: &serde_json::Value, key: &str| m[key].as_str().unwrap_or_default().to_owned();
+    let mut rows: Vec<[String; 3]> = models
+        .iter()
+        .map(|m| [text(m, "owned_by"), text(m, "kind"), text(m, "id")])
+        .collect();
+    rows.sort();
+    let width = |i: usize| rows.iter().map(|r| r[i].len()).max().unwrap_or(0).max(8);
+    let (provider, kind) = (width(0), width(1));
+    println!("{:<provider$}  {:<kind$}  MODEL", "PROVIDER", "KIND");
+    for [owner, kind_of, id] in &rows {
+        println!("{owner:<provider$}  {kind_of:<kind$}  {id}");
+    }
+    for why in &failed {
+        eprintln!("warning: could not list {why}");
+    }
+    match rows.is_empty() && !failed.is_empty() {
+        true => FAILURE,
+        false => SUCCESS,
+    }
+}
+
+fn init(output: &Path, force: bool) -> u8 {
     if output.exists() && !force {
         let path = output.display();
         return fail(&format!("{path} exists; add --force to replace it"));
@@ -160,10 +278,20 @@ fn init(output: &std::path::Path, force: bool) -> u8 {
     if let Err(e) = std::fs::write(output, config) {
         return fail(&format!("write {}: {e}", output.display()));
     }
-    println!(
-        "wrote {}; check it with `respan-gateway check`, run it with `respan-gateway`",
-        output.display()
-    );
+    let path = output.display();
+    let found = crate::init::detected_vendors();
+    if found.is_empty() {
+        println!(
+            "wrote {path} with openai enabled; no provider key is in the environment.\n\
+             Next: set OPENAI_API_KEY (export it, or put it in .env), then `respan-gateway check`."
+        );
+    } else {
+        println!(
+            "wrote {path} with {} enabled, from your environment.\n\
+             Next: `respan-gateway check`, then `respan-gateway`.",
+            found.join(", ")
+        );
+    }
     SUCCESS
 }
 
@@ -171,6 +299,6 @@ const SUCCESS: u8 = 0;
 const FAILURE: u8 = 1;
 
 fn fail(message: &str) -> u8 {
-    eprintln!("{message}");
+    eprintln!("error: {message}");
     FAILURE
 }

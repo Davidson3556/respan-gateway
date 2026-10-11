@@ -13,10 +13,10 @@ async fn no_case_insensitive_vendor_reads_a_passthrough_call_as_chat() {
     let (base, seen) = record_heads(CHAT_REPLY).await;
     let gw = Gateway::start(&format!(
         "providers:
-  p: {{ format: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ format: passthrough, base_url: '{base}/pt' }}
-serve: [openai-chat, passthrough]
-target: p
+  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
+  any: {{ formats: passthrough, base_url: '{base}/pt' }}
+formats: [openai-chat, passthrough]
+default: p
 "
     ))
     .await;

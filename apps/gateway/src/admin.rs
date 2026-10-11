@@ -131,7 +131,7 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
 
 async fn overview(State(admin): State<Arc<Admin>>) -> Json<Value> {
     Json(json!({
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::VERSION,
         "listen": admin.listen.get().map(ToString::to_string),
         "started_at": rfc3339(admin.started_at),
         "uptime_seconds": admin.started.elapsed().as_secs(),

@@ -26,6 +26,9 @@ pub struct Upstream {
     pub entries: Vec<Entry>,
     /// Whether it sends a key of its own, rather than the client's.
     pub own_key: bool,
+    /// Where its key comes from, such as `env OPENAI_API_KEY` or `config`;
+    /// never the key.
+    pub key_from: String,
 }
 
 /// One format of a provider: the core provider registered for it.
@@ -56,30 +59,31 @@ impl Plan {
 
 pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Plan), Fault> {
     let (gateway, upstreams) = providers(config, formats)?;
-    let serve = match &config.serve {
+    let serve = match &config.formats {
         Some(serve) => serve.clone(),
         None => default_serve(&upstreams, formats),
     };
     let gateway = serve_formats(gateway, &serve, &upstreams, formats)?;
     let tables = model_tables(&config.plugins, &upstreams)?;
-    if let Some(target) = &config.target
-        && !upstreams.iter().any(|u| u.name == *target)
+    if let Some(default) = &config.default
+        && !upstreams.iter().any(|u| u.name == *default)
     {
         return Err(Fault::config(format!(
-            "target: unknown provider '{target}'"
+            "default: unknown provider '{default}'; providers: [{}]",
+            names(&upstreams)
         )));
     }
     let keys = config
-        .keys
+        .client_keys
         .iter()
-        .map(|key| secret("keys", key))
+        .map(|key| secret("client_keys", key))
         .collect::<Result<_, _>>()?;
     if upstreams.is_empty() {
         return Err(Fault::config(
             "providers: none configured; add one, such as `openai: { vendor: openai }`",
         ));
     }
-    let routes = Arc::new(routes(&upstreams, tables, config.target.clone()));
+    let routes = Arc::new(routes(&upstreams, tables, config.default.clone()));
     let plan = Plan {
         upstreams,
         serve,
@@ -90,11 +94,11 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
 }
 
 /// The routes to `upstreams`: by `tables`, then their presets' prefixes,
-/// then by default to `target`.
+/// then by default to `default`.
 fn routes(
     upstreams: &[Upstream],
     tables: Vec<Vec<(String, String)>>,
-    target: Option<String>,
+    default: Option<String>,
 ) -> Routes {
     let mut routes = Routes::new();
     for u in upstreams {
@@ -111,8 +115,8 @@ fn routes(
     });
     routes = claims.fold(routes, |routes, (prefix, name)| routes.claim(prefix, name));
     routes = tables.into_iter().fold(routes, Routes::models);
-    match target {
-        Some(target) => routes.target(target),
+    match default {
+        Some(default) => routes.target(default),
         None => routes,
     }
 }
@@ -147,12 +151,12 @@ fn serve_formats(
     let after = serve.iter().skip_while(|n| *n != PASSTHROUGH).nth(1);
     if let Some(after) = after {
         return Err(Fault::config(format!(
-            "serve: '{after}' comes after '{PASSTHROUGH}', which accepts every request first; \
+            "formats: '{after}' comes after '{PASSTHROUGH}', which accepts every request first; \
              serve '{PASSTHROUGH}' last"
         )));
     }
     for name in serve {
-        let served = format_named(formats, name, "serve")?;
+        let served = format_named(formats, name, "formats")?;
         gateway = served.serve(gateway)?;
         if served.kind.translates {
             continue;
@@ -163,7 +167,7 @@ fn serve_formats(
             .map(|u| u.name.as_str())
             .collect();
         if speakers.len() != 1 {
-            let mut message = format!("serve: {name} needs exactly one provider of that format");
+            let mut message = format!("formats: {name} needs exactly one provider of that format");
             if speakers.len() > 1 {
                 message.push_str(&format!("; {} all speak it", speakers.join(", ")));
             }
@@ -174,42 +178,36 @@ fn serve_formats(
 }
 
 /// Each `models` plugin's routes, as `(prefix, provider)`, in the order
-/// the plugins run.
+/// listed. A route applies to every kind its provider serves.
 fn model_tables(
     plugins: &[PluginConfig],
     upstreams: &[Upstream],
 ) -> Result<Vec<Vec<(String, String)>>, Fault> {
     let mut tables = Vec::new();
-    for p in ordered(plugins)? {
-        let bad = |e: String| Fault::config(format!("plugin '{}': {e}", p.name));
-        let Some(models) = &p.models else {
-            return Err(bad("no plugin given; compiled-in plugins: [models]".into()));
-        };
-        for m in models {
-            let Some(upstream) = upstreams.iter().find(|u| u.name == m.provider) else {
-                return Err(bad(format!("unknown provider '{}'", m.provider)));
-            };
-            if !upstream.entries.iter().any(|e| e.kind == kind::CHAT) {
-                let formats: Vec<&str> =
-                    upstream.entries.iter().map(|e| e.format.as_str()).collect();
-                let formats = match formats.as_slice() {
-                    [one] => format!("format '{one}'"),
-                    many => format!("formats [{}]", many.join(", ")),
-                };
-                return Err(bad(format!(
-                    "provider '{}' uses {formats}, incompatible with conversation models routes",
-                    m.provider
+    for PluginConfig { models: routes } in plugins {
+        for m in routes {
+            if !upstreams.iter().any(|u| u.name == m.provider) {
+                return Err(Fault::config(format!(
+                    "plugins: models: unknown provider '{}'; providers: [{}]",
+                    m.provider,
+                    names(upstreams)
                 )));
             }
         }
         tables.push(
-            models
+            routes
                 .iter()
                 .map(|m| (m.prefix.clone(), m.provider.clone()))
                 .collect(),
         );
     }
     Ok(tables)
+}
+
+/// The providers' names, comma separated.
+fn names(upstreams: &[Upstream]) -> String {
+    let names: Vec<&str> = upstreams.iter().map(|u| u.name.as_str()).collect();
+    names.join(", ")
 }
 
 /// The compiled-in format `name`; `owner` says who asked for it in an error.
@@ -276,34 +274,37 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
             ))
         })?),
     };
-    let names: Vec<String> = match (&p.format, preset) {
+    let names: Vec<String> = match (&p.formats, preset) {
         (Some(names), _) => names.clone(),
         (None, Some(preset)) => preset
             .formats
             .iter()
             .map(|s| s.format.name().to_owned())
             .collect(),
-        (None, None) => return Err(bad("needs a `vendor` or a `format`".into())),
+        (None, None) => return Err(bad("needs a `vendor` or `formats`".into())),
     };
     if names.is_empty() {
-        return Err(bad("has no format".into()));
+        return Err(bad("has no formats".into()));
     }
     let base_url = p
         .base_url
         .as_deref()
         .or(preset.and_then(|preset| preset.base_url))
         .ok_or_else(|| bad("needs a `base_url`".into()))?;
-    let key = match (&p.key, &p.auth, preset) {
+    let (key, key_from) = match (&p.key, &p.auth, preset) {
         (Some(_), Some(_), _) => return Err(bad("set `key` or `auth`, not both".into())),
-        (Some(key), None, _) => Some(secret(&owner, key)?),
+        (Some(key), None, _) => (Some(secret(&owner, key)?), key_source(key)),
         (None, None, Some(preset)) if !preset.key_env.is_empty() => {
             let Some(key) = presets::key_from_env(preset.key_env) else {
                 let var = preset.key_env.join(" or ");
-                return Err(bad(format!("environment variable {var} is not set")));
+                return Err(bad(format!(
+                    "environment variable {var} is not set; export it, put it in .env, or set `key:`"
+                )));
             };
-            Some(secret(&owner, &key)?)
+            (Some(secret(&owner, &key)?), key_source(&key))
         }
-        _ => None,
+        (None, Some(Auth::Bearer { key } | Auth::Header { key, .. }), _) => (None, key_source(key)),
+        _ => (None, "client credentials".to_owned()),
     };
     // One explicit format sits at its base URL exactly as given.
     let exact = preset.is_none() && names.len() == 1;
@@ -343,7 +344,16 @@ fn upstream(name: &str, p: &ProviderConfig, formats: &[KnownFormat]) -> Result<U
         preset,
         entries,
         own_key: p.auth.is_some() || key.is_some(),
+        key_from,
     })
+}
+
+/// Where a configured key comes from, for a person to read: never the key.
+fn key_source(value: &str) -> String {
+    match value.strip_prefix("env:") {
+        Some(var) => format!("env {var}"),
+        None => "config".to_owned(),
+    }
 }
 
 /// Where `format` sits, at `base`, for a provider at `base_url`.
@@ -355,50 +365,6 @@ fn base_for(format: &KnownFormat, base: Base, base_url: &str) -> String {
         Base::Without(suffix) => base_url.strip_suffix(suffix).unwrap_or(base_url),
     };
     presets::with_scheme(base, format.websocket)
-}
-
-/// The plugins in the order they run: next is the earliest listed plugin
-/// whose `after` plugins are all placed. `Err` for an unknown name or a
-/// cycle.
-pub fn ordered(plugins: &[PluginConfig]) -> Result<Vec<&PluginConfig>, Fault> {
-    let index = |name: &str| plugins.iter().position(|p| p.name == name);
-    // `after` names a plugin, so a name is one plugin's.
-    let mut each = plugins.iter().enumerate();
-    if let Some((_, p)) = each.find(|(i, p)| index(&p.name) != Some(*i)) {
-        return Err(Fault::config(format!(
-            "plugin '{}' is registered twice",
-            p.name
-        )));
-    }
-    for p in plugins {
-        if let Some(first) = p.after.iter().find(|a| index(a).is_none()) {
-            return Err(Fault::config(format!(
-                "plugin '{}' runs after unknown plugin '{first}'",
-                p.name
-            )));
-        }
-    }
-    let mut placed = vec![false; plugins.len()];
-    let mut order = Vec::with_capacity(plugins.len());
-    while order.len() < plugins.len() {
-        let ready = (0..plugins.len()).find(|&i| {
-            let after = |a: &String| index(a).is_some_and(|a| placed[a]);
-            !placed[i] && plugins[i].after.iter().all(after)
-        });
-        let Some(i) = ready else {
-            let stuck: Vec<_> = (0..plugins.len())
-                .filter(|&i| !placed[i])
-                .map(|i| format!("'{}'", plugins[i].name))
-                .collect();
-            return Err(Fault::config(format!(
-                "plugins run after each other in a cycle: {}",
-                stuck.join(", ")
-            )));
-        };
-        placed[i] = true;
-        order.push(&plugins[i]);
-    }
-    Ok(order)
 }
 
 /// `env:NAME` reads the environment variable; anything else is literal.

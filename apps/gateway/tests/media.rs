@@ -206,7 +206,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 fn app(providers: &str) -> App {
-    let yaml = format!("log: false\nproviders:\n{providers}");
+    let yaml = format!("log: off\nproviders:\n{providers}");
     App::new(Config::parse(&yaml).unwrap()).unwrap()
 }
 
@@ -459,9 +459,9 @@ async fn a_video_follow_up_goes_to_the_provider_that_made_the_job() {
         Fake::start().await,
     );
     let app = app(&format!(
-        "  east: {{ format: openai-videos, key: e, base_url: '{}/v1' }}
-  west: {{ format: openai-videos, key: w, base_url: '{}/v1' }}
-  veo: {{ format: gemini-veo, key: g, base_url: '{}/v1beta' }}",
+        "  east: {{ formats: openai-videos, key: e, base_url: '{}/v1' }}
+  west: {{ formats: openai-videos, key: w, base_url: '{}/v1' }}
+  veo: {{ formats: gemini-veo, key: g, base_url: '{}/v1beta' }}",
         east.base, west.base, google.base
     ));
     let create = |model: &'static str| {
@@ -527,7 +527,7 @@ async fn models_are_listed_with_their_kinds() {
     // A provider of a media format alone lists the models it serves.
     let images = Fake::start().await;
     let app = self::app(&format!(
-        "  images: {{ format: openai-images, key: k, base_url: '{}/v1' }}",
+        "  images: {{ formats: openai-images, key: k, base_url: '{}/v1' }}",
         images.base
     ));
     let list = get_json(&app, "/v1/models").await;

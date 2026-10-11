@@ -17,15 +17,15 @@ use support::{Gateway, client, json, read_all};
 /// Anthropic Messages.
 async fn gateway(vendor: &str, fake: &FakeOpenAi) -> Gateway {
     let vendor = match vendor {
-        "" => "format: openai-chat".to_owned(),
+        "" => "formats: openai-chat".to_owned(),
         vendor => format!("vendor: {vendor}"),
     };
     let base = fake.base_url();
     Gateway::start(&format!(
         "providers:
   p: {{ {vendor}, base_url: '{base}', auth: {{ type: bearer, key: sk-test }} }}
-serve: [openai-chat, anthropic-messages]
-target: p
+formats: [openai-chat, anthropic-messages]
+default: p
 "
     ))
     .await

@@ -9,10 +9,10 @@ use crate::support::Gateway;
 fn gateway_yaml(base: &str) -> String {
     format!(
         "providers:
-  p: {{ format: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ format: passthrough, base_url: '{base}/pt' }}
-serve: [openai-chat, passthrough]
-target: p
+  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
+  any: {{ formats: passthrough, base_url: '{base}/pt' }}
+formats: [openai-chat, passthrough]
+default: p
 "
     )
 }

@@ -74,9 +74,9 @@ async fn fetch(gw: &Gateway) -> (String, Duration, usize) {
 async fn gateway(base: &str) -> Gateway {
     Gateway::start(&format!(
         "providers:
-  any: {{ format: passthrough, base_url: '{base}' }}
-serve: [passthrough]
-target: any
+  any: {{ formats: passthrough, base_url: '{base}' }}
+formats: [passthrough]
+default: any
 "
     ))
     .await

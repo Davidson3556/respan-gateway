@@ -90,21 +90,27 @@ impl Models {
         if let Some((_, list)) = self.lock().as_ref().filter(|(at, _)| fresh(at)) {
             return Ok(list.clone());
         }
-        let fetched = join_all(self.listings.iter().map(|l| self.fetch(l))).await;
-        let (listed, failed): (Vec<_>, Vec<_>) = fetched.into_iter().partition(Result::is_ok);
-        let failed: Vec<String> = failed.into_iter().filter_map(Result::err).collect();
-        if listed.is_empty() && !failed.is_empty() {
+        let (data, failed) = self.collect().await;
+        if data.is_empty() && !failed.is_empty() {
             return Err(format!(
                 "no provider listed its models: {}",
                 failed.join("; ")
             ));
         }
-        let data: Vec<Value> = listed.into_iter().flatten().flatten().collect();
         let list = json!({ "object": "list", "data": data });
         if failed.is_empty() {
             *self.lock() = Some((Instant::now(), list.clone()));
         }
         Ok(list)
+    }
+
+    /// Every provider's models now, and why each provider that did not
+    /// list is missing.
+    pub async fn collect(&self) -> (Vec<Value>, Vec<String>) {
+        let fetched = join_all(self.listings.iter().map(|l| self.fetch(l))).await;
+        let (listed, failed): (Vec<_>, Vec<_>) = fetched.into_iter().partition(Result::is_ok);
+        let failed = failed.into_iter().filter_map(Result::err).collect();
+        (listed.into_iter().flatten().flatten().collect(), failed)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, Value)>> {

@@ -22,9 +22,11 @@ use respan_gateway_http::http_body::{self, Frame, SizeHint};
 use respan_gateway_media::{embedding, image, speech, transcription};
 use respan_gateway_plugins::{Kind, Model};
 use serde::Serialize;
+use serde_json::{Map, Value};
 use tokio::sync::broadcast;
 
 use crate::formats::KnownFormat;
+use crate::logging::{Level, LogFormat};
 
 /// How many finished requests are kept.
 const KEPT: usize = 1000;
@@ -151,16 +153,16 @@ pub struct RequestLog {
     next_id: AtomicU64,
     kept: Mutex<Kept>,
     events: broadcast::Sender<Arc<str>>,
-    print: bool,
+    format: LogFormat,
 }
 
 impl RequestLog {
-    pub fn new(print: bool) -> Arc<Self> {
+    pub fn new(format: LogFormat) -> Arc<Self> {
         Arc::new(Self {
             next_id: AtomicU64::new(1),
             kept: Mutex::default(),
             events: broadcast::channel(256).0,
-            print,
+            format,
         })
     }
 
@@ -281,9 +283,31 @@ impl RequestLog {
             }
         }
         self.publish(entry);
-        if self.print {
-            eprintln!("{}", escape_controls(&line(&record)));
+        if self.format != LogFormat::Off {
+            self.print(&record);
         }
+    }
+}
+
+impl RequestLog {
+    /// Writes a finished request to stderr: a warning if it was refused, an
+    /// error if it failed.
+    fn print(&self, record: &RequestRecord) {
+        let level = match record.status {
+            _ if record.error.is_some() => Level::Error,
+            Some(s) if s >= 500 => Level::Error,
+            Some(s) if s >= 400 => Level::Warn,
+            _ => Level::Info,
+        };
+        let fields = match serde_json::to_value(record) {
+            Ok(Value::Object(fields)) => fields,
+            _ => Map::new(),
+        };
+        let message = match self.format {
+            LogFormat::Json => "request".to_owned(),
+            _ => escape_controls(&line(record)),
+        };
+        eprintln!("{}", self.format.line(level, &message, fields));
     }
 }
 

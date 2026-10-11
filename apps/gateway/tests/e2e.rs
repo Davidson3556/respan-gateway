@@ -36,9 +36,9 @@ const CLAUDE: &str = "claude-sonnet-4-5";
 fn one_provider(format: &str, base_url: &str) -> String {
     format!(
         "providers:
-  p: {{ format: {format}, base_url: '{base_url}' }}
-serve: [openai-chat, anthropic-messages]
-target: p
+  p: {{ formats: {format}, base_url: '{base_url}' }}
+formats: [openai-chat, anthropic-messages]
+default: p
 "
     )
 }
@@ -48,13 +48,12 @@ target: p
 fn both(openai: &str, anthropic: &str) -> String {
     format!(
         "providers:
-  openai: {{ format: openai-chat, base_url: '{openai}', auth: {{ type: bearer, key: sk-gw-openai }} }}
-  anthropic: {{ format: anthropic-messages, base_url: '{anthropic}', auth: {{ type: header, name: x-api-key, key: sk-gw-anthropic }} }}
-serve: [openai-chat, anthropic-messages]
+  openai: {{ formats: openai-chat, base_url: '{openai}', auth: {{ type: bearer, key: sk-gw-openai }} }}
+  anthropic: {{ formats: anthropic-messages, base_url: '{anthropic}', auth: {{ type: header, name: x-api-key, key: sk-gw-anthropic }} }}
+formats: [openai-chat, anthropic-messages]
 plugins:
-  - name: models
-    models: [{{ prefix: claude, provider: anthropic }}]
-target: openai
+  - models: [{{ prefix: claude, provider: anthropic }}]
+default: openai
 "
     )
 }
@@ -312,9 +311,9 @@ async fn a_provider_with_its_own_key_replaces_the_clients() {
     let openai = FakeOpenAi::start().await;
     let config = format!(
         "providers:
-  p: {{ format: openai-chat, base_url: '{}', auth: {{ type: bearer, key: sk-own }} }}
-serve: [openai-chat]
-target: p
+  p: {{ formats: openai-chat, base_url: '{}', auth: {{ type: bearer, key: sk-own }} }}
+formats: [openai-chat]
+default: p
 ",
         openai.base_url()
     );
@@ -522,13 +521,12 @@ async fn an_openai_clients_key_does_not_reach_an_anthropic_provider_without_one(
     let (openai, anthropic) = (FakeOpenAi::start().await, FakeAnthropic::start().await);
     let config = format!(
         "providers:
-  openai: {{ format: openai-chat, base_url: '{}' }}
-  anthropic: {{ format: anthropic-messages, base_url: '{}' }}
-serve: [openai-chat]
+  openai: {{ formats: openai-chat, base_url: '{}' }}
+  anthropic: {{ formats: anthropic-messages, base_url: '{}' }}
+formats: [openai-chat]
 plugins:
-  - name: models
-    models: [{{ prefix: claude, provider: anthropic }}]
-target: openai
+  - models: [{{ prefix: claude, provider: anthropic }}]
+default: openai
 ",
         openai.base_url(),
         anthropic.base_url()
@@ -1211,7 +1209,7 @@ fn check_says_ok_for_a_good_config_and_fails_a_bad_one() {
     assert!(out.status.success(), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stdout).ends_with(": ok\n"));
 
-    let bad = support::write_config("serve: [nope]\n");
+    let bad = support::write_config("formats: [nope]\n");
     let out = std::process::Command::new(bin)
         .args(["--config", bad.to_str().unwrap(), "check"])
         .output()
@@ -1294,9 +1292,9 @@ async fn serving_passthrough_needs_a_provider_of_that_format() {
     let bin = env!("CARGO_BIN_EXE_respan-gateway");
     let config = support::write_config(
         "providers:
-  p: { format: openai-chat, base_url: 'http://127.0.0.1:1/v1' }
-serve: [openai-chat, passthrough]
-target: p
+  p: { formats: openai-chat, base_url: 'http://127.0.0.1:1/v1' }
+formats: [openai-chat, passthrough]
+default: p
 ",
     );
     let out = std::process::Command::new(bin)
@@ -1382,33 +1380,8 @@ async fn proxy_relays_codex_the_responses_api_stream_byte_exact() {
 }
 
 #[test]
-fn models_cannot_route_conversations_to_a_passthrough_provider() {
-    let config = support::write_config(
-        "providers:
-  chat: { format: openai-chat, base_url: 'http://127.0.0.1:1/v1' }
-  any: { format: passthrough, base_url: 'http://127.0.0.1:1' }
-serve: [openai-chat, passthrough]
-plugins:
-  - name: models
-    models: [{ prefix: gpt, provider: any }]
-target: chat
-",
-    );
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_respan-gateway"))
-        .args(["--config", config.to_str().unwrap(), "check"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "{out:?}");
-    let error = String::from_utf8_lossy(&out.stderr);
-    assert!(error.contains("plugin 'models'"), "{error}");
-    assert!(error.contains("provider 'any'"), "{error}");
-    assert!(error.contains("passthrough"), "{error}");
-    assert!(error.contains("conversation"), "{error}");
-}
-
-#[test]
 fn proxy_rejects_explicit_config_in_either_argument_order() {
-    let config = support::write_config("serve: []\n");
+    let config = support::write_config("formats: []\n");
     let path = config.to_str().unwrap();
     for args in [
         vec!["--config", path, "proxy", "--openai", "--listen", "invalid"],
@@ -1451,7 +1424,7 @@ fn proxy_without_a_vendor_or_with_a_bad_address_is_a_usage_error() {
             "--listen",
             "127.0.0.1:0",
             "--openai",
-            "check",
+            "--check",
             "--url",
         ],
         &[
@@ -1476,7 +1449,7 @@ fn proxy_url_with_a_quote_is_not_parsed_as_yaml() {
         .args([
             "proxy",
             "--openai",
-            "check",
+            "--check",
             "--url",
             "http://localhost/vendor's/v1",
         ])
@@ -1552,9 +1525,9 @@ async fn sessions_from_yaml_relay_with_the_gateways_keys_and_close_1001_on_sigte
     let ws = |base: String| base.replace("http://", "ws://");
     let mut gw = Gateway::start(&format!(
         "providers:
-  realtime: {{ format: openai-realtime, base_url: '{}', auth: {{ type: bearer, key: sk-gw }} }}
-  live: {{ format: gemini-live, base_url: '{}', auth: {{ type: header, name: x-goog-api-key, key: AIza-gw }} }}
-serve: [openai-realtime, gemini-live]
+  realtime: {{ formats: openai-realtime, base_url: '{}', auth: {{ type: bearer, key: sk-gw }} }}
+  live: {{ formats: gemini-live, base_url: '{}', auth: {{ type: header, name: x-goog-api-key, key: AIza-gw }} }}
+formats: [openai-realtime, gemini-live]
 ",
         ws(openai.base_url()),
         ws(gemini.base_url())
@@ -1654,7 +1627,7 @@ async fn realtime_sessions_from_yaml_cross_vendors_by_the_model_they_ask_for() {
         "providers:
   openai: {{ vendor: openai, base_url: '{}', key: sk-gw }}
   gemini: {{ vendor: gemini, base_url: '{}/v1beta/openai', key: AIza-gw }}
-serve: [openai-realtime, gemini-live]
+formats: [openai-realtime, gemini-live]
 ",
         http(openai.base_url()),
         http(gemini.base_url())

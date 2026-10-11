@@ -9,10 +9,10 @@ async fn no_spelling_of_the_chat_path_reaches_the_vendor_chat_endpoint_through_p
     let (base, seen) = record_lines(CHAT_REPLY).await;
     let gw = Gateway::start(&format!(
         "providers:
-  p: {{ format: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ format: passthrough, base_url: '{base}/pt' }}
-serve: [openai-chat, passthrough]
-target: p
+  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
+  any: {{ formats: passthrough, base_url: '{base}/pt' }}
+formats: [openai-chat, passthrough]
+default: p
 "
     ))
     .await;
@@ -64,10 +64,10 @@ async fn passthrough_forwards_the_matched_segments() {
     let (base, seen) = record_lines(CHAT_REPLY).await;
     let gw = Gateway::start(&format!(
         "providers:
-  p: {{ format: openai-chat, base_url: '{base}/chatv1' }}
-  any: {{ format: passthrough, base_url: '{base}/pt' }}
-serve: [openai-chat, passthrough]
-target: p
+  p: {{ formats: openai-chat, base_url: '{base}/chatv1' }}
+  any: {{ formats: passthrough, base_url: '{base}/pt' }}
+formats: [openai-chat, passthrough]
+default: p
 "
     ))
     .await;
