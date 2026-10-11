@@ -171,6 +171,22 @@ providers:
 # 30s, 2m, 500ms); ws_message_limit is the largest WebSocket message of a
 # session, from either side, as a size like body_limit.
 # request_history: 1000
+
+# Keep the history across restarts: append each finished request (the same
+# record the admin API shows: no bodies, no keys) to a JSON-lines file, read the
+# last request_history of them back at start, and move the file to <file>.1 at
+# request_history_file_max (a size; 64MiB if unset). A disk error is a warning,
+# never a failed request. GET /ui/api/requests/export?format=jsonl|csv downloads
+# the history, with the UI's filters (kind, status, provider, model, since).
+# request_history_file: ./requests.jsonl
+# request_history_file_max: 64MiB
+
+# What models cost, in dollars per million tokens, by model prefix (the longest
+# match wins). Set, each request gets a cost_usd and the overview's totals their
+# sum. There is no built-in price list: prices change, so these are yours.
+# prices:
+#   gpt-4o: { input: 2.5, output: 10, cached_input: 1.25 }
+#   gpt-4o-mini: { input: 0.15, output: 0.6 }
 # shutdown_grace: 30s
 # ws_message_limit: 16MiB
 

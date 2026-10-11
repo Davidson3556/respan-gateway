@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::middleware::from_fn_with_state;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use respan_gateway_core::futures::{Stream, StreamExt, stream};
-use respan_gateway_http::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use respan_gateway_http::http::header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE};
 use respan_gateway_http::http::{HeaderValue, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -23,8 +24,9 @@ use crate::auth::{self, ClientKeys};
 use crate::compose::Plan;
 use crate::config::Source;
 use crate::formats::{KnownFormat, first_of_each_kind};
+use crate::history::{CSV_HEADER, Filter, csv_row};
 use crate::mcp::Transport;
-use crate::requests::rfc3339;
+use crate::requests::{RequestRecord, rfc3339};
 
 mod assets {
     include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
@@ -129,6 +131,7 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
         .route("/ui/api/mcp", get(mcp))
         .route("/ui/api/routes", get(routes))
         .route("/ui/api/requests", get(requests))
+        .route("/ui/api/requests/export", get(export))
         .route("/ui/api/requests/{id}", get(request))
         .route("/ui/api/events", get(events))
         .route("/ui/api/reload", post(reload))
@@ -285,6 +288,52 @@ struct Limit {
 async fn requests(State(admin): State<Arc<Admin>>, Query(q): Query<Limit>) -> Json<Value> {
     let requests = admin.process.log.recent(q.limit.unwrap_or(100));
     Json(json!({ "requests": requests }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportQuery {
+    /// `jsonl` (the default) or `csv`.
+    format: Option<String>,
+    #[serde(flatten)]
+    filter: Filter,
+}
+
+/// `GET /ui/api/requests/export?format=jsonl|csv`: the kept requests,
+/// oldest first, one record per line (`jsonl`, the records of
+/// `/ui/api/requests`; or `csv` with a header row), as a download. The
+/// filters narrow it as the UI's do, all optional: `kind`; `status` (`ok`,
+/// `error`, `pending`, or a class such as `2xx`); `provider`; `model` (a
+/// case-blind substring); `since` (an RFC 3339 time or date).
+async fn export(State(admin): State<Arc<Admin>>, Query(q): Query<ExportQuery>) -> Response {
+    let (content_type, name, header): (_, _, Option<&str>) = match q.format.as_deref() {
+        None | Some("jsonl") => ("application/x-ndjson", "requests.jsonl", None),
+        Some("csv") => ("text/csv; charset=utf-8", "requests.csv", Some(CSV_HEADER)),
+        Some(other) => {
+            let message = format!("format: '{other}' is not jsonl or csv");
+            return auth::error(StatusCode::BAD_REQUEST, "invalid_request_error", &message);
+        }
+    };
+    let csv = header.is_some();
+    let line = move |r: RequestRecord| {
+        let line = match csv {
+            true => csv_row(&r),
+            false => serde_json::to_string(&r).unwrap_or_default(),
+        };
+        Ok::<_, Infallible>(format!("{line}\n"))
+    };
+    let head = header.map(|h| Ok(format!("{h}\n")));
+    let rows = admin.process.log.export(&q.filter).into_iter().map(line);
+    let body = Body::from_stream(stream::iter(head.into_iter().chain(rows)));
+    let headers = [
+        (CONTENT_TYPE, HeaderValue::from_static(content_type)),
+        (
+            CONTENT_DISPOSITION,
+            HeaderValue::from_str(&format!("attachment; filename=\"{name}\""))
+                .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+        ),
+        (CACHE_CONTROL, HeaderValue::from_static("no-store")),
+    ];
+    (headers, body).into_response()
 }
 
 async fn request(State(admin): State<Arc<Admin>>, Path(id): Path<String>) -> Response {

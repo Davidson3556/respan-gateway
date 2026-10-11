@@ -134,7 +134,7 @@ needs `client_keys`. Without `cors`, nothing changes.
 [`gateway.example.yaml`](gateway.example.yaml): providers (vendor presets or
 spelled out), `formats` served, `client_keys`, `default`, `plugins` (model
 prefixes), `mcp` servers, `agent`, `cors`, `log`, `ui`, `body_limit`,
-`ws_message_limit`, `request_history`, `shutdown_grace`. Routing order: `name/model` goes to
+`ws_message_limit`, `request_history` (`request_history_file` keeps it across restarts, `/ui/api/requests/export` downloads it, `prices` adds a cost to each request), `shutdown_grace`. Routing order: `name/model` goes to
 provider `name`; else the `models` plugin's prefixes; else the vendors'
 prefixes (longest wins); else the kind's default
 ([routing](docs/ARCHITECTURE.md#routing)).

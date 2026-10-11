@@ -22,11 +22,13 @@ use respan_gateway_http::http_body::{self, Frame, SizeHint};
 use respan_gateway_media::{embedding, image, speech, transcription};
 use respan_gateway_plugins::agent::{Sink, StepReport, ToolHop};
 use respan_gateway_plugins::{Kind, Model};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast;
 
+use crate::config::{Config, Price};
 use crate::formats::KnownFormat;
+use crate::history::{self, Filter, Writer};
 use crate::logging::{Level, LogFormat};
 
 /// How many finished requests are kept unless the config's `request_history`
@@ -38,14 +40,14 @@ const ERROR_BODY: usize = 4096;
 const KEPT_CHARS: usize = 200;
 
 /// One request, as the admin API returns it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestRecord {
     pub id: String,
     pub started_at: String,
     pub method: String,
     pub path: String,
     pub format: Option<String>,
-    pub kind: Option<&'static str>,
+    pub kind: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub status: Option<u16>,
@@ -53,15 +55,19 @@ pub struct RequestRecord {
     pub ttfb_ms: Option<u64>,
     pub stream: bool,
     pub usage: Option<Usage>,
+    /// What it cost in dollars, by the config's `prices`; absent without a
+    /// price for its model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
     /// The calls to the model the agent loop made for it and the tools it
     /// ran, in order; none without the loop.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
     pub error: Option<String>,
 }
 
 /// One call to the model in an agent loop, and the tools it asked for.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
     pub index: u32,
     pub duration_ms: u64,
@@ -74,7 +80,7 @@ pub struct Step {
 }
 
 /// A tool the gateway ran for the model.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     /// As the model named it, `<server>__<tool>`.
     pub name: String,
@@ -84,34 +90,46 @@ pub struct ToolCall {
     pub bytes: usize,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Of `input_tokens`, those read from a cache.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cached_input_tokens: u64,
     /// Seconds of audio billed, as a transcription's provider may say
     /// instead of tokens.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// What one event of a response adds to its usage.
 enum Counted {
-    Tokens(u64, u64),
+    Tokens(u64, u64, u64),
     Seconds(f64),
 }
 
 impl Counted {
     fn tokens(usage: &respan_gateway_conversation::Usage) -> Self {
-        Counted::Tokens(usage.input_tokens, usage.output_tokens)
+        Counted::Tokens(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cached_input_tokens,
+        )
     }
 }
 
 impl Usage {
     fn add(&mut self, counted: Counted) {
         match counted {
-            Counted::Tokens(input, output) => {
+            Counted::Tokens(input, output, cached) => {
                 self.input_tokens += input;
                 self.output_tokens += output;
+                self.cached_input_tokens += cached;
             }
             Counted::Seconds(seconds) => *self.seconds.get_or_insert(0.0) += seconds,
         }
@@ -125,6 +143,9 @@ pub struct Totals {
     pub in_flight: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The sum of the requests' `cost_usd`; present once `prices` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// A provider's finished requests.
@@ -150,6 +171,16 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// A request that finished before this run, as the history file holds
+    /// it.
+    fn finished(record: RequestRecord) -> Self {
+        Self {
+            record: Mutex::new(record),
+            started: Instant::now(),
+            finished: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
     fn record(&self) -> MutexGuard<'_, RequestRecord> {
         self.record.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -177,6 +208,10 @@ struct Kept {
     capacity: usize,
     format: LogFormat,
     recent: VecDeque<Arc<Entry>>,
+    /// The config's `prices`.
+    prices: Vec<(String, Price)>,
+    /// Where finished requests are also written, if the config says.
+    writer: Option<Writer>,
     totals: Totals,
     providers: HashMap<String, ProviderStats>,
 }
@@ -189,30 +224,54 @@ pub struct RequestLog {
 }
 
 impl RequestLog {
-    /// An empty log keeping the last `capacity` requests, printing each as
-    /// `format` says.
-    pub fn new(capacity: usize, format: LogFormat) -> Arc<Self> {
-        Arc::new(Self {
-            next_id: AtomicU64::new(1),
+    /// A log as `config` says: keeping its last `request_history` requests,
+    /// printing each as its `log` says, starting with the ones its
+    /// `request_history_file` holds.
+    pub fn new(config: &Config) -> Arc<Self> {
+        let capacity = config.request_history.unwrap_or(KEPT);
+        let loaded = (config.request_history_file.as_deref())
+            .map(|path| history::load(path, capacity))
+            .unwrap_or_default();
+        let next_id = (loaded.iter())
+            .filter_map(|r| r.id.strip_prefix("r_")?.parse::<u64>().ok())
+            .max()
+            .map_or(1, |last| last + 1);
+        let recent = loaded.into_iter().map(Entry::finished).map(Arc::new);
+        let log = Arc::new(Self {
+            next_id: AtomicU64::new(next_id),
             kept: Mutex::new(Kept {
                 capacity,
-                format,
-                recent: VecDeque::new(),
+                format: config.log,
+                recent: recent.collect(),
+                prices: Vec::new(),
+                writer: None,
                 totals: Totals::default(),
                 providers: HashMap::new(),
             }),
             events: broadcast::channel(256).0,
-        })
+        });
+        log.configure(config);
+        log
     }
 
-    /// Keeps the last `capacity` requests and prints as `format` from now
-    /// on, as a reloaded config says; what is kept stays, up to `capacity`.
-    pub fn configure(&self, capacity: usize, format: LogFormat) {
+    /// Applies a reloaded `config`: what is kept stays, up to its
+    /// `request_history`.
+    pub fn configure(&self, config: &Config) {
         let mut kept = self.kept();
-        kept.capacity = capacity;
-        kept.format = format;
-        while kept.recent.len() > capacity {
+        kept.capacity = config.request_history.unwrap_or(KEPT);
+        kept.format = config.log;
+        while kept.recent.len() > kept.capacity {
             kept.recent.pop_front();
+        }
+        kept.prices = (config.prices.iter())
+            .map(|(prefix, price)| (prefix.clone(), *price))
+            .collect();
+        kept.totals.cost_usd = match kept.prices.is_empty() {
+            true => None,
+            false => Some(kept.totals.cost_usd.unwrap_or_default()),
+        };
+        if !kept.writer.as_ref().is_some_and(|w| w.is(config)) {
+            kept.writer = Writer::from_config(config);
         }
     }
 
@@ -229,6 +288,13 @@ impl RequestLog {
             .take(limit)
             .map(|e| e.snapshot())
             .collect()
+    }
+
+    /// The kept requests that match `filter`, oldest first.
+    pub fn export(&self, filter: &Filter) -> Vec<RequestRecord> {
+        let kept = self.kept();
+        let all = kept.recent.iter().map(|e| e.snapshot());
+        all.filter(|r| filter.matches(r)).collect()
     }
 
     pub fn get(&self, id: &str) -> Option<RequestRecord> {
@@ -283,6 +349,7 @@ impl RequestLog {
             ttfb_ms: None,
             stream: false,
             usage: None,
+            cost_usd: None,
             steps: Vec::new(),
             error: None,
         };
@@ -308,11 +375,15 @@ impl RequestLog {
         if entry.finished.swap(true, Ordering::SeqCst) {
             return;
         }
+        let prices = self.kept().prices.clone();
         let record = {
             let mut record = entry.record();
             record.duration_ms = Some(entry.elapsed_ms());
             if record.error.is_none() {
                 record.error = error;
+            }
+            if let (Some(model), Some(usage)) = (&record.model, &record.usage) {
+                record.cost_usd = history::cost(&prices, model, usage);
             }
             record.clone()
         };
@@ -326,11 +397,17 @@ impl RequestLog {
                 totals.input_tokens += usage.input_tokens;
                 totals.output_tokens += usage.output_tokens;
             }
+            if let Some(cost) = record.cost_usd {
+                *totals.cost_usd.get_or_insert(0.0) += cost;
+            }
             if let Some(provider) = &record.provider {
                 let stats = kept.providers.entry(provider.clone()).or_default();
                 stats.requests += 1;
                 stats.errors += u64::from(failed);
                 stats.total_ms += record.duration_ms.unwrap_or_default();
+            }
+            if let Some(writer) = &kept.writer {
+                writer.append(&record);
             }
             kept.format
         };
@@ -597,7 +674,7 @@ impl Plugin for Recorder {
             let mut record = entry.record();
             record.format = Some(cx.format().to_owned());
             if let Some((kind, model)) = self.formats.get(cx.format()) {
-                record.kind = Some(kind.label);
+                record.kind = Some(kind.label.to_owned());
                 let model = model.read(cx).map(|m| clip(&m));
                 record.model = model.or(record.model.take());
             }
@@ -774,7 +851,7 @@ mod tests {
             method: "POST".into(),
             path: "/v1/chat/completions".into(),
             format: Some("openai-chat".into()),
-            kind: Some("chat"),
+            kind: Some("chat".into()),
             model: Some("gpt-4o-mini".into()),
             provider: Some("openai".into()),
             status: Some(200),
@@ -784,8 +861,10 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 12,
                 output_tokens: 40,
+                cached_input_tokens: 0,
                 seconds: None,
             }),
+            cost_usd: None,
             steps: Vec::new(),
             error: None,
         };

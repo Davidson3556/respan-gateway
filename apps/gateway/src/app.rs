@@ -38,7 +38,7 @@ use crate::mcp::{self, McpRoute};
 use crate::models::{self, Models, Probe};
 use crate::quirks::with_quirks;
 use crate::report;
-use crate::requests::{self, KEPT, Recorder, RequestLog};
+use crate::requests::{self, Recorder, RequestLog};
 use crate::{Config, Error, VERSION};
 
 /// Where the gateway listens unless told.
@@ -220,10 +220,7 @@ impl Shared {
                 built.listen()
             ));
         }
-        process.log.configure(
-            built.config.request_history.unwrap_or(KEPT),
-            built.config.log,
-        );
+        process.log.configure(&built.config);
         let built = Arc::new(built);
         let previous = {
             let mut current = self.current.write().unwrap_or_else(|e| e.into_inner());
@@ -446,7 +443,7 @@ impl App {
     /// given a source ([`reload_from`](Self::reload_from)).
     pub fn new(config: Config) -> Result<App, Error> {
         let process = Arc::new(Process {
-            log: RequestLog::new(config.request_history.unwrap_or(KEPT), config.log),
+            log: RequestLog::new(&config),
             stopping: Arc::new(watch::channel(false).0),
             listen: OnceLock::new(),
             started_at: SystemTime::now(),

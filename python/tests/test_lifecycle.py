@@ -69,6 +69,28 @@ def test_requests_and_providers(gw):
     assert {p["name"] for p in asyncio.run(gw.aproviders())} == {"openai", "any"}
 
 
+def test_export_requests_filters_and_costs(fake, tmp_path):
+    history = tmp_path / "requests.jsonl"
+    config = {
+        **config_for(fake),
+        "request_history_file": str(history),
+        "prices": {"fake": {"input": 1_000_000, "output": 1_000_000}},
+    }
+    with rg.Gateway(config=config) as gw:
+        gw.request("POST", "/v1/chat/completions", json=CHAT)
+        gw.request("POST", "/v1/chat/completions", json={**CHAT, "model": "missing"})
+        lines = gw.export_requests().splitlines()
+        assert [json.loads(line)["status"] for line in lines] == [200, 404]  # oldest first
+        assert len(gw.export_requests(status="error").splitlines()) == 1
+        csv_rows = asyncio.run(gw.aexport_requests("csv", kind="chat")).splitlines()
+        assert csv_rows[0].startswith("id,started_at,") and len(csv_rows) == 3
+        with pytest.raises(rg.GatewayError, match="jsonl or csv"):
+            gw.export_requests("xml")
+        record = json.loads(lines[0])
+        assert record["cost_usd"] == record["usage"]["input_tokens"] + record["usage"]["output_tokens"]
+    assert history.exists()
+
+
 def test_admin_api_off_is_a_gateway_error(fake):
     gw = rg.Gateway(config={**config_for(fake), "ui": False})
     with pytest.raises(rg.GatewayError, match="ui: false"):
