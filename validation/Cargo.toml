@@ -22,11 +22,12 @@ respan-gateway-realtime = { path = "../crates/kinds/realtime" }
 respan-gateway-realtime-ws = { path = "../crates/formats/realtime-ws" }
 respan-gateway-conversation = { path = "../crates/kinds/conversation" }
 respan-gateway-core = { path = "../crates/core" }
-respan-gateway-http = { path = "../crates/wires/http", features = ["reqwest", "axum"] }
+respan-gateway-http = { path = "../crates/wires/http", features = ["reqwest"] }
 respan-gateway-plugins = { path = "../crates/plugins" }
 respan-gateway-mcp = { path = "../crates/kinds/mcp" }
 respan-gateway-mcp-http = { path = "../crates/formats/mcp-http" }
-respan-gateway-ws = { path = "../crates/wires/ws", features = ["axum"] }
+respan-gateway-ws = { path = "../crates/wires/ws" }
+respan-gateway-serve = { path = "../crates/serve" }
 axum = "0.8"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

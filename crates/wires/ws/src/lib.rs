@@ -10,7 +10,7 @@
 //! - [`WsTransport`]: an outbound native HTTP sender
 //!   that connects to a `ws://` or `wss://` provider.
 //! - [`serve`]: a client's upgrade, through a gateway, for an adapter that
-//!   hosts sessions, such as `axum::router` (behind the `axum` feature).
+//!   hosts sessions, such as `respan_gateway_serve`.
 //! - [`CloseCode`] and [`ProviderClose`]: the code a client is closed with,
 //!   and the one a provider closed with.
 //! - [`Limits`]: what either edge takes of a session, in bytes and time.
@@ -22,8 +22,6 @@
 
 use std::time::Duration;
 
-#[cfg(feature = "axum")]
-pub mod axum;
 mod session;
 mod transport;
 
@@ -79,7 +77,7 @@ impl Default for Limits {
 /// [`ProviderClose`], which reaches the client only as this: set by a
 /// plugin, or by [`WsTransport`] on a call relayed with
 /// [`RawErrors`](respan_gateway_http::RawErrors), as
-/// [`Relay`](respan_gateway_http::relay::Relay) relays one.
+/// [`Relay`](respan_gateway_http::Relay) relays one.
 ///
 /// [`Fault::with`]: respan_gateway_core::Fault::with
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

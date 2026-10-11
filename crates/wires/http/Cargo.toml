@@ -14,13 +14,10 @@ workspace = true
 [features]
 default = []
 reqwest = ["dep:reqwest"]
-# Axum hosting of the client edge (`axum::router`).
-axum = ["dep:axum"]
 
 [dependencies]
 respan-gateway-core.workspace = true
 reqwest = { workspace = true, optional = true }
-axum = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "time"] }
 bytes.workspace = true
 futures.workspace = true
@@ -39,7 +36,3 @@ respan-gateway-core.workspace = true
 serde_json.workspace = true
 mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time", "test-util"] }
-
-[[test]]
-name = "axum"
-required-features = ["axum", "reqwest"]

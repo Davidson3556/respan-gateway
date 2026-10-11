@@ -1285,6 +1285,7 @@ dependencies = [
  "respan-gateway-providers",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
  "respan-gateway-ws",
  "serde",
  "serde_json",
@@ -1327,7 +1328,6 @@ dependencies = [
 name = "respan-gateway-http"
 version = "0.0.0"
 dependencies = [
- "axum",
  "bytes",
  "futures",
  "http",
@@ -1433,6 +1433,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "respan-gateway-serve"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-ws",
+]
+
+[[package]]
 name = "respan-gateway-validation"
 version = "0.0.0"
 dependencies = [
@@ -1451,6 +1464,7 @@ dependencies = [
  "respan-gateway-plugins",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
  "respan-gateway-ws",
  "serde",
  "serde_json",
@@ -1463,9 +1477,6 @@ dependencies = [
 name = "respan-gateway-ws"
 version = "0.0.0"
 dependencies = [
- "axum",
- "hyper",
- "hyper-util",
  "reqwest",
  "respan-gateway-core",
  "respan-gateway-http",

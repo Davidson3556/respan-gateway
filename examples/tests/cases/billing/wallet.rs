@@ -108,7 +108,7 @@ async fn n_answers_cannot_overspend_the_wallet() -> Result<(), Fault> {
         )?
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(accounting)
-        .plugin(respan_gateway_http::relay::Relay::RAW)
+        .plugin(respan_gateway_http::Relay::RAW)
         .target("openai")?;
     let five = r#"{"id":"c1","object":"chat.completion","model":"gpt-x","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"..."}}],"usage":{"prompt_tokens":10,"completion_tokens":50000}}"#;
     let body =

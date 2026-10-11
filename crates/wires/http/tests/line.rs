@@ -1867,4 +1867,4 @@ async fn r11_a_filter_that_panics_fails_the_call_internal() {
     assert_eq!((t(&log.metered()[0]), internal), (None, true));
 }
 
-use respan_gateway_http::relay as explicit;
+use respan_gateway_http as explicit;

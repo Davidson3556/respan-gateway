@@ -52,7 +52,7 @@ it, and translating it is refused if it could change the answer.
 
 Input values are plain data: they keep nothing of the bytes they were
 decoded from, and compare by what they say. Only an explicit raw relay
-(`respan_gateway_http::relay::Relay::RAW`) sends a request's own bytes, and a
+(`respan_gateway_http::Relay::RAW`) sends a request's own bytes, and a
 response is always written again from its events.
 
 `Input.options: GenerationOptions` groups the output token limit, sampling,

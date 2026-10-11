@@ -1,21 +1,25 @@
-//! Pull-driven HTTP binding and delivery coordination.
+//! How HTTP meets the kernel: the client's edge ([`ClientIo`]), the provider's
+//! ([`ProviderIo`]), and the bodies and encoders between them.
 
-mod accept;
-mod dial;
+mod body;
+mod client;
+mod encoder;
+mod provider;
 mod reader;
-pub(crate) mod upload;
+mod upload;
 mod writer;
 
-use crate::Body;
 use bytes::Bytes;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use http_body_util::BodyExt;
 use respan_gateway_core::Fault;
 
-pub use accept::{ClientIo, Framing, Reply};
-pub use dial::ProviderIo;
-pub(crate) use dial::Sending;
+pub use body::Body;
+pub use client::{ClientIo, Framing, Reply, handle};
+pub use encoder::{Encoder, encode_all, messages};
+pub use provider::{ProviderIo, connect};
+
 const PANICKED: &str = "a plugin or format panicked";
 pub(crate) type Written = (http::Response<Body>, crate::Completion);
 
@@ -109,7 +113,7 @@ impl http_body::Body for Pump {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::framing::passthrough::Passthrough;
+    use crate::passthrough::Passthrough;
     use respan_gateway_core::{EventStream, Format, Upstream};
 
     /// A reply prepared before handling ends is kept, however it ended.

@@ -48,9 +48,9 @@ use respan_gateway_examples::store::{
     sql,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::{self, HeaderMap, Method, StatusCode, Uri};
 use respan_gateway_http::http_body_util::BodyExt;
+use respan_gateway_http::passthrough;
 use respan_gateway_http::{Body, Credential, HttpTransport, Wire, built_wrong};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]

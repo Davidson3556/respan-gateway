@@ -240,8 +240,9 @@ the gateway, and the binary chooses what to compose. See the
 | `crates/kinds/media/` | The media kinds, a kind per operation: image generation and edits, transcription, speech, embeddings, video jobs. |
 | `crates/kinds/realtime/` | The realtime kind: a live session's events, both ways. |
 | `crates/kinds/mcp/` | The MCP kind: typed JSON-RPC messages and their envelopes. |
-| `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the passthrough format, and optional Reqwest transport and Axum hosting. |
-| `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits, and optional Axum hosting. |
+| `crates/wires/http/` | The HTTP wire: owned edges, native bodies, stream/sink helpers, credentials, retry classification, the passthrough format, and and an optional Reqwest transport. |
+| `crates/wires/ws/` | The WebSocket wire: sessions at both edges, close codes and limits. |
+| `crates/serve/` | Hosting: one Axum router serving a gateway's plain HTTP and WebSocket sessions, with the body limit, session limits and graceful stop. |
 | `crates/formats/conversation-http/` | The conversation kind over HTTP: OpenAI Chat and Anthropic Messages, sharing the `Schema` trait. |
 | `crates/formats/media-http/` | The media kinds over HTTP: OpenAI Images, Audio Transcriptions, Speech, Embeddings and Videos, and Google's Veo as a provider. |
 | `crates/formats/realtime-ws/` | The realtime kind over WebSocket: OpenAI Realtime, Gemini Live, and Responses over WebSocket. |
@@ -270,9 +271,9 @@ Crates are in layers: a **kind** (`crates/kinds/`: `conversation`, `media`,
 `http`, `ws`) moves bytes at both edges and knows no kind; a **format**
 (`crates/formats/`) is a kind over a wire, and names no vendor; and
 `crates/providers` is every vendor, a file each, with the quirks it sets on
-the formats it speaks. A wire's `reqwest` (`HttpTransport`) and `axum`
-(hosting) features are opt-in, so format authors and ordinary HTTP hosts do
-not need unrelated hosting or transport code.
+the formats it speaks. A wire's `reqwest` feature (`HttpTransport`) is opt-in, and hosting is
+`crates/serve`'s, so format authors do not need unrelated transport or
+server code.
 
 HTTP formats prepare actual requests and event sinks synchronously, then let
 core drive delivery. Response readers return streams. Finite inputs are encoded

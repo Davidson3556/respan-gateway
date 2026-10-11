@@ -24,7 +24,7 @@ use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use respan_gateway_http::HttpTransport;
-use respan_gateway_http::axum::router;
+use respan_gateway_serve::router;
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]
 mod http_support;
@@ -173,4 +173,4 @@ const STREAM: &[&str] = &[
 #[path = "../tests/cases/hosting/local_proxy.rs"]
 mod tests;
 
-use respan_gateway_http::relay::Relay;
+use respan_gateway_http::Relay;

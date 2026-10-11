@@ -61,9 +61,9 @@ async fn real_gemini_live_audio_and_transcription_through_tls_gateway() {
         .unwrap()
         .with_binary_text(true);
     let gw = respan_gateway_core::Gateway::new()
-        .client::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_http::passthrough::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(
+        .provider::<respan_gateway_http::passthrough::Input<Raw>, _, _>(
             "p",
             Raw,
             transport.connect(),

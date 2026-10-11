@@ -13,7 +13,7 @@ use crate::Frames;
 /// does not imply a live semantic input; the incoming adapter selects that.
 pub struct Body {
     data: Data,
-    pub(crate) upload: Option<crate::driver::upload::Handoff>,
+    pub(crate) upload: Option<super::upload::Handoff>,
     /// The most bytes a reader holds of it at once, its binding's limit.
     pub(crate) limit: Option<usize>,
 }

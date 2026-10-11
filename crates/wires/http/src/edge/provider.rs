@@ -15,6 +15,32 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 
+/// Make a cloneable provider factory from an ordinary async sending function.
+/// `Some(completion)` remains authoritative even after response EOF; `None`
+/// means only the outgoing handoff is complete, not later socket writes.
+/// `limit` is the most bytes a reader holds of one answer at once
+/// ([`Body::limit`](crate::Body::limit)): a whole body, a refusal's, or one
+/// event; past it, the answer fails `upstream`.
+pub fn connect<F, Fut>(
+    send: F,
+    limit: usize,
+) -> impl Fn(Extensions) -> crate::ProviderIo + Clone + Send + Sync + 'static
+where
+    F: Fn(http::Request<crate::Body>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(http::Response<crate::Body>, Option<Completion>), Fault>>
+        + Send
+        + 'static,
+{
+    use futures::FutureExt;
+    let send: std::sync::Arc<Sending> = std::sync::Arc::new(move |request| send(request).boxed());
+    move |extensions| crate::ProviderIo {
+        send: send.clone(),
+        extensions,
+        limit,
+        success: None,
+    }
+}
+
 pub(crate) type Sending = dyn Fn(
         http::Request<Body>,
     ) -> BoxFuture<'static, Result<(http::Response<Body>, Option<Completion>), Fault>>
@@ -127,8 +153,8 @@ impl ProviderIo {
                     (head, body, sink)
                 }
             };
-            crate::transport::proxy_call(&mut head);
-            crate::transport::strip_client_origin_headers(&mut head.headers);
+            crate::call::proxy_call(&mut head);
+            crate::call::strip_client_origin_headers(&mut head.headers);
             let streaming = body.is_streaming();
             let sent = http::Request::from_parts(
                 head.clone(),
@@ -159,7 +185,7 @@ impl ProviderIo {
                     let call = sent.clone().into_parts().0;
                     let succeeded = match success {
                         Some(success) => success(&head, &call),
-                        None => crate::success(&head, &call),
+                        None => crate::rules::success(&head, &call),
                     };
                     let body = observed(body, failure, limit);
                     let applied = move |fault| match &raw_errors {

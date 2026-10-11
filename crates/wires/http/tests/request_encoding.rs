@@ -522,10 +522,10 @@ async fn a_passthrough_refuses_a_101_no_one_asked_for() {
         },
         LIMIT,
     );
-    let (read, mut sink) = h::framing::passthrough::Passthrough
+    let (read, mut sink) = h::passthrough::Passthrough
         .bind(send(Extensions::new()))
         .expect("bound");
-    let input = h::framing::passthrough::Input::new("x");
+    let input = h::passthrough::Input::new("x");
     sink.prepare(&mut EventStream::single(input))
         .expect("expected value");
     let (_, output) = future::join(sink.close(), read).await;

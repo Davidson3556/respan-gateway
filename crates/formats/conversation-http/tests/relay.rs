@@ -1,7 +1,7 @@
 //! The kernel's promises, driven through the OpenAI format.
 
 use respan_gateway_conversation_http::Schema;
-use respan_gateway_http::relay as explicit;
+use respan_gateway_http as explicit;
 #[allow(dead_code)]
 #[path = "../../../../tests/support/hooks.rs"]
 mod hooks;

@@ -29,8 +29,8 @@
 //! from `GET /v1/files/{id}` and the PDF signature before conversion.
 //!
 //! The HTTP adapter can allow 80 MiB on this route while keeping smaller
-//! limits elsewhere: `respan_gateway_http::axum::router_with_limit(gateway,
-//! |head| if head.uri.path() == "/v1/chat/completions" { 80 << 20 } else { 1 << 20 })`.
+//! limits elsewhere: `respan_gateway_serve::Host::new(gateway)
+//! .limit(|head| if head.uri.path() == "/v1/chat/completions" { 80 << 20 } else { 1 << 20 })`.
 //! The converter allows 72 MiB of base64, enough for a 50 MiB PDF.
 //!
 //! `cargo run -p respan-gateway-examples --example attachments`
@@ -59,8 +59,8 @@ use respan_gateway_examples::store::{
 };
 use respan_gateway_http::HttpTransport;
 use respan_gateway_http::Status;
-use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::{HeaderValue, StatusCode};
+use respan_gateway_http::passthrough;
 use respan_gateway_http::{CallHeaders, Credential, Wire, retryable};
 use respan_gateway_plugins::routing::{Backoff, Until, first_success};
 #[allow(dead_code)]

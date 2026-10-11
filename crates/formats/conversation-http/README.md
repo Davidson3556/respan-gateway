@@ -29,7 +29,7 @@ for the HTTP formats of other JSON kinds, such as the media kinds'.
 What a format has no form for stays native to it (`NativeFields`,
 `Content::Native`, `Output::Native`), is written only by that format, and is
 refused in translation where it could change the answer. Only an explicit
-raw relay ([`Relay::RAW`](../../wires/http/src/relay.rs)) sends a client's own bytes.
+raw relay ([`Relay::RAW`](../../wires/http/src/raw.rs)) sends a client's own bytes.
 
 ## OpenAI Chat Completions
 

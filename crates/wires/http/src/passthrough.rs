@@ -245,7 +245,7 @@ impl Format<ProviderIo, Output<Self>, Input<Self>> for Passthrough {
     fn bind(&self, io: ProviderIo) -> Result<Connection<Output<Self>, Input<Self>>, Fault> {
         let relayed = |answer: &http::response::Parts, call: &RequestHead| {
             let asked = call.headers.contains_key(http::header::UPGRADE);
-            crate::success(answer, call) || (answer.status.is_redirection() && !asked)
+            crate::rules::success(answer, call) || (answer.status.is_redirection() && !asked)
         };
         Ok(io
             .with_success(relayed)

@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use respan_gateway_core::{Connection, Fault, Format, Gateway};
-use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::header::UPGRADE;
 use respan_gateway_http::http::{HeaderMap, Method};
+use respan_gateway_http::passthrough;
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -81,12 +81,10 @@ impl Drop for Server {
 }
 
 #[allow(unused_imports)]
-pub use relay::Relay;
+pub use respan_gateway_http::Relay;
 /// Serve `gateway` on a free local port with the adapter's router.
-use respan_gateway_http::relay;
-
 pub async fn serve(gateway: Gateway) -> Server {
-    serve_typed(gateway.plugin(relay::Relay::RAW)).await
+    serve_typed(gateway.plugin(Relay::RAW)).await
 }
 
 pub async fn serve_typed(gateway: Gateway) -> Server {
@@ -101,7 +99,11 @@ pub async fn serve_with(
 ) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = respan_gateway_ws::axum::router(gateway.clone(), |_| 32 << 20, limits, stop);
+    let app = respan_gateway_serve::Host::new(gateway.clone())
+        .limit(|_| 32 << 20)
+        .limits(limits)
+        .stop(stop)
+        .router();
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

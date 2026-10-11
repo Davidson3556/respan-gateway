@@ -4,9 +4,8 @@
 
 use respan_gateway_core::Gateway;
 use respan_gateway_http::{
-    HttpTransport,
-    framing::passthrough::{Input, Passthrough},
-    relay::Relay,
+    HttpTransport, Relay,
+    passthrough::{Input, Passthrough},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, handshake::derive_accept_key};
@@ -44,12 +43,9 @@ async fn an_upgrade_over_http_is_refused_to_the_client() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = respan_gateway_ws::axum::router(
-        gateway,
-        |_| 1 << 20,
-        Default::default(),
-        std::future::pending(),
-    );
+    let app = respan_gateway_serve::Host::new(gateway)
+        .limit(|_| 1 << 20)
+        .router();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let request = format!("ws://{addr}/v1/other")

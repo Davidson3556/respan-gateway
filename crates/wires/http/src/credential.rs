@@ -18,7 +18,7 @@ use http::{HeaderMap, HeaderName, HeaderValue};
 ///
 /// No transport copies it ([`credentials`](crate::credentials)): a plugin
 /// that relays the client's key restores it on the call's head
-/// ([`restore`](Self::restore)), as [`Relay::RAW`](crate::relay::Relay::RAW)
+/// ([`restore`](Self::restore)), as [`Relay::RAW`](crate::Relay::RAW)
 /// does; a plugin that authenticates the client with the gateway's own key
 /// removes it.
 #[derive(Clone, Default, PartialEq, Eq)]

@@ -57,12 +57,9 @@ pub async fn start(
     let gateway = make(format!("ws://{at}"));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let at = listener.local_addr().unwrap();
-    let app = respan_gateway_ws::axum::router(
-        gateway.clone(),
-        |_| respan_gateway_examples::LIMIT,
-        respan_gateway_ws::Limits::default(),
-        std::future::pending(),
-    );
+    let app = respan_gateway_serve::Host::new(gateway.clone())
+        .limit(|_| respan_gateway_examples::LIMIT)
+        .router();
     let served = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{at}{path}"))
         .await

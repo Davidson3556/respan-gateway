@@ -18,15 +18,18 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
              |
          providers
              |
-   plugins · apps/gateway · python · examples · validation
+   plugins · serve · apps/gateway · python · examples · validation
 ```
 
 - A **kind** (`crates/kinds/`) owns a pair of events (`Input` in, `Output`
   out) that plugins read, and nothing else: its types, with no I/O, so a
   plugin depends on them alone.
 - A **wire** (`crates/wires/`) moves bytes at both edges and knows no kind: its owned I/O
-  types (`ClientIo`, `ProviderIo`), framing, credentials, a **transport** for
-  the provider edge and **hosting** for the client edge (behind features).
+  types (`ClientIo`, `ProviderIo`), framing, credentials, and a **transport**
+  for the provider edge (behind a feature).
+- The **serve** crate (`crates/serve/`) is hosting, beside the plugins and
+  providers: it serves a `Gateway` over Axum, plain HTTP and WebSocket
+  upgrades from one router, so no wire hosts anything.
 - A **format** (`crates/formats/`) is a kind over a wire, a crate per pair
   (`conversation-http`, `media-http`, `realtime-ws`, `mcp-http`), each a
   `Format`. A format is a spec and names no vendor: what a provider sends
@@ -45,13 +48,14 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/kinds/media/` | Kind | A kind per media operation (images, transcription, speech, embeddings, video jobs) over the conversation kind's media and usage | Core, conversation |
 | `crates/kinds/realtime/` | Kind | A live session's events both ways: configuration, audio, messages, responses, barge-in and tool calls, over the conversation kind's messages, tools and usage | Core, conversation |
 | `crates/kinds/mcp/` | Kind | Typed JSON-RPC messages and their envelopes | Core |
-| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the passthrough format; optional Reqwest transport and Axum hosting | Core |
-| `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`); optional Axum hosting | Core, HTTP |
+| `crates/wires/http/` | Wire | HTTP bindings, framing, bodies, credentials, the passthrough format; optional Reqwest transport | Core |
+| `crates/wires/ws/` | Wire | WebSocket sessions at both edges (provider transport, client `serve`) | Core, HTTP |
 | `crates/formats/conversation-http/` | Format | The HTTP binding (`Schema`), OpenAI Chat and Anthropic Messages | Conversation, HTTP |
 | `crates/formats/media-http/` | Format | OpenAI's media endpoints as compatible vendors serve them, and Veo's as a provider | Media, conversation-http, HTTP |
 | `crates/formats/realtime-ws/` | Format | OpenAI Realtime and Gemini Live, translated both ways (audio converted, the other's scaffolding emulated), and Responses over WebSocket, sharing their session's handshake | Realtime, HTTP, WS |
 | `crates/formats/mcp-http/` | Format | Streamable HTTP and the stdio transport | MCP, HTTP |
 | `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins | Core, the formats |
+| `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
 | `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |
 | `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | All of the above |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
@@ -148,7 +152,7 @@ format the router was not given keeps its target.
   and their quirks are the providers crate's.
 - Every kind is an `Input` in and an `Output` out, in the crate that owns
   it: `conversation`, `media` (a module per operation), `realtime`, and `mcp` (envelopes around its typed
-  JSON-RPC `Message`). HTTP's passthrough (`framing::passthrough`,
+  JSON-RPC `Message`). HTTP's passthrough (`passthrough`,
   `Input<F>` / `Output<F>`) is the one kind that is its own wire.
   Core defines no kinds or `Format` implementations.
   Plugins and whole-body conversation encoders share the conversation crate's ordered

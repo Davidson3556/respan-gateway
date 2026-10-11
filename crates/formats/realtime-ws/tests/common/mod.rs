@@ -12,7 +12,7 @@ use respan_gateway_core::{ClientContext, Fault, Format, Gateway, Plugin, Respons
 use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_http::{ClientIo, ProviderIo};
 use respan_gateway_realtime::{Input, Output};
-use respan_gateway_ws::{Limits, WsTransport};
+use respan_gateway_ws::WsTransport;
 use serde_json::Value;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -83,12 +83,9 @@ where
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let app = respan_gateway_ws::axum::router(
-        gateway,
-        |_| 32 << 20,
-        Limits::default(),
-        std::future::pending(),
-    );
+    let app = respan_gateway_serve::Host::new(gateway)
+        .limit(|_| 32 << 20)
+        .router();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (addr, seen)
 }

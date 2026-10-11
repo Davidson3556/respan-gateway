@@ -29,7 +29,7 @@ the vendors that speak them
 - `ProviderClose(u16)`: the code a provider closed with, other than 1000, on
   the `upstream` fault the transport ends the answer with. The client is told
   it only as a `CloseCode`, which the transport adds on a call relayed with
-  `RawErrors` (`relay::Relay`), or a plugin sets.
+  `RawErrors` (`Relay`), or a plugin sets.
 - `Limits { max_message, close_wait, close_send, ping_after }`: what an edge
   takes, with defaults and their reasons on the type: 16 MiB messages, 5 s
   for the other side's part of a close, 1 s for a Close to leave, a ping
@@ -37,14 +37,14 @@ the vendors that speak them
 - `serve(gateway, head, upgraded, limits, stop)`: a client's upgrade through
   the gateway, for an adapter that hosts sessions. `serve` documents how
   each end of a session reaches the client and the provider.
-- `axum::router(gateway, |head| bytes, limits, stop)`, behind the `axum`
-  feature: an Axum router that serves each upgrade as a session through
-  `serve`, and every other request as `respan_gateway_http::axum` does.
-  `stop` closes every open session 1001, for a graceful shutdown.
+
+Hosting is `respan-gateway-serve`'s: its router serves each upgrade as a
+session through `serve`, and `stop` closes every open session 1001, for a
+graceful shutdown.
 
 Both edges pump a session with the same code. Any other format on the HTTP
 wire works with the transport and the adapter: the tests relay through
-`framing::passthrough` too.
+`passthrough` too.
 
 ## The transport
 

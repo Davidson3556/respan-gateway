@@ -15,11 +15,11 @@ use respan_gateway_core::{
     Gateway, Internal, Plugin, ProviderContext, Response, Upstream, async_trait,
 };
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::passthrough::Passthrough;
 use respan_gateway_http::http::{
     self, HeaderMap, HeaderValue, StatusCode,
     header::{AUTHORIZATION, RETRY_AFTER},
 };
+use respan_gateway_http::passthrough::Passthrough;
 use respan_gateway_http::{Body, Completion, HttpTransport, error_code, retryable};
 use respan_gateway_plugins::routing::{Attempt, Backoff, Role, Until, first_success, race};
 use respan_gateway_plugins::{Kind, Model, Routes, Routing, Speaks};
@@ -622,9 +622,9 @@ async fn routing_leaves_other_formats_on_their_target() {
     let gw = Gateway::new()
         .client::<Input, _, _>(OpenAiChat)
         .expect("chat client")
-        .client::<respan_gateway_http::framing::passthrough::Input<Passthrough>, _, _>(Passthrough)
+        .client::<respan_gateway_http::passthrough::Input<Passthrough>, _, _>(Passthrough)
         .expect("opaque client")
-        .provider::<respan_gateway_http::framing::passthrough::Input<Passthrough>, _, _>(
+        .provider::<respan_gateway_http::passthrough::Input<Passthrough>, _, _>(
             "raw",
             Passthrough,
             respan_gateway_http::connect(

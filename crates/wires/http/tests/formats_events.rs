@@ -30,8 +30,8 @@ use respan_gateway_core::{
 };
 use respan_gateway_http::Status;
 use respan_gateway_http::bytes::Bytes;
-use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_http::passthrough;
 use respan_gateway_http::{Body, ClientIo, HttpTransport, ProviderIo, connect};
 use serde_json::json;
 use support::{Metered, with_plugins};

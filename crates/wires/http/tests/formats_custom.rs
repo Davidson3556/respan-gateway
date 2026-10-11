@@ -23,11 +23,11 @@ use respan_gateway_core::{
     Response,
 };
 use respan_gateway_http::bytes::{Bytes, BytesMut};
-use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::framing::whole;
 use respan_gateway_http::framing::{self, default_content_type, sse};
 use respan_gateway_http::http::header::CONTENT_TYPE;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_http::passthrough;
 use respan_gateway_http::{
     Body, ClientIo, HttpTransport, ProviderIo, Status, Wire, http::request::Parts as RequestHead,
     http::response::Parts as Head,
@@ -2020,7 +2020,7 @@ async fn a_keep_alive_reaches_filters_and_goes_on_as_a_comment() {
     assert_eq!(counts.0.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
-use respan_gateway_http::relay as explicit;
+use respan_gateway_http as explicit;
 
 struct ChosenHeads;
 #[async_trait]

@@ -2,18 +2,22 @@
 
 use super::writer::Writer;
 use super::{PANICKED, Written};
-use crate::{
-    Body, ClientHead, Completion, Credential, Encoder, Frames, RawReply, Status, Unwritten, Wire,
-    bodiless, error_head, plain_response,
-};
+use crate::rules::{bodiless, error_head, outgoing, plain_response, strip_hops};
+use crate::{Body, ClientHead, Completion, Credential, Encoder, Frames, RawReply, Status, Wire};
 use bytes::{Bytes, BytesMut};
 use futures::channel::oneshot;
+use futures::future::{BoxFuture, ready};
 use futures::{FutureExt, Sink, StreamExt, TryStreamExt};
+use http::Method;
 use http::StatusCode;
+use http::header::CONTENT_LENGTH;
 use http::response::Parts as ResponseHead;
+use http_body_util::BodyExt;
 use respan_gateway_core::{Connection, ErrorCode, EventSink, EventStream, Extensions, Fault};
+use respan_gateway_core::{Gateway, NotFound};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, ready};
 
@@ -71,7 +75,7 @@ pub enum Framing {
 /// ```
 /// Binding consumes it, preventing a second binding:
 /// ```compile_fail
-/// use respan_gateway_http::{self as h, framing::passthrough::Passthrough};
+/// use respan_gateway_http::{self as h, passthrough::Passthrough};
 /// use respan_gateway_core::Format;
 /// let request = h::http::Request::new(h::Body::default());
 /// let (incoming, _) = h::ClientIo::accept(request, h::Framing::Whole, 1024);
@@ -563,5 +567,146 @@ impl std::fmt::Debug for Reply {
         f.debug_struct("Reply")
             .field("request", &self.request)
             .finish_non_exhaustive()
+    }
+}
+
+/// Hand `req` to `gateway` as an HTTP adapter does, as an [`ClientIo`]
+/// handle, to [`Gateway::handle`], its body framed as `framing` with `limit`
+/// the most bytes of one message it takes ([`ClientIo::accept`]). Before:
+/// the hop's headers go (RFC 9110 7.6.1), and `Upgrade` too unless the
+/// body is [`Framing::Live`], as only a session switches protocols: a whole
+/// request's `Upgrade`, such as `h2c`, is no format's to pass on. The
+/// [`ClientIo`]'s [extensions](ClientIo::extensions) join those `req`
+/// carries. After: what no format can write, or a 101 to a whole request,
+/// goes as text/plain; the response loses a hop's headers; a [`bodiless`]
+/// one goes with none, the gateway's body read apart.
+///
+/// Like [`Gateway::handle`], the request counts for [`Gateway::idle`] from
+/// this call, not from the future's first poll, and the future borrows
+/// nothing: a job handed over from an end hook calls this where it starts
+/// and awaits the future in its own task. Await it on a tokio runtime.
+pub fn handle<B>(
+    gateway: &Gateway,
+    req: http::Request<B>,
+    framing: Framing,
+    limit: usize,
+) -> impl Future<Output = (http::Response<Body>, BoxFuture<'static, Result<(), Fault>>)> + Send + 'static
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<Fault>,
+{
+    let (mut head, body) = req.into_parts();
+    let mut extensions = head.extensions.remove::<Extensions>().unwrap_or_default();
+    head.extensions = http::Extensions::new();
+    strip_hops(&mut head.headers, framing == Framing::Live);
+    let to = (head.method.clone(), head.uri.path().to_owned());
+    let body = Body::stream(body.map_err(Into::into).into_data_stream());
+    let (incoming, answer) =
+        ClientIo::accept(http::Request::from_parts(head, body), framing, limit);
+    extensions.extend(incoming.extensions());
+    let handled = gateway.handle(incoming, extensions);
+    async move {
+        let (resp, ended) = match super::drive(handled.boxed(), answer).await {
+            Ok((resp, ended)) => (Ok(resp), ended),
+            Err(fault) => (Err(fault.clone()), ready(Err(fault)).boxed()),
+        };
+        (depart(&to, framing, resp), ended)
+    }
+}
+
+/// Marks the plain text of a refusal no codec could write, which goes as
+/// it is: HTTP's rules for a body do not apply to it.
+#[derive(Clone, Copy)]
+pub(crate) struct Unwritten;
+
+/// The answer to a request of `method` to `path` as it departs the adapter
+/// ([`handle`]): what no format can write, or a 101 to a whole request, as
+/// text/plain; a hop's headers gone; a [`bodiless`] one with none, the
+/// gateway's body read apart.
+fn depart(
+    (method, path): &(Method, String),
+    framing: Framing,
+    resp: Result<http::Response<Body>, Fault>,
+) -> http::Response<Body> {
+    // A refusal no codec could write goes as the client edge wrote it.
+    let resp = match resp {
+        Ok(mut resp) => match resp.extensions_mut().remove::<Unwritten>() {
+            Some(Unwritten) => return resp,
+            None => Ok(resp),
+        },
+        Err(fault) => Err(fault),
+    };
+    match resp {
+        Err(fault) if fault.is::<NotFound>() => {
+            let text = format!("no format served accepts {method} {path}");
+            plain_response(&Fault::not_found(text))
+        }
+        Err(fault) => plain_response(&fault),
+        Ok(resp)
+            if resp.status() == StatusCode::SWITCHING_PROTOCOLS && framing == Framing::Whole =>
+        {
+            // RFC 9110 15.2.2: a 101 only to a request that asked.
+            let asked = "a 101 to a request that did not ask to switch protocols";
+            plain_response(&Fault::internal(asked))
+        }
+        Ok(resp) => {
+            let (mut head, mut body) = resp.into_parts();
+            let length = head.headers.get(CONTENT_LENGTH).cloned();
+            outgoing(&mut head);
+            if bodiless(method, head.status) {
+                // A HEAD's or a 304's `Content-Length` is the provider's
+                // for the body it would send (RFC 9110 8.6); a 204 has none.
+                let kept = method == Method::HEAD || head.status == StatusCode::NOT_MODIFIED;
+                if let Some(length) = length.filter(|_| kept) {
+                    head.headers.insert(CONTENT_LENGTH, length);
+                }
+                // A hop drops a bodiless answer's body once its head is out,
+                // so that is when the client leaves. Read what is ready now,
+                // so an end that is ready is told, then drop the rest: the
+                // request ends with its client, never when a provider's
+                // stream does.
+                drain_ready(&mut body);
+                body = Body::default();
+            }
+            http::Response::from_parts(head, body)
+        }
+    }
+}
+
+/// Read what `body` has ready now, dropping its frames: a bodiless answer's
+/// are content it cannot send, read only to reach its end, so outputs dropped
+/// unread end their call as that end says if it is ready, else `abandoned`.
+///
+/// The drain stops at the body's end or error, at a `Pending` nothing woke
+/// (the body is waiting; the gateway's own body wakes itself between frames
+/// sent apart, which counts as ready), when tokio's cooperative budget is
+/// spent, or after `DRAIN_POLLS` polls, which bounds a task under
+/// `tokio::task::unconstrained` and a body that wakes itself without giving
+/// a frame.
+fn drain_ready(body: &mut Body) {
+    /// The most polls one drain makes.
+    const DRAIN_POLLS: usize = 1 << 16;
+    struct Woken(AtomicBool);
+    impl futures::task::ArcWake for Woken {
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let woken = Arc::new(Woken(AtomicBool::new(false)));
+    let waker = futures::task::waker(woken.clone());
+    let mut cx = std::task::Context::from_waker(&waker);
+    let mut left = DRAIN_POLLS;
+    while left > 0 {
+        let mut budget = std::pin::pin!(tokio::task::consume_budget());
+        if budget.as_mut().poll(&mut cx).is_pending() {
+            return;
+        }
+        left -= 1;
+        woken.0.store(false, Ordering::SeqCst);
+        match http_body::Body::poll_frame(std::pin::Pin::new(&mut *body), &mut cx) {
+            std::task::Poll::Pending if woken.0.load(Ordering::SeqCst) => {}
+            std::task::Poll::Ready(Some(Ok(_))) => {}
+            _ => return,
+        }
     }
 }

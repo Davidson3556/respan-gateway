@@ -11,14 +11,12 @@ use axum::middleware::{from_fn_with_state, map_response};
 use axum::response::Response;
 use axum::routing::get;
 use respan_gateway_core::Gateway;
-use respan_gateway_http::axum::router_with_limit;
+use respan_gateway_http::Relay;
 use respan_gateway_http::http::StatusCode;
 use respan_gateway_http::http::header::CONTENT_TYPE;
-use respan_gateway_http::relay::Relay;
 use respan_gateway_media::video::LocateContent;
 use respan_gateway_media_http::gemini::GeminiVeo;
 use respan_gateway_plugins::Routing;
-use respan_gateway_ws::Limits;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -348,16 +346,16 @@ fn relay(
     stopping: &Arc<watch::Sender<bool>>,
 ) -> Router {
     let session = |name: &String| formats.iter().any(|f| f.name == *name && f.websocket);
+    let host = respan_gateway_serve::Host::new(gateway.clone()).limit(move |_| limit);
     let router = match plan.serve.iter().any(session) {
         true => {
             let stopping = stopping.clone();
-            let stop = async move {
+            host.stop(async move {
                 let _ = stopping.subscribe().wait_for(|stop| *stop).await;
-            };
-            let limits = Limits::default();
-            respan_gateway_ws::axum::router(gateway.clone(), move |_| limit, limits, stop)
+            })
+            .router()
         }
-        false => router_with_limit(gateway.clone(), move |_| limit),
+        false => host.router(),
     };
     match plan.serves(PASSTHROUGH) {
         true => router,

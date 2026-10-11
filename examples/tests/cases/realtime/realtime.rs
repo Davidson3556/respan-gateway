@@ -37,7 +37,7 @@ async fn start_with(longest: Duration, tokens: Amount) -> Result<Session, Fault>
     wallets.open("sk-demo", None, tokens);
     let provider = provider.trim_end_matches("/v1");
     let gateway = gateway(provider, &meter, &ends, &wallets, longest)?;
-    let gateway = gateway.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gateway = gateway.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gateway).await;
     Ok(Session {
         openai,
@@ -410,7 +410,7 @@ async fn a_capped_session_keeps_the_subprotocol_the_provider_chose() -> Result<(
         &wallets,
         Duration::from_millis(300),
     )?;
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
 
     let mut req = format!("ws://{addr}/v1/realtime?model=gpt-realtime")
@@ -608,7 +608,7 @@ async fn raw_session(
     wallets.open("sk-demo", None, tokens);
     let provider = format!("ws://{at}");
     let gateway = gateway(&provider, &meter, &ends, &wallets, HOUR).expect("a gateway");
-    let gateway = gateway.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gateway = gateway.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gateway).await;
     (raw, gateway, meter, wallets, addr)
 }
@@ -847,7 +847,7 @@ async fn remote_session(
         )?
         .target("openai")?
         .plugin(Reserve(remote));
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     Ok((openai, gw, books, addr))
 }
@@ -947,7 +947,7 @@ async fn l5_a_client_that_leaves_during_a_wrap_ends_its_session_then() -> Result
         .target("openai")?
         .plugin(at.clone())
         .plugin(Slow);
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
@@ -1013,7 +1013,7 @@ async fn front(
     let wallets = MemoryLedger::new();
     wallets.open("sk-demo", None, tokens);
     let gw = gateway(&format!("ws://{at}"), &meter, &ends, &wallets, HOUR).expect("a gateway");
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     (gw, wallets, addr)
 }
@@ -1178,7 +1178,7 @@ async fn l6_a_refused_turn_being_released_as_the_client_left_is_settled() -> Res
         )?
         .target("openai")?
         .plugin(Reserve(remote));
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
@@ -1260,7 +1260,7 @@ async fn l6_leave_during_a_wrap(
         .target("openai")?
         .plugin(at.clone())
         .plugin(Slow);
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
@@ -1511,7 +1511,7 @@ async fn l7_a_turn_the_provider_starts_during_a_reserve_is_still_held() -> Resul
         )?
         .target("openai")?
         .plugin(Reserve(remote));
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
@@ -1559,7 +1559,7 @@ async fn l7_a_client_that_leaves_at_any_moment_leaves_no_hold() -> Result<(), Fa
                 )?
                 .target("openai")?
                 .plugin(Reserve(remote));
-            let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+            let gw = gw.plugin(respan_gateway_http::Relay::RAW);
             let addr = listen(&gw).await;
             openai.answer(Answer::events(script(&["a", "b", "c"], usage(40, 9))));
             let sampler = sample(&books);
@@ -1716,7 +1716,7 @@ async fn l8_a_turn_done_during_another_reserve_settles_its_own_hold() -> Result<
         )?
         .target("openai")?
         .plugin(Reserve(jitter));
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     let mut ws = client(addr).await;
     hear(&mut ws).await;
@@ -1844,7 +1844,7 @@ async fn l9_provider_turns_and_a_client_that_leaves_at_any_moment_leave_no_hold(
             )?
             .target("openai")?
             .plugin(Reserve(remote));
-        let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+        let gw = gw.plugin(respan_gateway_http::Relay::RAW);
         let addr = listen(&gw).await;
         let sampler = sample(&books);
         let mut ws = client(addr).await;
@@ -1884,7 +1884,7 @@ async fn audio_front(
         true,
     )
     .expect("gateway");
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     (gw, wallets, addr)
 }
@@ -1932,7 +1932,7 @@ async fn audio_usage_is_metered_per_turn_and_charged() {
         true,
     )
     .expect("gateway");
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
     let mut ws = client(addr).await;
     heard(&mut ws).await;

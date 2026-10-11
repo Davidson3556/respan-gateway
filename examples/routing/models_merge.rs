@@ -1,7 +1,7 @@
 //! Use case 4, one request, many upstream calls: `GET /v1/models` is answered
 //! by asking every configured provider and merging their lists into one.
 //!
-//! The endpoint is its own format, `Models`, built on `framing::passthrough`:
+//! The endpoint is its own format, `Models`, built on `passthrough`:
 //! its values are the bytes of the request and of each answer, which is all
 //! a plugin that never reads a chat needs. Its `MergeModels` plugin answers
 //! in `on_client`: it makes a call to each provider (a relay of the client's
@@ -27,9 +27,9 @@ use respan_gateway_core::{
 };
 use respan_gateway_http::HttpTransport;
 use respan_gateway_http::framing;
-use respan_gateway_http::framing::passthrough;
 use respan_gateway_http::framing::whole;
 use respan_gateway_http::http::{self, HeaderMap, HeaderValue, StatusCode};
+use respan_gateway_http::passthrough;
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 #[allow(dead_code)]
 #[path = "../../tests/support/http.rs"]

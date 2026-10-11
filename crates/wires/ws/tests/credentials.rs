@@ -87,9 +87,9 @@ async fn a_transport_with_its_own_key_hides_the_clients() {
         .with_headers(own)
         .unwrap();
     let gateway = Gateway::new()
-        .client::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_http::passthrough::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(
+        .provider::<respan_gateway_http::passthrough::Input<Raw>, _, _>(
             "p",
             Raw,
             transport.connect(),
@@ -197,9 +197,9 @@ impl Plugin for Tenant {
 async fn a_key_set_for_the_call_replaces_the_clients() {
     let probe = Probe::start().await;
     let gateway = Gateway::new()
-        .client::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(Raw)
+        .client::<respan_gateway_http::passthrough::Input<Raw>, _, _>(Raw)
         .unwrap()
-        .provider::<respan_gateway_http::framing::passthrough::Input<Raw>, _, _>(
+        .provider::<respan_gateway_http::passthrough::Input<Raw>, _, _>(
             "p",
             Raw,
             WsTransport::new(probe.base()).unwrap().connect(),

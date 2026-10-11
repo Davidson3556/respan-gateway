@@ -69,7 +69,7 @@ fn is_handshake(name: &HeaderName) -> bool {
 /// - The provider sends Close with no code or 1000: the answer ends clean.
 ///   With another code: an `Upstream` fault with that
 ///   [`ProviderClose`](crate::ProviderClose), and, on a call with
-///   [`RawErrors`] (the [`Relay`](respan_gateway_http::relay::Relay)'s
+///   [`RawErrors`] (the [`Relay`](respan_gateway_http::Relay)'s
 ///   permission to pass the provider's errors on), that `CloseCode` too.
 /// - The provider's connection breaks with no Close, or it is silent
 ///   through a ping: `Err(truncated)`.

@@ -27,7 +27,7 @@ use hooks::{Calls, Outcomes};
 use http_support::{LIMIT, post, read_whole, serve};
 use scripted::{Scripted, json, sse};
 
-use respan_gateway_http::relay;
+use respan_gateway_http::Relay;
 
 const OPENAI: &str = "http://openai.test/v1";
 const BACKUP: &str = "http://backup.test/v1";
@@ -77,7 +77,7 @@ fn gateway(
         .try_fold(Gateway::new(), |gw, add| add(gw))?
         .client::<Input, _, _>(OpenAiChat)?;
     let gw = plugins.into_iter().fold(gw, Gateway::plugin);
-    let gw = gw.plugin(relay::Relay::RAW);
+    let gw = gw.plugin(Relay::RAW);
     match target {
         Some(target) => gw.target(target),
         None => Ok(gw),

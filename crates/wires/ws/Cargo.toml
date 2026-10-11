@@ -11,15 +11,7 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = []
-# Axum hosting of sessions (`axum::router`).
-axum = ["respan-gateway-http/axum", "dep:axum", "dep:hyper", "dep:hyper-util"]
-
 [dependencies]
-axum = { workspace = true, optional = true }
-hyper = { version = "1", features = ["server", "http1"], optional = true }
-hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 respan-gateway-core.workspace = true
 respan-gateway-http.workspace = true
 serde_json.workspace = true
@@ -30,6 +22,8 @@ rustls-native-certs = "0.8"
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
+axum.workspace = true
+respan-gateway-serve.workspace = true
 http.workspace = true
 respan-gateway-realtime.workspace = true
 respan-gateway-realtime-ws.workspace = true
@@ -43,60 +37,3 @@ tower = { version = "0.5", features = ["util"] }
 bytes.workspace = true
 futures.workspace = true
 async-trait.workspace = true
-
-# Hosted sessions, end to end.
-[[test]]
-name = "backpressure"
-required-features = ["axum"]
-
-[[test]]
-name = "close"
-required-features = ["axum"]
-
-[[test]]
-name = "concurrency"
-required-features = ["axum"]
-
-[[test]]
-name = "credentials"
-required-features = ["axum"]
-
-[[test]]
-name = "events"
-required-features = ["axum"]
-
-[[test]]
-name = "kernel"
-required-features = ["axum"]
-
-[[test]]
-name = "passthrough"
-required-features = ["axum"]
-
-[[test]]
-name = "subprotocol"
-required-features = ["axum"]
-
-[[test]]
-name = "transport"
-required-features = ["axum"]
-
-[[test]]
-name = "until"
-required-features = ["axum"]
-
-[[test]]
-name = "wrap"
-required-features = ["axum"]
-
-[[test]]
-name = "ws_recovery"
-required-features = ["axum"]
-
-[[test]]
-name = "empty_messages"
-required-features = ["axum"]
-
-[[test]]
-name = "http_transport"
-required-features = ["axum"]

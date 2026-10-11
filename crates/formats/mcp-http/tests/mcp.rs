@@ -24,7 +24,7 @@ use respan_gateway_mcp::{Input, Output};
 use respan_gateway_mcp_http::{Owner, SESSION, StdioTransport, StreamableHttp};
 use serde_json::{Value, json};
 
-use respan_gateway_http::relay;
+use respan_gateway_http::Relay;
 
 const AT: &str = "http://mcp.test";
 
@@ -55,7 +55,7 @@ fn relayed(
     transport: impl Fn(Extensions) -> ProviderIo + Send + Sync + 'static,
     plugin: Option<Touch>,
 ) -> Gateway {
-    gateway(transport, plugin).plugin(relay::Relay::RAW)
+    gateway(transport, plugin).plugin(Relay::RAW)
 }
 
 /// Filters every input and output, changing them only if `edit`.

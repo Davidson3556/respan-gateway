@@ -1430,6 +1430,7 @@ dependencies = [
  "respan-gateway-providers",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
  "respan-gateway-ws",
  "serde",
  "serde_json",
@@ -1497,6 +1498,7 @@ dependencies = [
  "respan-gateway-providers",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
  "respan-gateway-ws",
  "rusqlite",
  "serde_json",
@@ -1511,7 +1513,6 @@ dependencies = [
 name = "respan-gateway-http"
 version = "0.0.0"
 dependencies = [
- "axum",
  "bytes",
  "futures",
  "http",
@@ -1609,6 +1610,7 @@ dependencies = [
  "respan-gateway-media-http",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
  "respan-gateway-ws",
  "serde_json",
  "tokio",
@@ -1649,10 +1651,34 @@ dependencies = [
  "respan-gateway-core",
  "respan-gateway-http",
  "respan-gateway-realtime",
+ "respan-gateway-serve",
  "respan-gateway-ws",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "respan-gateway-serve"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mockllm",
+ "reqwest",
+ "respan-gateway-conversation",
+ "respan-gateway-conversation-http",
+ "respan-gateway-core",
+ "respan-gateway-http",
+ "respan-gateway-plugins",
+ "respan-gateway-ws",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -1664,8 +1690,6 @@ dependencies = [
  "bytes",
  "futures",
  "http",
- "hyper",
- "hyper-util",
  "mockllm",
  "reqwest",
  "respan-gateway-conversation",
@@ -1674,6 +1698,7 @@ dependencies = [
  "respan-gateway-http",
  "respan-gateway-realtime",
  "respan-gateway-realtime-ws",
+ "respan-gateway-serve",
  "rustls",
  "rustls-native-certs",
  "serde_json",

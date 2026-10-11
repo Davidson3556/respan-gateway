@@ -2,9 +2,8 @@
 //! Framing that formats build on: server-sent events ([`sse`]), whole
 //! bodies ([`whole`]), an encoder per event, and path helpers. The formats
 //! themselves are the `respan-gateway-*-http` crates'; traffic of no kind
-//! relays through [`passthrough`].
+//! relays through [`passthrough`](crate::passthrough).
 
-pub mod passthrough;
 pub mod sse;
 pub mod whole;
 

@@ -1,0 +1,34 @@
+[package]
+name = "respan-gateway-serve"
+description = "Hosting a gateway with Axum: HTTP and WebSocket from one router."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+respan-gateway-core.workspace = true
+respan-gateway-http.workspace = true
+respan-gateway-ws.workspace = true
+axum.workspace = true
+http-body-util.workspace = true
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+[dev-dependencies]
+bytes.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+respan-gateway-conversation.workspace = true
+respan-gateway-conversation-http.workspace = true
+respan-gateway-http = { workspace = true, features = ["reqwest"] }
+respan-gateway-plugins.workspace = true
+serde_json.workspace = true
+tower = { version = "0.5", features = ["util"] }
+mockllm = { git = "https://github.com/lihe07/mockllm", rev = "4d4b194" }
+tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time", "test-util"] }

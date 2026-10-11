@@ -114,7 +114,7 @@ async fn n_answers_never_overspend_the_team() -> Result<(), Fault> {
         .client::<Input, _, _>(OpenAiChat)?
         .plugin(Cap)
         .plugin(Accounting::new(ledger.clone(), quote))
-        .plugin(respan_gateway_http::relay::Relay::RAW)
+        .plugin(respan_gateway_http::Relay::RAW)
         .target("openai")?;
     let body =
         r#"{"model":"m","n":3,"max_tokens":5000,"messages":[{"role":"user","content":"hi"}]}"#;

@@ -29,7 +29,7 @@ succeeds by HTTP's rule, a 2xx or an asked-for 101, unless the format says
 otherwise (`ProviderIo::with_success`). There is no additional HTTP format trait
 or implementation macro.
 
-The `framing::passthrough` module owns the `Input<F>` / `Output<F>` passthrough
+The `passthrough` module (`respan_gateway_http::passthrough`) owns the `Input<F>` / `Output<F>` passthrough
 pair, its four functions, and the `Passthrough` format.
 
 ## A small format
@@ -176,12 +176,10 @@ finite response conversion helpers for applications such as durable jobs.
 
 ## Hosting
 
-`axum::router(gateway)`, behind the `axum` feature, is an Axum router that
-sends every request through the adapter (`handle`), its body read whole up
-to 32 MiB (413 `too_large` past it). It switches no protocols.
-`axum::router_with_limit(gateway, |head| bytes)` chooses the body limit per
-request from its head. WebSocket upgrades are hosted by
-`respan_gateway_ws::axum::router`.
+Hosting is not a wire's job. `handle(gateway, request, framing, limit)` is the
+client edge's entry point, which any server calls: it publishes the request
+as an HTTP adapter does and answers with the response. `respan-gateway-serve`
+is the Axum server that calls it, for plain HTTP and WebSocket upgrades alike.
 
 ## Backends and completion
 

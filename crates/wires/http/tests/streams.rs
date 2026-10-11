@@ -24,7 +24,7 @@ use http_body_util::{BodyExt, StreamBody};
 use mockllm::{Answer, FakeOpenAi};
 use respan_gateway_http::Body;
 use respan_gateway_http::bytes;
-use respan_gateway_http::framing::passthrough;
+use respan_gateway_http::passthrough;
 
 use respan_gateway_conversation::{Delta, Input, Message, Output, Role};
 use respan_gateway_conversation_http::openai::OpenAiChat;
@@ -2001,4 +2001,4 @@ async fn r11_plugin_ws_to_sse_bridge() {
     assert!(ended.await.is_ok());
 }
 
-use respan_gateway_http::relay as explicit;
+use respan_gateway_http as explicit;

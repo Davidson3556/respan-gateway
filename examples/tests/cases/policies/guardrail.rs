@@ -1,7 +1,7 @@
 use super::*;
 use respan_gateway_conversation::{Message, Role};
 use respan_gateway_core::{Connection, Format};
-use respan_gateway_http::framing::passthrough;
+use respan_gateway_http::passthrough;
 use respan_gateway_http::{self as h, ClientIo, ProviderIo};
 
 /// OpenAI's Responses API, relayed byte for byte: traffic of no kind.

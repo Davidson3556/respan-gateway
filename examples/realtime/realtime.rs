@@ -61,7 +61,7 @@
 //! The default text-PII policy
 //! rejects opaque audio; it does not pretend a transcript filter redacts speech.
 //! Gemini Live and Responses WebSocket flows have their own examples. Shared
-//! shutdown signals use `respan_gateway_ws::axum::router`'s `stop`; no connection is silently resumed.
+//! shutdown signals use `respan_gateway_serve::Host::stop`; no connection is silently resumed.
 //! Sources: https://developers.openai.com/api/docs/guides/voice-latency-cost
 //!
 //! `cargo run -p respan-gateway-examples --example realtime`
@@ -1189,12 +1189,9 @@ async fn listen(gateway: &Gateway) -> std::net::SocketAddr {
         .await
         .expect("a port");
     let addr = listener.local_addr().expect("an address");
-    let app = respan_gateway_ws::axum::router(
-        gateway.clone(),
-        |_| respan_gateway_examples::LIMIT,
-        respan_gateway_ws::Limits::default(),
-        std::future::pending(),
-    );
+    let app = respan_gateway_serve::Host::new(gateway.clone())
+        .limit(|_| respan_gateway_examples::LIMIT)
+        .router();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -1313,7 +1310,7 @@ async fn main() -> Result<(), Fault> {
         &wallets,
         HOUR,
     )?;
-    let gw = gw.plugin(respan_gateway_http::relay::Relay::RAW);
+    let gw = gw.plugin(respan_gateway_http::Relay::RAW);
     let addr = listen(&gw).await;
 
     let mut ws = client(addr).await;

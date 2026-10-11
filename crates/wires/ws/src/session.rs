@@ -64,7 +64,7 @@ use respan_gateway_http::header_tokens;
 /// | Client's upgrade fails | as when it drops | nothing |
 /// | Client sends a binary frame, or a message over `max_message` | input ends `Err(bad_request)` with its [`CloseCode`]; provider is sent that Close | Close 1003 (binary) or 1009 (too large); the response is read to its end, unsent |
 /// | Provider sends Close 1000 (or no code) | dropped | Close 1000; ends clean |
-/// | Provider sends Close with another code | dropped | an `upstream` fault with that [`ProviderClose`]: Close 1011, or that code if the call was relayed ([`Relay`](respan_gateway_http::relay::Relay)) |
+/// | Provider sends Close with another code | dropped | an `upstream` fault with that [`ProviderClose`]: Close 1011, or that code if the call was relayed ([`Relay`](respan_gateway_http::Relay)) |
 /// | Provider drops, no Close, or is silent through a ping | dropped | Close 1011 `truncated` |
 /// | Provider sends a binary frame or a message over `max_message` | it is sent Close 1003 or 1009 | Close 1011 `upstream` |
 /// | Provider is unreachable, or refuses the upgrade | (no session) | the client's format answers the handshake: 502, or under the provider's status |

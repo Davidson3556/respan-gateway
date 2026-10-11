@@ -8,7 +8,7 @@
 //! value alone. A response, streamed or whole, decodes into the events of
 //! [`Output`] and is encoded from them, so what survives a relay is what
 //! the events and `native` say, not the provider's bytes. Only an explicit
-//! raw relay ([`respan_gateway_http::relay::Relay::RAW`]) sends the client's
+//! raw relay ([`respan_gateway_http::Relay::RAW`]) sends the client's
 //! own bytes.
 //!
 //! What a format has no form for stays in its own terms (optional

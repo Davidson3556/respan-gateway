@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use respan_gateway_conversation as conversation;
 use respan_gateway_core::{Extensions, Fault, Format, Gateway, Upstream};
-use respan_gateway_http::framing::passthrough::Passthrough;
 use respan_gateway_http::http::HeaderMap;
+use respan_gateway_http::passthrough::Passthrough;
 use respan_gateway_http::{ClientIo, HttpTransport, ProviderIo, Wire, reqwest};
 use respan_gateway_media::{embedding, image, speech, transcription, video};
 use respan_gateway_plugins::{Kind, Model};

@@ -10,7 +10,6 @@ use respan_gateway_http::http::{HeaderMap, HeaderValue};
 use respan_gateway_providers::openai::OpenAiQuirks;
 use respan_gateway_realtime::Input;
 use respan_gateway_realtime_ws::{GeminiLive, OpenAiRealtime};
-use respan_gateway_ws::Limits;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -43,12 +42,9 @@ async fn sent_of(setup: Value) -> Value {
         .await
         .expect("listen");
     let addr = listener.local_addr().expect("an address");
-    let app = respan_gateway_ws::axum::router(
-        gateway,
-        |_| 1 << 20,
-        Limits::default(),
-        std::future::pending(),
-    );
+    let app = respan_gateway_serve::Host::new(gateway)
+        .limit(|_| 1 << 20)
+        .router();
     tokio::spawn(async move { axum::serve(listener, app).await });
     let url = format!("ws://{addr}{}?model=gpt-realtime", GeminiLive::PATH);
     let (mut ws, _) = tokio_tungstenite::connect_async(url)

@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-#[path = "../../../../tests/support/http.rs"]
+#[path = "../../../tests/support/http.rs"]
 mod http_support;
 use http_support::LIMIT;
 
@@ -13,13 +13,13 @@ use respan_gateway_conversation_http::anthropic::AnthropicMessages;
 use respan_gateway_conversation_http::openai::OpenAiChat;
 use respan_gateway_core::{ClientContext, Extensions, Fault, Format, Gateway, Plugin, async_trait};
 use respan_gateway_http::HttpTransport;
-use respan_gateway_http::axum::router;
 use respan_gateway_http::http;
 use respan_gateway_http::{Body, Completion, ProviderIo};
 use respan_gateway_http::{CallHeaders, credentials};
+use respan_gateway_serve::router;
 use tokio::net::TcpListener;
 
-use respan_gateway_http::relay;
+use respan_gateway_http::Relay;
 
 const SSE: &str =
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
@@ -65,7 +65,7 @@ where
 /// A gateway relaying OpenAI clients raw, with their own paths, to the
 /// provider's origin `base`.
 fn openai_gateway(base: impl Into<String>) -> Gateway {
-    gateway_to(OpenAiChat, http(base).connect()).plugin(relay::Relay::RAW)
+    gateway_to(OpenAiChat, http(base).connect()).plugin(Relay::RAW)
 }
 
 async fn spawn(app: Router) -> String {
@@ -404,9 +404,9 @@ fn exchange(
 // which the transport puts back when it has no keys of its own.
 #[tokio::test]
 async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
-    use respan_gateway_http::framing::passthrough;
-    use respan_gateway_http::framing::passthrough::Passthrough;
     use respan_gateway_http::http_body_util::BodyExt;
+    use respan_gateway_http::passthrough;
+    use respan_gateway_http::passthrough::Passthrough;
     let head = call_head("/v1/chat?key=k&beta=1", &CLIENT);
     let before = head.headers.clone();
     let gateway = Gateway::new()
@@ -436,7 +436,7 @@ async fn without_headers_of_its_own_the_clients_credentials_pass_through() {
         .expect("valid test setup")
         .target("relay")
         .expect("valid test setup")
-        .plugin(relay::Relay::RAW);
+        .plugin(Relay::RAW);
     let (answer, ended) = respan_gateway_http::handle(
         &gateway,
         http::Request::from_parts(head, Body::full("")),
@@ -546,7 +546,7 @@ async fn a_204_ends_complete_though_its_body_is_never_polled() {
             http(format!("{provider}/v1")).connect(),
         )
         .and_then(|g| g.client::<Input, _, _>(OpenAiChat))
-        .map(|g| g.plugin(log.clone()).plugin(relay::Relay::HEADS))
+        .map(|g| g.plugin(log.clone()).plugin(Relay::HEADS))
         .and_then(|g| g.target("local"))
         .unwrap_or_else(|e| panic!("gateway: {e}"));
     let base = spawn(router(gateway.clone())).await;
@@ -726,7 +726,7 @@ impl Plugin for L6Ends {
 /// complete, so each request and call ends `ok`, never `abandoned`.
 async fn l6_bodiless(with_304: bool) {
     use axum::routing::get;
-    use respan_gateway_http::framing::passthrough::Passthrough;
+    use respan_gateway_http::passthrough::Passthrough;
     let big = "x".repeat(1 << 20);
     let provider = spawn(
         Router::new()
@@ -746,12 +746,12 @@ async fn l6_bodiless(with_304: bool) {
     .await;
     let ends = L6Ends::default();
     let gateway = Gateway::new()
-        .provider::<respan_gateway_http::framing::passthrough::Input<
-            respan_gateway_http::framing::passthrough::Passthrough,
+        .provider::<respan_gateway_http::passthrough::Input<
+            respan_gateway_http::passthrough::Passthrough,
         >, _, _>("any", Passthrough, http(provider.clone()).connect())
         .and_then(|g| {
-            g.client::<respan_gateway_http::framing::passthrough::Input<
-                respan_gateway_http::framing::passthrough::Passthrough,
+            g.client::<respan_gateway_http::passthrough::Input<
+                respan_gateway_http::passthrough::Passthrough,
             >, _, _>(Passthrough)
         })
         .map(|g| g.plugin(ends.clone()))
@@ -817,13 +817,14 @@ async fn l6_a_real_304_ends_ok() {
 #[tokio::test]
 async fn body_limits_can_differ_by_route_before_decoding() {
     let provider = spawn(Router::new().fallback(|| async { r#"{"choices":[]}"# })).await;
-    let app = respan_gateway_http::axum::router_with_limit(openai_gateway(provider), |head| {
+    let app = respan_gateway_serve::Host::new(openai_gateway(provider)).limit(|head| {
         if head.uri.path().starts_with("/large/") {
             1024
         } else {
             8
         }
     });
+    let app = app.router();
     for (path, expected) in [
         ("/v1/chat/completions", 413),
         ("/large/chat/completions", 200),
