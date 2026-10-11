@@ -419,17 +419,19 @@ fn refusal(fault: &Fault, _request: &http::Request<Bytes>, head: &mut ResponseHe
         .into()
 }
 
+/// Chooses the encoder of a response from the client's request, the text
+/// fields it asked ([`asked`]) and the response's head, whose content type
+/// it sets.
+type ChooseEncoder<O> =
+    fn(&http::Request<Bytes>, &Map<String, Value>, &mut ResponseHead) -> Box<dyn Encoder<O>>;
+
 /// The client edge of a format: a request decoded by `decode`, and its
 /// response written by the encoder `encoder` chooses for the client's
 /// request, with the head's content type it sets.
 fn bind_client<I, O>(
     io: ClientIo,
     decode: fn(&RequestHead, Bytes) -> Result<I, Fault>,
-    encoder: fn(
-        &http::Request<Bytes>,
-        &Map<String, Value>,
-        &mut ResponseHead,
-    ) -> Box<dyn Encoder<O>>,
+    encoder: ChooseEncoder<O>,
 ) -> Connection<I, O>
 where
     I: Clone + Send + Sync + 'static,
