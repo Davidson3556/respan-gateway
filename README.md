@@ -126,8 +126,8 @@ format, never across a translation.
 **Configuration** is one YAML file, every setting shown in
 [`gateway.example.yaml`](gateway.example.yaml): providers (vendor presets or
 spelled out), `formats` served, `client_keys`, `default`, `plugins` (model
-prefixes), `log`, `ui`, `body_limit`, `ws_message_limit`, `request_log`,
-`shutdown_grace`. Routing order: `name/model` goes to
+prefixes), `mcp` servers, `log`, `ui`, `body_limit`, `ws_message_limit`,
+`request_log`, `shutdown_grace`. Routing order: `name/model` goes to
 provider `name`; else the `models` plugin's prefixes; else the vendors'
 prefixes (longest wins); else the kind's default
 ([routing](docs/ARCHITECTURE.md#routing)).
@@ -139,8 +139,34 @@ one, the request log carries over, and an invalid config is refused while the
 old one keeps serving. A changed `listen` needs a restart.
 
 Not there yet: no admin writes (the web UI and admin API are read-only apart
-from reload); the **MCP kind** exists as a library but is not wired into the
-binary.
+from reload); the gateway does not run MCP tools inside chat requests (the
+agent loop, M9).
+
+### MCP servers
+
+The gateway fronts [MCP](https://modelcontextprotocol.io) servers too, behind
+the same client keys and `Host`/`Origin` guard. Each one is served to MCP
+clients over streamable HTTP at `/mcp/{name}`:
+
+```yaml
+mcp:
+  github: { url: "https://api.githubcopilot.com/mcp/", key: "env:GITHUB_TOKEN" }  # HTTP upstream
+  files:  { command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"] }  # stdio
+```
+
+A client points its MCP config at `http://localhost:8080/mcp/github` with a
+gateway key; the upstream key (`key`, or `auth` for another header) stays on
+the gateway, and a client's own credentials are not sent on unless the server
+says `forward_auth: true`. A stdio server runs as a child process, one per
+client session, started when the session initializes (the `command` must be
+on `PATH` at startup), given only `PATH` and its `env` (values literal or
+`env:NAME`), and stopped when the session ends: the client's `DELETE`, ten idle
+minutes, a crash (that session's calls fail and the client starts a new
+session, so a fresh child), or the gateway stopping. Each MCP request is in
+the request log as kind `mcp`, with its method and tool (`tools/call echo`)
+in place of a model and the server as its provider; the Providers page and
+`GET /ui/api/mcp` list the servers, and `check` prints them. Name `mcp` in
+`formats:` if you list formats.
 
 ## What it speaks
 
@@ -231,7 +257,7 @@ tests, and a 10-minute plugin really takes 10 minutes.
 | M5 Translation | Tools, images and reasoning between the chat formats | done |
 | M6 Hard cases | Realtime translation, video jobs, PII rewriting, admission | done |
 | M7 0.1 release | Release binaries, Docker image and PyPI wheels are built by tag workflows; first tag pending | open |
-| M8 MCP gateway | The `mcp` kind and formats exist; not wired into the binary | partial |
+| M8 MCP gateway | `mcp:` servers (streamable HTTP or stdio) served at `/mcp/{name}` with client keys, the request log and the web UI | done |
 | M9 Agent loop | Gateway-run MCP tools inside chat requests | open |
 
 ## License

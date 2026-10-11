@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::Error;
 use crate::logging::LogFormat;
+use crate::mcp::McpConfig;
 use crate::presets;
 
 /// A gateway's configuration, as `gateway.yaml` writes it.
@@ -63,6 +64,11 @@ pub struct Config {
     /// vendor's origin. Clients of a format no other translates,
     /// `passthrough` or a session's, go to the one provider of that format.
     pub formats: Option<Vec<String>>,
+    /// MCP servers by name, each served to clients at `/mcp/{name}`: a
+    /// streamable-HTTP `url`, or a stdio `command`. Name `mcp` in `formats`
+    /// if that lists formats.
+    #[serde(default)]
+    pub mcp: IndexMap<String, McpConfig>,
     /// Compiled-in plugins, in the order listed.
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
@@ -93,6 +99,7 @@ impl Default for Config {
             ui: true,
             providers: IndexMap::new(),
             formats: None,
+            mcp: IndexMap::new(),
             plugins: Vec::new(),
             default: None,
             source: Source::Inline,

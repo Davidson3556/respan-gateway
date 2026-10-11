@@ -57,7 +57,7 @@ extend (`crates/core/`) and the first-party plugins (`crates/plugins/`):
 | `crates/providers/` | Providers | Every vendor, a file each, and their quirks: data and plugins (such as Groq's usage, DeepSeek's `reasoning_content`, Gemini's `thought_signature` placeholder) | Core, the conversation, media and realtime formats, and the conversation and realtime kinds (for quirk plugins) |
 | `crates/serve/` | Hosting | One Axum router for a gateway: plain HTTP and WebSocket upgrades, body and session limits, graceful stop | Core, HTTP, WS |
 | `crates/plugins/` | Plugins | The router (`Routes`, `Routing`), attempts, fallback, races and backoff | Core |
-| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, except MCP |
+| `apps/gateway/` | Binary and library | Executable and the `respan_gateway` library it is built on: configuration (YAML, vendor presets, zero-config from the environment), composition (one core provider per format of a configured provider), routes from config, video job follow-ups, client keys, the request log, `/v1/models`, and the embedded web UI (`apps/ui/dist`) with its admin API | The kinds, wires, formats, providers and plugins above, and MCP (`mcp:` servers at `/mcp/{name}`) |
 | `apps/ui/` | Web UI | React and shadcn/ui admin UI (providers, routes, live requests), built by `pnpm build` to `apps/ui/dist` and embedded in the binary by `apps/gateway/build.rs`; a placeholder page stands in when it is not built | None (talks to the admin API) |
 | `python/` | Python package | PyO3 extension hosting the `apps/gateway` library in-process, plus httpx transports and SDK clients | `apps/gateway` |
 | `examples/` | Examples | Application policies and runnable integrations of public APIs | Libraries needed by each example |
@@ -92,12 +92,13 @@ flowchart LR
     conversation-http --> gateway
     media-http --> gateway
     realtime-ws --> gateway
+    mcp --> gateway
+    mcp-http --> gateway
 ```
 
 Core is a dependency of every crate, and `conversation` also of
 `conversation-http`, `media-http`, `realtime-ws` and `providers`; those
-edges are left out above. The binary does not depend on `mcp` or `mcp-http`
-yet.
+edges are left out above.
 
 The workspace manifest centralizes local dependency paths and common package
 settings. Crate names and `cargo run -p respan-gateway` remain independent of
@@ -278,5 +279,25 @@ accounts and stores.
 
 There are no admin writes; the config is reloaded from its source (SIGHUP,
 `POST /ui/api/reload`, `--watch`) by building a new gateway and swapping it
-in for new requests, the old one finishing its open ones. The `mcp` kind and
-`mcp-http` formats are libraries the binary does not compose yet.
+in for new requests, the old one finishing its open ones. The gateway does not
+run MCP tools for chat requests (the agent loop, M9).
+
+## MCP in the binary
+
+`mcp:` servers are not `providers:`: a server is an MCP upstream, a streamable
+HTTP `url` or a stdio `command`, and they share no formats with the chat
+providers. `apps/gateway/src/mcp.rs` composes them as one format, `mcp`
+(kind `mcp`, which does not translate), whose clients are served at
+`/mcp/{name}` for the configured names only (`StreamableHttp::serving`) and
+whose servers are core providers named by their `mcp:` key, each with its own
+`StreamableHttp` toward it (HTTP upstream path as configured, headers its key)
+or its own `StdioTransport` (one child per client session, limits at the
+transport's defaults but 32 sessions). `Routing` does not route the kind; a
+small plugin, `McpRoute`, targets the server named by the request path, so a
+client cannot choose another's. Credentials follow the provider rule: an
+upstream key replaces the client's, and `ClientCredentials` forwards a
+client's only to a server with `forward_auth`. The request log shows the
+method (and tool, prompt or resource) where other kinds show a model; the
+server is the provider. Children are the transport's: process groups,
+`stdin` closed then SIGTERM then SIGKILL, and `kill_on_drop` when the runtime
+stops.

@@ -14,6 +14,9 @@ as an HTTP transport.
   JSON-only answers contain responses; notifications are omitted, and
   server requests requiring bidirectional interaction are refused. Accept
   `text/event-stream` to receive those independent server messages.
+  `.serving(names)` serves clients at `{path}/{name}` for each of `names`
+  and nowhere else, so one gateway can front several servers; the caller
+  routes by name (the binary's `mcp:` section does).
 - `StdioTransport::new(program, args)`: an MCP server run as a child
   process per session. `send(Request<Body>)` returns a native response and
   optional write completion; `.connect()` supplies the provider factory.
@@ -38,7 +41,8 @@ as an HTTP transport.
   first message is forgotten at once; a request the client cancels is no
   longer waited for.
 
-Used by: [mcp_proxy](../../../examples/integrations/mcp_proxy.rs).
+Used by: [mcp_proxy](../../../examples/integrations/mcp_proxy.rs) and the
+binary's `mcp:` servers.
 
 Messages are validated as JSON-RPC envelopes before they can settle a
 request. Invalid HTTP provider messages fail `upstream`; stray or malformed

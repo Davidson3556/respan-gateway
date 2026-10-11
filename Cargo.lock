@@ -1432,6 +1432,8 @@ dependencies = [
  "respan-gateway-conversation-http",
  "respan-gateway-core",
  "respan-gateway-http",
+ "respan-gateway-mcp",
+ "respan-gateway-mcp-http",
  "respan-gateway-media",
  "respan-gateway-media-http",
  "respan-gateway-plugins",

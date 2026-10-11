@@ -179,4 +179,20 @@ providers:
 # and swap the new config in for new requests; requests and sessions already
 # open finish on the old one, and the request log carries over. An invalid
 # file is refused and the old config keeps serving. A new `listen` needs a
-# restart. The MCP kind is not served by the binary.
+# restart.
+
+# MCP servers, each served to MCP clients over streamable HTTP at
+# /mcp/{name}, behind the client keys. Name `mcp` in `formats` if you list
+# them. An HTTP server's key stays on the gateway (`key`, sent as a Bearer
+# token, or `auth` for another header); a client's own credentials go on
+# only with `forward_auth: true`. A stdio server is a child process per
+# client session, started at its `initialize` and stopped with the session
+# (DELETE, 10 idle minutes, a crash, or the gateway stopping); it gets only
+# PATH and its `env`, whose values are literal or env:NAME.
+# mcp:
+#   github: { url: "https://api.githubcopilot.com/mcp/", key: env:GITHUB_TOKEN }
+#   files:
+#     command: [npx, -y, "@modelcontextprotocol/server-filesystem", /data]
+#     env: { LOG_LEVEL: info }
+#     cwd: /data
+# At most 32 MCP sessions per server.

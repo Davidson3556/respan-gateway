@@ -63,6 +63,12 @@ pub mod kind {
         label: "embedding",
         translates: true,
     };
+    /// MCP: tools and resources over streamable HTTP, served by the `mcp:`
+    /// section, which no other format translates.
+    pub const MCP: Kind = Kind {
+        label: "mcp",
+        translates: false,
+    };
     /// The kinds of the media crate, whose client formats are served by
     /// default once a provider speaks the kind.
     pub const MEDIA: [Kind; 5] = [IMAGE, TRANSCRIPTION, SPEECH, VIDEO, EMBEDDING];
@@ -178,12 +184,21 @@ impl KnownFormat {
         self
     }
 
+    /// Registers what it serves with `serve` in place of its client format.
+    pub fn serving(
+        mut self,
+        serve: impl Fn(Gateway) -> Result<Gateway, Fault> + Send + Sync + 'static,
+    ) -> Self {
+        self.serve = Some(Box::new(serve));
+        self
+    }
+
     fn websocket(mut self) -> Self {
         self.websocket = true;
         self
     }
 
-    fn model(mut self, model: Model) -> Self {
+    pub fn model(mut self, model: Model) -> Self {
         self.model = model;
         self
     }
@@ -406,7 +421,7 @@ where
 
 /// `client`'s calls, a provider that cannot be reached named in the fault
 /// with its host and the cause: the transport's own message names neither.
-fn explained(
+pub(crate) fn explained(
     client: HttpTransport,
     provider: &str,
     base_url: &str,

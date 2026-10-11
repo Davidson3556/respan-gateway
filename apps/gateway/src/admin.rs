@@ -23,6 +23,7 @@ use crate::auth::{self, ClientKeys};
 use crate::compose::Plan;
 use crate::config::Source;
 use crate::formats::{KnownFormat, first_of_each_kind};
+use crate::mcp::Transport;
 use crate::requests::rfc3339;
 
 mod assets {
@@ -40,6 +41,8 @@ pub struct Admin {
     /// `credentials` (`"gateway"` or `"client"`), and the counts), but its counts.
     providers: Vec<Value>,
     routes: Value,
+    /// Each MCP server, as `/ui/api/mcp` lists it but its counts and status.
+    mcp: Vec<Value>,
 }
 
 impl Admin {
@@ -75,6 +78,25 @@ impl Admin {
             .filter_map(|name| formats.iter().find(|f| f.name == *name))
             .map(|f| json!({ "format": f.name, "kind": f.kind.label, "endpoints": f.endpoints }))
             .collect();
+        let mcp = plan
+            .mcp
+            .iter()
+            .map(|s| {
+                let credentials = match (&s.transport, s.own_key, s.forward_auth) {
+                    (Transport::Stdio { .. }, ..) => "none",
+                    (_, true, _) => "gateway",
+                    (_, false, true) => "client",
+                    (_, false, false) => "none",
+                };
+                json!({
+                    "name": s.name,
+                    "transport": s.transport_label(),
+                    "target": s.target(),
+                    "endpoint": s.endpoint(),
+                    "credentials": credentials,
+                })
+            })
+            .collect();
         let prefixes = plan.routes.prefixes();
         let prefixes = prefixes
             .iter()
@@ -94,6 +116,7 @@ impl Admin {
             auth_required: !plan.keys.is_empty(),
             providers,
             routes,
+            mcp,
         }
     }
 }
@@ -103,6 +126,7 @@ pub fn router(admin: Arc<Admin>, keys: Arc<ClientKeys>) -> Router {
     let api = Router::new()
         .route("/ui/api/overview", get(overview))
         .route("/ui/api/providers", get(providers))
+        .route("/ui/api/mcp", get(mcp))
         .route("/ui/api/routes", get(routes))
         .route("/ui/api/requests", get(requests))
         .route("/ui/api/requests/{id}", get(request))
@@ -217,6 +241,36 @@ async fn providers(State(admin): State<Arc<Admin>>) -> Json<Value> {
         })
         .collect();
     Json(json!({ "providers": providers }))
+}
+
+/// `GET /ui/api/mcp`: each MCP server (`name`, `transport` (`http` or
+/// `stdio`), `target` (its URL or command), `endpoint` (where clients reach
+/// it), `credentials` (`gateway`, `client` or `none`)), its `requests`,
+/// `errors`, `avg_latency_ms`, and `status`: `idle` before a request,
+/// `failing` if every request failed, else `ok`.
+async fn mcp(State(admin): State<Arc<Admin>>) -> Json<Value> {
+    let servers: Vec<Value> = admin
+        .mcp
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            let stats = admin
+                .process
+                .log
+                .provider_stats(s["name"].as_str().unwrap_or_default());
+            s["requests"] = stats.requests.into();
+            s["errors"] = stats.errors.into();
+            s["avg_latency_ms"] = stats.avg_latency_ms().into();
+            s["status"] = match (stats.requests, stats.errors) {
+                (0, _) => "idle",
+                (r, e) if r == e => "failing",
+                _ => "ok",
+            }
+            .into();
+            s
+        })
+        .collect();
+    Json(json!({ "servers": servers }))
 }
 
 async fn routes(State(admin): State<Arc<Admin>>) -> Json<Value> {

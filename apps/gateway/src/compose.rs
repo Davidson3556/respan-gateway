@@ -49,6 +49,8 @@ pub struct Plan {
     pub serve: Vec<String>,
     pub routes: Arc<Routes>,
     pub keys: Vec<String>,
+    /// The MCP servers, set by the app that built their format.
+    pub mcp: Vec<crate::mcp::McpServer>,
 }
 
 impl Plan {
@@ -78,7 +80,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
         .iter()
         .map(|key| secret("client_keys", key))
         .collect::<Result<_, _>>()?;
-    if upstreams.is_empty() {
+    if upstreams.is_empty() && config.mcp.is_empty() {
         return Err(Fault::config(
             "providers: none configured; add one, such as `openai: { vendor: openai }`",
         ));
@@ -89,6 +91,7 @@ pub fn compose(config: &Config, formats: &[KnownFormat]) -> Result<(Gateway, Pla
         serve,
         routes,
         keys,
+        mcp: Vec::new(),
     };
     Ok((gateway, plan))
 }
@@ -158,7 +161,7 @@ fn serve_formats(
     for name in serve {
         let served = format_named(formats, name, "formats")?;
         gateway = served.serve(gateway)?;
-        if served.kind.translates {
+        if served.kind.translates || served.kind == kind::MCP {
             continue;
         }
         let speakers: Vec<&str> = upstreams
@@ -227,7 +230,7 @@ fn format_named<'a>(
 
 /// Whether `name` may name a provider: routing reads `name/model`, video
 /// ids `name~id`, and core providers `name:format`.
-fn valid_provider_name(name: &str) -> bool {
+pub(crate) fn valid_provider_name(name: &str) -> bool {
     let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
     !name.is_empty() && name.chars().all(allowed)
 }
@@ -245,6 +248,7 @@ fn default_serve(upstreams: &[Upstream], formats: &[KnownFormat]) -> Vec<String>
         .iter()
         .filter(|f| match f.kind {
             kind::CHAT => entries().any(|e| e.format == f.name),
+            kind::MCP => true,
             k => (kind::MEDIA.contains(&k) || k == kind::REALTIME) && spoken(k),
         })
         .filter(|f| f.servable());
