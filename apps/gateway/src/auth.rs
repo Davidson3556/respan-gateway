@@ -1,6 +1,9 @@
 //! Whose keys go where. Client keys: when the config sets `keys`, every
 //! request carries one, as `Authorization: Bearer`, `x-api-key` or
-//! `x-goog-api-key`, and the gateway takes it off: no provider sees it.
+//! `x-goog-api-key`, and the gateway takes it off: no provider sees it. A
+//! browser's WebSocket can set no header, so on an upgrade a key may also
+//! come as a subprotocol (`realtime, openai-insecure-api-key.<key>`) or as a
+//! query parameter (`?key=<key>`), and goes from there likewise.
 //! Clients' own provider keys go only to a provider of their format that
 //! has none of its own.
 
@@ -13,7 +16,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use respan_gateway_core::{Fault, Plugin, ProviderContext, async_trait};
 use respan_gateway_http::http::header::{
-    AUTHORIZATION, HOST, HeaderName, ORIGIN, SEC_WEBSOCKET_PROTOCOL,
+    AUTHORIZATION, HOST, HeaderName, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE,
 };
 use respan_gateway_http::http::{HeaderMap, HeaderValue, StatusCode};
 use respan_gateway_http::{CallHeaders, Credential};
@@ -79,14 +82,17 @@ impl ClientKeys {
         !self.0.is_empty()
     }
 
+    /// Whether `key` is one of the client keys.
+    fn is_key(&self, key: &str) -> bool {
+        let key = key.trim().as_bytes();
+        !key.is_empty() && self.0.iter().any(|k| constant_time_eq(k.as_bytes(), key))
+    }
+
     fn presented(&self, headers: &HeaderMap) -> Presented {
         if !self.required() {
             return Presented::Open;
         }
-        let valid = |key: &str| {
-            let key = key.trim().as_bytes();
-            !key.is_empty() && self.0.iter().any(|k| constant_time_eq(k.as_bytes(), key))
-        };
+        let valid = |key: &str| self.is_key(key);
         let value = |name: &HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
         let holds_key = |name: &HeaderName| match *name == AUTHORIZATION {
             true => value(name)
@@ -118,7 +124,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// The 401 of a request without a valid key, in OpenAI's error shape.
 pub fn unauthorized() -> Response {
-    let message = "a valid gateway key is required: send it as `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key`";
+    let message = "a valid gateway key is required: send it as `Authorization: Bearer <key>`, `x-api-key` or `x-goog-api-key` (a WebSocket from a browser: as a subprotocol `openai-insecure-api-key.<key>` or `?key=<key>`)";
     error(StatusCode::UNAUTHORIZED, "authentication_error", message)
 }
 
@@ -136,6 +142,10 @@ pub async fn consume(
     next: Next,
 ) -> Response {
     match keys.presented(req.headers()) {
+        Presented::Refused if is_upgrade(req.headers()) => match keys.browser(req) {
+            Some(req) => next.run(req).await,
+            None => unauthorized(),
+        },
         Presented::Refused => unauthorized(),
         Presented::Open => next.run(req).await,
         Presented::Valid(holders) => {
@@ -144,6 +154,25 @@ pub async fn consume(
             }
             next.run(req).await
         }
+    }
+}
+
+/// Whether the request asks to become a WebSocket.
+fn is_upgrade(headers: &HeaderMap) -> bool {
+    let upgrade = headers.get(UPGRADE).and_then(|v| v.to_str().ok());
+    upgrade.is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
+impl ClientKeys {
+    /// The WebSocket upgrade `req` without the gateway key a browser
+    /// offered as a subprotocol or query parameter, if it offered one. The
+    /// rest of the client's credentials stay.
+    fn browser(&self, req: Request) -> Option<Request> {
+        let (mut head, body) = req.into_parts();
+        let mut credential = Credential::lift(&mut head)?;
+        let found = credential.take_keys(|key| self.is_key(key));
+        credential.restore(&mut head);
+        found.then(|| Request::from_parts(head, body))
     }
 }
 

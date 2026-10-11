@@ -93,6 +93,45 @@ impl Credential {
         self.query.iter().map(String::as_str)
     }
 
+    /// Take out the keys that `is_key` accepts from the places a browser
+    /// can use for one, where it can set no header: the entries of the
+    /// WebSocket subprotocol and the query parameters. Whether any went.
+    /// A subprotocol entry `name.value` offers `value` as well as itself.
+    /// The credential headers are not looked at: they are the caller's.
+    pub fn take_keys(&mut self, is_key: impl Fn(&str) -> bool) -> bool {
+        let before = self.query.len();
+        self.query.retain(|param| {
+            let value = param.split_once('=').map_or("", |(_, v)| v);
+            !is_key(&crate::percent_decode(value))
+        });
+        let mut taken = self.query.len() != before;
+        let entries: Vec<String> = self
+            .headers
+            .get_all(SEC_WEBSOCKET_PROTOCOL)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(',').map(|e| e.trim().to_owned()))
+            .collect();
+        let kept: Vec<&str> = entries
+            .iter()
+            .map(String::as_str)
+            .filter(|entry| {
+                let named = entry
+                    .split_once('.')
+                    .filter(|(name, _)| is_credential(name));
+                !(is_key(entry) || named.is_some_and(|(_, value)| is_key(value)))
+            })
+            .collect();
+        if kept.len() != entries.len() {
+            taken = true;
+            match HeaderValue::from_str(&kept.join(", ")) {
+                Ok(kept) if !kept.is_empty() => self.headers.insert(SEC_WEBSOCKET_PROTOCOL, kept),
+                _ => self.headers.remove(SEC_WEBSOCKET_PROTOCOL),
+            };
+        }
+        taken
+    }
+
     /// Put its headers and parameters on `head` where it has none of a name.
     pub fn restore(&self, head: &mut http::request::Parts) {
         for name in self.headers.keys() {
@@ -245,6 +284,32 @@ mod tests {
             req.headers_mut().append(*name, value);
         }
         req.into_parts().0
+    }
+
+    #[test]
+    fn keys_a_browser_offers_are_taken_and_the_rest_stays() {
+        let mut parts = head(
+            "/v1/x?key=gw&access_token=other&alt=sse",
+            &[
+                (
+                    "sec-websocket-protocol",
+                    "realtime, openai-insecure-api-key.gw",
+                ),
+                ("authorization", "Bearer sk-1"),
+            ],
+        );
+        let mut credential = Credential::lift(&mut parts).unwrap_or_default();
+        assert!(credential.take_keys(|k| k == "gw"));
+        assert_eq!(
+            credential.query().collect::<Vec<_>>(),
+            ["access_token=other"]
+        );
+        assert_eq!(credential.get("sec-websocket-protocol"), None);
+        assert_eq!(credential.bearer(), Some("sk-1"));
+        assert!(!credential.take_keys(|k| k == "gw"));
+        credential.restore(&mut parts);
+        assert_eq!(parts.uri.query(), Some("alt=sse&access_token=other"));
+        assert_eq!(parts.headers["sec-websocket-protocol"], "realtime");
     }
 
     #[test]
