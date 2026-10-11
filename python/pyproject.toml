@@ -10,21 +10,38 @@ requires-python = ">=3.9"
 license = { text = "MIT OR Apache-2.0" }
 dynamic = ["version"]
 dependencies = ["httpx>=0.25"]
+keywords = ["llm", "gateway", "openai", "anthropic", "gemini", "proxy", "router"]
 classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
 
 [project.optional-dependencies]
 openai = ["openai>=1"]
 anthropic = ["anthropic>=0.30"]
+test = ["pytest", "openai", "anthropic", "mypy"]
 
 [project.scripts]
 respan-gateway = "respan_gateway.__main__:main"
 
 [project.urls]
+Homepage = "https://github.com/respanai/respan-gateway"
 Repository = "https://github.com/respanai/respan-gateway"
+Issues = "https://github.com/respanai/respan-gateway/issues"
 
 [tool.maturin]
 python-source = "python"
@@ -33,3 +50,4 @@ features = ["extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore:The Sora API:DeprecationWarning"]

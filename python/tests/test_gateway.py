@@ -166,7 +166,7 @@ def test_async_openai_sdk(gw):
     pytest.importorskip("openai")
 
     async def main():
-        client = gw.openai(asynchronous=True)
+        client = gw.openai_async()
         done = await client.chat.completions.create(model="fake-1", messages=CHAT["messages"])
         assert done.choices[0].message.content == "".join(WORDS)
         stream = await client.chat.completions.create(model="fake-1", messages=CHAT["messages"], stream=True)
@@ -258,7 +258,7 @@ def test_async_timeout_stops_the_provider_call(gw, fake):
     import openai
 
     async def main():
-        client = gw.openai(asynchronous=True, timeout=0.5, max_retries=0)
+        client = gw.openai_async(timeout=0.5, max_retries=0)
         with pytest.raises(openai.APITimeoutError):
             await client.chat.completions.create(model="slow", messages=CHAT["messages"])
 
@@ -272,7 +272,7 @@ def test_async_cancellation_stops_the_provider_call(gw, fake):
     import time
 
     async def main():
-        client = gw.openai(asynchronous=True)
+        client = gw.openai_async()
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(client.chat.completions.create(model="slow", messages=CHAT["messages"]), 0.5)
 

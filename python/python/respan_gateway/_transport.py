@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import functools
 from types import ModuleType
-from typing import Any, Callable, Optional, Tuple, Type
+from typing import Any, AsyncIterator, Callable, Iterator, List, Optional, Tuple, Type
 
 from . import _native
 
@@ -30,7 +30,7 @@ from . import _native
 HOST = "respan-gateway"
 
 
-def _call(request: Any) -> Tuple[str, str, list]:
+def _call(request: Any) -> Tuple[str, str, List[Tuple[str, str]]]:
     """The method, target and headers for `Native.send`."""
     headers = [
         (k.decode("latin-1"), v.decode("latin-1")) for k, v in request.headers.raw if k.lower() != b"host"
@@ -88,7 +88,7 @@ def transports(httpx: ModuleType) -> Tuple[Type[Any], Type[Any]]:
             self._reply = reply
             self._request = request
 
-        def __iter__(self):
+        def __iter__(self) -> Iterator[bytes]:
             timeout = _read_timeout(self._request)
             while True:
                 try:
@@ -107,7 +107,7 @@ def transports(httpx: ModuleType) -> Tuple[Type[Any], Type[Any]]:
             self._reply = reply
             self._request = request
 
-        async def __aiter__(self):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
             timeout = _read_timeout(self._request)
             while True:
                 try:
@@ -127,7 +127,7 @@ def transports(httpx: ModuleType) -> Tuple[Type[Any], Type[Any]]:
         def __init__(self, native: "_native.Native") -> None:
             self._native = native
 
-        def handle_request(self, request):
+        def handle_request(self, request: Any) -> Any:
             method, target, headers = _call(request)
             try:
                 reply = self._native.send(method, target, headers, request.read(), _read_timeout(request))
@@ -141,7 +141,7 @@ def transports(httpx: ModuleType) -> Tuple[Type[Any], Type[Any]]:
         def __init__(self, native: "_native.Native") -> None:
             self._native = native
 
-        async def handle_async_request(self, request):
+        async def handle_async_request(self, request: Any) -> Any:
             method, target, headers = _call(request)
             body = await request.aread()
             timeout = _read_timeout(request)
